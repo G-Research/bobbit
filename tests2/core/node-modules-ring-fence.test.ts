@@ -338,6 +338,10 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 		const observer = observeLegacyRuntimeAccess(runtimeDir);
 		const spawnCalls: Array<{ command: string; args: readonly string[] }> = [];
 		const resolvedSpecifiers: string[] = [];
+		const binaryProbe = vi.spyOn(childProcess, "spawnSync").mockImplementation(() => {
+			throw new Error(`${POLICY_PREFIX}_AST_BINARY_PROBE: fake direct starts must not synchronously probe host binaries`);
+		});
+		let astGrepResolverCalls = 0;
 		try {
 			for (const route of ["pre-listen restored direct session", "later direct agent/verification"] as const) {
 				const spawnDirect = ((command: string, args: readonly string[] = []) => {
@@ -354,6 +358,10 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 						return pathToFileURL(entryPath).href;
 					},
 					spawnDirect,
+					resolveAstGrepPath: () => {
+						astGrepResolverCalls++;
+						return null;
+					},
 				});
 
 				await bridge.start();
@@ -363,6 +371,8 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 				expect(call!.args[0]).toBe(cliPath);
 			}
 			expect(resolvedSpecifiers).toEqual([PI_PACKAGE, PI_PACKAGE]);
+			expect(astGrepResolverCalls, `${POLICY_PREFIX}_AST_BINARY_RESOLVER_SEAM: direct starts must use the injected resolver`).toBe(2);
+			expect(binaryProbe, `${POLICY_PREFIX}_AST_BINARY_PROBE: fake direct starts must not invoke spawnSync`).not.toHaveBeenCalled();
 			expect(
 				observer.accesses,
 				`${POLICY_PREFIX}_LEGACY_RUNTIME_ACCESS: direct start must perform zero reads, stats, traversals, writes, creates, renames, or deletes below <stateDir>/runtime`,

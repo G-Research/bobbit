@@ -1,0 +1,32 @@
+name: ast_grep
+description: "Search syntax trees read-only. Prefer grep for text/regex and read for a known file."
+summary: "Read-only structural code search"
+params: [paths?, pattern, language?, strictness?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Code Intelligence
+docs: |-
+  Use `ast_grep` for syntax-aware patterns such as `console.log($$$ARGS)`. Patterns
+  must parse in the selected language, and this tool never edits files. Use `grep`
+  for plain text, regex, and broad discovery; use `read` for surrounding source or
+  a small known file.
+detail_docs: |-
+  ## Purpose
+
+  `ast_grep` performs read-only structural search with the maintained ast-grep CLI.
+  It understands syntax, so patterns can use metavariables such as
+  `console.log($$$ARGS)` without matching comments or strings.
+
+  ## When to use other tools
+
+  Use `grep` for plain text, regular expressions, or broad discovery. Use `read`
+  for surrounding source or a small known file. `ast_grep` is not an editor: it
+  never rewrites files.
+
+  ## Inputs
+
+  `paths` are existing working-directory-relative files or directories and default
+  to `.`. `language` is an optional supported alias; omitted languages are detected
+  from the paths. `strictness` controls ast-grep matching and defaults to `smart`.
+  The pattern must parse in the selected language.

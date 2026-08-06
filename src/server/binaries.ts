@@ -1,13 +1,13 @@
 /**
- * Bundled fd/rg binary resolution and staging.
+ * Bundled fd/rg/ast-grep binary resolution and staging.
  *
- * Bobbit ships fd and rg via per-platform optional npm sub-packages
+ * Bobbit ships fd, rg, and ast-grep (`ast-grep`, exposed to callers as `sg`) via per-platform optional npm sub-packages
  * (`@bobbit/binaries-<platform>-<arch>`) so agents always have them locally
  * with zero network calls at install or runtime.
  *
  * Resolution order (memoized per gateway lifetime):
  *   1. Bundled sub-package matching {process.platform, process.arch}.
- *   2. PATH fallback (`fd`, `fdfind`, `rg`) — confirmed by `<bin> --version`.
+ *   2. PATH fallback (`fd`, `fdfind`, `rg`, `sg`, `ast-grep`) — confirmed by `<bin> --version`.
  *   3. null. Caller logs a clear warning naming what was attempted.
  *
  * Staging: `stageBundledBinaries()` copies/symlinks the resolved binaries into
@@ -23,14 +23,15 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-export type BinaryTool = "fd" | "rg";
+export type BinaryTool = "fd" | "rg" | "sg";
 
 type Tool = BinaryTool;
 
 /** Injectable boundary for bundled-package and PATH executable probes. */
 export interface BinaryProbeBackend {
 	resolveBundled(tool: BinaryTool, packageName: string | null): string | null;
-	isOnPath(candidate: string): boolean;
+	/** Verify a candidate can actually execute before we hand it to an agent. */
+	isExecutable(candidate: string): boolean;
 }
 
 /** What kind of resolution happened. */
@@ -51,6 +52,16 @@ const require_ = createRequire(import.meta.url);
 const PATH_CANDIDATES: Record<Tool, string[]> = {
 	fd: ["fd", "fdfind"],
 	rg: ["rg"],
+	// `sg` is the upstream convenience launcher; the official release archive
+	// also contains the self-contained `ast-grep` executable we bundle.
+	sg: ["sg", "ast-grep"],
+};
+
+/** File names inside each binary package. Public API keeps getSgPath for compatibility. */
+const BUNDLED_FILE_NAMES: Record<Tool, string> = {
+	fd: "fd",
+	rg: "rg",
+	sg: "ast-grep",
 };
 
 /** Module-level cache — probe each tool at most once per gateway lifetime. */
@@ -87,7 +98,7 @@ function resolveBundled(tool: Tool, pkgName: string | null): string | null {
 		return null;
 	}
 	const ext = process.platform === "win32" ? ".exe" : "";
-	const binPath = path.join(path.dirname(entry), "bin", `${tool}${ext}`);
+	const binPath = path.join(path.dirname(entry), "bin", `${BUNDLED_FILE_NAMES[tool]}${ext}`);
 	if (!fs.existsSync(binPath)) return null;
 	// Defensive +x on POSIX in case the tarball lost the mode bits.
 	if (process.platform !== "win32") {
@@ -100,22 +111,22 @@ function resolveBundled(tool: Tool, pkgName: string | null): string | null {
 	return binPath;
 }
 
-/** Probe PATH by trying `<candidate> --version`. */
-function isOnPath(candidate: string): boolean {
+/** Probe a bundled or PATH candidate by trying `<candidate> --version`. */
+function isExecutable(candidate: string): boolean {
 	const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
 	return !result.error && result.status === 0;
 }
 
 export const realBinaryProbeBackend: BinaryProbeBackend = {
 	resolveBundled,
-	isOnPath,
+	isExecutable,
 };
 
 let binaryProbeBackend: BinaryProbeBackend = realBinaryProbeBackend;
 
 function resolveFromPath(candidates: string[]): string | null {
 	for (const candidate of candidates) {
-		if (binaryProbeBackend.isOnPath(candidate)) return candidate;
+		if (binaryProbeBackend.isExecutable(candidate)) return candidate;
 	}
 	return null;
 }
@@ -126,7 +137,10 @@ function resolve(tool: Tool): BinaryResolution {
 
 	const pkgName = expectedBinaryPackage();
 	const bundled = binaryProbeBackend.resolveBundled(tool, pkgName);
-	if (bundled) {
+	// Existence and mode bits are insufficient: an archive can contain a
+	// launcher without its sibling executable, or a binary for the wrong ABI.
+	// Verify the exact packaged candidate before preferring it over PATH.
+	if (bundled && binaryProbeBackend.isExecutable(bundled)) {
 		const res: BinaryResolution = {
 			source: "bundled",
 			path: bundled,
@@ -170,6 +184,11 @@ export function getRgPath(): string | null {
 	return resolve("rg").path;
 }
 
+/** Absolute path to bundled `ast-grep` or PATH `sg`/`ast-grep`, or null. Memoized. */
+export function getSgPath(): string | null {
+	return resolve("sg").path;
+}
+
 /** Full resolution detail for diagnostics. Memoized. */
 export function getFdResolution(): BinaryResolution {
 	return resolve("fd");
@@ -177,6 +196,10 @@ export function getFdResolution(): BinaryResolution {
 
 export function getRgResolution(): BinaryResolution {
 	return resolve("rg");
+}
+
+export function getSgResolution(): BinaryResolution {
+	return resolve("sg");
 }
 
 /** Test-only: replace executable probes without spawning; undefined restores production. */
@@ -193,6 +216,7 @@ export function _resetBinaryCacheForTests(): void {
 export interface StagingResult {
 	fd: BinaryResolution;
 	rg: BinaryResolution;
+	sg: BinaryResolution;
 	/** Directory we staged into, or null if staging was skipped. */
 	binDir: string | null;
 }
@@ -211,13 +235,14 @@ export interface StagingResult {
 export async function stageBundledBinaries(agentDir: string): Promise<StagingResult> {
 	const fd = getFdResolution();
 	const rg = getRgResolution();
+	const sg = getSgResolution();
 
 	const binDir = path.join(agentDir, "bin");
 	try {
 		fs.mkdirSync(binDir, { recursive: true });
 	} catch (e) {
 		console.warn(`[binaries] Failed to create ${binDir}: ${(e as Error).message}`);
-		return { fd, rg, binDir: null };
+		return { fd, rg, sg, binDir: null };
 	}
 
 	const ext = process.platform === "win32" ? ".exe" : "";
@@ -225,6 +250,7 @@ export async function stageBundledBinaries(agentDir: string): Promise<StagingRes
 	for (const [tool, res] of [
 		["fd", fd],
 		["rg", rg],
+		["sg", sg],
 	] as Array<[Tool, BinaryResolution]>) {
 		if (res.source !== "bundled" || !res.path) continue;
 		const target = path.join(binDir, `${tool}${ext}`);
@@ -276,6 +302,7 @@ export async function stageBundledBinaries(agentDir: string): Promise<StagingRes
 	for (const [tool, res] of [
 		["fd", fd],
 		["rg", rg],
+		["sg", sg],
 	] as Array<[Tool, BinaryResolution]>) {
 		if (res.source === "missing") {
 			console.warn(
@@ -287,5 +314,5 @@ export async function stageBundledBinaries(agentDir: string): Promise<StagingRes
 		}
 	}
 
-	return { fd, rg, binDir };
+	return { fd, rg, sg, binDir };
 }

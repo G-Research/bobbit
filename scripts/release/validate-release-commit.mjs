@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 
 import { assertDistTagAdvances } from "./dist-tag-guard.mjs";
 import {
+	assertBinarySubpackagePinAlignment,
 	assertChangelogAppendOnly,
 	assertChangelogSection,
 	assertExactOptionalDependencyPins,
 	assertLockfileAgreement,
+	BINARY_SUBPACKAGE_NAMES,
 	assertPublishedArtifactMatches,
 	assertPullRequestContract,
 	assertReleaseVersion,
@@ -68,7 +70,7 @@ async function isPublished(name, version, fetchImpl) {
 	throw new Error(`registry lookup for ${name}@${version} returned ${status}`);
 }
 
-async function assertOptionalDependenciesPublished(pkg, fetchImpl) {
+export async function assertOptionalDependenciesPublished(pkg, fetchImpl) {
 	const pins = Object.entries(pkg.optionalDependencies ?? {});
 	const missing = [];
 	for (const [name, version] of pins) {
@@ -80,6 +82,24 @@ async function assertOptionalDependenciesPublished(pkg, fetchImpl) {
 				"Publish the binary sub-packages before merging the release PR.",
 		);
 	}
+}
+
+function localBinarySubpackageVersions(root, pkg) {
+	const configured = BINARY_SUBPACKAGE_NAMES.some(name => Object.hasOwn(pkg.optionalDependencies ?? {}, name));
+	if (!configured) return {};
+
+	return Object.fromEntries(BINARY_SUBPACKAGE_NAMES.map(name => {
+		const directory = name.slice("@bobbit/".length);
+		let manifest;
+		try {
+			manifest = JSON.parse(readFileSync(join(root, "binaries", directory, "package.json"), "utf8"));
+		} catch (cause) {
+			throw new ReleaseContractError(
+				`missing local binary sub-package manifest for ${name}: ${cause instanceof Error ? cause.message : String(cause)}`,
+			);
+		}
+		return [name, manifest.version];
+	}));
 }
 
 async function releaseExists({ repository, tag, token, fetchImpl }) {
@@ -131,6 +151,7 @@ export async function validateReleaseCommit(args, env = process.env, options = {
 
 	assertLockfileAgreement(pkg, readJson("package-lock.json"));
 	assertExactOptionalDependencyPins(pkg);
+	assertBinarySubpackagePinAlignment(pkg, localBinarySubpackageVersions(root, pkg));
 
 	let changelog = "";
 	try {

@@ -1,6 +1,6 @@
 FROM node:22-slim
 
-# Install build tools, git, curl, gh CLI, ripgrep.
+# Install build tools, git, curl, gh CLI, ripgrep, and unzip for ast-grep.
 #
 # NOTE: we deliberately do NOT install Debian's `fd-find` apt package — at the
 # time of writing it ships fd 8.6.0 (bookworm), which predates `--no-require-git`
@@ -9,7 +9,7 @@ FROM node:22-slim
 # sandbox. Instead we pull a fixed-version fd binary from sharkdp's GitHub
 # release below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates build-essential python3 ripgrep \
+    git curl ca-certificates build-essential python3 ripgrep unzip \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install fd from sharkdp/fd GitHub release (must be >= 9.0 for --no-require-git).
@@ -30,6 +30,29 @@ RUN set -eu; \
     ln -sf /usr/local/bin/fd /usr/local/bin/fdfind; \
     rm -rf /tmp/fd.tar.gz "/tmp/fd-v${FD_VERSION}-${fd_arch}"; \
     fd --version
+
+# Install the pinned ast-grep CLI (`sg`) from its official release archive.
+# The matching version and archive checksums are recorded in binaries.versions.json
+# and binaries.checksums.json for host packaging. Keep this fallback ARG in sync
+# with that manifest; sandbox-status passes the manifest value at image build time.
+ARG AST_GREP_VERSION=0.39.5
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sg_target="x86_64-unknown-linux-gnu"; sg_sha256="9a1cab3e7916c98c6fe0079cc2c3b44d98832ba3bdb9db492d04a4e60e41fd0f" ;; \
+      arm64) sg_target="aarch64-unknown-linux-gnu"; sg_sha256="4b20d2032fec27d0863e9f58e2848861fd5b99bf71f56f271d636dc821056bbb" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    asset="app-${sg_target}.zip"; \
+    url="https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/${asset}"; \
+    curl -fsSL "$url" -o /tmp/ast-grep.zip; \
+    echo "${sg_sha256}  /tmp/ast-grep.zip" | sha256sum -c -; \
+    # The small `sg` launcher invokes the sibling `ast-grep` executable from this archive. \
+    unzip -p /tmp/ast-grep.zip sg > /usr/local/bin/sg; \
+    unzip -p /tmp/ast-grep.zip ast-grep > /usr/local/bin/ast-grep; \
+    chmod 0755 /usr/local/bin/sg /usr/local/bin/ast-grep; \
+    rm -f /tmp/ast-grep.zip; \
+    sg --version
 
 # gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -55,7 +78,8 @@ RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
 ARG PI_AGENT_VERSION=0.74.0
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
     && ln -sf $(npm root -g) /node_modules
-LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
+LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION} \
+      bobbit.ast-grep-version=${AST_GREP_VERSION}
 
 # TypeScript compiler — needed for `npm run check` in worktrees.
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.

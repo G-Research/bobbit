@@ -2401,7 +2401,7 @@ sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 docker build -t bobbit-agent docker/
 ```
 
-Auto-built on startup if image missing but `docker/Dockerfile` exists (120s timeout). Includes Node.js 20, git, curl, gh, build-essential, and the pinned `pi-coding-agent` package used by sandboxed agents.
+Auto-built on startup if image missing but `docker/Dockerfile` exists (120s timeout). Includes Node.js 20, git, curl, gh, build-essential, the pinned `pi-coding-agent` package, and the pinned ast-grep executable used by sandboxed agents. Sandbox freshness also compares the ast-grep image label with the bundled-binary manifest and rebuilds stale images. See [AST Structural Search](ast-structural-search.md) for tool behaviour and operations.
 
 ### How it works
 

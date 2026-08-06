@@ -1951,8 +1951,11 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/binaries-resolver.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
+			{ expression: "path.join(root, \"binaries\", directory, \"index.js\")", count: 1 },
+			{ expression: "path.join(root, \"binaries\", directory, \"package.json\")", count: 1 },
 			{ expression: "path.join(first.binDir!, `fd${ext}`)", count: 1 },
 			{ expression: "path.join(first.binDir!, `rg${ext}`)", count: 1 },
+			{ expression: "path.join(first.binDir!, `sg${ext}`)", count: 1 },
 		]),
 	},
 	{

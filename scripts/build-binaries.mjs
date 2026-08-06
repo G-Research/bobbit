@@ -2,19 +2,19 @@
 /**
  * Build per-platform binary sub-packages for Bobbit.
  *
- * Maintainer-run, NOT executed on `npm install`. Downloads fd and ripgrep
+ * Maintainer-run, NOT executed on `npm install`. Downloads fd, ripgrep, and ast-grep
  * release archives for every supported platform, verifies SHA-256, extracts
  * the binaries into `binaries/binaries-<plat>-<arch>/bin/`, and bumps each
  * sub-package's bin/ directory.
  *
- * Sub-package versions are INDEPENDENT of the root bobbit version — fd and rg
- * change rarely (~yearly), so we bump sub-package versions only when fd/rg
- * versions in binaries.versions.json change. The root bobbit can ship many
+ * Sub-package versions are INDEPENDENT of the root bobbit version. Bump them
+ * only when a pinned fd, ripgrep, or ast-grep version in binaries.versions.json
+ * changes. The root bobbit can ship many
  * versions while the sub-packages stay pinned. The root's optionalDependencies
  * block in package.json controls which sub-package version is required.
  *
  * Inputs:
- *   - binaries.versions.json — pinned fd / ripgrep versions
+ *   - binaries.versions.json — pinned fd / ripgrep / ast-grep versions
  *   - binaries.checksums.json (optional) — { "<assetName>": "<sha256>" }
  *
  * Asset-naming logic mirrors @mariozechner/pi-coding-agent's tools-manager
@@ -24,7 +24,14 @@
  *   node scripts/build-binaries.mjs                  # use pinned versions
  *   node scripts/build-binaries.mjs --fd 10.2.0      # override fd
  *   node scripts/build-binaries.mjs --rg 14.1.1      # override ripgrep
+ *   node scripts/build-binaries.mjs --ast-grep 0.39.5 # override ast-grep
  *   node scripts/build-binaries.mjs --only linux-x64 # single target
+ *   node scripts/build-binaries.mjs --only linux-x64 --staging-root /tmp/bobbit-binaries
+ *                                                # build copied package skeletons outside this checkout
+ *
+ * `--staging-root` must be an existing absolute directory outside the checkout.
+ * It contains one copied package skeleton per selected target, named
+ * `binaries-<platform>-<arch>`. The default remains this checkout's `binaries/`.
  *
  * After running, the script prints the suggested `npm publish` commands
  * for the maintainer to review and run.
@@ -98,10 +105,26 @@ const TOOLS = {
 			return null;
 		},
 	},
+	astGrep: {
+		repo: "ast-grep/ast-grep",
+		// The release archive's `sg` is a small launcher which requires the
+		// sibling `ast-grep` executable. Package the self-contained executable
+		// so the host optional dependency is complete by itself.
+		binary: "ast-grep",
+		tagPrefix: "",
+		// Official ast-grep releases use a uniform zip asset prefix, unlike fd/rg.
+		assetName: (_version, plat, arch) => {
+			const a = arch === "arm64" ? "aarch64" : "x86_64";
+			if (plat === "darwin") return `app-${a}-apple-darwin.zip`;
+			if (plat === "linux") return `app-${a}-unknown-linux-gnu.zip`;
+			if (plat === "win32") return `app-${a}-pc-windows-msvc.zip`;
+			return null;
+		},
+	},
 };
 
 function parseArgs(argv) {
-	const out = { fd: null, rg: null, only: null };
+	const out = { fd: null, rg: null, astGrep: null, only: null, stagingRoot: null };
 	for (let i = 0; i < argv.length; i++) {
 		switch (argv[i]) {
 			case "--fd":
@@ -111,8 +134,15 @@ function parseArgs(argv) {
 			case "--ripgrep":
 				out.rg = argv[++i];
 				break;
+			case "--ast-grep":
+			case "--sg":
+				out.astGrep = argv[++i];
+				break;
 			case "--only":
 				out.only = argv[++i];
+				break;
+			case "--staging-root":
+				out.stagingRoot = argv[++i];
 				break;
 			default:
 				console.error(`Unknown arg: ${argv[i]}`);
@@ -182,16 +212,55 @@ function findBinary(rootDir, name) {
 	return null;
 }
 
-async function buildOne(target, versions, checksums) {
-	console.log(`\n=== ${target.pkg} (${target.plat}/${target.arch}) ===`);
-	const pkgDir = path.join(BIN_PKG_ROOT, target.pkg);
+function isWithin(parent, candidate) {
+	const relative = path.relative(parent, candidate);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function resolveStagingRoot(stagingRoot) {
+	if (stagingRoot === null) return null;
+	if (typeof stagingRoot !== "string" || !path.isAbsolute(stagingRoot)) {
+		throw new Error("--staging-root must be an absolute path to an existing directory outside the checkout");
+	}
+	const stat = fs.lstatSync(stagingRoot, { throwIfNoEntry: false });
+	if (!stat?.isDirectory() || stat.isSymbolicLink()) {
+		throw new Error("--staging-root must be an existing non-symlink directory outside the checkout");
+	}
+	const resolved = fs.realpathSync(stagingRoot);
+	if (isWithin(fs.realpathSync(REPO_ROOT), resolved)) {
+		throw new Error("--staging-root must be outside the checkout");
+	}
+	return resolved;
+}
+
+function packageDirectory(target, stagingRoot) {
+	if (stagingRoot === null) return path.join(BIN_PKG_ROOT, target.pkg);
+	const pkgDir = path.join(stagingRoot, target.pkg);
+	const stat = fs.lstatSync(pkgDir, { throwIfNoEntry: false });
+	if (!stat?.isDirectory() || stat.isSymbolicLink() || !isWithin(stagingRoot, fs.realpathSync(pkgDir))) {
+		throw new Error(`--staging-root must contain a non-symlink ${target.pkg} package skeleton`);
+	}
+	return pkgDir;
+}
+
+function packageBinDirectory(pkgDir, stagingRoot) {
 	const binDir = path.join(pkgDir, "bin");
 	fs.mkdirSync(binDir, { recursive: true });
+	if (stagingRoot !== null && !isWithin(stagingRoot, fs.realpathSync(binDir))) {
+		throw new Error("staged package bin directory must remain within --staging-root");
+	}
+	return binDir;
+}
+
+async function buildOne(target, versions, checksums, stagingRoot) {
+	console.log(`\n=== ${target.pkg} (${target.plat}/${target.arch}) ===`);
+	const pkgDir = packageDirectory(target, stagingRoot);
+	const binDir = packageBinDirectory(pkgDir, stagingRoot);
 
 	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-bin-${target.pkg}-`));
 	try {
 		for (const [tool, cfg] of Object.entries(TOOLS)) {
-			const version = tool === "fd" ? versions.fd : versions.ripgrep;
+			const version = tool === "fd" ? versions.fd : tool === "rg" ? versions.ripgrep : versions.astGrep;
 			const asset = cfg.assetName(version, target.plat, target.arch);
 			if (!asset) {
 				console.warn(`  (skip ${tool}: no asset for ${target.plat}/${target.arch})`);
@@ -226,7 +295,7 @@ async function buildOne(target, versions, checksums) {
 
 		// Sub-package version is independent of root bobbit version. Bump it manually
 		// in each binaries/binaries-*/package.json when you actually intend to publish
-		// a new sub-package (fd/rg upstream change).
+		// a new sub-package (fd/ripgrep/ast-grep upstream change).
 		const subPkgPath = path.join(pkgDir, "package.json");
 		const sub = JSON.parse(fs.readFileSync(subPkgPath, "utf-8"));
 		console.log(`  version: ${sub.version} (pinned, decoupled from root ${ROOT_PKG.version})`);
@@ -237,17 +306,20 @@ async function buildOne(target, versions, checksums) {
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const pinned = loadJson(VERSIONS_PATH, { fd: null, ripgrep: null });
+	const pinned = loadJson(VERSIONS_PATH, { fd: null, ripgrep: null, astGrep: null });
 	const versions = {
 		fd: args.fd ?? pinned.fd,
 		ripgrep: args.rg ?? pinned.ripgrep,
+		astGrep: args.astGrep ?? pinned.astGrep,
 	};
-	if (!versions.fd || !versions.ripgrep) {
-		console.error("Missing pinned versions. Edit binaries.versions.json or pass --fd / --rg.");
+	if (!versions.fd || !versions.ripgrep || !versions.astGrep) {
+		console.error("Missing pinned versions. Edit binaries.versions.json or pass --fd / --rg / --ast-grep.");
 		process.exit(2);
 	}
 	const checksums = loadJson(CHECKSUMS_PATH, null);
-	console.log(`Building fd ${versions.fd}, ripgrep ${versions.ripgrep}`);
+	const stagingRoot = resolveStagingRoot(args.stagingRoot);
+	console.log(`Building fd ${versions.fd}, ripgrep ${versions.ripgrep}, ast-grep ${versions.astGrep}`);
+	if (stagingRoot) console.log(`Staging package output under ${stagingRoot}`);
 
 	const targets = args.only
 		? TARGETS.filter((t) => t.pkg === `binaries-${args.only}`)
@@ -258,13 +330,13 @@ async function main() {
 	}
 
 	for (const t of targets) {
-		await buildOne(t, versions, checksums);
+		await buildOne(t, versions, checksums, stagingRoot);
 	}
 
 	console.log(
 		"\nDone. Sub-packages are decoupled from the root bobbit version — only\n" +
-			"publish them when fd/rg upstream versions change (rare, ~yearly).\n\n" +
-			"If you DID change fd/rg versions and need to publish:\n" +
+			"publish them when fd/rg/ast-grep upstream versions change.\n\n" +
+			"If you DID change fd/rg/ast-grep versions and need to publish:\n" +
 			"  1. Bump version in each binaries/binaries-*/package.json by hand\n" +
 			"  2. Bump the matching pin in root package.json optionalDependencies\n" +
 			"  3. Run the commands below (publishConfig.access=public is baked in)",
