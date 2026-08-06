@@ -119,6 +119,37 @@ describe("tool startup resilience", () => {
 		assert.equal(preflightConfigExtensionFile({ toolName: "canary", groupDir, baseDir: root, extension }), undefined);
 	});
 
+	it("derives bobbit-extension provenance from config and Marketplace cascade layers", () => {
+		const fixture = makeAgentFixture();
+		writeTool(fixture.configToolsDir, "config_fixture", "tool.yaml", {
+			name: "config_fixture",
+			description: "config overlay fixture",
+		});
+		writeFile(path.join(fixture.configToolsDir, "config_fixture", "extension.ts"), "export default function extension() {}\n");
+
+		const marketToolsDir = path.join(tempRoot(), "market-pack", "tools");
+		writeTool(marketToolsDir, "market_fixture", "tool.yaml", {
+			name: "market_fixture",
+			description: "Marketplace fixture",
+		});
+		writeFile(path.join(marketToolsDir, "market_fixture", "extension.ts"), "export default function extension() {}\n");
+
+		const manager = new ToolManager(fixture.configDir, fixture.builtinToolsDir);
+		manager.setMarketToolRootsProvider(() => [{ dir: marketToolsDir }]);
+		const providers = manager.getToolProviders();
+		assert.equal(providers.get("config_fixture")?.extensionProvenance, "config");
+		assert.equal(providers.get("market_fixture")?.extensionProvenance, "marketplace");
+
+		const activation = computeToolActivationArgs([
+			{ kind: "yaml", name: "config_fixture" },
+			{ kind: "yaml", name: "market_fixture" },
+		], manager);
+		assert.deepEqual(
+			activation.activeBobbitExtensionProviders.map(provider => provider.provenance).sort(),
+			["config", "marketplace"],
+		);
+	});
+
 	it("rejects a broken active config agent override and falls back to bundled session_prompt", () => {
 		const fixture = makeAgentFixture();
 		writeTool(fixture.configToolsDir, "agent", "session_prompt.yaml", {
@@ -143,6 +174,7 @@ describe("tool startup resilience", () => {
 		const provider = tm.getToolProviders().get("session_prompt");
 		assert.ok(provider, "session_prompt must still have a provider via bundled fallback");
 		assert.equal(path.resolve(provider.baseDir), path.resolve(fixture.builtinToolsDir));
+		assert.equal(provider.extensionProvenance, "builtin");
 
 		const result = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], tm);
 		const activeExtensions = nonBuiltinExtensionPaths(result.args);

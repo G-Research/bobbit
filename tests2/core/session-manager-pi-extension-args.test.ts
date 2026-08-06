@@ -8,12 +8,16 @@ import path from "node:path";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { computeToolActivationArgs, type EffectiveTool } from "../../src/server/agent/tool-activation.ts";
 import {
+	assertToolResultFilterExtensionCompatibility,
 	assertToolResultFilterMarketplacePiExtensionCompatibility,
 	resolveMarketplacePiExtensionActivation,
 	resolveToolActivation,
 	TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE,
 	TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
 	type ResolvedPiExtensionContribution,
 	type SessionSetupPlan,
 } from "../../src/server/agent/session-setup.ts";
@@ -61,11 +65,30 @@ function extensionPaths(args: string[]): string[] {
 function assertProtectedMarketplacePiExtensionConflict(run: () => unknown): void {
 	assert.throws(run, (error: unknown) => {
 		assert.ok(error instanceof Error);
-		assert.equal((error as Error & { code?: string }).code, TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE);
-		assert.equal(error.message, TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE);
+		assert.equal((error as Error & { code?: string }).code, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE);
+		assert.equal(error.message, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE);
+		// Legacy names remain aliases while callers migrate to the general fence.
+		assert.equal(TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE);
+		assert.equal(TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE);
 		return true;
 	});
 }
+
+function bobbitExtensionToolManager(provenance: "builtin" | "marketplace" | "config") {
+	const provider = {
+		type: "bobbit-extension" as const,
+		extension: "extension.ts",
+		groupDir: "fixture",
+		baseDir: `/fixture/${provenance}`,
+		extensionProvenance: provenance,
+	};
+	return {
+		getToolProviders: () => new Map([["fixture_tool", provider]]),
+		getExtensionPath: (groupDir: string, filename: string) => path.join("/fixture/builtin", groupDir, filename),
+	};
+}
+
+const fixtureTool: EffectiveTool[] = [{ kind: "yaml", name: "fixture_tool" }];
 
 function scopedPiToolManager() {
 	const providers = new Map<string, any>([
@@ -168,6 +191,68 @@ describe("marketplace pi extension activation args", () => {
 		assert.doesNotThrow(() =>
 			assertToolResultFilterMarketplacePiExtensionCompatibility(
 				{ toolResult: true },
+				{ runtimeExtensions: [] },
+			),
+		);
+	});
+
+	for (const provenance of ["marketplace", "config"] as const) {
+		it(`rejects an active ${provenance} bobbit-extension provider before initial setup`, () => {
+			const tmp = fixtureRoot(`${provenance}-tool-initial`);
+			const plan = {
+				id: `protected-${provenance}-initial`,
+				mode: "normal",
+				cwd: tmp,
+				projectId: "project-1",
+				effectiveAllowedTools: fixtureTool,
+				bridgeOptions: {},
+			} as SessionSetupPlan;
+			const ctx: any = {
+				roleManager: null,
+				toolManager: bobbitExtensionToolManager(provenance),
+				mcpManager: null,
+				groupPolicyStore: null,
+				configCascade: null,
+				requestMutationActivation: undefined,
+				toolResultFilterActivation: () => ({ toolResult: true }),
+				marketplacePiExtensionResolver: undefined,
+				resolveGoalMetadata: () => ({}),
+			};
+
+			assertProtectedMarketplacePiExtensionConflict(() => resolveToolActivation(plan, ctx));
+			assert.deepEqual(plan.bridgeOptions.args, undefined, "protected setup must fail before Pi args are assembled");
+		});
+
+		for (const lifecycle of ["restore", "respawn", "role-replacement", "force-abort"] as const) {
+			it(`rejects an active ${provenance} bobbit-extension provider through ${lifecycle}`, () => {
+				const manager: any = new SessionManager({ toolManager: bobbitExtensionToolManager(provenance) as any });
+				manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+				assertProtectedMarketplacePiExtensionConflict(() =>
+					manager.buildToolActivationArgs(`protected-${provenance}-${lifecycle}`, fixtureTool, undefined, fixtureRoot(lifecycle), "project-1"),
+				);
+			});
+		}
+	}
+
+	it("records trusted shipped provider provenance and permits it beside the filter", () => {
+		const activation = computeToolActivationArgs(fixtureTool, bobbitExtensionToolManager("builtin") as any);
+		assert.deepEqual(activation.activeBobbitExtensionProviders.map(provider => provider.provenance), ["builtin"]);
+		assert.doesNotThrow(() =>
+			assertToolResultFilterExtensionCompatibility(
+				{ toolResult: true },
+				activation,
+				{ runtimeExtensions: [] },
+			),
+		);
+	});
+
+	it("keeps untrusted provider extensions available when result filtering is inactive", () => {
+		const activation = computeToolActivationArgs(fixtureTool, bobbitExtensionToolManager("config") as any);
+		assert.equal(activation.activeBobbitExtensionProviders[0]?.provenance, "config");
+		assert.doesNotThrow(() =>
+			assertToolResultFilterExtensionCompatibility(
+				undefined,
+				activation,
 				{ runtimeExtensions: [] },
 			),
 		);

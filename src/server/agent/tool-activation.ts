@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ScopedToolContext, ToolManager, ToolProvider } from "./tool-manager.js";
+import type { BobbitExtensionProvenance, ResolvedToolProvider, ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
 import { generateToolGuardExtension, type RequestMutationToolActivation, type ToolPolicyEntry } from "./tool-guard-extension.js";
@@ -574,6 +574,14 @@ export function computeEffectiveAllowedTools(
 	return result;
 }
 
+export interface ActiveBobbitExtensionProvider {
+	/** Server-derived provider identity; never sourced from extension YAML. */
+	toolName: string;
+	extensionPath: string;
+	/** `builtin` is the only same-realm provider allowed beside the result gate. */
+	provenance: BobbitExtensionProvenance;
+}
+
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--no-builtin-tools", "--no-extensions", "--extension", "/path/to/ext"]) */
 	args: string[];
@@ -586,6 +594,8 @@ export interface ToolActivationResult {
 	 * value is `""` so the extension registers nothing.
 	 */
 	env: Record<string, string>;
+	/** Every active YAML `bobbit-extension` provider and its cascade provenance. */
+	activeBobbitExtensionProviders: readonly ActiveBobbitExtensionProvider[];
 }
 
 /** Pi file-tool builtins re-registered via defaults/tools/_builtins/extension.ts. */
@@ -595,7 +605,7 @@ const FILE_TOOL_BUILTIN_NAMES = new Set(["read", "edit", "write", "grep", "find"
  * Resolve the absolute path for a bobbit-extension provider.
  * Uses the provider's baseDir (resolved from the cascade) instead of a hardcoded TOOLS_DIR.
  */
-function resolveExtensionPath(provider: ToolProvider & { groupDir: string; baseDir: string }): string {
+function resolveExtensionPath(provider: ResolvedToolProvider): string {
 	return path.join(provider.baseDir, provider.groupDir, provider.extension!);
 }
 
@@ -1255,6 +1265,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 
 	const builtinsToRegister = new Set<string>();
 	const extensionPaths = new Set<string>();
+	const activeBobbitExtensionProviders = new Map<string, ActiveBobbitExtensionProvider>();
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
@@ -1278,7 +1289,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 		if (mcpExtensionPaths) {
 			for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 		}
-		return { args, env };
+		return { args, env, activeBobbitExtensionProviders: [] };
 	}
 
 	// Always load the _builtins extension; it reads BOBBIT_BUILTIN_TOOLS to
@@ -1325,7 +1336,17 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 					console.warn(`[tool-activation] Tool "${entry.name}" has provider.type: builtin with tool: "${provider.tool}" but no handler — extension not loaded; this is likely a misconfigured YAML`);
 				}
 			} else if (provider.type === "bobbit-extension" && provider.extension) {
-				extensionPaths.add(resolveExtensionPath(provider));
+				const extensionPath = resolveExtensionPath(provider);
+				extensionPaths.add(extensionPath);
+				// Provenance is resolved by ToolManager from the winning cascade
+				// layer, not inferred from a CLI path or mutable provider YAML.
+				if (!activeBobbitExtensionProviders.has(extensionPath)) {
+					activeBobbitExtensionProviders.set(extensionPath, {
+						toolName: entry.name,
+						extensionPath,
+						provenance: provider.extensionProvenance ?? "unknown",
+					});
+				}
 			}
 		}
 	};
@@ -1346,5 +1367,5 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	if (mcpExtensionPaths) {
 		for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 	}
-	return { args, env };
+	return { args, env, activeBobbitExtensionProviders: [...activeBobbitExtensionProviders.values()] };
 }

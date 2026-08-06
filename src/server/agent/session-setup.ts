@@ -47,7 +47,7 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool, type ToolActivationResult } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
@@ -110,17 +110,36 @@ export interface MarketplacePiExtensionActivation {
  * share a protected result-gate session, even though core snapshots intrinsics,
  * because they could replace private AgentSession internals before execution.
  */
-export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE = "TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT";
-export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE = "Tool-result filtering cannot run with Marketplace Pi extensions.";
+export const TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE = "TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT";
+export const TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE = "Tool-result filtering cannot run with untrusted extensions.";
 
+/**
+ * Result-gate sessions share Pi's private realm with every `--extension`.
+ * Only immutable shipped Bobbit tool providers may coexist with that gate.
+ */
+export function assertToolResultFilterExtensionCompatibility(
+	filter: { toolResult?: boolean } | null | undefined,
+	toolActivation: Pick<ToolActivationResult, "activeBobbitExtensionProviders">,
+	piActivation: Pick<MarketplacePiExtensionActivation, "runtimeExtensions">,
+): void {
+	if (!filter?.toolResult) return;
+	const hasUntrustedToolProvider = toolActivation.activeBobbitExtensionProviders.some(provider => provider.provenance !== "builtin");
+	if (!hasUntrustedToolProvider && piActivation.runtimeExtensions.length === 0) return;
+	const error = new Error(TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE) as Error & { code: string };
+	error.code = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE;
+	throw error;
+}
+
+/** @deprecated Use assertToolResultFilterExtensionCompatibility. */
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE;
+/** @deprecated Use TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE. */
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE;
+/** @deprecated Compatibility wrapper for Marketplace Pi extensions. */
 export function assertToolResultFilterMarketplacePiExtensionCompatibility(
 	filter: { toolResult?: boolean } | null | undefined,
 	activation: Pick<MarketplacePiExtensionActivation, "runtimeExtensions">,
 ): void {
-	if (!filter?.toolResult || activation.runtimeExtensions.length === 0) return;
-	const error = new Error(TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE) as Error & { code: string };
-	error.code = TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE;
-	throw error;
+	assertToolResultFilterExtensionCompatibility(filter, { activeBobbitExtensionProviders: [] }, activation);
 }
 
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
@@ -1013,7 +1032,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
-	assertToolResultFilterMarketplacePiExtensionCompatibility(toolResultFilter, piExtensionActivation);
+	assertToolResultFilterExtensionCompatibility(toolResultFilter, activation, piExtensionActivation);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
 	let toolResultGateEnv: Record<string, string> | undefined;

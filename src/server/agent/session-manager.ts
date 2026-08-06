@@ -142,7 +142,7 @@ import {
 	type MarketplacePiExtensionResolver,
 	type MarketplacePiExtensionActivation,
 	type PiExtensionDiagnostic,
-	assertToolResultFilterMarketplacePiExtensionCompatibility,
+	assertToolResultFilterExtensionCompatibility,
 	resolveMarketplacePiExtensionActivation,
 	scopedToolContext,
 	executePlan,
@@ -3873,7 +3873,7 @@ export class SessionManager {
 		// Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
 		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
-		assertToolResultFilterMarketplacePiExtensionCompatibility(toolResultFilter, piExtensionActivation);
+		assertToolResultFilterExtensionCompatibility(toolResultFilter, activation, piExtensionActivation);
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 		let toolResultGateEnv: Record<string, string> | undefined;
