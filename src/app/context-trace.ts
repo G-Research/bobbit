@@ -33,6 +33,7 @@ const OUTCOME_REASONS = new Set<string>([
 	"Lower-priority selection",
 ]);
 const SELECTION_KINDS = new Set(["model", "thinking", "role", "workflow"]);
+const CAPABILITY_SELECTOR_STAGES = new Set(["skills", "mcp"]);
 const SAFE_MODEL_SELECTION_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const OUTCOME_ACTORS = new Set(["extension", "user", "deadline", "headless"]);
 const DECISION_CLASSES = new Set(["deferrable", "consent-required"]);
@@ -58,6 +59,7 @@ export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
 export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
 export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed" | "Lower-priority selection";
 export type SafeTraceSelectionKind = "model" | "thinking" | "role" | "workflow";
+export type SafeTraceCapabilitySelectorStage = "skills" | "mcp";
 export type SafeTraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 /** Fixed consent metadata retained by the safe REST projection. */
 export type SafeTraceDecisionClass = "deferrable" | "consent-required";
@@ -119,6 +121,13 @@ export interface SafeTraceOutcomeRow {
 	resumeStatus?: SafeTraceConsentResumeStatus;
 	selectionKind?: SafeTraceSelectionKind;
 	selectionValue?: string;
+	/** Aggregate startup capability-selection telemetry; no candidate ids or query data. */
+	capabilityStage?: SafeTraceCapabilitySelectorStage;
+	selectionFingerprint?: string;
+	candidateCount?: number;
+	selectedCount?: number;
+	selectorCount?: number;
+	contextBytesSaved?: number;
 }
 
 export interface SafeTraceEntry {
@@ -363,6 +372,23 @@ function safeOutcomes(value: unknown, audits?: ReadonlyMap<string, SafePromptExt
 		const selectionValue = SELECTION_VALUE_OUTCOMES.has(status)
 			? safeSelectionValue(selectionKind, outcome.selectionValue)
 			: undefined;
+		// Keep dynamic-selection telemetry on the same strict allow-list as its
+		// durable trace. It is aggregate-only and valid solely for session setup.
+		const capabilityStage = kind === "decision" && event === "sessionSetup"
+			&& typeof outcome.capabilityStage === "string" && CAPABILITY_SELECTOR_STAGES.has(outcome.capabilityStage)
+			? outcome.capabilityStage as SafeTraceCapabilitySelectorStage
+			: undefined;
+		const selectionFingerprint = capabilityStage && typeof outcome.selectionFingerprint === "string" && QUESTION_FINGERPRINT.test(outcome.selectionFingerprint)
+			? outcome.selectionFingerprint
+			: undefined;
+		const candidateCount = capabilityStage && typeof outcome.candidateCount === "number" && Number.isFinite(outcome.candidateCount) && outcome.candidateCount >= 0
+			? finiteDisplayNumber(outcome.candidateCount) : undefined;
+		const selectedCount = capabilityStage && typeof outcome.selectedCount === "number" && Number.isFinite(outcome.selectedCount) && outcome.selectedCount >= 0
+			? finiteDisplayNumber(outcome.selectedCount) : undefined;
+		const selectorCount = capabilityStage && typeof outcome.selectorCount === "number" && Number.isFinite(outcome.selectorCount) && outcome.selectorCount >= 0
+			? finiteDisplayNumber(outcome.selectorCount) : undefined;
+		const contextBytesSaved = capabilityStage && typeof outcome.contextBytesSaved === "number" && Number.isFinite(outcome.contextBytesSaved) && outcome.contextBytesSaved >= 0
+			? finiteDisplayNumber(outcome.contextBytesSaved) : undefined;
 		outcomes.push({
 			kind, ...(packId ? { packId } : {}), hookId: outcome.hookId, event, outcome: status,
 			...(reason ? { reason } : {}), ...(selectedValue ? { value: selectedValue } : {}), ...(latencyMs === undefined ? {} : { latencyMs }),
@@ -373,6 +399,9 @@ function safeOutcomes(value: unknown, audits?: ReadonlyMap<string, SafePromptExt
 			...(classificationReason ? { classificationReason } : {}), ...(timeoutAction ? { timeoutAction } : {}),
 			...(resumeStatus ? { resumeStatus } : {}), ...(selectionKind ? { selectionKind } : {}),
 			...(selectionValue ? { selectionValue } : {}),
+			...(capabilityStage ? { capabilityStage } : {}), ...(selectionFingerprint ? { selectionFingerprint } : {}),
+			...(candidateCount === undefined ? {} : { candidateCount }), ...(selectedCount === undefined ? {} : { selectedCount }),
+			...(selectorCount === undefined ? {} : { selectorCount }), ...(contextBytesSaved === undefined ? {} : { contextBytesSaved }),
 		});
 	}
 	return outcomes;

@@ -156,6 +156,47 @@ describe("context trace controller", () => {
 		expect(JSON.stringify(item)).not.toContain(secret);
 	});
 
+	it("normalizes only aggregate dynamic capability selection telemetry", () => {
+		const secret = "query proposal reason candidate-id denied-id /private/config token";
+		const [item] = normalizeContextTracePayload({
+			entries: [{
+				ts: 1, hook: "sessionSetup", providers: [],
+				outcomes: [
+					{
+						kind: "decision", packId: "extension-pack", hookId: "select-mcp", event: "sessionSetup", outcome: "applied",
+						capabilityStage: "mcp", selectionFingerprint: "a".repeat(64),
+						candidateCount: 8, selectedCount: 2, selectorCount: 3, contextBytesSaved: 512,
+						query: secret, proposal: { reason: secret, add: [secret] }, deniedIds: [secret], config: { secret },
+					},
+					{
+						kind: "decision", hookId: "bad-stage", event: "sessionSetup", outcome: "error",
+						capabilityStage: "tools", selectionFingerprint: secret, candidateCount: -1, selectedCount: Infinity, selectorCount: -1, contextBytesSaved: -1,
+					},
+					{
+						kind: "decision", hookId: "late", event: "beforePrompt", outcome: "applied",
+						capabilityStage: "skills", selectionFingerprint: secret, candidateCount: 1, selectedCount: 1, selectorCount: 1, contextBytesSaved: 1,
+					},
+				],
+			}],
+		});
+		expect(item).toEqual({
+			kind: "trace",
+			entry: {
+				hook: "sessionSetup", ts: 1, providers: [],
+				outcomes: [
+					{
+						kind: "decision", packId: "extension-pack", hookId: "select-mcp", event: "sessionSetup", outcome: "applied",
+						capabilityStage: "mcp", selectionFingerprint: "a".repeat(64),
+						candidateCount: 8, selectedCount: 2, selectorCount: 3, contextBytesSaved: 512,
+					},
+					{ kind: "decision", hookId: "bad-stage", event: "sessionSetup", outcome: "error" },
+					{ kind: "decision", hookId: "late", event: "beforePrompt", outcome: "applied" },
+				],
+			},
+		});
+		expect(JSON.stringify(item)).not.toContain(secret);
+	});
+
 	it("normalizes and presents only safe scheduled-advisor attribution", async () => {
 		const secret = "RAW_ADVISOR_RESULT /private/secret";
 		const [item] = normalizeContextTracePayload({
