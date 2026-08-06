@@ -14,6 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { test, expect } from "../e2e/in-process-harness.js";
 import { isDockerAvailable } from "../e2e/test-utils/docker.js";
+import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 import {
 	apiFetch,
 	readE2EToken,
@@ -32,6 +33,34 @@ test.describe("sandbox container recovery", () => {
 	const hasDocker = isDockerAvailable();
 
 	test.describe.configure({ mode: "serial" });
+
+	test("verification sidecar cleanup removes a real Docker child by exact full ID", async () => {
+		test.skip(!hasDocker, "Docker not available");
+		test.setTimeout(30_000);
+		let containerId: string | undefined;
+		try {
+			containerId = execFileSync("docker", [
+				"run", "-d",
+				"--label", "bobbit-verification-sidecar=1",
+				"alpine:3.20", "sleep", "infinity",
+			], { timeout: 15_000, encoding: "utf-8" }).trim();
+			expect(containerId).toMatch(/^[a-f0-9]{64}$/i);
+
+			const sandbox = new ProjectSandbox({
+				projectId: "manual-sidecar-cleanup",
+				projectDir: process.cwd(),
+				repoUrl: "https://example.test/repo.git",
+				image: "alpine:3.20",
+			});
+			await (sandbox as any)._removeVerificationSidecarContainer(containerId);
+			expect(() => execFileSync("docker", ["inspect", containerId!], { timeout: 5_000, stdio: "pipe" })).toThrow();
+		} finally {
+			if (containerId) {
+				try { execFileSync("docker", ["rm", "-f", containerId], { timeout: 5_000, stdio: "ignore" }); }
+				catch { /* already removed by the strict cleanup under test */ }
+			}
+		}
+	});
 
 	test("health monitor detects container death and recreates", async ({ gateway }) => {
 		test.skip(!hasDocker, "Docker not available");

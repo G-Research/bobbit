@@ -562,11 +562,11 @@ export class ProjectSandbox {
 		return this._withContainerLifecycle(async () => {
 			await this.getContainerId(); // project lifecycle and named volumes are ready
 			const checkoutPath = this._validateVerificationCheckout(request);
-			const ignoredOutputDirs = this._validatedSidecarOutputDirs(request, checkoutPath);
 			const matching = await this._findVerificationSidecars(request.signalId);
 			if (matching.length > 1) {
 				throw new Error(`[project-sandbox] refusing ambiguous verification sidecars for signal ${request.signalId}`);
 			}
+			const ignoredOutputDirs = this._validatedSidecarOutputDirs(request, checkoutPath, matching.length === 1);
 			if (matching.length === 1) {
 				const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath, undefined, ignoredOutputDirs);
 				if (!(await this._isContainerRunning(sidecar.containerId))) {
@@ -594,7 +594,7 @@ export class ProjectSandbox {
 				signalId: input.signalId,
 				checkoutPath: path.join(resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId), input.signalId),
 			});
-			const ignoredOutputDirs = this._validatedSidecarOutputDirs(input, checkoutPath);
+			const ignoredOutputDirs = this._validatedSidecarOutputDirs(input, checkoutPath, true);
 			const sidecar = await this._validateVerificationSidecar(input.containerId, input.signalId, checkoutPath, undefined, ignoredOutputDirs);
 			if (!(await this._isContainerRunning(sidecar.containerId))) {
 				await this.execDocker(["start", sidecar.containerId], { timeout: 30_000, env: DOCKER_ENV });
@@ -1483,15 +1483,22 @@ export class ProjectSandbox {
 		return actual;
 	}
 
-	private _validatedSidecarOutputDirs(request: Pick<VerificationSidecarRequest, "ignoredOutputDirs">, checkoutPath: string): string[] {
-		// Persistent output roots are created in the completed checkout before the
-		// first sidecar starts. On later phases and restart reconnects they are
-		// therefore present in readdir(), but remain exact writable overlay roots,
-		// not source entries. Validate the declaration first, then exclude only its
-		// declared top-level roots while checking it cannot shadow frozen source.
+	private _validatedSidecarOutputDirs(
+		request: Pick<VerificationSidecarRequest, "ignoredOutputDirs">,
+		checkoutPath: string,
+		allowPersistentOutputRoots = false,
+	): string[] {
 		const declared = validatedIgnoredOutputDirs(request.ignoredOutputDirs, new Set());
+		const entries = new Set(fs.readdirSync(checkoutPath));
+		if (!allowPersistentOutputRoots) return validatedIgnoredOutputDirs(declared, entries);
+
+		// A reconnect may see exactly the server-created roots from a prior phase.
+		// Require every declared child to already be a canonical directory before
+		// excluding its top-level root from the frozen source inventory. New sidecars
+		// retain the strict source collision check above.
+		for (const outputDir of declared) this._validatedOutputMountPath(checkoutPath, outputDir, false);
 		const outputRoots = new Set(declared.map(outputDir => outputDir.split("/")[0]));
-		const sourceEntries = new Set(fs.readdirSync(checkoutPath).filter(entry => !outputRoots.has(entry)));
+		const sourceEntries = new Set([...entries].filter(entry => !outputRoots.has(entry)));
 		return validatedIgnoredOutputDirs(declared, sourceEntries);
 	}
 

@@ -264,8 +264,23 @@ describe("ProjectSandbox verification sidecars", () => {
 			fs.mkdirSync(path.join(checkout, "coverage", "reports"), { recursive: true });
 			fs.mkdirSync(path.join(checkout, "src"), { recursive: true });
 			assert.deepEqual(
-				(makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["coverage/reports", "dist"] }, checkout),
+				(makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["coverage/reports", "dist"] }, checkout, true),
 				["coverage/reports", "dist"],
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a real source root before any persistent output overlay exists", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-source-collision-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "dist"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "dist", "tracked-source.js"), "source");
+			assert.throws(
+				() => (makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["dist"] }, checkout),
+				/overlaps a source entry/,
 			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -288,16 +303,30 @@ describe("ProjectSandbox verification sidecars", () => {
 		]);
 	});
 
-	it("does not turn an unconfirmed sidecar removal failure into success", async () => {
+	it("does not turn daemon or timeout removal failures into success", async () => {
+		for (const message of ["Docker daemon unavailable", "Docker command timed out"]) {
+			const sandbox = makeSandbox();
+			(sandbox as any).execDocker = async (args: string[]) => {
+				if (args[0] === "rm") throw new Error(message);
+				return { stdout: JSON.stringify({ Id: fullId }), stderr: "" };
+			};
+
+			await assert.rejects(
+				(sandbox as any)._removeVerificationSidecarContainer(fullId),
+				/removal failed/,
+			);
+		}
+	});
+
+	it("fails cleanup when Docker reports success but the exact sidecar remains", async () => {
 		const sandbox = makeSandbox();
-		(sandbox as any).execDocker = async (args: string[]) => {
-			if (args[0] === "rm") throw new Error("Docker daemon unavailable");
-			return { stdout: JSON.stringify({ Id: fullId }), stderr: "" };
-		};
+		(sandbox as any).execDocker = async (args: string[]) => args[0] === "rm"
+			? { stdout: fullId, stderr: "" }
+			: { stdout: JSON.stringify({ Id: fullId }), stderr: "" };
 
 		await assert.rejects(
 			(sandbox as any)._removeVerificationSidecarContainer(fullId),
-			/removal failed/,
+			/did not remove the recorded container/,
 		);
 	});
 
