@@ -93,7 +93,8 @@ function fakeGit(source: Fixture): FakeGit {
 					return { stdout: nul(command.includes("--cached") ? source.inventory.tracked : source.inventory.untracked), stderr: Buffer.alloc(0) };
 				}
 				if (command.includes("check-ignore")) {
-					if (source.ignoredTopLevel.has(command.at(-1)!)) return empty;
+					const candidate = command.at(-1)!;
+					if (source.ignoredTopLevel.has(candidate) || candidate === "ignored" || candidate.startsWith("ignored/")) return empty;
 					throw Object.assign(new Error("path is not ignored"), { code: 1 });
 				}
 				if (command.includes("worktree") && command.includes("add")) {
@@ -160,6 +161,42 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.equal(manager.getDiagnostics().leaseCount, 0);
 		await assert.rejects(readFile(checkout.path), /ENOENT/);
 		assert.ok(git.calls.every(call => call.options?.env?.GIT_DIR === undefined && call.options?.env?.GIT_WORK_TREE === undefined && call.options?.env?.GIT_INDEX_FILE === undefined), "every Git call clears ambient repository selectors");
+	});
+
+	it.skipIf(process.platform === "win32")("quarantines sandbox mutations before privileged inventory or Git work and never exposes .git", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		const outside = path.join(source.base, "outside-canary");
+		await mkdir(outside);
+		await writeFile(path.join(outside, "sentinel"), "unchanged\n");
+		await assert.rejects(lstat(path.join(checkout.path, ".git")), /ENOENT/, "the sandbox-visible tree never contains Git metadata");
+
+		// This models a sandbox process replacing an entry while it owns the public
+		// bind mount. assertUnchanged first renames the whole root into private
+		// quarantine, so neither its digest walk nor check-ignore uses the public cwd.
+		await symlink(outside, path.join(checkout.path, "attacker-link"));
+		await assert.rejects(manager.assertUnchanged(checkout), isPinnedError("PINNED_CHECKOUT_MUTATED"));
+		assert.equal(await readFile(path.join(outside, "sentinel"), "utf8"), "unchanged\n");
+		const gitCwds = git.calls.flatMap(call => call.args.flatMap((arg, index) => call.args[index - 1] === "-C" ? [arg] : []));
+		assert.equal(gitCwds.includes(checkout.path), false, "no Git command may receive the sandbox-public path");
+		await manager.release(checkout.id, "test-project-id");
+		assert.equal(await readFile(path.join(outside, "sentinel"), "utf8"), "unchanged\n");
+	});
+
+	it.skipIf(process.platform === "win32")("atomically quarantines a release-time symlink without traversing its external target", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		const outside = path.join(source.base, "release-outside");
+		await mkdir(outside);
+		await writeFile(path.join(outside, "sentinel"), "unchanged\n");
+		await symlink(outside, path.join(checkout.path, "release-link"));
+		await manager.release(checkout.id, "test-project-id");
+		assert.equal(await readFile(path.join(outside, "sentinel"), "utf8"), "unchanged\n");
+		assert.equal(manager.getDiagnostics().leaseCount, 0);
 	});
 
 	it("isolates two authoritative project owners and rejects foreign lease operations", async () => {
@@ -345,7 +382,9 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await assert.rejects(readFile(checkout.path), /ENOENT/);
 		assert.equal(await readFile(path.join(unrelated, "keep.txt"), "utf8"), "must survive\n");
 		const removes = git.calls.filter(call => call.args.includes("worktree") && call.args.includes("remove"));
-		assert.deepEqual(removes.map(call => call.args.at(-1)), [checkout.path]);
+		assert.equal(removes.length, 1);
+		assert.match(removes[0]!.args.at(-1)!, /\.worktree$/, "Git removal only sees the private worktree");
+		assert.notEqual(removes[0]!.args.at(-1), checkout.path);
 	});
 
 	it("persists failed cleanup for restart recovery and exposes bounded diagnostics", async () => {

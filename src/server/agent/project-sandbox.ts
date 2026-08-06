@@ -160,11 +160,14 @@ export function resolveScopedVerificationCheckoutMount(checkoutRoot: string, pro
 		}
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		fs.mkdirSync(scoped);
+		fs.mkdirSync(scoped, { mode: 0o755 });
 	}
+	// This is the mount root, not an execution tree. Sandbox processes may write
+	// inside atomically published signal children but cannot replace this parent.
+	fs.chmodSync(scoped, 0o755);
 	const canonicalScope = fs.realpathSync(scoped);
 	const scopeInfo = fs.lstatSync(canonicalScope);
-	if (!scopeInfo.isDirectory() || scopeInfo.isSymbolicLink() || comparableMountPath(canonicalScope) !== comparableMountPath(scoped) || !isStrictDescendant(canonicalRoot, canonicalScope)) {
+	if (!scopeInfo.isDirectory() || scopeInfo.isSymbolicLink() || (process.platform !== "win32" && (scopeInfo.mode & 0o022) !== 0) || comparableMountPath(canonicalScope) !== comparableMountPath(scoped) || !isStrictDescendant(canonicalRoot, canonicalScope)) {
 		throw new Error("[project-sandbox] verification checkout scope escapes its server-owned root");
 	}
 	return canonicalScope;

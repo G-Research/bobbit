@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import type { GateSignal } from "../../src/server/agent/gate-store.ts";
@@ -61,7 +61,7 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 		try {
 			assert.equal(await readFile(path.join(checkout.path, "tracked.txt"), "utf8"), "dirty\r\n");
 			await assert.rejects(readFile(path.join(checkout.path, "deleted.txt")), /ENOENT/);
-			assert.equal(await git(checkout.path, "ls-files", "--cached"), "", "real --no-checkout worktrees have no usable target inventory");
+			await assert.rejects(lstat(path.join(checkout.path, ".git")), /ENOENT/, "the sandbox-visible tree deliberately has no Git metadata");
 			assert.ok(checkout.contentDigest.digest);
 			const persisted = JSON.parse(await readFile(path.join(source.state, "verification-checkouts.json"), "utf8"));
 			assert.equal(persisted[0].sourceInventory.some((entry: { relativePath: string }) => entry.relativePath === "untracked.txt"), true);

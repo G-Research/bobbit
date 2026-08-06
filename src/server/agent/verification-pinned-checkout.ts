@@ -8,6 +8,7 @@ import {
 	readdir,
 	realpath,
 	rename,
+	rm,
 	stat,
 	symlink,
 	unlink,
@@ -65,7 +66,12 @@ export interface PinnedCheckoutLease {
 	goalId: string;
 	gateId: string;
 	state: PinnedCheckoutState;
+	/** Sandbox-visible, source-only tree. It never contains Git metadata. */
 	checkoutPath: string;
+	/** Server-private detached Git worktree; never bind-mounted into a sandbox. */
+	worktreePath?: string;
+	/** `public` is sandbox-visible; `quarantined` is private and safe to audit/remove. */
+	publicationState?: "public" | "quarantined";
 	sourceRoot: string;
 	repoRoot: string;
 	commitSha: string;
@@ -137,7 +143,9 @@ function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
 	delete env.GIT_DIR;
 	delete env.GIT_WORK_TREE;
 	delete env.GIT_INDEX_FILE;
-	return env;
+	delete env.GIT_CONFIG_GLOBAL;
+	delete env.GIT_CONFIG_SYSTEM;
+	return { ...env, GIT_CONFIG_NOSYSTEM: "1" };
 }
 
 function checkoutDigestIsValid(value: unknown): value is VerificationContentDigest {
@@ -192,14 +200,19 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	private readonly now: () => number;
 	private readonly leases = new Map<string, PinnedCheckoutLease>();
 	private readonly stateDir: string;
+	/** Public per-project roots are bind-mounted; host code only renames whole signal roots there. */
 	private readonly checkoutRoot: string;
+	/** All Git, copy, digest, and recursive cleanup work stays in this unmounted root. */
+	private readonly privateRoot: string;
 	private readonly stateFile: string;
 	private checkoutRootCanonical: string | undefined;
+	private privateRootCanonical: string | undefined;
 	private operations: Promise<void> = Promise.resolve();
 
 	constructor(stateDir: string, options: VerificationPinnedCheckoutManagerOptions = {}) {
 		this.stateDir = path.resolve(stateDir);
 		this.checkoutRoot = path.join(this.stateDir, "verification-checkouts");
+		this.privateRoot = path.join(this.stateDir, "verification-checkouts-private");
 		this.stateFile = path.join(this.stateDir, "verification-checkouts.json");
 		this.commandRunner = options.commandRunner ?? realCommandRunner;
 		this.inventory = options.readInventory ?? readVerificationSourceInventory;
@@ -257,19 +270,19 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 			}
 
-			let target: string;
+			let target!: string;
+			let worktree!: string;
+			let candidate!: string;
 			try {
-				target = await this.targetPath(input.projectId, signal.id);
+				target = await this.targetPath(input.projectId, signal.id, true);
+				worktree = await this.privatePath(input.projectId, signal.id, "worktree");
+				candidate = await this.privatePath(input.projectId, signal.id, "candidate");
+				for (const location of [target, worktree, candidate]) {
+					try { await lstat(location); throw new Error("checkout path exists"); }
+					catch (error) { if (!isMissing(error)) throw error; }
+				}
 			} catch {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-			}
-			try {
-				await lstat(target);
-				throw new Error("target exists");
-			} catch (error) {
-				if (!isMissing(error)) {
-					throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-				}
 			}
 			let sourceInventory: VerificationSourceInventoryEntry[];
 			try {
@@ -279,7 +292,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			}
 			const lease: PinnedCheckoutLease = {
 				signalId: signal.id, projectId: input.projectId, goalId: signal.goalId, gateId: signal.gateId, state: "preparing",
-				checkoutPath: target, sourceRoot, repoRoot, commitSha: signal.commitSha.toLowerCase(),
+				checkoutPath: target, worktreePath: worktree, publicationState: "quarantined", sourceRoot, repoRoot, commitSha: signal.commitSha.toLowerCase(),
 				createdAt: this.now(), sourceInventory: persistInventory(sourceInventory), cleanupAttempts: 0,
 			};
 			this.leases.set(lease.signalId, lease);
@@ -289,13 +302,18 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 			}
 			try {
-				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "add", "--detach", "--no-checkout", target, lease.commitSha]);
-				await this.materialize(sourceRoot, target, sourceInventory);
-				await this.exposeIgnoredSetupDirectories(sourceRoot, target);
-				const contentDigest = await computeVerificationContentDigestFromInventory(target, sourceInventory);
-				await this.makeReadOnly(target);
+				// Git and raw-byte copying only ever touch the private worktree. The public
+				// bind mount receives a finished source-only candidate by one rename.
+				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "add", "--detach", "--no-checkout", worktree, lease.commitSha]);
+				await this.materialize(sourceRoot, worktree, sourceInventory);
+				await this.materialize(worktree, candidate, sourceInventory);
+				await this.exposeIgnoredSetupDirectories(sourceRoot, candidate);
+				const contentDigest = await computeVerificationContentDigestFromInventory(candidate, sourceInventory);
+				await this.makePublicExecutionTree(candidate);
 				lease.digest = contentDigest;
+				await this.publishCandidate(lease, candidate);
 				lease.state = "ready";
+				lease.publicationState = "public";
 				await this.persist();
 				return { id: lease.signalId, projectId: lease.projectId, sourceRoot, repoRoot, path: target, commitSha: lease.commitSha, contentDigest };
 			} catch (error) {
@@ -351,12 +369,16 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			const restored = await this.checkoutFromLease(lease);
 			if (restored.path !== checkout.path || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha) throw new Error("mismatched checkout");
 			const sourceInventory = restoreInventory(lease.sourceInventory);
-			const actual = await computeVerificationContentDigestFromInventory(restored.path, sourceInventory);
-			await this.assertNoSourceAdditions(restored.path, sourceInventory);
+			// The sandbox-visible tree is never traversed by privileged code. Detach it
+			// first, audit the private quarantine, then atomically republish it.
+			const audit = await this.quarantinePublic(lease);
+			const actual = await computeVerificationContentDigestFromInventory(audit, sourceInventory);
+			await this.assertNoSourceAdditions(audit, lease, sourceInventory);
 			if (!checkoutDigestIsValid(lease.digest) || checkout.contentDigest.digest !== lease.digest.digest
 				|| actual.digest !== lease.digest.digest || actual.fileCount !== lease.digest.fileCount) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
 			}
+			await this.republishQuarantine(lease, audit);
 		} catch (error) {
 			if (error instanceof PinnedCheckoutError) throw error;
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout could not be read");
@@ -367,6 +389,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (!checkoutDigestIsValid(lease.digest) || lease.state !== "ready") throw new Error("incomplete lease");
 		restoreInventory(lease.sourceInventory);
 		const target = await this.validateLease(lease);
+		// A crash can persist between detach and republish. Restore only the exact
+		// recorded private quarantine; resume immediately audits it before execution.
+		if (lease.publicationState === "quarantined") await this.republishQuarantine(lease, await this.auditPath(lease.projectId, lease.signalId));
 		return {
 			id: lease.signalId, projectId: lease.projectId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
 			commitSha: lease.commitSha, contentDigest: { ...lease.digest },
@@ -377,9 +402,17 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		lease.state = "releasing";
 		await this.persist();
 		try {
-			const target = await this.validateLease(lease);
-			await this.makeWritable(target);
-			await this.execGit(["-c", "core.hooksPath=", "-C", lease.repoRoot, "worktree", "remove", "--force", target]);
+			await this.validateLease(lease);
+			let audit = await this.auditPath(lease.projectId, lease.signalId);
+			if (lease.publicationState !== "quarantined") {
+				try { audit = await this.quarantinePublic(lease); }
+				catch (error) { if (!isMissing(error)) throw error; }
+			}
+			const worktree = lease.worktreePath ?? audit; // durable migration for pre-quarantine leases
+			await this.makeWritable(worktree);
+			await this.execGit(["-c", "core.hooksPath=", "-C", lease.repoRoot, "worktree", "remove", "--force", worktree]);
+			await rm(audit, { recursive: true, force: true });
+			await rm(await this.privatePath(lease.projectId, lease.signalId, "candidate"), { recursive: true, force: true });
 			this.leases.delete(lease.signalId);
 			await this.persist();
 		} catch (error) {
@@ -394,17 +427,47 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	/**
-	 * A --no-checkout worktree may have an empty per-worktree index. Read its
-	 * current Git inventory only to discover non-ignored additions, then bind
-	 * every known path to the durable inventory that was copied into the lease.
+	 * The published tree is sandbox-writable. It has already been renamed into
+	 * private quarantine when this runs, so neither this traversal nor Git sees a
+	 * sandbox namespace. `--no-index` checks the private detached worktree's
+	 * frozen ignore rules without consulting the quarantined tree as a Git cwd.
 	 */
-	private async assertNoSourceAdditions(targetRoot: string, sourceInventory: readonly VerificationSourceInventoryEntry[]): Promise<void> {
+	private async assertNoSourceAdditions(targetRoot: string, lease: PinnedCheckoutLease, sourceInventory: readonly VerificationSourceInventoryEntry[]): Promise<void> {
 		const known = new Set(sourceInventory.map(entry => entry.relativePath));
-		const observed = await this.inventory(targetRoot, this.secureRunner());
-		for (const entry of observed) {
-			if (!known.has(entry.relativePath)) {
-				throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
+		const ancestors = new Set<string>();
+		for (const entry of known) {
+			let parent = path.posix.dirname(entry);
+			while (parent !== ".") { ancestors.add(parent); parent = path.posix.dirname(parent); }
+		}
+		const inspect = async (directory: string, relative = ""): Promise<void> => {
+			for (const name of await readdir(directory)) {
+				const child = path.join(directory, name);
+				const childRelative = relative ? `${relative}/${name}` : name;
+				const info = await lstat(child);
+				if (known.has(childRelative) || ancestors.has(childRelative)) {
+					if (info.isDirectory() && !info.isSymbolicLink()) await inspect(child, childRelative);
+					continue;
+				}
+				if (EXPOSED_IGNORED_SETUP_DIRECTORIES.includes(childRelative as typeof EXPOSED_IGNORED_SETUP_DIRECTORIES[number])) continue;
+				if (!await this.isIgnoredPrivatePath(lease, childRelative)) {
+					throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
+				}
+				// A matching ignored directory needs no source traversal below it.
 			}
+		};
+		await inspect(targetRoot);
+	}
+
+	private async isIgnoredPrivatePath(lease: PinnedCheckoutLease, relativePath: string): Promise<boolean> {
+		const worktree = lease.worktreePath;
+		if (!worktree) return false;
+		try {
+			await this.execGit(["-c", "core.hooksPath=", "-c", "core.fsmonitor=false", "-C", worktree, "check-ignore", "--quiet", "--no-index", "--", relativePath]);
+			return true;
+		} catch (error) {
+			const exitCode = (error as { code?: string | number } | undefined)?.code;
+			if (exitCode === 1 || exitCode === "1") return false;
+			throw error;
 		}
 	}
 
@@ -559,12 +622,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		}
 	}
 
-	private async makeReadOnly(root: string): Promise<void> {
+	/** Prepare a source-only candidate for a sandbox owned by another UID. */
+	private async makePublicExecutionTree(root: string): Promise<void> {
 		await this.walkSafe(root, async (entry, info) => {
-			// Source files are a best-effort guardrail, while writable directories let
-			// verification tools create ignored build output. The digest remains the
-			// authoritative mutation boundary for every non-ignored source path.
-			if (info.isDirectory()) await chmod(entry, 0o755);
+			// Directories deliberately remain writable for ignored build output; source
+			// files remain immutable-by-permission and immutable-by-digest.
+			if (info.isDirectory()) await chmod(entry, 0o777);
 			else if (info.isFile()) await chmod(entry, (info.mode & 0o111) ? 0o555 : 0o444);
 		});
 	}
@@ -613,7 +676,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		return this.commandRunner.execFile("git", args, { env: sanitizedGitEnvironment(), timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
 	}
 
-	private async targetPath(projectId: string, signalId: string): Promise<string> {
+	private async targetPath(projectId: string, signalId: string, prepare = false): Promise<string> {
 		if (!UUID.test(signalId)) throw new Error("unsafe signal id");
 		const root = this.checkoutRootCanonical ?? this.checkoutRoot;
 		const scoped = verificationCheckoutProjectDir(root, projectId);
@@ -622,33 +685,112 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			const info = await lstat(scoped);
 			if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe project scope");
 		} catch (error) {
-			if (!isMissing(error)) throw error;
-			await mkdir(scoped);
+			if (!prepare || !isMissing(error)) throw error;
+			await mkdir(scoped, { mode: 0o755 });
 		}
+		// The container gets this directory as its mount root. It must never be
+		// writable by the sandbox; only its atomically-published signal children are.
+		if (prepare) await chmod(scoped, 0o755);
 		const canonicalScoped = await realpath(scoped);
 		const info = await lstat(canonicalScoped);
-		if (!info.isDirectory() || info.isSymbolicLink() || !samePath(canonicalScoped, scoped) || !isWithin(root, canonicalScoped)) throw new Error("unsafe project scope");
+		if (!info.isDirectory() || info.isSymbolicLink() || !samePath(canonicalScoped, scoped) || !isWithin(root, canonicalScoped)
+			|| (process.platform !== "win32" && (info.mode & 0o022) !== 0)) throw new Error("unsafe project scope");
 		const target = path.resolve(canonicalScoped, signalId);
 		if (!isWithin(canonicalScoped, target)) throw new Error("checkout escape");
 		return target;
 	}
 
-	private async ensureCheckoutRoot(sourceRoot: string): Promise<void> {
-		await mkdir(this.checkoutRoot, { recursive: true });
-		const canonical = await realpath(this.checkoutRoot);
+	private async privatePath(projectId: string, signalId: string, kind: "worktree" | "candidate" | "audit"): Promise<string> {
+		if (!UUID.test(signalId)) throw new Error("unsafe signal id");
+		const root = this.privateRootCanonical ?? this.privateRoot;
+		const scoped = verificationCheckoutProjectDir(root, projectId);
+		if (!scoped || !isWithin(root, scoped)) throw new Error("unsafe private scope");
+		await mkdir(scoped, { recursive: true, mode: 0o700 });
+		const canonical = await realpath(scoped);
 		const info = await lstat(canonical);
-		if (!info.isDirectory() || info.isSymbolicLink() || isWithin(sourceRoot, canonical)) throw new Error("unsafe checkout root");
+		if (!info.isDirectory() || info.isSymbolicLink() || !samePath(canonical, scoped) || !isWithin(root, canonical)) throw new Error("unsafe private scope");
+		const target = path.join(canonical, `${signalId}.${kind}`);
+		if (!isWithin(canonical, target)) throw new Error("private checkout escape");
+		return target;
+	}
+
+	private async auditPath(projectId: string, signalId: string): Promise<string> {
+		return this.privatePath(projectId, signalId, "audit");
+	}
+
+	private async ensureCheckoutRoot(sourceRoot: string): Promise<void> {
+		await mkdir(this.checkoutRoot, { recursive: true, mode: 0o755 });
+		await mkdir(this.privateRoot, { recursive: true, mode: 0o700 });
+		const [canonical, privateCanonical] = await Promise.all([realpath(this.checkoutRoot), realpath(this.privateRoot)]);
+		const [info, privateInfo] = await Promise.all([lstat(canonical), lstat(privateCanonical)]);
+		if (!info.isDirectory() || info.isSymbolicLink() || !privateInfo.isDirectory() || privateInfo.isSymbolicLink()
+			|| isWithin(sourceRoot, canonical) || isWithin(sourceRoot, privateCanonical)) throw new Error("unsafe checkout root");
 		this.checkoutRootCanonical = canonical;
+		this.privateRootCanonical = privateCanonical;
+	}
+
+	private async publishCandidate(lease: PinnedCheckoutLease, candidate: string): Promise<void> {
+		const target = await this.targetPath(lease.projectId, lease.signalId);
+		await rename(candidate, target);
+		lease.publicationState = "public";
+		// A crash after rename must recover by quarantining this exact public root,
+		// never by treating it as an unowned path.
+		await this.persist();
+	}
+
+	private async quarantinePublic(lease: PinnedCheckoutLease): Promise<string> {
+		const target = await this.targetPath(lease.projectId, lease.signalId);
+		const audit = await this.auditPath(lease.projectId, lease.signalId);
+		try {
+			await lstat(audit);
+			// Recover the crash window after rename and before durable state publication.
+			try { await lstat(target); throw new Error("conflicting checkout roots"); }
+			catch (error) {
+				if (!isMissing(error)) throw error;
+				lease.publicationState = "quarantined";
+				await this.persist();
+				return audit;
+			}
+		} catch (error) {
+			if (!isMissing(error)) throw error;
+		}
+		await rename(target, audit);
+		lease.publicationState = "quarantined";
+		await this.persist();
+		return audit;
+	}
+
+	private async republishQuarantine(lease: PinnedCheckoutLease, audit: string): Promise<void> {
+		const target = await this.targetPath(lease.projectId, lease.signalId);
+		try {
+			await lstat(audit);
+		} catch (error) {
+			if (!isMissing(error)) throw error;
+			// Recover the inverse crash window: the public rename completed before
+			// the lease state did. Do not overwrite an attacker-created replacement.
+			await lstat(target);
+			lease.publicationState = "public";
+			await this.persist();
+			return;
+		}
+		await rename(audit, target);
+		lease.publicationState = "public";
+		await this.persist();
 	}
 
 	private async validateLease(lease: PinnedCheckoutLease): Promise<string> {
-		if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !COMMIT_SHA.test(lease.commitSha) || !checkoutDigestIsValid(lease.digest) && lease.state === "ready") throw new Error("invalid lease");
+		if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !COMMIT_SHA.test(lease.commitSha)
+			|| (!checkoutDigestIsValid(lease.digest) && lease.state === "ready")) throw new Error("invalid lease");
 		await this.ensureCheckoutRoot(lease.sourceRoot);
 		const source = await realpath(lease.sourceRoot);
 		const repo = await realpath(lease.repoRoot);
 		if (source !== lease.sourceRoot || repo !== lease.repoRoot || source !== repo) throw new Error("changed lease root");
 		const target = await this.targetPath(lease.projectId, lease.signalId);
 		if (target !== lease.checkoutPath) throw new Error("changed lease path");
+		if (lease.worktreePath) {
+			const expected = await this.privatePath(lease.projectId, lease.signalId, "worktree");
+			if (expected !== lease.worktreePath) throw new Error("changed private worktree path");
+		}
 		return target;
 	}
 

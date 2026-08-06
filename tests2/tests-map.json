@@ -2436,7 +2436,7 @@
     },
     {
       "path": "tests2/core/verification-pinned-checkout.test.ts",
-      "reason": "Pins detached raw-byte pinned checkout materialization, immutable digest assertions, stale-commit rejection, targeted orphan-lease recovery, and ignored dependency sensitivity boundaries.",
+      "reason": "Pins private detached raw-byte staging, atomic source-only public checkout publication/quarantine, immutable digest assertions, symlink-race containment, stale-commit rejection, targeted orphan-lease recovery, and ignored dependency sensitivity boundaries.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2454,7 +2454,7 @@
     },
     {
       "path": "tests2/integration/verification-pinned-checkout-real-git.test.ts",
-      "reason": "Real-Git D-3 regression: a detached no-checkout worktree attests its durable materialized inventory, permits ignored output, rejects non-ignored additions, and resumes from the persisted lease.",
+      "reason": "Real-Git D-3 regression: a private detached no-checkout worktree publishes a Git-free public inventory, permits ignored output, rejects non-ignored additions, and resumes from the persisted lease.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",
