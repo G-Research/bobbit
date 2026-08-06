@@ -2480,6 +2480,15 @@
       }
     },
     {
+      "path": "tests2/core/budget-enforcement.test.ts",
+      "reason": "Pure grant-gated budget enforcement reducer coverage for strict proposal validation, restrictive deterministic resolution, fail-closed pause and halt, revocation, hard-cap classification, and secret-free immutable audit metadata.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/extension-capability-grants.test.ts",
       "reason": "Authenticated gateway integration coverage for exact grant and revoke routes, server-derived administrative metadata, live contribution invalidation, activation ceilings, and durable secret-free audit history.",
       "execution": {
@@ -2495,6 +2504,15 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/turn-usage.test.ts",
+      "reason": "Direct terminal assistant usage normalization: aliases, finite validation, omitted cache telemetry, explicit zeroes, authoritative cost, and complete-only attribution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],

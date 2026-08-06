@@ -242,9 +242,24 @@ class LifecycleHub {
    export type HookScopeKind = "project" | "global";
    export const DEFAULT_HOOK_SCOPE: HookScopeKind = "project";
 
+   export type TurnUsageSnapshot =
+     | {
+         telemetry: "known";
+         inputTokens?: number;
+         outputTokens?: number;
+         cacheReadTokens?: number;
+         cacheWriteTokens?: number;
+         cost?: number;
+         provider?: string;
+         modelId?: string;
+       }
+     | { telemetry: "unknown" };
+
    interface HookCtx {
      sessionId: string; projectId?: string; scope: HookScopeKind; cwd: string;
      goalId?: string; roleName?: string; prompt?: string; turn?: { index: number };
+     /** Present for gateway-dispatched afterTurn only. */
+     usage?: TurnUsageSnapshot;
      budget: { maxTokens: number };
      config: Record<string, unknown>;
      runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
@@ -274,6 +289,53 @@ provider-facing TypeScript.
 rich scope can ignore it safely: the Hub preserves their invocation, ordering, configuration,
 budgets, diagnostics, and block behavior. It is absent when the resolver is unavailable, fails,
 or cannot safely produce a snapshot.
+
+### `afterTurn` usage telemetry
+
+`HookCtx.usage` is an optional additive field supplied only to gateway-dispatched `afterTurn`
+hooks. It exposes direct telemetry for the just-finished assistant turn so a provider can observe
+usage without reading or reconstructing the cost ledger. It is not supplied to `sessionSetup`,
+`beforePrompt`, `beforeCompact`, or `sessionShutdown`.
+
+```ts
+export type TurnUsageSnapshot =
+  | {
+      telemetry: "known";
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      cost?: number;
+      provider?: string;
+      modelId?: string;
+    }
+  | { telemetry: "unknown" };
+```
+
+`telemetry: "known"` means the final assistant `message_end` carried a usage object. It does
+not mean every field is known. Numeric fields are retained only when Pi reported a finite,
+non-negative value; zero remains a reported value. Supported wire aliases are `inputTokens` /
+`input`, `outputTokens` / `output`, `cacheReadTokens` / `cacheRead`, and `cacheWriteTokens` /
+`cacheWrite`; `cost` accepts either a numeric value or `cost.total`. Omitted cache fields remain
+absent (unknown), rather than being converted to zero. Invalid, negative, non-finite, and
+object-shaped token fields are omitted; no token or cost value is estimated.
+
+`provider` and `modelId` appear together only when the runtime supplies a complete observed or
+verified model pair. A partial pair is omitted. `telemetry: "unknown"` has no numeric or
+attribution fields and means the completed turn had no usable terminal assistant usage object.
+
+The gateway normalizes this data once from the same terminal event consumed by
+`SessionManager.trackCostFromEvent()`. The snapshot is an ephemeral live-turn value, not a
+`CostTracker` readback, cost ledger, persisted session field, trace entry, or API response. This
+keeps cache-unknown and missing-cost semantics aligned with the terminal wire data.
+
+At the final non-retry `agent_end`, the gateway copies the snapshot (or `{ telemetry: "unknown" }`)
+and fire-and-forget dispatches `afterTurn`. The existing terminal guard makes that dispatch
+exactly once: duplicate or late terminal events cannot create another hook call. Retryable ends
+do not dispatch; the final attempt supplies the snapshot. Error and abort terminals retain their
+reported usage when available, otherwise they are unknown. The copied value prevents a slow hook
+from observing a later turn. When no Lifecycle Hub is installed, no usage slot is allocated and
+the existing cost and terminal lifecycle paths remain unchanged.
 
 ### `scopeContext`: bounded advisory scope
 

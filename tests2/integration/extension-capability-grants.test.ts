@@ -2,6 +2,8 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, base, defaultProject } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
+import { resolveBudgetEnforcement } from "../../src/server/agent/budget-enforcement.js";
+import type { ResolvedHook } from "../../src/server/agent/extension-grant-policy.js";
 
 const PACK_NAME = `extension-grants-fixture-${Date.now()}`;
 const DECIDE_HOOK = "decision.alpha";
@@ -169,6 +171,30 @@ test.describe("extension capability grants API", () => {
 		const idempotent = await apiFetch(`${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`, { method: "DELETE" });
 		expect(idempotent.status).toBe(200);
 		expect((await json(idempotent)).revoked, `${REPRO}: exact DELETE is idempotent after live revocation`).toBe(false);
+	});
+
+	test("denies simulated worker re-application after live grant revocation without a restart", async () => {
+		const revokePath = `${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`;
+		await apiFetch(revokePath, { method: "DELETE" });
+		const grantedResponse = await apiFetch(grantsPath(), {
+			method: "PUT",
+			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
+		});
+		expect(grantedResponse.status).toBe(200);
+		const granted = await json(grantedResponse);
+		const activeHooks: ResolvedHook[] = [{ packId: PACK_NAME, hookId: DECIDE_HOOK, mode: "decide", capabilities: [] }];
+		const request = { sessionId: "grant-journey", consumerId: "budget-consumer", operationId: "worker-result-1", fallback: "halt" as const };
+		const workerResult = [{ source: { packId: PACK_NAME, hookId: DECIDE_HOOK }, proposal: { disposition: "allow", ruleId: "safe-rule" } }];
+
+		expect(resolveBudgetEnforcement(request, activeHooks, [granted.grant], workerResult)).toMatchObject({
+			disposition: "allow", permitsOperation: true, audit: { grantDenied: 0 },
+		});
+		const revoked = await apiFetch(revokePath, { method: "DELETE" });
+		expect(revoked.status).toBe(200);
+		expect((await json(revoked)).revoked).toBe(true);
+		expect(resolveBudgetEnforcement(request, activeHooks, [], workerResult)).toMatchObject({
+			disposition: "halt", permitsOperation: false, audit: { grantDenied: 1 },
+		});
 	});
 
 	test("recovers a failed revoke audit through an exact retry without auditing no-op deletes", async () => {

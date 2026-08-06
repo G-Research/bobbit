@@ -192,7 +192,9 @@ restart is required for the next resolution to see a revocation.
 EP-6 creates no general hook dispatcher or proposal-application path. A later decision consumer
 must resolve the grant immediately before invoking a hook and again immediately before applying
 its result. A running worker cannot be preempted, but a late result must not be applied after a
-revocation.
+revocation. The core [budget enforcement](budget-enforcement.md) reducer is one future-consumer
+surface: it reuses this exact `decide` boundary and does not itself dispatch hooks or create a
+consumer.
 
 ## For extension authors
 
