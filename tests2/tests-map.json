@@ -2525,6 +2525,15 @@
       }
     },
     {
+      "path": "tests2/integration/pinned-gate-verification-e2e.test.ts",
+      "reason": "Real-Git D-5 lifecycle E2E: production VerificationHarness executes frozen single- and multi-repository checkouts, audits source mutation, and keeps cache witnesses digest- and repository-identity-safe.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/integration/gate-content-digest-nested.test.ts",
       "reason": "Integration seam for nested child branch-container content witnesses: parent, sibling, and child layouts remain isolated; same-SHA content changes and v2 repository identities report legible cache misses, while component cwd is composed once.",
       "execution": {
