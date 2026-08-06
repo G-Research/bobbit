@@ -1,5 +1,5 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, deleteSession, rawApiFetch, registerProject } from "./_e2e/e2e-setup.js";
 import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.js";
 import type { PackEntry, PackManifest } from "../../src/server/agent/pack-types.js";
 import {
@@ -178,8 +178,14 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		const project = await registerProject({ name: `prompt-proposal-${FIXTURE_SUFFIX}`, rootPath: projectRoot, seedWorkflows: false });
 		let sessionId = "";
 		let verificationSessionId = "";
-		const secret = "password=authoring-secret-value";
-		const replacement = `Approved policy ${secret}`;
+		const secrets = [
+			"Bearer bearer-authoring-secret-value-1234567890",
+			"access_token=access-authoring-secret-value-1234567890",
+			"github_pat_0123456789abcdefghij",
+			"sk-proj-OpenAI-authoring-secret-value-1234567890",
+			"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdWRpdCJ9.signaturevalue",
+		];
+		const replacement = `Approved harmless-policy-text ${secrets.join(" ")}`;
 		const change = { packId: packName, sectionId: "policy", content: replacement, expectedRevision: 0 };
 		try {
 			const activation = await apiFetch("/api/marketplace/pack-activation", {
@@ -226,8 +232,15 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 				expect.objectContaining({ packId: packName, hookId: "author.prompt", actor: "agent", status: "requested", sectionId: "policy", proposalId: expect.any(String) }),
 			]));
 			const auditText = JSON.stringify(audit);
-			expect(auditText).not.toContain(secret);
+			const rawAuditText = fs.readFileSync(path.join(projectRoot, ".bobbit", "state", "prompt-extension-authoring-audit.jsonl"), "utf8");
+			for (const secret of secrets) {
+				expect(auditText, `${REPRO}: authorized audit API must redact ${secret}`).not.toContain(secret);
+				expect(rawAuditText, `${REPRO}: durable audit JSONL must redact ${secret}`).not.toContain(secret);
+			}
 			expect(auditText).toContain("[REDACTED]");
+			expect(rawAuditText).toContain("[REDACTED]");
+			expect(auditText).toContain("harmless-policy-text");
+			expect(rawAuditText).toContain("harmless-policy-text");
 
 			const genericConfigWrite = await apiFetch(`/api/projects/${project.id}/config`, {
 				method: "PUT",
@@ -267,6 +280,127 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 				body: JSON.stringify({ scope: "server", packName, disabled: {} }),
 			}).catch(() => {});
 			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("denies authenticated and sandboxed prompt mutations without changing drafts, revisions, or audit", async ({ gateway }) => {
+		const packName = `prompt-mutation-authz-${FIXTURE_SUFFIX}`;
+		const otherPackName = `${packName}-other`;
+		const packDir = writeApiPack(gateway.bobbitDir, packName);
+		const otherPackDir = writeApiPack(gateway.bobbitDir, otherPackName);
+		const projectRoot = path.join(gateway.bobbitDir, "prompt-extension-projects", packName);
+		fs.mkdirSync(projectRoot, { recursive: true });
+		const project = await registerProject({ name: `prompt-mutation-authz-${FIXTURE_SUFFIX}`, rootPath: projectRoot, seedWorkflows: false });
+		let sessionId = "";
+		try {
+			for (const name of [packName, otherPackName]) {
+				expect((await apiFetch("/api/marketplace/pack-activation", {
+					method: "PUT", body: JSON.stringify({ scope: "server", packName: name, disabled: {} }),
+				})).status).toBe(200);
+			}
+			sessionId = await createSession({ projectId: project.id });
+			const sessionSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+			const agentHeaders = { "X-Bobbit-Session-Secret": sessionSecret };
+			for (const name of [packName, otherPackName]) {
+				expect((await apiFetch(grantPath(project.id), {
+					method: "PUT", body: JSON.stringify({ packId: name, hookId: "static.prompt", capability: "prompt:system-static" }),
+				})).status).toBe(200);
+			}
+			expect((await apiFetch(grantPath(project.id), {
+				method: "PUT", body: JSON.stringify({ packId: packName, hookId: "author.prompt", capability: "prompt:system-author" }),
+			})).status).toBe(200);
+
+			const initial = { packId: packName, sectionId: "policy", content: "initial authorized policy", expectedRevision: 0 };
+			expect((await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
+				method: "POST", headers: agentHeaders,
+				body: JSON.stringify({ args: { name: "Proposal target", projectId: project.id, extensionPromptSections: [initial] } }),
+			})).status).toBe(200);
+			const draftAtRev1 = await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text();
+			const auditsAtRev1 = await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`));
+			expect(auditsAtRev1.entries).toHaveLength(1);
+
+			// A grant is scoped to the granted pack's active section, not every installed pack.
+			const otherSection = "  - packId: " + otherPackName + "\n    sectionId: policy\n    content: other pack policy\n    expectedRevision: 0";
+			const foreignEdit = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
+				method: "POST", headers: agentHeaders,
+				body: JSON.stringify({ old_text: "    expectedRevision: 0", new_text: `    expectedRevision: 0\n${otherSection}` }),
+			});
+			expect(foreignEdit.status).toBe(403);
+			expect(await readJson(foreignEdit)).toMatchObject({ code: "GRANT_REQUIRED" });
+			expect(await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text()).toBe(draftAtRev1);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/proposals`))).proposals).toEqual([expect.objectContaining({ proposalType: "project", rev: 1 })]);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(1);
+
+			const authorized = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
+				method: "POST", headers: agentHeaders,
+				body: JSON.stringify({ old_text: "initial authorized policy", new_text: "authorized agent policy" }),
+			});
+			expect(authorized.status).toBe(200);
+			const draftAtRev2 = await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text();
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(2);
+
+			// Revoking the author grant must block both an authentic agent secret and a sandbox token.
+			expect((await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/author.prompt/prompt%3Asystem-author`, { method: "DELETE" })).status).toBe(200);
+			const deniedAgent = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
+				method: "POST", headers: agentHeaders,
+				body: JSON.stringify({ old_text: "authorized agent policy", new_text: "forbidden agent policy" }),
+			});
+			expect(deniedAgent.status).toBe(403);
+			expect(await readJson(deniedAgent)).toMatchObject({ code: "GRANT_REQUIRED" });
+			expect(await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text()).toBe(draftAtRev2);
+
+			const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(project.id);
+			gateway.sessionManager.sandboxTokenStore.addSession(project.id, sessionId);
+			const deniedSandbox = await rawApiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
+				method: "POST", headers: { Authorization: `Bearer ${sandboxToken}` },
+				body: JSON.stringify({ old_text: "authorized agent policy", new_text: "forbidden sandbox policy" }),
+			});
+			expect(deniedSandbox.status).toBe(403);
+			expect(await readJson(deniedSandbox)).toMatchObject({ code: "GRANT_REQUIRED" });
+
+			const deniedRestore = await apiFetch(`/api/sessions/${sessionId}/proposal/project/restore`, {
+				method: "POST", headers: agentHeaders, body: JSON.stringify({ rev: 1 }),
+			});
+			expect(deniedRestore.status).toBe(403);
+			expect(await readJson(deniedRestore)).toMatchObject({ code: "GRANT_REQUIRED" });
+			expect(await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text()).toBe(draftAtRev2);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/proposals`))).proposals).toEqual([expect.objectContaining({ proposalType: "project", rev: 2 })]);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(2);
+
+			// A browser/human edit remains available and only approval rechecks the static grant.
+			const humanEdit = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
+				method: "POST", body: JSON.stringify({ old_text: "authorized agent policy", new_text: "human approved policy" }),
+			});
+			expect(humanEdit.status).toBe(200);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(2);
+			expect((await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/static.prompt/prompt%3Asystem-static`, { method: "DELETE" })).status).toBe(200);
+			const noStaticGrant = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
+				method: "POST", body: JSON.stringify({ projectId: project.id }),
+			});
+			expect(noStaticGrant.status).toBe(422);
+			expect(await readJson(noStaticGrant)).toMatchObject({ code: "GRANT_REQUIRED" });
+			expect(configuredPromptExtensions(await readJson(await apiFetch(`/api/projects/${project.id}/config`)))).toBeUndefined();
+			expect((await apiFetch(grantPath(project.id), {
+				method: "PUT", body: JSON.stringify({ packId: packName, hookId: "static.prompt", capability: "prompt:system-static" }),
+			})).status).toBe(200);
+			expect((await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
+				method: "POST", body: JSON.stringify({ projectId: project.id }),
+			})).status).toBe(200);
+			const stale = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
+				method: "POST", body: JSON.stringify({ projectId: project.id }),
+			});
+			expect(stale.status).toBe(422);
+			expect(await readJson(stale)).toMatchObject({ code: "STALE_REVISION" });
+		} finally {
+			if (sessionId) await deleteSession(sessionId);
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			for (const name of [packName, otherPackName]) {
+				await apiFetch("/api/marketplace/pack-activation", {
+					method: "PUT", body: JSON.stringify({ scope: "server", packName: name, disabled: {} }),
+				}).catch(() => {});
+			}
+			fs.rmSync(packDir, { recursive: true, force: true });
+			fs.rmSync(otherPackDir, { recursive: true, force: true });
 		}
 	});
 
