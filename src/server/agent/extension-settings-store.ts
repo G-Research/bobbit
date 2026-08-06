@@ -136,7 +136,11 @@ function assertRef(ref: ExtensionSettingsTargetRef): void {
 }
 
 function assertState(state: unknown): asserts state is ExtensionSettingsState {
-  if (!isPlainObject(state) || state.schema !== 1 || !Number.isSafeInteger(state.revision) || state.revision < 0 || !isPlainObject(state.targets)) {
+  // `isPlainObject` deliberately narrows to Record<string, unknown>; capture
+  // the scalar before checking it so the assertion is sound rather than
+  // relying on a property access that remains `unknown` to TypeScript.
+  const revision = isPlainObject(state) ? state.revision : undefined;
+  if (!isPlainObject(state) || state.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || !isPlainObject(state.targets)) {
     throw new ExtensionSettingsUnavailableError();
   }
   for (const record of Object.values(state.targets)) {

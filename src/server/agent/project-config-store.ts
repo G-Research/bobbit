@@ -319,11 +319,17 @@ function cloneExtensionSettings(state: ExtensionSettingsState): ExtensionSetting
  */
 export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSettingsState; ok: boolean } {
 	const empty = (): ExtensionSettingsState => ({ schema: 1, revision: 0, targets: {} });
-	if (!isPlainObject(raw) || raw.schema !== 1 || !Number.isSafeInteger(raw.revision) || raw.revision < 0 || !isPlainObject(raw.targets)) {
+	if (!isPlainObject(raw)) return { value: empty(), ok: false };
+	// Keep untrusted scalar values in locals. `Record<string, unknown>` is the
+	// correct boundary type for parsed YAML, so property reads must be narrowed
+	// before they can enter the persisted settings state.
+	const revision = raw.revision;
+	const rawTargets = raw.targets;
+	if (raw.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || !isPlainObject(rawTargets)) {
 		return { value: empty(), ok: false };
 	}
 	const targets: ExtensionSettingsMap = {};
-	const entries = Object.entries(raw.targets);
+	const entries = Object.entries(rawTargets);
 	if (entries.length > MAX_EXTENSION_SETTINGS_TARGETS) return { value: empty(), ok: false };
 	for (const [targetKey, candidate] of entries) {
 		// Server-created identity has exactly packId, kind and contribution id.
@@ -331,7 +337,8 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 		if (targetKey.length === 0 || targetKey.length > MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH
 			|| parts.length !== 3 || parts.some(part => part.length === 0)
 			|| (parts[1] !== "provider" && parts[1] !== "hook") || !isPlainObject(candidate)) continue;
-		if (candidate.enabled !== undefined && typeof candidate.enabled !== "boolean") continue;
+		const enabled = candidate.enabled;
+		if (enabled !== undefined && typeof enabled !== "boolean") continue;
 		const rawValues = candidate.values === undefined ? {} : candidate.values;
 		if (!isPlainObject(rawValues)) continue;
 		const valueEntries = Object.entries(rawValues);
@@ -347,9 +354,9 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 			values[key] = value;
 		}
 		if (!valid) continue;
-		targets[targetKey] = { ...(candidate.enabled === undefined ? {} : { enabled: candidate.enabled }), values };
+		targets[targetKey] = { ...(enabled === undefined ? {} : { enabled }), values };
 	}
-	return { value: { schema: 1, revision: raw.revision, targets }, ok: true };
+	return { value: { schema: 1, revision, targets }, ok: true };
 }
 
 /** Shared strict bound for stored hook refs and server-derived principal labels. */
