@@ -3480,6 +3480,13 @@ export class VerificationHarness {
 					.resolveRootMaxConcurrentChildren(rootGoalId) ?? 3,
 			getChild: (childGoalId) =>
 				this.projectContextManager?.getContextForGoal(childGoalId)?.goalStore.get(childGoalId),
+			// Match TeamManager's idempotency contract: a persisted team only
+			// counts when its lead session still exists and is non-terminated.
+			hasLiveTeam: (childGoalId) => {
+				const leadId = this.teamManager?.getTeamState(childGoalId)?.teamLeadSessionId;
+				const lead = leadId ? this.sessionManager?.getSession(leadId) : undefined;
+				return !!lead && lead.status !== "terminated";
+			},
 			startChildTeam: (childGoalId) => this._startScheduledChildTeam(childGoalId),
 			repairUnavailableLead: (childGoalId) => this.teamManager?.teardownTeam(childGoalId),
 			onRecovery: (recovery) => this._publishSchedulerRecovery(recovery),
