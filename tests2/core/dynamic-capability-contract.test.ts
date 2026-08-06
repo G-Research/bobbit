@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	canonicalizeCapabilityQuery,
 	DynamicCapabilityContractError,
 	createCapabilitySelectionCandidate,
 	createDynamicCapabilitySelection,
@@ -66,12 +67,20 @@ describe("dynamic capability contract", () => {
 	});
 
 	it("creates redacted reproducible snapshots and rejects tampering or malformed legacy state", () => {
-		const snapshot = createDynamicCapabilitySelection("find useful capability", ["skill-z", "skill-a", "skill-a"], ["mcp-b", "mcp-a"]);
-		expect(snapshot).toMatchObject({ version: 1, skills: ["skill-a", "skill-z"], mcp: ["mcp-a", "mcp-b"] });
+		const snapshot = createDynamicCapabilitySelection("find useful capability", ["skill-z", "skill-a", "skill-a"], ["mcp-b", "mcp-a"], { skills: true, mcp: false });
+		expect(snapshot).toMatchObject({ version: 1, skillsAuthoritative: true, skills: ["skill-a", "skill-z"], mcpAuthoritative: false, mcp: ["mcp-a", "mcp-b"] });
 		expect(JSON.stringify(snapshot)).not.toContain("find useful capability");
 		expect(validateDynamicCapabilitySelection(JSON.parse(JSON.stringify(snapshot)))).toEqual(snapshot);
 		expect(validateDynamicCapabilitySelection({ ...snapshot, skills: ["skill-z"] })).toBeUndefined();
+		expect(validateDynamicCapabilitySelection({ ...snapshot, skillsAuthoritative: false })).toBeUndefined();
 		expect(validateDynamicCapabilitySelection({ ...snapshot, unexpected: true })).toBeUndefined();
-		expect(() => createDynamicCapabilitySelection("x".repeat(8 * 1024 + 1), [], [])).toThrow(DynamicCapabilityContractError);
+		const ascii = "x".repeat(8 * 1024 + 512);
+		const multibyte = "😀".repeat(3 * 1024);
+		expect(Buffer.byteLength(canonicalizeCapabilityQuery(ascii), "utf8")).toBe(8 * 1024);
+		expect(Buffer.byteLength(canonicalizeCapabilityQuery(multibyte), "utf8")).toBe(8 * 1024);
+		expect(createDynamicCapabilitySelection(ascii, [], [], { skills: true, mcp: false }).queryFingerprint)
+			.toBe(createDynamicCapabilitySelection(canonicalizeCapabilityQuery(ascii), [], [], { skills: true, mcp: false }).queryFingerprint);
+		expect(createDynamicCapabilitySelection(multibyte, [], [], { skills: false, mcp: true }).selectionFingerprint)
+			.toBe(createDynamicCapabilitySelection(canonicalizeCapabilityQuery(multibyte), [], [], { skills: false, mcp: true }).selectionFingerprint);
 	});
 });

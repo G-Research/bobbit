@@ -2840,22 +2840,22 @@ export class SessionManager {
 			recordDynamicCapabilitySelection: (input) => {
 				try {
 					const trace = new ContextTraceStore(this.stateDir);
-					const stageRows = (stage: "skills" | "mcp", result: { outcomes: readonly unknown[]; selected: readonly string[] }, candidateCount: number) => [
+					const stageRows = (stage: "skills" | "mcp", result: { outcomes: readonly unknown[]; selected: readonly string[]; authoritative: boolean }, candidateCount: number, contextBytesSaved: number) => [
 						...result.outcomes.map(row => ({
 							...(row as Record<string, unknown>), capabilityStage: stage,
-							selectionFingerprint: input.selection.selectionFingerprint,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}),
 							candidateCount, selectedCount: result.selected.length,
-							selectorCount: result.outcomes.length, contextBytesSaved: input.contextBytesSaved,
+							selectorCount: result.outcomes.length, contextBytesSaved,
 						})),
-						{ kind: "decision", hookId: "core", event: "sessionSetup", outcome: "applied", capabilityStage: stage,
-							selectionFingerprint: input.selection.selectionFingerprint, candidateCount, selectedCount: result.selected.length,
-							selectorCount: result.outcomes.length, contextBytesSaved: input.contextBytesSaved },
+						{ kind: "decision", hookId: "core", event: "sessionSetup", outcome: result.authoritative ? "applied" : "dropped", capabilityStage: stage,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}), candidateCount, selectedCount: result.selected.length,
+							selectorCount: result.outcomes.length, contextBytesSaved },
 					];
 					trace.appendTrace(input.sessionId, {
 						ts: Date.now(), hook: "sessionSetup", sessionId: input.sessionId, providers: [],
 						outcomes: [
-							...stageRows("skills", input.skills, input.skillCandidateCount),
-							...stageRows("mcp", input.mcp, input.mcpCandidateCount),
+							...stageRows("skills", input.skills, input.skillCandidateCount, input.skillsContextBytesSaved),
+							...stageRows("mcp", input.mcp, input.mcpCandidateCount, input.mcpContextBytesSaved),
 						] as any,
 					});
 				} catch { /* telemetry is deliberately isolated from setup */ }
@@ -3882,7 +3882,7 @@ export class SessionManager {
 		const selection = this.resolveStoreForSession(sessionId).get(sessionId)?.dynamicCapabilities;
 		// A pinned selector snapshot may narrow only MCP meta-tools. It never
 		// grants a YAML tool and an absent snapshot remains the legacy surface.
-		const filteredAllowed = selection && filteredAllowedByMetadata
+		const filteredAllowed = selection?.mcpAuthoritative && filteredAllowedByMetadata
 			? filteredAllowedByMetadata.filter(tool => tool.kind !== "mcp" || selection.mcp.includes(tool.name))
 			: filteredAllowedByMetadata;
 		const flatNames = filteredAllowed?.map(e => e.name);
@@ -4027,7 +4027,7 @@ export class SessionManager {
 			const catalogProjectId = catalogSession?.projectId;
 			parts.skillsCatalog = this.computeSkillsCatalog(
 				parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId,
-				catalogSession?.dynamicCapabilities?.skills,
+				catalogSession?.dynamicCapabilities?.skillsAuthoritative ? catalogSession.dynamicCapabilities.skills : undefined,
 			);
 		}
 		// Stamp the user-configured skills-catalog byte budget onto the parts so it flows
@@ -4177,7 +4177,8 @@ export class SessionManager {
 		catch { persisted = undefined; }
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
-		const selectedSkillNames = session.dynamicCapabilities?.skills ?? persisted?.dynamicCapabilities?.skills;
+		const dynamicSelection = session.dynamicCapabilities ?? persisted?.dynamicCapabilities;
+		const selectedSkillNames = dynamicSelection?.skillsAuthoritative ? dynamicSelection.skills : undefined;
 
 		// Delegate task instructions are durable store data, not ordinary cached prompt
 		// state. A provider hook can run after an early incomplete cache was created;
@@ -7861,8 +7862,8 @@ export class SessionManager {
 		const restoredFilteredByMetadata = restoreDisabled
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
-		const restoredFiltered = ps.dynamicCapabilities
-			? restoredFilteredByMetadata.filter(tool => tool.kind !== "mcp" || ps.dynamicCapabilities!.mcp.includes(tool.name))
+		const restoredFiltered = ps.dynamicCapabilities?.mcpAuthoritative
+			? restoredFilteredByMetadata.filter(tool => tool.kind !== "mcp" || ps.dynamicCapabilities.mcp.includes(tool.name))
 			: restoredFilteredByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. A genuinely unrestricted session (role-less / no
@@ -10400,7 +10401,7 @@ export class SessionManager {
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowedRaw;
 		const roleSelection = persistedBeforeRole?.dynamicCapabilities ?? session.dynamicCapabilities;
-		const effectiveAllowed = roleSelection
+		const effectiveAllowed = roleSelection?.mcpAuthoritative
 			? effectiveAllowedByMetadata.filter(tool => tool.kind !== "mcp" || roleSelection.mcp.includes(tool.name))
 			: effectiveAllowedByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)

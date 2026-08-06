@@ -42,15 +42,27 @@ describe("dynamic capability decision dispatch", () => {
 		});
 
 		const skillResult = await dispatcher.selectCapabilities("skills", context);
-		expect(skillResult.selected).toEqual(["allowed"]);
+		expect(skillResult).toMatchObject({ selected: ["allowed"], authoritative: true });
 		expect(invocations).toHaveLength(1);
 		expect(invocations[0]).toMatchObject({ member: "selectSkills", ctx: { event: "sessionSetup", available: ["allowed", "other"] } });
 		expect(Object.isFrozen(invocations[0].ctx)).toBe(true);
 
 		const mcpResult = await dispatcher.selectCapabilities("mcp", { ...context, available: ["other"], selectedSkills: skillResult.selected });
-		expect(mcpResult.selected).toEqual(["other"]);
+		expect(mcpResult).toMatchObject({ selected: ["other"], authoritative: true });
 		expect(invocations).toHaveLength(2);
 		expect(invocations[1]).toMatchObject({ member: "selectMcp", ctx: { selectedSkills: ["allowed"] } });
+	});
+
+	it("marks a valid explicit-empty proposal authoritative so it can deny the optional stage", async () => {
+		const hook = selector("empty", "pack", ["skills"]);
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: { list: () => [{ packId: "pack", hooks: [hook] }], listHooks: () => [hook] } as any,
+			moduleHost: { invoke: async () => ({ add: [], reason: "intentionally empty", confidence: 1 }) } as any,
+			grantsForProject: () => [grant("pack", "empty")],
+		});
+
+		await expect(dispatcher.selectCapabilities("skills", context)).resolves.toMatchObject({ selected: [], authoritative: true });
 	});
 
 	it("rechecks active grants after an isolated selector finishes", async () => {
@@ -67,7 +79,7 @@ describe("dynamic capability decision dispatch", () => {
 		});
 
 		const result = await dispatcher.selectCapabilities("skills", context);
-		expect(result.selected).toEqual([]);
+		expect(result).toMatchObject({ selected: [], authoritative: false });
 		expect(result.outcomes).toEqual([expect.objectContaining({ outcome: "denied", reason: "Grant required", capabilityStage: "skills" })]);
 	});
 
@@ -85,12 +97,12 @@ describe("dynamic capability decision dispatch", () => {
 				expect(received.event).toBe("sessionSetup");
 				calls.push(stage);
 				if (stage === "mcp") throw new Error("isolated");
-				return { selected: ["selected"], outcomes: [{ kind: "decision", packId: "pack", hookId: "hook", event: "sessionSetup", outcome: "advised" }] } as any;
+				return { selected: ["selected"], authoritative: true, outcomes: [{ kind: "decision", packId: "pack", hookId: "hook", event: "sessionSetup", outcome: "advised" }] } as any;
 			},
 		});
 
 		await expect(hub.selectCapabilities("skills", context)).resolves.toMatchObject({ selected: ["selected"] });
-		await expect(hub.selectCapabilities("mcp", { ...context, selectedSkills: ["selected"] })).resolves.toEqual({ selected: [], outcomes: [] });
+		await expect(hub.selectCapabilities("mcp", { ...context, selectedSkills: ["selected"] })).resolves.toEqual({ selected: [], authoritative: false, outcomes: [] });
 		expect(calls).toEqual(["skills", "mcp"]);
 	});
 });
