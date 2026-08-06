@@ -8,10 +8,10 @@ a verification step must resolve its component cwd once against the goal's
 branch container and execute at the equivalent location in the frozen copy,
 not at the copied-container root and never in the live worktree.
 
-> Every fresh verification step, including a component command beneath a
-> nested path or in a different repository, runs only from the matching path
-> in one signal-owned pinned layout. A signal passes only after every copied
-> repository still matches the persisted source manifest and aggregate digest.
+> Every fresh verification signal that runs a component command beneath a
+> nested path or in a different repository uses only the matching path in one
+> signal-owned pinned layout. A signal passes only after every copied repository
+> still matches the persisted source manifest and aggregate digest.
 
 D-4 preserves D-1/D-2 and D-3 contracts:
 
@@ -57,7 +57,7 @@ live fallback. D-4 refuses those conditions instead.
 ```text
 frozen project components + own goal's repository map
   -> resolve component to { repoKey, relativePath } once
-  -> validate goal-owned live repository roots / synchronize each repository
+  -> synchronize the verification cwd; validate every goal-owned repository root
   -> read one raw-byte inventory and commit for each repository
   -> materialize private Git worktree and source tree per repository
   -> publish one public source-only branch-container layout
@@ -177,11 +177,17 @@ type PinnedSourceIdentity =
       repositories: readonly { repoKey: string; commitSha: string; digest: VerificationContentDigest }[] };
 ```
 
-`buildStepCache()` and `reuseCachedGateSignal()` receive that identity rather
-than treating equal `commitSha` as sufficient. They require exact layout kind,
-ordered repository keys, each commit, per-repo digest, and aggregate digest.
-A v1 prior attestation is only comparable to another single layout. Old signals
-and any partial/unknown v2 manifest are cache misses, never inferred matches.
+`buildStepCache()` compares the current and prior persisted v1/v2
+attestations rather than treating equal `commitSha` as sufficient. It requires
+exact layout kind, ordered repository keys, each commit, per-repo digest, and
+aggregate digest. A v1 prior attestation is only comparable to another single
+layout. Old signals and any partial/unknown v2 manifest are cache misses,
+never inferred matches.
+
+The route-level whole-gate fast path has only the branch-container commit and
+digest before it creates a signal or acquires a checkout. It cannot establish a
+current v2 repository manifest for a polyrepo container, so polyrepo signals
+proceed to fresh pinned verification rather than receiving v2 whole-gate reuse.
 This retains D-1/D-2's digest guard while preventing a pass from repository A
 being reused after only repository B changed.
 
@@ -248,9 +254,11 @@ monorepo offset. `goalBranchContainer(goal)` stays the only place that chooses
 ## Acquisition and execution flow
 
 1. Resolve the own goal layout and each step's logical location before source
-   acquisition. Resolve/synchronize every repository against its own
-   `sourceRoot`; a failure in any repository fails the signal before a cache
-   is built or a command is launched. The single-repo synchronization flow and
+   acquisition. The harness applies the existing origin synchronization to its
+   verification cwd, then validates and pins every authoritative repository
+   root from its current worktree state. A failure in any repository fails the
+   signal before a post-acquisition step cache is built or a command is
+   launched. The single-repo synchronization flow and
    post-sync signal repin remain unchanged.
 2. Persist a `preparing` lease containing the immutable repository plan. For
    each ordered entry, read D-1's raw source inventory once, validate the
@@ -266,14 +274,14 @@ monorepo offset. `goalBranchContainer(goal)` stays the only place that chooses
    per-repo digest and the aggregate digest, make source files read-only, and
    atomically publish the complete candidate as one public signal root.
 5. Persist ready layout/identity state, the v2 signal attestation, and active
-   recovery state before calculating step cache reuse. Fresh and cached steps
-   share this one aggregate witness.
+   recovery state before calculating post-acquisition step cache reuse. Fresh
+   and cached steps share this one aggregate witness.
 6. At every fresh phase, map each logical location to the public path, create
    one sidecar if sandboxed, map the same relative path beneath the sidecar
-   execution root, then execute. Review Git context is selected by the review
-   target: whole-layout review receives a deterministic read-only collection
-   of private repositories; component-targeted QA receives only its matching
-   private worktree. No private path is supplied to an agent or command.
+   execution root, then execute. Commands and agent QA use only public mapped
+   paths. Server-side LLM review uses the single manager-selected trusted
+   checkout Git context, not a repository collection; it must not expose a
+   private path to an agent.
 7. Remove the phase sidecar, quarantine the complete public root, recompute
    all repository and aggregate digests from persisted inventories, check for
    non-ignored additions within each repository subtree, and republish only
@@ -356,8 +364,9 @@ no global sweep.
   validation and deterministic private repository path derivation, so raw keys
   never become filesystem components without validation.
 - `gate-store.ts`, `verification-logic.ts`, and `gate-signal-response.ts`
-  persist and compare the v1/v2 attestation union for whole-gate and per-step
-  reuse.
+  persist the v1/v2 attestation union. The harness compares it for
+  post-acquisition per-step reuse; the route-level whole-gate fast path uses
+  only its preliminary single-container witness.
 - The verification sidecar contract persists and validates a multi-layout
   output/dependency map while retaining the exact signal-root mount.
 

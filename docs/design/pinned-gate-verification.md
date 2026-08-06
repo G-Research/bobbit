@@ -321,11 +321,12 @@ whole-gate reuse. `reuseCachedGateSignal()` therefore requires equal valid
 content digests **and** a valid `pinnedCheckout` whose commit and digest match
 the signal. This intentionally reruns all pre-D-3 green gates once.
 
-A whole-gate reuse does not execute a process. It is safe to materialize only
-when the current live preliminary digest equals this durable pinned digest;
-its new cached signal copies the prior `pinnedCheckout` attestation and the
-matching current digest. Any mismatch/unavailable/legacy attestation creates
-a fresh signal which takes the pinned execution path above.
+A whole-gate reuse does not execute a process or acquire a new checkout. It is
+safe to materialize only when the current live preliminary digest equals this
+durable pinned digest; its new cached signal copies the prior
+`pinnedCheckout` attestation and the matching current digest. Any
+mismatch/unavailable/legacy attestation creates a fresh signal which takes the
+pinned execution path above.
 
 `buildStepCache()` likewise requires the prior step's signal to have matching
 valid content and pinned attestation. Its existing decision object gains
