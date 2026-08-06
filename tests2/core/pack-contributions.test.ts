@@ -561,6 +561,50 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		const registry = new PackContributionRegistry(() => [entry(root, "server", m)]);
 		assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.id), ["inert.throwing"]);
 	});
+
+	it("accepts bounded every-N and inert wall-clock schedule metadata", () => {
+		const root = packRoot("hooks-schedules-valid", "scheduled-pack");
+		w(path.join(root, "pack.yaml"), "name: scheduled-pack\n");
+		w(path.join(root, "hooks", "every.yaml"), hookYaml([
+			"id: scheduled.every", "mode: decide", "events: [afterTurn]", "schedule:", "  everyNTurns: 3", "  wallClockMs: 10000",
+		]));
+		w(path.join(root, "hooks", "clock.yaml"), hookYaml([
+			"id: scheduled.clock", "schedule:", "  wallClockMs: 1",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const hooks = loadPackContributions(root, { ...manifest("scheduled-pack", { hooks: ["every", "clock"] }), schema: 2 }).hooks;
+		assert.deepEqual(hooks.map((hook) => ({ id: hook.id, schedule: hook.schedule })), [
+			{ id: "scheduled.every", schedule: { everyNTurns: 3, wallClockMs: 10000 } },
+			{ id: "scheduled.clock", schedule: { wallClockMs: 1 } },
+		]);
+	});
+
+	it("drops malformed schedules and every-N declarations with an unsafe lifecycle combination", () => {
+		const root = packRoot("hooks-schedules-invalid", "scheduled-pack");
+		w(path.join(root, "pack.yaml"), "name: scheduled-pack\n");
+		w(path.join(root, "hooks", "good.yaml"), hookYaml(["id: scheduled.good", "mode: decide", "events: [afterTurn]", "schedule: { everyNTurns: 1 }"]));
+		w(path.join(root, "hooks", "array.yaml"), hookYaml(["id: scheduled.array", "schedule: []"]));
+		w(path.join(root, "hooks", "unknown.yaml"), hookYaml(["id: scheduled.unknown", "schedule: { everyNTurns: 1, future: 2 }"]));
+		w(path.join(root, "hooks", "fraction.yaml"), hookYaml(["id: scheduled.fraction", "schedule: { everyNTurns: 1.5 }"]));
+		w(path.join(root, "hooks", "large.yaml"), hookYaml(["id: scheduled.large", "schedule: { wallClockMs: 10001 }"]));
+		w(path.join(root, "hooks", "observe.yaml"), hookYaml(["id: scheduled.observe", "mode: observe", "schedule: { everyNTurns: 2 }"]));
+		w(path.join(root, "hooks", "many-events.yaml"), hookYaml(["id: scheduled.many-events", "mode: decide", "events: [afterTurn, beforePrompt]", "schedule: { everyNTurns: 2 }"]));
+		// Wall-clock-only metadata remains a valid inert declaration even with a
+		// normal observe lifecycle.
+		w(path.join(root, "hooks", "wall-only.yaml"), hookYaml(["id: scheduled.wall-only", "schedule: { wallClockMs: 10000 }"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const hooks = loadPackContributions(root, {
+				...manifest("scheduled-pack", { hooks: ["good", "array", "unknown", "fraction", "large", "observe", "many-events", "wall-only"] }), schema: 2,
+			}).hooks;
+			assert.deepEqual(hooks.map((hook) => hook.id), ["scheduled.good", "scheduled.wall-only"]);
+			const output = warn.mock.calls.map((args) => args.join(" ")).join("\n");
+			for (const file of ["array", "unknown", "fraction", "large", "observe", "many-events"]) assert.match(output, new RegExp(file));
+		} finally {
+			warn.mockRestore();
+		}
+	});
 });
 
 // ── Hard conflicts (§5.4) ──────────────────────────────────────────
@@ -663,6 +707,28 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 			`${otherRoot}:same.id`,
 		]);
 		assert.deepEqual(registry.getPack(undefined, "shared")!.hooks.map((hook) => hook.id), ["same.id", "shared.second"]);
+	});
+
+	it("lists only active runnable scheduled advisors", () => {
+		const root = packRoot("hooks-scheduled-registry", "scheduled-pack");
+		w(path.join(root, "pack.yaml"), "name: scheduled-pack\n");
+		w(path.join(root, "hooks", "due.yaml"), hookYaml(["id: scheduled.due", "mode: decide", "events: [afterTurn]", "schedule: { everyNTurns: 4 }"]));
+		w(path.join(root, "hooks", "wall.yaml"), hookYaml(["id: scheduled.wall", "schedule: { wallClockMs: 4 }"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		let disabled: string[] = [];
+		const m = { ...manifest("scheduled-pack", { hooks: ["due", "wall"] }), schema: 2 };
+		const registry = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined,
+			undefined,
+			undefined,
+			(_scope, _projectId, packName) => packName === "scheduled-pack" ? disabled : [],
+		);
+		assert.deepEqual(registry.listScheduledAdvisorHooks(undefined).map((hook) => hook.id), ["scheduled.due"]);
+		assert.equal(registry.listScheduledAdvisorHooks(undefined)[0].schedule?.everyNTurns, 4);
+		disabled = ["due"];
+		registry.invalidate();
+		assert.deepEqual(registry.listScheduledAdvisorHooks(undefined), []);
 	});
 
 	it("activation filtering removes disabled hook list names after invalidation and restores them", () => {

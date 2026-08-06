@@ -123,6 +123,34 @@ describe("ContextTraceStore", () => {
 		expect(persisted).not.toContain(secret);
 	});
 
+	it("requires safe scheduled-advisor pack attribution and fixed lifecycle labels", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "RAW_ADVISOR_PROSE /private/pack-token";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "advised", value: "safe-advice-id", ms: 1_000_000_001 },
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Overlapping invocation", ms: 0 },
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Cancelled", ms: 4 },
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Disabled or revoked", ms: 5 },
+				{ kind: "advisory", hookId: "missing-pack", event: "afterTurn", outcome: "advised", value: secret, ms: 6 },
+				{ kind: "advisory", packId: "../../unsafe", hookId: "unsafe-pack", event: "afterTurn", outcome: "advised", value: secret, ms: 7 },
+			],
+		});
+
+		const row = store.readTrace("sess-1")[0]!;
+		assert.deepEqual(row.outcomes, [
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "advised", value: "safe-advice-id", ms: 1_000_000_000 },
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Overlapping invocation", ms: 0 },
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Cancelled", ms: 4 },
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Disabled or revoked", ms: 5 },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		assert.ok(!persisted.includes(secret));
+		assert.ok(!persisted.includes("../../unsafe"));
+	});
+
 	it("notifies an observer only after the trace is durable", () => {
 		const memfs = createMemFs();
 		const observed: TraceEntry[] = [];

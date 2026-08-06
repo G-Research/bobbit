@@ -18,6 +18,9 @@ const OUTCOME_REASONS = new Set<string>([
 	"Unavailable value",
 	"Malformed result",
 	"Timed out",
+	"Overlapping invocation",
+	"Cancelled",
+	"Disabled or revoked",
 ]);
 const MAX_OUTCOMES_PER_ENTRY = 50;
 
@@ -26,7 +29,7 @@ export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn"
 export type SafeContextTraceError = "Timed out" | "Malformed blocks omitted" | "Provider error";
 export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
 export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
-export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out";
+export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked";
 
 export interface SafeTraceProviderRow {
 	id: string;
@@ -38,6 +41,8 @@ export interface SafeTraceProviderRow {
 
 export interface SafeTraceOutcomeRow {
 	kind: SafeTraceOutcomeKind;
+	/** Safe server-derived pack attribution for scheduled advisor activity. */
+	packId?: string;
 	hookId: string;
 	event: Exclude<SafeContextTraceHook, "Unknown event">;
 	outcome: SafeTraceOutcome;
@@ -189,7 +194,15 @@ function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
 		if (typeof outcome.hookId !== "string" || !SAFE_IDENTIFIER.test(outcome.hookId)) continue;
 		if (typeof outcome.event !== "string" || !HOOKS.has(outcome.event)) continue;
 		if (typeof outcome.outcome !== "string" || !OUTCOMES.has(outcome.outcome)) continue;
+		const kind = outcome.kind as SafeTraceOutcomeKind;
+		const event = outcome.event as Exclude<SafeContextTraceHook, "Unknown event">;
 		const status = outcome.outcome as SafeTraceOutcome;
+		const packId = typeof outcome.packId === "string" && SAFE_IDENTIFIER.test(outcome.packId)
+			? outcome.packId
+			: undefined;
+		// Scheduled advisors use the advisory afterTurn surface and require a safe
+		// server-derived pack identity. Do not let malformed attribution reach UI.
+		if (kind === "advisory" && event === "afterTurn" && !packId) continue;
 		const reason = typeof outcome.reason === "string" && OUTCOME_REASONS.has(outcome.reason)
 			? outcome.reason as SafeTraceOutcomeReason
 			: undefined;
@@ -200,9 +213,10 @@ function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
 			? finiteDisplayNumber(outcome.ms)
 			: undefined;
 		outcomes.push({
-			kind: outcome.kind as SafeTraceOutcomeKind,
+			kind,
+			...(packId ? { packId } : {}),
 			hookId: outcome.hookId,
-			event: outcome.event as Exclude<SafeContextTraceHook, "Unknown event">,
+			event,
 			outcome: status,
 			...(reason ? { reason } : {}),
 			...(selectedValue ? { value: selectedValue } : {}),

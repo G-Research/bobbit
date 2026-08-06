@@ -148,6 +148,7 @@ function contribResolver(packs: PackContributions[]): PackContributionResolver {
 		getChannel: () => undefined,
 		listProviders: () => packs.flatMap((p) => p.providers),
 		listHooks: () => packs.flatMap((p) => p.hooks),
+		listScheduledAdvisorHooks: () => [],
 		hasRoute: (_pid, packId, name) => !!byId.get(packId)?.routes?.names.includes(name),
 	};
 }

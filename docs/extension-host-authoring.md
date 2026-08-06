@@ -46,7 +46,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
-| **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
+| **Hooks** *(schema 2)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; eligible every-N-turn advisors run in the worker tier | Metadata is inert unless it declares the narrow scheduled-advisor contract |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
@@ -99,7 +99,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
-  hooks/<name>.yaml               # schema-2 inert hook metadata (listed in contents.hooks)
+  hooks/<name>.yaml               # schema-2 hook metadata; can declare an every-N-turn advisor
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
   pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
   lib/                            # shared implementation modules, NOT entities
@@ -129,7 +129,7 @@ contents:
   tools:       [artifact_demo]          # tools/<group> dir names
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
-  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2, metadata only
+  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -146,8 +146,8 @@ Rules:
   channel names within a pack are rejected.
 - **`contents.hooks: string[]`** — schema-2 hook metadata basenames under
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
-  read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-inert) for the strict
-  declaration contract and its intentionally non-runtime boundary.
+  read. See [Hooks and scheduled advisors](#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2) for the strict
+  declaration contract and runtime boundary.
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1439,19 +1439,18 @@ Author-facing rules:
 
 Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
 
-### Hook metadata (`hooks/<name>.yaml`) — schema 2; inert
+### Hook metadata and scheduled advisors (`hooks/<name>.yaml`) — schema 2
 
-**Status:** a `schema: 2` pack can declare hook **metadata** in the same pack-contribution
-registry used by panels, entrypoints, providers, and channels. This is an indexing seam for a
-future runtime contract, not a hook runtime: it lets tooling inspect a stable declaration without
-making the declaration operational. Schema-1 packs, and schema-2 packs with no `contents.hooks`,
-produce an empty hook list and otherwise keep their existing behavior.
+**Status:** a `schema: 2` pack can declare hook metadata in the same contribution registry used
+by panels, entrypoints, providers, and channels. Metadata is normally an indexing seam, but an
+exact, granted `afterTurn` declaration can opt into the narrow **scheduled-advisor** runtime
+below. Schema-1 packs, and schema-2 packs with no `contents.hooks`, produce an empty hook list
+and otherwise keep their existing behavior.
 
-The project can separately record an exact [extension capability grant](extension-capability-grants.md)
-for an active hook. That administrative decision is not part of the pack manifest or Host API:
-a declaration cannot grant itself authority, and enabling a pack does not grant `decide` or any
-other capability. In this release, a grant changes only server status metadata; it does not load
-or run the declared module.
+The project separately records an exact [extension capability grant](extension-capability-grants.md)
+for an active hook. A declaration cannot grant itself authority, and enabling a pack does not
+grant `decide` or any other capability. An active `decide` grant is necessary—but not
+sufficient—for a scheduled advisor to run.
 
 Declare each file by basename in `pack.yaml`; only listed files are considered:
 
@@ -1484,6 +1483,62 @@ activation:
   requiresConfig: [auditEndpoint]
 ```
 
+#### Every-N-turn advisor
+
+An advisor is the only runnable hook contract in this release. It must be an exact `mode: decide`
+declaration with exactly `events: [afterTurn]` and `schedule.everyNTurns`:
+
+```yaml
+# hooks/turn-audit.yaml
+id: audit.turn
+module: ../lib/audit-turn.mjs
+events: [afterTurn]
+mode: decide
+capabilities: []
+budget:
+  maxTokens: 1200
+  timeoutMs: 1000
+schedule:
+  everyNTurns: 5
+```
+
+`everyNTurns` is a safe integer from 1 through 10,000. The durable completed-turn index starts at
+zero, so this example is due on turns 5, 10, 15, and so on. It survives compaction, restore, and
+respawn; a missed or interrupted due invocation is not replayed. `schedule.wallClockMs` accepts
+the same bounded integer range as inert, forward-compatible metadata only: it creates no timer,
+deadline, catch-up work, or wall-clock invocation.
+
+The module must export an `advisors` object keyed by the declared hook id:
+
+```js
+export const advisors = {
+  "audit.turn": async (ctx) => {
+    // Record only a safe identifier, if anything.
+    return { advisory: { value: "turn-audit-complete" } };
+  },
+};
+```
+
+The advisor context is frozen server-derived data: `sessionId`, optional `projectId`/`goalId` and
+`roleName`, `cwd`, `workingDir`, `turn.index`, hook `config`, `budget.maxTokens`, and an optional
+read-only `scopeContext`. It deliberately contains no `host`, gateway credential, prompt,
+transcript, session object, or mutation surface. The only accepted return values are `undefined`
+or `{ advisory?: { value?: string } }`; `value` must be a safe identifier. Advice is trace
+metadata, not prompt text, a model message, a decision, or an instruction to the gateway.
+
+The Session Manager launches due advisors after the main turn on a fire-and-forget path. They
+never delay idle status, queue draining, or a later turn. There is at most one live invocation per
+`(sessionId, packId, hookId)`; a due overlap is recorded as dropped and is neither queued nor
+retried. Disable, removal, or exact-grant revocation aborts matching work and fences its late
+result. The trace attributes parent-measured execution duration to the server-derived `packId` and
+hook id; advisors cannot supply token or dollar estimates. Worker timeout, throw, malformed output,
+and trace failure remain isolated from the main turn and other advisors.
+
+Advisor code is installed-pack server code, so it remains trusted code with ambient Node,
+filesystem, and network access; this is not an OS sandbox. Its worker receives a small portable
+environment rather than the gateway's inherited environment, and has no Host API or gateway
+secret. Authors must still treat advisor code as privileged pack code.
+
 The declaration fields are strict:
 
 - **`id`** is a stable pack-local identifier matching
@@ -1505,6 +1560,10 @@ The declaration fields are strict:
 - **`config`**, when present, must be a mapping and is retained verbatim. **`activation`**,
   when present, must be a mapping containing no keys other than optional `requiresConfig`.
   That value, when present, is a non-empty, duplicate-free array of non-empty strings.
+- **`schedule`**, when present, is a mapping with only optional `everyNTurns` and
+  `wallClockMs`, each a safe integer from 1 through 10,000. `everyNTurns` is valid only with
+  `mode: decide` and exactly `events: [afterTurn]`; any other pairing drops the declaration.
+  `wallClockMs` alone remains inert metadata.
 
 Basenames must be safe pack-local names. The loader resolves `hooks/<basename>.yaml`, then
 `hooks/<basename>.yml`, and never scans the directory. A malformed YAML file or invalid field
@@ -1537,12 +1596,12 @@ trusted pack server module can access. It also does not turn a hook into a provi
 action, channel, or standalone pi extension. See [Extension capability grants](extension-capability-grants.md)
 for the operator API, audit, and live-revocation contract.
 
-**Non-runtime boundary.** Loading or listing hook metadata does not import the `module`, execute
-code, dispatch an event, establish authorization, evaluate `config` or `activation`, start timers,
-mutate state, or register a UI surface. A granted decide hook is still in this boundary: its
-`runnable` status is only static eligibility for a later core dispatcher. It creates no executable
-hook registration. Authors must not rely on a hook file or grant for runtime behavior in this
-release.
+**Runtime boundary.** Loading or listing a hook still does not import its `module`, execute code,
+evaluate `config` or `activation`, start a timer, mutate state, or register a UI surface. The sole
+exception is a due scheduled advisor meeting the exact contract above: after live declaration and
+`decide`-grant checks, the Lifecycle Hub imports its `advisors[hook.id]` member on the worker tier.
+All other hook declarations, including wall-clock-only schedules and granted `decide` hooks without
+an every-N-turn schedule, remain metadata only.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 

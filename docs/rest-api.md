@@ -145,7 +145,8 @@ type TraceOutcomeKind = "decision" | "advisory" | "audit";
 type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
   | "beforeCompact" | "sessionShutdown";
 type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
-  | "Malformed result" | "Timed out";
+  | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
+  | "Disabled or revoked";
 
 {
   entries: Array<{
@@ -161,6 +162,7 @@ type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
     }>;
     outcomes?: Array<{
       kind: TraceOutcomeKind;
+      packId?: string; // server-derived; required for advisory afterTurn rows
       hookId: string;
       event: TraceOutcomeEvent;
       outcome: TraceOutcome;
@@ -197,8 +199,9 @@ error maps only to `Timed out`, `Malformed blocks omitted`, or `Provider error`.
 
 At most 50 outcome rows per entry are retained. A row is omitted unless its kind, lifecycle event,
 and terminal outcome exactly match the enumerations above and its `hookId` is the same safe
-identifier form. `reason` is retained only from the fixed catalog above. `value` is retained only
-for `advised`, `applied`, or `superseded` outcomes and only as a safe identifier. This excludes
+identifier form. Advisory `afterTurn` rows additionally require a safe, server-derived `packId`.
+`reason` is retained only from the fixed catalog above. `value` is retained only for `advised`,
+`applied`, or `superseded` outcomes and only as a safe identifier. This excludes
 extension-provided rationale, arbitrary error text, prompts, raw context, tool arguments, patches,
 configuration values, paths, stacks, tokens, and secrets from durable diagnostics and REST data.
 

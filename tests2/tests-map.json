@@ -2084,6 +2084,15 @@
       }
     },
     {
+      "path": "tests2/core/scheduled-advisor-lifecycle.test.ts",
+      "reason": "Deterministic lifecycle coverage for exact every-N advisor cadence, advisory-only context, overlap dropping, revocation fencing, cancellation, and malformed-result isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-boot-restore-lag.test.ts",
       "reason": "Native v2 core coverage for event-loop-lag-aware eager restore batching without skipped or deferred sessions.",
       "execution": {

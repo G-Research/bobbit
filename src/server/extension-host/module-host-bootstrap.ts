@@ -4,15 +4,17 @@
 //
 // This module is the `Worker` entry spawned by `ModuleHost.invoke`
 // (module-host-worker.ts). It runs in a worker thread whose memory is capped by
-// `resourceLimits` and that inherits a full copy of the gateway env.
+// `resourceLimits`. Actions/routes/providers inherit the gateway environment;
+// scheduled advisors receive only a portable runtime environment.
 //
 // **Trust model (Model A).** Pack SERVER code is TRUSTED — same tier as a tool or
-// MCP server the user chose to install — so it runs with FULL ambient parity:
-// normal `node:` built-ins (`fs`/`child_process`/`net`/`http`…), normal network
-// globals (`fetch`/`WebSocket`), and the normal `process` (full env). There is NO
-// capability sandbox; a per-capability sandbox over trusted in-process code is false
-// security (a native `.node` addon or the shared process trivially defeats it). The
-// worker is purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
+// MCP server the user chose to install — so it has ambient Node built-ins
+// (`fs`/`child_process`/`net`/`http`…) and network globals (`fetch`/`WebSocket`).
+// Actions/routes/providers also retain the normal full environment. Advisors receive
+// only portable runtime variables, avoiding inherited gateway environment secrets;
+// this is not a capability sandbox because trusted advisor code still has ambient
+// filesystem/network access and can defeat in-process restrictions. The worker is
+// otherwise purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
 // mem/cpu caps, spawned-child kill) plus module-import containment to the pack root
 // (loader/stability hygiene, NOT a security boundary).
 //
@@ -101,9 +103,11 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes" | "providers";
+	exportKind: "actions" | "routes" | "providers" | "advisors";
 	member: string;
-	/** Serializable handler context (identity + capability flags; NO live host). */
+	/** Serializable handler context (identity + capability flags; NO live host).
+	 * Advisor contexts are server-derived data only and intentionally have no
+	 * host/capability surface. */
 	ctx: SerializableCtx;
 	arg: unknown;
 }
@@ -148,14 +152,16 @@ type ParentMessage = InvokeMessage | HostReplyMessage | ChannelOpenMessage | Cha
 
 /** The serializable shape of `ActionHandlerCtx` sent across the MessagePort. */
 interface SerializableCtx {
-	sessionId: string;
+	/** Advisor contexts retain their narrow server-derived fields unchanged. */
+	[key: string]: unknown;
+	sessionId?: string;
 	toolUseId?: string;
-	tool: string;
+	tool?: string;
 	workingDir?: string;
 	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	capabilities?: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
 }
 
 interface ChannelSerializableCtx {
@@ -215,8 +221,9 @@ const confinementReady: Promise<void> = (async () => {
  * Override ONLY `process.cwd()` so it returns the session working dir (tool parity:
  * a tool/MCP server runs rooted at the session worktree, and worker threads cannot
  * `process.chdir()`). Nothing else about `process` is touched — the worker keeps the
- * real `process` global with the full env, real `argv`/`execPath`/`exit`/`kill`/
- * `binding`/… all present (trusted pack code is the tool/MCP tier). A no-op when
+ * real `process` global with its configured env, real `argv`/`execPath`/`exit`/
+ * `kill`/`binding`/… all present. Actions/routes/providers retain their full
+ * inherited env; advisors receive only portable runtime variables. A no-op when
  * `workingDir` is absent/empty (the worker keeps its real cwd).
  */
 function setSessionCwd(workingDir?: string): void {
@@ -459,7 +466,7 @@ function callHost(path: [string, string], args: unknown[]): Promise<unknown> {
  *  marshalled to the parent (authorized there — these cross-pack/cross-session
  *  boundaries ARE enforced); identity + flags are local. */
 function buildHostProxy(ctx: SerializableCtx): unknown {
-	const flags = ctx.capabilities;
+	const flags = ctx.capabilities ?? { callRoute: false, session: false, store: false, agents: false };
 	return {
 		version: ctx.hostVersion,
 		contractVersion: ctx.hostContractVersion,
@@ -686,14 +693,19 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		}
 		const ctx = msg.exportKind === "providers"
 			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
-			: {
-				host: buildHostProxy(msg.ctx),
-				sessionId: msg.ctx.sessionId,
-				toolUseId: msg.ctx.toolUseId,
-				tool: msg.ctx.tool,
-				workingDir: msg.ctx.workingDir,
-				sessionArchived: msg.ctx.sessionArchived,
-			};
+			: msg.exportKind === "advisors"
+				// Do not synthesize a Host API for advisors. The parent has already
+				// stripped `host` and gateway metadata; preserving this data-only
+				// object also keeps the advisor contract narrow and auditable.
+				? msg.ctx
+				: {
+					host: buildHostProxy(msg.ctx),
+					sessionId: msg.ctx.sessionId,
+					toolUseId: msg.ctx.toolUseId,
+					tool: msg.ctx.tool,
+					workingDir: msg.ctx.workingDir,
+					sessionArchived: msg.ctx.sessionArchived,
+				};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });
 	} catch (err) {

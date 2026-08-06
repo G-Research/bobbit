@@ -120,6 +120,40 @@ describe("context trace controller", () => {
 		});
 	});
 
+	it("normalizes and presents only safe scheduled-advisor attribution", async () => {
+		const secret = "RAW_ADVISOR_RESULT /private/secret";
+		const [item] = normalizeContextTracePayload({
+			entries: [{
+				ts: 1,
+				hook: "afterTurn",
+				providers: [],
+				outcomes: [
+					{ kind: "advisory", packId: "trusted-pack.1", hookId: "every-two-turns", event: "afterTurn", outcome: "dropped", reason: "Disabled or revoked", value: secret, ms: 12 },
+					{ kind: "advisory", hookId: "missing-pack", event: "afterTurn", outcome: "advised", value: secret, ms: 5 },
+					{ kind: "advisory", packId: "../../unsafe", hookId: "unsafe-pack", event: "afterTurn", outcome: "advised", value: secret, ms: 6 },
+				],
+			}],
+		});
+		expect(item).toEqual({
+			kind: "trace",
+			entry: {
+				hook: "afterTurn",
+				ts: 1,
+				providers: [],
+				outcomes: [{ kind: "advisory", packId: "trusted-pack.1", hookId: "every-two-turns", event: "afterTurn", outcome: "dropped", reason: "Disabled or revoked", latencyMs: 12 }],
+			},
+		});
+
+		const inspector = document.createElement("context-trace-inspector") as ContextTraceInspector;
+		inspector.state = { status: "ready", items: [item!], limit: 100, hasEarlier: false, isRefreshing: false, refreshError: false };
+		document.body.appendChild(inspector);
+		await inspector.updateComplete;
+		expect(inspector.textContent).toContain("Pack");
+		expect(inspector.textContent).toContain("trusted-pack.1");
+		expect(inspector.textContent).toContain("Disabled or revoked");
+		expect(inspector.textContent).not.toContain(secret);
+	});
+
 	it("uses only the active encoded session endpoint and grows bounded pages", async () => {
 		const fetch = vi.fn(async (input: RequestInfo | URL) => {
 			const url = String(input);

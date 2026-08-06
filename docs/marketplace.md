@@ -154,7 +154,7 @@ The MVP ships exactly one configured resolution mechanism: **`pack_order`**, the
 Each installed pack exposes per-entity **activation toggles** on the Market installed-pack
 surface, so you can disable individual entities without uninstalling the pack. Schema-1 packs
 toggle user-facing roles, tools, skills, and entrypoints. Schema-2 packs also toggle pack-scoped
-contributions: providers, hook metadata, MCP, and pi extensions. Support surfaces — panels,
+contributions: providers, hooks (including eligible scheduled advisors), MCP, and pi extensions. Support surfaces — panels,
 routes, stores, renderers, actions, `lib/` — are **not** independently toggleable (panels may be
 shown read-only as "support surfaces").
 
@@ -162,13 +162,13 @@ shown read-only as "support surfaces").
 > `mcp`, `piExtensions`, and the reserved `runtimes` / `workflows` siblings. They are first-class
 > in `DisabledRefs` and `ACTIVATION_KINDS`, and the `pack-activation` catalogue includes their
 > arrays only for schema-2 packs, so toggles round-trip through the same REST without changing
-> schema-1 catalogue shapes. **Providers** and manifest-listed **hook metadata** load through
-> `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
-> (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
-> standalone pi `--extension` entries. `runtimes` and `workflows` remain catalogue-only reserved
-> kinds. Hook metadata is inert: indexing imports or dispatches nothing and grants no authority.
-> See [pack.yaml schema 2](#packyaml-schema-2-extension-platform) and the
-> [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
+> schema-1 catalogue shapes. **Providers** and manifest-listed **hooks** load through
+> `PackContributionRegistry`; hook activation filters declarations by manifest basename (`listName`)
+> only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to standalone pi
+> `--extension` entries. `runtimes` and `workflows` remain catalogue-only reserved kinds. Listing a
+> hook imports or dispatches nothing, but an active, exact-granted every-N-turn advisor can run after
+> a completed turn. See [pack.yaml schema 2](#packyaml-schema-2-extension-platform) and the
+> [hook and scheduled-advisor contract](extension-host-authoring.md#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2).
 
 What disabling does:
 
@@ -181,7 +181,7 @@ What disabling does:
   entrypoint never disables a panel.
 - **Disable an MCP contribution or operation** — the contribution id/list name is added to `DisabledRefs.mcp`, or operation names are added under `DisabledRefs.mcpOperations[contributionId]`. Disabled contributions are omitted from Marketplace MCP discovery/connection; disabled operations are omitted from route maps and external `mcp_*` tools. Runtime status refreshes immediately, while disabled rows remain visible in the activation catalogue so they can be re-enabled.
 - **Disable a pi extension** — its `contents.pi-extensions` list name is added to `DisabledRefs.piExtensions`, so Bobbit does not add its `--extension <path>` flag to matching agent sessions. The disabled row remains visible in the activation catalogue, including any last known diagnostics, so it can be re-enabled.
-- **Disable hook metadata** — its `contents.hooks` basename is added to `DisabledRefs.hooks`, so the registry omits that indexed declaration after invalidation. This does not change runtime behavior: hook metadata has no import, dispatch, authority, config evaluation, or UI surface.
+- **Disable a hook** — its `contents.hooks` basename is added to `DisabledRefs.hooks`, so the registry omits that declaration after invalidation. Listing remains non-executing, and an active scheduled advisor is aborted and prevented from recording a late result.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
 names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands
@@ -716,7 +716,7 @@ each defaults to `[]` when absent:
 | `contents` key | YAML key | Runtime loader? | Purpose |
 |---|---|---|---|
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
-| `hooks` | `hooks` | **Yes (metadata only)** | Manifest-listed `hooks/<name>.yaml|yml` declarations; validated and indexed without runtime execution. See the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert). |
+| `hooks` | `hooks` | **Yes** | Manifest-listed `hooks/<name>.yaml|yml` declarations. They are indexed without execution unless they meet the narrow every-N-turn advisor contract. See the [hook and scheduled-advisor contract](extension-host-authoring.md#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2). |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
 | `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
@@ -739,7 +739,7 @@ contents:
   tools:    []
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
-  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; inert metadata
+  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; can declare an advisor
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
   # runtimes / workflows are accepted here at schema 2 but remain reserved.
@@ -834,11 +834,12 @@ Providers, hook metadata, MCP, pi extensions, and the reserved runtime/workflow 
   generalised analogue of the entrypoint filter), and
   **`listProviders(projectId)`** returns only providers from packs that are **installed +
   active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
-- Hook metadata is toggled by its **`listName`** (its `contents.hooks` basename).
-  `PackContributionRegistry` filters that declaration from the pack contribution and
+- Hooks are toggled by their **`listName`** (their `contents.hooks` basename).
+  `PackContributionRegistry` filters a declaration from the pack contribution and
   `listHooks(projectId)` after invalidation; it does not inspect `config` or `activation`.
-  The toggle remains metadata-only and never imports a module, dispatches a hook, grants
-  capability/authority, or registers UI. See the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
+  Listing never imports a module, grants authority, or registers UI. Disabling also stops matching
+  scheduled advisors; only the exact due, `decide`-granted advisor contract dispatches code. See the
+  [hook and scheduled-advisor contract](extension-host-authoring.md#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2).
 - An authored MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). A gateway MCP contribution is toggled by its stable installed contribution id, not by runtime key or fingerprint. `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
 - A pi extension is toggled by its **`listName`** (its `contents.pi-extensions` basename). Session startup filters disabled/unresolved extensions before appending pi `--extension` args, while the activation catalogue keeps disabled/unresolved rows visible with diagnostics.
 
