@@ -150,7 +150,7 @@ describe("DecisionRequestManager", () => {
 		const created = await first.manager.create(origin(), request(first.clock));
 		first.clock.advance(30_000);
 		await first.manager.reconcile();
-		assert.equal(first.store.get(created.requestId!)?.status, "expired");
+		assert.equal(first.store.get(created.requestId!)?.status, "defaulted");
 		assert.deepEqual(first.store.get(created.requestId!)?.resolution, {
 			value: { kind: "option", value: "quick" }, actor: "deadline", reason: "deadline_elapsed",
 		});
@@ -159,7 +159,7 @@ describe("DecisionRequestManager", () => {
 	it("applies a headless default immediately without an interactive invalidation", async () => {
 		const { manager, clock, store, invalidations } = fixture({ headless: true });
 		const created = await manager.create(origin(), request(clock));
-		assert.equal(created.request?.status, "resolved");
+		assert.equal(created.request?.status, "defaulted");
 		assert.equal(store.get(created.requestId!)?.resolution?.actor, "headless");
 		assert.deepEqual(invalidations, ["session-1"]);
 	});
@@ -226,6 +226,116 @@ describe("DecisionRequestManager", () => {
 		await manager.reconcile();
 		assert.equal(store.get(created.requestId!)?.continuationState, "delivered");
 		assert.equal(store.get(created.requestId!)?.continuationAttempts, 2);
+	});
+
+	it("forces all trusted platform floors to consent and strips a requested safe default", async () => {
+		const { manager, clock, store } = fixture();
+		const operations = [
+			{ hardCapOverride: "core-hard-cap" as const, reason: "core-hard-cap" },
+			{ toolSafety: "unsafe" as const, reason: "core-unsafe-tool" },
+			{ change: "capability-escalation" as const, reason: "core-capability-change" },
+			{ change: "grant-change" as const, reason: "core-grant-change" },
+			{ change: "configuration-change" as const, reason: "core-configuration-change" },
+		];
+		for (const [index, floor] of operations.entries()) {
+			const created = await manager.create(origin({ sessionId: `session-${index}`, goalId: `goal-${index}` }), request(clock, { key: `forced-${index}` }), {
+				id: `operation-${index}`, kind: "trusted", ...floor,
+			});
+			const persisted = store.get(created.requestId!)!;
+			assert.equal(persisted.decisionClass, "consent-required");
+			assert.equal(persisted.classificationReason, floor.reason);
+			assert.equal(persisted.request.default, undefined);
+			assert.equal(persisted.timeoutAction, "deny-operation");
+		}
+	});
+
+	it("denies silent consent headlessly without a memory, continuation, or protected work", async () => {
+		let delivered = 0;
+		const { manager, clock, store } = fixture({ headless: true, continuation: async () => { delivered++; return "delivered"; } });
+		const created = await manager.create(origin(), request(clock), { id: "unsafe-tool", kind: "tool", toolSafety: "unsafe" });
+		const persisted = store.get(created.requestId!)!;
+		assert.equal(persisted.status, "denied");
+		assert.equal(persisted.resolution, undefined);
+		assert.equal(persisted.continuationState, "skipped");
+		assert.equal(store.listMemories().length, 0);
+		assert.equal(delivered, 0);
+	});
+
+	it("pauses consent durably, surfaces one non-waking inbox reference, and resumes through one answer", async () => {
+		const fs: MemFs = createMemFs();
+		const dir = path.join("/memfs", `consent-manager-${sequence++}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const store = new DecisionRequestStore(dir, fs);
+		const clock = new FakeClock(Date.parse("2026-01-01T00:00:00.000Z"));
+		const pauses: string[] = [];
+		const resumes: string[] = [];
+		const entries: Array<{ id: string; staffId: string; wake: boolean }> = [];
+		const manager = new DecisionRequestManager({
+			storeForProject: () => store, clock,
+			consentPauseLifecycle: {
+				pause: async (_goal, reason) => { pauses.push(reason.requestId); return pauses.length === 1 ? "paused" : "already-paused"; },
+				resume: async (_goal, reason) => { resumes.push(reason.requestId); return "resumed"; },
+			},
+			consentInboxTarget: () => "staff-1",
+			inboxManager: {
+				hasStaff: () => true,
+				enqueueOnce: (_staff, input) => {
+					const existing = entries[0];
+					if (existing) return { entry: existing as never, created: false };
+					const entry = { id: "inbox-1", staffId: "staff-1", wake: false };
+					entries.push(entry);
+					assert.equal(input.source.type, "consent_pause");
+					return { entry: entry as never, created: true };
+				},
+				completeOnce: () => ({}) as never,
+				cancelOnce: () => ({}) as never,
+			} as never,
+		});
+		const created = await manager.create(origin(), request(clock), { id: "goal-operation", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal" });
+		clock.advance(30_000);
+		await manager.reconcile();
+		const paused = store.get(created.requestId!)!;
+		assert.equal(paused.status, "paused-awaiting-consent");
+		assert.equal(paused.consentInbox?.status, "surfaced");
+		assert.deepEqual(pauses, [created.requestId!]);
+		assert.deepEqual(entries, [{ id: "inbox-1", staffId: "staff-1", wake: false }]);
+		await manager.reconcile();
+		assert.equal(entries.length, 1, "startup replay must use source-key dedupe");
+		const answered = await manager.answer("project-1", created.requestId!, { kind: "option", value: "thorough" });
+		assert.equal(answered.status, "resolved");
+		assert.equal(store.get(created.requestId!)?.status, "resolved");
+		assert.deepEqual(resumes, [created.requestId!]);
+	});
+
+	it("does not resume a manual or different consent pause after an answer", async () => {
+		const { clock, store } = fixture();
+		// Construct with a matching pause service first so timeout stores its exact intent.
+		const pausedManager = new DecisionRequestManager({
+			storeForProject: () => store, clock,
+			consentPauseLifecycle: { pause: async () => "paused", resume: async () => "not-matching" },
+		});
+		const created = await pausedManager.create(origin(), request(clock), { id: "goal-operation", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal" });
+		clock.advance(30_000);
+		await pausedManager.reconcile();
+		const result = await pausedManager.answer("project-1", created.requestId!, { kind: "option", value: "quick" });
+		assert.equal(result.status, "already_resolved");
+		assert.equal(store.get(created.requestId!)?.status, "paused-awaiting-consent");
+	});
+
+	it("rechecks trusted consent facts before a user answer can release protected work", async () => {
+		let continuationCalls = 0;
+		const { clock, store } = fixture();
+		const guarded = new DecisionRequestManager({
+			storeForProject: () => store, clock,
+			recheckConsentOperation: () => false,
+			continuation: { deliver: async () => { continuationCalls++; return "delivered"; } },
+		});
+		const created = await guarded.create(origin(), request(clock), { id: "unsafe-tool", kind: "tool", toolSafety: "unsafe" });
+		const result = await guarded.answer("project-1", created.requestId!, { kind: "option", value: "quick" });
+		assert.equal(result.status, "resolved");
+		assert.equal(store.get(created.requestId!)?.status, "denied");
+		assert.equal(store.get(created.requestId!)?.resolution, undefined);
+		assert.equal(continuationCalls, 0);
 	});
 
 	it("durably deduplicates and caps advisories through the non-waking inbox seam", () => {
