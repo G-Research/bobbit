@@ -816,13 +816,18 @@ async function createWorktreeUncoordinated(repoPath: string, branchName: string,
 				}
 			}
 			// Re-create worktree using existing branch (no -b)
-			await runGit(worktreeAddArgs(commandRunner, worktreePath, branchName), { cwd: repoPath });
+			await runGit(worktreeAddArgs(worktreePath, branchName), { cwd: repoPath });
 			console.log(`[git] Re-created worktree for existing branch "${branchName}" at ${worktreePath}`);
 		}
 	} else {
 		// Branch doesn't exist — create branch and worktree in one step
 		try {
-			await runGit(worktreeAddArgs(commandRunner, worktreePath, branchName, startPoint), {
+			await runGit(worktreeAddArgs(
+				worktreePath,
+				branchName,
+				startPoint,
+				{ noTrack: !!configuredBaseRefTrimmed },
+			), {
 				cwd: repoPath,
 			});
 		} catch (err) {
@@ -867,22 +872,23 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 }
 
 function worktreeAddArgs(
-	commandRunner: CommandRunner,
 	worktreePath: string,
 	branchName: string,
 	startPoint?: string,
+	opts?: { noTrack?: boolean },
 ): string[] {
 	// `--no-track` is valid only when `git worktree add` also creates its
 	// branch. Reusing an existing branch must omit it; Git otherwise rejects
-	// the command before the recovery worktree is created.
+	// the command before the recovery worktree is created. It is used only when
+	// the caller immediately performs a serialized explicit upstream write.
+	// Without that compensating write, preserve Git's implicit remote tracking.
 	if (startPoint === undefined) return ["worktree", "add", worktreePath, branchName];
 
-	const creation = ["worktree", "add", "--no-track", "-b", branchName, worktreePath, startPoint];
-	if (commandRunner === realCommandRunner) return creation;
-	// Existing in-memory CommandRunner seams model Git's legacy positional
-	// layout. Git accepts options after positional args; preserve that test seam
-	// while new-branch creation still explicitly prevents implicit tracking.
-	return ["worktree", "add", "-b", branchName, worktreePath, "--no-track", startPoint];
+	return [
+		"worktree", "add",
+		...(opts?.noTrack ? ["--no-track"] : []),
+		"-b", branchName, worktreePath, startPoint,
+	];
 }
 
 async function resolveGitCommonDir(repoPath: string, commandRunner: CommandRunner): Promise<string> {
@@ -1191,9 +1197,14 @@ async function createWorktreeSetUncoordinated(
 
 			try {
 				if (branchExists) {
-					await runGit(worktreeAddArgs(commandRunner, wtPath, branchName), { cwd: repoSrc });
+					await runGit(worktreeAddArgs(wtPath, branchName), { cwd: repoSrc });
 				} else {
-					await runGit(worktreeAddArgs(commandRunner, wtPath, branchName, startPoint), { cwd: repoSrc });
+					await runGit(worktreeAddArgs(
+						wtPath,
+						branchName,
+						startPoint,
+						{ noTrack: !!configuredBaseRefTrimmed },
+					), { cwd: repoSrc });
 				}
 			} catch (err) {
 				if (startPointFromConfiguredBase && !branchExists) {
@@ -1593,12 +1604,12 @@ export async function recoverWorktree(
 			return null;
 		}
 
-		// Create the worktree — use existing branch (no -b) or track from remote
+		// Create the worktree — use existing branch (no -b) or let Git restore
+		// implicit tracking when recreating a branch that exists only on origin.
 		if (branchExists) {
-			await runGit(worktreeAddArgs(commandRunner, worktreePath, branchName), { cwd: repoPath });
+			await runGit(worktreeAddArgs(worktreePath, branchName), { cwd: repoPath });
 		} else {
-			// Create local branch from the remote without an implicit config write.
-			await runGit(worktreeAddArgs(commandRunner, worktreePath, branchName, `origin/${branchName}`), { cwd: repoPath });
+			await runGit(worktreeAddArgs(worktreePath, branchName, `origin/${branchName}`), { cwd: repoPath });
 		}
 
 		console.log(`[git] Recovered worktree for branch "${branchName}" at ${worktreePath}`);
