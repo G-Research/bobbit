@@ -1592,6 +1592,7 @@ Maintenance endpoints back Settings → Maintenance. They are preview-first and 
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/api/maintenance/gate-store` | Project-scoped gate persistence inventory and metrics. Requires `?projectId=`. |
 | `GET` | `/api/maintenance/worktrees` | Canonical unified worktree inventory. Optional `?include=all|actionable|troubleshooting`; default is `all`. |
 | `POST` | `/api/maintenance/cleanup-worktrees` | Canonical cleanup for all safe or selected unified worktree inventory items. Also accepts legacy orphan cleanup bodies. |
 | `GET` | `/api/maintenance/orphaned-worktrees` | Legacy compatibility view of safe unowned Bobbit `session/*` git worktrees. |
@@ -1603,6 +1604,8 @@ Maintenance endpoints back Settings → Maintenance. They are preview-first and 
 | `POST` | `/api/maintenance/purge-archives` | Purge expired archives. |
 | `GET` | `/api/maintenance/orphaned-index-rows` | List search index rows whose parent records are gone (`?projectId=`). |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned search index rows (`{ projectId }`). |
+
+**`GET /api/maintenance/gate-store?projectId=<id>`** returns a worker-backed, body-free inventory of the project's partitioned gate store. The response includes migration/externalization metadata, category totals, retention cutoffs, persistence/compaction/reclaim metrics, a bounded largest-record list, and scan freshness. Concurrent scans coalesce. A failed scan returns a bounded stale result when available; otherwise it returns retryable `503` rather than traversing on the gateway thread. See [Gate store persistence](gate-store-persistence.md#maintenance-and-metrics).
 
 **`GET /api/maintenance/worktrees`** returns the canonical inventory used by the unified Worktree Cleanup card. The inventory reconciles live runtime sessions, persisted live and archived sessions, goals, teams, delegates/child sessions, staff records, in-memory pool entries, git worktree metadata, and directories under each visible project's resolved worktree root.
 
