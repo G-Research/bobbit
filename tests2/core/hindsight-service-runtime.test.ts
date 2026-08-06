@@ -25,6 +25,10 @@ const root = path.resolve(
   "../..",
 );
 const endpoint = "http://127.0.0.1:49152";
+const authoritativeScopeContext = {
+  project: { id: "runtime-project" },
+  goal: { id: "runtime-goal" },
+};
 
 function store() {
   const values = new Map<string, unknown>();
@@ -88,6 +92,7 @@ describe("Hindsight generic runtime linkage", () => {
           runtime: variant.runtime,
           prompt: "does every adapter use this endpoint?",
           host: { store: store() },
+          scopeContext: authoritativeScopeContext,
         } as never);
         assert.equal(result.blocks[0]?.content, "- same endpoint contract");
       }
@@ -146,6 +151,7 @@ describe("Hindsight generic runtime linkage", () => {
             runtime,
             prompt: "do not start a service",
             host: { store: store() },
+            scopeContext: authoritativeScopeContext,
           } as never),
           { blocks: [] },
         );
@@ -165,7 +171,7 @@ describe("Hindsight generic runtime linkage", () => {
         runtimeMode: "compose",
         bank: "bobbit",
         namespace: "default",
-        recallScope: "all",
+        recallScope: "project",
         autoRecall: true,
         autoRetain: true,
         queueDepth: 0,

@@ -235,7 +235,7 @@ test("recall is fixed to authoritative project and goal scope; flat fields canno
 		assert.deepEqual(o.tags, { project: "proj-42", goal: "goal-42" });
 		assert.equal(o.tagsMatch, "all_strict");
 
-		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: makeStore() }, projectId: "forged-project", prompt: "must not recall" });
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: makeStore() }, prompt: "must not recall" });
 		assert.equal(calls.recall.length, 1, "missing authoritative scope must not issue a remote recall");
 	} finally {
 		__setClientFactory(null);
@@ -251,9 +251,9 @@ test("afterTurn retains a compact summary with the full auto-tag taxonomy", asyn
 			config: { ...ACTIVE },
 			host: { store }, scopeContext: scope(),
 			sessionId: "sess-1",
-			projectId: "proj-1",
-			goalId: "goal-1",
-			roleName: "coder",
+			projectId: "forged-project",
+			goalId: "forged-goal",
+			roleName: "forged-role",
 			prompt: "hello",
 			response: "hi there",
 		};
@@ -282,7 +282,7 @@ test("beforeCompact retains synchronously with kind:compaction", async () => {
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const c = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", goalId: "g", summary: "lost span text" };
+		const c = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", summary: "lost span text" };
 		await provider.beforeCompact(c);
 		assert.equal(calls.retain.length, 1);
 		assert.equal(calls.retain[0].content, "lost span text");
@@ -298,7 +298,7 @@ test("UH-2: remote retain and queue persistence failure rejects with a sanitized
 	const storeCanary = "queue-store-secret-canary";
 	const store = makeStore();
 	const durableMutate = store.mutate!;
-	store.mutate = async <T>(key: string, value: T, options) => {
+	store.mutate = async <T>(key: string, value: T, options?: { expectedVersion?: number | null }) => {
 		if (key === QUEUE_KEY) throw new Error(storeCanary);
 		return durableMutate(key, value, options);
 	};
@@ -524,7 +524,7 @@ test("retry queue: shutdown drain keeps all durable entries when save fails", as
 			if (key === QUEUE_KEY) throw new Error("queue-save-failed");
 			await durablePut(key, value);
 		};
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store } });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
 		assert.deepEqual(await store.get(QUEUE_KEY), entries);
 		assert.deepEqual(calls.retain.map((call) => call.content), ["first", "second"]);
 	} finally {
@@ -609,7 +609,7 @@ test("routes recall uses authoritative scope and fails closed without it", async
 		assert.deepEqual(o1.tags, { project: "proj-7", goal: "goal-7" });
 		assert.equal(o1.tagsMatch, "all_strict");
 
-		const missing = await routes.recall({ host: { store }, projectId: "forged-project" } as never, { body: { query: "q2" } } as never);
+		const missing = await routes.recall({ host: { store } } as never, { body: { query: "q2" } } as never);
 		assert.deepEqual(missing, { configured: true, memories: [] });
 		assert.equal(calls.recall.length, 1, "missing scope must not call the remote provider");
 	} finally {
