@@ -295,8 +295,8 @@ bypass the UI. The server clamps at every entry point:
 | WS `set_model` | `src/server/ws/runtime-model-selection.ts` | The optional requested thinking level, or the previous effective level for an older frame, against the exact selected catalog model before either value becomes durable. |
 | WS `set_thinking_level` | `src/server/ws/handler.ts` | The level the client sent, against the session's currently-bound model. |
 | REST role create/update | `clampRoleThinking` in `src/server/server.ts` | The role's `thinkingLevel` field, against the role's `model` if set (or returned as-is if the role inherits, since the per-session clamp will run at spawn). |
-| REST project/system prefs PUT | `/api/preferences` | Stored as-is (no write-time clamp): the defaults apply to many models and the resolved model may not be known yet. Clamping happens at use-time — see `resolveInitialThinkingLevel` / `tryApplyDefaultThinkingLevel` for sessions and `clampReviewThinking` for verification reviewers. |
-| Session start | `resolveInitialThinkingLevel` + `tryApplyDefaultThinkingLevel` in `src/server/agent/session-manager.ts` | The role-or-default level, against the model resolved for that session (role override → global default → aigw fallback). |
+| REST project/system prefs PUT | `/api/preferences` | Stored as-is (no write-time clamp): defaults can apply to many models and the resolved model is not yet known. `resolveInitialThinkingLevel` later resolves a configured role/default candidate and clamps it for setup. |
+| Session start | `resolveInitialThinkingLevel`, `resolveDynamicContext`, and `tryAutoSelectModel` | Setup first accepts explicit caller, role/default, or matching durable authority. Only when that authority is absent may the lifecycle decision path return an enabled, exactly granted selector candidate; that candidate is exact-model clamped. `tryAutoSelectModel` then verifies and persists the complete tuple. No path synthesizes an optional level when there is no candidate. |
 | Verification harness | `clampReviewThinking` in `src/server/agent/verification-harness.ts` | Reviewer/QA/sub-session levels at six call sites, against the resolved reviewer or role model. |
 
 Both server helpers (`clampRoleThinking`, `clampReviewThinking`) parse the
@@ -325,29 +325,39 @@ This is purely a server-side concern — the UI also calls `inferMeta` via the
 shared module path, but the bug surfaces as "thinking level mysteriously
 resets to off for aigw users on gpt-5.2" if the rule order regresses.
 
-## Optional first-party fallback selector
+## Optional first-party selector
 
-The optional `thinking-selector` built-in pack can recommend the former fallback
-level, `medium`. It is not a hidden default: the pack ships default-disabled,
-and it needs both normal Market activation and an exact project grant for its
-`default-thinking` hook's `decide` capability. If it is absent, disabled,
-shadowed, ungranted, or revoked, core does not synthesize `medium`, import a
-hook, or issue a thinking mutation merely because the pack is available.
+The optional `thinking-selector` built-in pack can propose `medium`, the level
+formerly chosen by a core fallback. It is not a hidden default: the pack ships
+default-disabled and requires both Market activation and an exact project grant
+for the `default-thinking` hook's `decide` capability. If it is absent,
+disabled, shadowed, ungranted, or revoked, Bobbit neither imports the hook nor
+synthesizes a thinking selection.
 
-When both opt-ins are present, the pure hook proposes `medium` during session
-setup and after a turn. The existing decision dispatcher admits and reduces
-that proposal; at setup its result is available before the agent is spawned,
-and after a turn the advisory path remains detached. In neither case does the
-pack control the final level. Core clamps the proposal against the exact model,
-and live application uses the normal serialized Pi mutation, read-back,
-durable-tuple persistence, and authoritative state broadcast path.
+Setup has a deliberately narrow boundary. `resolveInitialThinkingLevel` first
+supplies only configured role/default authority; explicit caller-provided
+startup choices and a matching verified durable tuple are authority as well.
+`resolveDynamicContext` may consume the decision dispatcher's reduced thinking
+candidate only when that explicit authority is absent. The dispatcher admits a
+candidate only from an enabled hook with its exact grant. Every candidate is
+clamped against the exact selected model before it enters spawn or live tuple
+handling. When neither core authority nor an admitted candidate exists, Bobbit
+leaves the optional selection unset rather than manufacturing `medium` or any
+other fallback.
+
+With both opt-ins, the pure hook can make a proposal during session setup and
+after a turn. The dispatcher admits and reduces that proposal; setup awaits its
+reduced result before spawn, while after-turn work remains detached. The pack
+never controls the final level: `tryAutoSelectModel` and the live advisory path
+verify the complete provider/model/thinking tuple with Pi, persist only the
+verified tuple, and broadcast authoritative state.
 
 This boundary preserves operator authority. Authenticated user selections,
 caller-provided startup choices, role or global defaults, and a matching
 verified tuple on recovery are explicit choices, not extension advice. They
-suppress the selector; the core rechecks that fence and the exact grant
-immediately before a live mutation, so a late proposal cannot override a user
-or operator change. The selector never writes `HumanSelectionPins`.
+suppress the selector; core rechecks that fence and the exact grant immediately
+before a live mutation, so a late proposal cannot override a user or operator
+change. The selector never writes `HumanSelectionPins`.
 
 The clamp stays in core because a pack can only nominate a host-known token;
 it cannot determine a model's supported levels safely. The live model may have
@@ -471,8 +481,8 @@ in the wiring between the shared module and the UI / server boundary.
   — how roles can pin model + level overrides, and how the cascade resolves
   them.
 - [Spawn-time model pinning](internals.md#spawn-time-model-pinning) — how
-  `resolveInitialThinkingLevel` injects the level into the agent CLI args at
-  spawn so there's no boot-time race.
+  setup passes a selected, clamped level into the agent CLI args so there is no
+  boot-time race.
 - [Pi runtime compatibility](pi-runtime-compatibility.md) — current Pi `0.82.1`
   package, Opus 5 catalog, exact tuple, spawn, audit, and verification status.
 - [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — historical
