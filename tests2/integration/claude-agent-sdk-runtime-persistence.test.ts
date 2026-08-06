@@ -34,7 +34,6 @@ function persistedSdkSession(id: string, opaqueId = SDK_SESSION_ID): PersistedSe
 		agentSessionFile: "/workspace/project/transcript.jsonl",
 		createdAt: now,
 		lastActivity: now,
-		runtime: "claude-agent-sdk",
 		claudeAgentSdkSessionId: opaqueId,
 		modelProvider: "claude-agent-sdk",
 		modelId: "sonnet-test",
@@ -63,7 +62,7 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 	it("round-trips SDK runtime, opaque resume id, and verified model tuple through SessionStore", async () => {
 		const stateDir = path.join(root(), "state");
 		const store = new SessionStore(stateDir);
-		store.put(persistedSdkSession("sdk-session"));
+		store.put({ ...persistedSdkSession("sdk-session"), runtime: "claude-agent-sdk" });
 		await store.flushAsync();
 
 		const reloaded = new SessionStore(stateDir);
@@ -77,8 +76,9 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		});
 	});
 
-	it("reads archived SDK history through the injected official API without touching Pi JSONL", async () => {
+	it("reads archived SDK history derived from the provider tuple without touching Pi JSONL", async () => {
 		const session = { ...persistedSdkSession("sdk-archived"), archived: true, agentSessionFile: "/must-not-read.jsonl" };
+		expect(session.runtime).toBeUndefined();
 		const calls: Array<[string, string, unknown]> = [];
 		const manager: any = Object.create(SessionManager.prototype);
 		manager.sessions = new Map();

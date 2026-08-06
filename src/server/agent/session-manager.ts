@@ -11178,7 +11178,7 @@ export class SessionManager {
 	async getArchivedMessages(id: string): Promise<unknown[]> {
 		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived) return [];
-		if (ps.runtime === "claude-agent-sdk") {
+		if (runtimeForPersistedSession(ps) === "claude-agent-sdk") {
 			if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return [];
 			try {
 				const messages = await readSdkSessionMessages({
