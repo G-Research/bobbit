@@ -280,9 +280,9 @@ This commit intentionally has no live consumer and invokes no hook itself. Its c
 
 ## Delivery and compatibility
 
-Commit separately, in this order:
+Delivered separately, in this order:
 
-1. `feat: expose authoritative after-turn usage snapshot` — public interface: `TurnUsageSnapshot` and optional `HookCtx.usage`.
-2. `feat: add grant-gated budget enforcement reducer` — public interface: `BudgetEnforcementProposal`, `BudgetEnforcementRequest`, `BudgetEnforcementResult`, and `resolveBudgetEnforcement()`.
+1. `feat: expose authoritative after-turn usage snapshot` — public interface: `TurnUsageSnapshot` and optional `HookCtx.usage`; goal-branch commit `50402da048756e05f2da119782f9b3b293a71486`.
+2. `feat: add grant-gated budget enforcement reducer` — public interface: `BudgetEnforcementProposal`, `BudgetEnforcementRequest`, `BudgetEnforcementResult`, and `resolveBudgetEnforcement()`; goal-branch commit `eacd5b7b9b644415ba7e15ab6639a33a6d3e5c2b`.
 
-Each commit must compile and pass its listed tests on its own; commit 2 must not require commit 1. The parent integration record should list both resulting SHAs for cherry-pick. Neither commit opens a PR to `main`.
+Each commit compiles and passes its listed tests independently; commit 2 does not require commit 1. The recorded SHAs support clean cross-parent cherry-picks in this order. Neither commit opens a PR to `main`.
