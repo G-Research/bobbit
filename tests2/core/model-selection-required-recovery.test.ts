@@ -90,6 +90,17 @@ function messageRows(snapshot: { data?: unknown }): any[] {
 	return Array.isArray(data?.messages) ? data.messages : [];
 }
 
+function readFixtureUtf8(file: string): string {
+	const fd = fs.openSync(file, "r");
+	try {
+		const bytes = Buffer.alloc(fs.fstatSync(fd).size);
+		fs.readSync(fd, bytes, 0, bytes.length, 0);
+		return bytes.toString("utf8");
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
 function textOf(message: any): string {
 	if (typeof message?.content === "string") return message.content;
 	if (!Array.isArray(message?.content)) return "";
@@ -97,6 +108,38 @@ function textOf(message: any): string {
 		.filter((block: any) => block?.type === "text" && typeof block.text === "string")
 		.map((block: any) => block.text)
 		.join("\n");
+}
+
+function replacementBridge(options: Record<string, any>, overrides: Record<string, any> = {}): any {
+	const model = String(options.initialModel);
+	const slash = model.indexOf("/");
+	let provider = model.slice(0, slash);
+	let modelId = model.slice(slash + 1);
+	let thinkingLevel = options.initialThinkingLevel ?? "medium";
+	return {
+		running: true,
+		start: vi.fn(async () => {}),
+		stop: vi.fn(async () => {}),
+		onEvent: vi.fn(() => () => {}),
+		sendCommand: vi.fn(async () => ({ success: true })),
+		getMessages: vi.fn(async () => ({ success: true, data: { messages: [] } })),
+		getState: vi.fn(async () => ({
+			success: true,
+			data: { model: { provider, id: modelId }, thinkingLevel },
+		})),
+		setModel: vi.fn(async (nextProvider: string, nextModelId: string) => {
+			provider = nextProvider;
+			modelId = nextModelId;
+			return { success: true };
+		}),
+		setThinkingLevel: vi.fn(async (next: string) => {
+			thinkingLevel = next;
+			return { success: true };
+		}),
+		prompt: vi.fn(async () => ({ success: true })),
+		promptWhenReady: vi.fn(async () => ({ success: true })),
+		...overrides,
+	};
 }
 
 const managers: any[] = [];
@@ -172,6 +215,10 @@ describe("retired persisted model cold recovery", () => {
 
 		const manager: any = new SessionManager({ preferencesStore: preferences, stateDir });
 		manager._testStore = store;
+		// Keep the fixture at the model lifecycle boundary; gateway credential wiring
+		// is independently covered and would add a repository-read audit dependency.
+		manager.applyScopedGatewayCredentials = vi.fn();
+		manager.applyDirectProviderEnv = vi.fn(async () => {});
 		managers.push(manager);
 		const restoreSession = vi.spyOn(manager, "restoreSession");
 		vi.spyOn(console, "error").mockImplementation(() => {});
@@ -192,7 +239,7 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(recovered?.dormant, true, "the recoverable capsule must remain processless");
 		assert.equal(restoreSession.mock.calls.length, 0, "authoritative omission must be classified before ordinary restore machinery");
 		assert.equal(piStartCount, 0, "cold recovery must not spawn Pi or a fallback model");
-		assert.equal(fs.readFileSync(transcriptFile, "utf-8"), transcriptBytes, "cold recovery must preserve transcript bytes exactly");
+		assert.equal(readFixtureUtf8(transcriptFile), transcriptBytes, "cold recovery must preserve transcript bytes exactly");
 		assert.equal(store.updates.length, 0, "cold recovery must not rewrite persisted session metadata");
 		assert.equal(
 			JSON.stringify({
@@ -224,5 +271,67 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(manager.getSession(SESSION_ID), recovered, "attachment must retain the same recoverable capsule");
 		assert.equal(recovered.clients.has(firstClient), true, "the first client must attach to the recoverable capsule");
 		assert.equal(recovered.clients.has(secondClient), true, "the second client must attach to the recoverable capsule");
+
+		const queueBeforeRejectedPrompt = recovered.promptQueue.toArray();
+		const writesBeforeRejectedPrompt = store.updates.length;
+		await assert.rejects(
+			manager.enqueuePrompt(SESSION_ID, "must not be accepted"),
+			(error: any) => error?.code === "MODEL_SELECTION_REQUIRED" && /Choose a replacement model/.test(error.message),
+			"prompt admission must fail with an actionable stable condition",
+		);
+		assert.deepEqual(recovered.promptQueue.toArray(), queueBeforeRejectedPrompt, "rejection must precede queue acceptance");
+		assert.equal(store.updates.length, writesBeforeRejectedPrompt, "rejection must precede persistence");
+
+		const replacement = catalog.find((model: any) =>
+			model.provider === "anthropic" && model.sessionSelectable !== false,
+		);
+		assert.ok(replacement, "fixture requires a current session-selectable replacement");
+
+		let failedOptions: Record<string, any> | undefined;
+		let failedBridge: any;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			failedOptions = { ...options };
+			failedBridge = replacementBridge(options, {
+				start: vi.fn(async () => { throw new Error("Bearer sk-fixture-secret activation failed"); }),
+			});
+			return failedBridge;
+		});
+		await assert.rejects(
+			manager.recoverModelSelectionRequired(SESSION_ID, replacement.provider, replacement.id, "high"),
+			(error: any) => error?.code === "MODEL_RECOVERY_FAILED"
+				&& /Choose another available model or retry/.test(error.message)
+				&& !error.message.includes("sk-fixture-secret"),
+			"failed activation must be sanitized and actionable",
+		);
+		assert.equal(failedOptions?.initialModel, `${replacement.provider}/${replacement.id}`, "failure must attempt only the selected exact tuple");
+		assert.equal(failedBridge.stop.mock.calls.length, 1, "failed activation must stop its candidate");
+		assert.equal(manager.getSession(SESSION_ID), recovered, "failed activation must retain the original capsule");
+		assert.deepEqual(recovered.condition, EXPECTED_CONDITION, "failed activation must retain recovery state");
+		assert.equal(store.get(SESSION_ID)?.modelProvider, RETIRED_PROVIDER, "failed activation must retain durable provider");
+		assert.equal(store.get(SESSION_ID)?.modelId, RETIRED_MODEL_ID, "failed activation must retain durable model");
+		assert.equal(recovered.clients.has(firstClient), true, "failed activation must retain attached clients");
+
+		let successfulOptions: Record<string, any> | undefined;
+		let successfulBridge: any;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			successfulOptions = { ...options };
+			successfulBridge = replacementBridge(options);
+			return successfulBridge;
+		});
+		const activated = await manager.recoverModelSelectionRequired(
+			SESSION_ID,
+			replacement.provider,
+			replacement.id,
+			"high",
+		);
+		assert.equal(successfulOptions?.initialModel, `${replacement.provider}/${replacement.id}`, "recovery must spawn pinned to the selected exact tuple");
+		assert.equal(activated.provider, replacement.provider);
+		assert.equal(activated.modelId, replacement.id);
+		assert.equal(manager.getSession(SESSION_ID)?.condition, undefined, "verified activation clears the condition");
+		assert.equal(manager.getSession(SESSION_ID)?.clients.has(firstClient), true, "verified activation transfers clients");
+		assert.equal(store.get(SESSION_ID)?.modelProvider, replacement.provider, "only verified activation publishes provider");
+		assert.equal(store.get(SESSION_ID)?.modelId, replacement.id, "only verified activation publishes model");
+		assert.equal(store.get(SESSION_ID)?.effectiveThinkingLevel, activated.thinkingLevel, "published thinking is the verified clamp");
+		assert.ok(successfulBridge.getState.mock.calls.length >= 2, "activation must verify runtime read-back before publishing");
 	});
 });
