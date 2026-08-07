@@ -431,6 +431,10 @@ export class ServiceRuntimeSupervisor {
 				return recordContext(identity, prior!);
 			}
 			this.cancelHealthMonitor(identity);
+			// Settings resolution and ready-resource inspection are asynchronous. The
+			// live grant is therefore read again at the application boundary, directly
+			// before the first durable desired-state mutation.
+			await this.authorize(request, "start");
 			// Keep a prior ownership identity durable until its resource has actually
 			// been removed. A replacement must never launch over an unremoved stale
 			// resource, even though desired-running was committed first.
@@ -446,13 +450,22 @@ export class ServiceRuntimeSupervisor {
 			try {
 				if (prior?.runnerIdentity) {
 					const staleRunner = selectServiceRunner(this.options.runners, prior.runnerIdentity.kind);
-					try { await staleRunner.remove(await this.controlInput(identity, contribution, prior.runnerIdentity)); }
+					const staleInput = await this.controlInput(identity, contribution, prior.runnerIdentity);
+					await this.authorize(request, "start");
+					try { await staleRunner.remove(staleInput); }
 					catch (error) { return this.failStart(identity, desired, contribution, request, error, undefined, false); }
 					desired = this.nextRecord(desired, { runnerIdentity: undefined });
 					await this.options.store.replace(identity, desired);
 				}
+				// Secret generation/resolution and environment persistence are mutations.
+				// Do not enter that materialization boundary on a revoked live grant.
+				await this.authorize(request, "start");
 				materialized = await this.materialize(identity, request, contribution, settings);
 				runner = selectServiceRunner(this.options.runners, settings.mode);
+				// Materialization awaits secret/storage-owner work, so fence the actual
+				// launch separately. Ownership persistence below deliberately has no
+				// intervening authorization await: a started resource is always recorded.
+				await this.authorize(request, "start");
 				started = await runner.start({
 					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile),
 					serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,

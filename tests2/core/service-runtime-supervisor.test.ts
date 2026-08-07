@@ -66,6 +66,7 @@ class FakeStore {
 	readonly environmentCalls: Array<Record<string, string>> = [];
 	readonly logCalls: Array<{ output: string; redactions: readonly string[] }> = [];
 	readonly generated = new Map<string, string>();
+	generatedSecretCalls = 0;
 	failReplace = false;
 	failLoad = false;
 
@@ -91,6 +92,7 @@ class FakeStore {
 		this.environmentCalls.push(structuredClone(environment));
 	}
 	async getOrCreateGeneratedSecret(_value: ServiceRuntimeIdentity, name: string): Promise<string> {
+		this.generatedSecretCalls += 1;
 		const existing = this.generated.get(name);
 		if (existing) return existing;
 		const created = `generated-${name}`;
@@ -121,12 +123,13 @@ function supervisor(input: {
 	clock?: ServiceRuntimeClock;
 	probe?: ReturnType<typeof vi.fn>;
 	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined>; storageIdentity?: string; storageContinuity?: "verified" | "unsupported"; resolvedSecrets?: Readonly<Record<string, string | undefined>> };
+	resolve?: ReturnType<typeof vi.fn>;
 	authorize?: ReturnType<typeof vi.fn>;
 	resolveSecret?: ReturnType<typeof vi.fn>;
 } = {}) {
 	const store = input.store ?? new FakeStore();
 	const authorize = input.authorize ?? vi.fn(async () => true);
-	const resolve = vi.fn(async () => input.settings ?? { mode: "local" as const, revision: "revision-1", values: { configValue: "configured" } });
+	const resolve = input.resolve ?? vi.fn(async () => input.settings ?? { mode: "local" as const, revision: "revision-1", values: { configValue: "configured" } });
 	const resolveSecret = input.resolveSecret ?? vi.fn(async () => "user-secret");
 	const runners = input.runners ?? [runner("local"), runner("docker"), runner("compose")];
 	const instance = new ServiceRuntimeSupervisor({
@@ -289,13 +292,13 @@ describe("ServiceRuntimeSupervisor", () => {
 			await launched;
 			return { endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] };
 		} });
-		const authorize = vi.fn(async () => authorize.mock.calls.length !== 3);
+		const authorize = vi.fn(async () => authorize.mock.calls.length !== 6);
 		const { instance } = supervisor({ authorize, runners: [local], probe: vi.fn(async () => true) });
 
 		const permitted = instance.start({ ...identity, mode: "local" });
 		await flush();
 		await expect(instance.start({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
-		assert.equal(authorize.mock.calls.length, 3);
+		assert.equal(authorize.mock.calls.length, 6);
 		release();
 		await expect(permitted).resolves.toMatchObject({ state: "ready", endpoint });
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
@@ -322,6 +325,62 @@ describe("ServiceRuntimeSupervisor", () => {
 
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
 		assert.equal(authorize.mock.calls.length, 3);
+	});
+
+	it("fails closed after deferred settings revoke without applying any start side effects", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ runnerIdentity: { kind: "local", id: "stale-resource" } }));
+		let releaseSettings!: () => void;
+		let settingsResolving!: () => void;
+		const settingsReady = new Promise<void>((resolve) => { releaseSettings = resolve; });
+		const settingsResolvingPromise = new Promise<void>((resolve) => { settingsResolving = resolve; });
+		const resolve = vi.fn(async () => {
+			settingsResolving();
+			await settingsReady;
+			return { mode: "local" as const, revision: "revision-2", values: { configValue: "configured" } };
+		});
+		let allowed = true;
+		const authorize = vi.fn(async () => allowed);
+		const local = runner("local");
+		const { instance } = supervisor({ store, resolve, authorize, runners: [local] });
+
+		const start = instance.start({ ...identity, mode: "local" });
+		await settingsResolvingPromise;
+		allowed = false;
+		releaseSettings();
+
+		await expect(start).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		assert.equal(store.replaceCalls.length, 0, "revocation before desired persistence leaves the record untouched");
+		assert.equal(store.environmentCalls.length, 0);
+		assert.equal(store.generatedSecretCalls, 0);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(authorize.mock.calls.length, 3, "the application grant fence runs after settings resolve");
+	});
+
+	it("continues a start when the grant remains live through deferred settings", async () => {
+		let releaseSettings!: () => void;
+		let settingsResolving!: () => void;
+		const settingsReady = new Promise<void>((resolve) => { releaseSettings = resolve; });
+		const settingsResolvingPromise = new Promise<void>((resolve) => { settingsResolving = resolve; });
+		const resolve = vi.fn(async () => {
+			settingsResolving();
+			await settingsReady;
+			return { mode: "local" as const, revision: "revision-2", values: { configValue: "configured" } };
+		});
+		const authorize = vi.fn(async () => true);
+		const local = runner("local");
+		const { instance, store } = supervisor({ resolve, authorize, runners: [local] });
+
+		const start = instance.start({ ...identity, mode: "local" });
+		await settingsResolvingPromise;
+		releaseSettings();
+
+		await expect(start).resolves.toMatchObject({ state: "ready", endpoint });
+		assert.equal(authorize.mock.calls.length, 5, "each start application boundary reads the current grant");
+		assert.equal(store.environmentCalls.length, 1);
+		assert.equal(store.generatedSecretCalls, 1);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 	});
 
 	it("bounds readiness retries, tears down the failed launch, and never leaks an endpoint outside ready", async () => {
@@ -376,8 +435,8 @@ describe("ServiceRuntimeSupervisor", () => {
 		await flush();
 
 		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 1, "revocation prevents the queued restart launch");
-		assert.equal(authorize.mock.calls.length, 3);
-		assert.deepEqual(authorize.mock.calls[2]?.[0], { ...identity, action: "start" });
+		assert.equal(authorize.mock.calls.length, 6);
+		assert.deepEqual(authorize.mock.calls[5]?.[0], { ...identity, action: "start" });
 		assert.deepEqual(store.replaceCalls.at(-1)?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.010Z" });
 	});
 
