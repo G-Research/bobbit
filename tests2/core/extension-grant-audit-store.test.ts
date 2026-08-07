@@ -4,6 +4,8 @@ import {
 	ExtensionGrantAuditStore,
 	ExtensionGrantAuditStoreError,
 	type ExtensionGrantAuditEntry,
+	type ExtensionHookGrantAuditEntry,
+	type ExtensionPackGrantAuditEntry,
 } from "../../src/server/agent/extension-grant-audit-store.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
@@ -11,13 +13,25 @@ const stateDir = path.resolve("/memfs/extension-grant-audit");
 const auditFile = path.join(stateDir, "extension-capability-audit.jsonl");
 const outboxFile = path.join(stateDir, "extension-capability-audit.outbox.json");
 
-function entry(number: number, overrides: Partial<ExtensionGrantAuditEntry> = {}): ExtensionGrantAuditEntry {
+function entry(number: number, overrides: Partial<ExtensionHookGrantAuditEntry> = {}): ExtensionHookGrantAuditEntry {
 	return {
 		at: `2025-02-03T04:05:0${number}.000Z`,
 		actor: "admin",
 		action: number % 2 ? "granted" : "revoked",
 		packId: "pack-a",
 		hookId: `hook-${number}`,
+		capability: "decide",
+		...overrides,
+	};
+}
+
+function packEntry(number: number, overrides: Partial<ExtensionPackGrantAuditEntry> = {}): ExtensionPackGrantAuditEntry {
+	return {
+		at: `2025-02-03T04:06:0${number}.000Z`,
+		actor: "admin",
+		action: number % 2 ? "granted" : "revoked",
+		packId: "pack-a",
+		principal: "pack",
 		capability: "decide",
 		...overrides,
 	};
@@ -34,6 +48,28 @@ describe("ExtensionGrantAuditStore", () => {
 		expect(store.list().map(row => row.hookId)).toEqual(["hook-1", "hook-2", "hook-3"]);
 		expect(store.list(2).map(row => row.hookId)).toEqual(["hook-2", "hook-3"]);
 		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain("secret-not-persisted");
+	});
+
+	it("preserves legacy hook rows while accepting only unmixed pack-principal rows", () => {
+		const fs = createMemFs();
+		const store = new ExtensionGrantAuditStore(stateDir, fs);
+		const legacy = entry(1);
+		const pack = packEntry(2, { capability: "store" });
+		store.append(legacy);
+		store.append({ ...pack, ignoredRequestDetail: "secret-not-persisted" } as ExtensionGrantAuditEntry);
+
+		const rows = store.list();
+		expect(rows).toEqual([legacy, pack]);
+		expect(rows[0]).not.toHaveProperty("principal");
+		expect(rows[1]).toMatchObject({ principal: "pack", packId: "pack-a", capability: "store" });
+		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain("secret-not-persisted");
+
+		fs.appendFileSync(auditFile, [
+			JSON.stringify({ ...entry(3), principal: "hook" }),
+			JSON.stringify({ ...packEntry(4), hookId: "must-not-mix" }),
+			JSON.stringify({ ...packEntry(5), principal: "unknown" }),
+		].join("\n") + "\n", "utf-8");
+		expect(store.list()).toEqual([legacy, pack]);
 	});
 
 	it("bounds audit reads and treats missing audit files as an empty history", () => {
@@ -109,6 +145,32 @@ describe("ExtensionGrantAuditStore", () => {
 		expect(restarted.recoverPending(ref)).toBe(true);
 		expect(restarted.list()).toEqual([revoked]);
 		expect(restarted.recoverPending(ref)).toBe(false);
+	});
+
+	it("recovers only the exact pending pack-principal ref", () => {
+		const fs = createMemFs();
+		const pending = packEntry(2, { action: "revoked", capability: "store" });
+		const store = new ExtensionGrantAuditStore(stateDir, fs);
+		const originalAppend = fs.appendFileSync.bind(fs);
+		let failOnce = true;
+		fs.appendFileSync = ((file, data, options) => {
+			if (failOnce && String(file) === auditFile) {
+				failOnce = false;
+				throw new Error("AUDIT_PACK_WRITE_SECRET=must-not-leak");
+			}
+			return originalAppend(file, data, options as any);
+		}) as typeof fs.appendFileSync;
+		try {
+			expect(() => store.appendOrQueue(pending)).toThrow(ExtensionGrantAuditStoreError);
+		} finally {
+			fs.appendFileSync = originalAppend;
+		}
+
+		// A hook named "pack" must not drain a pack-principal event.
+		expect(store.recoverPending({ action: "revoked", packId: pending.packId, hookId: "pack", capability: pending.capability })).toBe(false);
+		expect(store.recoverPending({ action: "revoked", packId: pending.packId, principal: "pack", capability: pending.capability })).toBe(true);
+		expect(store.list()).toEqual([pending]);
+		expect(store.recoverPending({ action: "revoked", packId: pending.packId, principal: "pack", capability: pending.capability })).toBe(false);
 	});
 
 	it("rejects malformed append data and redacts filesystem error details", () => {
