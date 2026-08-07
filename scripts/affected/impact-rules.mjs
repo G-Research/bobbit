@@ -786,6 +786,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/hindsight-experience-api.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "PACK_SOURCE", "copies the reviewed installed Hindsight pack into an isolated marketplace fixture"),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
@@ -1810,6 +1816,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary project configuration output",
 		reads: frozen([
 			{ expression: "path.join(tmpDir, \"project.yaml\")", count: 3 },
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-settings-store.test.ts",
+		allowReason: "test-owned temporary project configuration output",
+		reads: frozen([
+			{ expression: "path.join(configDir, \"project.yaml\")", count: 2 },
 		]),
 	},
 	{
