@@ -3016,7 +3016,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return packs;
 	};
-	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
+	const extensionSettingsRuntimeLookup: ExtensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
 		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
 		if (!context) return { state: "absent" as const };
 		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
@@ -4049,7 +4049,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes, hindsightRuntimeBridge);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionSettingsRuntimeLookup, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes, hindsightRuntimeBridge);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5329,6 +5329,16 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
+type ExtensionSettingsRuntimeLookup = (
+	projectId: string | undefined,
+	packId: string,
+	kind: "pack" | "provider" | "hook",
+	id?: string,
+) =>
+	| { state: "absent" }
+	| { state: "present"; enabled: boolean; values: Record<string, unknown> }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -5368,6 +5378,7 @@ async function handleApiRoute(
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
+	extensionSettingsRuntimeLookup?: ExtensionSettingsRuntimeLookup,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
 	commandRunner: CommandRunner = realCommandRunner,
@@ -5391,6 +5402,7 @@ async function handleApiRoute(
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
 	const settingsCatalogue = extensionSettingsCatalogue!;
+	const settingsRuntimeLookup = extensionSettingsRuntimeLookup!;
 	type SettingsField = ExtensionSettingDefinition;
 	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
 	const isSettingsIdentifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
@@ -10645,7 +10657,7 @@ async function handleApiRoute(
 				}
 				const projectId = authenticatedRouteSession?.projectId;
 				if (projectId) {
-					const providerSettings = extensionSettingsRuntimeLookup(projectId, "hindsight", "provider", "memory");
+					const providerSettings = settingsRuntimeLookup(projectId, "hindsight", "provider", "memory");
 					if (providerSettings.state === "error") throw new Error("HINDSIGHT_CONFIG_UNAVAILABLE");
 					if (providerSettings.state === "present" && providerSettings.enabled) routeProviderConfig = { ...providerSettings.values };
 				}
