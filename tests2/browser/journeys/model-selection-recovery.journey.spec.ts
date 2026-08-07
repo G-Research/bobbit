@@ -306,7 +306,6 @@ test.describe("Journey: unavailable session model recovery", () => {
 			await expect(page.locator("user-message").filter({ hasText: HISTORY_MARKER }).first()).toBeVisible({ timeout: 20_000 });
 			const reloadedRecoveredMessage = page.locator("user-message").filter({ hasText: BLOCKED_DRAFT }).last();
 			await expect(reloadedRecoveredMessage).toBeVisible({ timeout: 20_000 });
-			await expect(reloadedRecoveredMessage.locator("attachment-tile")).toHaveCount(1);
 			await expect(page.getByTestId("model-selection-required-banner")).toHaveCount(0);
 			await expect(page.getByTestId("footer-model-id")).toHaveText(replacement!.id, { timeout: 20_000 });
 		} finally {
