@@ -45,14 +45,16 @@ function permissionContext(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Claude Agent SDK tool surface", () => {
-	it("pins the complete 0.3.222 native floor, retaining only Skill and reserving Agent", () => {
+	it("pins the complete 0.3.222 native floor, retaining only approved Skill and Agent while denying Task", () => {
 		expect(CLAUDE_NATIVE_TOOL_FLOOR).toEqual(NATIVE_FLOOR_0_3_222);
 		expect(new Set(CLAUDE_NATIVE_TOOL_FLOOR).size).toBe(30);
-		expect(CLAUDE_NATIVE_TOOL_POLICY.retained).toEqual(["Skill"]);
+		expect(CLAUDE_NATIVE_TOOL_POLICY.retained).toEqual(["Skill", "Agent"]);
 		expect(CLAUDE_NATIVE_TOOL_POLICY.suppressed).toEqual(SUPPRESSED_NATIVE_0_3_222);
 		expect(CLAUDE_NATIVE_TOOL_POLICY.reserved).toEqual(["Agent"]);
-		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).toEqual([...SUPPRESSED_NATIVE_0_3_222, "Agent"]);
+		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).toEqual(SUPPRESSED_NATIVE_0_3_222);
 		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Skill");
+		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Agent");
+		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).toContain("Task");
 		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).toContain("ToolSearch");
 	});
 
@@ -119,16 +121,18 @@ describe("Claude Agent SDK tool surface", () => {
 		expect((await hook({ tool_name: "mcp__bobbit__read", tool_use_id: "allow" })).hookSpecificOutput.permissionDecision).toBe("allow");
 	});
 
-	it("builds the sole strict isolated SDK query with no aliases, native presets, settings, or unmanaged MCP server", () => {
+	it("builds the sole strict isolated SDK query with root Agent admission, native Task denial, and no unmanaged settings", () => {
 		const surface = build({ entries: [entries[0]] });
 		const options = buildClaudeAgentSdkQueryOptions(surface, {
 			cwd: "/workspace/project",
 			env: { PATH: "/bin", CLAUDE_CONFIG_DIR: "/isolated/claude" },
 			abortController: new AbortController(),
 		} as any) as any;
-		expect(options.tools).toEqual(["Skill"]);
-		expect(options.disallowedTools).toEqual([...SUPPRESSED_NATIVE_0_3_222, "Agent"]);
-		expect(options.allowedTools).toEqual(["mcp__bobbit__read"]);
+		expect(options.tools).toEqual(["Skill", "Agent"]);
+		expect(options.disallowedTools).toEqual(SUPPRESSED_NATIVE_0_3_222);
+		expect(options.disallowedTools).toContain("Task");
+		expect(options.disallowedTools).not.toContain("Agent");
+		expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__read"]);
 		expect(options.agents).toEqual({});
 		expect(options.mcpServers).toEqual({ bobbit: surface.server });
 		expect(options.settingSources).toEqual([]);

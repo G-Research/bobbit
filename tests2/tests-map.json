@@ -2499,7 +2499,7 @@
     },
     {
       "path": "tests2/core/claude-agent-sdk-tool-surface.test.ts",
-      "reason": "Literal 0.3.222 native-policy, canonical-name, collision, permission-ceiling, allowlist distinction, and strict-isolation regression coverage for the in-process Bobbit MCP surface.",
+      "reason": "D1/D3/D4 literal 0.3.222 native-policy, Skill-and-Agent root inventory, Task denial, canonical-name, collision, permission-ceiling, allowlist distinction, and strict-isolation regression coverage for the in-process Bobbit MCP surface.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2549,6 +2549,15 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/claude-agent-sdk-skills-subagents.test.ts",
+      "reason": "D3/D4 literal inventory and fake-policy regression coverage for the reviewed bundled Claude skills, exact bounded Bobbit subagent projections, foreground admission, native Task denial, child registry/tool ceilings, audit redaction, and disposal without Bobbit orchestration ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],
