@@ -2505,6 +2505,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/integration/claude-agent-sdk-permission-card-journey.test.ts",
+      "reason": "Real SessionManager-to-Claude SDK permission-card journey covering canonical card metadata, duration ownership, cancellation, stale/mismatched grants, and PreToolUse defence in depth.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
