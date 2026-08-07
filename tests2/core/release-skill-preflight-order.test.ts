@@ -378,6 +378,7 @@ describe("push-triggered release workflow", () => {
 		assert.deepEqual(releaseJob("release").needs, ["verify", "tag"]);
 		const release = releaseStep("release", "Create release").run ?? "";
 		assert.match(release, /gh release create "\$TAG"/);
+		assert.match(release, /--repo "\$GITHUB_REPOSITORY"/);
 		assert.match(release, /--notes-file release-artifact\/release-notes\.md/);
 		assert.match(release, /--generate-notes/);
 		assert.match(release, /PRERELEASE=\(\)/);
