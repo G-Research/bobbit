@@ -1144,9 +1144,36 @@ async function initApp() {
 
 initApp();
 
-// Register the worker below the runtime mount so it cannot claim sibling apps.
+// Production registers the offline worker below the runtime mount. In dev,
+// unregister it instead: a worker controlling Vite intercepts and cache-writes
+// every source-module request, turning each full reload into a long grey boot.
 if ('serviceWorker' in navigator) {
-	navigator.serviceWorker.register(appUrl('/sw.js'), { scope: `${runtimeBasePath()}/` }).catch(() => {});
+	const scopePath = `${runtimeBasePath()}/`;
+	if ((globalThis as any).__BOBBIT_DEV__) {
+		const scopeUrl = new URL(scopePath, window.location.origin).href;
+		void navigator.serviceWorker.getRegistrations()
+			.then((registrations) => Promise.all(
+				registrations
+					.filter((registration) => registration.scope === scopeUrl)
+					.map((registration) => registration.unregister()),
+			))
+			.catch(() => {});
+
+		// Remove only this Bobbit mount's superseded worker caches. The current
+		// controller releases the page on the next navigation after unregister.
+		if ('caches' in window) {
+			const cachePrefix = `bobbit:${encodeURIComponent(runtimeBasePath() || "/")}:`;
+			void caches.keys()
+				.then((keys) => Promise.all(
+					keys
+						.filter((key) => key.startsWith(cachePrefix) || (!runtimeBasePath() && key.startsWith("bobbit-")))
+						.map((key) => caches.delete(key)),
+				))
+				.catch(() => {});
+		}
+	} else {
+		navigator.serviceWorker.register(appUrl('/sw.js'), { scope: scopePath }).catch(() => {});
+	}
 }
 
 // iOS PWA grey-screen recovery (frozen/killed standalone snapshot on relaunch).
