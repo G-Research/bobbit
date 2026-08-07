@@ -72,9 +72,10 @@ describe("ProjectConfigStore extension_grants", () => {
 		expect(new ProjectConfigStore(tmpDir).getExtensionGrants()).toEqual(expected);
 	});
 
-	it("keeps legacy hook rows discriminator-free through load and serialization", () => {
+	it("keeps legacy hook rows discriminator-free and strips unknown legacy keys through load and serialization", () => {
 		const legacy = hookGrant();
-		fs.writeFileSync(path.join(tmpDir, "project.yaml"), yaml.stringify({ extension_grants: [legacy] }), "utf-8");
+		const legacyWithExtraKey = { ...legacy, retiredMetadata: true };
+		fs.writeFileSync(path.join(tmpDir, "project.yaml"), yaml.stringify({ extension_grants: [legacyWithExtraKey] }), "utf-8");
 
 		const store = new ProjectConfigStore(tmpDir);
 		expect(store.getExtensionGrants()).toEqual([legacy]);
@@ -83,6 +84,7 @@ describe("ProjectConfigStore extension_grants", () => {
 		const onDisk = yaml.parse(fs.readFileSync(path.join(tmpDir, "project.yaml"), "utf-8")) as { extension_grants: Array<Record<string, unknown>> };
 		expect(onDisk.extension_grants).toEqual([legacy]);
 		expect(Object.hasOwn(onDisk.extension_grants[0], "principal")).toBe(false);
+		expect(Object.hasOwn(onDisk.extension_grants[0], "retiredMetadata")).toBe(false);
 	});
 
 	it("accepts exactly the six platform-owned pack capabilities and keeps them pack-scoped", () => {
