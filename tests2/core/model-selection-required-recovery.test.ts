@@ -90,6 +90,14 @@ function messageRows(snapshot: { data?: unknown }): any[] {
 	return Array.isArray(data?.messages) ? data.messages : [];
 }
 
+function explicitConditionClearFrames(client: any): any[] {
+	return client.send.mock.calls
+		.map(([payload]: [unknown]) => JSON.parse(String(payload)))
+		.filter((frame: any) => frame?.type === "state"
+			&& Object.prototype.hasOwnProperty.call(frame.data, "condition")
+			&& frame.data.condition === null);
+}
+
 function readFixtureUtf8(file: string): string {
 	const fd = fs.openSync(file, "r");
 	try {
@@ -310,9 +318,24 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(store.get(SESSION_ID)?.modelProvider, RETIRED_PROVIDER, "failed activation must retain durable provider");
 		assert.equal(store.get(SESSION_ID)?.modelId, RETIRED_MODEL_ID, "failed activation must retain durable model");
 		assert.equal(recovered.clients.has(firstClient), true, "failed activation must retain attached clients");
+		assert.equal(explicitConditionClearFrames(firstClient).length, 0, "failed activation must not publish a recovery-condition clear");
 
 		let successfulOptions: Record<string, any> | undefined;
 		let successfulBridge: any;
+		let durableTupleAtConditionClear: Record<string, unknown> | undefined;
+		firstClient.send.mockImplementation((payload: unknown) => {
+			const frame = JSON.parse(String(payload));
+			if (frame?.type === "state"
+				&& Object.prototype.hasOwnProperty.call(frame.data, "condition")
+				&& frame.data.condition === null) {
+				const durable = store.get(SESSION_ID);
+				durableTupleAtConditionClear = {
+					modelProvider: durable?.modelProvider,
+					modelId: durable?.modelId,
+					effectiveThinkingLevel: durable?.effectiveThinkingLevel,
+				};
+			}
+		});
 		registerRpcBridgeFactory((options: Record<string, any>) => {
 			successfulOptions = { ...options };
 			successfulBridge = replacementBridge(options);
@@ -332,6 +355,12 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(store.get(SESSION_ID)?.modelProvider, replacement.provider, "only verified activation publishes provider");
 		assert.equal(store.get(SESSION_ID)?.modelId, replacement.id, "only verified activation publishes model");
 		assert.equal(store.get(SESSION_ID)?.effectiveThinkingLevel, activated.thinkingLevel, "published thinking is the verified clamp");
+		assert.equal(explicitConditionClearFrames(firstClient).length, 1, "verified activation must publish one explicit condition clear");
+		assert.deepEqual(durableTupleAtConditionClear, {
+			modelProvider: replacement.provider,
+			modelId: replacement.id,
+			effectiveThinkingLevel: activated.thinkingLevel,
+		}, "the explicit condition clear must publish only after the verified tuple is durable");
 		assert.ok(successfulBridge.getState.mock.calls.length >= 2, "activation must verify runtime read-back before publishing");
 	});
 });
