@@ -6,7 +6,7 @@ __syncBeforeAll(() => __syncCE());
 // already imported it from src, no fixture DOM). No DOM/geometry involved; the
 // bridge import is present for tier uniformity per the migration guide.
 import { describe, expect, it } from "vitest";
-import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
+import { PromptQueue, type DurableQueuedMessage } from "../../src/server/agent/prompt-queue.js";
 
 describe("PromptQueue", () => {
 	it("enqueue basics: adds messages, toArray returns in order, length/isEmpty correct", () => {
@@ -219,6 +219,26 @@ describe("PromptQueue", () => {
 		q.reorderByIds([]);
 		expect(q.toArray().map(m => m.text)).toEqual(["A", "B", "C"]);
 		expect(q.length).toBe(3);
+	});
+
+	it("generic controls preserve a prompt-id-only ownership fence", () => {
+		const owned: DurableQueuedMessage = {
+			id: "owned",
+			text: "owned body",
+			isSteered: false,
+			createdAt: 1,
+			deliveryPromptId: "stable-prompt-id",
+		};
+		const q = new PromptQueue([owned]);
+		const laterA = q.enqueue("later A");
+		const laterB = q.enqueue("later B");
+
+		expect(q.removeUnowned("owned")).toBe(false);
+		expect(q.reorderUnownedByIds([laterB.id, laterA.id])).toBe(true);
+		expect(q.toArray().map((row) => row.id)).toEqual(["owned", laterB.id, laterA.id]);
+		expect(q.toArray()[0]).toMatchObject({ deliveryPromptId: "stable-prompt-id", text: "owned body" });
+		expect(q.reorderUnownedByIds([laterA.id, "missing"])).toBe(false);
+		expect(q.toArray().map((row) => row.id)).toEqual(["owned", laterB.id, laterA.id]);
 	});
 });
 

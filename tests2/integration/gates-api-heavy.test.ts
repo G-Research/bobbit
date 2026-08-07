@@ -29,6 +29,65 @@ async function deleteGoal(goalId: string): Promise<void> {
 }
 
 test.describe("Gates API (verification)", () => {
+	test("ordinary gate list and detail responses omit persisted verification cache bodies", async ({ gateway }) => {
+		const goalId = await createGoalWithWorkflow("test-fast");
+		try {
+			const gateStore = gateway.projectContextManager.getContextForGoal(goalId)?.gateStore;
+			expect(gateStore).toBeTruthy();
+			const marker = `INTERNAL_GATE_CACHE_BODY_${"z".repeat(128 * 1024)}`;
+			const timestamp = Date.now();
+			gateStore!.recordSignal({
+				id: `cache-source-${timestamp}`,
+				goalId,
+				gateId: "design-doc",
+				sessionId: "cache-response-boundary-test",
+				timestamp,
+				commitSha: "cache-response-boundary-commit",
+				verification: {
+					status: "passed",
+					steps: [{
+						name: "cached command",
+						type: "command",
+						passed: true,
+						output: marker,
+						duration_ms: 1,
+						status: "passed",
+					}],
+				},
+			});
+			gateStore!.updateGateStatus(goalId, "design-doc", "passed");
+			await gateStore!.flush();
+
+			const stored = gateStore!.getGate(goalId, "design-doc");
+			expect(stored?.verificationCache?.length).toBeGreaterThan(0);
+			const cachedSignals = gateStore!.getVerificationCacheSignals(goalId, "design-doc");
+			expect(cachedSignals).toHaveLength(1);
+			expect(cachedSignals[0]?.verification.steps[0]?.output).toBe(marker);
+
+			const listResponse = await apiFetch(`/api/goals/${goalId}/gates`);
+			expect(listResponse.status).toBe(200);
+			const listText = await listResponse.text();
+			expect(listText).not.toContain(marker);
+			const listed = JSON.parse(listText).gates.find((gate: any) => gate.gateId === "design-doc");
+			expect(listed).not.toHaveProperty("verificationCache");
+			expect(listed).toMatchObject({ status: "passed", signalCount: 1 });
+
+			const detailResponse = await apiFetch(`/api/goals/${goalId}/gates/design-doc`);
+			expect(detailResponse.status).toBe(200);
+			const detailText = await detailResponse.text();
+			expect(detailText).not.toContain(marker);
+			const detail = JSON.parse(detailText);
+			expect(detail).not.toHaveProperty("verificationCache");
+			expect(detail).toMatchObject({ status: "passed", gateId: "design-doc" });
+			expect(detail.signals).toHaveLength(1);
+
+			// Response projection must not mutate the internal cache used by reuse.
+			expect(gateStore!.getVerificationCacheSignals(goalId, "design-doc")[0]?.verification.steps[0]?.output).toBe(marker);
+		} finally {
+			await deleteGoal(goalId);
+		}
+	});
+
 	test("cascade reset — re-signaling upstream resets downstream", async () => {
 		const goalId = await createGoalWithWorkflow("test-fast");
 		const sessionId = await createSession({ goalId });

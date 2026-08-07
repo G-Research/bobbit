@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import fs from "node:fs";
@@ -155,9 +156,14 @@ export type RpcEventListener = (event: any) => void;
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
+	/** Present only after the exact versioned delivery extension handshakes. */
+	readonly promptDeliveryProtocol?: "v1";
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
+	promptWithId?(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
 	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
+	promptWhenReadyWithId?(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
 	steer(text: string): Promise<any>;
+	steerWithId?(text: string, promptId: string): Promise<any>;
 	abort(): Promise<any>;
 	getState(): Promise<any>;
 	getMessages(): Promise<any>;
@@ -192,6 +198,36 @@ export const ATTACHMENT_ONLY_TEXT = "Attachments:";
  */
 export const COLD_REPROMPT_READY_TIMEOUT_MS = 90_000;
 export const COLD_REPROMPT_PROMPT_TIMEOUT_MS = 120_000;
+
+const PROMPT_FRAME_PREFIX = "\u001eBOBBIT_PROMPT_V1:";
+const PROMPT_FRAME_SUFFIX = "\u001f";
+const PROMPT_DELIVERY_CAPABILITY_EVENT = "bobbit_prompt_delivery_capability";
+const PROMPT_DELIVERY_FAILURE_EVENT = "bobbit_prompt_delivery_failure";
+const PROMPT_DELIVERY_PROTOCOL_VERSION = 1;
+
+export class PromptDeliveryProtocolError extends Error {
+	readonly retryable = true;
+
+	constructor(readonly code: string, message: string) {
+		super(message);
+		this.name = "PromptDeliveryProtocolError";
+	}
+}
+
+/** Frame a stable delivery id for the agent-side input extension. The extension
+ * removes this transport envelope before Pi persists or sends the user text. */
+export function frameIdempotentPrompt(text: string, promptId?: string): string {
+	if (!promptId) return text;
+	const digest = createHash("sha256").update(text, "utf8").digest("hex");
+	const envelope = Buffer.from(JSON.stringify({ v: 1, id: promptId, digest }), "utf8").toString("base64url");
+	return `${PROMPT_FRAME_PREFIX}${envelope}${PROMPT_FRAME_SUFFIX}${text}`;
+}
+
+function builtinPromptDeliveryExtensionPath(): string {
+	const distPath = path.join(BUILTIN_TOOLS_DIR, "_prompt-delivery", "extension.ts");
+	if (fs.existsSync(distPath)) return distPath;
+	return path.resolve(__dirname, "..", "..", "..", "defaults", "tools", "_prompt-delivery", "extension.ts");
+}
 
 /**
  * Pure helper: decide the model-facing text for a prompt.
@@ -376,7 +412,13 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 export class RpcBridge {
 	private process: ChildProcess | null = null;
 	private requestId = 0;
-	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]> }>();
+	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]>; deliveryPromptId?: string }>();
+	/** Immutable capability decision for one child-process generation. */
+	private promptDeliveryMode: "pending" | "v1" | "legacy" | "failed" = "pending";
+	private promptDeliveryHandshakeError: PromptDeliveryProtocolError | undefined;
+	get promptDeliveryProtocol(): "v1" | undefined {
+		return this.promptDeliveryMode === "v1" ? "v1" : undefined;
+	}
 	private eventListeners: RpcEventListener[] = [];
 	/** Incomplete trailing JSONL fragment retained between stdout chunks. */
 	private lineBuffer = "";
@@ -411,6 +453,8 @@ export class RpcBridge {
 	}
 
 	async start(): Promise<void> {
+		this.promptDeliveryMode = "pending";
+		this.promptDeliveryHandshakeError = undefined;
 		// Docker uses the Pi runtime baked into the sandbox image. Only direct host
 		// spawns resolve Bobbit's installed package (or an explicit CLI override).
 		const cliPath = this.options.containerId
@@ -437,6 +481,11 @@ export class RpcBridge {
 		// don't go through tool activation (no role, fallback path), force-load
 		// shell/extension.ts (bash + bash_bg) and _builtins/extension.ts (file
 		// tools) so the agent has its baseline toolset.
+		// Delivery idempotency is a transport invariant, not a role tool. Load its
+		// input hook even when role activation disabled extension auto-discovery.
+		const deliveryExtPath = builtinPromptDeliveryExtensionPath();
+		if (!args.includes(deliveryExtPath)) args.push("--extension", deliveryExtPath);
+
 		if (!args.includes("--no-extensions")) {
 			const bashExtPath = this.options.toolManager
 				? this.options.toolManager.getExtensionPath("shell", "extension.ts")
@@ -492,7 +541,15 @@ export class RpcBridge {
 						}
 					}, startupDelay);
 				});
-				// Spawn succeeded and stabilized
+				// Production stable delivery fails startup closed unless the exact
+				// extension generation handshakes. Injected-spawn test seams explicitly
+				// latch legacy for this generation and cannot flip on a late event.
+				if (this.startDeps.spawnDirect) {
+					this.promptDeliveryMode = "legacy";
+				} else {
+					const handshakeTimeoutMs = this.options.containerId ? 30_000 : 5_000;
+					await this._waitForPromptDeliveryHandshake(handshakeTimeoutMs);
+				}
 				return;
 			} catch (err: any) {
 				// Clean up the failed process
@@ -517,6 +574,20 @@ export class RpcBridge {
 				throw err;
 			}
 		}
+	}
+
+	private async _waitForPromptDeliveryHandshake(timeoutMs: number): Promise<void> {
+		const deadline = this.clock.now() + timeoutMs;
+		while (this.process && this.promptDeliveryMode === "pending" && this.clock.now() < deadline) {
+			await new Promise<void>((resolve) => this.clock.setTimeout(resolve, 25));
+		}
+		if (this.promptDeliveryMode === "v1") return;
+		if (this.promptDeliveryHandshakeError) throw this.promptDeliveryHandshakeError;
+		this.promptDeliveryMode = "failed";
+		throw new PromptDeliveryProtocolError(
+			"handshake-timeout",
+			`Stable prompt delivery extension did not complete its exact handshake within ${timeoutMs}ms`,
+		);
 	}
 
 	/**
@@ -624,6 +695,7 @@ export class RpcBridge {
 		});
 
 		this.process!.on("exit", (code, signal) => {
+			if (this.promptDeliveryMode === "pending") this.promptDeliveryMode = "failed";
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
 				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
@@ -661,7 +733,7 @@ export class RpcBridge {
 	}
 
 	/** Send an RPC command and wait for its response. */
-	sendCommand(command: Record<string, any>, timeoutMs = 30_000): Promise<any> {
+	sendCommand(command: Record<string, any>, timeoutMs = 30_000, deliveryPromptId?: string): Promise<any> {
 		if (!this.process?.stdin) {
 			throw new Error("Agent process not running");
 		}
@@ -675,7 +747,7 @@ export class RpcBridge {
 				reject(new Error(`Command timed out: ${command.type}`));
 			}, timeoutMs);
 
-			this.pending.set(id, { resolve, reject, timeout });
+			this.pending.set(id, { resolve, reject, timeout, ...(deliveryPromptId ? { deliveryPromptId } : {}) });
 			this.process!.stdin!.write(JSON.stringify(msg) + "\n");
 		});
 	}
@@ -683,6 +755,17 @@ export class RpcBridge {
 	// --- Convenience methods matching the RPC protocol ---
 
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
+		const effectiveText = synthesizeAttachmentText(text, images);
+		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
+	}
+
+	promptWithId(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
+		if (this.promptDeliveryProtocol !== "v1") {
+			return Promise.reject(new PromptDeliveryProtocolError(
+				"capability-unavailable",
+				"Stable prompt delivery protocol is unavailable; retaining the durable row for retry",
+			));
+		}
 		// Defensive backstop: if a prompt carries image(s) but blank text, the
 		// model API rejects the blank ContentBlock. The primary fix synthesizes
 		// text upstream in session-manager.enqueuePrompt (where non-image
@@ -692,7 +775,7 @@ export class RpcBridge {
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
+		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(effectiveText, promptId), ...(images?.length ? { images } : {}) }, timeoutMs, promptId);
 	}
 
 	/** Wait for a (possibly cold) agent to become responsive, then prompt with a
@@ -708,8 +791,30 @@ export class RpcBridge {
 		return this.prompt(text, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
 	}
 
+	async promptWhenReadyWithId(
+		text: string,
+		promptId: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number },
+	): Promise<any> {
+		await this.waitForReady(opts?.readyTimeoutMs ?? COLD_REPROMPT_READY_TIMEOUT_MS);
+		return this.promptWithId(text, promptId, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
+	}
+
 	steer(text: string) {
 		return this.sendCommand({ type: "steer", message: text });
+	}
+
+	steerWithId(text: string, promptId: string) {
+		if (this.promptDeliveryProtocol !== "v1") {
+			return Promise.reject(new PromptDeliveryProtocolError(
+				"capability-unavailable",
+				"Stable prompt delivery protocol is unavailable; retaining the durable steer for retry",
+			));
+		}
+		// Stable-id steers must pass through Pi's `input` hook. The prompt command
+		// with streamingBehavior=steer is Pi's supported equivalent of steer RPC.
+		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(text, promptId), streamingBehavior: "steer" }, undefined, promptId);
 	}
 
 	abort() {
@@ -965,6 +1070,39 @@ export class RpcBridge {
 			parsed = JSON.parse(trimmed);
 		} catch {
 			return; // skip non-JSON output (e.g. log lines)
+		}
+
+		if (parsed.type === PROMPT_DELIVERY_CAPABILITY_EVENT) {
+			// The first capability decision is final for this child generation. Late
+			// output after timeout/legacy selection cannot split framing from queue
+			// settlement semantics inside SessionManager.
+			if (this.promptDeliveryMode !== "pending") return;
+			if (parsed.protocolVersion === PROMPT_DELIVERY_PROTOCOL_VERSION && parsed.extensionVersion === "1.0.0") {
+				this.promptDeliveryMode = "v1";
+			} else {
+				this.promptDeliveryMode = "failed";
+				this.promptDeliveryHandshakeError = new PromptDeliveryProtocolError(
+					"handshake-mismatch",
+					"Stable prompt delivery extension reported an incompatible capability",
+				);
+			}
+			return;
+		}
+
+		if (parsed.type === PROMPT_DELIVERY_FAILURE_EVENT && parsed.protocolVersion === PROMPT_DELIVERY_PROTOCOL_VERSION) {
+			const promptId = typeof parsed.promptId === "string" ? parsed.promptId : undefined;
+			if (promptId) {
+				for (const [id, request] of this.pending) {
+					if (request.deliveryPromptId !== promptId) continue;
+					this.clock.clearTimeout(request.timeout);
+					this.pending.delete(id);
+					request.reject(new PromptDeliveryProtocolError(
+						typeof parsed.code === "string" ? parsed.code : "extension-rejected",
+						`Stable prompt delivery extension rejected ${promptId}; retaining the durable row for retry`,
+					));
+				}
+			}
+			return;
 		}
 
 		// Response to a pending request

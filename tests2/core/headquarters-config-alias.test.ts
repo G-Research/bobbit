@@ -17,7 +17,14 @@ import {
 	setProjectRoot,
 } from "../../src/server/bobbit-dir.ts";
 import { ConfigCascade } from "../../src/server/agent/config-cascade.ts";
-import { ProjectContext } from "../../src/server/agent/project-context.ts";
+import { ProjectContext, resolveProjectContextPaths } from "../../src/server/agent/project-context.ts";
+import { ProjectContextManager } from "../../src/server/agent/project-context-manager.ts";
+import { GateStore } from "../../src/server/agent/gate-store.ts";
+import {
+	canonicalGateStoreStateRoot,
+	coordinateGateStoreRootPreparation,
+} from "../../src/server/agent/gate-store-root-coordinator.ts";
+import type { GateStoreMigrationWorkerResult } from "../../src/server/agent/gate-store-migration-worker.ts";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
@@ -74,6 +81,69 @@ function minimalProject(id: string, name: string, rootPath: string, extra: Recor
 
 function tool(name: string, description: string) {
 	return { name, description, group: "custom", hasRenderer: false } as any;
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
+function claimedEmptyPreparation(stateDir: string, barrier: Promise<void> = Promise.resolve()): Promise<GateStoreMigrationWorkerResult> {
+	const canonicalStateRoot = canonicalGateStoreStateRoot(stateDir);
+	const v2Root = path.join(stateDir, "gate-records", "v2");
+	const now = Date.now();
+	const result = {
+		migrated: false,
+		sourceBytes: 0,
+		externalizedBytes: 0,
+		payloadBytes: 0,
+		durationMs: 0,
+		preload: {
+			canonicalStateRoot,
+			v2Root,
+			manifest: {
+				schemaVersion: 2,
+				state: "complete",
+				sourceFile: "none",
+				sourceBytes: 0,
+				sourceSha256: "0".repeat(64),
+				gateCount: 0,
+				signalCount: 0,
+				bypassCount: 0,
+				externalizedBytes: 0,
+				payloadBytes: 0,
+				inventory: [],
+				migrationMs: 0,
+				migratedAt: now,
+				validatedAt: now,
+			},
+			gates: new Map(),
+			legacySignalIds: new Set<string>(),
+			legacyPayloadRefs: new Set<string>(),
+			auditPayloadRefs: new Set<string>(),
+			partitionPayloadRefs: new Map<string, Set<string>>(),
+			reclaimedPayloadBytes: 0,
+			orphanPayloadBytes: 0,
+			orphanPayloads: 0,
+			reclaimFailureBytes: 0,
+			reclaimFailures: 0,
+			deferredReclaimBytes: 0,
+			deferredReclaims: 0,
+		},
+	} as GateStoreMigrationWorkerResult;
+	return coordinateGateStoreRootPreparation(
+		stateDir,
+		async () => { await barrier; return result; },
+		prepared => ({
+			immutable: [...prepared.preload.legacyPayloadRefs, ...prepared.preload.auditPayloadRefs],
+			partitions: prepared.preload.partitionPayloadRefs,
+		}),
+	).then(({ result: prepared, claim }) => {
+		prepared.preload.rootClaim = claim;
+		return prepared;
+	});
 }
 
 function withEnv<T>(updates: Record<string, string | undefined>, fn: () => T): T {
@@ -142,6 +212,272 @@ describe("Headquarters storage and config aliasing", () => {
 			assert.equal(path.resolve(normal.stateDir), path.resolve(path.join(serverRoot, ".bobbit", "state")));
 			assert.equal(path.resolve(normal.configDir), path.resolve(path.join(serverRoot, ".bobbit", "config")));
 		});
+	});
+
+	it("initAll prepares every registered gate store before ordered context publication and coalesces callers", async () => {
+		const projects = [
+			minimalProject("prepare-a", "Prepare A", fixturePath("prepare-a")),
+			minimalProject("prepare-b", "Prepare B", fixturePath("prepare-b")),
+		];
+		for (const project of projects) memoryFs.mkdirSync(project.rootPath, { recursive: true });
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const firstPrepare = deferred<any>();
+		const secondPrepare = deferred<any>();
+		const prepared: string[] = [];
+		const configured: string[] = [];
+		manager.setContextConfigurator(ctx => configured.push(ctx.project.id));
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation((stateDir) => {
+			prepared.push(path.resolve(stateDir));
+			return prepared.length === 1 ? firstPrepare.promise : secondPrepare.promise;
+		});
+
+		try {
+			const firstInit = manager.initAll();
+			const concurrentInit = manager.initAll();
+			assert.equal(concurrentInit, firstInit, "concurrent initAll calls share one preparation barrier");
+			assert.equal(manager.size, 0);
+			assert.equal(manager.getOrCreate(projects[0].id), null, "sync access cannot bypass preparation");
+
+			secondPrepare.resolve({ migrated: false });
+			await Promise.resolve();
+			assert.equal(manager.size, 0, "one completed worker cannot publish ahead of the all-project barrier");
+			firstPrepare.resolve({ migrated: false });
+			await firstInit;
+
+			assert.deepEqual(Array.from(manager.all(), ctx => ctx.project.id), ["prepare-a", "prepare-b"]);
+			assert.deepEqual(configured, ["prepare-a", "prepare-b"]);
+			assert.deepEqual(prepared, projects.map(project => path.resolve(project.rootPath, ".bobbit", "state")));
+
+			const lazy = minimalProject("lazy-empty", "Lazy Empty", fixturePath("lazy-empty"));
+			memoryFs.mkdirSync(lazy.rootPath, { recursive: true });
+			projects.push(lazy);
+			assert.equal(manager.getOrCreate(lazy.id)?.project.id, lazy.id, "empty post-boot projects remain synchronously lazy");
+			assert.equal(prepareSpy.mock.calls.length, 2, "lazy empty creation does not launch a migration worker");
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("initAll rejects duplicate canonical state roots before any preparation or publication", async () => {
+		const sharedRoot = fixturePath("init-duplicate-root");
+		memoryFs.mkdirSync(sharedRoot, { recursive: true });
+		const projects = [
+			minimalProject("init-duplicate-a", "Init Duplicate A", sharedRoot),
+			minimalProject("init-duplicate-b", "Init Duplicate B", sharedRoot),
+		];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const prepareSpy = vi.spyOn(GateStore, "prepare");
+		try {
+			assert.throws(
+				() => manager.initAll(),
+				/Duplicate canonical project state root.*init-duplicate-a.*init-duplicate-b/,
+			);
+			assert.equal(prepareSpy.mock.calls.length, 0);
+			assert.equal(manager.size, 0);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("keeps case-distinct sibling state roots independent on a sensitive parent", async () => {
+		const parent = fixturePath("init-case-sensitive-pair");
+		const upperRoot = path.join(parent, "Project");
+		const lowerRoot = path.join(parent, "project");
+		memoryFs.mkdirSync(upperRoot, { recursive: true });
+		memoryFs.mkdirSync(lowerRoot, { recursive: true });
+		const projects = [
+			minimalProject("case-upper", "Case Upper", upperRoot),
+			minimalProject("case-lower", "Case Lower", lowerRoot),
+		];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry, {
+			// The in-memory Stat shim has no distinct inode evidence. Model the
+			// sensitive parent explicitly so this test pins the manager's rejection
+			// policy rather than the native filesystem probe.
+			stateRootIdentityForTests: stateDir => path.resolve(stateDir),
+		});
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockResolvedValue({ migrated: false } as GateStoreMigrationWorkerResult);
+		try {
+			await manager.initAll();
+			assert.equal(prepareSpy.mock.calls.length, 2, "case-sensitive siblings must retain separate preparation claims");
+			assert.deepEqual(Array.from(manager.all(), ctx => ctx.project.id), ["case-upper", "case-lower"]);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("initAll releases fulfilled real claims when a sibling preparation rejects", async () => {
+		const projects = [
+			minimalProject("prepare-ok", "Prepare OK", fixturePath("prepare-ok")),
+			minimalProject("prepare-fail", "Prepare Fail", fixturePath("prepare-fail")),
+		];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const failed = deferred<never>();
+		let fulfilled: GateStoreMigrationWorkerResult | undefined;
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation((stateDir) => {
+			if (stateDir.includes("prepare-fail")) return failed.promise;
+			return claimedEmptyPreparation(stateDir).then(result => { fulfilled = result; return result; });
+		});
+		try {
+			const initialization = manager.initAll();
+			while (!fulfilled) await Promise.resolve();
+			failed.reject(new Error("migration worker exploded"));
+			await assert.rejects(initialization, /migration worker exploded/);
+			await Promise.resolve();
+			assert.equal(manager.size, 0);
+			assert.equal(Array.from(manager.all()).length, 0);
+			assert.throws(
+				() => new GateStore(resolveProjectContextPaths(projects[0]).stateDir, undefined, fulfilled!.preload),
+				/root preparation claim is not available/,
+				"the fulfilled sibling claim must not be lost when Promise.all rejects",
+			);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("prepareAndGetOrCreate fences synchronously and coalesces identical project callers", async () => {
+		const root = fixturePath("postboot-single-root");
+		memoryFs.mkdirSync(root, { recursive: true });
+		const projects = [minimalProject("postboot-a", "Postboot A", root)];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const worker = deferred<any>();
+		let fencedInsideWorkerLaunch = false;
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation(() => {
+			fencedInsideWorkerLaunch = manager.getOrCreate("postboot-a") === null;
+			return worker.promise;
+		});
+
+		try {
+			const first = manager.prepareAndGetOrCreate("postboot-a");
+			const duplicate = manager.prepareAndGetOrCreate("postboot-a");
+			assert.equal(duplicate, first, "identical project preparations share context publication");
+			assert.equal(fencedInsideWorkerLaunch, true, "root is fenced before GateStore.prepare starts");
+			assert.equal(prepareSpy.mock.calls.length, 1);
+			assert.equal(manager.getOrCreate("postboot-a"), null);
+			worker.resolve({ migrated: false });
+			assert.equal((await first)?.project.id, "postboot-a");
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("rejects duplicate lazy project roots before preparation or publication", async () => {
+		const sharedRoot = fixturePath("postboot-duplicate-root");
+		memoryFs.mkdirSync(sharedRoot, { recursive: true });
+		const projects = [
+			minimalProject("duplicate-first", "Duplicate First", sharedRoot),
+			minimalProject("duplicate-second", "Duplicate Second", sharedRoot),
+		];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const prepareSpy = vi.spyOn(GateStore, "prepare");
+		try {
+			assert.throws(
+				() => manager.prepareAndGetOrCreate("duplicate-first"),
+				/Duplicate canonical project state root.*duplicate-first.*duplicate-second/,
+			);
+			assert.throws(() => manager.getOrCreate("duplicate-second"), /Duplicate canonical project state root/);
+			assert.equal(prepareSpy.mock.calls.length, 0, "duplicate ownership must be rejected before claiming a worker preload");
+			assert.equal(manager.size, 0);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("releases an old-root claim when a registry move retries into a duplicate root", async () => {
+		const oldRoot = fixturePath("postboot-root-mismatch-old");
+		const occupiedRoot = fixturePath("postboot-root-mismatch-occupied");
+		memoryFs.mkdirSync(oldRoot, { recursive: true });
+		memoryFs.mkdirSync(occupiedRoot, { recursive: true });
+		const moving = minimalProject("moving-first", "Moving First", oldRoot);
+		const occupied = minimalProject("occupied-second", "Occupied Second", occupiedRoot);
+		const projects = [moving, occupied];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const oldWorker = deferred<void>();
+		let oldPreparation: GateStoreMigrationWorkerResult | undefined;
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation(stateDir =>
+			claimedEmptyPreparation(stateDir, oldWorker.promise).then(prepared => { oldPreparation = prepared; return prepared; }),
+		);
+		try {
+			const movingContext = manager.prepareAndGetOrCreate(moving.id);
+			moving.rootPath = occupiedRoot;
+			oldWorker.resolve();
+			await assert.rejects(movingContext, /Duplicate canonical project state root/);
+			await Promise.resolve();
+			assert.equal(manager.size, 0);
+			assert.throws(
+				() => new GateStore(path.join(oldRoot, ".bobbit", "state"), undefined, oldPreparation!.preload),
+				/root preparation claim is not available/,
+				"the abandoned old-root result must release its one-shot claim",
+			);
+		} finally {
+			oldWorker.resolve();
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("prepareAndGetOrCreate publishes nothing after worker failure and permits a fenced retry", async () => {
+		const project = minimalProject("postboot-retry", "Postboot Retry", fixturePath("postboot-retry"));
+		memoryFs.mkdirSync(project.rootPath, { recursive: true });
+		const registry = {
+			list: () => [project],
+			get: (id: string) => id === project.id ? project : undefined,
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const failedWorker = deferred<any>();
+		const prepareSpy = vi.spyOn(GateStore, "prepare")
+			.mockImplementationOnce(() => failedWorker.promise)
+			.mockResolvedValue({ migrated: false } as any);
+
+		try {
+			const failed = manager.prepareAndGetOrCreate(project.id);
+			assert.equal(manager.getOrCreate(project.id), null);
+			failedWorker.reject(new Error("migration worker exploded"));
+			await assert.rejects(failed, /migration worker exploded/);
+			assert.equal(manager.size, 0);
+			assert.equal(manager.getOrCreate(project.id), null, "failed roots remain fenced from sync bypass");
+
+			const context = await manager.prepareAndGetOrCreate(project.id);
+			assert.equal(context?.project.id, project.id);
+			assert.equal(prepareSpy.mock.calls.length, 2);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
 	});
 
 	it("ConfigCascade treats projectId=headquarters as server scope for roles, tools, and tool policies", async () => {

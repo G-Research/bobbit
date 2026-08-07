@@ -21,12 +21,57 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/gate-inspection-regex-worker.test.ts",
+      "reason": "Pins process-wide regex worker admission, aggregate deadlines, exact permit recovery, bounded long-line rolling matches, chunk-boundary semantics, event-loop health, and follow-up availability.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/pack-list-scan-cache.test.ts",
       "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/prompt-delivery-protocol.test.ts",
+      "reason": "Pins the versioned extension handshake, frame stripping, post-persistence ACK, fail-closed reservation, RpcBridge rejection, and Docker remap boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/prompt-delivery-session-redrive.test.ts",
+      "reason": "Pins real SessionStore crash-window settlement plus stable direct, queued, prefixed batch, and exact identity redrive semantics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/prompt-delivery-real-rpc.test.ts",
+      "reason": "Real-fidelity pinned Pi/RpcBridge handshake coverage for direct and Docker generations, including durable SessionStore state across a Docker process crash.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/generated-agent-prompt-delivery.test.ts",
+      "reason": "Spawns both explicit standalone inline-theme agent sources and pins their exact v1 handshake, frame stripping, persisted reservation/ACK ordering, idempotent redrive, and fail-closed identity validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {
@@ -2166,7 +2211,7 @@
     },
     {
       "path": "tests2/core/task-generation.test.ts",
-      "reason": "Native v2 core coverage for TaskStore mutation generations on successful put, remove, and removeMany operations.",
+      "reason": "Native v2 core coverage for TaskStore mutation generations plus ProjectContext gate-store close ordering and retryable ProjectContextManager removal barriers.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2471,12 +2516,57 @@
       }
     },
     {
-      "path": "tests2/core/gateway-session-lifecycle-races.test.ts",
-      "reason": "Focused real-seam regressions proving dormant and stale-generation state reads return persisted model state without misleading COMMAND_ERROR frames.",
+      "path": "tests2/integration/gate-store-large-persistence.test.ts",
+      "reason": "Configurable artifact-heavy legacy migration coverage: routine runs use a ~1 MiB behavioral fixture while BOBBIT_GATE_STORE_STRESS_MIB=280 selects the observed-corpus benchmark. Deterministic assertions pin zero synchronous canonical reads after worker preload and target-only bounded shard rewrites; the unchanged warmed 5ms/75ms heartbeat remains a lag smoke check. Separate retention tests own the 32-hot/256-summary/8-MiB production boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/gate-store-v2-migration.test.ts",
+      "reason": "Gate persistence v2 worker migration coverage for payload/shard/manifest/publication interruption recovery, concurrent-open coalescing, post-publication retirement, idempotency, legacy truth/order/verdict/bypass/cache and archived-project preservation, externalization security, and bounded body-free metrics.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/gate-store-v2-retention.test.ts",
+      "reason": "Gate persistence v2 retention coverage pinning 32 hot rows, 256-or-8MiB ordinary limits, stable ordinals/gaps, an indefinitely retained external bypass audit whose hot shard and later writes stay bounded, cache-safe misses, and shared managed-payload collection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/gate-store-root-coordinator.test.ts",
+      "reason": "Canonical root regressions pin payload-finalization fencing, retryable history/goal close failures, exact reopen inspection, separate modeled Windows case-sensitive preload/ledger domains, and shared-hash ownership across proven aliases.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/gateway-session-lifecycle-races.test.ts",
+      "reason": "Focused real-seam regressions for dormant get-state readiness and turn-boundary Pi busy rejection, proving recoverable restore and durable prompt retry do not emit misleading COMMAND_ERROR frames or duplicate delivery.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/gateway-session-lifecycle-race.journey.spec.ts",
+      "reason": "Chromium journey through a real dormant-session wake and Pi finish-run busy guard, proving fallback state, durable queued/retrying reconciliation across reload, exactly-once follow-up delivery, one response, and no false fatal error or duplicate user row.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
       }
     }
   ],
@@ -2487,6 +2577,10 @@
     },
     {
       "path": "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/gateway-session-lifecycle-race.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -4648,7 +4742,7 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "rationale": "API/integration E2E against a real gateway: bounded content/verification/diagnostic selection plus metadata-only managed primary review/QA artifacts older than the hot window, single-pass payload reads, and tamper/cross-project fail-closed behavior.",
       "migrated": true,
       "v2Path": "tests2/integration/gate-inspect-slicing.test.ts",
       "execution": {

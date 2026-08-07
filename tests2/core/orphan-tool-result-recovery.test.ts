@@ -434,7 +434,7 @@ describe("SessionManager poisoned-history recovery", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "later done" }], stopReason: "stop" },
 		});
 		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await new Promise((resolve) => setTimeout(resolve, 30));
 
 		assert.equal(h.newPrompts.length, 3);
 		assert.equal(h.newPrompts[0].text, piText);
@@ -452,7 +452,7 @@ describe("SessionManager poisoned-history recovery", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "rollback done" }], stopReason: "stop" },
 		});
 		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await new Promise((resolve) => setTimeout(resolve, 30));
 		assert.equal(h.newPrompts.filter((entry) => entry.text === piText).length, 2);
 		assert.equal(h.newPrompts.at(-1)?.text, "older parked intent");
 	});
@@ -534,7 +534,7 @@ describe("SessionManager poisoned-history recovery", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "later done" }], stopReason: "stop" },
 		});
 		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await new Promise((resolve) => setTimeout(resolve, 30));
 
 		assert.equal(h.newPrompts.length, 3);
 		assert.equal(h.newPrompts[0].text, poisonPiText);
@@ -563,7 +563,7 @@ describe("SessionManager poisoned-history recovery", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "recovery done" }], stopReason: "stop" },
 		});
 		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await new Promise((resolve) => setTimeout(resolve, 30));
 		assert.deepEqual(h.newPrompts.map((entry) => entry.text).filter((text) => text === poisonPiText), [
 			poisonPiText,
 			poisonPiText,
