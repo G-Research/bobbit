@@ -516,8 +516,11 @@ export class RpcBridge {
 		for (let attempt = 0; attempt <= MAX_SPAWN_RETRIES; attempt++) {
 			try {
 				this._spawnProcess(cliPath, args);
-				await this._writeToolResultFilterBootstrap();
+				// A spawn may report ENOENT on the next tick and stdin can report EPIPE
+				// while the private bootstrap write is in flight. Install every handler
+				// synchronously before the first await or write so neither error escapes.
 				this._attachProcessHandlers();
+				await this._writeToolResultFilterBootstrap();
 				// Brief pause to let async socket initialization errors surface.
 				// If ENOTCONN occurs during socket read setup, the process 'error'
 				// event fires within the next microtask. We wait for that.
