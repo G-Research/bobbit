@@ -50,7 +50,7 @@ describe("Hindsight typed memory routes and tool adapters", () => {
 		assert.deepEqual(denied, { configured: true, code: "EXTENSION_CAPABILITY_DENIED", memories: [] });
 	});
 
-	it("prefers injected EP-7 config and retains only a host-injected completed outcome", async () => {
+	it("uses the real server completion envelope, ignores body content, and repeats a stable outcome document", async () => {
 		const store = new MemoryStore();
 		const received: Array<{ content?: string; tags?: Record<string, string>; id?: string }> = [];
 		__setClientFactory(() => ({
@@ -60,14 +60,36 @@ describe("Hindsight typed memory routes and tool adapters", () => {
 			browse: async () => ({ memories: [{ id: "m", text: "injected config" }] }),
 		}));
 		const context = {
-			host: { store, providerConfig: { runtimeMode: "external", externalUrl: "http://127.0.0.1:8848" }, completedOutcome: { id: "outcome-1", content: "goal completed" }, memory: { requireCapability: () => ({ allowed: true as const }) } },
+			host: {
+				store,
+				providerConfig: { runtimeMode: "external", externalUrl: "http://127.0.0.1:8848" },
+				completedOutcome: {
+					outcome: {
+						version: 1,
+						goal: { id: "goal-a", title: "Ship retention", state: "complete", spec: "Preserve the real snapshot" },
+						tasks: [{ id: "task-a", title: "Retain result", state: "complete", resultSummary: "verified" }],
+						gates: [{ id: "gate-a", status: "passed", content: "all checks pass" }],
+					},
+					completedAt: 1_700_000_000_000,
+					completionRevision: 1_700_000_000_000,
+				},
+				memory: { requireCapability: () => ({ allowed: true as const }) },
+			},
 			scopeContext: { project: { id: "project-a" }, goal: { id: "goal-a" } },
 		};
 		const browse = await memoryRoutes.browse(context, { body: {} });
 		assert.deepEqual(browse, { configured: true, memories: [{ id: "m", text: "injected config" }] });
-		const outcome = await memoryRoutes["retain-outcome"](context, { body: { content: "forged body text" } });
-		assert.deepEqual(outcome, { ok: true, configured: true, outcomeId: "outcome-1" });
-		assert.deepEqual(received, [{ content: "goal completed", id: "outcome-1", tags: { kind: "outcome", project: "project-a", goal: "goal-a" } }]);
+		const first = await memoryRoutes["retain-outcome"](context, { body: { content: "forged body text", goal: "forged-goal", completionRevision: "forged" } });
+		const second = await memoryRoutes["retain-outcome"](context, { body: { content: "different forged body" } });
+		assert.deepEqual(second, first);
+		assert.deepEqual(received.map(call => call.id), [(first as { outcomeId: string }).outcomeId, (first as { outcomeId: string }).outcomeId]);
+		assert.deepEqual(received.map(call => call.tags), [{ kind: "outcome", project: "project-a", goal: "goal-a" }, { kind: "outcome", project: "project-a", goal: "goal-a" }]);
+		assert.match(received[0]!.content ?? "", /Goal title: Ship retention/);
+		assert.match(received[0]!.content ?? "", /Task: Retain result — complete — verified/);
+		assert.doesNotMatch(received[0]!.content ?? "", /forged body|forged-goal/);
+
+		const unavailable = await memoryRoutes["retain-outcome"]({ ...context, host: { ...context.host, completedOutcome: undefined } }, { body: {} });
+		assert.deepEqual(unavailable, { ok: false, configured: true, code: "OUTCOME_UNAVAILABLE" });
 	});
 
 	it("registers every exported memory route, including the required browse surface", async () => {

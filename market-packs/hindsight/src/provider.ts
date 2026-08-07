@@ -2,9 +2,9 @@
 // host's immutable scopeContext snapshot; compatibility flat fields are never a
 // fallback for project, goal, or role.
 import {
-	clientConfig, detectLegacyQueue, documentId, enqueueRetain, isActive, isPendingEnvelope, isQueueEntry,
+	clientConfig, completedOutcomeRetention, detectLegacyQueue, documentId, enqueueRetain, isActive, isPendingEnvelope, isQueueEntry,
 	loadQueue, makeClient, pendingKey, pendingPrefix, recordError, removeQueuedEntry, resolveConfig, sweepKey,
-	tagsForRecord, truncate, updateRecord, type EffectiveConfig, type HindsightIdentity, type PendingEnvelope,
+	tagsForRecord, truncate, updateRecord, type CompletedOutcomeRetention, type EffectiveConfig, type HindsightIdentity, type PendingEnvelope,
 	type RuntimeContext, type ScopeProvenance, type StoreLike, type SweepControl, type Tags,
 	DEFAULT_STRANDED_AFTER_MS, RETAIN_SWEEP_INTERVAL_MS,
 } from "./shared.js";
@@ -18,7 +18,7 @@ interface ProviderCtx {
 	host?: { store?: StoreLike; memory?: { requireCapability(capability: "memory.read" | "memory.write"): Promise<void> | void } };
 	scopeContext?: ScopeContext;
 	signal?: AbortSignal; deadline?: Deadline; now?: number;
-	/** Host-originated, already bounded outcome snapshot. */ outcome?: unknown; completedAt?: number; completionRevision?: string;
+	/** Host-originated, already bounded outcome snapshot. */ outcome?: unknown; completedAt?: number; completionRevision?: string | number;
 }
 interface ContextBlock { id: string; title: string; authority: string; priority: number; reason: string; content: string }
 const TITLE = "Relevant memory"; const SUMMARY_CAP = 2000;
@@ -171,52 +171,21 @@ async function recoverStranded(ctx: ProviderCtx, cfg: EffectiveConfig): Promise<
 	}, deadline, ctx.signal);
 }
 
-function outcomeSummary(ctx: ProviderCtx): string {
-	const outcome = ctx.outcome; const lines = ["Goal outcome"];
-	const add = (label: string, value: unknown, cap = 480) => { const text = typeof value === "string" ? value.trim() : typeof value === "number" || typeof value === "boolean" ? String(value) : ""; if (text) lines.push(`${label}: ${truncate(text.replace(/\s+/g, " "), cap)}`); };
-	const addItems = (label: "Task" | "Gate", items: unknown) => {
-		if (!Array.isArray(items)) return;
-		for (const item of items.slice(0, 100)) if (item && typeof item === "object") {
-			const record = item as Record<string, unknown>;
-			add(label, [record.title ?? record.name ?? record.id, record.state ?? record.status, record.resultSummary ?? record.summary ?? record.content].filter(v => typeof v === "string" && v.trim()).join(" — "));
-		}
-	};
-	if (typeof outcome === "string") add("Summary", outcome, 7_600);
-	else if (outcome && typeof outcome === "object" && !Array.isArray(outcome)) {
-		const data = outcome as Record<string, unknown>;
-		const goal = data.goal;
-		if (goal && typeof goal === "object" && !Array.isArray(goal)) {
-			// Host completion snapshots are nested: retain the useful goal fields
-			// before potentially numerous tasks/gates, while preserving flat legacy
-			// payload support below.
-			const record = goal as Record<string, unknown>;
-			const before = lines.length;
-			add("Goal title", record.title);
-			add("Goal state", record.state);
-			add("Goal spec", record.spec);
-			// A valid host goal always contributes more than the bare document header,
-			// even if its optional display fields were blanked by upstream bounding.
-			if (lines.length === before) add("Goal", record.id ?? "completed");
-		} else {
-			for (const key of ["title", "state", "spec", "summary", "result", "decision", "completedAt"]) add(key[0].toUpperCase() + key.slice(1), data[key]);
-		}
-		addItems("Task", data.tasks);
-		addItems("Gate", data.gates);
-	}
-	let result = ""; for (const line of lines) { if ((result.length + line.length + 1) > 8_000) break; result += `${result ? "\n" : ""}${line}`; }
-	return result;
+function completionRetention(ctx: ProviderCtx, scope: ScopeProvenance, cfg: EffectiveConfig): CompletedOutcomeRetention | undefined {
+	return completedOutcomeRetention({ outcome: ctx.outcome, completionRevision: ctx.completionRevision, completedAt: ctx.completedAt }, scope, cfg);
 }
-function completionEventId(ctx: ProviderCtx): string | undefined { const revision = textOf(ctx.completionRevision) ?? (typeof ctx.completedAt === "number" && Number.isFinite(ctx.completedAt) ? String(ctx.completedAt) : undefined); return revision ? `goal-completion:${revision}` : undefined; }
 /** A compaction's injected event time is the retry-stable per-session sequence.
  * It is encoded in the canonical identity so a queued replay uses the same id. */
 function compactionEventSeq(ctx: ProviderCtx): number { const now = nowOf(ctx); return Number.isSafeInteger(now) && now >= 0 ? now : Date.now(); }
-async function retainImmediate(ctx: ProviderCtx, cfg: EffectiveConfig, content: string, kind: "compaction" | "outcome", sync: boolean): Promise<boolean> {
+async function retainImmediate(ctx: ProviderCtx, cfg: EffectiveConfig, content: string, kind: "compaction" | "outcome", sync: boolean, completed?: CompletedOutcomeRetention): Promise<boolean> {
 	const store = storeOf(ctx); const scope = scopeOf(ctx); if (!store || !scope || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false;
 	const seq = kind === "compaction" ? compactionEventSeq(ctx) : undefined;
-	const eventId = kind === "outcome" ? completionEventId(ctx) : (scope.sessionId ?? `compaction:${seq}`); if (!eventId) return false;
-	const identity = eventIdentity(scope, cfg, kind, eventId, seq);
-	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(clientConfig(cfg, ctx.runtime)); await client.ensureBank(cfg.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(cfg.bank, content, { tags: tagsFor(scope, kind), sync, id: documentId(identity) }); return true; }
-	catch (e) { const queued = await queueRecord(store, scope, identity, content, tagsFor(scope, kind), sync, nowOf(ctx), ctx); if (!queued) throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); await recordAutomaticError(ctx, store, e); return true; }
+	const eventId = scope.sessionId ?? `compaction:${seq}`;
+	const identity = completed?.identity ?? eventIdentity(scope, cfg, kind, eventId, seq);
+	const recordScope = completed?.scope ?? scope;
+	const tags = completed?.tags ?? tagsFor(scope, kind);
+	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(clientConfig(cfg, ctx.runtime)); await client.ensureBank(cfg.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(cfg.bank, content, { tags, sync, id: completed?.documentId ?? documentId(identity) }); return true; }
+	catch (e) { const queued = await queueRecord(store, recordScope, identity, content, tags, sync, nowOf(ctx), ctx); if (!queued) throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); await recordAutomaticError(ctx, store, e); return true; }
 }
 const provider = {
 	async sessionSetup(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); if (!isActive(cfg, ctx.runtime)) return { blocks: [] }; await recoverStranded(ctx, cfg); return { blocks: await doRecall(ctx, cfg, ctx.prompt) }; },
@@ -224,6 +193,6 @@ const provider = {
 	async afterTurn(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain || !scopeOf(ctx)) return { blocks: [] }; const store = storeOf(ctx); if (!store) return { blocks: [] }; await drainQueueHead(store, cfg, ctx); const summary = turnSummary(ctx); const appended = summary ? await appendTurn(ctx, cfg, summary) : undefined; if (appended) { const read = await store.read<unknown>(appended.key); if (read.state === "present" && isPendingEnvelope(read.value, appended.identity) && pendingDue(read.value, cfg, nowOf(ctx))) await flushPending(ctx, cfg, appended.key, appended.identity); } return { blocks: [] }; },
 	async beforeCompact(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); const content = compactSummary(ctx); if (isActive(cfg, ctx.runtime) && cfg.autoRetain && content) await retainImmediate(ctx, cfg, content, "compaction", true); return { blocks: [] }; },
 	async sessionShutdown(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); if (isActive(cfg, ctx.runtime) && storeOf(ctx)) await drainQueueAll(storeOf(ctx)!, cfg, ctx); return { blocks: [] }; },
-	async goalCompleted(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); const content = outcomeSummary(ctx); if (!await hasMemoryCapability(ctx, "memory.write")) return { blocks: [] }; if (!isActive(cfg, ctx.runtime) || !scopeOf(ctx)?.goalId || !completionEventId(ctx) || !content || !await retainImmediate(ctx, cfg, content, "outcome", true)) throw new Error(OUTCOME_NOT_DURABLE_ERROR); return { blocks: [] }; },
+	async goalCompleted(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); const scope = scopeOf(ctx); const completed = scope ? completionRetention(ctx, scope, cfg) : undefined; if (!await hasMemoryCapability(ctx, "memory.write")) return { blocks: [] }; if (!isActive(cfg, ctx.runtime) || !completed || !await retainImmediate(ctx, cfg, completed.content, "outcome", true, completed)) throw new Error(OUTCOME_NOT_DURABLE_ERROR); return { blocks: [] }; },
 };
 export default provider;
