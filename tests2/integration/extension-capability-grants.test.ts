@@ -12,6 +12,7 @@ const REPRO = "EXTENSION_CAPABILITY_GRANTS_API_REGRESSION";
 let packDir = "";
 let projectId = "";
 let operatorCookie = "";
+let initialServerPackOrder: string[] = [];
 
 function operatorHeaders(): Record<string, string> {
 	return { Cookie: operatorCookie };
@@ -38,6 +39,14 @@ function auditPath(): string {
 
 function settingsPath(): string {
 	return `/api/projects/${encodeURIComponent(projectId)}/extension-settings`;
+}
+
+async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order }),
+	});
+	expect(response.status, `${REPRO}: fixture filesystem refresh failed: ${await response.clone().text()}`).toBe(200);
 }
 
 function writeFixturePack(headquartersDir: string): void {
@@ -107,21 +116,20 @@ test.describe("extension capability grants API", () => {
 	test.beforeAll(async ({ gateway }) => {
 		const project = await defaultProject();
 		projectId = project.id;
+		const order = await apiFetch("/api/marketplace/pack-order?scope=server");
+		expect(order.status).toBe(200);
+		initialServerPackOrder = (await json(order)).order;
 		writeFixturePack(gateway.bobbitDir);
-		const activation = await apiFetch("/api/marketplace/pack-activation", {
-			method: "PUT",
-			body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: {} }),
-		});
-		expect(activation.status, `${REPRO}: fixture activation refresh failed; body=${await activation.clone().text()}`).toBe(200);
+		// Direct fixture writes are not Marketplace installs. Replay the public
+		// pack-order mutation to invalidate the server's marketplace scan before
+		// exercising normal activation APIs.
+		await notifyPackFilesystemMutation(initialServerPackOrder);
 		operatorCookie = await mintOperatorCookie();
 	});
 
 	test.afterAll(async () => {
-		await apiFetch("/api/marketplace/pack-activation", {
-			method: "PUT",
-			body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: {} }),
-		}).catch(() => {});
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		await notifyPackFilesystemMutation(initialServerPackOrder).catch(() => {});
 	});
 
 	test("requires authentication and rejects client authority, wildcards, inactive hooks, and unsupported capabilities", async () => {

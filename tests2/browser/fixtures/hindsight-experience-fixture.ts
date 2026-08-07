@@ -11,28 +11,15 @@ export const HINDSIGHT_EXPERIENCE_SECRET = "hindsight-browser-secret-7d8a9c";
 export type HindsightExperienceProject = { id: string; name: string; rootPath: string };
 export type HindsightExperienceBrowserResponse = { status: number; text: string };
 
-/**
- * Installs the shipped pack in the isolated gateway only. Its deliberately
- * unique name prevents this browser suite from sharing cleanup state with the
- * extension-settings fixture.
- */
-export function installHindsightExperienceBrowserFixture(bobbitDir: string): string {
-	const source = path.resolve(import.meta.dirname, "../../../market-packs/hindsight");
-	const destination = path.join(bobbitDir, "config", "market-packs", HINDSIGHT_EXPERIENCE_PACK_ID);
-	fs.rmSync(destination, { recursive: true, force: true });
-	fs.mkdirSync(path.dirname(destination), { recursive: true });
-	fs.cpSync(source, destination, { recursive: true });
-	fs.writeFileSync(path.join(destination, ".pack-meta.yaml"), [
-		"sourceUrl: e2e",
-		"sourceRef: local",
-		"commit: test",
-		`packName: ${HINDSIGHT_EXPERIENCE_PACK_ID}`,
-		"version: 1.0.0",
-		"installedAt: '2026-01-01T00:00:00.000Z'",
-		"updatedAt: '2026-01-01T00:00:00.000Z'",
-		"scope: server",
-	].join("\n") + "\n");
-	return destination;
+/** Restore the normal enabled first-party built-in activation state. */
+export async function resetHindsightExperienceBuiltinActivation(): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: HINDSIGHT_EXPERIENCE_PACK_ID, disabled: {} }),
+	});
+	if (response.status !== 200) {
+		throw new Error(`Hindsight built-in activation reset failed: ${response.status} ${await response.text()}`);
+	}
 }
 
 export async function createHindsightExperienceBrowserProject(): Promise<HindsightExperienceProject> {
@@ -47,13 +34,12 @@ export async function createHindsightExperienceBrowserProject(): Promise<Hindsig
 
 export async function cleanupHindsightExperienceBrowserFixture(
 	project: HindsightExperienceProject | undefined,
-	packDir: string | undefined,
 ): Promise<void> {
 	if (project) {
 		await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" }).catch(() => {});
 		fs.rmSync(project.rootPath, { recursive: true, force: true });
 	}
-	if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+	await resetHindsightExperienceBuiltinActivation().catch(() => {});
 }
 
 /** Execute a same-origin request with precisely the credentials the user has. */

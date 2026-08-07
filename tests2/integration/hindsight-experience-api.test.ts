@@ -7,8 +7,9 @@ import { apiFetch, createSession, deleteSession, registerProject } from "./_e2e/
 import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.ts";
 import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.ts";
 
-// This fixture installs the source pack in an unbuilt in-process gateway.
-// Its route worker therefore needs the standard test-only TypeScript resolver.
+// The in-process gateway stages Hindsight as the shipped built-in pack. Keep
+// the test-only resolver available for source-mode route workers in older test
+// bundles, but do not copy-install or shadow the built-in pack.
 enableTsWorkerResolver();
 
 const test = base;
@@ -22,7 +23,6 @@ const IMPLEMENTED = fs.existsSync(path.join(PACK_SOURCE, "src", "memory-routes.t
 	&& fs.existsSync(path.resolve(__dirname, "..", "..", "src", "server", "agent", "hindsight-runtime-bridge.ts"));
 const describe = IMPLEMENTED ? test.describe : test.describe.skip;
 
-let packDir = "";
 let operatorCookie = "";
 const projectRoots: string[] = [];
 const sessions: string[] = [];
@@ -66,20 +66,6 @@ async function createProject(gateway: any, label: string): Promise<{ id: string;
 	return registerProject({ name: `hindsight-experience-${label}-${Date.now()}`, rootPath, seedWorkflows: false });
 }
 
-async function installPack(headquartersDir: string): Promise<void> {
-	packDir = path.join(headquartersDir, "config", "market-packs", PACK_ID);
-	fs.rmSync(packDir, { recursive: true, force: true });
-	fs.cpSync(PACK_SOURCE, packDir, { recursive: true });
-	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
-		"sourceUrl: test", "sourceRef: local", "commit: fixture", `packName: ${PACK_ID}`, "version: 1.0.0",
-		"installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",
-	].join("\n") + "\n", "utf8");
-	const refresh = await apiFetch("/api/marketplace/pack-activation", {
-		method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
-	});
-	expect(refresh.status, `Hindsight fixture activation failed: ${await refresh.clone().text()}`).toBe(200);
-}
-
 async function route(sessionId: string, name: string, body: Record<string, unknown> = {}): Promise<Response> {
 	return apiFetch(`/api/ext/route/${encodeURIComponent(name)}`, {
 		method: "POST",
@@ -114,14 +100,21 @@ function denied(response: Response, body: any, capability: string): void {
 }
 
 describe.serial("Hindsight experience API", () => {
-	test.beforeAll(async ({ gateway }) => {
-		await installPack(gateway.bobbitDir);
+	test.beforeAll(async () => {
+		// Hindsight is a normal enabled built-in. Clearing any prior server override
+		// exercises its shipped activation path without creating a shadow install.
+		const activation = await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
+		});
+		expect(activation.status, `Hindsight built-in activation reset failed: ${await activation.clone().text()}`).toBe(200);
 		operatorCookie = await mintOperatorCookie();
 	});
 
 	test.afterAll(async () => {
 		for (const sessionId of sessions.splice(0)) await deleteSession(sessionId);
-		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
+		}).catch(() => {});
 		for (const root of projectRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 	});
 
