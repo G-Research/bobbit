@@ -11841,7 +11841,14 @@ async function handleApiRoute(
 				&& normalized.runtimes.includes("hindsight");
 			if (disablingHindsightRuntime) {
 				const builtin = isBuiltinPackName(packName) && !hasUserInstall(targetScope, packName, targetProjectId);
-				await removeHindsightRuntimeBeforeContributionChange(packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, packName, builtin));
+				try {
+					await removeHindsightRuntimeBeforeContributionChange(packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, packName, builtin));
+				} catch (err) {
+					// Leave the activation record unchanged so the old descriptor remains
+					// resolvable and the operator can retry the failed owned cleanup.
+					jsonError(409, err);
+					return;
+				}
 			}
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
