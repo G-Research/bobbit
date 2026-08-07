@@ -11,6 +11,12 @@ import {
 	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
 	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
 } from "../../src/server/agent/tool-result-filter-extension-trust.ts";
+import { prependToolResultErrorBridge, resetToolResultErrorBridgeExtensionCache } from "../../src/server/agent/tool-result-error-bridge-extension.ts";
+import {
+	resetToolResultFilterExtensionCache,
+	toolResultFilterGateEnvironment,
+	writeToolResultFilterExtension,
+} from "../../src/server/agent/tool-result-filter-extension.ts";
 
 const tempDirs: string[] = [];
 
@@ -170,7 +176,7 @@ describe("protected RpcBridge extension trust boundary", () => {
 				}) as any,
 			});
 
-			await expect(bridge.start()).rejects.toThrow("Process failed to start");
+			await expect(bridge.start()).rejects.toThrow("missing executable");
 			expect(uncaught).toBeUndefined();
 		} finally {
 			process.removeListener("uncaughtException", onUncaught);
@@ -201,19 +207,40 @@ describe("protected RpcBridge extension trust boundary", () => {
 		let uncaught: Error | undefined;
 		const onUncaught = (error: Error) => { uncaught = error; };
 		process.on("uncaughtException", onUncaught);
+		const previousBobbitDir = process.env.BOBBIT_DIR;
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-rpc-bridge-filter-gate-"));
 		try {
+			// Model the production protected setup: the generated core gate is the
+			// environment input and the generated error bridge is the only explicit
+			// extension. Its closed-list state path is accepted by the trust boundary.
+			process.env.BOBBIT_DIR = stateDir;
+			resetToolResultFilterExtensionCache();
+			resetToolResultErrorBridgeExtensionCache();
+			const gatePath = writeToolResultFilterExtension("rpc-bridge-epipe");
+			expect(gatePath).toBeDefined();
+			const args = prependToolResultErrorBridge(["--no-extensions"]);
+			expect(args).toHaveLength(3);
+
 			const bridge = new RpcBridge({
 				cliPath: "/fixture/pi.js",
-				env: { BOBBIT_TOOL_RESULT_FILTER_GATE: "/fixture/gate.ts" },
+				args,
+				env: toolResultFilterGateEnvironment(gatePath!),
 				toolResultFilterBootstrap: { runtimeGeneration: 4, runtimeKey: secret },
 			}, { spawnDirect: (() => child) as any });
 
 			await expect(bridge.start()).rejects.toMatchObject({ code: "EPIPE" });
 			expect(firstWriteHandlers).toEqual({ process: 1, stdin: 1 });
+			// The private bootstrap is the sole first stdin record; ordinary RPC
+			// messages cannot precede it when the write fails.
 			expect(writes).toEqual([JSON.stringify({ runtimeGeneration: 4, runtimeKey: secret }) + "\n"]);
 			expect(uncaught).toBeUndefined();
 		} finally {
 			process.removeListener("uncaughtException", onUncaught);
+			resetToolResultFilterExtensionCache();
+			resetToolResultErrorBridgeExtensionCache();
+			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousBobbitDir;
+			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 });
