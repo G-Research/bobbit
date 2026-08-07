@@ -54,7 +54,16 @@ describe("service worker mount contracts", () => {
 		assert.match(worker, /cache\.match\(OFFLINE_NAVIGATION_URL\)/);
 	});
 
-	it("registers the worker script and scope below the runtime mount", () => {
-		assert.match(main, /serviceWorker\.register\(appUrl\('\/sw\.js'\), \{ scope: `\$\{runtimeBasePath\(\)\}\/` \}\)/);
+	it("registers the worker below the runtime mount only outside Vite dev mode", () => {
+		assert.match(main, /const scopePath = `\$\{runtimeBasePath\(\)\}\/`/);
+		assert.match(main, /if \(\(globalThis as any\)\.__BOBBIT_DEV__\)/);
+		assert.match(main, /serviceWorker\.register\(appUrl\('\/sw\.js'\), \{ scope: scopePath \}\)/);
+	});
+
+	it("unregisters the exact mounted worker and clears only its caches in dev", () => {
+		assert.match(main, /navigator\.serviceWorker\.getRegistrations\(\)/);
+		assert.match(main, /registration\.scope === scopeUrl/);
+		assert.match(main, /registration\.unregister\(\)/);
+		assert.match(main, /key\.startsWith\(cachePrefix\)/);
 	});
 });
