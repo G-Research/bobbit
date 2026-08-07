@@ -10,23 +10,31 @@ import {
 
 export type ExtensionGrantAuditAction = "granted" | "revoked";
 
-/** Secret-free durable administrative history for extension authority changes. */
-export interface ExtensionGrantAuditEntry {
+interface ExtensionGrantAuditBase {
 	at: string;
 	actor: string;
 	action: ExtensionGrantAuditAction;
 	packId: string;
-	hookId: string;
 	capability: ExtensionCapability;
 }
 
-/** Exact safe tuple used to recover a post-mutation audit failure. */
-export interface ExtensionGrantAuditRef {
-	action: ExtensionGrantAuditAction;
-	packId: string;
+/** Legacy durable shape. An absent discriminator permanently means hook. */
+export interface ExtensionHookGrantAuditEntry extends ExtensionGrantAuditBase {
 	hookId: string;
-	capability: ExtensionCapability;
 }
+
+/** Durable audit shape for an exact non-hook pack principal. */
+export interface ExtensionPackGrantAuditEntry extends ExtensionGrantAuditBase {
+	principal: "pack";
+}
+
+/** Secret-free durable administrative history for extension authority changes. */
+export type ExtensionGrantAuditEntry = ExtensionHookGrantAuditEntry | ExtensionPackGrantAuditEntry;
+
+/** Exact safe tuple used to recover a post-mutation audit failure. */
+export type ExtensionGrantAuditRef =
+	| Pick<ExtensionHookGrantAuditEntry, "action" | "packId" | "hookId" | "capability">
+	| Pick<ExtensionPackGrantAuditEntry, "action" | "packId" | "principal" | "capability">;
 
 export class ExtensionGrantAuditStoreError extends Error {
 	readonly code = "EXTENSION_GRANT_AUDIT_UNAVAILABLE";
@@ -43,32 +51,55 @@ function normalizeEntry(value: unknown): ExtensionGrantAuditEntry | undefined {
 		|| !isSafeExtensionGrantIdentifier(candidate.actor)
 		|| (candidate.action !== "granted" && candidate.action !== "revoked")
 		|| !isSafeExtensionGrantIdentifier(candidate.packId)
-		|| !isSafeExtensionGrantIdentifier(candidate.hookId)
 		|| !isExtensionCapability(candidate.capability)) return undefined;
-	return {
+
+	const base: ExtensionGrantAuditBase = {
 		at: candidate.at,
 		actor: candidate.actor,
 		action: candidate.action,
 		packId: candidate.packId,
-		hookId: candidate.hookId,
 		capability: candidate.capability,
 	};
+	if (candidate.principal === "pack") {
+		// A pack principal never carries a hook identity. Keeping this explicit
+		// prevents a malformed mixed row from recovering the wrong authority event.
+		if (candidate.hookId !== undefined) return undefined;
+		return { ...base, principal: "pack" };
+	}
+	// Legacy hook rows deliberately have no principal discriminator. Do not
+	// reinterpret an added/unknown discriminator as a hook grant.
+	if (candidate.principal !== undefined || !isSafeExtensionGrantIdentifier(candidate.hookId)) return undefined;
+	return { ...base, hookId: candidate.hookId };
+}
+
+function isPackEntry(entry: ExtensionGrantAuditEntry): entry is ExtensionPackGrantAuditEntry {
+	return "principal" in entry;
 }
 
 function sameEntry(left: ExtensionGrantAuditEntry, right: ExtensionGrantAuditEntry): boolean {
-	return left.at === right.at
-		&& left.actor === right.actor
-		&& left.action === right.action
-		&& left.packId === right.packId
-		&& left.hookId === right.hookId
-		&& left.capability === right.capability;
+	if (left.at !== right.at
+		|| left.actor !== right.actor
+		|| left.action !== right.action
+		|| left.packId !== right.packId
+		|| left.capability !== right.capability
+		|| isPackEntry(left) !== isPackEntry(right)) return false;
+	return isPackEntry(left) || left.hookId === (right as ExtensionHookGrantAuditEntry).hookId;
+}
+
+function isExactRef(value: unknown): value is ExtensionGrantAuditRef {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const candidate = value as Record<string, unknown>;
+	if ((candidate.action !== "granted" && candidate.action !== "revoked")
+		|| !isSafeExtensionGrantIdentifier(candidate.packId)
+		|| !isExtensionCapability(candidate.capability)) return false;
+	if (candidate.principal === "pack") return candidate.hookId === undefined;
+	return candidate.principal === undefined && isSafeExtensionGrantIdentifier(candidate.hookId);
 }
 
 function matchesRef(entry: ExtensionGrantAuditEntry, ref: ExtensionGrantAuditRef): boolean {
-	return entry.action === ref.action
-		&& entry.packId === ref.packId
-		&& entry.hookId === ref.hookId
-		&& entry.capability === ref.capability;
+	if (entry.action !== ref.action || entry.packId !== ref.packId || entry.capability !== ref.capability) return false;
+	if (isPackEntry(entry)) return "principal" in ref && ref.principal === "pack";
+	return "hookId" in ref && entry.hookId === ref.hookId;
 }
 
 /**
@@ -116,6 +147,7 @@ export class ExtensionGrantAuditStore {
 
 	/** Drains a pending event only when this request names its exact safe tuple. */
 	recoverPending(ref: ExtensionGrantAuditRef): boolean {
+		if (!isExactRef(ref)) return false;
 		const pending = this.readOutbox();
 		if (!pending.some(entry => matchesRef(entry, ref))) return false;
 		this.flushPending();
