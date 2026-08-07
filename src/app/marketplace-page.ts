@@ -2523,13 +2523,17 @@ function renderExtensionGrants(target: ExtensionSettingsTarget): TemplateResult 
 				? "Enable this pack before granting this capability."
 				: undefined;
 			return html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-busy=${grantBusy ? "true" : "false"}>
-				<div class="market-capability-copy">
-					${copy ? html`<strong>${copy.label}</strong>` : ""}
-					<code>${grant.capability}</code>
-					<span>${grant.state || "Unavailable"}</span>
-					${copy ? html`<span id=${rowId} class="market-capability-description">${copy.description}</span>` : ""}
-					${inactiveReason ? html`<span id=${rowId} class="market-capability-description">${inactiveReason}</span>` : ""}
-				</div>
+				${target.kind === "hook"
+					// Keep the legacy hook row as text, including its punctuation. Existing
+					// Market journeys and assistive output use this exact concise form.
+					? html`<span>${grant.capability}: ${grant.state || "Unavailable"}</span>`
+					: html`<div class="market-capability-copy">
+						${copy ? html`<strong>${copy.label}</strong>` : ""}
+						<code>${grant.capability}</code>
+						<span>${grant.state || "Unavailable"}</span>
+						${copy ? html`<span id=${rowId} class="market-capability-description">${copy.description}</span>` : ""}
+						${inactiveReason ? html`<span id=${rowId} class="market-capability-description">${inactiveReason}</span>` : ""}
+					</div>`}
 				<button type="button" class="market-btn" data-testid="market-capability-action" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-describedby=${copy || inactiveReason ? rowId : undefined} ?disabled=${!actionable || grantBusy} @click=${() => changeCapabilityGrant(target, grant.capability, grant.state)}>${grantBusy ? (granted ? "Revoking…" : "Granting…") : grant.state === "Unavailable" ? "Unavailable" : `${granted ? "Revoke" : "Grant"} ${grant.capability}`}</button>
 				${grantError ? html`<div class="market-error" data-testid="market-capability-error" role="alert">${grantError}</div>` : ""}
 			</div>`;
@@ -2564,7 +2568,14 @@ function renderProjectRuntime(pack: InstalledPackWire): TemplateResult {
 	const targets = extensionSettings?.targets.filter((target) => target.packId === pack.packName) ?? [];
 	if (!targets.length) return html``;
 	const project = state.projects.find((item) => item.id === projectId);
-	return html`<section class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><div class="market-project-runtime-heading">Project runtime <span>${project?.name || "Unknown project"}</span></div><div class="market-runtime-grid">${targets.map(renderSettingsTarget)}</div><div class="market-settings-status" data-testid="market-settings-status" role="status" aria-live="polite">${settingsStatus}</div></section>`;
+	return html`<section class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><div class="market-project-runtime-heading">Project runtime <span>${project?.name || "Unknown project"}</span></div><div class="market-runtime-grid">${targets.map(renderSettingsTarget)}</div></section>`;
+}
+
+/** One live region per selected project, not one per installed pack card. */
+function renderProjectSettingsStatus(): TemplateResult {
+	const projectId = currentProjectId();
+	if (!projectId) return html``;
+	return html`<div class="market-settings-status" data-testid="market-settings-status" data-project-id=${projectId} role="status" aria-live="polite" aria-atomic="true">${settingsStatus}</div>`;
 }
 
 function renderNoProjectRuntimeEmptyState(): TemplateResult {
@@ -2621,6 +2632,7 @@ function renderInstalledPanel(): TemplateResult {
 					${builtinPacks.length > 0 ? renderBuiltinGroup(builtinPacks) : ""}
 					${scopesWithPacks.map(renderScopeGroup)}
 				`}
+			${renderProjectSettingsStatus()}
 			${renderGrantHistory()}
 		</section>
 	`;
