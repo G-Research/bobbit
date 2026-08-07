@@ -264,10 +264,13 @@ describe("Slash autocomplete", () => {
 		const attachment = { id: "a1", type: "image", fileName: "keep.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" };
 		const el = await mount({ runtime: "pi", onCompact: compact, onSend: (text) => sends.push(text), attachments: [attachment] });
 		await setComposer(el, "/compact", 8);
+		// Enter first accepts the autocomplete item; the second Enter submits it.
+		await key(el, "Enter");
+		expect(el.value).toBe("/compact ");
 		await key(el, "Enter");
 		expect(compact).not.toHaveBeenCalled();
 		expect(sends).toEqual([]);
-		expect(el.value).toBe("/compact");
+		expect(el.value).toBe("/compact ");
 		expect(el.attachments).toEqual([attachment]);
 		expect(el.querySelector('[role="alert"]')?.textContent).toMatch(/attachment/i);
 	});
