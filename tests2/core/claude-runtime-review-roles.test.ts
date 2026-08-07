@@ -26,9 +26,20 @@ type RoleSource = {
 	updatedAt?: unknown;
 };
 
-function sourceRole(name: string): RoleSource {
-	const source = fs.readFileSync(path.join(rolesDir, `${name}.yaml`), "utf8");
-	return YAML.parse(source) as RoleSource;
+const sourceRoles: Record<(typeof roleNames)[number], RoleSource> = {
+	"claude-protocol-scout": YAML.parse(
+		fs.readFileSync(path.join(rolesDir, "claude-protocol-scout.yaml"), "utf8"),
+	) as RoleSource,
+	"backend-parity-reviewer": YAML.parse(
+		fs.readFileSync(path.join(rolesDir, "backend-parity-reviewer.yaml"), "utf8"),
+	) as RoleSource,
+	"billing-safety-auditor": YAML.parse(
+		fs.readFileSync(path.join(rolesDir, "billing-safety-auditor.yaml"), "utf8"),
+	) as RoleSource,
+};
+
+function sourceRole(name: (typeof roleNames)[number]): RoleSource {
+	return sourceRoles[name];
 }
 
 function resolvedRoles(): Map<string, Role> {
