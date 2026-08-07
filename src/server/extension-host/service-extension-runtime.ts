@@ -63,10 +63,10 @@ export interface ServiceExtensionPortAllocator {
 }
 
 /**
- * Structural view of the public ExtensionCapabilityGrantResolver seam. The
- * server injects that resolver; this runtime never reads grant state itself.
+ * Structural view of the platform authorization seam. The server supplies the
+ * resolver; this runtime never reads durable authorization state itself.
  */
-export type ServiceExtensionGrantResolver = (
+export type ServiceExtensionAuthorizationResolver = (
 	projectId: string,
 	principal: { kind: "pack"; packId: string },
 	capability: "service.manage",
@@ -76,7 +76,7 @@ export interface ServiceExtensionRuntimeDeps {
 	/** Active declarations only. A thrown error fails closed for this reconcile. */
 	listActive(projectId: string): Promise<readonly ActiveServiceExtension[]> | readonly ActiveServiceExtension[];
 	/** Required authorization fence for every service lifecycle action. */
-	grantResolver: ServiceExtensionGrantResolver;
+	authorize: ServiceExtensionAuthorizationResolver;
 	launchers: Readonly<Record<ServiceRunMode, ServiceExtensionLauncher>>;
 	probe: ServiceReadinessProbe;
 	ports: ServiceExtensionPortAllocator;
@@ -257,10 +257,10 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 			&& fence.project === this.projectGenerations.get(projectId);
 	}
 
-	/** Never cache an allow: revocation must win over awaited lifecycle work. */
+	/** Never cache an allow: revoked authorization must win over awaited work. */
 	private isAuthorized(identity: ServiceExtensionIdentity): boolean {
 		try {
-			return this.deps.grantResolver(
+			return this.deps.authorize(
 				identity.projectId,
 				{ kind: "pack", packId: identity.packId },
 				"service.manage",
