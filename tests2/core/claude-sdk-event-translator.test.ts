@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
 	createClaudeSdkTranslatorState,
+	normalizeClaudeSdkRootResultUsage,
 	translateClaudeSdkEvent,
 	type ClaudeSdkTranslation,
 	type ClaudeSdkTranslatorState,
@@ -140,6 +141,43 @@ describe("Claude Agent SDK event translator", () => {
 				expect(events[agentEnd]).toMatchObject({ claudeSdk: { terminal: { error: expect.any(String) } } });
 			}
 		}
+	});
+
+	it("carries only a valid root result's authoritative usage on root agent_end", () => {
+		const rootResult = {
+			type: "result", subtype: "success", uuid: "result-usage-1", session_id: "sdk-session-usage-1",
+			total_cost_usd: 0.0042,
+			usage: { input_tokens: 123, output_tokens: 45, cache_read_input_tokens: 10, cache_creation_input_tokens: 2 },
+			modelUsage: {
+				"claude-sonnet-4": {
+					inputTokens: 121, outputTokens: 43, cacheReadInputTokens: 10, cacheCreationInputTokens: 2,
+					costUSD: 0.004, contextWindow: 200_000, maxOutputTokens: 16_384,
+				},
+				"claude-haiku-4": {
+					inputTokens: 3, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+					costUSD: 0.0002, contextWindow: 200_000, maxOutputTokens: 8_192,
+				},
+			},
+		};
+		const translated = translateClaudeSdkEvent(createClaudeSdkTranslatorState(), rootResult);
+		expect(translated.diagnostics).toEqual([]);
+		expect(translated.events).toEqual([expect.objectContaining({
+			type: "agent_end",
+			claudeSdkUsage: {
+				source: "claude-agent-sdk-result",
+				sourceResultId: "sdk-session-usage-1:result-usage-1",
+				sdkSessionId: "sdk-session-usage-1",
+				costBasis: "subscription-notional",
+				total: { inputTokens: 123, outputTokens: 45, cacheReadTokens: 10, cacheWriteTokens: 2, notionalCostUsd: 0.0042 },
+				modelUsage: expect.objectContaining({
+					"claude-sonnet-4": expect.objectContaining({ inputTokens: 121, contextWindow: 200_000, maxOutputTokens: 16_384, notionalCostUsd: 0.004 }),
+				}),
+			},
+		})]);
+
+		expect(normalizeClaudeSdkRootResultUsage({ ...rootResult, parent_tool_use_id: "parent-tool" })).toBeUndefined();
+		expect(normalizeClaudeSdkRootResultUsage({ ...rootResult, uuid: "" })).toBeUndefined();
+		expect(normalizeClaudeSdkRootResultUsage({ ...rootResult, usage: { input_tokens: 1 } })).toBeUndefined();
 	});
 
 	it("drains a child terminal locally while root tools and the root terminal remain live", () => {

@@ -27,10 +27,17 @@ type QueryFactory = (input: Parameters<typeof sdkQuery>[0]) => ReturnType<typeof
 
 export type ClaudeAgentSdkState = "new" | "starting" | "ready" | "running" | "interrupting" | "failed" | "stopped";
 
+/** A provider-owned compaction boundary for the SessionManager coordinator. */
+export interface ClaudeSdkPreCompactObservation {
+	readonly source: "claude-agent-sdk";
+	readonly trigger?: string;
+	readonly summary?: string;
+}
+
 export interface ClaudeAgentSdkBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-agent-sdk";
 	claudeAgentSdkSessionId?: string;
-	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
+	onBeforeCompact?: (input: ClaudeSdkPreCompactObservation) => Promise<void>;
 	/** Session-local Bobbit MCP surface. Direct bridge tests receive an equally strict empty surface. */
 	claudeSdkToolSurface?: ClaudeSdkToolSurface;
 }
@@ -221,6 +228,10 @@ function errorMessage(error: unknown): string {
 	return raw.replace(/(token|secret|key|authorization)\s*[:=]\s*[^\s,;]+/ig, "$1=<redacted>").slice(0, 500);
 }
 
+function boundedString(value: unknown, maxLength = 2_000): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value.slice(0, maxLength) : undefined;
+}
+
 function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
 	return typeof (value as Promise<T>)?.then === "function";
 }
@@ -304,7 +315,16 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				? this.options.initialModel.slice("claude-agent-sdk/".length) : undefined;
 			const preCompact = this.options.onBeforeCompact ? [{ hooks: [async (input: unknown) => {
 				const compact = input as import("@anthropic-ai/claude-agent-sdk").PreCompactHookInput;
-				await this.options.onBeforeCompact?.({ summary: compact.custom_instructions ?? undefined });
+				// This is a provider-owned checkpoint observation. The callback's
+				// coordinator decides persistence/refresh; do not emit Pi compaction
+				// completion events merely because the SDK is about to compact.
+				const trigger = boundedString((compact as { trigger?: unknown }).trigger, 120);
+				const summary = boundedString(compact.custom_instructions);
+				await this.options.onBeforeCompact?.({
+					source: "claude-agent-sdk",
+					...(trigger ? { trigger } : {}),
+					...(summary ? { summary } : {}),
+				});
 				return {};
 			}] }] : undefined;
 			const env = buildClaudeAgentSdkEnv(this.options);
@@ -483,7 +503,17 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		if (this.state === "failed" || this.state === "stopped") throw this.terminalError ?? new Error("Claude Agent SDK bridge stopped");
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			await Promise.race([this.ready, new Promise<void>((_, reject) => { timer = this.deps.clock.setTimeout(() => reject(new Error("Claude Agent SDK readiness timed out")), overallTimeoutMs); })]);
+			await Promise.race([this.ready, new Promise<void>((_, reject) => {
+				timer = this.deps.clock.setTimeout(
+					() => reject(new ClaudeAgentSdkUnavailableError("Claude Agent SDK unavailable: readiness timed out")),
+					overallTimeoutMs,
+				);
+			})]);
+		} catch (error) {
+			// A readiness deadline means a loader/query cannot safely accept queued
+			// input. Fail it once so every waiter and prompt settles consistently.
+			if (!this.terminalError && error instanceof ClaudeAgentSdkUnavailableError) this.fail(error);
+			throw this.terminalError ?? error;
 		} finally { if (timer) this.deps.clock.clearTimeout(timer); }
 	}
 
