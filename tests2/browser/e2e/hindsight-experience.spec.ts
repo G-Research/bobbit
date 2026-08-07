@@ -191,20 +191,34 @@ test.describe("Hindsight experience", () => {
 		await expect(retainOutcome).toBeVisible();
 		await expect(memories.getByLabel("Completed outcome")).toHaveCount(0);
 		// The server integration covers real completed/incomplete snapshots. This
-		// browser journey proves the native control sends no panel outcome body and
-		// that a retry renders the same idempotent success rather than a duplicate UI
-		// state.
+		// browser journey proves the native control sends no panel outcome body,
+		// never reports success for an unhealthy non-ok reply, and preserves the
+		// idempotent retry affordance after recovery.
 		let outcomeCalls = 0;
 		await page.route("**/api/ext/route/retain-outcome", async route => {
 			const request = JSON.parse(route.request().postData() ?? "{}");
 			expect(request.init?.body).toBeUndefined();
 			outcomeCalls += 1;
-			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, configured: true, outcomeId: "hindsight/stable-completed-goal" }) });
+			const body = outcomeCalls === 1
+				? { configured: true, code: "SERVICE_UNHEALTHY" }
+				: outcomeCalls === 2
+					? { configured: true }
+					: { ok: true, configured: true, outcomeId: "hindsight/stable-completed-goal" };
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 		});
 		await retainOutcome.click();
-		await expect(panel.getByRole("status")).toContainText("Completed outcome retained.");
+		await expect(panel.getByRole("status")).toContainText("SERVICE_UNHEALTHY");
+		await expect(panel.getByRole("status")).not.toContainText("Completed outcome retained.");
+		await expect(retainOutcome).toBeEnabled();
 		await retainOutcome.click();
 		await expect.poll(() => outcomeCalls).toBe(2);
+		await expect(panel.getByRole("status")).not.toContainText("Completed outcome retained.");
+		await expect(retainOutcome).toBeEnabled();
+		await retainOutcome.click();
+		await expect.poll(() => outcomeCalls).toBe(3);
+		await expect(panel.getByRole("status")).toContainText("Completed outcome retained.");
+		await retainOutcome.click();
+		await expect.poll(() => outcomeCalls).toBe(4);
 		await expect(panel.getByRole("status")).toContainText("Completed outcome retained.");
 
 		const hindsightTab = page.locator('[data-testid="side-panel-tab"]', { hasText: "Hindsight Memory" }).first();
