@@ -120,7 +120,7 @@ function supervisor(input: {
 	runners?: ServiceRunner[];
 	clock?: ServiceRuntimeClock;
 	probe?: ReturnType<typeof vi.fn>;
-	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined> };
+	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined>; storageIdentity?: string };
 	authorize?: ReturnType<typeof vi.fn>;
 	resolveSecret?: ReturnType<typeof vi.fn>;
 } = {}) {
@@ -401,6 +401,84 @@ describe("ServiceRuntimeSupervisor", () => {
 		await flush();
 
 		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 2, "the denied purge did not alter restart scheduling");
+	});
+
+	it("preflights restart continuity before mutating an existing resource", async () => {
+		const store = new FakeStore();
+		const old = record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:old-bank",
+		});
+		store.records.set(store.key(identity), old);
+		const local = runner("local");
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			settings: { mode: "docker", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-external:new-bank" },
+		});
+		const before = JSON.stringify(store.records.get(store.key(identity)));
+
+		await expect(instance.restart({ ...identity, mode: "docker" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		assert.equal(JSON.stringify(store.records.get(store.key(identity))), before, "mismatch leaves the persisted record byte-for-byte unchanged");
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		const status = await instance.status(identity);
+		assert.deepEqual(status, { identity, desired: "running", mode: "local", state: "degraded", diagnostic: { code: "SERVICE_DOWN" } });
+		assert.ok(!JSON.stringify(status).includes("new-bank"), "continuity identities never surface in status");
+	});
+
+	it("uses the established stop-then-start path when restart continuity matches", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:stable-bank",
+		}));
+		const local = runner("local", {
+			start: async () => ({ endpoint: `${endpoint}/restarted`, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] }),
+		});
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			settings: { mode: "local", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-managed:stable-bank" },
+			probe: vi.fn(async () => true),
+		});
+
+		await expect(instance.restart({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready", endpoint: `${endpoint}/restarted` });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1, "restart keeps the normal stop phase after preflight");
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1, "restart keeps normal stale ownership removal");
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, "hindsight-managed:stable-bank");
+	});
+
+	it("blocks a legacy runtime without an identity when a settings owner now resolves one", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "legacy-resource" } }));
+		const local = runner("local");
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			settings: { mode: "local", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-managed:known-bank" },
+		});
+
+		await expect(instance.restart({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0, "legacy records require explicit migration rather than replacement");
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, undefined);
+	});
+
+	it("keeps legacy generic records compatible when no settings owner opts into continuity", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "legacy-resource" } }));
+		const local = runner("local", {
+			start: async () => ({ endpoint: `${endpoint}/legacy-restarted`, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] }),
+		});
+		const { instance } = supervisor({ store, runners: [local], probe: vi.fn(async () => true) });
+
+		await expect(instance.restart({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready", endpoint: `${endpoint}/legacy-restarted` });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, undefined);
 	});
 
 	it("persists stopped intent before teardown and cancels a pending restart", async () => {

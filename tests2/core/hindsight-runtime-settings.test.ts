@@ -13,6 +13,7 @@ import {
 	redactEndpointHost,
 	validateHindsightRuntimeSettings,
 } from "../../market-packs/hindsight/src/runtime-settings.ts";
+import { hindsightStorageIdentity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const descriptorPath = path.join(root, "market-packs/hindsight/providers/memory.yaml");
@@ -48,6 +49,26 @@ describe("Hindsight EP-7 runtime settings", () => {
 		const saved = validateHindsightRuntimeSettings({ runtimeMode: "docker", ociImage: "registry.internal:5000/team/hindsight:0.8.6" });
 		assert.equal(saved.ok, true);
 		if (saved.ok) assert.deepEqual(saved.warnings, ["OCI_REFERENCE_MUTABLE_TAG"]);
+	});
+
+	it("derives opaque durable continuity identities without retaining database credentials", () => {
+		const managed = hindsightStorageIdentity("/state/service-data/../service-data/hindsight", "managed-volume");
+		assert.match(managed, /^hindsight-managed:[a-f0-9]{64}$/);
+		assert.equal(managed, hindsightStorageIdentity("/state/service-data/hindsight", "managed-volume"));
+
+		const secretUrl = "postgresql://alice:super-secret@DB.example:5432/hindsight?sslmode=require&token=also-secret";
+		const external = hindsightStorageIdentity("/ignored", "external", secretUrl);
+		assert.match(external, /^hindsight-external:[a-f0-9]{64}$/);
+		assert.equal(external, hindsightStorageIdentity("/ignored", "external", "postgresql://other-user:other-secret@db.example/hindsight"), "credential rotation preserves the same database continuity identity");
+		assert.ok(!external.includes("alice") && !external.includes("secret") && !external.includes("db.example"));
+		assert.throws(() => hindsightStorageIdentity("/ignored", "external", "not a database URL"), { code: "SERVICE_SETTING_UNAVAILABLE" });
+		try {
+			hindsightStorageIdentity("/ignored", "external", "mysql://alice:super-secret@db.example/hindsight");
+			assert.fail("an unsupported external database URL must fail closed");
+		} catch (error) {
+			assert.equal((error as { code?: unknown }).code, "SERVICE_SETTING_UNAVAILABLE");
+			assert.ok(!String(error).includes("alice") && !String(error).includes("super-secret") && !String(error).includes("db.example"));
+		}
 	});
 
 	it("allows a loopback local endpoint without a fake key and projects only safe diagnostics", () => {

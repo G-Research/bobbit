@@ -115,16 +115,18 @@ export class HindsightRuntimeSettingsResolver {
 		void input; // Settings ownership, rather than a caller, selects the target.
 		const provider = this.provider();
 		const runtime = this.getRuntimeValues(provider, true);
+		const resolved = resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values));
 		const materialized = materializeHindsightRuntimeSettings(publicRuntimeValues(runtime.values), runtime.revision, secretValues(runtime.values));
 		if (!materialized.ok) throw new ServiceRuntimeError(materialized.code);
 		if (materialized.mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
-		const dataDir = this.ownedDataDir(resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values)).dataDir);
+		const dataDir = this.ownedDataDir(resolved.dataDir);
 		return {
 			mode: materialized.mode,
 			revision: materialized.revision,
 			values: materialized.values,
 			storage: { dataPath: dataDir, ownedRoot: path.join(this.context.stateDir, "service-data") },
 			imageOverride: materialized.values.HINDSIGHT_OCI_IMAGE,
+			storageIdentity: hindsightStorageIdentity(dataDir, resolved.databaseMode, materialized.secrets.externalDatabaseUrl),
 		};
 	}
 
@@ -257,9 +259,11 @@ export class HindsightRuntimeBridge {
 		if (mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 		const request = { packId: HINDSIGHT_PACK_ID, runtimeId: HINDSIGHT_RUNTIME_ID, projectId };
 		if (action === "stop") return this.supervisor(projectId).stop(request);
-		if (action === "restart") await this.supervisor(projectId).stop(request);
 		const settings = this.settings(projectId);
-		return safeStatusDiagnostic(await this.supervisor(projectId).start(request), settings.modelDiagnostic(), settings.ociWarning());
+		const status = action === "restart"
+			? await this.supervisor(projectId).restart(request)
+			: await this.supervisor(projectId).start(request);
+		return safeStatusDiagnostic(status, settings.modelDiagnostic(), settings.ociWarning());
 	}
 
 	async logs(projectId: string): Promise<string | undefined> {
@@ -361,6 +365,27 @@ export class HindsightRuntimeBridge {
 
 function safeProjectToken(projectId: string): string {
 	return createHash("sha256").update(projectId).digest("hex").slice(0, 24);
+}
+
+/**
+ * This is deliberately an opaque durable continuity key, not a connection
+ * string or host path. Credential changes for the same external database do
+ * not change continuity; database target changes do.
+ */
+export function hindsightStorageIdentity(dataDir: string, databaseMode: "managed-volume" | "external", externalDatabaseUrl?: string): string {
+	if (databaseMode === "managed-volume") {
+		return `hindsight-managed:${createHash("sha256").update(path.normalize(dataDir)).digest("hex")}`;
+	}
+	if (!externalDatabaseUrl) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+	try {
+		const url = new URL(externalDatabaseUrl);
+		const protocol = url.protocol.toLowerCase() === "postgres:" ? "postgresql:" : url.protocol.toLowerCase();
+		if (protocol !== "postgresql:" || !url.hostname || !url.pathname || url.pathname === "/") throw new Error("invalid external database target");
+		const target = `${protocol}//${url.hostname.toLowerCase()}:${url.port || "5432"}${url.pathname}`;
+		return `hindsight-external:${createHash("sha256").update(target).digest("hex")}`;
+	} catch {
+		throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+	}
 }
 
 function sameStorage(a: MigrationStorage, b: MigrationStorage): boolean {

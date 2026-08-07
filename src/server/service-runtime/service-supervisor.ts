@@ -52,6 +52,8 @@ export interface ServiceRuntimeSettings {
 	storage?: RuntimeStorageDeclaration;
 	/** Validated user-selected OCI ref. It is materialized only for explicit start. */
 	imageOverride?: string;
+	/** Opaque settings-owner continuity key. The supervisor compares but never interprets it. */
+	storageIdentity?: string;
 }
 
 /** Settings are resolved only for explicit control or durable reconciliation. */
@@ -261,6 +263,21 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		return this.enqueueStart(request, () => this.doStart(request, false));
+	}
+
+	/**
+	 * Restart retains the established stop-then-start lifecycle, but makes the
+	 * settings-owner continuity comparison while the old record is authoritative.
+	 * It intentionally does not attempt an atomic/candidate replacement.
+	 */
+	restart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		return Promise.resolve()
+			.then(() => this.authorize(request, "start"))
+			.then(() => this.enqueueStart(request, () => this.doRestart(request)));
+	}
+
+	private enqueueStart(request: ServiceRuntimeControlRequest, operation: () => Promise<ServiceRuntimeStatus>): Promise<ServiceRuntimeStatus> {
 		const key = identityKey(request);
 		const prior = this.inFlight.get(key);
 		if (prior) {
@@ -268,12 +285,25 @@ export class ServiceRuntimeSupervisor {
 			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 		}
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, false));
+		const promise = this.enqueueLifecycle(identity, operation);
 		this.inFlight.set(key, { mode: request.mode, promise });
 		void promise.finally(() => {
 			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
 		}).catch(() => undefined);
 		return promise;
+	}
+
+	private async doRestart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		// The queued restart rechecks the live start grant before resolving settings
+		// or touching the old resource. doStop and doStart retain their own live
+		// action fences as they apply their respective lifecycle changes.
+		await this.authorize(request, "start");
+		const contribution = this.requireContribution(request);
+		const settings = await this.resolveControlSettings(request, contribution);
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		this.assertStorageContinuity(await this.options.store.load(identity), settings);
+		await this.doStop(request);
+		return this.doStart(request, false);
 	}
 
 	stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
@@ -373,10 +403,9 @@ export class ServiceRuntimeSupervisor {
 		try {
 			if (!alreadyAuthorized) await this.authorize(request, "start");
 			const contribution = this.requireContribution(request);
-			const settings = await this.options.settings.resolve({ ...request, contribution });
-			if (settings.imageOverride !== undefined && !isSafeServiceImageReference(settings.imageOverride)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
-			if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
+			const settings = await this.resolveControlSettings(request, contribution);
 			const prior = await this.options.store.load(identity);
+			this.assertStorageContinuity(prior, settings);
 			// A durable endpoint is only reusable when it names the current settings
 			// revision and the adapter proves that exact resource is still present.
 			if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
@@ -389,6 +418,7 @@ export class ServiceRuntimeSupervisor {
 			// resource, even though desired-running was committed first.
 			let desired = this.nextRecord(prior, {
 				desired: "running", selectedMode: settings.mode, settingsRevision: settings.revision,
+				storageIdentity: settings.storageIdentity,
 				endpoint: undefined, runnerIdentity: prior?.runnerIdentity, lastDiagnostic: undefined,
 			});
 			await this.options.store.replace(identity, desired);
@@ -426,7 +456,7 @@ export class ServiceRuntimeSupervisor {
 					: undefined);
 			}
 		} catch (error) {
-			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET/.test(error.code)) throw error;
+			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET|CONTINUITY/.test(error.code)) throw error;
 			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime start failed", { cause: error });
 		}
 	}
@@ -478,6 +508,23 @@ export class ServiceRuntimeSupervisor {
 		}
 		if (delay !== undefined) this.scheduleRestart(identity, request, delay);
 		return recordContext(identity, finalRecord);
+	}
+
+	private async resolveControlSettings(request: ServiceRuntimeControlRequest, contribution: RuntimeContribution): Promise<ServiceRuntimeSettings> {
+		const settings = await this.options.settings.resolve({ ...request, contribution });
+		if (settings.imageOverride !== undefined && !isSafeServiceImageReference(settings.imageOverride)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+		if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
+		return settings;
+	}
+
+	private assertStorageContinuity(prior: PersistedServiceRuntime | undefined, settings: ServiceRuntimeSettings): void {
+		// Both sides are optional to preserve generic runtimes that do not own a
+		// continuity key. A legacy record without one is safely blocked if its
+		// settings owner now resolves one, rather than guessing that an unknown
+		// existing bank can be replaced.
+		if (prior && prior.storageIdentity !== settings.storageIdentity) {
+			throw new ServiceRuntimeError("SERVICE_CONTINUITY_REQUIRED");
+		}
 	}
 
 	private async isReusableReady(
