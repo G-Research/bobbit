@@ -1,6 +1,6 @@
 name: claude-protocol-scout
 label: Claude Protocol Scout
-accessory: radar
+accessory: flask
 toolPolicies:
   bash: allow
   bash_bg: never
@@ -19,7 +19,6 @@ toolPolicies:
   goal_archive_child: never
   goal_decide_mutation: never
   goal_set_policy: never
-model: anthropic/claude-opus-5
 thinkingLevel: high
 createdAt: 1786096700000
 updatedAt: 1786096700000
