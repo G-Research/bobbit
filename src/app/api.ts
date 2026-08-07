@@ -2976,7 +2976,14 @@ export interface PackEntrypointWire {
 	listName: string;
 }
 
-export type ExtensionCapabilityWire = "decide" | "mutate" | "store" | "session" | "agents";
+/** Public vocabulary for exact, project-owned extension capability grants. */
+export type ExtensionCapabilityWire = "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
+
+export interface ExtensionCapabilityGrantTuple {
+	packId: string;
+	hookId: string;
+	capability: ExtensionCapabilityWire;
+}
 
 /** Grant-state metadata for an active inert hook declaration. */
 export interface HookGrantStatusWire {
@@ -4035,5 +4042,27 @@ export function patchExtensionSettingsPack(
 	return marketFetch(
 		`/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(packId)}`,
 		jsonInit("PATCH", request),
+	);
+}
+
+/** Grant one exact capability tuple through the authenticated project policy route. */
+export function grantExtensionCapability(
+	projectId: string,
+	tuple: ExtensionCapabilityGrantTuple,
+): Promise<MarketResult<{ grant: ExtensionCapabilityGrantTuple }>> {
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-grants`,
+		jsonInit("PUT", tuple),
+	);
+}
+
+/** Revoke one exact capability tuple through the authenticated project policy route. */
+export function revokeExtensionCapability(
+	projectId: string,
+	tuple: ExtensionCapabilityGrantTuple,
+): Promise<MarketResult<{ revoked: boolean }>> {
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-grants/${encodeURIComponent(tuple.packId)}/${encodeURIComponent(tuple.hookId)}/${encodeURIComponent(tuple.capability)}`,
+		jsonInit("DELETE"),
 	);
 }

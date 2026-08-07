@@ -1349,9 +1349,17 @@
 }
 
 .market-capability-grant {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.375rem;
 	margin-top: 0.25rem;
 	padding: 0.25rem 0.375rem;
 	border-left: 2px solid var(--border);
+}
+
+.market-capability-grant > .market-error {
+	flex-basis: 100%;
 }
 
 .market-settings-form {
