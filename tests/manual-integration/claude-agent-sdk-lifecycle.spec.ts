@@ -11,6 +11,7 @@
  */
 import { test, expect } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { manualTmpRoot } from "./manual-test-paths.ts";
 
@@ -155,6 +156,124 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 
 			const terminated = await gateway.sessionManager.terminateSession(created.id);
 			expect(terminated).toBe(true);
+			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
+		} finally {
+			if (gateway) await gateway.shutdown().catch(() => {});
+			if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+// This intentionally has a separate gate: the direct SDK smoke above remains
+// useful on hosts without Docker, while this proof requires the rebuilt image.
+test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription smoke)", () => {
+	test("uses the pooled Docker container with an explicit OAuth policy and resumes after replacement", async () => {
+		test.skip(
+			process.env.BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE !== "1",
+			"Set BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 with Docker, a rebuilt bobbit-agent image, and a local Claude subscription.",
+		);
+		test.setTimeout(360_000);
+		try {
+			execFileSync("docker", ["image", "inspect", "bobbit-agent"], { stdio: "ignore", timeout: 10_000 });
+		} catch {
+			throw new Error("Claude Agent SDK sandbox smoke requires Docker and a rebuilt bobbit-agent image.");
+		}
+		const configuredModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim();
+		if (!configuredModel || configuredModel.startsWith("claude-agent-sdk/")) {
+			throw new Error("Claude Agent SDK sandbox smoke requires MANUAL_CLAUDE_AGENT_SDK_MODEL without the provider prefix.");
+		}
+		const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		const root = join(manualTmpRoot(), `bobbit-claude-agent-sdk-sandbox-${nonce}`);
+		const bobbitDir = join(root, ".bobbit");
+		const projectRoot = join(root, "project");
+		let gateway: { shutdown(): Promise<void>; sessionManager: any } | undefined;
+		let token = "";
+		try {
+			mkdirSync(projectRoot, { recursive: true });
+			// A remote-less checkout exercises Bobbit's mounted clone without copying
+			// any credentials, settings, or authentication files into the sandbox.
+			execFileSync("git", ["init"], { cwd: projectRoot, stdio: "ignore" });
+			execFileSync("git", ["config", "user.email", "manual-smoke@example.invalid"], { cwd: projectRoot });
+			execFileSync("git", ["config", "user.name", "Manual SDK Smoke"], { cwd: projectRoot });
+			writeFileSync(join(projectRoot, "README.md"), "sandbox SDK manual smoke\n");
+			execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
+			execFileSync("git", ["commit", "-m", "manual sandbox smoke"], { cwd: projectRoot, stdio: "ignore" });
+			mkdirSync(join(bobbitDir, "state"), { recursive: true });
+			writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
+			writeFileSync(join(bobbitDir, "state", "setup-complete"), "manual-sdk-sandbox-smoke\n");
+			process.env.BOBBIT_DIR = bobbitDir;
+			process.env.BOBBIT_SECRETS_DIR = join(root, ".secrets");
+			// Do not set BOBBIT_AGENT_DIR: production resolves the current local
+			// subscription itself. This test never reads, copies, or logs its contents.
+			delete process.env.BOBBIT_AGENT_DIR;
+			delete process.env.ANTHROPIC_API_KEY;
+			delete process.env.ANTHROPIC_AUTH_TOKEN;
+			process.env.BOBBIT_SKIP_MCP = "1";
+			process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+			process.env.BOBBIT_SKIP_TITLE_GEN = "1";
+			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
+			process.env.BOBBIT_NO_OPEN = "1";
+			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
+			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
+			const { createGateway } = await import("../../dist/server/server.js");
+			setProjectRoot(bobbitDir);
+			scaffoldBobbitDir(bobbitDir);
+			token = loadOrCreateToken();
+			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
+			const port = await (gateway as any).start();
+			const api = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${port}${path}`, {
+				...init,
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers as Record<string, string> | undefined) },
+			});
+			const waitFor = async <T>(read: () => T | undefined, label: string, timeoutMs = 120_000): Promise<T> => {
+				const deadline = Date.now() + timeoutMs;
+				while (Date.now() < deadline) {
+					const value = read();
+					if (value !== undefined) return value;
+					await new Promise(resolve => setTimeout(resolve, 100));
+				}
+				throw new Error(`Timed out waiting for ${label}`);
+			};
+			const projectResponse = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: `sdk-sandbox-${nonce}`, rootPath: projectRoot, acceptCanonical: true }) });
+			expect(projectResponse.status, await projectResponse.clone().text()).toBe(201);
+			const project = await projectResponse.json() as { id: string };
+			const config = await api(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }] }),
+			});
+			expect(config.status, await config.text()).toBe(200);
+			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false, initialModel: `claude-agent-sdk/${configuredModel}` }) });
+			expect(createdResponse.status, await createdResponse.clone().text()).toBe(201);
+			const created = await createdResponse.json() as { id: string };
+			let session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK bridge installation");
+			expect(session.runtime).toBe("claude-agent-sdk");
+			expect(session.sandboxed).toBe(true);
+			expect(session.cwd).toBe("/workspace");
+			await session.rpcClient.waitForReady(120_000);
+			const firstVersion = session.agentObservedTurnVersion ?? 0;
+			await gateway.sessionManager.enqueuePrompt(created.id, "Reply with exactly: SDK_SANDBOX_READY", { source: "user" });
+			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > firstVersion ? true : undefined, "sandbox SDK prompt output");
+			await gateway.sessionManager.enqueuePrompt(created.id, "Count slowly until told to stop.", { source: "user" });
+			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "streaming" ? true : undefined, "sandbox SDK streaming turn");
+			await gateway.sessionManager.deliverLiveSteer(created.id, "Stop now and acknowledge this steer.");
+			await gateway.sessionManager.abortSessionTurn(created.id);
+			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox SDK interrupt to settle");
+			const sdkId = gateway.sessionManager.getPersistedSession(created.id).claudeAgentSdkSessionId;
+			expect(typeof sdkId).toBe("string");
+			await gateway.sessionManager.forceAbort(created.id);
+			session = await waitFor(() => gateway!.sessionManager.getSession(created.id)?.rpcClient?.running ? gateway!.sessionManager.getSession(created.id) : undefined, "sandbox SDK replacement");
+			expect(gateway.sessionManager.getPersistedSession(created.id).claudeAgentSdkSessionId).toBe(sdkId);
+			// Rebuild the gateway against the same isolated state. This exercises the
+			// persisted SDK UUID, fresh container wiring, and subscription handoff a
+			// second time without exposing any credential material to the test.
+			await gateway.shutdown();
+			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
+			await (gateway as any).start();
+			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK gateway restart");
+			await session.rpcClient.waitForReady(120_000);
+			expect(gateway.sessionManager.getPersistedSession(created.id).claudeAgentSdkSessionId).toBe(sdkId);
+			await gateway.sessionManager.terminateSession(created.id);
 			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
 		} finally {
 			if (gateway) await gateway.shutdown().catch(() => {});
