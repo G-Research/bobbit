@@ -130,6 +130,7 @@ const PROXYABLE: Record<string, Set<string>> = {
 	// `ServerHostApi` with the bound owner/source scoping stays in the PARENT and
 	// services the proxied calls over the same channel.
 	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status"]),
+	memory: new Set(["requireCapability"]),
 };
 
 interface HostCallBudget {
@@ -264,6 +265,7 @@ export class ModuleHost {
 					session: capSrc?.session === true,
 					store: capSrc?.store === true,
 					agents: capSrc?.agents === true,
+					memory: capSrc?.memory === true,
 				},
 			}
 			: {
@@ -274,6 +276,7 @@ export class ModuleHost {
 				// structured-cloned to the worker for routes that require rich identity.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
 				scopeContext: (req.ctx as { scopeContext?: unknown } | undefined)?.scopeContext,
+				outcome: (req.ctx as { outcome?: unknown } | undefined)?.outcome,
 				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
 				workingDir: req.ctx?.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,
@@ -283,6 +286,7 @@ export class ModuleHost {
 					session: capSrc?.session === true,
 					store: capSrc?.store === true,
 					agents: capSrc?.agents === true,
+					memory: capSrc?.memory === true,
 				},
 			};
 

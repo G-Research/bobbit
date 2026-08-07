@@ -6,7 +6,7 @@ import { execa } from "execa";
 import getPort from "get-port";
 import Dockerode from "dockerode";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
-import type { ComposeLaunch, DockerLaunch, LocalLaunch, ServiceRunMode, ServiceRuntimeManifest } from "./service-manifest.js";
+import { isSafeServiceImageReference, type ComposeLaunch, type DockerLaunch, type LocalLaunch, type ServiceRunMode, type ServiceRuntimeManifest } from "./service-manifest.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const STOP_TIMEOUT_MS = 10_000;
@@ -67,6 +67,8 @@ export interface ServiceRunnerStartInput {
 	envFile?: string;
 	/** A canonical storage bind prepared by the supervisor. */
 	storage?: { hostPath: string; target: string };
+	/** Validated settings-owned OCI ref, resolved only during explicit start. */
+	imageOverride?: string;
 	/** Exact secrets which must not enter the bounded command-output hook. */
 	redactions?: string[];
 	onOutput?: (output: string) => void;
@@ -417,7 +419,8 @@ export class DockerServiceRunner implements ServiceRunner {
 	async start(input: ServiceRunnerStartInput): Promise<StartedService> {
 		if (input.mode !== this.mode) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker runner selected for another mode");
 		const launch: DockerLaunch = input.manifest.modes.docker;
-		assertNonEmptyString(launch.image, "Docker image");
+		const image = input.imageOverride ?? launch.image;
+		if (!isSafeServiceImageReference(image)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker image is invalid");
 		if (launch.command) {
 			assertArgv(launch.command, "Docker command");
 			assertNoShellInterpreterInvocation(launch.command[0]!, launch.command.slice(1), "Docker command");
@@ -426,7 +429,7 @@ export class DockerServiceRunner implements ServiceRunner {
 		let container: DockerContainer | undefined;
 		try {
 			container = await this.docker.createContainer({
-				Image: launch.image,
+				Image: image,
 				Cmd: launch.command,
 				Env: Object.entries(input.environment).map(([key, value]) => `${key}=${value}`),
 				Labels: labelsFor(input),
@@ -450,7 +453,7 @@ export class DockerServiceRunner implements ServiceRunner {
 			const inspected = await container.inspect();
 			const endpoint = dockerEndpoint(inspected, input.manifest);
 			if (!endpoint) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker did not publish a loopback port");
-			return { endpoint, runnerIdentity: { kind: this.mode, id }, services: [{ id, name: launch.image }] };
+			return { endpoint, runnerIdentity: { kind: this.mode, id }, services: [{ id, name: image }] };
 		} catch (cause) {
 			await container.remove({ force: true }).catch(() => undefined);
 			throw cause;
@@ -582,11 +585,24 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose file is invalid", { cause });
 	}
 	assertComposeNoUnownedInterpolation(source, input.environment);
-	// This intentionally recognizes only the generic runtime surface. In
-	// particular, it excludes Compose imports, configs, secrets, named volumes,
-	// socket mounts, devices, and every host-namespace escape before `up`.
-	if (!isRecord(document) || !hasOnlyComposeKeys(document, ["services"]) || !isRecord(document.services)) {
-		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires only a services mapping");
+	// Compose named volumes are permitted only when they are project-owned (no
+	// `external`, custom `name`, drivers, or driver options). Compose prefixes the
+	// declared key with the server-derived project name, so `down` preserves an
+	// owned durable volume without ever reaching a host path or live legacy data.
+	if (!isRecord(document) || !hasOnlyComposeKeys(document, ["services", "volumes"]) || !isRecord(document.services)) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires services and optional owned volumes");
+	}
+	const volumes = document.volumes;
+	const namedVolumes = new Set<string>();
+	if (volumes !== undefined) {
+		if (!isRecord(volumes)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volumes are invalid");
+		for (const [name, declaration] of Object.entries(volumes)) {
+			assertComposeToken(name, "Compose volume");
+			if (declaration !== null && (!isRecord(declaration) || Object.keys(declaration).length !== 0)) {
+				throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume must be project-owned");
+			}
+			namedVolumes.add(name);
+		}
 	}
 	const services = document.services as Record<string, unknown>;
 	const declaredStorage = input.manifest.storage;
@@ -595,7 +611,8 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 		if (!isRecord(rawService) || !hasOnlyComposeKeys(rawService, ["image", "restart", "environment", "ports", "volumes", "depends_on"])) {
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service uses an unsupported feature");
 		}
-		if (typeof rawService.image !== "string" || rawService.image.length === 0 || /[\0\r\n$]/.test(rawService.image)) {
+		const image = rawService.image === "${SERVICE_RUNTIME_IMAGE}" ? input.environment.SERVICE_RUNTIME_IMAGE : rawService.image;
+		if (!isSafeServiceImageReference(image)) {
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service image is invalid");
 		}
 		if (rawService.restart !== undefined && rawService.restart !== "no" && rawService.restart !== false) {
@@ -617,19 +634,19 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Only the declared Compose service may publish ports");
 		}
 		if (rawService.volumes !== undefined) {
-			if (!declaredStorage || !input.storage || !Array.isArray(rawService.volumes)) {
+			if (!declaredStorage || !Array.isArray(rawService.volumes)) {
 				throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose storage is undeclared");
 			}
 			for (const volume of rawService.volumes) {
 				if (typeof volume !== "string") throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume is invalid");
-				const match = volume.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}:([^:]+)$/);
-				const environmentSource = match ? input.manifest.environment[match[1]!] : undefined;
-				if (!match || !environmentSource || !("setting" in environmentSource)
-					|| environmentSource.setting !== declaredStorage.setting
-					|| input.environment[match[1]!] !== input.storage.hostPath
-					|| match[2] !== declaredStorage.target || match[2] !== input.storage.target) {
-					throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume escapes declared storage");
-				}
+				const bind = volume.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}:([^:]+)$/);
+				const named = volume.match(/^([A-Za-z0-9][A-Za-z0-9_.-]*):([^:]+)$/);
+				const environmentSource = bind ? input.manifest.environment[bind[1]!] : undefined;
+				const validBind = !!bind && !!input.storage && !!environmentSource && "setting" in environmentSource
+					&& environmentSource.setting === declaredStorage.setting && input.environment[bind[1]!] === input.storage.hostPath
+					&& bind[2] === declaredStorage.target && bind[2] === input.storage.target;
+				const validNamed = !!named && namedVolumes.has(named[1]!) && named[2] === declaredStorage.target;
+				if (!validBind && !validNamed) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume escapes declared storage");
 				storageMounts++;
 			}
 		}
@@ -663,8 +680,11 @@ export class ComposeServiceRunner implements ServiceRunner {
 		assertComposeToken(launch.service, "Compose service");
 		const project = resolveComposeProject(launch, input);
 		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
-		validateComposeContract(file, input, launch);
-		const envFile = this.startEnvironmentFile(input, project, launch.service);
+		const composeInput = input.imageOverride
+			? { ...input, environment: { ...input.environment, SERVICE_RUNTIME_IMAGE: input.imageOverride } }
+			: input;
+		validateComposeContract(file, composeInput, launch);
+		const envFile = this.startEnvironmentFile(composeInput, project, launch.service);
 		let upIssued = false;
 		try {
 			upIssued = true;

@@ -15,7 +15,7 @@ export type RestartPolicy = "never" | "on-failure";
 export type ServiceEnvSource =
 	| { value: string }
 	| { setting: string }
-	| { secret: string }
+	| { secret: string; optional?: true }
 	| { generatedSecret: string }
 	| { endpointPort: true };
 
@@ -90,6 +90,11 @@ const SERVICE_TOKEN_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const PROJECT_TEMPLATE_RE = /^(?:[a-z0-9][a-z0-9_-]*|\$\{(?:packId|runtimeId|serverIdentity)\})(?:[a-z0-9_-]*|\$\{(?:packId|runtimeId|serverIdentity)\})*$/;
 const COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9._/@+-]*$/;
 const IMAGE_RE = /^(?=.{1,255}$)[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
+/** Safe OCI reference accepted on an inert settings save; resolution/pull occurs
+ * only when a generic runtime runner explicitly starts. */
+export function isSafeServiceImageReference(value: unknown): value is string {
+	return typeof value === "string" && IMAGE_RE.test(value);
+}
 const SHELL_METACHAR_RE = /[\0\r\n;&|`$<>]/;
 const LIKELY_SECRET_KEY_RE = /(secret|password|token|api[_-]?key|credential|private[_-]?key)/i;
 const LIKELY_SECRET_VALUE_RE = /(?:^|\s)(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_-]{12,}|bearer\s+\S+|eyJ[A-Za-z0-9_-]{10,}\.)/i;
@@ -175,9 +180,9 @@ function parseEnvironment(value: unknown, problems: string[]): Record<string, Se
 			problems.push(`environment has invalid variable name ${JSON.stringify(name)}`);
 			return null;
 		}
-		if (!isRecord(raw) || !hasOnlyKeys(raw, ["value", "setting", "secret", "generatedSecret", "endpointPort"], `environment.${name}`, problems)) return null;
-		const keys = Object.keys(raw);
-		if (keys.length !== 1) {
+		if (!isRecord(raw) || !hasOnlyKeys(raw, ["value", "setting", "secret", "generatedSecret", "endpointPort", "optional"], `environment.${name}`, problems)) return null;
+		const keys = Object.keys(raw).filter(key => key !== "optional");
+		if (keys.length !== 1 || (raw.optional !== undefined && (raw.optional !== true || keys[0] !== "secret"))) {
 			problems.push(`environment.${name} must declare exactly one source`);
 			return null;
 		}
@@ -200,7 +205,7 @@ function parseEnvironment(value: unknown, problems: string[]): Record<string, Se
 			}
 			result[name] = { value: source };
 		} else if (key === "setting") result[name] = { setting: source };
-		else if (key === "secret") result[name] = { secret: source };
+		else if (key === "secret") result[name] = raw.optional === true ? { secret: source, optional: true } : { secret: source };
 		else result[name] = { generatedSecret: source };
 	}
 	if (endpointPortCount !== 1) {

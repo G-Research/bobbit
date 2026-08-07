@@ -2,7 +2,7 @@ import path from "node:path";
 import pRetry from "p-retry";
 import type { RuntimeContribution } from "../agent/pack-contributions.js";
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
-import type { ServiceRuntimeManifest } from "./service-manifest.js";
+import { isSafeServiceImageReference, type ServiceRuntimeManifest } from "./service-manifest.js";
 import {
 	SERVICE_RUNTIME_STORE_ERROR,
 	ServiceRuntimeStore,
@@ -27,10 +27,14 @@ export interface ServiceRuntimeContext {
 	diagnostic?: { code: string; retryAt?: string };
 }
 
+/** Public status can also describe a configured external endpoint. External has
+ * no generic runner and therefore is never accepted by a control request. */
+export type ServiceRuntimeStatusMode = ServiceRuntimeMode | "external";
+
 export interface ServiceRuntimeStatus extends ServiceRuntimeContext {
 	identity: ServiceRuntimeIdentity;
 	desired: "stopped" | "running";
-	mode?: ServiceRuntimeMode;
+	mode?: ServiceRuntimeStatusMode;
 }
 
 export interface ServiceRuntimeControlRequest extends ServiceRuntimeIdentity {
@@ -46,6 +50,8 @@ export interface ServiceRuntimeSettings {
 	values: Readonly<Record<string, string | undefined>>;
 	/** A canonical, descriptor-owned host path for the declared storage bind. */
 	storage?: RuntimeStorageDeclaration;
+	/** Validated user-selected OCI ref. It is materialized only for explicit start. */
+	imageOverride?: string;
 }
 
 /** Settings are resolved only for explicit control or durable reconciliation. */
@@ -95,6 +101,18 @@ export class ServiceRuntimeError extends Error {
 		super(message, options);
 		this.name = "ServiceRuntimeError";
 	}
+}
+
+const STATUS_INSPECTION_TIMEOUT_MS = 2_000;
+
+function boundedStatusInspection<T>(work: Promise<T>): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new ServiceRuntimeError("SERVICE_UNAVAILABLE")), STATUS_INSPECTION_TIMEOUT_MS);
+		work.then(
+			value => { clearTimeout(timer); resolve(value); },
+			error => { clearTimeout(timer); reject(error); },
+		);
+	});
 }
 
 const realClock: ServiceRuntimeClock = {
@@ -218,7 +236,7 @@ export class ServiceRuntimeSupervisor {
 		if (!contribution) return base;
 		try {
 			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
-			const inspected = await runner.inspect(await this.inspectInput(identity, contribution, record.runnerIdentity));
+			const inspected = await boundedStatusInspection(runner.inspect(await this.inspectInput(identity, contribution, record.runnerIdentity)));
 			if (!inspected) {
 				return { ...withoutEndpoint(base), state: "degraded", diagnostic: { code: "SERVICE_DOWN" } };
 			}
@@ -354,6 +372,7 @@ export class ServiceRuntimeSupervisor {
 			if (!alreadyAuthorized) await this.authorize(request, "start");
 			const contribution = this.requireContribution(request);
 			const settings = await this.options.settings.resolve({ ...request, contribution });
+			if (settings.imageOverride !== undefined && !isSafeServiceImageReference(settings.imageOverride)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
 			if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 			const prior = await this.options.store.load(identity);
 			// A durable endpoint is only reusable when it names the current settings
@@ -387,7 +406,8 @@ export class ServiceRuntimeSupervisor {
 				started = await runner.start({
 					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile),
 					serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,
-					environment: materialized.environment, ...(materialized.envFile ? { envFile: materialized.envFile } : {}), storage: materialized.storage, redactions: materialized.secrets,
+					environment: materialized.environment, ...(materialized.envFile ? { envFile: materialized.envFile } : {}), storage: materialized.storage,
+					...(settings.imageOverride ? { imageOverride: settings.imageOverride } : {}), redactions: materialized.secrets,
 					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized!.secrets).catch(() => undefined); },
 				});
 				// A running resource is durably owned before readiness can fail.
@@ -539,7 +559,10 @@ export class ServiceRuntimeSupervisor {
 				const value = this.options.settings.resolveSecret
 					? await this.options.settings.resolveSecret(source.secret, { ...request, contribution })
 					: await this.options.store.resolveUserSecret(source.secret);
-				if (!value) throw new ServiceRuntimeError("SERVICE_SECRET_UNAVAILABLE");
+				if (!value) {
+					if (source.optional === true) continue;
+					throw new ServiceRuntimeError("SERVICE_SECRET_UNAVAILABLE");
+				}
 				environment[name] = value; secrets.push(value);
 			}
 		}
