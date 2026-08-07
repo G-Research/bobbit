@@ -52,8 +52,6 @@ export interface ServiceRuntimeSettings {
 	storage?: RuntimeStorageDeclaration;
 	/** Validated user-selected OCI ref. It is materialized only for explicit start. */
 	imageOverride?: string;
-	/** Opaque owner-derived storage key. The supervisor compares it but never interprets it. */
-	storageIdentity?: string;
 }
 
 /** Settings are resolved only for explicit control or durable reconciliation. */
@@ -259,21 +257,10 @@ export class ServiceRuntimeSupervisor {
 		// endpoint or status. doStart rechecks the live grant when queued work applies.
 		return Promise.resolve()
 			.then(() => this.authorize(request, "start"))
-			.then(() => this.startAuthorized(request, false));
+			.then(() => this.startAuthorized(request));
 	}
 
-	/**
-	 * Restart is a single lifecycle operation, not stop-then-start. This lets the
-	 * storage preflight reject an unsafe replacement before endpoint/state/runner
-	 * ownership is changed.
-	 */
-	restart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
-		return Promise.resolve()
-			.then(() => this.authorize(request, "start"))
-			.then(() => this.startAuthorized(request, true));
-	}
-
-	private startAuthorized(request: ServiceRuntimeControlRequest, forceFresh: boolean): Promise<ServiceRuntimeStatus> {
+	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
 		const key = identityKey(request);
 		const prior = this.inFlight.get(key);
 		if (prior) {
@@ -281,7 +268,7 @@ export class ServiceRuntimeSupervisor {
 			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 		}
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, false, forceFresh));
+		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, false));
 		this.inFlight.set(key, { mode: request.mode, promise });
 		void promise.finally(() => {
 			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
@@ -390,12 +377,6 @@ export class ServiceRuntimeSupervisor {
 			if (settings.imageOverride !== undefined && !isSafeServiceImageReference(settings.imageOverride)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
 			if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 			const prior = await this.options.store.load(identity);
-			// Settings owners provide only an opaque identity. A changed identity is
-			// an explicit migration boundary: fail before changing durable state or
-			// removing a resource that still owns the prior bank.
-			if (prior && prior.storageIdentity !== settings.storageIdentity) {
-				throw new ServiceRuntimeError("SERVICE_MIGRATION_REQUIRED");
-			}
 			// A durable endpoint is only reusable when it names the current settings
 			// revision and the adapter proves that exact resource is still present.
 			if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
@@ -408,7 +389,6 @@ export class ServiceRuntimeSupervisor {
 			// resource, even though desired-running was committed first.
 			let desired = this.nextRecord(prior, {
 				desired: "running", selectedMode: settings.mode, settingsRevision: settings.revision,
-				storageIdentity: settings.storageIdentity,
 				endpoint: undefined, runnerIdentity: prior?.runnerIdentity, lastDiagnostic: undefined,
 			});
 			await this.options.store.replace(identity, desired);
@@ -446,7 +426,7 @@ export class ServiceRuntimeSupervisor {
 					: undefined);
 			}
 		} catch (error) {
-			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET|MIGRATION/.test(error.code)) throw error;
+			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET/.test(error.code)) throw error;
 			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime start failed", { cause: error });
 		}
 	}

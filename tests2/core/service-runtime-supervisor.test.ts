@@ -120,7 +120,7 @@ function supervisor(input: {
 	runners?: ServiceRunner[];
 	clock?: ServiceRuntimeClock;
 	probe?: ReturnType<typeof vi.fn>;
-	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined>; storageIdentity?: string };
+	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined> };
 	authorize?: ReturnType<typeof vi.fn>;
 	resolveSecret?: ReturnType<typeof vi.fn>;
 } = {}) {
@@ -428,43 +428,6 @@ describe("ServiceRuntimeSupervisor", () => {
 		retryClock.advance();
 		await flush();
 		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
-	});
-
-	it("fences a storage-changing start before state or old resource ownership changes", async () => {
-		const store = new FakeStore();
-		const old = record({ endpoint, runnerIdentity: { kind: "local", id: "old-resource" }, storageIdentity: "hindsight-managed-marker-bank" });
-		store.records.set(store.key(identity), old);
-		const local = runner("local");
-		const { instance } = supervisor({
-			store,
-			runners: [local],
-			settings: { mode: "docker", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-external-migrated-bank" },
-		});
-
-		await expect(instance.start({ ...identity, mode: "docker" })).rejects.toMatchObject({ code: "SERVICE_MIGRATION_REQUIRED" });
-		assert.deepEqual(store.records.get(store.key(identity)), old, "the old ready endpoint and opaque bank identity remain authoritative");
-		assert.equal(store.replaceCalls.length, 0, "storage fence runs before durable state application");
-		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0, "storage fence never removes the old resource");
-		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
-		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0, "storage fence never launches an empty replacement");
-	});
-
-	it("restarts atomically only when the opaque storage identity is unchanged", async () => {
-		const store = new FakeStore();
-		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "old-resource" }, storageIdentity: "bank-stable" }));
-		const local = runner("local", { start: async () => ({ endpoint: `${endpoint}/restarted`, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] }) });
-		const { instance } = supervisor({
-			store,
-			runners: [local],
-			settings: { mode: "local", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "bank-stable" },
-			probe: vi.fn(async () => true),
-		});
-
-		await expect(instance.restart({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready", endpoint: `${endpoint}/restarted` });
-		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0, "restart must not publish a stopped gap before storage preflight");
-		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1);
-		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
-		assert.equal(store.records.get(store.key(identity))?.storageIdentity, "bank-stable");
 	});
 
 	it("retains ownership and a diagnostic when stop or stale removal fails", async () => {

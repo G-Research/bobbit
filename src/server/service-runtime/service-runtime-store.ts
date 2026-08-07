@@ -35,8 +35,6 @@ export interface PersistedServiceRuntime {
 	desired: ServiceRuntimeDesiredState;
 	selectedMode: ServiceRuntimeMode;
 	settingsRevision: string;
-	/** Opaque owner-derived storage key. It never contains a path, URL, or secret. */
-	storageIdentity?: string;
 	runnerIdentity?: ServiceRuntimeRunnerIdentity;
 	endpoint?: string;
 	restartAttempts: number[];
@@ -102,7 +100,6 @@ const MAX_ARTIFACT_LINES = 200;
 const ID_RE = /^@?[A-Za-z0-9][A-Za-z0-9._@/-]{0,199}$/;
 const RUNTIME_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const DIAGNOSTIC_CODE_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
-const STORAGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 function isNotFound(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
@@ -141,7 +138,7 @@ function assertSafeString(value: unknown, name: string, max = 1024): asserts val
 }
 
 function assertRecord(record: PersistedServiceRuntime, serverIdentity: string): void {
-	const allowed = new Set(["version", "serverIdentity", "desired", "selectedMode", "settingsRevision", "storageIdentity", "runnerIdentity", "endpoint", "restartAttempts", "lastDiagnostic", "updatedAt"]);
+	const allowed = new Set(["version", "serverIdentity", "desired", "selectedMode", "settingsRevision", "runnerIdentity", "endpoint", "restartAttempts", "lastDiagnostic", "updatedAt"]);
 	if (!record || typeof record !== "object" || Object.keys(record).some((key) => !allowed.has(key)) || record.version !== 1 || record.serverIdentity !== serverIdentity) {
 		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted runtime record");
 	}
@@ -152,9 +149,6 @@ function assertRecord(record: PersistedServiceRuntime, serverIdentity: string): 
 		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted runtime mode");
 	}
 	assertSafeString(record.settingsRevision, "settings revision", 512);
-	if (record.storageIdentity !== undefined && (typeof record.storageIdentity !== "string" || !STORAGE_ID_RE.test(record.storageIdentity))) {
-		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted storage identity");
-	}
 	assertSafeString(record.updatedAt, "timestamp", 64);
 	if (!Array.isArray(record.restartAttempts) || record.restartAttempts.some((value) => !Number.isFinite(value) || value < 0)) {
 		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted restart attempts");
