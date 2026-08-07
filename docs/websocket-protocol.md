@@ -235,10 +235,10 @@ verifies model read-back. It persists and publishes the replacement tuple with
 `condition: null` only after activation succeeds.
 
 Activation failure returns `MODEL_SELECTION_RECOVERY_FAILED` and preserves the
-unavailable durable tuple and condition. A second model or thinking selection
-while activation is running returns the same code instead of waiting behind the
-first request. While the condition remains, `prompt`, `steer`, `retry`,
-`restart_agent`, and `set_thinking_level` return `MODEL_SELECTION_REQUIRED`;
+unavailable durable tuple and condition. A second `set_model` while activation
+is running returns the same code instead of waiting behind the first request.
+While the condition remains, `prompt`, `steer`, `retry`, `restart_agent`, and
+`set_thinking_level` return `MODEL_SELECTION_REQUIRED`;
 `get_state` and `get_messages` remain available so the session stays navigable
 and readable. See [Restored session requires a model](debugging.md#restored-session-requires-a-model).
 
