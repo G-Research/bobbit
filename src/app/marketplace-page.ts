@@ -46,6 +46,8 @@ import {
 	getExtensionSettings,
 	patchExtensionSettingsPack,
 	patchExtensionSettingsTarget,
+	grantExtensionCapability,
+	revokeExtensionCapability,
 	fetchTools,
 	fetchMcpServers,
 	listMarketplaceAdoptions,
@@ -72,6 +74,8 @@ import {
 	type PackEntityDescriptions,
 	type PackMcpContributionWire,
 	type PiExtensionDiagnostic,
+	type ExtensionCapabilityGrantTuple,
+	type ExtensionCapabilityWire,
 	type ExtensionSettingsResponse,
 } from "./api.js";
 
@@ -190,6 +194,13 @@ let settingsErrors = new Map<string, Map<string, string>>();
 let settingsFormErrors = new Map<string, string>();
 let settingsBusy = new Set<string>();
 let settingsStatus = "";
+// Grant actions are independent from settings saves and keyed by their exact,
+// project-owned tuple so a repeated click cannot submit duplicate authority.
+const capabilityGrantBusy = new Set<string>();
+const capabilityGrantErrors = new Map<string, string>();
+const marketGrantCapabilities = new Set<ExtensionCapabilityWire>([
+	"decide", "mutate", "filter:tool-result", "store", "session", "agents", "prompt:system-static", "prompt:system-author",
+]);
 
 // Drag-reorder state (market packs within one scope).
 let dragScope: MarketScope | null = null;
@@ -312,7 +323,11 @@ function settingsOwnerKey(target: Pick<ExtensionSettingsTarget, "packId" | "kind
 	return `${target.packId}:${target.kind}:${target.id}`;
 }
 
-function clearExtensionSettingsUi(): void {
+function capabilityGrantKey(projectId: string, tuple: ExtensionCapabilityGrantTuple): string {
+	return `${projectId}:${tuple.packId}:${tuple.hookId}:${tuple.capability}`;
+}
+
+function clearExtensionSettingsUi(clearCapabilityGrantState = true): void {
 	expandedSettingsOwner = "";
 	settingsDrafts.clear();
 	secretDrafts.clear();
@@ -320,6 +335,10 @@ function clearExtensionSettingsUi(): void {
 	settingsFormErrors.clear();
 	settingsBusy.clear();
 	settingsStatus = "";
+	if (clearCapabilityGrantState) {
+		capabilityGrantBusy.clear();
+		capabilityGrantErrors.clear();
+	}
 }
 
 function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: string): ExtensionSettingsProjection {
@@ -366,8 +385,13 @@ function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: 
 			}),
 			grants: target.hookGrant?.requestedCapabilities.map((capability) => ({
 				capability,
-				state: target.hookGrant?.grants.includes(capability) ? (inactive ? "Granted · inactive" : "Granted") : "Not granted",
+				// A newer server may advertise a reserved capability unknown to this
+				// client. Keep it visible, but never offer authority we cannot name.
+				state: marketGrantCapabilities.has(capability)
+					? target.hookGrant?.grants.includes(capability) ? (inactive ? "Granted · inactive" : "Granted") : "Not granted"
+					: "Unavailable",
 			})),
+
 		};
 	});
 	for (const packId of new Set(targets.map((target) => target.packId))) {
@@ -2286,7 +2310,7 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 			}
 			throw new Error();
 		}
-		clearExtensionSettingsUi();
+		clearExtensionSettingsUi(false);
 		settingsStatus = `Settings saved for ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
 		await loadExtensionSettings(projectId);
 	} catch {
@@ -2317,6 +2341,59 @@ async function toggleSettingsTarget(target: ExtensionSettingsTarget, enabled: bo
 	} finally { settingsBusy.delete(owner); renderApp(); }
 }
 
+function isGrantedCapability(state?: string): boolean {
+	return state === "Granted" || state === "Granted · inactive";
+}
+
+function isActionableCapability(capability: string, state?: string): capability is ExtensionCapabilityWire {
+	return state !== "Unavailable" && marketGrantCapabilities.has(capability as ExtensionCapabilityWire);
+}
+
+async function changeCapabilityGrant(target: ExtensionSettingsTarget, capability: string, grantState?: string): Promise<void> {
+	const projectId = currentProjectId();
+	if (!projectId || !isActionableCapability(capability, grantState)) return;
+	const tuple: ExtensionCapabilityGrantTuple = { packId: target.packId, hookId: target.id, capability };
+	const key = capabilityGrantKey(projectId, tuple);
+	if (capabilityGrantBusy.has(key)) return;
+	const granted = isGrantedCapability(grantState);
+	if (!granted) {
+		const { confirmAction } = await import("./dialogs.js");
+		const projectName = state.projects.find((project) => project.id === projectId)?.name || "this project";
+		const confirmed = await confirmAction(
+			"Grant extension capability",
+			`Grant ${capability} to hook ${target.label || target.id} (${target.id}) in pack ${target.packId} for ${projectName}?`,
+			"Grant capability",
+		);
+		if (!confirmed || currentProjectId() !== projectId || capabilityGrantBusy.has(key)) return;
+	}
+	capabilityGrantBusy.add(key);
+	capabilityGrantErrors.delete(key);
+	renderApp();
+	try {
+		const response = granted
+			? await revokeExtensionCapability(projectId, tuple)
+			: await grantExtensionCapability(projectId, tuple);
+		if (!response.ok) {
+			if (currentProjectId() === projectId) {
+				capabilityGrantErrors.set(key, response.status === 403
+					? "Only a browser operator can change extension grants"
+					: `Could not ${granted ? "revoke" : "grant"} this extension capability. Retry.`);
+			}
+			return;
+		}
+		if (currentProjectId() !== projectId) return;
+		settingsStatus = `${granted ? "Revoked" : "Granted"} ${capability} for ${target.label || target.id} in ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
+		// Grants affect only authority. Reload the server's safe projection rather
+		// than inferring runtime status or changing activation/configuration locally.
+		await loadExtensionSettings(projectId);
+	} finally {
+		if (currentProjectId() === projectId) {
+			capabilityGrantBusy.delete(key);
+			renderApp();
+		}
+	}
+}
+
 function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 	const owner = settingsOwnerKey(target);
 	const open = expandedSettingsOwner === owner;
@@ -2331,7 +2408,19 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : target.kind === "runtime" ? "market-project-runtime-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
 		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
 		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
-		${target.kind === "hook" && target.grants?.length ? html`<details class="market-hook-grants" data-testid="market-hook-grants"><summary>Review grants</summary>${target.grants.map((grant) => html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "unknown"}>${grant.capability}: ${grant.state || "Unavailable"}</div>`)}</details>` : ""}
+		${target.kind === "hook" && target.grants?.length ? html`<details class="market-hook-grants" data-testid="market-hook-grants"><summary>Review grants</summary>${target.grants.map((grant) => {
+			const tuple = { packId: target.packId, hookId: target.id, capability: grant.capability as ExtensionCapabilityWire };
+			const grantKey = capabilityGrantKey(currentProjectId() || "", tuple);
+			const granted = isGrantedCapability(grant.state);
+			const actionable = isActionableCapability(grant.capability, grant.state);
+			const grantBusy = capabilityGrantBusy.has(grantKey);
+			const grantError = capabilityGrantErrors.get(grantKey);
+			return html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"}>
+				<span>${grant.capability}: ${grant.state || "Unavailable"}</span>
+				<button type="button" class="market-btn" data-testid="market-capability-action" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} ?disabled=${!actionable || grantBusy} @click=${() => changeCapabilityGrant(target, grant.capability, grant.state)}>${grantBusy ? (granted ? "Revoking…" : "Granting…") : actionable ? `${granted ? "Revoke" : "Grant"} ${grant.capability}` : "Unavailable"}</button>
+				${grantError ? html`<div class="market-error" data-testid="market-capability-error" role="alert">${grantError}</div>` : ""}
+			</div>`;
+		})}</details>` : ""}
 		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId())}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
 	</div>`;
 }
