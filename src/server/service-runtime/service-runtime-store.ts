@@ -263,7 +263,7 @@ function redact(value: string, secrets: readonly string[]): string | undefined {
 	const variants = redactionVariants(secrets);
 	if (!variants) return undefined;
 	let sanitized = value;
-	for (const secret of variants.sort((a, b) => b.length - a.length)) {
+	for (const secret of [...variants].sort((a, b) => b.length - a.length)) {
 		const escaped = escapeSecretForPattern(secret);
 		sanitized = sanitized.replace(new RegExp(`\\b[A-Za-z_][A-Za-z0-9_]*=${escaped}`, "g"), (entry) => {
 			const equals = entry.indexOf("=");
