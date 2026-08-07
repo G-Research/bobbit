@@ -132,8 +132,9 @@ export class MessageEditor extends LitElement {
 	@property() cwd?: string;
 	/** Project ID — used to scope slash skill discovery */
 	@property() projectId?: string;
-	/** Explicit server-provided session runtime; never inferred from model/provider. */
-	@property() runtime: ComposerRuntime = "pi";
+	/** Explicit server-provided session runtime; never inferred from model/provider.
+	 * Undefined is a real loading state and must not assume Pi controls. */
+	@property() runtime: ComposerRuntime | undefined;
 	@property({ attribute: false }) onCompact?: () => void | Promise<void>;
 
 	@state() processingFiles = false;
@@ -163,6 +164,8 @@ export class MessageEditor extends LitElement {
 
 	// Slash skill autocomplete state
 	@state() private _slashSkills: ComposerSlashSkill[] = mergeBuiltInSlashCommands([]);
+	/** Server-only token reservations for non-menu skill winners. */
+	private _slashCollisionClaims: Array<{ name: string }> = [];
 	@state() private _slashFilteredSkills: SlashSkillInfo[] = [];
 	@state() private _slashMenuOpen = false;
 	@state() private _slashSelectedIndex = 0;
@@ -233,6 +236,7 @@ export class MessageEditor extends LitElement {
 	private _composerSlashRegistry() {
 		return createComposerSlashRegistry({
 			skills: this._slashSkills,
+			collisionClaims: this._slashCollisionClaims,
 			launchers: listLauncherEntrypoints("composer-slash"),
 			runtime: this.runtime,
 		});
@@ -241,6 +245,7 @@ export class MessageEditor extends LitElement {
 	private async _loadSlashSkills() {
 		if (!this.cwd) {
 			this._slashSkills = mergeBuiltInSlashCommands([]);
+			this._slashCollisionClaims = [];
 			this._slashSkillsLoaded = true;
 			return;
 		}
@@ -256,11 +261,13 @@ export class MessageEditor extends LitElement {
 				const data = await res.json();
 				if (generation === this._slashLoadGeneration && this.cwd === cwd && this.projectId === projectId) {
 					this._slashSkills = mergeBuiltInSlashCommands(Array.isArray(data.skills) ? data.skills : []);
+					this._slashCollisionClaims = Array.isArray(data.collisionClaims) ? data.collisionClaims : [];
 				}
 			}
 		} catch {
 			if (generation === this._slashLoadGeneration && this.cwd === cwd && this.projectId === projectId) {
 				this._slashSkills = mergeBuiltInSlashCommands([]);
+				this._slashCollisionClaims = [];
 			}
 		}
 		if (generation !== this._slashLoadGeneration || this.cwd !== cwd || this.projectId !== projectId) return;
@@ -857,6 +864,15 @@ export class MessageEditor extends LitElement {
 		// commit is left to the IME. Zero effect for non-IME users.
 		if (e.isComposing || e.keyCode === 229) return;
 
+		// Ctrl/Cmd+Enter is a submit path even while autocomplete is visible. Give
+		// interception priority so an exact Bobbit command cannot bypass the
+		// resolver by being completed as a normal Enter selection.
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+			e.preventDefault();
+			void this.handleSteerShortcut();
+			return;
+		}
+
 		// Slash autocomplete keyboard handling
 		if (this._slashMenuOpen) {
 			if (e.key === "ArrowDown") {
@@ -902,15 +918,6 @@ export class MessageEditor extends LitElement {
 				this._atMenuOpen = false;
 				return;
 			}
-		}
-
-		// Ctrl/Cmd+Enter steer shortcut. Placed AFTER the slash/@-menu blocks (so an
-		// open autocomplete keeps Enter ownership) and BEFORE the plain Enter branch
-		// (Ctrl/Cmd+Enter also satisfies `!e.shiftKey`). IME is already guarded above.
-		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
-			e.preventDefault();
-			void this.handleSteerShortcut();
-			return;
 		}
 
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -1006,6 +1013,17 @@ export class MessageEditor extends LitElement {
 		}
 	};
 
+	private _composerDispatchAlert(kind: "unsupported-compact" | "unavailable-compact" | "compact" | "skill" | "launcher"): string {
+		switch (kind) {
+			case "unsupported-compact":
+				return "Manual compaction isn’t available for Claude Agent SDK sessions.";
+			case "unavailable-compact":
+				return "Manual compaction is unavailable until the session runtime is ready.";
+			default:
+				return "Slash commands can’t be sent as steers. Press Enter to send a normal prompt.";
+		}
+	}
+
 	private handleSend = async () => {
 		const text = this.value;
 		// Content-aware lock: block only an identical concurrent submission (same text
@@ -1027,10 +1045,10 @@ export class MessageEditor extends LitElement {
 		this._sendSizeError = "";
 		this._steerError = ""; // a normal send dismisses any stale steer-attachment alert (D2)
 		const dispatch = resolveComposerSlashDispatch(text, { runtime: this.runtime, registry: this._composerSlashRegistry() });
-		if (dispatch?.kind === "unsupported-compact") {
-			// This hidden reservation prevents Claude Agent SDK's bundled command from
-			// receiving the raw token. Do not mutate the draft, attachments, history, or focus.
-			this._steerError = "Manual compaction isn’t available for Claude Agent SDK sessions.";
+		if (dispatch?.kind === "unsupported-compact" || dispatch?.kind === "unavailable-compact") {
+			// Hidden reservations prevent a runtime-native command from receiving the
+			// raw token. Do not mutate the draft, attachments, history, or focus.
+			this._steerError = this._composerDispatchAlert(dispatch.kind);
 			return;
 		}
 		if (dispatch?.kind === "compact") {
@@ -1100,13 +1118,21 @@ export class MessageEditor extends LitElement {
 	 *  newly added attachment during the await is preserved, never discarded. */
 	private handleSteerShortcut = async () => {
 		if (this.processingFiles) return; // same readiness guard as send
+		const text = this.value;
+		if (!text.trim()) return; // non-empty text required
+		// Steers bypass server prompt expansion and local launcher dispatch. Refuse
+		// every exact Bobbit-owned command before attachment/lock/send handling so
+		// none can reach a runtime as raw text.
+		const dispatch = resolveComposerSlashDispatch(text, { runtime: this.runtime, registry: this._composerSlashRegistry() });
+		if (dispatch) {
+			this._steerError = this._composerDispatchAlert(dispatch.kind);
+			return;
+		}
 		if (this.attachments.length > 0) {
 			// Block: retain text, attachments, draft, and focus untouched.
 			this._steerError = MessageEditor.STEER_ATTACHMENT_ERROR;
 			return;
 		}
-		const text = this.value;
-		if (!text.trim()) return; // non-empty text required
 		// Content-aware submit-lock: while the async readiness/send await is pending the
 		// composer stays enabled, so a second Ctrl/Cmd+Enter (or key auto-repeat) — or a
 		// normal send via handleSend — could re-enter with the SAME unchanged snapshot and
@@ -1435,6 +1461,7 @@ export class MessageEditor extends LitElement {
 			this._slashLoadGeneration++;
 			this._slashSkillsLoaded = false;
 			this._slashSkills = mergeBuiltInSlashCommands([]);
+			this._slashCollisionClaims = [];
 			this._slashFilteredSkills = [];
 			this._slashMenuOpen = false;
 			if (this.cwd) void this._loadSlashSkills();

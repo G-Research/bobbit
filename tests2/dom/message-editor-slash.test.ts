@@ -49,9 +49,11 @@ afterEach(() => {
 });
 
 interface MountOptions {
-	runtime?: "pi" | "claude-agent-sdk";
+	/** null explicitly models a runtime that has not arrived from the server yet. */
+	runtime?: "pi" | "claude-agent-sdk" | null;
 	onSend?: (text: string, attachments: unknown[]) => void;
 	onCompact?: () => void;
+	onSteerSend?: (text: string) => boolean | Promise<boolean>;
 	attachments?: unknown[];
 }
 
@@ -59,9 +61,10 @@ async function mount(options: MountOptions = {}): Promise<any> {
 	const el = document.createElement("message-editor") as any;
 	// Runtime and onCompact are the composer dispatch boundary. Keep these tests
 	// on the real component rather than reproducing the resolver in a fixture.
-	el.runtime = options.runtime ?? "pi";
+	el.runtime = options.runtime === null ? undefined : (options.runtime ?? "pi");
 	el.onCompact = options.onCompact;
 	el.onSend = options.onSend;
+	el.onSteerSend = options.onSteerSend;
 	el.attachments = options.attachments ?? [];
 	el.cwd = "/tmp";
 	el.showModelSelector = false;
@@ -86,8 +89,8 @@ async function setComposer(el: any, value: string, caret: number): Promise<void>
 	await el.updateComplete;
 	t.setSelectionRange(caret, caret);
 }
-async function key(el: any, k: string): Promise<void> {
-	textarea(el).dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+async function key(el: any, k: string, modifiers: KeyboardEventInit = {}): Promise<void> {
+	textarea(el).dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...modifiers }));
 	await el.updateComplete;
 }
 const isMenuOpen = (el: any): boolean => !!el._slashMenuOpen;
@@ -273,5 +276,49 @@ describe("Slash autocomplete", () => {
 		expect(el.value).toBe("/compact ");
 		expect(el.attachments).toEqual([attachment]);
 		expect(el.querySelector('[role="alert"]')?.textContent).toMatch(/attachment/i);
+	});
+
+	it("refuses SDK /compact before Ctrl/Cmd+Enter steer and preserves the draft", async () => {
+		const steer = vi.fn(() => true);
+		const attachment = { id: "a1", type: "image", fileName: "keep.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" };
+		const el = await mount({ runtime: "claude-agent-sdk", onSteerSend: steer, attachments: [attachment] });
+		await setComposer(el, "/compact", 8);
+		textarea(el).focus();
+		await key(el, "Enter", { ctrlKey: true });
+
+		expect(steer).not.toHaveBeenCalled();
+		expect(el.value).toBe("/compact");
+		expect(el.attachments).toEqual([attachment]);
+		expect(document.activeElement).toBe(textarea(el));
+		expect(el.querySelector('[role="alert"]')?.textContent).toBe("Manual compaction isn’t available for Claude Agent SDK sessions.");
+	});
+
+	it("keeps runtime unknown distinct from Pi and consumes /compact locally", async () => {
+		const sends: string[] = [];
+		const compact = vi.fn();
+		const el = await mount({ runtime: null, onSend: (text) => sends.push(text), onCompact: compact });
+		await setComposer(el, "/", 1);
+		expect(filtered(el)).not.toContain("compact");
+
+		await setComposer(el, "/compact", 8);
+		await key(el, "Enter");
+		expect(sends).toEqual([]);
+		expect(compact).not.toHaveBeenCalled();
+		expect(el.querySelector('[role="alert"]')?.textContent).toBe("Manual compaction is unavailable until the session runtime is ready.");
+	});
+
+	it("refuses Bobbit slash commands as steers while ordinary steers are unchanged", async () => {
+		const steer = vi.fn(() => true);
+		const compact = vi.fn();
+		const el = await mount({ runtime: "pi", onSteerSend: steer, onCompact: compact });
+		await setComposer(el, "/compact", 8);
+		await key(el, "Enter", { metaKey: true });
+		expect(steer).not.toHaveBeenCalled();
+		expect(compact).not.toHaveBeenCalled();
+		expect(el.querySelector('[role="alert"]')?.textContent).toBe("Slash commands can’t be sent as steers. Press Enter to send a normal prompt.");
+
+		await setComposer(el, "interrupt now", 13);
+		await key(el, "Enter", { ctrlKey: true });
+		expect(steer).toHaveBeenCalledWith("interrupt now");
 	});
 });
