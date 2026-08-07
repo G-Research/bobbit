@@ -33,6 +33,51 @@ Bobbit derives and persists runtime from the selected provider; the runtime is
 not a separate preference. Replacement cannot change an existing session between
 Pi and SDK; create a new session for a cross-runtime model choice.
 
+## Review workflow selection
+
+Workflow choice is separate from runtime selection. The registered
+`claude-runtime` workflow is for changes whose correctness depends on the Claude
+Agent SDK contract or its subscription-only boundary; it does not make a session
+use the SDK. The selected `claude-agent-sdk/<model-id>` provider still decides
+that.
+
+| Scope | Select | Required evidence |
+| --- | --- | --- |
+| A narrow empirical SDK or fixture question | A protocol-only, goal-specific snapshot using the `protocol-spike` gate | Version-tagged, sanitized observed setup and SDK evidence; record unresolved questions rather than inferring behavior. |
+| Setup or provider-selection work with no end-to-end SDK session claim | A reduced, goal-specific `claude-runtime` snapshot | Retain the applicable protocol/design, parity, and billing checks; state which gates are omitted and why. It cannot claim real-session coverage. |
+| Session lifecycle, tools, persistence, transcript/usage, rendering, auth, billing, or any user-visible SDK behavior | The full registered `claude-runtime` workflow | All workflow gates, including real-subscription dogfood evidence. |
+| Work with no Claude-runtime safety contract, such as unrelated documentation | `general` | The ordinary workflow evidence. |
+
+The named `claude-runtime` definition is the full workflow. A protocol-only or
+reduced scope must be proposed as a valid inline workflow snapshot before goal
+creation, not obtained by silently skipping gates on an active goal. Bobbit uses
+the same validation and verification engine for these snapshots. Every goal
+stores its own frozen workflow copy, so later edits to the project template do
+not change work already in progress; use the explicit goal-workflow replacement
+flow when a live goal genuinely needs a different contract. See
+[Goals, Workflows, Tasks & Gates](goals-workflows-tasks.md#workflows).
+
+The full workflow assigns three narrow specialists in addition to ordinary
+reviewers:
+
+- **Claude Protocol Scout** gathers version-tagged, sanitized empirical evidence
+  for a protocol spike. It is an evidence producer, not a gate verifier.
+- **Backend Parity Reviewer** checks SDK fixture drift, Pi-default routing,
+  canonical tool-policy names, and transcript/usage fidelity at shared seams.
+- **Billing Safety Auditor** checks that subscription-only operation cannot
+  inherit API, cloud, or alternate-auth fallback and that billed and notional
+  usage remain distinct.
+
+The dogfood gate is a content review by `spec-auditor`. Deterministic tests do
+not replace it: the submitted matrix must record the opt-in real-subscription
+command, installed SDK/Claude version, unprefixed model ID, sanitized
+`apiKeySource`/subscription proof, lifecycle results, transcript and usage
+observations, and any exercised browser-rendering screenshots. The specialist
+roles do not pin a provider or model; they inherit the goal's resolved model, so
+review coverage does not introduce an API-provider selection. See the
+[Claude runtime review workflow design](design/claude-runtime-review-workflow.md)
+for the gate layout and evidence rules.
+
 ## Runtime architecture
 
 `SessionManager` continues to own durable prompt queues, steer recovery, status,
