@@ -63,6 +63,32 @@ function json<T>(response: BrowserResponse): T {
 	}
 }
 
+function packRow(page: Page) {
+	return page.locator(`[data-testid="market-project-pack-row"][data-contribution-id="${PACK_ID}"]`);
+}
+
+async function openProjectMarket(page: Page, projectId: string): Promise<void> {
+	await openApp(page);
+	// The ordinary browser bootstrap request mints the signed operator cookie;
+	// grant controls then use that same browser-held proof, never a test header.
+	await browserApi(page, { path: "/api/goals" });
+	await page.evaluate((id) => { window.location.hash = `#/market/${encodeURIComponent(id)}/installed`; }, projectId);
+	await expect(page.locator(`[data-testid="market-project-runtime"][data-project-id="${projectId}"][data-pack-id="${PACK_ID}"]`)).toBeVisible({ timeout: 20_000 });
+	await expect(packRow(page)).toBeVisible({ timeout: 20_000 });
+}
+
+async function openPackGrantDetails(page: Page): Promise<ReturnType<typeof packRow>> {
+	const row = packRow(page);
+	const grants = row.getByTestId("market-extension-grants");
+	await expect(grants).toBeVisible({ timeout: 20_000 });
+	if ((await grants.getAttribute("open")) === null) {
+		await grants.locator("summary").focus();
+		await page.keyboard.press("Enter");
+	}
+	await expect(grants).toHaveAttribute("open", "");
+	return row;
+}
+
 function hookProjection(body: ContributionsResponse): HookProjection {
 	const pack = body.packs.find(candidate => candidate.packId === PACK_ID);
 	if (!pack) throw new Error(`Fixture pack ${PACK_ID} was not active in /api/ext/contributions`);
@@ -91,6 +117,7 @@ function installFixturePack(bobbitDir: string): string {
 		"description: Browser fixture for exact extension grants.",
 		"version: 1.0.0",
 		"schema: 2",
+		"capabilities: [service.manage, memory.read, memory.read.all]",
 		"contents:",
 		"  roles: []",
 		"  tools: []",
@@ -142,6 +169,55 @@ test.describe("extension capability grants", () => {
 		if (projectRoot) fs.rmSync(projectRoot, { recursive: true, force: true });
 	});
 
+	test("Market pack row grants, reloads, revokes, and audits one exact non-hook capability", async ({ page }) => {
+		if (!projectId) throw new Error("fixture project was not registered");
+		await openProjectMarket(page, projectId);
+		const row = await openPackGrantDetails(page);
+		const grants = row.getByTestId("market-extension-grants");
+		await expect(grants).toContainText("Manage service");
+		await expect(grants).toContainText("service.manage");
+		await expect(grants).toContainText("Read memory");
+		await expect(grants).toContainText("memory.read");
+		await expect(grants).toContainText("Read all memory");
+		await expect(grants).toContainText("memory.read.all");
+		await expect(grants.getByText(/grant all/i)).toHaveCount(0);
+
+		const broadRow = grants.getByTestId("market-capability-grant").filter({ has: page.locator('[data-capability="memory.read.all"]') });
+		const broadAction = broadRow.getByTestId("market-capability-action");
+		await expect(broadRow).toContainText("Not granted");
+		await expect(broadAction).toHaveAccessibleName("Grant memory.read.all");
+		await broadAction.focus();
+		await page.keyboard.press("Enter");
+		await expect(page.getByText("Grant extension capability")).toBeVisible();
+		await expect(page.getByText(new RegExp(`Grant memory\\.read\\.all to pack .*\\(${PACK_ID}\\).*all project memory`, "i"))).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(broadRow).toContainText("Not granted");
+
+		await broadAction.click();
+		await page.getByRole("button", { name: "Grant capability", exact: true }).click();
+		await expect(broadRow).toContainText("Granted", { timeout: 20_000 });
+		await expect(grants.getByTestId("market-capability-grant").filter({ has: page.locator('[data-capability="memory.read"]') })).toContainText("Not granted");
+		await expect(grants.getByTestId("market-capability-grant").filter({ has: page.locator('[data-capability="service.manage"]') })).toContainText("Not granted");
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
+		const reloadedRow = await openPackGrantDetails(page);
+		const reloadedGrants = reloadedRow.getByTestId("market-extension-grants");
+		const reloadedBroadRow = reloadedGrants.getByTestId("market-capability-grant").filter({ has: page.locator('[data-capability="memory.read.all"]') });
+		await expect(reloadedBroadRow).toContainText("Granted");
+
+		const history = page.getByTestId("market-grant-history");
+		await history.locator("summary").click();
+		const grantedAudit = history.getByTestId("market-grant-history-entry").filter({ hasText: "memory.read.all" }).first();
+		await expect(grantedAudit).toContainText(`Pack · ${PACK_ID}`);
+		await expect(grantedAudit).toContainText("Granted");
+		await expect(grantedAudit.locator("time")).toHaveAttribute("datetime", /T/);
+
+		await reloadedBroadRow.getByTestId("market-capability-action").click();
+		await expect(reloadedBroadRow).toContainText("Not granted", { timeout: 20_000 });
+		await expect(history.getByTestId("market-grant-history-entry").filter({ hasText: "Revoked" }).filter({ hasText: "memory.read.all" })).toHaveCount(1, { timeout: 20_000 });
+	});
+
 	test("grant → revoke from the authenticated app origin leaves an inert persisted projection after reload", async ({ page }) => {
 		if (!projectId) throw new Error("fixture project was not registered");
 		await openApp(page);
@@ -180,11 +256,11 @@ test.describe("extension capability grants", () => {
 		response = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectId)}/extension-grant-audit` });
 		expect(response.status, response.text).toBe(200);
 		const audit = json<{ entries: Array<{ at: string; actor: string; action: string; packId: string; hookId: string; capability: string }> }>(response);
-		expect(audit.entries.slice(0, 2)).toEqual(expect.arrayContaining([
+		expect(audit.entries).toEqual(expect.arrayContaining([
 			expect.objectContaining({ action: "granted", ...tuple }),
 			expect.objectContaining({ action: "revoked", ...tuple }),
 		]));
-		for (const entry of audit.entries) {
+		for (const entry of audit.entries.filter((entry) => entry.hookId === HOOK_ID)) {
 			expect(Object.keys(entry).sort()).toEqual(["action", "actor", "at", "capability", "hookId", "packId"]);
 			expect(new Date(entry.at).toISOString()).toBe(entry.at);
 			expect(entry.actor).toMatch(/^(localhost|admin)$/);
