@@ -24,6 +24,24 @@ export function readPackageVersion(): string {
 	return (JSON.parse(fs.readFileSync(path.resolve(cliDir, "../../package.json"), "utf-8")) as { version: string }).version;
 }
 
+export function hasVersionFlag(argv: string[]): boolean {
+	for (let i = 0; i < argv.length; i++) {
+		switch (argv[i]) {
+			case "--version":
+				return true;
+			case "--host":
+			case "--port":
+			case "--cwd":
+			case "--static":
+			case "--agent-cli":
+			case "--base-path":
+				i++;
+				break;
+		}
+	}
+	return false;
+}
+
 export interface CliArgs {
 	host: string;
 	port: number;
@@ -218,7 +236,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 
 async function main() {
 	const argv = process.argv.slice(2);
-	if (argv.includes("--version")) {
+	if (hasVersionFlag(argv)) {
 		process.stdout.write(`v${readPackageVersion()}\n`);
 		return;
 	}
