@@ -41,6 +41,59 @@ the source row/event that supplied them. Replay may suppress a duplicate
 rendered row by its stable source identity, but it must not sum, normalize,
 move, synthesize, or otherwise account for usage/cost.
 
+## Alternatives considered
+
+### Option A (chosen): server semantic embedded-work projection
+
+The bridge sends partitioned translated child rows and verified policy lifecycle
+records to `claude-sdk-subagent-work.ts`. Its assembler emits
+`claude_sdk_subagent_work` frames; `SessionManager`/`EventBuffer` sequence and
+snapshot those frames without admitting them to root lifecycle state. The
+client mirror applies frames to `subagentWorkByParent` before root reduction,
+and the existing parent `DelegateRenderer` branch renders the exact-keyed work.
+
+### Option B (rejected): minimal client-side projection of raw events
+
+The existing translator already stamps child events with `parentToolUseId`, and
+the bridge/EventBuffer already forward and replay ordinary translated events
+with server sequence numbers. This lighter composition would leave those raw
+partitioned events unchanged and have `remote-agent.ts` partition/project them
+before `message-reducer.ts`, reusing the existing root event path.
+
+The baseline is protected by
+`tests2/core/claude-sdk-event-translator.test.ts` (partitioning, duplicate
+fingerprints, child-local terminal drain),
+`tests2/core/claude-agent-sdk-bridge.test.ts` (event routing and root
+`agent_end`), `tests2/core/claude-agent-sdk-skills-subagents.test.ts`
+(admission registry), and
+`tests2/core/claude-agent-sdk-session-access.test.ts` (sanitized SDK access).
+
+| Option | Data/control flow and files | Concrete failure modes | Protecting test seams |
+| --- | --- | --- | --- |
+| A — selected | `claude-sdk-subagent-work.ts` assembles translated partitions plus policy lifecycle into semantic frames; `claude-agent-sdk-bridge.ts`, `session-manager.ts`, and EventBuffer carry them; session-access supplies recovery; `src/app/claude-sdk-subagent-work.ts`, `remote-agent.ts`, and the existing renderer consume parent-keyed work. | A missing/late parent, replay, reload, and root abort are handled where the authoritative parent, lifecycle, event sequence, and snapshot boundaries exist; only malformed/unknown data remains bounded diagnostic work. | New core assembler, bridge, policy, session-access, integration SessionManager/EventBuffer, DOM card, and browser reload/resume tests in the focused plan; the four baseline tests above protect the reused seams. |
+| B — rejected | `claude-sdk-event-translator.ts` and the existing bridge continue raw forwarding; only `remote-agent.ts` adds a client projection before `message-reducer.ts`, with existing raw EventBuffer replay. | `SubagentStart`/`SubagentStop` are only in the server policy registry, so lifecycle phase still requires a server-to-client lifecycle event. Reload/archive still require server `listSubagents`/`getSubagentMessages` recovery and snapshot handling. Client-only isolation leaves `SessionManager.handleAgentLifecycle` and snapshot construction able to treat child terminals/rows as root state. | The four baseline tests prove raw forwarding, not lifecycle publication, conservative recovery, snapshot reconstruction, or server root isolation; those gaps require the same new server/integration seams as A. |
+
+Option B therefore saves neither the lifecycle wire contract nor the server
+recovery and root-boundary work, while splitting the authoritative projection
+across client and server. Option A is the smallest robust option: one semantic
+server projection at the lifecycle/snapshot boundary plus a narrow client
+mirror. A standalone subagent UI is excluded by the goal, not an alternative
+under consideration.
+
+### Defect-surface inventory
+
+| New surface | Failure prevented / reason it exists |
+| --- | --- |
+| Server `claude-sdk-subagent-work.ts` projection/assembler | Prevents raw child rows, tools, and terminals from crossing root lifecycle and transcript boundaries while preserving exact-parent ordering and replay identity. |
+| Client `claude-sdk-subagent-work.ts` mirror | Prevents semantic-frame/recovery/replay application from being duplicated in `RemoteAgent` or entering the root message reducer. |
+| `claude_sdk_subagent_work` event type | Prevents client receipt of indistinguishable raw child events that can leak into root prose or settle root state. |
+| Policy `subscribe` API | Prevents uncorrelated Start/Stop hooks from losing their admitted registry parent association or leaving live work permanently running. |
+| `readSdkSubagents` wrapper | Prevents direct transcript parsing or treating an agent-id list as a parent/lifecycle mapping during recovery. |
+| `readSdkSubagentMessages` wrapper | Prevents unsanitized, unbounded, or wrong-directory SDK history access and makes exact-parent recovery testable. |
+| Snapshot envelope `subagentWork` field | Prevents reload/archive/compaction from either losing child work or promoting it into root `messages`. |
+| Narrow `DelegateRenderer` branch | Prevents a second standalone subagent UI or rendering approved native `Agent` work through an incompatible generic card. |
+| Parent-keyed `subagentWorkByParent` client state | Prevents interleaved/late children from attaching to the latest parent or reordering root transcript state. |
+
 ## Existing seams
 
 | Existing seam | G10b responsibility |
