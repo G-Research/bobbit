@@ -212,10 +212,14 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		// These are the actual SDK hook fields. No invented lifecycle/cost/session
 		// ids are permitted as a correlation backdoor.
 		const startInput = { hook_event_name: "SubagentStart", session_id: "root-sdk-session", transcript_path: "/private/child.jsonl", cwd: "/workspace", ...child };
-		// A malformed/unadmitted lifecycle hook must not terminate the root query;
-		// it simply leaves no active child capable of dispatching a tool.
+		// Invalid and unadmitted lifecycle hooks preserve the root query. Neither
+		// can create a child capable of dispatching even a read-only MCP tool.
+		expect(await start({ ...startInput, agent_id: "" })).toMatchObject({ continue: true });
+		expect(policy.active.size).toBe(0);
+		await expect((surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext({ agentID: "child-1" }))).resolves.toMatchObject({ behavior: "deny" });
 		expect(await start(startInput)).toMatchObject({ continue: true });
 		expect(policy.active.size).toBe(0);
+		await expect((surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext({ agentID: "child-1" }))).resolves.toMatchObject({ behavior: "deny" });
 
 		const rootCall = hookInput();
 		await expect((surface.canUseTool as any)("Agent", rootCall.tool_input, permissionContext())).resolves.toMatchObject({ behavior: "allow" });
@@ -224,10 +228,12 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		const competing = hookInput({ tool_use_id: "agent-use-2", tool_input: { subagent_type: "bobbit-protocol-scout", prompt: "competing child", run_in_background: false } });
 		expect(permissionDecision(await preToolUse(competing))).toBe("deny");
 
-		// A hostile start cannot consume the admitted root request or fabricate an
-		// active child; the root still admits the exact pending projection.
-		expect(await start({ ...startInput, agent_type: "general-purpose" })).toMatchObject({ continue: false });
+		// A mismatched start cannot consume the admitted root request or fabricate
+		// an active child. It continues the root; only the exact pending projection
+		// may start and inherit its originating Agent tool-use id.
+		expect(await start({ ...startInput, agent_type: "general-purpose" })).toMatchObject({ continue: true });
 		expect(policy.active.size).toBe(0);
+		await expect((surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext({ agentID: "child-1" }))).resolves.toMatchObject({ behavior: "deny" });
 		expect(await start(startInput)).toMatchObject({ continue: true });
 		expect(policy.active.get("child-1")).toMatchObject({ agentId: "child-1", agentType: "bobbit-backend-parity-reviewer" });
 		await expect((surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext({ agentID: "child-1" }))).resolves.toMatchObject({ behavior: "allow" });
@@ -242,7 +248,7 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "read-only evidence" }], stop_reason: "end_turn" },
 		});
 		translator = childFrame.state;
-		expect(childFrame.events).toEqual([expect.objectContaining({ type: "message_end", parentToolUseId: "agent-use-1", parentAgentId: "child-1" })]);
+		expect(childFrame.events).toEqual([expect.objectContaining({ type: "message_end", parentToolUseId: "agent-use-1" })]);
 		expect(childFrame.events.some((event: any) => event.type === "agent_end")).toBe(false);
 		await stop({ hook_event_name: "SubagentStop", session_id: "root-sdk-session", transcript_path: "/private/root.jsonl", cwd: "/workspace", stop_hook_active: false, agent_transcript_path: "/private/child.jsonl", ...child });
 		expect(policy.active.size).toBe(0);
@@ -291,8 +297,10 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 			expect(event).toEqual(expect.objectContaining({ sessionId: "root-sdk-session", outcome: expect.any(String) }));
 			expect(Object.keys(event).every(key => ["sessionId", "outcome", "toolUseId", "agentId", "agentType", "parentToolUseId", "durationMs"].includes(key))).toBe(true);
 		}
-		expect(audit).toContainEqual(expect.objectContaining({ outcome: "started", agentId: "child-1", agentType: "bobbit-backend-parity-reviewer" }));
-		expect(audit).toContainEqual(expect.objectContaining({ outcome: "stopped", agentId: "child-1", agentType: "bobbit-backend-parity-reviewer", parentToolUseId: "agent-use-1", durationMs: expect.any(Number) }));
+		expect(audit).toContainEqual(expect.objectContaining({ outcome: "started", toolUseId: "agent-use-1", agentId: "child-1", agentType: "bobbit-backend-parity-reviewer" }));
+		// Stop must retain the bounded root Agent id correlated at exact admission,
+		// never a lifecycle-hook supplied parent identifier.
+		expect(audit).toContainEqual(expect.objectContaining({ outcome: "stopped", toolUseId: "agent-use-1", agentId: "child-1", agentType: "bobbit-backend-parity-reviewer", parentToolUseId: "agent-use-1", durationMs: expect.any(Number) }));
 		surface.dispose?.();
 		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "mcp__bobbit__read", ...child })))).toBe("deny");
 	});

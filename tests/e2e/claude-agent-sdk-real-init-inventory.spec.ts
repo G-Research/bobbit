@@ -18,7 +18,7 @@ import { buildClaudeAgentSdkQueryOptions, buildClaudeSdkSubagentPolicy, buildCla
 const EXPECTED_INVENTORY = {
 	sdkPackageVersion: "0.3.222",
 	claudeCodeVersion: "2.1.222",
-	tools: ["Agent", "Skill", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"],
+	tools: ["Skill", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"],
 	skills: ["batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design-sync", "doctor", "fewer-permission-prompts", "loop", "run", "run-skill-generator", "simplify", "update-config", "verify"],
 	agents: ["Explore", "Plan", "bobbit-backend-parity-reviewer", "bobbit-billing-safety-auditor", "bobbit-protocol-scout", "claude", "general-purpose", "statusline-setup"],
 	slash_commands: ["__remote-workflow", "agents", "autocompact", "batch", "claude-api", "clear", "code-review", "color", "compact", "config", "context", "dataviz", "debug", "deep-research", "design", "design-consent", "design-revoke", "design-sync", "doctor", "effort", "fast", "fewer-permission-prompts", "goal", "heapdump", "init", "insights", "loop", "mcp", "model", "recap", "reload-skills", "rename", "review", "run", "run-skill-generator", "security-review", "simplify", "team-onboarding", "update-config", "usage", "verify", "workflow-launch-exec"],
@@ -134,6 +134,8 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 				autoMemoryEnabled: EXPECTED_INVENTORY.autoMemoryEnabled,
 				mcpServers: EXPECTED_INVENTORY.mcp_servers,
 			});
+			// `init.tools` reports literal callable tools only. The programmatic
+			// `agents` definitions are the real Agent meta-facility inventory.
 			expect(options.tools).toEqual(["Skill", "Agent"]);
 			expect(options.skills).toEqual(EXPECTED_INVENTORY.skills);
 			expect(options.agents && Object.keys(options.agents).sort()).toEqual([
@@ -174,8 +176,8 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 					expect(observed).toEqual(EXPECTED_INVENTORY);
 				} catch (error) {
 					// Pin upgrades must be reviewed against the literal live report, never
-					// accepted by regenerating the fixture. In particular 2.1.222 omits
-					// Agent from this diagnostic inventory despite the option admitting it.
+					// accepted by regenerating the fixture. In 2.1.222 `init.tools` omits
+					// Agent: the agent definitions are the real meta-facility inventory.
 					console.error("[claude-sdk-real-init-inventory] observed", JSON.stringify(observed));
 					throw error;
 				}
