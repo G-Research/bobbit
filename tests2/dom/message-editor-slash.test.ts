@@ -312,6 +312,10 @@ describe("Slash autocomplete", () => {
 		const compact = vi.fn();
 		const el = await mount({ runtime: "pi", onSteerSend: steer, onCompact: compact });
 		await setComposer(el, "/compact", 8);
+		// Close the completion menu first: open-menu Enter ownership is covered in
+		// message-editor-steer.test.ts, while this test verifies slash refusal.
+		await key(el, "Escape");
+		expect(isMenuOpen(el)).toBe(false);
 		await key(el, "Enter", { metaKey: true });
 		expect(steer).not.toHaveBeenCalled();
 		expect(compact).not.toHaveBeenCalled();
