@@ -52,6 +52,21 @@ Retention never masks a successful discovery result. If discovery succeeds and o
 
 `GET /api/aigw/status` is deliberately a live-discovery view and therefore returns `models: []` on an outage. `/api/models` is the session-selection view and may still include the matching retained rows. The empty status response does not erase `models.json` or by itself mean that durable routing was disconnected.
 
+## Saved sessions after authoritative model removal
+
+A persisted provider/model tuple is a binding, not a hint. If cold restore completes against an authoritative session catalog that omits a session's complete tuple, Bobbit exposes the session condition `MODEL_SELECTION_REQUIRED` instead of starting Pi with a fallback. This prevents a historical conversation from silently continuing through a different provider or model.
+
+While the condition is active:
+
+- The session remains listed, attachable, and navigable. Its transcript and exact saved tuple remain unchanged, and history is read without starting Pi.
+- Prompt admission is rejected before queue, transcript, attachment, persistence, or RPC work. The browser keeps the composer text and attachment draft so the user can send them after recovery.
+- The **Choose replacement model** action opens the existing session picker. Recovery accepts only an exact, currently session-selectable tuple, starts the session pinned to it, restores the existing transcript, clamps thinking to that model's capabilities, and verifies runtime read-back.
+- Bobbit persists the replacement and clears the condition only after successful verification. A failed activation keeps the unavailable tuple and recoverable session intact and returns a sanitized error so the user can retry or choose another model.
+
+For AIGW, a successful discovery that omits the old row can trigger this condition. A thrown discovery request alone is not evidence of retirement: when the matching last-published row is eligible for retention, it remains the session-selection authority during that outage. This distinction is why operators should compare `/api/models`, not only the live `/api/aigw/status` response, before concluding that a saved model was retired.
+
+See [Debugging — restored session requires a model](debugging.md#restored-session-requires-a-model) for diagnosis and recovery checks.
+
 ## Remote config security
 
 Discovery URLs are untrusted configuration and are constrained to prevent credential leakage, SSRF, and DNS rebinding:
