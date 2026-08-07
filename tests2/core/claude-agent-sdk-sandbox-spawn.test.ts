@@ -54,7 +54,11 @@ afterEach(() => {
 describe("Claude Agent SDK sandbox spawn", () => {
 	it("executes only the image-pinned wrapper with opaque SDK args and an allowlisted environment", () => {
 		const child = dockerChild();
-		const spawn = vi.fn(() => child);
+		let dockerSpawnCall: [command: string, args: string[], options: { stdio?: unknown }] | undefined;
+		const spawn = vi.fn((command: string, args: string[], options: { stdio?: unknown }) => {
+			dockerSpawnCall = [command, args, options];
+			return child;
+		});
 		const launch = createClaudeSdkDockerSpawn({
 			containerId: "sandbox-current",
 			cwd: "/workspace-wt/team/session",
@@ -86,7 +90,8 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		} as any);
 
 		expect(spawn).toHaveBeenCalledOnce();
-		const [bin, args, options] = spawn.mock.calls[0];
+		if (!dockerSpawnCall) throw new Error("Expected Docker spawn arguments to be captured");
+		const [bin, args, options] = dockerSpawnCall;
 		expect(bin).toBe("docker");
 		expect(options).toMatchObject({ stdio: ["pipe", "pipe", "pipe"] });
 		expect(args).toEqual([
