@@ -237,6 +237,7 @@ jobs:
           PRERELEASE=()
           if [ "$DIST_TAG" = next ]; then PRERELEASE=(--prerelease); fi
           gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Bobbit $TAG" \
             --notes-file release-artifact/release-notes.md \
