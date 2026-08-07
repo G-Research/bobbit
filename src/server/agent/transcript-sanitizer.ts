@@ -41,6 +41,7 @@ import { trustedAgentSessionsRoots } from "./agent-session-path.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 /**
  * Compute the effective text of a pi-coding-agent message `content`.
@@ -780,10 +781,59 @@ export async function sanitizeAgentTranscriptFile(
 	);
 }
 
+function writeAll(fd: number, data: Buffer): void {
+	let offset = 0;
+	while (offset < data.length) {
+		const written = fs.writeSync(fd, data, offset, data.length - offset, null);
+		if (!Number.isSafeInteger(written) || written <= 0) {
+			throw new Error("Transcript snapshot staging write was incomplete");
+		}
+		offset += written;
+	}
+}
+
+/**
+ * Stage a recovery snapshot beside its target, then atomically replace the
+ * target. The exclusive, unpredictable temporary name and no-follow open keep
+ * staging inside the already-validated directory without trusting an existing
+ * entry. Until rename succeeds, the original transcript inode is untouched.
+ */
+function replaceTranscriptSnapshotAtomic(realPath: string, content: string): void {
+	const directory = path.dirname(realPath);
+	const temporaryPath = path.join(
+		directory,
+		`.${path.basename(realPath)}.bobbit-rollback-${process.pid}-${randomUUID()}.tmp`,
+	);
+	const NOFOLLOW = (fs.constants as any).O_NOFOLLOW ?? 0;
+	const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW;
+	let fd: number | undefined;
+	let temporaryCreated = false;
+	try {
+		fd = fs.openSync(temporaryPath, flags, 0o600);
+		temporaryCreated = true;
+		if (!fs.fstatSync(fd).isFile()) throw new Error("Transcript snapshot staging entry is not a regular file");
+		writeAll(fd, Buffer.from(content, "utf8"));
+		fs.fsyncSync(fd);
+		fs.closeSync(fd);
+		fd = undefined;
+		fs.renameSync(temporaryPath, realPath);
+		temporaryCreated = false;
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* retain the primary staging failure */ }
+		}
+		if (temporaryCreated) {
+			try { fs.unlinkSync(temporaryPath); } catch { /* best-effort cleanup of this invocation's exclusive temp */ }
+		}
+	}
+}
+
 /**
  * Restore a caller-owned transcript snapshot through the sanitizer's existing
- * trusted-root and no-follow write boundary. Recovery uses this only to roll
- * back sanitizer changes made by a provisional model activation.
+ * trusted-root and no-follow boundary. Recovery uses this only to roll back
+ * sanitizer changes made by a provisional model activation. Snapshot bytes are
+ * staged beside the target and atomically published so a failed write cannot
+ * truncate or partially overwrite the current transcript.
  */
 export function restoreAgentTranscriptSnapshot(
 	ctx: SessionFsContext,
@@ -795,7 +845,7 @@ export function restoreAgentTranscriptSnapshot(
 		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
 		const realPath = resolveSafeSessionsPath(hostPath, rootPolicy);
 		if (realPath === null) return false;
-		writeFileNoFollow(realPath, content);
+		replaceTranscriptSnapshotAtomic(realPath, content);
 		return true;
 	} catch (err) {
 		console.warn(`[transcript-sanitizer] Failed to restore recovery snapshot ${filePath}:`, err);
