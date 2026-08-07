@@ -120,6 +120,27 @@ describe("Hindsight typed memory routes and tool adapters", () => {
 		assert.equal(calls.invalidate, 0, "invalidation must not follow a revoked detail grant");
 	});
 
+	it("marks unhealthy and client failures from mutating routes as explicit failures", async () => {
+		const store = new MemoryStore();
+		await store.put(CONFIG_KEY, { runtimeMode: "local" });
+		const unhealthyContext = {
+			host: { store, memory: { requireCapability: () => ({ allowed: true as const }) } },
+			scopeContext: { project: { id: "project-a" } },
+			runtime: { state: "degraded" as const },
+		};
+		assert.deepEqual(await memoryRoutes.retain(unhealthyContext, { body: { content: "must remain editable" } }), { ok: false, configured: true, code: "SERVICE_UNHEALTHY" });
+		assert.deepEqual(await memoryRoutes.invalidate(unhealthyContext, { body: { id: "memory-a", confirmation: "memory-a" } }), { ok: false, configured: true, code: "SERVICE_UNHEALTHY" });
+
+		const activeStore = configuredStore();
+		__setClientFactory(() => { throw new Error("service disconnected during mutation"); });
+		const activeContext = {
+			host: { store: activeStore, memory: { requireCapability: () => ({ allowed: true as const }) } },
+			scopeContext: { project: { id: "project-a" } },
+		};
+		assert.deepEqual(await memoryRoutes.retain(activeContext, { body: { content: "must remain editable" } }), { ok: false, configured: true, code: "SERVICE_UNHEALTHY" });
+		assert.deepEqual(await memoryRoutes.invalidate(activeContext, { body: { id: "memory-a", confirmation: "memory-a" } }), { ok: false, configured: true, code: "SERVICE_UNHEALTHY" });
+	});
+
 	it("uses the real server completion envelope, ignores body content, and repeats a stable outcome document", async () => {
 		const store = new MemoryStore();
 		const received: Array<{ content?: string; tags?: Record<string, string>; id?: string }> = [];

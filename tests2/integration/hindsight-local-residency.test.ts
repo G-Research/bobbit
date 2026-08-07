@@ -61,7 +61,7 @@ describe("Hindsight local resident model integration", () => {
 		__setClientFactory(() => { clientConstructed = true; throw new Error("unexpected fallback"); });
 		const context = { host: { store, memory: allowMemoryCapabilities }, scopeContext: { project: { id: "project-a" } }, runtime: { state: "degraded" as const, diagnostic: { code: "SERVICE_UNHEALTHY" } } };
 		assert.deepEqual(await routes.recall(context, { body: { query: "do not hang" } }), { configured: true, code: "SERVICE_UNHEALTHY" });
-		assert.deepEqual(await routes.retain(context, { body: { content: "do not write" } }), { configured: true, code: "SERVICE_UNHEALTHY" });
+		assert.deepEqual(await routes.retain(context, { body: { content: "do not write" } }), { ok: false, configured: true, code: "SERVICE_UNHEALTHY" });
 		assert.deepEqual(await routes.reflect(context, { body: { prompt: "do not reflect" } }), { configured: true, code: "SERVICE_UNHEALTHY" });
 		assert.equal(clientConstructed, false);
 	});
