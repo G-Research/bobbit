@@ -539,7 +539,12 @@ export class ServiceRuntimeSupervisor {
 					const staleInput = await this.controlInput(identity, contribution, prior.runnerIdentity);
 					await this.authorize(request, "start");
 					try { await staleRunner.remove(staleInput); }
-					catch (error) { return this.failStart(identity, desired, contribution, request, error, undefined, false); }
+					catch (error) {
+						return {
+							status: await this.failStart(identity, desired, contribution, request, error, undefined, false),
+							settingsRevision: settings.revision,
+						};
+					}
 					desired = this.nextRecord(desired, { runnerIdentity: undefined });
 					await this.options.store.replace(identity, desired);
 				}
