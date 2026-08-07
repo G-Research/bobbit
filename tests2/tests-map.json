@@ -3056,6 +3056,15 @@
       }
     },
     {
+      "path": "tests2/core/tool-result-filter-attempt-credentials.test.ts",
+      "reason": "EP-14 private Pi callback credential coverage for one-use atomic consumption, replay/cross-settlement rejection, expiry, and runtime invalidation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/tool-result-filter-dispatcher.test.ts",
       "reason": "EP-14 dispatcher coverage for exact filter grants, revoke fencing, deterministic reject-wins reduction, fail-closed worker isolation, and concurrent call isolation.",
       "execution": {
@@ -3084,7 +3093,7 @@
     },
     {
       "path": "tests2/browser/e2e/tool-result-filter.spec.ts",
-      "reason": "Production browser-origin EP-14 fixture journey for inert/grant/reject-wins/redact/revoke/reload lifecycle and safe result visibility in DOM and accessibility snapshots.",
+      "reason": "Browser-origin EP-14 callback journey proving UI/cookie transport cannot mint a private Pi attempt credential or expose raw result bytes in DOM, snapshots, trace, or audit views.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

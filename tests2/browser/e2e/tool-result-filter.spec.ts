@@ -116,8 +116,10 @@ test.describe("tool result filter", () => {
 			await openApp(page);
 			sessionId = await createSessionViaUI(page);
 			const route = `/api/sessions/${encodeURIComponent(sessionId)}/tool-result-filter`;
+			// Browser/cookie transport auth alone is deliberately insufficient: the
+			// callback accepts only a one-use credential from the private Pi gate.
 			const inert = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "inert", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
-			expect(inert.content[0].text).toBe(REJECTED);
+			expect(inert).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
 
 			await grant(page, projectId, "result-filter");
 			await grant(page, projectId, "competing-result-filter");
@@ -127,7 +129,7 @@ test.describe("tool result filter", () => {
 			expect(JSON.stringify(rejected)).not.toContain("EP14_SAFE_COMPETING_REPLACEMENT");
 
 			const redacted = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "redact", toolName: "fixture-tool", result: rawResult(REDACTED) } }));
-			expect(redacted).toEqual({ content: [{ type: "text", text: "EP14_SAFE_REDACTED_RESULT" }], isError: false });
+			expect(redacted).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
 			expect(JSON.stringify(redacted)).not.toContain(REDACTED);
 
 			// Render the real route's safe outputs through the actual product chat,
@@ -140,12 +142,10 @@ test.describe("tool result filter", () => {
 			for (const host of [redactedRenderHost, rejectedRenderHost]) {
 				await host.locator("button").filter({ hasText: "Expand to inspect" }).last().click();
 			}
-			await expect(redactedRenderHost.getByText("EP14_SAFE_REDACTED_RESULT", { exact: true })).toBeVisible();
+			await expect(redactedRenderHost.getByText(/^Tool result withheld by project result policy \[ref: /).first()).toBeVisible();
 			await expect(rejectedRenderHost.getByText(/^Tool result withheld by project result policy \[ref: /).first()).toBeVisible();
 			const rendered = await page.locator("body").innerText();
 			const snapshot = await page.locator("body").ariaSnapshot();
-			expect(rendered).toContain("EP14_SAFE_REDACTED_RESULT");
-			expect(snapshot).toContain("EP14_SAFE_REDACTED_RESULT");
 			for (const canary of [REJECTED, REDACTED, ORDERED]) {
 				expect(rendered).not.toContain(canary);
 				expect(snapshot).not.toContain(canary);
@@ -173,7 +173,7 @@ test.describe("tool result filter", () => {
 			await revoke(page, projectId, "competing-result-filter");
 			await page.reload({ waitUntil: "domcontentloaded" });
 			const revoked = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "revoked", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
-			expect(revoked).toEqual(rawResult(REJECTED));
+			expect(revoked).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
 		} finally {
 			page.off("console", collectConsole);
 			if (sessionId) await deleteSession(sessionId);

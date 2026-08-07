@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { inspect } from "node:util";
+import { randomUUID } from "node:crypto";
 import { generateToolResultFilterExtension } from "../../src/server/agent/tool-result-filter-extension.js";
+import { createToolResultFilterAttemptToken, type ToolResultFilterGateCredential } from "../../src/server/agent/tool-result-filter-attempt-credentials.js";
 import { expect, test } from "./_e2e/in-process-harness.js";
 import { apiFetch, base, createSession, defaultProject, deleteSession, rawApiFetch, readE2EToken } from "./_e2e/e2e-setup.js";
 
@@ -96,9 +98,19 @@ function expectNoCanaryInServerLogs(lines: string[]): void {
 	}
 }
 
+let runtimeCredential: ToolResultFilterGateCredential | undefined;
+
 async function postFilter(sessionId: string, body: unknown): Promise<any> {
+	const toolCallId = body && typeof body === "object" && !Array.isArray(body)
+		? (body as Record<string, unknown>).toolCallId : undefined;
+	const attempt = typeof toolCallId === "string" && runtimeCredential
+		? createToolResultFilterAttemptToken(runtimeCredential, sessionId, toolCallId, randomUUID())
+		: undefined;
 	const captured = await captureServerConsole(async () => {
-		const response = await apiFetch(filterPath(sessionId), { method: "POST", body: JSON.stringify(body) });
+		const response = await apiFetch(filterPath(sessionId), {
+			method: "POST", body: JSON.stringify(body),
+			headers: attempt ? { "X-Bobbit-Tool-Result-Attempt": attempt } : undefined,
+		});
 		expect(response.status).toBe(200);
 		return json(response);
 	});
@@ -107,7 +119,7 @@ async function postFilter(sessionId: string, body: unknown): Promise<any> {
 }
 
 /** Loads the production-generated gate and forwards its untouched HTTP request to the live route. */
-async function installLiveGeneratedGate(sessionId: string): Promise<{
+async function installLiveGeneratedGate(sessionId: string, credential: ToolResultFilterGateCredential): Promise<{
 	gate: (event: unknown) => Promise<any>;
 	requests: Array<{ url: string; body: string }>;
 	close: () => Promise<void>;
@@ -119,7 +131,7 @@ async function installLiveGeneratedGate(sessionId: string): Promise<{
 	const originalToken = process.env.BOBBIT_TOKEN;
 	const requests: Array<{ url: string; body: string }> = [];
 	try {
-		await writeFile(file, generateToolResultFilterExtension(sessionId), "utf8");
+		await writeFile(file, generateToolResultFilterExtension(sessionId, credential), "utf8");
 		process.env.BOBBIT_GATEWAY_URL = base();
 		process.env.BOBBIT_TOKEN = readE2EToken();
 		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -183,8 +195,10 @@ test.describe("tool result filter route", () => {
 	let sessionId = "";
 	let cookie = "";
 	let packDir = "";
+	let gatewayManager: any;
 
 	test.beforeAll(async ({ gateway }) => {
+		gatewayManager = gateway.sessionManager;
 		packDir = installFixture(gateway.bobbitDir);
 		projectId = (await defaultProject()).id;
 		cookie = await operatorCookie();
@@ -194,7 +208,10 @@ test.describe("tool result filter route", () => {
 		expect(activation.status, await activation.text()).toBe(200);
 	});
 
-	test.beforeEach(async () => { sessionId = await createSession({ projectId }); });
+	test.beforeEach(async () => {
+		sessionId = await createSession({ projectId });
+		runtimeCredential = gatewayManager.toolResultFilterAttemptCredentials.beginRuntime(sessionId, 0);
+	});
 	test.afterEach(async () => {
 		if (projectId && cookie) {
 			await revoke(projectId, cookie, "result-filter").catch(() => {});
@@ -212,7 +229,7 @@ test.describe("tool result filter route", () => {
 
 	test("round-trips generated gate wire bodies through the live route with ordinary Pi-safe output", async () => {
 		await grant(projectId, cookie, "result-filter");
-		const live = await installLiveGeneratedGate(sessionId);
+		const live = await installLiveGeneratedGate(sessionId, runtimeCredential!);
 		const cases = [
 			{ id: "generated-pass-false", text: "EP14_GENERATED_PASS_FALSE", isError: false, expectedText: "EP14_GENERATED_PASS_FALSE", expectedError: false },
 			{ id: "generated-pass-true", text: "EP14_GENERATED_PASS_TRUE", isError: true, expectedText: "EP14_GENERATED_PASS_TRUE", expectedError: true },

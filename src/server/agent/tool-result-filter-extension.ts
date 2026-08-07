@@ -56,8 +56,14 @@ export function assertToolResultGatePiCompatibility(requireFn = createRequire(im
  * protected-session activation must reject untrusted same-realm code that can
  * replace Pi internals.
  */
-export function generateToolResultFilterExtension(sessionId: string): string {
-	return `const $Object = Object;
+export function generateToolResultFilterExtension(
+	sessionId: string,
+	// Test-only unbound input: production activation always receives a fresh
+	// SessionManager-owned credential and the server has no runtime for this key.
+	credential: { runtimeGeneration: number; runtimeKey: string } = { runtimeGeneration: 0, runtimeKey: "0000000000000000000000000000000000000000000000000000000000000000" },
+): string {
+	return `import { createHmac as $createHmac } from "node:crypto";
+const $Object = Object;
 const $Array = Array;
 const $JSON = JSON;
 const $Buffer = Buffer;
@@ -101,6 +107,10 @@ const $randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? global
 const $random = Math.random.bind(Math);
 const $gatewayUrl = typeof process.env.BOBBIT_GATEWAY_URL === "string" ? process.env.BOBBIT_GATEWAY_URL.trim() : "";
 const $token = typeof process.env.BOBBIT_TOKEN === "string" ? process.env.BOBBIT_TOKEN.trim() : "";
+// This key is a private Pi-loader input, never an environment variable. Each
+// callback derives a short-lived, tool-call/attempt-bound one-use credential.
+const $runtimeGeneration = ${credential.runtimeGeneration};
+const $runtimeKey = ${JSON.stringify(credential.runtimeKey)};
 const MAX_BYTES = ${TOOL_RESULT_FILTER_MAX_INPUT_BYTES};
 const TIMEOUT_MS = ${TOOL_RESULT_FILTER_TIMEOUT_MS};
 
@@ -110,6 +120,15 @@ function ref() {
 }
 function withheld() {
   return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + ref() + "]." }], isError: true };
+}
+function attemptCredential(sessionId, toolCallId) {
+  const attemptId = ref();
+  const issued = Date.now().toString(36);
+  try {
+    const payload = "v1\\u0000" + sessionId + "\\u0000" + $runtimeGeneration + "\\u0000" + toolCallId + "\\u0000" + issued + "\\u0000" + attemptId;
+    const signature = $createHmac("sha256", $runtimeKey).update(payload, "utf8").digest("hex");
+    return "v1." + issued + "." + attemptId + "." + signature;
+  } catch { return undefined; }
 }
 function own(object, name) {
   if (!object || (typeof object !== "object" && typeof object !== "function")) return undefined;
@@ -380,9 +399,11 @@ export default function createCoreToolResultGate() {
       const timer = $setTimeout(abortRequest, TIMEOUT_MS);
       try {
         if (isAborted()) return withheld();
+        const credential = attemptCredential(sessionId, request.toolCallId);
+        if (!credential || isAborted()) return withheld();
         const response = await $fetch($gatewayUrl + "/api/sessions/" + $encodeURIComponent(sessionId) + "/tool-result-filter", {
           method: "POST",
-          headers: { "Authorization": "Bearer " + $token, "Content-Type": "application/json" },
+          headers: { "Authorization": "Bearer " + $token, "Content-Type": "application/json", "X-Bobbit-Tool-Result-Attempt": credential },
           body,
           signal: controller.signal,
         });
@@ -410,8 +431,11 @@ function hasExpectedRegularFile(filePath: string, expected: string): boolean {
 }
 
 /** Write a content-addressed, read-only core input. Any mismatch fails closed. */
-export function writeToolResultFilterExtension(sessionId: string): string | undefined {
-	const code = generateToolResultFilterExtension(sessionId);
+export function writeToolResultFilterExtension(
+	sessionId: string,
+	credential?: { runtimeGeneration: number; runtimeKey: string },
+): string | undefined {
+	const code = generateToolResultFilterExtension(sessionId, credential);
 	if (cachedPath && hasExpectedRegularFile(cachedPath, code)) return cachedPath;
 	cachedPath = undefined;
 	try {

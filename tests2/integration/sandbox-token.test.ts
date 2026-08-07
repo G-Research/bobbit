@@ -151,7 +151,9 @@ test.describe("Sandbox Token Scoping", () => {
 				method: "POST", body: JSON.stringify(body),
 			});
 			expect(allowed.status, await allowed.clone().text()).toBe(200);
-			expect(await allowed.json()).toEqual(body.result);
+			// Sandbox scope/Bearer authentication reaches the private callback but
+			// cannot invoke it: only the core Pi gate has an attempt credential.
+			expect(await allowed.json()).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
 
 			const crossSession = await fetchWithToken(gateway.baseURL, `/api/sessions/${otherSessionId}/tool-result-filter`, sandboxToken, {
 				method: "POST", body: JSON.stringify(body),
