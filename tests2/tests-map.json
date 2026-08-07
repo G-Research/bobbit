@@ -302,7 +302,7 @@
     },
     {
       "path": "tests2/core/base-path-cli.test.ts",
-      "reason": "Focused CLI coverage for flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
+      "reason": "Focused CLI coverage for standalone version-flag recognition without consuming option values, flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -356,7 +356,7 @@
     },
     {
       "path": "tests2/integration/base-path-cli-entrypoint.test.ts",
-      "reason": "Real executable CLI entrypoint smoke in the E2E Vitest lane proving an isolated nested mount binds an ephemeral port, persists its mounted gateway URL, serves mounted health and static routes, prints the truthful loopback-auth banner, and terminates cleanly within a bound.",
+      "reason": "Real package-bin CLI entrypoint smoke in the E2E Vitest lane proving --version prints exact package metadata and exits without gateway state or port binding, while an isolated nested mount binds an ephemeral port, persists its mounted gateway URL, serves mounted health and static routes, prints the truthful loopback-auth banner, and terminates cleanly within a bound.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",
