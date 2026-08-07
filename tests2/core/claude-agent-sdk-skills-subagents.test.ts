@@ -25,9 +25,15 @@ const PROJECTIONS = {
 type BuildPolicy = (input: {
 	sessionId: string;
 	goalBranch: string;
-	roleSnapshot: ReadonlyMap<string, { name: string; promptTemplate: string }>;
-	selectedRootEntries: readonly { name: string; policy: "allow" | "ask" | "never" }[];
-	resolvedModel: string;
+	roles: Readonly<Record<string, { name: string; promptTemplate: string }>>;
+	entries: readonly {
+		name: string;
+		description: string;
+		group: string;
+		inputSchema: Record<string, unknown>;
+		policy: "allow" | "ask" | "never";
+		invoke: () => Promise<string>;
+	}[];
 	audit: (event: Record<string, unknown>) => void;
 }) => any;
 
@@ -35,21 +41,20 @@ function policyFixture() {
 	const audit: Array<Record<string, unknown>> = [];
 	const buildPolicy = (sdkSurface as Record<string, unknown>).buildClaudeSdkSubagentPolicy;
 	expect(buildPolicy, "D4 must expose the pure policy factory used by the session-setup preflight").toBeTypeOf("function");
-	const roleSnapshot = new Map(Object.values(PROJECTIONS).map(({ sourceRole }) => [sourceRole, {
+	const roles = Object.fromEntries(Object.values(PROJECTIONS).map(({ sourceRole }) => [sourceRole, {
 		name: sourceRole,
 		promptTemplate: `Resolved ${sourceRole}: {{AGENT_ID}} @ {{GOAL_BRANCH}}`,
 	}]));
 	const policy = (buildPolicy as BuildPolicy)({
 		sessionId: "root-sdk-session",
 		goalBranch: "goal/immutable-projection",
-		roleSnapshot,
-		selectedRootEntries: [
-			{ name: "read", policy: "allow" },
-			{ name: "find", policy: "allow" },
-			{ name: "grep", policy: "allow" },
-			{ name: "bash", policy: "never" },
+		roles,
+		entries: [
+			{ name: "read", description: "read", group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "ok" },
+			{ name: "find", description: "find", group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "ok" },
+			{ name: "grep", description: "grep", group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "ok" },
+			{ name: "bash", description: "bash", group: "Shell", inputSchema: { type: "object", properties: {} }, policy: "never", invoke: async () => "ok" },
 		],
-		resolvedModel: "claude-sonnet-4-6",
 		audit: event => audit.push(event),
 	});
 	return { policy, audit };
@@ -100,7 +105,7 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 				tools: ["Skill", ...CHILD_MCP_TOOLS],
 				skills: BUNDLED_SKILLS_0_3_222,
 			});
-			expect(definition.prompt).toBe(`Resolved ${expected.sourceRole}: root-sdk-session @ goal/immutable-projection`);
+			expect(definition.prompt).toBe(`Resolved ${expected.sourceRole}: sdk-root-sdk-session @ goal/immutable-projection`);
 			for (const forbidden of ["Agent", "Task", "Bash", "mcp__bobbit__bash"]) {
 				expect(definition.disallowedTools, `${agentType} must explicitly disallow ${forbidden}`).toContain(forbidden);
 			}
@@ -137,7 +142,7 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		expect(options.tools).toEqual(["Skill", "Agent"]);
 		expect(options.skills).toEqual(BUNDLED_SKILLS_0_3_222);
 		expect(options.agents).toEqual(policy.definitions);
-		expect(options.allowedTools).toEqual(["Agent", ...CHILD_MCP_TOOLS]);
+		expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"]);
 		expect(options.disallowedTools).toEqual(ROOT_NATIVE_DISALLOWED);
 		expect(options.settingSources).toEqual([]);
 		expect(options.strictMcpConfig).toBe(true);
@@ -160,8 +165,11 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		} as any);
 		const preToolUse = (surface.preToolUseMatcher as any)[0].hooks[0];
 
-		await expect((surface.canUseTool as any)("Agent", hookInput().tool_input, permissionContext())).resolves.toMatchObject({ behavior: "allow" });
-		expect(permissionDecision(await preToolUse(hookInput()))).toBe("allow");
+		for (const subagent_type of Object.keys(PROJECTIONS)) {
+			const admitted = hookInput({ tool_input: { subagent_type, prompt: "Inspect this change", run_in_background: false } });
+			await expect((surface.canUseTool as any)("Agent", admitted.tool_input, permissionContext())).resolves.toMatchObject({ behavior: "allow" });
+			expect(permissionDecision(await preToolUse(admitted))).toBe("allow");
+		}
 		for (const denied of [
 			hookInput({ tool_name: "Task", tool_input: {} }),
 			hookInput({ tool_input: { subagent_type: "general-purpose", prompt: "escape", run_in_background: false } }),
@@ -205,13 +213,16 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 			expect(permissionDecision(await preToolUse(hookInput({ tool_name, ...child })))).toBe("deny");
 		}
 		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "Agent", agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" })))).toBe("deny");
-		await stop({ hook_event_name: "SubagentStop", session_id: "root-sdk-session", transcript_path: "/private/root.jsonl", cwd: "/workspace", agent_transcript_path: "/private/child.jsonl", stop_hook_active: false, ...child });
+		await stop({ hook_event_name: "SubagentStop", session_id: "root-sdk-session", transcript_path: "/private/root.jsonl", cwd: "/workspace", agent_transcript_path: "/private/child.jsonl", parent_tool_use_id: "agent-use-1", stop_hook_active: false, ...child });
 		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "mcp__bobbit__read", ...child })))).toBe("deny");
 		expect(audit).not.toEqual([]);
 		for (const event of audit) {
 			expect(JSON.stringify(event)).not.toMatch(/Inspect this change|private|transcript|credential|secret/i);
-			expect(event).toEqual(expect.objectContaining({ sessionId: "root-sdk-session", agentId: expect.any(String), agentType: expect.any(String), outcome: expect.any(String) }));
+			expect(event).toEqual(expect.objectContaining({ sessionId: "root-sdk-session", outcome: expect.any(String) }));
+			expect(Object.keys(event).every(key => ["sessionId", "outcome", "toolUseId", "agentId", "agentType", "parentToolUseId", "durationMs"].includes(key))).toBe(true);
 		}
+		expect(audit).toContainEqual(expect.objectContaining({ outcome: "started", agentId: "child-1", agentType: "bobbit-backend-parity-reviewer" }));
+		expect(audit).toContainEqual(expect.objectContaining({ outcome: "stopped", agentId: "child-1", agentType: "bobbit-backend-parity-reviewer", parentToolUseId: "agent-use-1", durationMs: expect.any(Number) }));
 		surface.dispose?.();
 		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "mcp__bobbit__read", ...child })))).toBe("deny");
 	});
