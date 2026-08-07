@@ -142,8 +142,9 @@ test.describe("extension platform lifecycle", () => {
 		const grantAction = grantRow.getByTestId("market-capability-action");
 		await expect(grantAction).toHaveAccessibleName(`Grant ${CAPABILITY}`);
 		await grantAction.click();
-		await expect(page.getByText(new RegExp(`Grant.*${PACK_ID}.*${HOOK_ID}.*${CAPABILITY}`, "i"))).toBeVisible();
-		await page.getByRole("button", { name: `Grant ${CAPABILITY}`, exact: true }).last().click();
+		await expect(page.getByText("Grant extension capability")).toBeVisible();
+		await expect(page.getByText(new RegExp(`Grant ${CAPABILITY} to hook ${HOOK_ID}.*pack ${PACK_ID}`, "i"))).toBeVisible();
+		await page.getByRole("button", { name: "Grant capability", exact: true }).click();
 		await expect(grantRow).toContainText(`${CAPABILITY}: Granted`, { timeout: 15_000 });
 		await expect(hook.getByTestId("market-runtime-status")).toHaveText("Active");
 
@@ -169,7 +170,12 @@ test.describe("extension platform lifecycle", () => {
 		await openMarket(page, project);
 		await expect(pack).toBeVisible({ timeout: 15_000 });
 		await pack.getByTestId("market-uninstall-pack").click();
-		await page.getByRole("button", { name: "Uninstall", exact: true }).click();
+		// Wait until the shared confirmation dialog has mounted before confirming
+		// by keyboard; otherwise the click's dynamic import can race the keypress.
+		const confirmationBackdrop = page.locator("div.fixed.inset-0").last();
+		await expect(confirmationBackdrop).toBeVisible();
+		await page.keyboard.press("Enter");
+		await expect(confirmationBackdrop).toBeHidden();
 		await expect(pack).toHaveCount(0, { timeout: 20_000 });
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
@@ -188,7 +194,9 @@ test.describe("extension platform lifecycle", () => {
 		await page.getByTestId("market-tab-sources").click();
 		await expect(sourceRow(page)).toBeVisible({ timeout: 15_000 });
 		await sourceRow(page).getByTestId("market-remove-source").click();
-		await page.getByRole("button", { name: "Remove", exact: true }).click();
+		await expect(confirmationBackdrop).toBeVisible();
+		await page.keyboard.press("Enter");
+		await expect(confirmationBackdrop).toBeHidden();
 		await expect(sourceRow(page)).toHaveCount(0, { timeout: 15_000 });
 		completed = true;
 	});
