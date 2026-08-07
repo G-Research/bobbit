@@ -408,15 +408,25 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(query.options).toMatchObject({
 			settingSources: [],
 			strictMcpConfig: true,
-			tools: ["Skill"],
-			allowedTools: [],
+			tools: ["Skill", "Agent"],
+			allowedTools: ["Agent"],
 			agents: {},
+			skills: [
+				"batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design-sync",
+				"doctor", "fewer-permission-prompts", "loop", "run", "run-skill-generator", "simplify", "update-config", "verify",
+			],
 			managedSettings: { autoMemoryEnabled: false },
 			permissionMode: "default",
 			mcpServers: { bobbit: expect.any(Object) },
 		});
-		expect(query.options.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Read", "ToolSearch", "Agent"]));
+		expect(query.options.disallowedTools).toEqual(expect.arrayContaining([
+			"Bash", "Read", "ToolSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
+		]));
+		expect(query.options.disallowedTools).not.toContain("Agent");
 		expect(query.options.canUseTool).toEqual(expect.any(Function));
+		await expect((query.options.canUseTool as any)("Agent", {
+			subagent_type: "bobbit-backend-parity-reviewer", prompt: "must be denied without a policy", run_in_background: false,
+		}, { signal: new AbortController().signal, toolUseID: "agent-use-without-policy" })).resolves.toMatchObject({ behavior: "deny" });
 		expect((query.options.hooks as any).PreToolUse).toHaveLength(1);
 	});
 
