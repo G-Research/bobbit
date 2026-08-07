@@ -21,6 +21,11 @@ const DURABLE_C = {
 	id: "gemini-2.5-pro",
 	thinkingLevel: "high",
 } as const;
+const DURABLE_SDK_B = {
+	provider: "claude-agent-sdk",
+	id: "sdk-replacement-model",
+	thinkingLevel: "medium",
+} as const;
 const MARKER = "RUNTIME_RECOVERY_OWNERSHIP";
 
 type Tuple = { provider: string; id: string; thinkingLevel: string };
@@ -176,6 +181,31 @@ describe("runtime recovery bridge ownership", () => {
 		assert.equal(harness.canonical(), b, `${MARKER}: B must remain canonical`);
 		assert.deepEqual(harness.durable(), DURABLE_B, `${MARKER}: B must remain durable`);
 		assert.equal(harness.broadcasts.at(-1), `${DURABLE_B.provider}/${DURABLE_B.id}/${DURABLE_B.thinkingLevel}`);
+	});
+
+	it("retains a verified SDK replacement without broadcasting over it", async () => {
+		const rReadStarted = deferred<void>();
+		const rRead = deferred<unknown>();
+		const rBridge = makeBridge("R", async () => {
+			rReadStarted.resolve();
+			return rRead.promise;
+		});
+		const harness = makeHarness(rBridge);
+		const sdkBridge = makeBridge("SDK-B", async () => state(DURABLE_SDK_B));
+		const sdkReplacement = makeSession("SDK-B", sdkBridge);
+
+		const selection = startFailedSelection(harness);
+		await rReadStarted.promise;
+		harness.install(sdkReplacement, DURABLE_SDK_B);
+		rRead.resolve({ success: true, data: {} });
+		await assert.rejects(selection);
+
+		assert.deepEqual(harness.terminated, [], `${MARKER}: detached SDK recovery terminated its canonical replacement`);
+		assert.deepEqual(harness.archived, [], `${MARKER}: detached SDK recovery archived its canonical replacement`);
+		assert.equal(sdkBridge.stop.mock.calls.length, 0, `${MARKER}: canonical SDK bridge must remain live`);
+		assert.equal(harness.canonical(), sdkReplacement);
+		assert.deepEqual(harness.durable(), DURABLE_SDK_B);
+		assert.equal(harness.broadcasts.at(-1), `${DURABLE_SDK_B.provider}/${DURABLE_SDK_B.id}/${DURABLE_SDK_B.thinkingLevel}`);
 	});
 
 	it("retains B when it commits after R failure is released but before quarantine admission", async () => {

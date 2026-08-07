@@ -159,8 +159,8 @@ lifecycle, validation, size, or replay rules.
 | `restart_agent` | — | Restart the agent process for this socket's session. This is the active-session path; the sidebar `Refresh agent` action uses `POST /api/sessions/:id/restart` to target any live row by id. Both paths call the same session-manager restart implementation. |
 | `grant_tool_permission` | `toolName`, `scope`, `group?`, `mode?` | Grant the active `ask`-gated tool request for one tool or a tool group. `mode` is `persistent`, `session-only`, or `one-time`; see [Permission Card UX](permission-card-ux.md). |
 | `deny_tool_permission` | `toolName` | Deny the active `ask`-gated tool request so the guard long-poll returns immediately. |
-| `set_model` | `provider`, `modelId`, `thinkingLevel?` | Switch the exact AI provider/model and, when supplied, its effective thinking level as one request. The session picker always supplies the clamped level; the field remains optional for older clients. See [Model and thinking selection](#model-and-thinking-selection). |
-| `set_thinking_level` | `level` | Change only the current model's thinking level. The server clamps and verifies the resulting complete tuple; this remains separate from a model-picker request. |
+| `set_model` | `provider`, `modelId`, `thinkingLevel?` | Switch the exact AI provider/model and, when supplied, its effective thinking level as one request. Pi normalizes the level against its selected catalog row; an interactive Claude Agent SDK request must be advertised by the active Query. The field remains optional for older clients. See [Model and thinking selection](#model-and-thinking-selection). |
+| `set_thinking_level` | `level` | Change only the current model's thinking level. Pi clamps it against the bound catalog model; an interactive Claude Agent SDK request is rejected when the active Query does not advertise it. Both paths verify the resulting complete tuple. |
 | `set_image_model` | `provider`, `modelId` | Switch the per-session image generation model. Server validates `(provider, modelId)` against `getAvailableImageModels()`; on unknown the server replies with `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and does **not** mutate session state. On valid, persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state to all attached clients. |
 | `compact` | — | Trigger context compaction |
 | `get_state` | — | Request current agent state |
@@ -182,11 +182,17 @@ A model-picker choice is one exact provider/model/effective-thinking request:
 { type: "set_model"; provider: string; modelId: string; thinkingLevel?: string }
 ```
 
-The picker always includes `thinkingLevel`. Before sending, it clamps the
-session's current level against the chosen catalog row, optimistically updates
-both fields, and emits no follow-up `set_thinking_level`. For example, if the
-current level is `max` and the user selects Opus 4.8, whose metadata advertises
-`xhigh` but not `max`, the only picker frame is:
+The picker always includes `thinkingLevel`, optimistically updates both fields,
+and emits no follow-up `set_thinking_level`. For a Pi catalog row, it clamps the
+current level against that row before sending. For an interactive Claude Agent
+SDK session, the active Query's live capability map is authoritative instead:
+an unsupported model is rejected before mutation. An unavailable level in a
+combined request is rejected after model read-back but before its requested
+thinking mutation; neither failure makes the requested tuple durable, and
+recovery handles any already-applied model. Neither case is clamped. For
+example, if the current level is `max` and a Pi user selects Opus 4.8, whose
+metadata advertises `xhigh` but not `max`,
+the only picker frame is:
 
 ```json
 {
@@ -197,27 +203,28 @@ current level is `max` and the user selects Opus 4.8, whose metadata advertises
 }
 ```
 
-The optional field preserves compatibility with older clients. When it is
-absent, the gateway reuses the previous durable effective level when available,
+The optional field preserves compatibility with older clients. For Pi, when it
+is absent the gateway reuses the previous durable effective level when available,
 otherwise the current authoritative level, and clamps it against the exact new
-model. It does not infer `max`: that level is selectable only when the model's
-`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.82.1`'s
-direct Anthropic and supported Amazon Bedrock Opus 5 rows publish
-`{ xhigh: "xhigh", max: "max" }`, so both levels—and the ordinary
-`off` through `high` levels retained by the map rules—are available for those
-exact rows. Opus 4.8 publishes `xhigh` only. `max` is unavailable without an
-explicit map entry; `xhigh` may additionally come from the narrow map-less
-family fallbacks documented in the thinking-level guide.
+catalog model. `max` is selectable only when that model's `thinkingLevelMap`
+explicitly contains a non-null `max` entry. Interactive Claude Agent SDK
+requests instead require a model and level advertised by the initialized active
+Query. An unavailable model rejects before SDK mutation. An unavailable level
+in a combined request makes no requested thinking mutation or durable requested
+tuple, although model application and read-back can already have occurred before
+recovery. See [Per-model thinking-level capabilities](thinking-levels.md) for Pi
+map semantics and [Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls)
+for the SDK capability contract.
 
 On success, the gateway:
 
-1. Requires the exact `provider`/`modelId` to be session-selectable.
-2. Clamps thinking against that selected catalog model.
-3. Applies the model and verifies exact provider/model read-back before applying
+1. Requires the exact `provider`/`modelId` to be session-selectable and validates
+   the runtime-specific thinking capability.
+2. Applies the model and verifies exact provider/model read-back before applying
    thinking.
-4. Applies thinking and verifies the complete provider/model/effective-thinking
+3. Applies thinking and verifies the complete provider/model/effective-thinking
    tuple.
-5. Persists and broadcasts only that verified tuple in one authoritative
+4. Persists and broadcasts only that verified tuple in one authoritative
    `state` frame containing both `model` and `thinkingLevel`.
 
 `set_model` and `set_thinking_level` use the existing per-session command FIFO,
@@ -278,15 +285,17 @@ A thinking-only UI change remains supported with:
 { "type": "set_thinking_level", "level": "high" }
 ```
 
-This standalone path leaves provider/model unchanged, clamps `level`—including
-`xhigh` or `max` only when supported—against the currently bound exact model,
-verifies and persists the resulting complete tuple, and broadcasts both tuple
-fields as authoritative state. Failure returns
+This standalone path leaves provider/model unchanged. Pi clamps `level` against
+the currently bound exact catalog model; an interactive Claude Agent SDK request
+uses the active Query map and rejects an unsupported value before a thinking
+mutation or durable write. A successful request verifies and persists the
+complete tuple and broadcasts both fields as authoritative state. Failure returns
 `SET_THINKING_LEVEL_FAILED` and uses the same correction, bounded rollback,
 restart, fail-closed quarantine, stale-target fencing, and client refresh rules.
 
-See [Per-model thinking-level capabilities](thinking-levels.md) for map
-semantics and the shared clamp order.
+See [Per-model thinking-level capabilities](thinking-levels.md) for Pi map
+semantics and [Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls)
+for the SDK contract.
 
 ## Server → Client
 

@@ -5,6 +5,8 @@ import {
 	ClaudeAgentSdkBridge,
 	ClaudeAgentSdkUnavailableError,
 	buildClaudeAgentSdkEnv,
+	normalizeClaudeAgentSdkModelCapabilities,
+	resolveClaudeAgentSdkModelCapability,
 } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
 import type { Clock } from "../../src/server/gateway-deps.ts";
 
@@ -44,14 +46,27 @@ class FakeClock implements Clock {
 	pending(): number { return this.timers.size; }
 }
 
+
+type SdkModel = {
+	value: string;
+	resolvedModel?: string;
+	supportsEffort?: boolean;
+	supportedEffortLevels?: string[];
+	supportsAdaptiveThinking?: boolean;
+};
 class FakeQuery implements AsyncIterable<unknown> {
-	readonly initialization = deferred<{ session_id?: unknown }>();
+	readonly initialization = deferred<{ session_id?: unknown; models?: SdkModel[] }>();
 	readonly events: unknown[] = [];
 	readonly waiters: Array<(result: IteratorResult<unknown>) => void> = [];
 	readonly inputs: unknown[] = [];
 	readonly inputWaiters: Array<(input: unknown) => void> = [];
 	readonly setModels: string[] = [];
 	readonly thinkingBudgets: Array<number | null> = [];
+	readonly flagSettings: Array<Record<string, unknown>> = [];
+	readonly thinkingControlCalls: string[] = [];
+	supportedModelsData?: SdkModel[];
+	setModelError?: Error;
+	setThinkingError?: Error;
 	interruptCalls = 0;
 	closeCalls = 0;
 	private closed = false;
@@ -61,7 +76,8 @@ class FakeQuery implements AsyncIterable<unknown> {
 	constructor(readonly prompt: AsyncIterable<unknown>, readonly options: Record<string, unknown>, autoPullInputs = true) {
 		if (autoPullInputs) void this.pullInputs();
 	}
-	initializationResult(): Promise<{ session_id?: unknown }> { return this.initialization.promise; }
+	initializationResult(): Promise<{ session_id?: unknown; models?: SdkModel[] }> { return this.initialization.promise; }
+	async supportedModels(): Promise<SdkModel[] | undefined> { return this.supportedModelsData; }
 	async pullInputs(): Promise<void> {
 		try {
 			for await (const input of this.prompt) {
@@ -82,8 +98,20 @@ class FakeQuery implements AsyncIterable<unknown> {
 		else this.events.push(event);
 	}
 	async interrupt(): Promise<void> { this.interruptCalls++; }
-	async setModel(model: string): Promise<void> { this.setModels.push(model); }
-	async setMaxThinkingTokens(budget: number | null): Promise<void> { this.thinkingBudgets.push(budget); }
+	async setModel(model: string): Promise<void> {
+		if (this.setModelError) throw this.setModelError;
+		this.setModels.push(model);
+	}
+	async setMaxThinkingTokens(budget: number | null): Promise<void> {
+		if (this.setThinkingError) throw this.setThinkingError;
+		this.thinkingBudgets.push(budget);
+		this.thinkingControlCalls.push(`budget:${budget}`);
+	}
+	async applyFlagSettings(settings: Record<string, unknown>): Promise<void> {
+		if (this.setThinkingError) throw this.setThinkingError;
+		this.flagSettings.push(settings);
+		this.thinkingControlCalls.push(`effort:${String(settings.effortLevel)}`);
+	}
 	async close(): Promise<void> {
 		this.closeCalls++;
 		this.closed = true;
@@ -101,8 +129,8 @@ class FakeQuery implements AsyncIterable<unknown> {
 	}
 }
 
-function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: boolean; sessionAccess?: any } = {}) {
-	const { autoPullInputs = true, sessionAccess, ...bridgeOptions } = overrides;
+function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: boolean; sessionAccess?: any; models?: SdkModel[]; supportedModels?: SdkModel[] } = {}) {
+	const { autoPullInputs = true, sessionAccess, models, supportedModels, ...bridgeOptions } = overrides;
 	const clock = new FakeClock();
 	let query!: FakeQuery;
 	const bridge = new ClaudeAgentSdkBridge({
@@ -114,12 +142,13 @@ function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: b
 	}, {
 		query: ((input: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
 			query = new FakeQuery(input.prompt, input.options, autoPullInputs);
+			query.supportedModelsData = supportedModels ?? models;
 			return query;
 		}) as never,
 		clock,
 		...(sessionAccess ? { sessionAccess } : {}),
 	});
-	return { bridge, clock, get query() { return query; } };
+	return { bridge, clock, models, get query() { return query; } };
 }
 
 async function flushMicrotasks(count = 6): Promise<void> {
@@ -129,7 +158,7 @@ async function flushMicrotasks(count = 6): Promise<void> {
 async function startReady(fixture: ReturnType<typeof bridgeFixture>, sessionId = "00000000-0000-4000-8000-000000000001"): Promise<FakeQuery> {
 	const started = fixture.bridge.start();
 	await Promise.resolve();
-	fixture.query.initialization.resolve({ session_id: sessionId });
+	fixture.query.initialization.resolve({ session_id: sessionId, models: fixture.models });
 	await started;
 	return fixture.query;
 }
@@ -324,22 +353,131 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(fixture.bridge.running).toBe(false);
 	});
 
-	it("applies only verified SDK model/thinking controls and rejects unsupported or cross-runtime controls", async () => {
+	it("derives live SDK capability metadata, resolves canonical ids to wire aliases, and routes effort controls", async () => {
+		const models: SdkModel[] = [{
+			value: "sonnet", resolvedModel: "claude-sonnet-5", supportsEffort: true,
+			supportedEffortLevels: ["low", "high", "max"],
+		}];
+		const fixture = bridgeFixture({ models });
+		const query = await startReady(fixture, "00000000-0000-4000-8000-000000000004");
+		await expect(fixture.bridge.setModel("claude-agent-sdk", "claude-sonnet-5")).resolves.toMatchObject({ success: true });
+		expect(query.setModels).toEqual(["sonnet"]);
+		await expect(fixture.bridge.setThinkingLevel("high")).resolves.toMatchObject({ success: true });
+		expect(query.flagSettings).toEqual([{ effortLevel: "high" }]);
+		await expect(fixture.bridge.setThinkingLevel("off")).resolves.toMatchObject({ success: true });
+		expect(query.flagSettings).toEqual([{ effortLevel: "high" }, { effortLevel: null }]);
+		expect(query.thinkingBudgets).toEqual([null, null]);
+		expect(query.thinkingControlCalls).toEqual(["budget:null", "effort:high", "effort:null", "budget:null"]);
+		await expect(fixture.bridge.setThinkingLevel("minimal")).resolves.toMatchObject({ success: false });
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: expect.objectContaining({ model: expect.objectContaining({
+				provider: "claude-agent-sdk", id: "claude-sonnet-5", reasoning: true,
+				thinkingLevelMap: expect.objectContaining({ off: "off", minimal: null, low: "low", high: "high", max: "max" }),
+			}) }),
+		});
+	});
+
+	it("keeps aliases as the public model identity while resolving them to SDK wire values", async () => {
+		const models: SdkModel[] = [{ value: "sonnet", resolvedModel: "claude-sonnet-5", supportsEffort: true, supportedEffortLevels: ["high"] }];
+		const fixture = bridgeFixture({ initialModel: "claude-agent-sdk/sonnet", models });
+		const query = await startReady(fixture);
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: { model: expect.objectContaining({ id: "sonnet", reasoning: true }) },
+		});
+
+		await fixture.bridge.setModel("claude-agent-sdk", "claude-sonnet-5");
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: { model: expect.objectContaining({ id: "claude-sonnet-5" }) },
+		});
+		await fixture.bridge.setModel("claude-agent-sdk", "sonnet");
+		expect(query.setModels).toEqual(["sonnet", "sonnet"]);
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: { model: expect.objectContaining({ id: "sonnet", reasoning: true }) },
+		});
+	});
+
+	it("clears stale controls when switching between SDK effort, fixed-budget, and off thinking", async () => {
+		const fixture = bridgeFixture({ models: [{ value: "opus", supportsEffort: true, supportedEffortLevels: ["high"], supportsAdaptiveThinking: true }] });
+		const query = await startReady(fixture);
+		await fixture.bridge.setModel("claude-agent-sdk", "opus");
+		await fixture.bridge.setThinkingLevel("high");
+		await fixture.bridge.setThinkingLevel("minimal");
+		await fixture.bridge.setThinkingLevel("high");
+		await fixture.bridge.setThinkingLevel("off");
+
+		expect(query.thinkingControlCalls).toEqual([
+			"budget:null", "effort:high",
+			"effort:null", "budget:1024",
+			"budget:null", "effort:high",
+			"effort:null", "budget:null",
+		]);
+		expect(query.flagSettings).toEqual([
+			{ effortLevel: "high" }, { effortLevel: null }, { effortLevel: "high" }, { effortLevel: null },
+		]);
+	});
+
+	it("uses fixed token budgets only for adaptive-thinking models and rejects unadvertised models without SDK mutation", async () => {
+		const fixture = bridgeFixture({ models: [{ value: "opus", supportsAdaptiveThinking: true }] });
+		const query = await startReady(fixture);
+		await expect(fixture.bridge.setModel("claude-agent-sdk", "not-advertised")).resolves.toMatchObject({ success: false });
+		expect(query.setModels).toEqual([]);
+		await expect(fixture.bridge.setModel("claude-agent-sdk", "opus")).resolves.toMatchObject({ success: true });
+		await expect(fixture.bridge.setThinkingLevel("high")).resolves.toMatchObject({ success: true });
+		await expect(fixture.bridge.setThinkingLevel("off")).resolves.toMatchObject({ success: true });
+		expect(query.thinkingBudgets).toEqual([8_192, null]);
+	});
+
+	it("does not alter the locally read-back model or thinking tuple after an SDK control failure", async () => {
+		const fixture = bridgeFixture({ models: [{ value: "sonnet", supportsEffort: true, supportedEffortLevels: ["high"] }] });
+		const query = await startReady(fixture);
+		query.setModelError = new Error("model rejected");
+		await expect(fixture.bridge.setModel("claude-agent-sdk", "sonnet")).rejects.toThrow("model rejected");
+		query.setModelError = undefined;
+		await fixture.bridge.setModel("claude-agent-sdk", "sonnet");
+		query.setThinkingError = new Error("effort rejected");
+		await expect(fixture.bridge.setThinkingLevel("high")).rejects.toThrow("effort rejected");
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: expect.objectContaining({ model: expect.objectContaining({ id: "sonnet" }), thinkingLevel: undefined }),
+		});
+	});
+
+	it("normalizes only SDK-proven effort levels and matches aliases through the pure resolver", () => {
+		const capabilities = normalizeClaudeAgentSdkModelCapabilities([{ value: "sonnet", resolvedModel: "claude-sonnet-5", supportsEffort: true, supportedEffortLevels: ["low", "minimal", "bogus"] }]);
+		expect(capabilities).toHaveLength(1);
+		expect(resolveClaudeAgentSdkModelCapability(capabilities, "claude-sonnet-5")).toMatchObject({ wireValue: "sonnet", effortLevels: ["low"] });
+		expect(resolveClaudeAgentSdkModelCapability(capabilities, "sonnet")).toMatchObject({ id: "claude-sonnet-5" });
+		expect(capabilities![0].thinkingLevelMap).toMatchObject({ off: "off", minimal: null, low: "low", medium: null });
+	});
+
+	it("clears legacy SDK thinking without flags but rejects advertised effort controls", async () => {
+		const fixture = bridgeFixture({ models: [{ value: "sonnet", supportsEffort: true, supportedEffortLevels: ["high"] }] });
+		const query = await startReady(fixture);
+		await fixture.bridge.setModel("claude-agent-sdk", "sonnet");
+		Object.defineProperty(query, "applyFlagSettings", { value: undefined });
+
+		await expect(fixture.bridge.setThinkingLevel("off")).resolves.toMatchObject({ success: true });
+		expect(query.thinkingBudgets).toEqual([null]);
+		await expect(fixture.bridge.setThinkingLevel("high")).resolves.toMatchObject({
+			success: false,
+			error: "Claude Agent SDK does not support advertised effort controls",
+		});
+		expect(query.thinkingBudgets).toEqual([null]);
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: expect.objectContaining({ thinkingLevel: "off" }),
+		});
+	});
+
+	it("keeps capability-less SDKs conservative while retaining cross-runtime rejection", async () => {
 		const fixture = bridgeFixture();
-		const query = await startReady(fixture, "00000000-0000-4000-8000-000000000002");
+		const query = await startReady(fixture, "00000000-0000-4000-8000-000000000004");
 		await expect(fixture.bridge.setModel("claude-agent-sdk", "opus-test")).resolves.toMatchObject({ success: true });
 		expect(query.setModels).toEqual(["opus-test"]);
 		await expect(fixture.bridge.setModel("anthropic", "sonnet")).resolves.toMatchObject({ success: false });
 		await expect(fixture.bridge.setThinkingLevel("off")).resolves.toMatchObject({ success: true });
-		await expect(fixture.bridge.setThinkingLevel("high")).resolves.toMatchObject({ success: true });
-		expect(query.thinkingBudgets[0]).toBeNull();
-		expect(query.thinkingBudgets[1]).toBeGreaterThan(0);
+		await expect(fixture.bridge.setThinkingLevel("high")).resolves.toMatchObject({ success: false });
 		await expect(fixture.bridge.compact()).resolves.toMatchObject({ success: false });
 		await expect(fixture.bridge.sendCommand()).resolves.toMatchObject({ success: false });
 		await expect(fixture.bridge.getMessages()).resolves.toMatchObject({ success: false });
-		await expect(fixture.bridge.getState()).resolves.toMatchObject({
-			data: expect.objectContaining({ model: { provider: "claude-agent-sdk", id: "opus-test" } }),
-		});
 	});
 
 	it("adapts SDK PreCompact through the existing beforeCompact callback without fabricating manual compact events", async () => {
