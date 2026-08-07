@@ -3,6 +3,14 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.16.2
+
+Upgrading from v0.16.1. This release fixes automated release completion.
+
+### 🐛 Bug Fixes
+
+* 📦 **Reliable release completion**: Automated releases now handle a missing version tag correctly after npm publication, allowing the immutable source tag and GitHub release to be created as intended.
+
 ## v0.16.1
 
 Upgrading from v0.15.1. This release adds shared Git and PR status, URL subpath hosting, keyboard steering, clearer workflow guidance, and broad improvements to authentication, recovery, and performance.
