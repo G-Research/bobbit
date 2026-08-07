@@ -1,0 +1,43 @@
+apiVersion: 1
+id: hindsight-runtime-matrix
+title: Hindsight runtime matrix fixture
+endpoint:
+  protocol: http
+  servicePort: 8888
+  health:
+    path: /health
+    expectedStatus: 200
+    requestTimeoutMs: 300
+    intervalMs: 100
+    startupTimeoutMs: 5000
+lifecycle:
+  startPolicy: manual
+  restart:
+    policy: never
+    maxAttempts: 0
+    windowMs: 1000
+    initialBackoffMs: 100
+    maxBackoffMs: 100
+environment:
+  HINDSIGHT_FIXTURE_PORT:
+    endpointPort: true
+  HINDSIGHT_FIXTURE_DATA_DIR:
+    setting: runtimeDataDir
+  HINDSIGHT_FIXTURE_HOST_DATA_DIR:
+    setting: hostDataDir
+storage:
+  setting: hostDataDir
+  target: /data
+  survival: preserve
+modes:
+  local:
+    command: node
+    args: [server.mjs]
+    cwd: .
+    portEnv: HINDSIGHT_FIXTURE_PORT
+  docker:
+    image: HINDSIGHT_RUNTIME_MATRIX_IMAGE
+  compose:
+    file: compose.yaml
+    service: hindsight
+    projectName: bobbit-hindsight-runtime-matrix-${serverIdentity}
