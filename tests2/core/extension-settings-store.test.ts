@@ -83,8 +83,32 @@ describe("extension settings store", () => {
 		expect(JSON.stringify(projection)).not.toContain(privateValue);
 		expect(projection).toMatchObject({ secretSet: { credential: true }, values: { endpoint: "https://private.example" } });
 		expect(secrets.getForRuntime(ref, "credential")).toBe(privateValue);
-		expect(fs.statSync(path.join(stateDir, "extension-settings-secrets.json")).mode & 0o777).toBe(0o600);
+		// Windows reports 0666 even when Node receives a 0600 mode request.
+		if (process.platform !== "win32") {
+			expect(fs.statSync(path.join(stateDir, "extension-settings-secrets.json")).mode & 0o777).toBe(0o600);
+		}
 	}));
+
+	it("requests an owner-only mode through its injected filesystem seam", () => {
+		const memFs = createMemFs();
+		const stateDir = "/memfs/settings-state";
+		const secrets = new ExtensionSettingsSecretStore(stateDir, memFs);
+		const originalWrite = memFs.writeFileSync.bind(memFs);
+		const writes: Array<{ file: string; options: unknown }> = [];
+		memFs.writeFileSync = (file, ...args) => {
+			writes.push({ file: String(file), options: args[1] });
+			return originalWrite(file, ...args);
+		};
+
+		secrets.update(ref, { credential: "runtime-credential-value" });
+
+		expect(writes).toHaveLength(1);
+		expect(writes[0]).toMatchObject({
+			file: expect.stringContaining("extension-settings-secrets.json."),
+			options: { encoding: "utf-8", mode: 0o600 },
+		});
+		expect(secrets.getForRuntime(ref, "credential")).toBe("runtime-credential-value");
+	});
 
 	it("reports a redacted partial result when the owner-only write fails", () => {
 		const memFs = createMemFs();

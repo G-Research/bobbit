@@ -15,9 +15,10 @@ const packagePatches = [
 ];
 const scenarioFile = fileURLToPath(new URL("./tool-result-filter-pi-gate-scenario.mjs", import.meta.url));
 const scenarioSuccess = "PI_RESULT_GATE_SCENARIO_PASSED\n";
-// Node 26 emits this exact upstream warning while loading Pi's published ESM.
-// Remove only this complete known frame so any new child stderr still fails.
-const NODE_26_DEP0205 = /(?:^|\n)\(node:\d+\) \[DEP0205\] DeprecationWarning: Automatic \.js syntax detection is deprecated and may change in the future\.\n\(Use `node --trace-deprecation \.\.\.` to show where the warning was created\)\n?/g;
+// Node 26 emits these exact upstream warning frames while loading Pi's
+// published ESM. Remove complete, known frames only: unexpected child stderr
+// remains a test failure rather than being hidden by broad normalization.
+const NODE_26_DEP0205 = /(?:^|\n)\(node:\d+\) \[DEP0205\] DeprecationWarning: (?:Automatic \.js syntax detection is deprecated and may change in the future\.|`module\.register\(\)` is deprecated\. Use `module\.registerHooks\(\)` instead\.)\n\(Use `node --trace-deprecation \.\.\.` to show where the warning was created\)(?=\n|$)\n?/g;
 
 function withoutKnownNode26Dep0205(stderr: string): string {
 	return stderr.replace(NODE_26_DEP0205, "");
@@ -144,11 +145,24 @@ function createPatchedPiHarness(): string {
 }
 
 describe("patched Pi result gate", () => {
-	it("normalizes only Node 26's known DEP0205 child warning", () => {
-		const known = "(node:123) [DEP0205] DeprecationWarning: Automatic .js syntax detection is deprecated and may change in the future.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n";
-		expect(withoutKnownNode26Dep0205(known)).toBe("");
-		expect(withoutKnownNode26Dep0205(`${known}unexpected child stderr\n`)).toBe("unexpected child stderr\n");
-		expect(withoutKnownNode26Dep0205("(node:123) [DEP9999] DeprecationWarning: unexpected\n")).toContain("DEP9999");
+	it("normalizes only complete exact Node 26 DEP0205 child warnings", () => {
+		const automaticSyntaxDetection = "(node:123) [DEP0205] DeprecationWarning: Automatic .js syntax detection is deprecated and may change in the future.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n";
+		const registerHooks = "(node:456) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n";
+
+		expect(withoutKnownNode26Dep0205(automaticSyntaxDetection)).toBe("");
+		expect(withoutKnownNode26Dep0205(registerHooks)).toBe("");
+		expect(withoutKnownNode26Dep0205(`${automaticSyntaxDetection}${registerHooks}`)).toBe("");
+		expect(withoutKnownNode26Dep0205(`${registerHooks}unexpected child stderr\n`)).toBe("unexpected child stderr\n");
+	});
+
+	it("keeps incomplete, altered, and unknown stderr frames", () => {
+		const incompleteRegisterHooks = "(node:456) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.\n";
+		const alteredRegisterHooks = "(node:456) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use module.registerHooks() instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n";
+		const unknown = "(node:123) [DEP9999] DeprecationWarning: unexpected\n";
+
+		expect(withoutKnownNode26Dep0205(incompleteRegisterHooks)).toBe(incompleteRegisterHooks);
+		expect(withoutKnownNode26Dep0205(alteredRegisterHooks)).toBe(alteredRegisterHooks);
+		expect(withoutKnownNode26Dep0205(unknown)).toBe(unknown);
 	});
 
 	it("executes the shipped patch in a child process and makes its safe result authoritative before all fan-out", async () => {
