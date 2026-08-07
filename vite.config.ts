@@ -602,7 +602,9 @@ export default defineConfig(({ command, mode }) => ({
 	// Bundle the browser graph during development. Bobbit's large eager graph
 	// takes tens of seconds to traverse as one request per source module; Vite's
 	// bundled mode keeps HMR while serving a small set of in-memory chunks.
-	// Production retains its mount-aware runtime URL rewriting instead.
+	// Production retains its mount-aware runtime URL rewriting instead. The
+	// source-runtime E2E owns an explicit opt-out because it verifies the actual
+	// source module graph rather than the normal bundled development runtime.
 	experimental: command === "build"
 		? {
 			renderBuiltUrl(filename, { hostType }) {
@@ -618,7 +620,9 @@ export default defineConfig(({ command, mode }) => ({
 				return { relative: hostType === "css" };
 			},
 		}
-		: { bundledDev: true },
+		: process.env.BOBBIT_VITE_SOURCE_GRAPH === "1"
+			? undefined
+			: { bundledDev: true },
 	build: {
 		outDir: "dist/ui",
 		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)

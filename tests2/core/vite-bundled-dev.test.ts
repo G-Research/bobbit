@@ -21,6 +21,19 @@ describe("Vite bundled development mode", () => {
 			.not.toContain("batch-client-full-reloads");
 	});
 
+	it("allows the owned source-runtime smoke to inspect the native module graph", async () => {
+		const previous = process.env.BOBBIT_VITE_SOURCE_GRAPH;
+		process.env.BOBBIT_VITE_SOURCE_GRAPH = "1";
+		try {
+			const config = await configFor("serve");
+			expect(config.experimental?.bundledDev).toBeUndefined();
+			expect(config.experimental?.renderBuiltUrl).toBeUndefined();
+		} finally {
+			if (previous === undefined) delete process.env.BOBBIT_VITE_SOURCE_GRAPH;
+			else process.env.BOBBIT_VITE_SOURCE_GRAPH = previous;
+		}
+	});
+
 	it("guards Tailwind's unreleased bundled-dev hot-update fix", async () => {
 		const config = await configFor("serve");
 		const plugin = config.plugins?.flat().find(
