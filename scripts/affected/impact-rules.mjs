@@ -221,6 +221,7 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 			"tests2/core/gateway-nondelete-push-boundary.test.ts",
 			"tests2/core/perm-frame-late-joiner-seq-gap.test.ts",
 			"tests2/core/spawn-node-execpath-invariant.test.ts",
+			"tests2/integration/extension-host-surface-token.test.ts",
 		]),
 	},
 	{
@@ -898,6 +899,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned generated Pi result-gate extension file",
 		reads: frozen([
 			{ expression: "gatePath!", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/extension-host-surface-token.test.ts",
+		declarations: frozen(["scan:server-typescript-source-guards"]),
+		reads: frozen([
+			{ expression: "sourcePath", count: 1 },
 		]),
 	},
 	{
