@@ -231,10 +231,22 @@ export class HindsightRuntimeBridge {
 		return Number(this.settings(projectId).getRuntimeValues(this.provider(projectId)).revision);
 	}
 
-	/** Inert EP-7 PATCH validation. It sees public values only and never probes,
+	/** Inert EP-7 PATCH validation. The caller supplies schema defaults from the
+	 * server-resolved catalogue, rather than resolving the active runtime
+	 * provider: a disabled/dormant target must remain repairable. This only reads
+	 * EP-7's redacted public values (and its commit pairing), and never probes,
 	 * pulls, starts, or contacts a model, registry, or database. */
-	validateSettingsSave(projectId: string, changes: Readonly<Record<string, ExtensionSettingValue | undefined>>): { ok: true; warnings: string[] } | { ok: false; code: string } {
-		const current = this.settings(projectId).getRuntimeValues(this.provider(projectId)).values;
+	validateSettingsSave(
+		projectId: string,
+		defaults: Readonly<Record<string, ExtensionSettingValue>>,
+		changes: Readonly<Record<string, ExtensionSettingValue | undefined>>,
+	): { ok: true; warnings: string[] } | { ok: false; code: string } {
+		const context = this.options.contextForProject(projectId);
+		if (!context) throw new ServiceRuntimeError("SERVICE_RUNTIME_NOT_FOUND");
+		const current = context.extensionSettingsStore.getEffective(
+			{ packId: HINDSIGHT_PACK_ID, kind: "provider", id: HINDSIGHT_PROVIDER_ID },
+			defaults,
+		).values;
 		const merged: Record<string, ExtensionSettingValue> = { ...current };
 		for (const [key, value] of Object.entries(changes)) {
 			if (value === undefined) delete merged[key];

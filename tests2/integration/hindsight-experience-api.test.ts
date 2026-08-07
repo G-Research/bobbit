@@ -9,6 +9,8 @@ import { mintSurfaceToken } from "../../src/server/extension-host/surface-bindin
 import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.ts";
 import { startHindsightStub } from "../../tests/e2e/hindsight-stub.mjs";
 import { ServiceRuntimeStore } from "../../src/server/service-runtime/service-runtime-store.ts";
+import { getPackStore } from "../../src/server/extension-host/pack-store.ts";
+import { queueKey } from "../../market-packs/hindsight/src/shared.ts";
 
 // The in-process gateway stages Hindsight as the shipped built-in pack. Keep
 // the test-only resolver available for source-mode route workers in older test
@@ -270,6 +272,84 @@ describe.serial("Hindsight experience API", () => {
 		const reloaded = await apiFetch(settingsPath(project.id));
 		expect(reloaded.status).toBe(200);
 		expect(await reloaded.text()).not.toContain(SECRET);
+	});
+
+	test("repairs inactive Hindsight settings through the catalogue without runtime side effects", async ({ gateway }) => {
+		const project = await createProject(gateway, "inactive-settings-repair");
+		const context = gateway.projectContextManager.getOrCreate(project.id);
+		const initial = await json(await apiFetch(settingsPath(project.id)));
+
+		for (const [packId, providerId] of [["not-installed", PROVIDER_ID], [PACK_ID, "not-installed"]] as const) {
+			const denied = await apiFetch(`${settingsPath(project.id)}/${packId}/provider/${providerId}`, {
+				method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: initial.revision, enabled: true }),
+			});
+			expect(denied.status).toBe(404);
+			expect(await json(denied)).toMatchObject({ code: "EXTENSION_SETTINGS_TARGET_NOT_FOUND" });
+		}
+
+		const disabled = await apiFetch(providerPath(project.id), {
+			method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: initial.revision, enabled: false }),
+		});
+		expect(disabled.status).toBe(200);
+		const disabledBody = await json(disabled);
+		expect(disabledBody.target).toMatchObject({ enabled: { effective: false, projectOverride: false } });
+		expect(fs.existsSync(path.join(context.stateDir, "service-runtimes"))).toBe(false);
+		expect(fs.existsSync(path.join(context.stateDir, "hindsight-queue"))).toBe(false);
+		expect(getPackStore().readSync(PACK_ID, queueKey(project.id))).toMatchObject({ state: "absent" });
+
+		// The active registry now drops this provider. Re-enabling still uses only
+		// the server-resolved installed schema and EP-7 CAS; it cannot start a
+		// runtime, contact a service, or create private provider state.
+		const repaired = await apiFetch(providerPath(project.id), {
+			method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: disabledBody.revision, enabled: true }),
+		});
+		expect(repaired.status).toBe(200);
+		const repairedBody = await json(repaired);
+		expect(repairedBody).toMatchObject({ revision: disabledBody.revision + 1, target: { enabled: { effective: true, projectOverride: true } } });
+		expect(fs.existsSync(path.join(context.stateDir, "service-runtimes"))).toBe(false);
+		expect(fs.existsSync(path.join(context.stateDir, "hindsight-queue"))).toBe(false);
+		expect(getPackStore().readSync(PACK_ID, queueKey(project.id))).toMatchObject({ state: "absent" });
+	});
+
+	test("fails closed with redacted typed errors when Hindsight settings pairing cannot be read", async ({ gateway }) => {
+		const project = await createProject(gateway, "settings-pairing-repair");
+		const initial = await json(await apiFetch(settingsPath(project.id)));
+		const disabled = await apiFetch(providerPath(project.id), {
+			method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: initial.revision, enabled: false }),
+		});
+		expect(disabled.status).toBe(200);
+		const revision = (await json(disabled)).revision;
+		const context = gateway.projectContextManager.getOrCreate(project.id);
+		const secretsPath = path.join(context.stateDir, "extension-settings-secrets.json");
+
+		fs.writeFileSync(secretsPath, JSON.stringify({ schema: 1, commitId: "mismatched-commit", values: {} }) + "\n");
+		await gateway.projectContextManager.remove(project.id);
+		const mismatched = await apiFetch(providerPath(project.id), {
+			method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: revision, enabled: true }),
+		});
+		expect(mismatched.status).toBe(503);
+		const mismatchBody = await json(mismatched);
+		expect(mismatchBody).toEqual({
+			error: "Extension settings are unavailable. Retry after repairing project state.",
+			code: "EXTENSION_SETTINGS_SECRET_COMMIT_MISMATCH",
+		});
+		expect(JSON.stringify(mismatchBody)).not.toContain("mismatched-commit");
+
+		fs.writeFileSync(secretsPath, "not valid JSON\n");
+		await gateway.projectContextManager.remove(project.id);
+		const unreadable = await apiFetch(providerPath(project.id), {
+			method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: revision, enabled: true }),
+		});
+		expect(unreadable.status).toBe(503);
+		const unreadableBody = await json(unreadable);
+		expect(unreadableBody).toEqual({
+			error: "Extension settings are unavailable. Retry after repairing project state.",
+			code: "EXTENSION_SETTINGS_SECRET_READ_FAILED",
+		});
+		expect(JSON.stringify(unreadableBody)).not.toContain("not valid JSON");
+		const reopened = gateway.projectContextManager.getOrCreate(project.id);
+		expect(fs.existsSync(path.join(reopened.stateDir, "service-runtimes"))).toBe(false);
+		expect(fs.existsSync(path.join(reopened.stateDir, "hindsight-queue"))).toBe(false);
 	});
 
 	test("keeps local managed-volume settings dormant but rejects explicit start before runtime mutation", async ({ gateway }) => {
