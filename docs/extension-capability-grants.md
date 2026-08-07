@@ -260,12 +260,15 @@ when the hook also declares `mutate` and has its separate exact `mutate` grant, 
 decision, mutation, and filter hooks receive no working Host API. See [Extension decision
 requests](extension-decision-requests.md).
 
-## Deferred UI work
+## Market controls
 
-EP-6 intentionally has no Marketplace grant controls, approval dialog, settings page, or audit
-viewer. Those operator experiences are EP-7 work. Automation and future UI clients may use the
-normal-auth read routes above, but grant and revoke mutations require the signed operator cookie;
-treat the contribution projection as status metadata, not an execution API.
+Market now renders the active hook's exact grant status beside its project settings and activation
+state. Granting or revoking opens a named confirmation for the precise `(pack, hook, capability)`
+tuple; it still uses the same signed-operator route described above. The UI does not turn a grant
+into an execution API: it displays state and sends the exact administrative mutation, while core
+continues to resolve activation, configuration, and live authority at the relevant application
+fence. See [Project extension settings](extension-settings.md#market-behavior) and the
+[Extension Platform lifecycle](extension-platform.md#operator-lifecycle).
 
 `bobbit.disabledProviders` is unrelated to grants and remains a compatible provider kill switch.
 It is neither renamed nor interpreted as pack activation or hook authority.
