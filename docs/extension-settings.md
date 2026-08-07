@@ -101,13 +101,41 @@ The public project YAML holds an `extension_settings` record with storage `schem
 override and primitive non-secret `values`. Its internal key is derived from the pack id,
 `provider` or `hook` kind, and contribution id; clients never create or choose that storage key.
 
-Secret bytes are kept separately in the project's state directory. The secret owner publishes its
-own file atomically with owner-only permissions and exposes only a per-target presence check and
-a runtime-only single-field read. It has no bulk or public getter. Thus a project YAML file,
-project-config endpoint, settings projection, WebSocket invalidation, log, trace, audit record,
-diff, or Market-rendered state/attributes do not contain a secret value. A password input temporarily
-holds the value only while an operator enters it for a save, then is cleared. Public responses
-represent a secret only as `secretSet: true` or `false`.
+Secret bytes are kept separately in the project's state directory. The secret owner coalesces every
+secret-field change in one settings mutation into one owner-only, atomic file replacement. It exposes
+only a per-target presence check and a runtime-only single-field read; it has no bulk or public getter.
+Thus a project YAML file, project-config endpoint, settings projection, WebSocket invalidation, log,
+trace, audit record, diff, or Market-rendered state/attributes do not contain a secret value. A password
+input temporarily holds the value only while an operator enters it for a save, then is cleared. Public
+responses represent a secret only as `secretSet: true` or `false`.
+
+### Commit binding and recovery
+
+The public record and the owner-only secret record are separate files, so they cannot be made one
+filesystem transaction. The security invariant is therefore that the runtime may combine public settings
+with secret presence or secret bytes **only when both durable records identify the same settings commit**.
+This prevents a crash or an ambiguous file replacement from pairing a newer public override with an
+older secret record.
+
+Every successful settings mutation creates a fresh opaque `commitId` in the public
+`extension_settings` record. The owner-only secret file is written as a versioned envelope containing
+its own schema marker, the same opaque identifier, and its private values. The envelope is refreshed
+for every mutation, including a public-only one, so retained secret values remain bound to the current
+public generation. The identifier is correlation metadata, not a credential, and the public API does
+not expose the secret envelope or its contents.
+
+Older projects may have a public record without `commitId` and a legacy flat secret file. That complete
+legacy pair remains readable for compatibility. The first successful settings mutation upgrades both
+records to the bound format. A versioned record paired with a legacy record, an invalid versioned
+envelope, or unequal identifiers is not treated as legacy or repaired by guessing. Settings resolution,
+including redacted `secretSet` state, fails closed and new settings mutations are blocked so a later
+save cannot relabel stale secret data as current.
+
+If storage recovery leaves the pair mismatched, repair the project state to a matching pair from the
+same known-good state before retrying. The service does not claim cross-file crash atomicity, infer which
+side is authoritative, or expose a secret to make that repair. At request time it still compensates a
+known secret-save failure by restoring the previous public snapshot when possible; that compensation
+reduces ordinary write failures but does not replace the durable pairing check.
 
 The effective non-secret value order is:
 
@@ -198,10 +226,15 @@ reports whether the hook's applicable capability is authorized: ordinary decisio
 
 Mutations are compare-and-swap operations. The caller must send the revision it read; a stale
 revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT` and must be reloaded and reviewed,
-not overwritten. A public update increments the revision once. Public YAML is published before
-secret persistence, because the two files cannot be one filesystem transaction. If the later
-secret write fails, the response is `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with the new
-revision and a redacted retry projection; it never claims that the secret was stored.
+not overwritten. A successful public update increments the revision once and advances the paired opaque
+commit identity described above. Public YAML is persisted before the one coalesced secret-file save,
+because the two files cannot be one filesystem transaction. If that secret save fails, the server first
+compensates by restoring the exact prior public settings snapshot and revision, then returns the generic
+sanitized `503 EXTENSION_SETTINGS_PERSIST_FAILED`. The original revision is therefore retryable, and
+the prior public projection and runtime values remain authoritative; the attempted secret is never
+reported as stored. If that compensating public save also fails, or durable records cannot be paired,
+the server reports settings as unavailable rather than claiming a determinate result or success. This
+request-time compensation does not provide crash-level atomicity across the two files.
 
 Other useful mutation outcomes include:
 
