@@ -36,6 +36,7 @@ const DOCKER_BIN = "docker";
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
+export const CLAUDE_AGENT_SDK_SANDBOX_VERSION = "0.3.222";
 
 interface DockerMountInfo {
 	Type?: string;
@@ -651,6 +652,21 @@ export class ProjectSandbox {
 	async exec(args: string[], opts?: { cwd?: string; env?: Record<string, string>; timeout?: number }): Promise<string> {
 		const containerId = await this.getContainerId();
 		return this._dockerExec(containerId, args, opts);
+	}
+
+	/** Exact image and wrapper probe for the SDK-only sandbox launch path. */
+	async hasClaudeAgentSdkCapability(): Promise<boolean> {
+		try {
+			const { stdout } = await this.execDocker([
+				"image", "inspect", "--format", "{{index .Config.Labels \"bobbit.claude-agent-sdk-version\"}}", this.options.image,
+			], { timeout: 5_000, env: DOCKER_ENV });
+			if (stdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION) return false;
+			const containerId = await this.getContainerId();
+			await this._dockerExec(containerId, ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	// ── Health monitoring ──────────────────────────────────────────────

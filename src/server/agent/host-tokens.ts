@@ -314,6 +314,36 @@ export function sandboxTokenPolicyAllowsAnthropicAuth(entries: Array<{ key?: str
 	return (entries || []).some((entry) => entry.enabled !== false && !!entry.key && ANTHROPIC_SANDBOX_AUTH_TOKEN_KEYS.has(entry.key));
 }
 
+/** Stable, credential-free failure for the SDK-only subscription handoff. */
+export class ClaudeAgentSdkSandboxAuthUnavailableError extends Error {
+	readonly code = "CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE";
+	constructor() {
+		super("CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE: enable the Anthropic OAuth sandbox token policy and sign in again");
+		this.name = "ClaudeAgentSdkSandboxAuthUnavailableError";
+	}
+}
+
+/**
+ * Resolve only the current host subscription access token for one SDK
+ * `docker exec`. The caller holds `withSandboxAgentAuthFileLock`; no API key,
+ * refresh token, generic sandbox credential, or persisted object crosses this
+ * boundary.
+ */
+export async function resolveSandboxClaudeAgentSdkOAuthAccessToken(input: {
+	entries: Array<{ key?: string; enabled?: boolean; value?: string }> | undefined | null;
+	secrets?: Record<string, string> | null;
+}): Promise<string> {
+	if (!sandboxTokenPolicyAllowsAnthropicAuth(input.entries)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	if (hasExplicitSandboxAnthropicCredential(input.entries, input.secrets)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	const before = readHostAuthJson()?.anthropic;
+	// An API-key host row must never be silently converted into the SDK path.
+	if (isAnthropicApiKeyCredential(before)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	if (!(await refreshSandboxAnthropicOAuthCredential())) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	const credential = readHostAuthJson()?.anthropic;
+	if (!hasCurrentOAuthAccess(credential) || isAnthropicApiKeyCredential(credential)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	return credential.access;
+}
+
 /** True when the project supplies an Anthropic token rather than requesting a host handoff. */
 export function hasExplicitSandboxAnthropicCredential(
 	entries: Array<{ key?: string; enabled?: boolean; value?: string }> | undefined | null,

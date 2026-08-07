@@ -5,11 +5,14 @@ import {
 	defaultClaudeAgentSdkBridgeDeps,
 	type ClaudeAgentSdkBridgeDeps,
 } from "./claude-agent-sdk-bridge.js";
+import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
 
 export type SessionRuntime = "pi" | "claude-agent-sdk";
 
 export interface SessionBridgeOptions extends RpcBridgeOptions {
 	runtime?: SessionRuntime;
+	/** Ephemeral SDK-only sandbox launch descriptor; never persists with SessionInfo. */
+	claudeSdkSandboxLaunch?: import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkSandboxLaunch;
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
 	claudeSdkToolSurface?: import("./claude-agent-sdk-tool-surface.js").ClaudeSdkToolSurface;
@@ -65,7 +68,19 @@ export function createSessionBridge(options: SessionBridgeOptions): IRpcBridge {
 	const runtime = resolveSessionRuntime(options);
 	if (runtime === "claude-agent-sdk") {
 		const sdkOptions = { ...options, runtime } as import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkBridgeOptions;
-		return new ClaudeAgentSdkBridge(sdkOptions, options.claudeAgentSdkBridgeDepsFactory?.(sdkOptions) ?? sdkDeps);
+		const deps = options.claudeAgentSdkBridgeDepsFactory?.(sdkOptions) ?? sdkDeps;
+		const launch = sdkOptions.claudeSdkSandboxLaunch;
+		const sandboxSessionAccess = launch
+			? createSandboxClaudeAgentSdkSessionAccess({
+				containerId: launch.containerId,
+				cwd: launch.cwd,
+				bobbitSessionId: launch.sessionId,
+			})
+			: undefined;
+		return new ClaudeAgentSdkBridge(sdkOptions, sandboxSessionAccess ? {
+			...deps,
+			sessionAccess: { ...(deps.sessionAccess ?? defaultClaudeAgentSdkSessionAccessDeps), sandboxSdk: sandboxSessionAccess },
+		} : deps);
 	}
 	return new RpcBridge(options);
 }

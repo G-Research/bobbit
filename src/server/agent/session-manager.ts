@@ -25,7 +25,7 @@ import { SearchService } from "../search/search-service.js";
 import { hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
 import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
-import { readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
+import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
@@ -3070,6 +3070,10 @@ export class SessionManager {
 		}
 
 		const containerId = await sandbox.getContainerId();
+		const sdkRuntime = resolveSessionRuntime(bridgeOptions) === "claude-agent-sdk";
+		if (sdkRuntime && !(await sandbox.hasClaudeAgentSdkCapability())) {
+			throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: rebuild the Docker sandbox image before starting a Claude Agent SDK session");
+		}
 
 		// Read gateway URL and generate scoped token for the container.
 		const gwUrl = this.readGatewayUrlForAgent();
@@ -3157,6 +3161,7 @@ export class SessionManager {
 		// empty ANTHROPIC_OAUTH_TOKEN entry opts in to one current, non-renewable
 		// auth.json entry. Project credentials win and never trigger host refresh.
 		const secretsStore = projectContext?.secretsStore ?? null;
+		let sdkOAuthAccessToken: string | undefined;
 		await withSandboxAgentAuthFileLock(projectId, async () => {
 			const readSandboxAuthPolicy = () => {
 				const entries = projectConfigStore.getSandboxTokens();
@@ -3181,22 +3186,53 @@ export class SessionManager {
 			};
 
 			let policy = readSandboxAuthPolicy();
-			const anthropicOAuthCurrent = policy.includeAnthropicAuth
+			const anthropicOAuthCurrent = !sdkRuntime && policy.includeAnthropicAuth
 				&& await refreshSandboxAnthropicOAuthCredential();
 
 			// Refresh is asynchronous, so the user may have configured an explicit
 			// project key while it was in flight. Re-read policy and credentials under
 			// this project's write lock before changing its shared auth.json.
 			policy = readSandboxAuthPolicy();
-			bridgeOptions.sandboxCredentials = policy.credentials;
+			if (sdkRuntime) {
+				// The SDK receives no generic sandbox credentials and cannot fall back
+				// to an API key. This opaque value exists only until its docker exec.
+				if (policy.credentials.ANTHROPIC_API_KEY || policy.credentials.ANTHROPIC_OAUTH_TOKEN) {
+					throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+				}
+				sdkOAuthAccessToken = await resolveSandboxClaudeAgentSdkOAuthAccessToken({
+					entries: projectConfigStore.getSandboxTokens(),
+					secrets: secretsStore?.getAll(),
+				});
+				delete bridgeOptions.sandboxCredentials;
+			} else {
+				bridgeOptions.sandboxCredentials = policy.credentials;
+			}
 			ensureSandboxAgentAuthFile({
 				prefs: this.preferencesStore,
 				includeCodexAuth: policy.sandboxAuthPolicy.includeCodexAuth,
-				includeAnthropicAuth: anthropicOAuthCurrent && policy.includeAnthropicAuth,
+				includeAnthropicAuth: !sdkRuntime && anthropicOAuthCurrent && policy.includeAnthropicAuth,
 				includeGoogleAuth: policy.sandboxAuthPolicy.includeGoogleAuth,
 				scope: projectId,
 			});
 		});
+
+		if (sdkRuntime) {
+			if (!sdkOAuthAccessToken || !bridgeOptions.gatewayToken || !bridgeOptions.gatewayUrl || !bridgeOptions.cwd) {
+				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE: enable the Anthropic OAuth sandbox token policy and sign in again");
+			}
+			bridgeOptions.claudeSdkSandboxLaunch = {
+				containerId,
+				cwd: bridgeOptions.cwd,
+				sessionId,
+				sessionSecret: bridgeOptions.env?.BOBBIT_SESSION_SECRET,
+				goalId: bridgeOptions.env?.BOBBIT_GOAL_ID,
+				gatewayToken: bridgeOptions.gatewayToken,
+				gatewayUrl: bridgeOptions.gatewayUrl,
+				oauthAccessToken: sdkOAuthAccessToken,
+			};
+		} else {
+			delete bridgeOptions.claudeSdkSandboxLaunch;
+		}
 
 		return true;
 	}
@@ -11225,13 +11261,31 @@ export class SessionManager {
 
 	/** Resolve the existing SDK bridge factory's deterministic history seam. */
 	private sdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
-		if (!this.claudeAgentSdkBridgeDepsFactory || !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
+		if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
 		const options: ClaudeAgentSdkBridgeOptions = {
 			runtime: "claude-agent-sdk",
 			cwd: ps.cwd,
 			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
 		};
-		return this.claudeAgentSdkBridgeDepsFactory(options).sessionAccess;
+		const base = this.claudeAgentSdkBridgeDepsFactory?.(options).sessionAccess ?? defaultClaudeAgentSdkSessionAccessDeps;
+		if (!ps.sandboxed) return base;
+		const sandbox = ps.projectId ? this.sandboxManager?.get(ps.projectId) : undefined;
+		const containerId = sandbox?.getStatus().containerId;
+		if (!containerId) {
+			// Do not fall back to a host SDK store for a sandbox-owned transcript.
+			return { ...base, sandboxSdk: {
+				getSessionInfo: async () => { throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: sandbox container is unavailable"); },
+				getSessionMessages: async () => { throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: sandbox container is unavailable"); },
+			} };
+		}
+		return {
+			...base,
+			sandboxSdk: createSandboxClaudeAgentSdkSessionAccess({
+				containerId,
+				cwd: ps.cwd,
+				bobbitSessionId: ps.id,
+			}),
+		};
 	}
 
 	/** Read SDK source metadata through the bridge factory's official SDK access seam. */
@@ -13261,7 +13315,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
+import { ClaudeAgentSdkSandboxAuthUnavailableError, ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, resolveSandboxClaudeAgentSdkOAuthAccessToken, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

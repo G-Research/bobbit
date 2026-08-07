@@ -37,6 +37,8 @@ import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 // ── Config ─────────────────────────────────────────────────────────────────
 
 export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
+	// SDK-owned conversations/config survive bridge and container replacement.
+	{ sub: "claude-agent-sdk" },
 	{ sub: "sessions" },
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },

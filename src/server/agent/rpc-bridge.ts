@@ -14,6 +14,8 @@ import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
+import { spawnDockerExec as spawnDockerExecChild } from "./docker-exec-spawn.js";
+export { redactDockerArgs } from "./docker-exec-spawn.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -24,42 +26,6 @@ export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
 export const SERVER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-server";
 export const GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR = "/market-packs-global-user";
 export const PROJECT_MARKET_PACKS_CONTAINER_DIR = "/market-packs-project";
-
-/**
- * Redact sensitive env vars from Docker arg arrays for logging.
- *
- * Handles both `-e NAME=VALUE` (the form spawnDockerExec uses) and the
- * separated `-e NAME VALUE` form, redacting only the VALUE and leaving the
- * NAME visible for diagnostics.
- *
- * The match is on the env-var NAME, broadened to cover any `*_SECRET` /
- * `*_TOKEN` so per-session capability secrets (BOBBIT_SESSION_SECRET — a
- * replayable `X-Bobbit-Session-Secret` credential) and arbitrary
- * future credentials never leak into gateway logs in cleartext. Exported for
- * regression testing.
- */
-export function redactDockerArgs(args: string[]): string {
-	// Match on env-var NAME (left of "=", or the bare token in the split form).
-	const sensitiveName = /^(BOBBIT_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|AWS_SECRET|.*_SECRET|.*_TOKEN|.*_API_KEY|.*_OAUTH_TOKEN|.*_ACCESS_KEY)$/i;
-	const isSensitive = (token: string): boolean => {
-		const name = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
-		return sensitiveName.test(name);
-	};
-	return args.map((a, i) => {
-		if (i > 0 && args[i - 1] === "-e" && isSensitive(a)) {
-			// `-e NAME=VALUE` form: redact the value after the first "=".
-			if (a.includes("=")) return a.replace(/=.*/s, "=<REDACTED>");
-			// `-e NAME` form: the NAME token itself is fine; the value (next arg)
-			// is redacted below.
-			return a;
-		}
-		// Split `-e NAME VALUE` form: redact the VALUE following a sensitive NAME.
-		if (i > 1 && args[i - 2] === "-e" && !args[i - 1].includes("=") && isSensitive(args[i - 1])) {
-			return "<REDACTED>";
-		}
-		return a;
-	}).join(" ");
-}
 
 /** Container home directory for the Docker sandbox (node:20-slim, USER node) */
 export const CONTAINER_HOME = "/home/node";
@@ -787,60 +753,24 @@ export class RpcBridge {
 	 * The container already has all bind mounts and env vars configured.
 	 */
 	private spawnDockerExec(containerId: string, _cliPath: string, agentArgs: string[]): ChildProcess {
-		const execArgs: string[] = ["exec", "-i"];
-
-		// Pass session-specific env vars via docker exec -e (overrides container env)
-		if (this.options.env?.BOBBIT_SESSION_ID) {
-			execArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);
-		}
-		// S1: the per-session capability secret reaches the sandboxed agent
-		// process via docker exec -e (NOT the pool container's PID 1 env — so it
-		// never appears in /proc/1/environ). See session-secret.ts.
-		if (this.options.env?.BOBBIT_SESSION_SECRET) {
-			execArgs.push("-e", `BOBBIT_SESSION_SECRET=${this.options.env.BOBBIT_SESSION_SECRET}`);
-		}
-		if (this.options.env?.BOBBIT_GOAL_ID) {
-			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
-		}
-		if (this.options.gatewayToken) {
-			execArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
-		}
-		if (this.options.gatewayUrl) {
-			execArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
-		}
-		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
-		execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
-
-		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
-		if (this.options.sandboxCredentials) {
-			for (const [key, value] of Object.entries(this.options.sandboxCredentials)) {
-				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-				execArgs.push("-e", `${key}=${value}`);
-			}
-		}
-
-		// Set the container process working directory via docker exec -w.
-		// The agent CLI (pi) uses process.cwd() — not --cwd — to determine the
-		// working directory for tools and the system prompt's "Current working
-		// directory" line. Without -w, docker exec defaults to the container's
-		// WORKDIR (/workspace), which is wrong for worktree sessions.
-		const containerCwd = this.options.cwd || "/workspace";
-		execArgs.push("-w", containerCwd);
-
-		execArgs.push(
+		// Keep Pi-only remapping and its exact per-process environment separate from
+		// the generic Docker child launcher used by the Agent SDK.
+		return spawnDockerExecChild({
 			containerId,
-			"node", "--disable-warning=DEP0123", "/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-			...this.remapArgsForContainer(agentArgs),
-		);
-
-		console.log(`[rpc-bridge] Docker exec args: ${redactDockerArgs(execArgs)}`);
-
-		// Host-side spawn doesn't need a specific cwd — the container working
-		// directory is set via `docker exec -w` above.
-		return spawn("docker", execArgs, {
-			stdio: ["pipe", "pipe", "pipe"],
-			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-		});
+			cwd: this.options.cwd || "/workspace",
+			env: {
+				BOBBIT_SESSION_ID: this.options.env?.BOBBIT_SESSION_ID,
+				BOBBIT_SESSION_SECRET: this.options.env?.BOBBIT_SESSION_SECRET,
+				BOBBIT_GOAL_ID: this.options.env?.BOBBIT_GOAL_ID,
+				BOBBIT_TOKEN: this.options.gatewayToken,
+				BOBBIT_GATEWAY_URL: this.options.gatewayUrl,
+				NODE_TLS_REJECT_UNAUTHORIZED: "0",
+				NODE_OPTIONS: "--no-warnings",
+			},
+			envEntries: Object.entries(this.options.sandboxCredentials ?? {}),
+			command: ["node", "--disable-warning=DEP0123", "/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"],
+			logPrefix: "rpc-bridge",
+		}, this.remapArgsForContainer(agentArgs));
 	}
 
 	/**
@@ -1126,6 +1056,7 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		// Mount only specific state subdirectories — never the full state dir
 		// (which contains the host gateway token, TLS keys, etc.)
 		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
+		{ containerPrefix: "/bobbit-state/claude-agent-sdk", hostPath: path.join(stateDir, "claude-agent-sdk") },
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		// Generated pi-coding-agent extensions — bind-mounted by docker-args.ts so

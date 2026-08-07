@@ -57,6 +57,21 @@ RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audi
     && ln -sf $(npm root -g) /node_modules
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 
+# The sandbox SDK launcher is deliberately pinned to the server dependency.
+# It discovers only the installed package's bundled platform binary; it never
+# falls back to a globally installed `claude` command.
+ARG CLAUDE_AGENT_SDK_VERSION=0.3.222
+RUN npm install -g @anthropic-ai/claude-agent-sdk@${CLAUDE_AGENT_SDK_VERSION} --no-audit --no-fund 2>/dev/null \
+    && printf '%s\n' '#!/bin/sh' 'set -eu' 'case "$(dpkg --print-architecture)" in' \
+      '  amd64) package="@anthropic-ai/claude-agent-sdk-linux-x64" ;;' \
+      '  arm64) package="@anthropic-ai/claude-agent-sdk-linux-arm64" ;;' \
+      '  *) echo "unsupported SDK sandbox architecture" >&2; exit 127 ;;' 'esac' \
+      'binary="$(npm root -g)/$package/claude"' 'if [ ! -x "$binary" ]; then' \
+      '  echo "Bobbit Claude Agent SDK binary is unavailable in the sandbox image" >&2' '  exit 127' 'fi' \
+      'exec "$binary" "$@"' > /usr/local/bin/bobbit-claude-agent-sdk \
+    && chmod 0755 /usr/local/bin/bobbit-claude-agent-sdk
+LABEL bobbit.claude-agent-sdk-version=${CLAUDE_AGENT_SDK_VERSION}
+
 # TypeScript compiler — needed for `npm run check` in worktrees.
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
 RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
