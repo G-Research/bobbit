@@ -196,9 +196,11 @@ describe("push-triggered release workflow", () => {
 		);
 	});
 
-	it("decides that a push is a release by the version bump, not by its message", () => {
+	it("releases only when a push advances the version, not by its message", () => {
 		const detect = releaseStep("detect", "Did this commit bump the version?").run ?? "";
 		assert.match(detect, /HEAD\^:package\.json/);
+		assert.match(detect, /compareReleaseVersions/);
+		assert.match(detect, /> 0/);
 		assert.match(detect, /is-release=true/);
 		assert.match(detect, /is-release=false/);
 		assert.equal(releaseJob("verify").needs, "detect");
@@ -229,11 +231,11 @@ describe("push-triggered release workflow", () => {
 		assert.match(steps[validateIndex]?.run ?? "", /validate-release-commit\.mjs --mode merged/);
 	});
 
-	it("builds, type-checks, and unit-tests the release commit before anything ships", () => {
+	it("builds and type-checks the release commit without rerunning the PR unit gate", () => {
 		const runs = (releaseJob("verify").steps ?? []).map(step => step.run ?? "");
 		assert.ok(runs.some(run => run.includes("npm run build")));
 		assert.ok(runs.some(run => run.includes("npm run check")));
-		assert.ok(runs.some(run => run.includes("npm run test:unit")));
+		assert.ok(!runs.some(run => run.includes("npm run test:unit")));
 		assert.ok(!runs.some(run => /npm audit|audit:packed-consumer/.test(run)));
 		assert.equal(releaseJob("publish").needs, "verify");
 	});
@@ -257,8 +259,12 @@ describe("push-triggered release workflow", () => {
 			`release verify runs Node ${release.node}, which the PR gate never exercises (${gateNodes.join(", ")})`,
 		);
 
-		// The commands themselves must not drift.
-		assert.deepEqual(release.runs, toolchainOf(gate).runs);
+		// Build and type-check must not drift. The PR additionally runs the unit
+		// suite, which is deliberately not repeated after merge approval.
+		const gateRuns = toolchainOf(gate).runs;
+		for (const run of release.runs) assert.ok(gateRuns.includes(run), `${run} is not exercised by the PR gate`);
+		assert.ok(gateRuns.some(run => run.includes("npm run test:unit")));
+		assert.ok(!release.runs.some(run => run.includes("npm run test:unit")));
 		assert.equal(release.cache, toolchainOf(gate).cache);
 	});
 
@@ -358,7 +364,7 @@ describe("push-triggered release workflow", () => {
 			releaseStep("publish", "Publish verified artifact (OIDC trusted publishing)").run ?? "";
 		assert.match(
 			publish,
-			/npm publish release-artifact\/bobbit\.tgz --ignore-scripts --provenance --tag "\$DIST_TAG"/,
+			/npm publish \.\/release-artifact\/bobbit\.tgz --ignore-scripts --provenance --tag "\$DIST_TAG"/,
 		);
 		assert.doesNotMatch(publish, /NODE_AUTH_TOKEN|NPM_TOKEN/);
 		assert.equal(distTagFor("0.16.0"), "latest");

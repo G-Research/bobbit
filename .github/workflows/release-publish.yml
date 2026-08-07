@@ -28,12 +28,15 @@ jobs:
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').version")"
           PARENT_VERSION="$(git show "HEAD^:package.json" | node -pe 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
-          if [ "$VERSION" = "$PARENT_VERSION" ]; then
-            echo "no version change ($VERSION); not a release commit"
-            echo "is-release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "version bumped $PARENT_VERSION -> $VERSION"
+          if VERSION="$VERSION" PARENT_VERSION="$PARENT_VERSION" node --input-type=module -e '
+            import { compareReleaseVersions } from "./scripts/release/dist-tag-guard.mjs";
+            process.exit(compareReleaseVersions(process.env.VERSION, process.env.PARENT_VERSION) > 0 ? 0 : 1);
+          '; then
+            echo "version advanced $PARENT_VERSION -> $VERSION"
             echo "is-release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version did not advance ($PARENT_VERSION -> $VERSION); not a release commit"
+            echo "is-release=false" >> "$GITHUB_OUTPUT"
           fi
 
   verify:
@@ -77,9 +80,6 @@ jobs:
 
       - name: Type-check
         run: npm run check
-
-      - name: Unit gate
-        run: npm run test:unit
 
       - name: Prepare verified release artifacts
         id: package
@@ -179,7 +179,7 @@ jobs:
           NODE
           test -s release-artifact/bobbit.tgz
           echo "publishing verified @gresearch/bobbit@$VERSION from $GITHUB_SHA to dist-tag: $DIST_TAG"
-          npm publish release-artifact/bobbit.tgz --ignore-scripts --provenance --tag "$DIST_TAG" --loglevel verbose
+          npm publish ./release-artifact/bobbit.tgz --ignore-scripts --provenance --tag "$DIST_TAG" --loglevel verbose
 
   tag:
     name: Tag release commit
