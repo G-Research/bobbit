@@ -198,15 +198,107 @@ any destination allocation, Pi transcript handling, worktree setup, or sidecar
 work. See [Session runtime identity](design/session-runtime-identity.md) and the
 [REST endpoint contract](rest-api.md#fork-session-endpoint).
 
-## Model, thinking, and compaction
+## Live model and thinking controls
 
 An SDK session can change model only within `claude-agent-sdk`; switching providers
-requires a new session. The bridge updates its persisted model state only after the
-SDK accepts the change.
+requires a new session. Live controls use the existing session WebSocket model-tuple
+transaction, not a second SDK-specific persistence or broadcast path. In particular,
+Bobbit does not replace a healthy SDK session merely to simulate a model or thinking
+control. A replacement is recovery for an unverified partial mutation, not the way a
+supported SDK control is implemented.
 
-Bobbit thinking levels map to fixed SDK maximum-thinking-token budgets (`off` maps
-to no budget). As with models, a failed SDK call does not update the bridge's
-reported setting.
+### Capability authority and model identity
+
+Configured custom-provider rows remain the picker's source of available session
+models. After the query initializes, however, the live `Query` is the authority for
+whether an SDK model and its reasoning controls can actually run. The bridge reads
+its initialization `models` and prefers `supportedModels()` when that method is
+available. It converts those SDK rows into capability records owned by that one
+bridge; it does not seed a process-wide catalog or mutate `model-registry` caches.
+This matters because an SDK query replacement can expose different capabilities, and
+stale process-global metadata would outlive the query that proved it.
+
+A capability record uses the SDK's `value`, optional `resolvedModel`,
+`supportsEffort`, `supportedEffortLevels`, and `supportsAdaptiveThinking` fields.
+It matches a requested id against both `value` and `resolvedModel`, but preserves the
+SDK `value` as the private wire value passed to `Query.setModel()`. The requested
+configured identity remains the public identity in live state and the durable tuple.
+For example, a picker can retain `sonnet` while the SDK receives that alias as its
+wire value, or it can retain `claude-sonnet-5` while resolving it to the SDK wire
+alias. Bobbit never silently rewrites either form to the other during verified
+read-back.
+
+The bridge publishes `reasoning` and `thinkingLevelMap` with its live model state.
+Reasoning is true only when SDK metadata proves effort or adaptive-thinking support.
+The map marks `off` and each canonical control as advertised or unavailable; it
+never borrows Pi family heuristics or invents `minimal`. This live metadata overrides the
+conservative manual provider row for an active SDK session, so clients see the
+capabilities that the query, rather than the registry, has verified.
+
+### Applying controls
+
+The bridge resolves a thinking request against the active model's live capability.
+It uses the appropriate SDK control instead of translating one control family into
+another:
+
+| Proven capability / request | SDK operation |
+| --- | --- |
+| Advertised effort level | Clear any fixed budget with `setMaxThinkingTokens(null)`, then call `applyFlagSettings({ effortLevel })`. |
+| Adaptive-thinking fixed-token level | If available, clear prior effort with `applyFlagSettings({ effortLevel: null })`, then call `setMaxThinkingTokens()` with Bobbit's fixed budget for that level. |
+| `off` | If available, clear prior effort, then explicitly call `setMaxThinkingTokens(null)`. |
+
+Clearing the other control family prevents a prior effort setting or fixed budget
+from surviving a model or level transition. The bridge changes its locally reported
+model or thinking value only after the corresponding SDK call succeeds; SDK errors
+propagate to the session transaction.
+
+Unsupported input is explicit, never a clamp. A configured model that the live SDK
+advertised-model list does not contain is rejected without calling `Query.setModel()`.
+Likewise, a non-`off` level absent from the active live map is rejected without a
+thinking mutation. If an older SDK provides no model data, Bobbit keeps a
+conservative compatibility path: a configured SDK model may still be selected, but
+only `off` is available. If the SDK advertises effort but lacks
+`applyFlagSettings()`, advertised effort is rejected rather than emulated; `off`
+continues to clear the token budget. These cases let the UI make unavailable controls
+visible while keeping a direct or stale client request safe.
+
+Initial SDK thinking application uses the same live bridge capability, rather than
+the manual provider row. The bridge capability itself is not persisted: it is
+re-derived whenever a query starts.
+
+### Verified tuple transaction and recovery
+
+`SessionManager` and the runtime model selector own the transaction. The bridge
+only mutates its `Query` and reports live state; it never persists a request,
+capability record, SDK `ModelInfo`, or broadcast. For a model-plus-thinking request,
+the selector follows this order:
+
+1. Read the durable and live tuple, validate the configured model and live SDK
+   capability, and fence the current bridge owner.
+2. Mutate the model, then require an exact model read-back.
+3. Validate and mutate thinking, then require an exact final
+   `(provider, modelId, thinkingLevel)` read-back and recheck ownership.
+4. Only then persist the normal tuple, update the model-name mirror, and broadcast
+   the verified model metadata and thinking level.
+
+A standalone thinking request uses the same validation, exact read-back, commit, and
+broadcast rule. Therefore a request is not durable merely because an SDK call was
+attempted or returned: the final state must match exactly. This also preserves alias
+identity—an accepted alias is persisted and broadcast as that alias, not as an
+unrequested resolved id.
+
+On a rejection, SDK error, mismatch, or ownership change, the selector broadcasts a
+correction from live or durable truth and performs the established bounded rollback.
+If rollback cannot be verified, it uses normal bridge-replacement recovery from the
+unchanged durable tuple; if that recovery is unsafe, it quarantines the affected
+canonical session. Owner fencing prevents a delayed detached bridge from rolling
+back, stopping, archiving, persisting over, or broadcasting over a newer canonical
+replacement. A verified replacement instead remains authoritative and is the only
+state that may be broadcast.
+
+This contract is provider-scoped. Pi continues to use its registry-derived metadata
+and existing thinking-level clamping behavior; SDK live capability checks neither
+populate Pi metadata nor change Pi controls.
 
 The SDK does not expose a manual compact operation, so Bobbit reports manual
 compaction as unsupported rather than inventing Pi compaction events. SDK-managed
@@ -417,7 +509,9 @@ account or credentials:
   history access, cwd scoping, sanitized unavailable errors, valid empty history,
   and snapshot adaptation without Pi transcript access.
 - `tests2/core/claude-agent-sdk-bridge.test.ts` covers initialization UUID
-  validation, unavailable startup settlement, and live official-history reads.
+  validation, unavailable startup settlement, live official-history reads, and
+  session-local SDK capability discovery, alias wire selection, effort/fixed/off
+  transitions, unsupported controls, and failure-safe read-back state.
 - `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` covers the
   minimal SessionStore tuple, strict metadata persistence, and dormant recovery
   that retains queued prompts and in-flight steers.
@@ -427,6 +521,13 @@ account or credentials:
 - `tests/e2e/claude-agent-sdk-session-restart.spec.ts` runs a fake official SDK
   through prompt/history, `PreCompact`, gateway crash/restart, snapshot equality,
   resumed append, and co-resident Pi recovery.
+- `tests2/core/controlled-model-fallback.test.ts` pins exact tuple read-back,
+  verified-only persistence, live SDK capability metadata, explicit unsupported
+  levels, and rollback behavior; `tests2/core/runtime-model-recovery-ownership.test.ts`
+  pins replacement fencing.
+- `tests2/browser/journeys/claude-live-controls.journey.spec.ts` verifies a
+  production SDK bridge with mixed advertised controls, wire-model selection,
+  verified persistence across reload, and rollback of a failed model request.
 
 Run the focused deterministic coverage with:
 
@@ -434,6 +535,8 @@ Run the focused deterministic coverage with:
 npx vitest run --config vitest.config.ts --silent=passed-only \
   tests2/core/claude-agent-sdk-session-access.test.ts \
   tests2/core/claude-agent-sdk-bridge.test.ts \
+  tests2/core/controlled-model-fallback.test.ts \
+  tests2/core/runtime-model-recovery-ownership.test.ts \
   tests2/integration/claude-agent-sdk-runtime-persistence.test.ts \
   tests2/integration/session-runtime-route-boundary.test.ts
 npm run check
