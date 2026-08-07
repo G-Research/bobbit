@@ -246,7 +246,10 @@ export const EXTENSION_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set(
 ]);
 
 /** The platform-owned capabilities available only to a non-hook pack principal. */
-export const EXTENSION_PACK_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
+export type ExtensionPackCapability =
+	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect"
+	| "memory.invalidate" | "memory.read.all";
+export const EXTENSION_PACK_CAPABILITIES: ReadonlySet<ExtensionPackCapability> = new Set([
 	"service.manage", "memory.read", "memory.write", "memory.reflect",
 	"memory.invalidate", "memory.read.all",
 ]);
@@ -272,7 +275,7 @@ export interface ExtensionPackGrant {
 	principal: "pack";
 	/** Pack rows must not name a hook. */
 	hookId?: never;
-	capability: ExtensionCapability;
+	capability: ExtensionPackCapability;
 	grantedAt: string;
 	grantedBy: string;
 }
@@ -322,8 +325,8 @@ export function isExtensionCapability(value: unknown): value is ExtensionCapabil
 }
 
 /** Pack-only capability matrix; hook capability support remains declaration-owned. */
-export function isExtensionPackCapability(value: unknown): value is ExtensionCapability {
-	return typeof value === "string" && EXTENSION_PACK_CAPABILITIES.has(value as ExtensionCapability);
+export function isExtensionPackCapability(value: unknown): value is ExtensionPackCapability {
+	return typeof value === "string" && EXTENSION_PACK_CAPABILITIES.has(value as ExtensionPackCapability);
 }
 
 export function isSafeExtensionGrantIdentifier(value: unknown): value is string {

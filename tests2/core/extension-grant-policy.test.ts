@@ -6,6 +6,8 @@ import {
 } from "../../src/server/agent/extension-grant-policy.js";
 import {
 	type ExtensionGrant,
+	type ExtensionHookGrant,
+	type ExtensionPackGrant,
 } from "../../src/server/agent/project-config-store.js";
 
 const grantedAt = "2025-02-03T04:05:06.000Z";
@@ -30,7 +32,7 @@ const packOnlyCapabilities = [
 	"memory.read.all",
 ] as const;
 
-function grant(overrides: Partial<ExtensionGrant> = {}): ExtensionGrant {
+function grant(overrides: Partial<ExtensionHookGrant> = {}): ExtensionHookGrant {
 	return {
 		packId: "pack-a",
 		hookId: "decider",
@@ -41,14 +43,14 @@ function grant(overrides: Partial<ExtensionGrant> = {}): ExtensionGrant {
 	};
 }
 
-function packGrant(capability: typeof packOnlyCapabilities[number], packId = "pack-a"): ExtensionGrant {
+function packGrant(capability: typeof packOnlyCapabilities[number], packId = "pack-a"): ExtensionPackGrant {
 	return {
 		packId,
 		principal: "pack",
 		capability,
 		grantedAt,
 		grantedBy: "admin",
-	} as unknown as ExtensionGrant;
+	};
 }
 
 describe("extension capability grant policy", () => {

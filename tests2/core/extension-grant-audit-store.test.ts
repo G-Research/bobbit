@@ -32,9 +32,18 @@ function packEntry(number: number, overrides: Partial<ExtensionPackGrantAuditEnt
 		action: number % 2 ? "granted" : "revoked",
 		packId: "pack-a",
 		principal: "pack",
-		capability: "decide",
+		capability: "memory.read",
 		...overrides,
 	};
+}
+
+function isHookEntry(entry: ExtensionGrantAuditEntry): entry is ExtensionHookGrantAuditEntry {
+	return !("principal" in entry);
+}
+
+function hookRows(rows: readonly ExtensionGrantAuditEntry[]): ExtensionHookGrantAuditEntry[] {
+	expect(rows.every(isHookEntry)).toBe(true);
+	return rows.filter(isHookEntry);
 }
 
 describe("ExtensionGrantAuditStore", () => {
@@ -45,8 +54,8 @@ describe("ExtensionGrantAuditStore", () => {
 		store.append(entry(2));
 		store.append(entry(3));
 
-		expect(store.list().map(row => row.hookId)).toEqual(["hook-1", "hook-2", "hook-3"]);
-		expect(store.list(2).map(row => row.hookId)).toEqual(["hook-2", "hook-3"]);
+		expect(hookRows(store.list()).map(row => row.hookId)).toEqual(["hook-1", "hook-2", "hook-3"]);
+		expect(hookRows(store.list(2)).map(row => row.hookId)).toEqual(["hook-2", "hook-3"]);
 		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain("secret-not-persisted");
 	});
 
@@ -54,20 +63,21 @@ describe("ExtensionGrantAuditStore", () => {
 		const fs = createMemFs();
 		const store = new ExtensionGrantAuditStore(stateDir, fs);
 		const legacy = entry(1);
-		const pack = packEntry(2, { capability: "store" });
+		const pack = packEntry(2, { capability: "memory.write" });
 		store.append(legacy);
 		store.append({ ...pack, ignoredRequestDetail: "secret-not-persisted" } as ExtensionGrantAuditEntry);
 
 		const rows = store.list();
 		expect(rows).toEqual([legacy, pack]);
 		expect(rows[0]).not.toHaveProperty("principal");
-		expect(rows[1]).toMatchObject({ principal: "pack", packId: "pack-a", capability: "store" });
+		expect(rows[1]).toMatchObject({ principal: "pack", packId: "pack-a", capability: "memory.write" });
 		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain("secret-not-persisted");
 
 		fs.appendFileSync(auditFile, [
 			JSON.stringify({ ...entry(3), principal: "hook" }),
 			JSON.stringify({ ...packEntry(4), hookId: "must-not-mix" }),
 			JSON.stringify({ ...packEntry(5), principal: "unknown" }),
+			JSON.stringify({ ...packEntry(6), capability: "decide" }),
 		].join("\n") + "\n", "utf-8");
 		expect(store.list()).toEqual([legacy, pack]);
 	});
@@ -81,7 +91,7 @@ describe("ExtensionGrantAuditStore", () => {
 		}
 
 		expect(store.list(999).length).toBe(200);
-		expect(store.list(0).map(row => row.hookId)).toEqual(["hook-205"]);
+		expect(hookRows(store.list(0)).map(row => row.hookId)).toEqual(["hook-205"]);
 		expect(store.list(Number.NaN).length).toBe(100);
 	});
 
@@ -149,7 +159,7 @@ describe("ExtensionGrantAuditStore", () => {
 
 	it("recovers only the exact pending pack-principal ref", () => {
 		const fs = createMemFs();
-		const pending = packEntry(2, { action: "revoked", capability: "store" });
+		const pending = packEntry(2, { action: "revoked", capability: "memory.read" });
 		const store = new ExtensionGrantAuditStore(stateDir, fs);
 		const originalAppend = fs.appendFileSync.bind(fs);
 		let failOnce = true;

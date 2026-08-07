@@ -547,6 +547,7 @@ import {
 	ProjectConfigLoadError,
 	ProjectConfigStore,
 	isExtensionCapability,
+	isExtensionPackCapability,
 	isSafeExtensionGrantIdentifier,
 	type ExtensionCapability,
 	type ExtensionGrant,
@@ -9814,7 +9815,7 @@ async function handleApiRoute(
 				json({ error: "Active extension principal not found", code: "EXTENSION_GRANT_PRINCIPAL_NOT_FOUND" }, 404);
 				return;
 			}
-			if (!extensionPackGrantCapabilities.includes(capability)) {
+			if (!isExtensionPackCapability(capability)) {
 				json({ error: "Capability is not supported by this pack principal", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
 				return;
 			}

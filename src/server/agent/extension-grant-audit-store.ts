@@ -4,6 +4,7 @@ import { realFs } from "../gateway-deps.js";
 import {
 	isCanonicalExtensionGrantTimestamp,
 	isExtensionCapability,
+	isExtensionPackCapability,
 	isSafeExtensionGrantIdentifier,
 	type ExtensionCapability,
 } from "./project-config-store.js";
@@ -61,9 +62,10 @@ function normalizeEntry(value: unknown): ExtensionGrantAuditEntry | undefined {
 		capability: candidate.capability,
 	};
 	if (candidate.principal === "pack") {
-		// A pack principal never carries a hook identity. Keeping this explicit
-		// prevents a malformed mixed row from recovering the wrong authority event.
-		if (candidate.hookId !== undefined) return undefined;
+		// A pack principal never carries a hook identity or hook-only authority.
+		// Keeping both boundaries explicit prevents a malformed row from recovering
+		// the wrong authority event.
+		if (candidate.hookId !== undefined || !isExtensionPackCapability(candidate.capability)) return undefined;
 		return { ...base, principal: "pack" };
 	}
 	// Legacy hook rows deliberately have no principal discriminator. Do not
@@ -92,7 +94,7 @@ function isExactRef(value: unknown): value is ExtensionGrantAuditRef {
 	if ((candidate.action !== "granted" && candidate.action !== "revoked")
 		|| !isSafeExtensionGrantIdentifier(candidate.packId)
 		|| !isExtensionCapability(candidate.capability)) return false;
-	if (candidate.principal === "pack") return candidate.hookId === undefined;
+	if (candidate.principal === "pack") return candidate.hookId === undefined && isExtensionPackCapability(candidate.capability);
 	return candidate.principal === undefined && isSafeExtensionGrantIdentifier(candidate.hookId);
 }
 
