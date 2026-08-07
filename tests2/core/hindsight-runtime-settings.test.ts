@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
@@ -13,7 +14,10 @@ import {
 	redactEndpointHost,
 	validateHindsightRuntimeSettings,
 } from "../../market-packs/hindsight/src/runtime-settings.ts";
-import { hindsightStorageContinuity, hindsightStorageIdentity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
+import { HindsightRuntimeSettingsResolver, hindsightStorageContinuity, hindsightStorageIdentity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
+import { ExtensionSettingsStore } from "../../src/server/agent/extension-settings-store.ts";
+import { ExtensionSettingsSecretStore } from "../../src/server/agent/extension-settings-secret-store.ts";
+import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const descriptorPath = path.join(root, "market-packs/hindsight/providers/memory.yaml");
@@ -100,12 +104,74 @@ describe("Hindsight EP-7 runtime settings", () => {
 			contextTokens: 32768, maxOutputTokens: 4096, residency: "resident", keepAliveSeconds: 3600,
 			fallback: "disabled", observedLoadId: "mlx-load-1",
 		});
-		const loopbackStart = validateHindsightRuntimeSettings(settings, {}, true);
-		assert.equal(loopbackStart.ok, true);
-		const remoteWithoutKey = validateHindsightRuntimeSettings({ ...settings, localLlmBaseUrl: "http://model.example.test:11434/v1" }, {}, true);
+		const dormantManaged = validateHindsightRuntimeSettings(settings);
+		assert.equal(dormantManaged.ok, true, "EP-7 saves a dormant local managed-volume selection without starting it");
+		const managedStart = validateHindsightRuntimeSettings(settings, {}, true);
+		assert.deepEqual(managedStart, { ok: false, code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" });
+
+		const composeManagedStart = validateHindsightRuntimeSettings({ ...settings, runtimeMode: "compose" }, {}, true);
+		assert.equal(composeManagedStart.ok, true, "Compose owns its declared durable named volume");
+		const localExternalStart = validateHindsightRuntimeSettings(
+			{ ...settings, databaseMode: "external" },
+			{ externalDatabaseUrl: "postgresql://hindsight:database-secret@db.example/hindsight" },
+			true,
+		);
+		assert.equal(localExternalStart.ok, true, "local external storage is materializable only at explicit start");
+		const dockerExternalStart = validateHindsightRuntimeSettings(
+			{ ...settings, runtimeMode: "docker", databaseMode: "external" },
+			{ externalDatabaseUrl: "postgresql://hindsight:database-secret@db.example/hindsight" },
+			true,
+		);
+		assert.equal(dockerExternalStart.ok, true, "Docker external storage is materializable only at explicit start");
+
+		const remoteWithoutKey = validateHindsightRuntimeSettings({ ...settings, localLlmBaseUrl: "http://model.example.test:11434/v1", databaseMode: "external" }, {}, true);
 		assert.deepEqual(remoteWithoutKey, { ok: false, code: "HINDSIGHT_LOCAL_API_KEY_REQUIRED" });
 		const legacyRequestResidency = validateHindsightRuntimeSettings({ ...settings, localLlmResidency: "request" }, {}, true);
 		assert.equal(legacyRequestResidency.ok, true, "legacy request residency normalizes to the only supported resident mode");
 		if (legacyRequestResidency.ok) assert.equal(legacyRequestResidency.settings.localLlmResidency, "resident");
+	});
+
+	it("uses the production EP-7 resolver for external continuity and rejects unsupported starts before a runtime is selected", () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "hindsight-settings-resolver-"));
+		try {
+			const settingsStore = new ExtensionSettingsStore(
+				new ProjectConfigStore(directory),
+				new ExtensionSettingsSecretStore(path.join(directory, "state")),
+			);
+			const ref = { packId: "hindsight", kind: "provider" as const, id: "memory" };
+			const externalDatabaseUrl = "postgresql://hindsight:resolver-secret@db.example/hindsight";
+			const config = {
+				runtimeMode: "external", localLlmProvider: "openai-compatible", localLlmContextTokens: 32768,
+				localLlmMaxOutputTokens: 4096, localLlmResidency: "resident", localLlmKeepAlive: 3600,
+				ociImage: DEFAULT_HINDSIGHT_OCI_IMAGE, databaseMode: "managed-volume",
+			};
+			const resolver = new HindsightRuntimeSettingsResolver("project", { stateDir: path.join(directory, "state"), extensionSettingsStore: settingsStore }, {
+				getPack: () => ({ providers: [{ id: "memory", runtime: "hindsight", config, configSchema: {
+					apiKey: { type: "secret" }, localLlmApiKey: { type: "secret" }, registryCredentials: { type: "secret" }, externalDatabaseUrl: { type: "secret" },
+				} }] }),
+			} as never);
+			const request = { packId: "hindsight", runtimeId: "hindsight", contribution: { id: "hindsight" } } as never;
+			const values = {
+				runtimeMode: "local", databaseMode: "external", localLlmProvider: "openai-compatible",
+				localLlmModelId: "qwen3-coder", localLlmBaseUrl: "http://127.0.0.1:11434/v1",
+				localLlmContextTokens: 32768, localLlmMaxOutputTokens: 4096, localLlmResidency: "resident", localLlmKeepAlive: 3600,
+			};
+			settingsStore.compareAndSwap(ref, 0, { values, secrets: { externalDatabaseUrl } });
+			const local = resolver.resolve(request);
+			assert.equal(local.storageContinuity, "verified");
+			assert.equal(local.storageIdentity, hindsightStorageIdentity("local", "external", externalDatabaseUrl));
+			assert.ok(!JSON.stringify(settingsStore.getPublicState()).includes("resolver-secret"));
+
+			settingsStore.compareAndSwap(ref, 1, { values: { runtimeMode: "docker" } });
+			const docker = resolver.resolve(request);
+			assert.equal(docker.storageContinuity, "verified");
+			assert.equal(docker.storageIdentity, local.storageIdentity, "external storage survives a local-to-Docker control transition");
+
+			settingsStore.compareAndSwap(ref, 2, { values: { runtimeMode: "local", databaseMode: "managed-volume" }, secrets: { externalDatabaseUrl: undefined } });
+			assert.throws(() => resolver.resolve(request), { code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" });
+			assert.ok(!JSON.stringify(settingsStore.getPublicState()).includes("resolver-secret"));
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
