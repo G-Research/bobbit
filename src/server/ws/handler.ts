@@ -144,6 +144,10 @@ type ModelSelectionRecoveryManager = SessionManager & {
 		modelId: string,
 		thinkingLevel?: string,
 	): Promise<unknown>;
+	getModelSelectionRecoveryAdmission?(sessionId: string): {
+		condition?: ModelSelectionRequiredCondition;
+		activationInProgress: boolean;
+	};
 };
 
 function sessionModelSelectionRequired(
@@ -151,6 +155,16 @@ function sessionModelSelectionRequired(
 ): ModelSelectionRequiredCondition | undefined {
 	const condition = (session as { condition?: unknown } | null | undefined)?.condition;
 	return isModelSelectionRequiredCondition(condition) ? condition : undefined;
+}
+
+function modelSelectionRecoveryAdmission(
+	sessionManager: SessionManager,
+	sessionId: string,
+	session: unknown,
+): { condition?: ModelSelectionRequiredCondition; activationInProgress: boolean } {
+	const query = (sessionManager as ModelSelectionRecoveryManager).getModelSelectionRecoveryAdmission;
+	if (typeof query === "function") return query.call(sessionManager, sessionId);
+	return { condition: sessionModelSelectionRequired(session), activationInProgress: false };
 }
 
 function normalizeStateModelSnapshot(
@@ -1087,7 +1101,7 @@ export function handleWebSocketConnection(
 				case "prompt": {
 					// Fence unavailable-model capsules before mention/skill/attachment
 					// preprocessing or SessionManager's authoritative acceptance boundary.
-					const modelSelectionCondition = sessionModelSelectionRequired(session);
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
 					if (modelSelectionCondition) {
 						send(ws, {
 							type: "error",
@@ -1252,7 +1266,16 @@ export function handleWebSocketConnection(
 					});
 					break;
 				}
-				case "steer":
+				case "steer": {
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+					if (modelSelectionCondition) {
+						send(ws, {
+							type: "error",
+							message: modelSelectionRequiredMessage(modelSelectionCondition),
+							code: MODEL_SELECTION_REQUIRED,
+						});
+						break;
+					}
 					// Live steer: if agent is streaming, send directly via RPC
 					// (real-time interrupt, bypasses queue intentionally).
 					// Otherwise enqueue as a steered message and drain if idle.
@@ -1268,6 +1291,7 @@ export function handleWebSocketConnection(
 						});
 					}
 					break;
+				}
 				case "steer_queued":
 					sessionManager.steerQueued(sessionId, msg.messageId);
 					break;
@@ -1313,16 +1337,31 @@ export function handleWebSocketConnection(
 					}
 					break;
 				}
-				case "retry":
+				case "retry": {
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+					if (modelSelectionCondition) {
+						send(ws, { type: "error", message: modelSelectionRequiredMessage(modelSelectionCondition), code: MODEL_SELECTION_REQUIRED });
+						break;
+					}
 					try {
 						await sessionManager.retryLastPrompt(sessionId);
 					} catch (err) {
 						send(ws, { type: "error", message: `Retry failed: ${err}`, code: "RETRY_ERROR" });
 					}
 					break;
+				}
 				case "set_model": {
 					const combined = msg as typeof msg & { thinkingLevel?: string };
-					const modelSelectionCondition = sessionModelSelectionRequired(session);
+					const recoveryAdmission = modelSelectionRecoveryAdmission(sessionManager, sessionId, session);
+					if (recoveryAdmission.activationInProgress) {
+						send(ws, {
+							type: "error",
+							message: "Replacement model activation is already in progress. Wait for it to finish before choosing another model.",
+							code: MODEL_SELECTION_RECOVERY_FAILED,
+						});
+						break;
+					}
+					const modelSelectionCondition = recoveryAdmission.condition;
 					if (modelSelectionCondition) {
 						try {
 							await (sessionManager as ModelSelectionRecoveryManager).recoverModelSelectionRequired(
@@ -1380,6 +1419,15 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "set_thinking_level": {
+					const recoveryAdmission = modelSelectionRecoveryAdmission(sessionManager, sessionId, session);
+					if (recoveryAdmission.condition) {
+						send(ws, { type: "error", message: modelSelectionRequiredMessage(recoveryAdmission.condition), code: MODEL_SELECTION_REQUIRED });
+						break;
+					}
+					if (recoveryAdmission.activationInProgress) {
+						send(ws, { type: "error", message: "Replacement model activation is already in progress.", code: MODEL_SELECTION_RECOVERY_FAILED });
+						break;
+					}
 					try {
 						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
 					} catch (err: any) {
@@ -1615,7 +1663,12 @@ export function handleWebSocketConnection(
 					sessionManager.denyToolPermission(sessionId, msg.toolName, msg.permissionId);
 					break;
 				}
-				case "restart_agent":
+				case "restart_agent": {
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+					if (modelSelectionCondition) {
+						send(ws, { type: "error", message: modelSelectionRequiredMessage(modelSelectionCondition), code: MODEL_SELECTION_REQUIRED });
+						break;
+					}
 					sessionManager.restartAgent(sessionId).then(() => {
 						// Refresh messages after restart so the client sees the full history
 						const restored = sessionManager.getSession(sessionId);
@@ -1632,6 +1685,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Restart failed: ${err}`, code: "RESTART_ERROR" });
 					});
 					break;
+				}
 				case "ping":
 					send(ws, { type: "pong" });
 					break;
@@ -2099,6 +2153,39 @@ export function handleWebSocketConnection(
 			? sessionManager.getSession(sessionId)
 			: undefined;
 		const liveStreamingSteer = msg.type === "steer" && liveSession?.status === "streaming";
+		const recoveryAdmissionAtFrame = authenticated
+			? modelSelectionRecoveryAdmission(sessionManager, sessionId, liveSession)
+			: { condition: undefined, activationInProgress: false };
+		// Condition admission happens before the per-session serializer: a command
+		// submitted during activation must not wait for recovery to clear and then run.
+		if (
+			recoveryAdmissionAtFrame.condition
+			&& (msg.type === "prompt"
+				|| msg.type === "steer"
+				|| msg.type === "retry"
+				|| msg.type === "restart_agent"
+				|| msg.type === "set_thinking_level")
+		) {
+			send(ws, {
+				type: "error",
+				message: modelSelectionRequiredMessage(recoveryAdmissionAtFrame.condition),
+				code: MODEL_SELECTION_REQUIRED,
+			});
+			return;
+		}
+		// Reject a second model/thinking choice before it can wait behind the first
+		// activation and later fall through to ordinary runtime mutation.
+		if (
+			recoveryAdmissionAtFrame.activationInProgress
+			&& (msg.type === "set_model" || msg.type === "set_thinking_level")
+		) {
+			send(ws, {
+				type: "error",
+				message: "Replacement model activation is already in progress. Wait for it to finish before changing model settings.",
+				code: MODEL_SELECTION_RECOVERY_FAILED,
+			});
+			return;
+		}
 		const serialisedSessionCommand = msg.type === "prompt" ||
 			msg.type === "retry" ||
 			msg.type === "set_model" ||

@@ -1119,6 +1119,10 @@ export class MessageEditor extends LitElement {
 	 *  ONLY if the composer still holds exactly what we sent — a mid-flight edit or a
 	 *  newly added attachment during the await is preserved, never discarded. */
 	private handleSteerShortcut = async () => {
+		if (this.blockedSendReason) {
+			this.showBlockedSendError(this.blockedSendReason);
+			return;
+		}
 		if (this.processingFiles) return; // same readiness guard as send
 		if (this.attachments.length > 0) {
 			// Block: retain text, attachments, draft, and focus untouched.

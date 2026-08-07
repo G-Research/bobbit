@@ -1676,6 +1676,7 @@ export class AgentInterface extends LitElement {
 		if (!text.trim()) return false;
 		const session = this.session;
 		if (!session) throw new Error("No session set on AgentInterface");
+		if ((session.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED") return false;
 		if (!session.state.model) throw new Error("No model set on AgentInterface");
 
 		const isStreaming = session.state.isStreaming;
@@ -1752,6 +1753,7 @@ export class AgentInterface extends LitElement {
 
 	/** Apply one picker choice as an exact model/effective-thinking tuple. */
 	private _applyModelSelection(session: any, model: any): void {
+		if (session.state?.modelSelectionPending) return;
 		const effectiveThinking = clampThinkingLevel(session.state?.thinkingLevel, model as any) ?? "off";
 		const requiresRecovery = session.state?.condition?.code === "MODEL_SELECTION_REQUIRED";
 		// Normal selection stays optimistic. Recovery keeps the retired tuple visible
@@ -2226,6 +2228,8 @@ export class AgentInterface extends LitElement {
 		}
 
 		const session = this.session!;
+		const modelSelectionRequired = (state as any).condition?.code === "MODEL_SELECTION_REQUIRED";
+		const modelSelectionPending = !!(state as any).modelSelectionPending;
 		const supportsThinking = (state.model as any)?.reasoning === true;
 
 		// The dropdown popover always shows full labels; on mobile (<640px) the trigger
@@ -2245,7 +2249,7 @@ export class AgentInterface extends LitElement {
 			: ["off", "minimal", "low", "medium", "high"];
 		const thinkingTitle = fullLabels[(state.thinkingLevel as ThinkingLevel) ?? "off"] ?? fullLabels.off;
 
-		const thinkingSelect = supportsThinking && this.enableThinkingSelector
+		const thinkingSelect = supportsThinking && this.enableThinkingSelector && !modelSelectionRequired
 			// Outer button gap (label → chevron) tightened to 2px; inner span gap
 			// (brain icon → label) stays at 4px so the icon doesn't crowd the text.
 			? html`<span class="thinking-select-compact [&_button]:!gap-0.5 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
@@ -2267,7 +2271,9 @@ export class AgentInterface extends LitElement {
 			? Button({
 				variant: "ghost",
 				size: "sm",
+				disabled: modelSelectionPending,
 				onClick: () => {
+					if (modelSelectionPending) return;
 					void openModelSelector(state.model, (model) => {
 						this._applyModelSelection(session, model);
 					});
@@ -2592,8 +2598,8 @@ export class AgentInterface extends LitElement {
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}
 							.showAttachmentButton=${this.enableAttachments}
-							.showModelSelector=${this.enableModelSelector}
-							.showThinkingSelector=${this.enableThinkingSelector}
+							.showModelSelector=${this.enableModelSelector && !(state as any).modelSelectionPending}
+							.showThinkingSelector=${this.enableThinkingSelector && (state as any).condition?.code !== "MODEL_SELECTION_REQUIRED"}
 							.queuedMessages=${this._serverQueue}
 							.attachments=${this._attachments}
 							.blockedSendReason=${(state as any).condition?.code === "MODEL_SELECTION_REQUIRED"
@@ -2630,13 +2636,13 @@ export class AgentInterface extends LitElement {
 									(session as any).reorderQueue(messageIds);
 								}
 							}}
-							.onModelSelect=${() => {
+							.onModelSelect=${(state as any).modelSelectionPending ? undefined : () => {
 								void openModelSelector(state.model, (model) => {
 									this._applyModelSelection(session, model);
 								});
 							}}
 							.onThinkingChange=${
-								this.enableThinkingSelector
+								this.enableThinkingSelector && (state as any).condition?.code !== "MODEL_SELECTION_REQUIRED"
 									? (level: ThinkingLevel) => {
 											if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(level);
 											else session.state.thinkingLevel = level;

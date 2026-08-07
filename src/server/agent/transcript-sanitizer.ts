@@ -781,6 +781,29 @@ export async function sanitizeAgentTranscriptFile(
 }
 
 /**
+ * Restore a caller-owned transcript snapshot through the sanitizer's existing
+ * trusted-root and no-follow write boundary. Recovery uses this only to roll
+ * back sanitizer changes made by a provisional model activation.
+ */
+export function restoreAgentTranscriptSnapshot(
+	ctx: SessionFsContext,
+	filePath: string,
+	content: string,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): boolean {
+	try {
+		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
+		const realPath = resolveSafeSessionsPath(hostPath, rootPolicy);
+		if (realPath === null) return false;
+		writeFileNoFollow(realPath, content);
+		return true;
+	} catch (err) {
+		console.warn(`[transcript-sanitizer] Failed to restore recovery snapshot ${filePath}:`, err);
+		return false;
+	}
+}
+
+/**
  * Read, rebase runtime-only cwd metadata, and (if changed) write back an agent
  * `.jsonl` transcript file using the same safe read/write boundary as the blank
  * user-message sanitizer. Best-effort and non-fatal.
