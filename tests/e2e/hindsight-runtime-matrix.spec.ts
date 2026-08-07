@@ -5,6 +5,7 @@
  * supervisor. No host Hindsight, credentials, fixed ports, or user bank is used.
  */
 import { expect, test } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -19,6 +20,7 @@ import { ServiceRuntimeStore } from "../../src/server/service-runtime/service-ru
 import { ServiceRuntimeSupervisor } from "../../src/server/service-runtime/service-supervisor.js";
 import { ComposeServiceRunner, DockerServiceRunner, LocalServiceRunner, type ServiceRunner } from "../../src/server/service-runtime/service-runners.js";
 import { createClient } from "../../market-packs/hindsight/src/hindsight-client.ts";
+import { hindsightStorageContinuity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -70,6 +72,17 @@ function assertLoopbackDynamic(endpoint: string): void {
 	expect(Number(url.port)).not.toBe(8888);
 }
 
+/**
+ * The fixture's actual durable backing is its descriptor-declared host bind.
+ * Its synthetic, secret-free PostgreSQL URL names that bind only for the
+ * production Hindsight external-storage identity function; this generic runner
+ * fixture does not claim to exercise a real Hindsight database deployment.
+ */
+function continuityForFixtureBind(mode: ServiceRunMode, dataDir: string) {
+	const backing = createHash("sha256").update(resolve(dataDir)).digest("hex");
+	return hindsightStorageContinuity(mode, "external", `postgresql://fixture@matrix.invalid/${backing}`);
+}
+
 async function json(endpoint: string, pathname: string, init?: RequestInit): Promise<any> {
 	const response = await fetch(new URL(pathname, `${endpoint}/`), init);
 	expect(response.ok, `${init?.method ?? "GET"} ${pathname} must succeed`).toBe(true);
@@ -85,6 +98,7 @@ interface Running {
 	runner: ServiceRunner;
 	identity: { packId: string; runtimeId: string };
 	endpoint: string;
+	storageIdentity: string;
 }
 
 async function start(
@@ -103,6 +117,7 @@ async function start(
 		manifest: value,
 	};
 	const store = new ServiceRuntimeStore({ stateDir: join(root, "runtime-state"), serverIdentity: `hindsight-matrix-${runId}` });
+	const continuity = continuityForFixtureBind(mode, dataDir);
 	const runners: ServiceRunner[] = [new LocalServiceRunner(), new DockerServiceRunner(), new ComposeServiceRunner()];
 	const runner = runners.find((candidate) => candidate.mode === mode)!;
 	const supervisor = new ServiceRuntimeSupervisor({
@@ -119,6 +134,10 @@ async function start(
 					hostDataDir: dataDir,
 				},
 				storage: { dataPath: dataDir, ownedRoot: root },
+				// Never hand-roll a fixture continuity key: reuse the exported
+				// production Hindsight storage resolver over this fixture's actual bind.
+				storageIdentity: continuity.identity,
+				storageContinuity: continuity.continuity,
 			}),
 		},
 		serverIdentity: `hindsight-matrix-${runId}`,
@@ -130,7 +149,8 @@ async function start(
 		expect(status.endpoint).toBeTruthy();
 		assertLoopbackDynamic(status.endpoint!);
 	}
-	return { root, mode, manifest: value, store, supervisor, runner, identity, endpoint: status.endpoint ?? "" };
+	expect((await store.load(identity))?.storageIdentity).toBe(continuity.identity);
+	return { root, mode, manifest: value, store, supervisor, runner, identity, endpoint: status.endpoint ?? "", storageIdentity: continuity.identity };
 }
 
 async function stopAndRemove(running: Running): Promise<void> {
@@ -206,6 +226,7 @@ test.describe.serial("Hindsight real runtime mode matrix", () => {
 			await running.supervisor.stop(running.identity);
 			const restarted = await running.supervisor.start(running.identity);
 			expect(restarted.state).toBe("ready");
+			expect((await running.store.load(running.identity))?.storageIdentity).toBe(running.storageIdentity);
 			await expectRecalled(restarted.endpoint!, bank, marker);
 		} finally {
 			await stopAndRemove(running).catch(() => {});
@@ -235,6 +256,7 @@ test.describe.serial("Hindsight real runtime mode matrix", () => {
 					await target.supervisor.stop(target.identity);
 					const restarted = await target.supervisor.start(target.identity);
 					expect(restarted.state).toBe("ready");
+					expect((await target.store.load(target.identity))?.storageIdentity).toBe(target.storageIdentity);
 					await expectRecalled(restarted.endpoint!, bank, marker);
 				} finally {
 					await stopAndRemove(target).catch(() => {});

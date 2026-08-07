@@ -153,6 +153,41 @@ describe.serial("Hindsight experience API", () => {
 		expect(await reloaded.text()).not.toContain(SECRET);
 	});
 
+	test("keeps local managed-volume settings dormant but rejects explicit start before runtime mutation", async ({ gateway }) => {
+		const project = await createProject(gateway, "managed-volume-start");
+		const sessionId = await createSession({ projectId: project.id, cwd: project.rootPath });
+		sessions.push(sessionId);
+		const initial = await json(await apiFetch(settingsPath(project.id)));
+		const saved = await apiFetch(providerPath(project.id), {
+			method: "PATCH", headers: operatorHeaders(),
+			body: JSON.stringify({
+				expectedRevision: initial.revision,
+				values: {
+					runtimeMode: "local", databaseMode: "managed-volume",
+					localLlmProvider: "openai-compatible", localLlmModelId: "qwen3-coder",
+					localLlmBaseUrl: "http://127.0.0.1:11434/v1", localLlmApiKey: SECRET,
+				},
+			}),
+		});
+		const savedText = await saved.text();
+		expect(saved.status).toBe(200);
+		expect(savedText).not.toContain(SECRET);
+
+		await grant(project.id, "service.manage");
+		const start = await route(sessionId, "runtime-control", { action: "start", consent: true });
+		const startBody = await json(start);
+		expect(start.status).toBe(422);
+		expect(startBody).toMatchObject({ code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" });
+		expect(String(startBody.error)).toMatch(/external PostgreSQL database/i);
+		expect(JSON.stringify(startBody)).not.toContain(SECRET);
+		const context = gateway.projectContextManager.getOrCreate(project.id);
+		expect(fs.existsSync(path.join(context.stateDir, "service-runtimes"))).toBe(false);
+
+		const status = await route(sessionId, "runtime-status");
+		expect(status.status).toBe(200);
+		expect((await json(status)).runtime).toMatchObject({ state: "stopped", desired: "stopped" });
+	});
+
 	test("retains the server-derived completed outcome idempotently and rejects incomplete goals", async ({ gateway }) => {
 		const project = await createProject(gateway, "outcome-route");
 		const goal = await createGoal({ projectId: project.id, title: "Route-owned completed outcome", cwd: project.rootPath, worktree: false, team: false });

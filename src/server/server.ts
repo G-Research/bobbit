@@ -10711,10 +10711,15 @@ async function handleApiRoute(
 		} catch (err) {
 			const runtimeCode = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
 			const continuityRequired = runtimeCode === "SERVICE_CONTINUITY_REQUIRED";
-			const status = continuityRequired ? 409 : err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;
+			const externalDatabaseRequired = runtimeCode === "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED";
+			const status = continuityRequired ? 409 : externalDatabaseRequired ? 422 : err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;
 			json({
-				error: continuityRequired ? "Hindsight storage continuity requires a migration" : status === 403 ? "Hindsight capability is required" : "Hindsight runtime is unavailable",
-				code: continuityRequired ? "HINDSIGHT_STORAGE_CONTINUITY_REQUIRED" : err instanceof HindsightCapabilityError ? "EXTENSION_CAPABILITY_DENIED" : "HINDSIGHT_RUNTIME_UNAVAILABLE",
+				error: continuityRequired
+					? "Hindsight storage continuity requires a migration"
+					: externalDatabaseRequired
+						? "Local and Docker Hindsight runtimes require a configured external PostgreSQL database."
+						: status === 403 ? "Hindsight capability is required" : "Hindsight runtime is unavailable",
+				code: continuityRequired ? "HINDSIGHT_STORAGE_CONTINUITY_REQUIRED" : externalDatabaseRequired ? runtimeCode : err instanceof HindsightCapabilityError ? "EXTENSION_CAPABILITY_DENIED" : "HINDSIGHT_RUNTIME_UNAVAILABLE",
 				...(err instanceof HindsightCapabilityError ? { capability: err.capability } : {}),
 			}, status);
 			return;
