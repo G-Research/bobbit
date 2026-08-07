@@ -16295,8 +16295,17 @@ async function handleApiRoute(
 		// For sandboxed sessions the cwd is a container-internal path (e.g. /workspace-wt/...).
 		// Skill files live on the host, so resolve the project rootPath for discovery.
 		const cwd = resolveSkillDiscoveryCwd(rawCwd, resolvedProject.projectId);
-		const skills = discoverSlashSkills(cwd, resolvedStore, skillMarketContext(resolvedProject.projectId));
-		json({ skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })) });
+		const marketContext = skillMarketContext(resolvedProject.projectId);
+		const skills = discoverSlashSkills(cwd, resolvedStore, marketContext);
+		// The visible list intentionally excludes non-invocable skills. Send a
+		// separate body-free claim list for every active resolved winner so a pack
+		// launcher cannot take over an otherwise hidden Bobbit slash token.
+		const collisionClaims = discoverSlashSkillsResolved(cwd, resolvedStore, marketContext)
+			.map(({ item }) => ({ name: item.name }));
+		json({
+			skills: skills.map((s) => ({ name: s.name, description: s.description, argumentHint: s.argumentHint, source: s.source, originPackId: s.originPackId ?? null, originPackName: s.originPackName ?? null })),
+			collisionClaims,
+		});
 		return;
 	}
 
