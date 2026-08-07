@@ -22,19 +22,21 @@ import { MessageEditor } from "../../src/ui/components/MessageEditor.js";
 // under vitest isolate:false.
 if (!customElements.get("message-editor")) customElements.define("message-editor", MessageEditor);
 
-const SLASH_SKILLS = [
+const DEFAULT_SLASH_SKILLS = [
 	{ name: "deploy", description: "Deploy to production", argumentHint: "<env>", source: "project" },
 	{ name: "deploy-staging", description: "Deploy to staging", source: "project" },
 	{ name: "skill-name", description: "A test skill", source: "personal" },
 	{ name: "status", description: "Check status", source: "project" },
 	{ name: "test", description: "Run tests", argumentHint: "<pattern>", source: "project" },
 ];
+let slashSkills: any[];
 
 beforeEach(() => {
+	slashSkills = [...DEFAULT_SLASH_SKILLS];
 	vi.stubGlobal("fetch", async (input: any): Promise<Response> => {
 		const url = typeof input === "string" ? input : (input && input.url) || String(input);
 		if (url.includes("/api/slash-skills")) {
-			return new Response(JSON.stringify({ skills: SLASH_SKILLS }), {
+			return new Response(JSON.stringify({ skills: slashSkills }), {
 				status: 200, headers: { "Content-Type": "application/json" },
 			});
 		}
@@ -46,8 +48,24 @@ afterEach(() => {
 	document.body.innerHTML = "";
 });
 
-async function mount(): Promise<any> {
+interface MountOptions {
+	/** null explicitly models a runtime that has not arrived from the server yet. */
+	runtime?: "pi" | "claude-agent-sdk" | null;
+	onSend?: (text: string, attachments: unknown[]) => void;
+	onCompact?: () => void;
+	onSteerSend?: (text: string) => boolean | Promise<boolean>;
+	attachments?: unknown[];
+}
+
+async function mount(options: MountOptions = {}): Promise<any> {
 	const el = document.createElement("message-editor") as any;
+	// Runtime and onCompact are the composer dispatch boundary. Keep these tests
+	// on the real component rather than reproducing the resolver in a fixture.
+	el.runtime = options.runtime === null ? undefined : (options.runtime ?? "pi");
+	el.onCompact = options.onCompact;
+	el.onSend = options.onSend;
+	el.onSteerSend = options.onSteerSend;
+	el.attachments = options.attachments ?? [];
 	el.cwd = "/tmp";
 	el.showModelSelector = false;
 	el.showThinkingSelector = false;
@@ -71,8 +89,8 @@ async function setComposer(el: any, value: string, caret: number): Promise<void>
 	await el.updateComplete;
 	t.setSelectionRange(caret, caret);
 }
-async function key(el: any, k: string): Promise<void> {
-	textarea(el).dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+async function key(el: any, k: string, modifiers: KeyboardEventInit = {}): Promise<void> {
+	textarea(el).dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...modifiers }));
 	await el.updateComplete;
 }
 const isMenuOpen = (el: any): boolean => !!el._slashMenuOpen;
@@ -159,5 +177,152 @@ describe("Slash autocomplete", () => {
 		const el = await mount();
 		await setComposer(el, "line1\n/dep", 10);
 		expect(isMenuOpen(el)).toBe(true);
+	});
+
+	it("selected skills only complete in the editor, then take the ordinary send path", async () => {
+		const sends: string[] = [];
+		const el = await mount({ onSend: (text) => sends.push(text) });
+		await setComposer(el, "/tes", 4);
+		await key(el, "Enter");
+		expect(el.value).toBe("/test ");
+		expect(sends).toEqual([]);
+
+		await setComposer(el, "/test src/ui", "/test src/ui".length);
+		await key(el, "Enter");
+		expect(sends).toEqual(["/test src/ui"]);
+	});
+
+	it("ordinary text, unknown commands, and near-prefix commands pass through unchanged", async () => {
+		const sends: string[] = [];
+		const el = await mount({ runtime: "claude-agent-sdk", onSend: (text) => sends.push(text) });
+		for (const value of ["explain /goal", "/unknown arg", "/review-notes", "/compact-notes"]) {
+			await setComposer(el, value, value.length);
+			await key(el, "Enter");
+		}
+		expect(sends).toEqual(["explain /goal", "/unknown arg", "/review-notes", "/compact-notes"]);
+	});
+
+	it("Bobbit /goal and /review skills own exact Claude collisions while near-prefixes stay ordinary", async () => {
+		slashSkills = [
+			{ name: "goal", description: "Bobbit goal skill", source: "project" },
+			{ name: "review", description: "Bobbit review skill", source: "project" },
+		];
+		const sends: string[] = [];
+		const el = await mount({ runtime: "claude-agent-sdk", onSend: (text) => sends.push(text) });
+
+		await setComposer(el, "/goal", 5);
+		expect(filtered(el)).toEqual(["goal"]);
+		await key(el, "Enter");
+		expect(el.value).toBe("/goal ");
+		await key(el, "Enter");
+		expect(sends).toEqual(["/goal "]);
+
+		await setComposer(el, "/review", 7);
+		expect(filtered(el)).toEqual(["review"]);
+		await setComposer(el, "/review-notes", 13);
+		await key(el, "Enter");
+		expect(sends).toEqual(["/goal ", "/review-notes"]);
+	});
+
+	it("shows /compact only for Pi and locally dispatches the exact command", async () => {
+		slashSkills = [{ name: "compact", description: "Compact context", source: "built-in" }];
+		const compact = vi.fn();
+		const pi = await mount({ runtime: "pi", onCompact: compact });
+		await setComposer(pi, "/", 1);
+		expect(filtered(pi)).toContain("compact");
+		await setComposer(pi, "  /CoMpAcT  ", "  /CoMpAcT  ".length);
+		await key(pi, "Enter");
+		expect(compact).toHaveBeenCalledTimes(1);
+
+		document.body.innerHTML = "";
+		const sdk = await mount({ runtime: "claude-agent-sdk" });
+		await setComposer(sdk, "/", 1);
+		expect(filtered(sdk)).not.toContain("compact");
+	});
+
+	it("consumes exact SDK /compact without sending and preserves draft, files, and focus", async () => {
+		const sends: string[] = [];
+		const attachment = { id: "a1", type: "image", fileName: "keep.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" };
+		const el = await mount({
+			runtime: "claude-agent-sdk",
+			onSend: (text) => sends.push(text),
+			attachments: [attachment],
+		});
+		const command = "  /CoMpAcT  ";
+		await setComposer(el, command, command.length);
+		textarea(el).focus();
+		await key(el, "Enter");
+
+		expect(sends).toEqual([]);
+		expect(el.value).toBe(command);
+		expect(el.attachments).toEqual([attachment]);
+		expect(document.activeElement).toBe(textarea(el));
+		const alert = el.querySelector('[role="alert"]');
+		expect(alert?.textContent).toBe("Manual compaction isn’t available for Claude Agent SDK sessions.");
+	});
+
+	it("does not discard attachments when Pi /compact is requested", async () => {
+		const compact = vi.fn();
+		const sends: string[] = [];
+		const attachment = { id: "a1", type: "image", fileName: "keep.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" };
+		const el = await mount({ runtime: "pi", onCompact: compact, onSend: (text) => sends.push(text), attachments: [attachment] });
+		await setComposer(el, "/compact", 8);
+		// Enter first accepts the autocomplete item; the second Enter submits it.
+		await key(el, "Enter");
+		expect(el.value).toBe("/compact ");
+		await key(el, "Enter");
+		expect(compact).not.toHaveBeenCalled();
+		expect(sends).toEqual([]);
+		expect(el.value).toBe("/compact ");
+		expect(el.attachments).toEqual([attachment]);
+		expect(el.querySelector('[role="alert"]')?.textContent).toMatch(/attachment/i);
+	});
+
+	it("refuses SDK /compact before Ctrl/Cmd+Enter steer and preserves the draft", async () => {
+		const steer = vi.fn(() => true);
+		const attachment = { id: "a1", type: "image", fileName: "keep.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" };
+		const el = await mount({ runtime: "claude-agent-sdk", onSteerSend: steer, attachments: [attachment] });
+		await setComposer(el, "/compact", 8);
+		textarea(el).focus();
+		await key(el, "Enter", { ctrlKey: true });
+
+		expect(steer).not.toHaveBeenCalled();
+		expect(el.value).toBe("/compact");
+		expect(el.attachments).toEqual([attachment]);
+		expect(document.activeElement).toBe(textarea(el));
+		expect(el.querySelector('[role="alert"]')?.textContent).toBe("Manual compaction isn’t available for Claude Agent SDK sessions.");
+	});
+
+	it("keeps runtime unknown distinct from Pi and consumes /compact locally", async () => {
+		const sends: string[] = [];
+		const compact = vi.fn();
+		const el = await mount({ runtime: null, onSend: (text) => sends.push(text), onCompact: compact });
+		await setComposer(el, "/", 1);
+		expect(filtered(el)).not.toContain("compact");
+
+		await setComposer(el, "/compact", 8);
+		await key(el, "Enter");
+		expect(sends).toEqual([]);
+		expect(compact).not.toHaveBeenCalled();
+		expect(el.querySelector('[role="alert"]')?.textContent).toBe("Manual compaction is unavailable until the session runtime is ready.");
+	});
+
+	it("refuses Bobbit slash commands as steers while ordinary steers are unchanged", async () => {
+		const steer = vi.fn(() => true);
+		const compact = vi.fn();
+		const el = await mount({ runtime: "pi", onSteerSend: steer, onCompact: compact });
+		await setComposer(el, "/compact", 8);
+		// Close the completion menu first: open-menu Enter ownership is covered in
+		// message-editor-steer.test.ts, while this test verifies slash refusal.
+		await key(el, "Escape");
+		expect(isMenuOpen(el)).toBe(false);
+		await key(el, "Enter", { metaKey: true });
+		expect(steer).not.toHaveBeenCalled();
+		expect(compact).not.toHaveBeenCalled();
+		expect(el.querySelector('[role="alert"]')?.textContent).toBe("Slash commands can’t be sent as steers. Press Enter to send a normal prompt.");
+
+		await setComposer(el, "interrupt now", 13);
+		await key(el, "Enter", { ctrlKey: true });
+		expect(steer).toHaveBeenCalledWith("interrupt now");
 	});
 });

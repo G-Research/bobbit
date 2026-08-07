@@ -1408,6 +1408,15 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/claude-sdk-composer-slash.journey.spec.ts",
+      "reason": "Production Chromium journey with the official Claude Agent SDK Query seam, proving runtime-filtered autocomplete, Bobbit skill expansion before SDK delivery, pack launcher dispatch, hidden SDK /compact interception, ordinary slash pass-through, and reload/project-switch inventory reconciliation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/headset-accessory.test.ts",
       "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
       "execution": {
@@ -2489,6 +2498,24 @@
       }
     },
     {
+      "path": "tests2/core/claude-runtime-review-roles.test.ts",
+      "reason": "Shipped Claude runtime reviewer-role schema, builtin PackResolver resolution, normalized policy ceilings, required protocol/parity/billing concerns, verifier boundaries, and UTF-8 prompt budgets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-runtime-review-workflow.test.ts",
+      "reason": "Real project claude-runtime inline-workflow validation, canonical DAG and command phases, specialist role resolution, no-custom-engine guard, real-model dogfood evidence, and UTF-8 prompt budgets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/session-runtime-status-protocol.test.ts",
       "reason": "Happy-dom coverage for applying server runtime and model-availability projections without violating status-version ownership.",
       "execution": {
@@ -2523,6 +2550,10 @@
     },
     {
       "path": "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/claude-sdk-composer-slash.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

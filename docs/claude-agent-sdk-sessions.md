@@ -33,6 +33,51 @@ Bobbit derives and persists runtime from the selected provider; the runtime is
 not a separate preference. Replacement cannot change an existing session between
 Pi and SDK; create a new session for a cross-runtime model choice.
 
+## Review workflow selection
+
+Workflow choice is separate from runtime selection. The registered
+`claude-runtime` workflow is for changes whose correctness depends on the Claude
+Agent SDK contract or its subscription-only boundary; it does not make a session
+use the SDK. The selected `claude-agent-sdk/<model-id>` provider still decides
+that.
+
+| Scope | Select | Required evidence |
+| --- | --- | --- |
+| A narrow empirical SDK or fixture question | A protocol-only, goal-specific snapshot using the `protocol-spike` gate | Version-tagged, sanitized observed setup and SDK evidence; record unresolved questions rather than inferring behavior. |
+| Setup or provider-selection work with no end-to-end SDK session claim | A reduced, goal-specific `claude-runtime` snapshot | Retain the applicable protocol/design, parity, and billing checks; state which gates are omitted and why. It cannot claim real-session coverage. |
+| Session lifecycle, tools, persistence, transcript/usage, rendering, auth, billing, or any user-visible SDK behavior | The full registered `claude-runtime` workflow | All workflow gates, including real-subscription dogfood evidence. |
+| Work with no Claude-runtime safety contract, such as unrelated documentation | `general` | The ordinary workflow evidence. |
+
+The named `claude-runtime` definition is the full workflow. A protocol-only or
+reduced scope must be proposed as a valid inline workflow snapshot before goal
+creation, not obtained by silently skipping gates on an active goal. Bobbit uses
+the same validation and verification engine for these snapshots. Every goal
+stores its own frozen workflow copy, so later edits to the project template do
+not change work already in progress; use the explicit goal-workflow replacement
+flow when a live goal genuinely needs a different contract. See
+[Goals, Workflows, Tasks & Gates](goals-workflows-tasks.md#workflows).
+
+The full workflow assigns three narrow specialists in addition to ordinary
+reviewers:
+
+- **Claude Protocol Scout** gathers version-tagged, sanitized empirical evidence
+  for a protocol spike. It is an evidence producer, not a gate verifier.
+- **Backend Parity Reviewer** checks SDK fixture drift, Pi-default routing,
+  canonical tool-policy names, and transcript/usage fidelity at shared seams.
+- **Billing Safety Auditor** checks that subscription-only operation cannot
+  inherit API, cloud, or alternate-auth fallback and that billed and notional
+  usage remain distinct.
+
+The dogfood gate is a content review by `spec-auditor`. Deterministic tests do
+not replace it: the submitted matrix must record the opt-in real-subscription
+command, installed SDK/Claude version, unprefixed model ID, sanitized
+`apiKeySource`/subscription proof, lifecycle results, transcript and usage
+observations, and any exercised browser-rendering screenshots. The specialist
+roles do not pin a provider or model; they inherit the goal's resolved model, so
+review coverage does not introduce an API-provider selection. See the
+[Claude runtime review workflow design](design/claude-runtime-review-workflow.md)
+for the gate layout and evidence rules.
+
 ## Runtime architecture
 
 `SessionManager` continues to own durable prompt queues, steer recovery, status,
@@ -168,6 +213,45 @@ compaction as unsupported rather than inventing Pi compaction events. SDK-manage
 compaction still dispatches the existing Extension Platform `beforeCompact`
 lifecycle hook through the SDK `PreCompact` hook. This keeps extension lifecycle
 behavior additive without introducing a provider-specific hook.
+
+### Composer slash commands
+
+The composer, not the SDK, owns current Bobbit slash controls, discovered skills,
+and active Extension Platform launchers. It builds its inventory from the scoped
+skill catalogue, server collision claims, active `composer-slash` pack entries,
+and the explicit session runtime. This prevents a Bobbit command from colliding
+with a bundled Claude command while preserving the existing server skill
+expansion pipeline.
+
+In an SDK session, `/compact` is deliberately absent from autocomplete but exact
+trimmed, case-insensitive input is consumed locally. The editor shows an inline
+unsupported-command alert and retains the text, attachments, and focus; it never
+calls the SDK. This avoids accidentally invoking Claude's bundled `/compact`.
+Pi sessions instead show `/compact` and run Bobbit's existing local compaction;
+attachments block that action without being discarded. While runtime identity is
+still loading, `/compact` is also consumed with an unavailable-until-ready alert
+rather than assuming Pi.
+
+A current Bobbit skill named `/goal` or `/review` wins over a Claude command with
+the same name. The editor only completes the token; normal send still reaches the
+server, where the skill is expanded before `ClaudeAgentSdkBridge` receives the
+final text. Without that exact Bobbit skill, `/goal`, `/review`, unknown slashes,
+and near-prefixes pass through as raw runtime prompts. Hidden recognized skills
+also mask same-named pack launchers, and ambiguous launcher ids never dispatch.
+
+Pack launchers run only for an exact full-line command with no attachments and
+use the existing compound entrypoint key. On reload or a project/session change,
+Bobbit refetches scoped skills and reconciles active pack entries; launcher and
+menu state are not persisted in drafts. Ctrl/Cmd+Enter normally steers text, but
+refuses an exact Bobbit-owned command so an unexpanded skill or launcher cannot
+reach the SDK raw. An open autocomplete menu owns Enter, Ctrl+Enter, and
+Cmd+Enter to complete its selection before send or steer behavior applies.
+
+These composer rules do not configure Claude commands or loosen SDK isolation:
+query options still use `settingSources: []`, `strictMcpConfig: true`, and only
+the live Bobbit MCP server. See the
+[composer slash interception design](design/claude-sdk-composer-slash-intercept.md)
+for the full ownership, collision, reload, and failure behavior.
 
 ## Tool ownership and permissions
 
