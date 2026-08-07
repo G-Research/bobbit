@@ -5448,7 +5448,7 @@ async function handleApiRoute(
 	const extensionPackGrantCapabilities: readonly ExtensionCapability[] = [
 		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
 	];
-	const isPackExtensionGrant = (grant: ExtensionGrant): boolean =>
+	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
 		(grant as { principal?: unknown }).principal === "pack";
 	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
 		const grants = store.getExtensionGrants();
