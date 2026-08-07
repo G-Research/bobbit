@@ -50,12 +50,17 @@ describe("Hindsight typed memory routes and tool adapters", () => {
 		assert.deepEqual(denied, { configured: true, code: "EXTENSION_CAPABILITY_DENIED", memories: [] });
 	});
 
-	it("declares the complete public route surface and returns a bounded result while unavailable", async () => {
+	it("registers every exported memory route, including the required browse surface", async () => {
 		const manifest = YAML.parse(fs.readFileSync(path.join(packRoot, "pack.yaml"), "utf8")) as { routes: { names: string[] } };
-		assert.deepEqual(manifest.routes.names, [
-			"runtime-status", "runtime-control", "runtime-logs", "migration-plan", "migration-execute",
-			"browse", "detail", "recall", "retain", "reflect", "invalidate", "retain-outcome",
-		]);
+		const registeredRouteNames = new Set(manifest.routes.names);
+		const exportedMemoryRouteNames = Object.keys(memoryRoutes);
+		assert.deepEqual(exportedMemoryRouteNames.filter(routeName => !registeredRouteNames.has(routeName)), []);
+		for (const routeName of ["browse", "search", "detail", "history"]) {
+			assert.ok(registeredRouteNames.has(routeName), `${routeName} must be available to the panel`);
+		}
+		for (const routeName of exportedMemoryRouteNames) {
+			assert.equal(typeof (routes as Record<string, unknown>)[routeName], "function");
+		}
 
 		const store = new MemoryStore();
 		await store.put(CONFIG_KEY, { runtimeMode: "local" });

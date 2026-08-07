@@ -20,4 +20,4 @@ requires: []
 # Pack routes are the shared, typed data-plane surface for the panel and tools.
 routes:
   module: lib/routes.mjs
-  names: [runtime-status, runtime-control, runtime-logs, migration-plan, migration-execute, browse, detail, recall, retain, reflect, invalidate, retain-outcome]
+  names: [runtime-status, runtime-control, runtime-logs, migration-plan, migration-execute, browse, search, detail, history, recall, retain, reflect, invalidate, retain-outcome]
