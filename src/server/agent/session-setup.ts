@@ -393,6 +393,8 @@ export interface PipelineContext {
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	/** S1 — per-session capability secret store (see session-secret.ts). */
 	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
+	/** Server-owned private Pi gate input; never added to bridge env or public APIs. */
+	toolResultFilterGateCredential?: (sessionId: string) => { runtimeGeneration: number; runtimeKey: string };
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
@@ -1192,7 +1194,9 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		// This is intentionally a setup-time hard failure. The private Pi loader
 		// must install the gate before every ordinary extension or no session starts.
 		assertToolResultGatePiCompatibility();
-		const gatePath = writeToolResultFilterExtension(plan.id);
+		const credential = ctx.toolResultFilterGateCredential?.(plan.id);
+		if (!credential) throw new Error("Tool-result filter gate credential installation failed.");
+		const gatePath = writeToolResultFilterExtension(plan.id, credential);
 		if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
 		toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
 	}

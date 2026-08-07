@@ -90,6 +90,7 @@ import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExten
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
+import { ToolResultFilterAttemptCredentials } from "./tool-result-filter-attempt-credentials.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
@@ -1955,6 +1956,8 @@ export class SessionManager {
 	 * every spawn/restore/respawn path can inject without a null-check).
 	 */
 	readonly sessionSecretStore: SessionSecretStore = new SessionSecretStore();
+	/** Server-only owner of private Pi result-gate callback credentials. */
+	readonly toolResultFilterAttemptCredentials = new ToolResultFilterAttemptCredentials();
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	/**
 	 * Optional inbox nudger. Wired late from `server.ts` boot via
@@ -2057,6 +2060,9 @@ export class SessionManager {
 
 	private _nextRespawnGeneration(sessionId: string): number {
 		const next = this._currentRespawnGeneration(sessionId) + 1;
+		// A replacement fences the old private Pi gate before it can submit a
+		// late raw result. The replacement obtains a fresh key during activation.
+		this.toolResultFilterAttemptCredentials.invalidate(sessionId);
 		this._sessionRespawnGenerations.set(sessionId, next);
 		return next;
 	}
@@ -2837,6 +2843,9 @@ export class SessionManager {
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			sessionSecretStore: this.sessionSecretStore,
+			toolResultFilterGateCredential: (sessionId) => this.toolResultFilterAttemptCredentials.beginRuntime(
+				sessionId, this._currentRespawnGeneration(sessionId),
+			),
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
@@ -3928,7 +3937,9 @@ export class SessionManager {
 		let toolResultGateEnv: Record<string, string> | undefined;
 		if (toolResultFilter?.toolResult) {
 			assertToolResultGatePiCompatibility();
-			const gatePath = writeToolResultFilterExtension(sessionId);
+			const gatePath = writeToolResultFilterExtension(sessionId, this.toolResultFilterAttemptCredentials.beginRuntime(
+				sessionId, this._currentRespawnGeneration(sessionId),
+			));
 			if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
 			toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
 		}
@@ -10995,6 +11006,7 @@ export class SessionManager {
 		// S1: drop the per-session capability secret so a terminated session's
 		// secret can no longer resolve to an authentic caller.
 		this.sessionSecretStore.remove(id);
+		this.toolResultFilterAttemptCredentials.invalidate(id);
 
 		// Clean up sandbox worktree inside the container.
 		// Skip for sessions that SHARE the parent's worktree and must never remove it:

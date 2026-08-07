@@ -127,6 +127,7 @@ describe("generated tool-result filter Pi gate", () => {
 		const [url, init] = coreFetch.mock.calls[0];
 		expect(url).toBe(`http://gateway.test/api/sessions/${sessionId}/tool-result-filter`);
 		expect(JSON.parse(init.body)).toMatchObject({ toolCallId: "call-1", toolName: "fixture-tool", result: { content: [{ text: canary }], isError: false } });
+		expect(new Headers(init.headers).get("X-Bobbit-Tool-Result-Attempt")).toMatch(/^v1\.[0-9a-z]+\.[0-9a-f-]{36}\.[0-9a-f]{64}$/);
 	});
 
 	it("encodes canonical request data without inherited toJSON observation", async () => {

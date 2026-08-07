@@ -8310,6 +8310,17 @@ async function handleApiRoute(
 				reject();
 				return;
 			}
+			// BOBBIT_TOKEN proves only transport/session scope. The opaque callback
+			// credential is minted by the private Pi gate, bound to this exact tool
+			// attempt, and consumed synchronously before worker admission or audit.
+			if (!sessionManager.toolResultFilterAttemptCredentials.consume(
+				sessionId,
+				(body as Record<string, unknown>).toolCallId,
+				req.headers["x-bobbit-tool-result-attempt"],
+			)) {
+				reject();
+				return;
+			}
 			const inspection = validateToolResultInspection({
 				event: "afterToolResult",
 				sessionId,
