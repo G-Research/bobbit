@@ -147,15 +147,6 @@
       }
     },
     {
-      "path": "tests2/browser/e2e/context-trace-inspector.spec.ts",
-      "reason": "Real-browser Context trace inspector journey with an isolated provider pack: it pins ordered safe provider rows, raw-content/error redaction, active-session isolation, post-append WebSocket refresh, persisted historical reload, focus restoration, and cleanup.",
-      "execution": {
-        "runner": "playwright",
-        "tier": "browser",
-        "project": "browser"
-      }
-    },
-    {
       "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
       "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
       "execution": {
@@ -2138,26 +2129,8 @@
       }
     },
     {
-      "path": "tests2/core/scheduled-advisor-lifecycle.test.ts",
-      "reason": "Deterministic lifecycle coverage for exact every-N advisor cadence, advisory-only context, overlap dropping, revocation fencing, cancellation, and malformed-result isolation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
       "path": "tests2/core/session-manager-boot-restore-lag.test.ts",
       "reason": "Native v2 core coverage for event-loop-lag-aware eager restore batching without skipped or deferred sessions.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/session-manager-lifecycle-dispatch.test.ts",
-      "reason": "Focused SessionManager lifecycle boundary coverage for after-turn and shutdown dispatch payloads, effective-goal fallback, scope coordinates, exactly-once delivery, and rejection isolation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2408,24 +2381,6 @@
       }
     },
     {
-      "path": "tests2/dom/context-trace-controller.test.ts",
-      "reason": "DOM controller coverage for bounded active-session trace fetches, pagination, stale-response fencing, scoped invalidation, and sanitized refresh failures.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "dom"
-      }
-    },
-    {
-      "path": "tests2/dom/context-trace-inspector.test.ts",
-      "reason": "DOM rendering coverage for safe newest-first Context trace rows, provider ordering, state feedback, controls, and tabpanel accessibility.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "dom"
-      }
-    },
-    {
       "path": "tests2/browser/journeys/bg-spawn-failure.journey.spec.ts",
       "reason": "Real browser journey through WebSocket delivery, persisted REST rehydration, distinct spawn-failed diagnostic rendering, and user removal of a background process whose container runtime cannot start.",
       "execution": {
@@ -2552,15 +2507,6 @@
       }
     },
     {
-      "path": "tests2/core/budget-enforcement.test.ts",
-      "reason": "Pure grant-gated budget enforcement reducer coverage for strict proposal validation, restrictive deterministic resolution, fail-closed pause and halt, revocation, hard-cap classification, and secret-free immutable audit metadata.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
       "path": "tests2/integration/extension-capability-grants.test.ts",
       "reason": "Authenticated gateway integration coverage for exact grant and revoke routes, server-derived administrative metadata, live contribution invalidation, activation ceilings, and durable secret-free audit history.",
       "execution": {
@@ -2579,260 +2525,8 @@
       }
     },
     {
-      "path": "tests2/core/turn-usage.test.ts",
-      "reason": "Direct terminal assistant usage normalization: aliases, finite validation, omitted cache telemetry, explicit zeroes, authoritative cost, and complete-only attribution.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/adopted-extension-ledger.test.ts",
-      "reason": "EP-9 unit coverage for scope-aware adoption identity, idempotence, durable config persistence, source redaction, and least-privilege MCP contribution mapping.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/adopted-skills.test.ts",
-      "reason": "EP-9 shared skill-loader coverage for namespaced adopted Claude-style skills, provenance, parser diagnostics, and collision-safe precedence.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/mcp-negotiation-status.test.ts",
-      "reason": "EP-9 MCP client and manager coverage for sanitized stdio/HTTP initialize handshake protocol and server identity reporting.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/pi-extension-harness-version.test.ts",
-      "reason": "EP-9 bounded Pi discovery coverage for exposing the probe harness version in successful, skipped, failed, and contribution diagnostics.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/integration/adopted-extension-runtime.test.ts",
-      "reason": "EP-9 runtime API coverage for stock stdio/HTTP MCP and Claude-style skill adoption, conservative operation selection, idempotence, removal, and project isolation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
       "path": "tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts",
       "reason": "EP-9 browser journey through Market adoption inspection, least-privilege conformance display, durable reload, and confirmed cleanup for project-scoped skills and MCP assets.",
-      "execution": {
-        "runner": "playwright",
-        "tier": "browser",
-        "project": "browser"
-      }
-    },
-    {
-      "path": "tests2/core/ws-skill-activation.test.ts",
-      "reason": "WebSocket prompt expansion must honor scoped market skill activation and cannot seed the shared catalog cache with disabled skills.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/browser/e2e/extension-decision-request.spec.ts",
-      "reason": "Real-browser schema-2 decision-hook journey covering pack activation, explicit decide grant, lifecycle dispatch, shared AskUserChoicesWidget Other submission, reload persistence, session-scoped durable memory, no agent prompt, and Context trace redaction.",
-      "execution": {
-        "runner": "playwright",
-        "tier": "browser",
-        "project": "browser"
-      }
-    },
-    {
-      "path": "tests2/browser/e2e/consent-pause-recovery.spec.ts",
-      "reason": "Browser journey for a seeded durable paused-consent projection: reload, shared-card Review link, one typed answer, no prompt/default/failure surface, and advisory inbox-only behavior.",
-      "execution": {
-        "runner": "playwright",
-        "tier": "browser",
-        "project": "browser"
-      }
-    },
-    {
-      "path": "tests2/integration/extension-decision-requests.test.ts",
-      "reason": "Gateway-facing decision dispatch seams: grants/revocation, session-owned answers, malformed values, and no-prompt isolation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/decision-proposal-routing.test.ts",
-      "reason": "Decision proposal effects create only editable drafts after durable resolution and isolate seed failures.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/consent-pause-recovery.test.ts",
-      "reason": "Composed durable consent recovery coverage for forced classification, deny/pause timeout settlement, restart replay, exact goal resume, inbox projection, advisory isolation, and proposal-only configuration effects.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/core/decision-hook-contract.test.ts",
-      "reason": "Strict extension decision contract validation, bounded defaults, deadlines, effects, and typed answers.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/decision-hook-module-host.test.ts",
-      "reason": "Decision hook worker invocation remains isolated and bounded.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/decision-request-manager.test.ts",
-      "reason": "Decision persistence lifecycle: deadlines, headless defaults, dedupe, scope memory, budgets, advisories, and isolated continuations.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/decision-request-store.test.ts",
-      "reason": "Atomic project-owned decision store persistence, corruption isolation, retention, and exact scope memory.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/inbox-nudger-advisory.test.ts",
-      "reason": "Extension advisory inbox entries persist as non-waking, remain actionable, survive reload, and never nudge staff beside ordinary wakeable work.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/dom/decision-request-renderer.test.ts",
-      "reason": "Existing ask-user-choices adapter transports durable decision answers without ask envelopes.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "dom"
-      }
-    },
-    {
-      "path": "tests2/dom/consent-inbox-reference.test.ts",
-      "reason": "Consent inbox references remain non-destructive and focus the existing typed decision card rather than creating an answer route.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "dom"
-      }
-    },
-    {
-      "path": "tests2/core/goal-pause-service.test.ts",
-      "reason": "Canonical pause lifecycle and exact awaiting-consent resume ownership preserve manual pause protection.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/extension-prompt-layout-cache-boundary.test.ts",
-      "reason": "Focused static extension prompt layout coverage for canonical assembly/inspector parity, byte-identical no-extension output, stable UTF-8 prefix digest across extension changes, and wrapper-inclusive budget rejection.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/integration/prompt-extension-registry-proposal-audit.test.ts",
-      "reason": "Real gateway integration coverage for grant-gated deterministic prompt-section registry resolution, generic-config rejection with stored-proposal CAS acceptance, requested/proposed audit lifecycle and terminal usage, plus wrapper-inclusive override budget safety.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/browser/e2e/prompt-extension-inspector.spec.ts",
-      "reason": "Production browser E2E journey for static prompt contributions: it grants and orders fixture packs, inspects attributed UTF-8 bytes across reload, disables sections, and preserves the stable core cache identity.",
-      "execution": {
-        "runner": "playwright",
-        "tier": "browser",
-        "project": "browser"
-      }
-    },
-    {
-      "path": "tests2/core/advisory-selection-contract.test.ts",
-      "reason": "EP-2 pure advisory-selection contract coverage for the strict closed union, immutable exact host availability admission, trusted candidate provenance, and deterministic priority/pack/hook reduction.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/decision-hook-dispatcher.test.ts",
-      "reason": "EP-2 dispatcher coverage proving concurrent afterTurn advisory selections reduce in deterministic active-pack order and an absent exact decide grant prevents hook import.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/runtime-model-selection.test.ts",
-      "reason": "EP-2 runtime model-selection coverage for isolated explicit human pin provenance, durable round-trip, verified thinking read-back/persistence/broadcast, and post-success websocket pin writes.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/advisory-thinking-consumer.test.ts",
-      "reason": "EP-2 advisory thinking consumer coverage proving human pins and fresh grant authorization short-circuit before runtime RPC mutation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/browser/e2e/extension-advisory-thinking.spec.ts",
-      "reason": "EP-2 production browser journey proving granted afterTurn thinking advice uses terminal usage, clamps and persists, while unavailable values, human pins, revocation, reload, and redacted Context trace remain safe.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2873,6 +2567,132 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/extension-host-pack-store-mutations.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-memory-completion.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-service-runtime.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/lifecycle-delivery-foundation.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-health.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-manifest.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-runners.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-security.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-store.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-supervisor.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-host-lifecycle-foundation.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-memory-completion.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-runtime-context.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/service-runtime-docker.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
       }
     }
   ],

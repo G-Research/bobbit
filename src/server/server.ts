@@ -52,8 +52,7 @@ import { handleWebSocketConnection, hasUiWebSocketPrincipal } from "./ws/handler
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
-import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, scanSkillDirResolved, type SkillMarketContext } from "./skills/slash-skills.js";
-import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "./skills/adopted-skill-entries.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError, TeamStartError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
@@ -64,8 +63,7 @@ import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
-import { resumeOnlyAwaitingConsentGoal, resumeOperatorPausedGoal } from "./agent/goal-resume.js";
-import { pauseGoalAwaitingExtensionConsent } from "./agent/goal-pause-service.js";
+import { resumeOperatorPausedGoal } from "./agent/goal-resume.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
@@ -85,25 +83,17 @@ import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
-import type { StorePutOptions } from "../shared/extension-host/host-api.js";
+import type { StoreMutationOptions, StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
 import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
 import { isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
-import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
-import { AdvisoryThinkingConsumer } from "./agent/advisory-thinking-consumer.js";
-import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
-import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
-import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
-import { PromptExtensionAuthoringAuditStore } from "./agent/prompt-extension-audit-store.js";
-import { createPromptExtensionUnifiedDiff, promptExtensionBaseline } from "./agent/prompt-extension-diff.js";
-import { redactSensitive } from "./auth/redact.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
@@ -125,7 +115,7 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
-import { getPromptSections } from "./agent/system-prompt.js";
+import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { SearchUnavailableError } from "./search/search-service.js";
@@ -532,7 +522,7 @@ export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
-import { THINKING_LEVELS, isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
 import { normalizeBasePath, stripBasePath } from "../shared/base-path.js";
 import { rewriteManifestForBasePath, rewriteSpaShell } from "./base-path-http.js";
 import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
@@ -564,20 +554,6 @@ import {
 } from "./agent/project-config-store.js";
 import { ExtensionGrantAuditStore } from "./agent/extension-grant-audit-store.js";
 import { resolveExtensionGrant, type ResolvedHook } from "./agent/extension-grant-policy.js";
-import {
-	aggregateAdoptedExtensions,
-	adoptedMcpContributions,
-	adoptionNamespace,
-	AdoptionValidationError,
-	cloneAdoptedExtension,
-	findOrCreateAdoptedExtension,
-	nextAdoptedExtensionRevision,
-	reconcileAdoptionOperations,
-	redactAdoptedExtension,
-	type AdoptedExtension,
-	type AdoptionConformance,
-	type AdoptionScope,
-} from "./agent/adopted-extensions.js";
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -588,7 +564,7 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
-import { classifyBrowserCookieEligibility, hasSameOriginBrowserMutationEvidence, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
+import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
@@ -647,7 +623,7 @@ import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPar
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
-import { scopeMarketPackEntries, refreshScopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
+import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
@@ -656,7 +632,6 @@ import { initAssistantRegistry, assistantRoleForType } from "./agent/assistant-r
 import {
 	deleteProposalFile,
 	editProposalFile,
-	extensionPromptSectionsFromProposal,
 	isProposalType,
 	latestRev,
 	listProposalFiles,
@@ -668,7 +643,7 @@ import {
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
-import { ProposalSeedService } from "./proposals/proposal-seed-service.js";
+import { prepareGoalProposalSeed } from "./proposals/goal-proposal-seed.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -685,42 +660,6 @@ const _goalWarnedClients = new WeakSet<WebSocket>();
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
-
-/**
- * Resolve the project-effective EP-13 prompt projection at every server
- * boundary that needs it. Registry order is already deterministic; overrides
- * replace only content, so position and attribution cannot drift.
- */
-function resolveStaticPromptSectionsForProject(
-	projectContextManager: ProjectContextManager,
-	packContributionRegistry: PackContributionRegistry,
-	projectId: string | undefined,
-	overrideRows?: readonly PromptExtensionOverride[],
-): ResolvedSystemPromptSection[] {
-	if (!projectId) return [];
-	const context = projectContextManager.getOrCreate(projectId);
-	if (!context) return [];
-	const overrides = new Map((overrideRows ?? context.projectConfigStore.getPromptExtensionOverrides())
-		.map(row => [promptExtensionKey(row.packId, row.sectionId), row]));
-	const declaredMaxBytes = new Map<string, number | undefined>();
-	const effective = packContributionRegistry.listSystemPromptSections?.(projectId).map(section => {
-		const key = promptExtensionKey(section.packId, section.sectionId);
-		const override = overrides.get(key);
-		declaredMaxBytes.set(key, section.maxBytes);
-		return {
-			packId: section.packId,
-			packName: section.packName,
-			sectionId: section.sectionId,
-			title: section.title,
-			content: override?.content ?? section.content,
-			source: override ? "project-override" : "manifest",
-		} satisfies ResolvedSystemPromptSection;
-	}) ?? [];
-	// Wrapper-inclusive budgets reject the complete candidate rather than
-	// truncating or publishing a partial prompt.
-	assertPromptExtensionBudget(effective, context.projectConfigStore.getPromptExtensionBudget(), declaredMaxBytes);
-	return effective;
-}
 export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
 let serverRuntimeFlags = { e2e: false, testNoExternal: false };
 // Audit rows are append-only events. Keep timestamps unique per injected clock
@@ -1115,6 +1054,78 @@ const GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE = "This goal runs without a git workt
 
 function hasGoalGitWorktree<T extends Pick<PersistedGoal, "branch" | "worktreePath">>(goal: T): goal is T & { branch: string; worktreePath: string } {
 	return !!goal.branch && !!goal.worktreePath;
+}
+
+const GOAL_COMPLETION_TEXT_LIMIT = 4_000;
+const GOAL_COMPLETION_ITEMS_LIMIT = 100;
+const GOAL_COMPLETION_METADATA_LIMIT = 40;
+
+/**
+ * Construct the only completion payload extension providers may receive. Keep
+ * the source snapshot deliberately narrow and bounded: raw stores, managers,
+ * workflows, sessions, and arbitrary goal data never cross this boundary.
+ */
+function boundedGoalCompletionOutcome(
+	goal: PersistedGoal,
+	tasks: readonly {
+		id: string; title: string; type: string; state: string; updatedAt: number;
+		completedAt?: number; resultSummary?: string; headSha?: string; workflowGateId?: string;
+	}[],
+	gates: readonly {
+		gateId: string; status: string; updatedAt: number; currentContent?: string;
+		currentContentVersion?: number; currentMetadata?: Record<string, string>;
+	}[],
+): Record<string, unknown> {
+	const clip = (value: unknown, limit = GOAL_COMPLETION_TEXT_LIMIT): string | undefined => {
+		if (typeof value !== "string") return undefined;
+		return value.length <= limit ? value : value.slice(0, limit);
+	};
+	const metadata = (value: Record<string, string> | undefined): Record<string, string> | undefined => {
+		if (!value) return undefined;
+		const out: Record<string, string> = {};
+		for (const [key, item] of Object.entries(value).slice(0, GOAL_COMPLETION_METADATA_LIMIT)) {
+			if (typeof item === "string") out[key.slice(0, 200)] = item.slice(0, 1_000);
+		}
+		return Object.keys(out).length ? out : undefined;
+	};
+	return {
+		version: 1,
+		goal: {
+			id: goal.id,
+			title: clip(goal.title, 1_000) ?? "",
+			...(clip(goal.spec) ? { spec: clip(goal.spec) } : {}),
+			state: goal.state,
+			updatedAt: goal.updatedAt,
+			...(goal.workflowId ? { workflowId: goal.workflowId.slice(0, 200) } : {}),
+		},
+		tasks: tasks
+			.slice()
+			.sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id))
+			.slice(0, GOAL_COMPLETION_ITEMS_LIMIT)
+			.map((task) => ({
+				id: task.id,
+				title: clip(task.title, 1_000) ?? "",
+				type: task.type,
+				state: task.state,
+				updatedAt: task.updatedAt,
+				...(task.completedAt ? { completedAt: task.completedAt } : {}),
+				...(clip(task.resultSummary) ? { resultSummary: clip(task.resultSummary) } : {}),
+				...(clip(task.headSha, 200) ? { headSha: clip(task.headSha, 200) } : {}),
+				...(clip(task.workflowGateId, 200) ? { workflowGateId: clip(task.workflowGateId, 200) } : {}),
+			})),
+		gates: gates
+			.slice()
+			.sort((a, b) => a.updatedAt - b.updatedAt || a.gateId.localeCompare(b.gateId))
+			.slice(0, GOAL_COMPLETION_ITEMS_LIMIT)
+			.map((gate) => ({
+				id: gate.gateId,
+				status: gate.status,
+				updatedAt: gate.updatedAt,
+				...(gate.currentContentVersion !== undefined ? { contentVersion: gate.currentContentVersion } : {}),
+				...(clip(gate.currentContent) ? { content: clip(gate.currentContent) } : {}),
+				...(metadata(gate.currentMetadata) ? { metadata: metadata(gate.currentMetadata) } : {}),
+			})),
+	};
 }
 
 function noWorktreeGoalGitMessage(goal: Pick<PersistedGoal, "projectId">): string {
@@ -2588,7 +2599,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// wiring below (they enumerate via the same marketPackProvider).
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
-	let decisionRequestManager!: DecisionRequestManager;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
@@ -2603,7 +2613,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
-		systemPromptPath: config.systemPromptPath ?? resolveSystemPromptPath(),
+		systemPromptPath: config.systemPromptPath,
 		colorStore,
 		roleManager,
 		toolManager,
@@ -2755,6 +2765,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			setGoalProvisionedDispatcher?: (
 				fn: (dctx: { goalId: string; projectId?: string; worktreePath: string; cwd: string; branch?: string; metadata: Record<string, unknown> }) => Promise<void>,
 			) => void;
+			setGoalCompletedDispatcher?: (
+				fn: (dctx: { goalId: string; goal: PersistedGoal; completedAt: number }) => Promise<void>,
+			) => void;
 		};
 		if (typeof gm.setGoalProvisionedDispatcher === "function") {
 			gm.setGoalProvisionedDispatcher(async (dctx) => {
@@ -2764,6 +2777,47 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (hub && typeof hub.dispatchGoalProvisioned === "function") {
 					await hub.dispatchGoalProvisioned(dctx);
 				}
+			});
+		}
+		// Completion is configured per owning ProjectContext, exactly like worktree
+		// provisioning. The TeamManager obtains this GoalManager only after its
+		// durable state transition, so no session/body fields can redirect scope.
+		if (typeof gm.setGoalCompletedDispatcher === "function") {
+			gm.setGoalCompletedDispatcher(async ({ goalId, goal, completedAt }) => {
+				if (goal.projectId && goal.projectId !== ctx.project.id) {
+					console.warn(`[server] goalCompleted skipped: goal ${goalId} project ownership mismatch`);
+					return;
+				}
+				const hub = sessionManager.lifecycleHub;
+				if (!hub) return;
+				const scopeContext = resolveHookScopeContext(projectContextManager, {
+					projectId: ctx.project.id,
+					goalId,
+					cwd: goal.cwd,
+					worktreePath: goal.worktreePath,
+					repoPath: goal.repoPath,
+					repoWorktrees: goal.repoWorktrees,
+				});
+				if (!scopeContext?.project || scopeContext.project.id !== ctx.project.id) {
+					console.warn(`[server] goalCompleted skipped: authoritative scope unavailable for goal ${goalId}`);
+					return;
+				}
+				await hub.dispatchGoalCompleted({
+					goalId,
+					projectId: ctx.project.id,
+					cwd: goal.cwd,
+					worktreePath: goal.worktreePath,
+					repoPath: goal.repoPath,
+					repoWorktrees: goal.repoWorktrees,
+					scopeContext,
+					outcome: boundedGoalCompletionOutcome(
+						goal,
+						ctx.taskStore.getByGoalId(goalId),
+						ctx.gateStore.getGatesForGoal(goalId),
+					),
+					completedAt,
+					completionRevision: completedAt,
+				});
 			});
 		}
 	});
@@ -2816,20 +2870,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return out;
 	};
-	/** Assemble the durable ledger at the existing resolver boundary. Server and
-	 * global-user records belong to the HQ store; project records never escape
-	 * their owning project store. */
-	const adoptedExtensionsForProject = (projectId?: string): AdoptedExtension[] => {
-		const effectiveProjectId = normalizeConfigProjectId(projectId);
-		const records = {
-			server: projectConfigStore.getAdoptedExtensions("server"),
-			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
-			...(effectiveProjectId && projectContextManager.getOrCreate(effectiveProjectId)
-				? { project: projectContextManager.getOrCreate(effectiveProjectId)!.projectConfigStore.getAdoptedExtensions("project") }
-				: {}),
-		};
-		return aggregateAdoptedExtensions(records, effectiveProjectId);
-	};
 	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
 		const contributions: ResolvedMcpContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
@@ -2872,9 +2912,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				console.warn(`[mcp] failed to load Marketplace MCP contributions from ${entry.path}:`, (err as Error).message);
 			}
 		}
-		// Vanilla MCPs use the same normalizer/manager path as pack MCPs. They
-		// intentionally precede the manual overlay, preserving manual precedence.
-		contributions.push(...adoptedMcpContributions(adoptedExtensionsForProject(projectId)));
 		return contributions;
 	};
 	const marketplacePiExtensionDiscoveryTrusted = (entry: PackEntry): boolean => {
@@ -3033,26 +3070,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return result;
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
-		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).systemPrompts ?? [],
-		(projectId, packId, activeHooks = []) => {
-			const store = projectId ? projectContextManager.getOrCreate(projectId)?.projectConfigStore : undefined;
-			return !!store?.getExtensionGrants().some(grant => grant.packId === packId
-				&& grant.capability === "prompt:system-static"
-				&& activeHooks.some(hook => hook.id === grant.hookId && hook.capabilities.includes("prompt:system-static")),
-			);
-		},
+		undefined,
+		undefined,
 		extensionSettingsRuntimeLookup,
 	);
-	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
-		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
-	});
-	const resolveStaticPromptSections = (projectId: string | undefined): ResolvedSystemPromptSection[] =>
-		resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, projectId);
-	sessionManager.setStaticPromptSectionResolver(resolveStaticPromptSections);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
-		trace: contextTraceStore,
+		trace: new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl),
 		// Hierarchical goal-metadata resolver. The hub is shared across projects
 		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
 		// (never the caller-supplied projectId, which may be stale/cross-project).
@@ -3081,22 +3106,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			packStore: getPackStore(),
 			capabilityMask: { store: true, session: false, agents: false },
 		}),
-		// Rebuild the active hook tuple and re-read grants at both LifecycleHub
-		// fences. Scheduled advisors never cache a capability or configuration.
-		scheduledAdvisorAuthorizer: ({ projectId, packId, hookId }) => {
-			const activeHooks: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap((pack) =>
-				pack.hooks.map((hook) => ({
-					packId: pack.packId,
-					hookId: hook.id,
-					mode: hook.mode,
-					capabilities: hook.capabilities,
-				})),
-			);
-			const configStore = projectId
-				? projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? projectConfigStore
-				: projectConfigStore;
-			return resolveExtensionGrant(activeHooks, configStore.getExtensionGrants(), { packId, hookId }, "decide").allowed;
-		},
 		gatewayInfo: () => {
 			try {
 				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -3173,106 +3182,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	inboxManager.setNudger(inboxNudger);
 	staffManager.setInboxManager(inboxManager);
 	sessionManager.setInboxNudger(inboxNudger);
-
-	// Decision mediation is project-owned and never creates a prompt/agent turn.
-	// It is deliberately wired after inbox/proposal dependencies exist, then
-	// attached to LifecycleHub as a detached post-provider branch.
-	const proposalSeedService = new ProposalSeedService({
-		stateDir,
-		sessionManager,
-		projectRegistry,
-		projectContextManager,
-		configCascade,
-		getGoal: (goalId) => projectContextManager.getContextForGoal(goalId)?.goalStore.get(goalId),
-		getPreference: (key) => preferencesStore.get(key),
-		systemProjectId: SYSTEM_PROJECT_ID,
-		headquartersProjectId: HEADQUARTERS_PROJECT_ID,
-		broadcastToSession,
-		packContributionRegistry,
-		readBody,
-	});
-	decisionRequestManager = new DecisionRequestManager({
-		storeForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.decisionRequestStore,
-		projectIds: function* () { for (const ctx of projectContextManager.all()) yield ctx.project.id; },
-		clock: gatewayDeps.clock,
-		// CI and explicitly headless gateway processes cannot wait for a browser.
-		isHeadless: () => process.env.CI === "true" || process.env.BOBBIT_HEADLESS === "1",
-		inboxManager,
-		// A consent inbox can only target the persisted origin session's staff
-		// record in the same project. Never substitute a lead or another staffer.
-		consentInboxTarget: (projectId, sessionId) => {
-			const session = sessionManager.getPersistedSession(sessionId);
-			const context = projectContextManager.getOrCreate(projectId);
-			if (!session?.staffId || session.projectId !== projectId || !context?.staffStore.get(session.staffId)) return undefined;
-			return session.staffId;
-		},
-		consentPauseLifecycle: {
-			pause: (goalId, reason, callerSessionId) => {
-				const context = projectContextManager.getContextForGoal(goalId);
-				if (!context) return Promise.resolve("not-matching" as const);
-				return pauseGoalAwaitingExtensionConsent({
-					getGoalManagerForGoal: () => context.goalManager, verificationHarness, sessionManager,
-					broadcastGoalStateChanged: (changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }),
-				}, goalId, reason, callerSessionId);
-			},
-			resume: (goalId, reason) => {
-				const context = projectContextManager.getContextForGoal(goalId);
-				if (!context) return Promise.resolve("not-matching" as const);
-				return resumeOnlyAwaitingConsentGoal(context.goalStore, goalId, reason,
-					(changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }));
-			},
-		},
-		// Read hooks, grants, and the exact protected operation afresh at both
-		// settlement fences. A missing, inactive, revoked, or changed operation
-		// fails closed before a consent answer can seed a proposal or continue work.
-		recheckConsentOperation: (record) => {
-			const active: ResolvedHook[] = packContributionRegistry.list(record.projectId).flatMap(pack =>
-				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
-			);
-			const grants = projectContextManager.getOrCreate(record.projectId)?.projectConfigStore.getExtensionGrants() ?? [];
-			if (!resolveExtensionGrant(active, grants, { packId: record.asker.packId, hookId: record.asker.hookId }, "decide").allowed) return false;
-			// Unprotected, explicitly consent-required hook requests still need the
-			// fresh grant fence. Protected extension proposal effects additionally
-			// prove their stable core-owned operation fingerprint.
-			return !record.protectedOperation || isCurrentTrustedExtensionDecisionOperation(record);
-		},
-		proposalSeedService,
-		trace: contextTraceStore,
-		invalidateSession: (sessionId) => broadcastToSession(sessionId, {
-			type: "decision_requests_updated", sessionId, ts: gatewayDeps.clock.now(),
-		}),
-	});
-	const advisoryThinkingConsumer = new AdvisoryThinkingConsumer({
-		sessionManager,
-		// Preserve the canonical SessionInfo identity: verified runtime mutation
-		// fences the bridge against this exact manager-owned object.
-		getSession: sessionManager.getSession.bind(sessionManager),
-		getPersistedSession: (sessionId) => sessionManager.getPersistedSession(sessionId),
-		isAuthorized: ({ projectId, source }) => {
-			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
-				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
-			);
-			const grants = projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [];
-			return resolveExtensionGrant(active, grants, source, "decide").allowed;
-		},
-		broadcast: (sessionId, message) => broadcastToSession(sessionId, message),
-	});
-	const decisionHookDispatcher = new DecisionHookDispatcher({
-		manager: decisionRequestManager,
-		registry: packContributionRegistry,
-		moduleHost,
-		grantsForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [],
-		availabilityForProject: async (projectId) => ({
-			models: (await getAvailableModels(preferencesStore))
-				.filter(model => model.sessionSelectable !== false)
-				.map(model => ({ provider: model.provider, modelId: model.id })),
-			thinkingLevels: THINKING_LEVELS,
-			roles: configCascade.resolveRoles(projectId).map(role => role.item.name),
-			workflows: configCascade.resolveWorkflows(projectId).map(workflow => workflow.item.id),
-		}),
-		thinkingConsumer: advisoryThinkingConsumer,
-	});
-	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
 
 	// One-shot migration: heal sessions that lost their `staffId` association
 	// before the staffId-persistence fix landed. Idempotent — sessions that
@@ -4077,7 +3986,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4556,11 +4465,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	ck("pre-VerificationHarness");
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
 	ck("new VerificationHarness");
-	// Reconciliation may replay a durable consent pause, so wait until its
-	// canonical verification lifecycle dependency is initialized.
-	void decisionRequestManager.reconcile().catch((err) => {
-		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
-	});
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -5149,7 +5053,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				gatewayDeps.clock.clearInterval(cleanupInterval);
 				triggerEngine.stop();
 				inboxNudger.stop();
-				decisionRequestManager.stop();
 				wss.close();
 				// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
 				// and await them before tearing down stores or allowing restart.
@@ -5394,7 +5297,6 @@ async function handleApiRoute(
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
-	decisionRequestManager?: DecisionRequestManager,
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
@@ -5524,23 +5426,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => {
-		invalidateMarketPackScanCache();
-		invalidateBuiltinPackScanCache();
-		invalidateSlashSkillsCache();
-		__resetToolScanCache();
-		toolManager.clearScopedPiExtensionTools();
-		piExtensionDiscoveryCache.clear();
-		dispatcher.invalidate();
-		routeDispatcher.invalidate();
-		routeRegistry.invalidate();
-		packContributionRegistry.invalidate();
-		sessionManager.lifecycleHub?.cancelScheduledAdvisors?.();
-		closeUnavailableExtensionChannels();
-		for (const projectId of new Set(sessionManager.listSessions().map(session => session.projectId).filter((id): id is string => !!id))) {
-			sessionManager.refreshStaticPromptSections(projectId);
-		}
-	};
+	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 
 	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
 	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
@@ -5955,11 +5841,6 @@ async function handleApiRoute(
 				const store = scope === "project" ? ctx?.projectConfigStore : projectConfigStore;
 				return store?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 			},
-			adoptedEntries: (scope) => adoptedSkillEntries(scope, {
-				serverConfigStore: projectConfigStore as AdoptedSkillLedgerReader,
-				projectConfigStore: ctx?.projectConfigStore as AdoptedSkillLedgerReader | undefined,
-				projectId: effectiveProjectId ?? undefined,
-			}),
 		};
 	}
 
@@ -7787,88 +7668,6 @@ async function handleApiRoute(
 		};
 	};
 
-	// Decision requests are a REST projection of durable project-owned records.
-	// They deliberately bypass ask envelopes and SessionManager.enqueuePrompt.
-	const decisionRequestsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests$/);
-	if (decisionRequestsMatch && req.method === "GET") {
-		let sessionId: string;
-		try { sessionId = decodeURIComponent(decisionRequestsMatch[1]); } catch { json({ error: "Session not found" }, 404); return; }
-		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
-		if (!session?.projectId || !decisionRequestManager) { json({ error: "Session not found" }, 404); return; }
-		const state = url.searchParams.get("state");
-		if (state !== null && state !== "pending") { json({ error: "state must be pending" }, 400); return; }
-		const projectId = session.projectId;
-		const project = (record: import("./agent/decision-request-store.js").StoredDecisionRequest) => ({
-			id: record.id,
-			sessionId: record.sessionId,
-			status: record.status,
-			decisionClass: record.decisionClass ?? "deferrable",
-			classificationReason: record.classificationReason ?? "requested",
-			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
-			...(record.consentPause ? { consentPause: {
-				goalId: record.consentPause.goalId,
-				reason: record.consentPause.reason,
-				pausedAt: record.consentPause.pausedAt,
-				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
-			} } : {}),
-			request: {
-				title: record.request.title,
-				question: record.request.question,
-				options: record.request.options.map((option) => ({ value: option.value, label: option.label })),
-			},
-			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
-		});
-		json({ requests: decisionRequestManager.listActionable(projectId, sessionId).map(project) });
-		return;
-	}
-
-	const decisionAnswerMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests\/([^/]+)\/answer$/);
-	if (decisionAnswerMatch && req.method === "POST") {
-		let sessionId: string;
-		let requestId: string;
-		try {
-			sessionId = decodeURIComponent(decisionAnswerMatch[1]);
-			requestId = decodeURIComponent(decisionAnswerMatch[2]);
-		} catch { json({ error: "Decision request not found" }, 404); return; }
-		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
-		if (!session?.projectId || !decisionRequestManager) { json({ error: "Session not found" }, 404); return; }
-		const current = decisionRequestManager.get(session.projectId, requestId);
-		// A request id is never sufficient authority: it must be owned by the URL's
-		// session before an answer can reach the durable manager.
-		if (!current || current.sessionId !== sessionId) { json({ error: "Decision request not found" }, 404); return; }
-		const body = await readBody(req).catch(() => undefined);
-		if (!body || typeof body !== "object" || Array.isArray(body)
-			|| Object.keys(body).length !== 1 || !("value" in body)) {
-			json({ error: "value is required" }, 400);
-			return;
-		}
-		const result = await decisionRequestManager.answer(session.projectId, requestId, (body as { value: unknown }).value);
-		if (result.status === "invalid") { json({ error: "Invalid decision answer" }, 400); return; }
-		if (!result.request) { json({ error: "Decision request not found" }, 404); return; }
-		const record = result.request;
-		json({ request: {
-			id: record.id,
-			sessionId: record.sessionId,
-			status: record.status,
-			decisionClass: record.decisionClass ?? "deferrable",
-			classificationReason: record.classificationReason ?? "requested",
-			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
-			...(record.consentPause ? { consentPause: {
-				goalId: record.consentPause.goalId,
-				reason: record.consentPause.reason,
-				pausedAt: record.consentPause.pausedAt,
-				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
-			} } : {}),
-			request: {
-				title: record.request.title,
-				question: record.request.question,
-				options: record.request.options.map((option) => ({ value: option.value, label: option.label })),
-			},
-			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
-		} });
-		return;
-	}
-
 	// POST /api/sessions/:id/provider-hooks/before-prompt — per-turn dynamic context.
 	const beforePromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-prompt$/);
 	if (beforePromptMatch && req.method === "POST") {
@@ -7963,17 +7762,7 @@ async function handleApiRoute(
 	// GET /api/sessions/:id/context-trace?limit=N — per-turn provider dispatch trace.
 	const contextTraceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/context-trace$/);
 	if (contextTraceMatch && req.method === "GET") {
-		let sessionId: string;
-		try {
-			sessionId = decodeURIComponent(contextTraceMatch[1]);
-		} catch {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-		if (!sessionManager.getSession(sessionId) && !sessionManager.getPersistedSession(sessionId)) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
+		const sessionId = contextTraceMatch[1];
 		let limit: number | undefined;
 		const rawLimit = url.searchParams.get("limit");
 		if (rawLimit !== null) {
@@ -7986,22 +7775,6 @@ async function handleApiRoute(
 		} catch (err: any) {
 			jsonError(500, err);
 		}
-		return;
-	}
-
-	// GET /api/sessions/:id/prompt-extension-audit — authorized durable detail.
-	const promptExtensionAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-extension-audit$/);
-	if (promptExtensionAuditMatch && req.method === "GET") {
-		if (!requireVerifiedPromptOperator()) return;
-		const sessionId = promptExtensionAuditMatch[1];
-		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
-		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
-		try {
-			const entries = [...projectContextManager.all()]
-				.flatMap(context => new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl).list(200))
-				.filter(entry => entry.sessionId === sessionId).sort((a, b) => a.at.localeCompare(b.at)).slice(-limit);
-			json({ entries });
-		} catch { json({ error: "Prompt extension audit is unavailable", code: "PROMPT_EXTENSION_AUDIT_UNAVAILABLE" }, 503); }
 		return;
 	}
 
@@ -9968,7 +9741,6 @@ async function handleApiRoute(
 			json({ error: "Invalid extension grant tuple" }, 400);
 			return;
 		}
-		if ((capability === "prompt:system-static" || capability === "prompt:system-author") && !requireVerifiedPromptOperator()) return;
 		const hook = extensionGrantHook(resolved.projectId, packId, hookId);
 		if (!hook) {
 			json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
@@ -10365,7 +10137,7 @@ async function handleApiRoute(
 	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
 	if (storeMatch && req.method === "POST") {
 		const op = decodeURIComponent(storeMatch[1]);
-		if (op !== "get" && op !== "read" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
+		if (op !== "get" && op !== "read" && op !== "put" && op !== "mutate" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
 			json({ error: `Unknown store op "${op}"`, code: "STORE_OP_UNKNOWN" }, 404);
 			return;
 		}
@@ -10431,10 +10203,17 @@ async function handleApiRoute(
 					`store ${op}`,
 				);
 			} else if (op === "put") {
-				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions }).opts), undefined, `store ${op}`);
+				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions | null }).opts ?? undefined), undefined, `store ${op}`);
 				// Host-owned: a direct provider-config write must drop activation caches too.
 				notePackStoreWrite(key);
 				result = { ok: true };
+			} else if (op === "mutate") {
+				result = await withStoreTimeout(
+					packStore.mutate(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StoreMutationOptions | null }).opts ?? undefined),
+					undefined,
+					`store ${op}`,
+				);
+				if ((result as { status?: string }).status === "committed") notePackStoreWrite(key);
 			} else if (op === "delete") {
 				result = await withStoreTimeout(packStore.delete(ident.packId, key as string), undefined, `store ${op}`);
 			} else if (op === "deletePrefix") {
@@ -10555,13 +10334,12 @@ async function handleApiRoute(
 		const body = (await readBody(req)) ?? {};
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const routeLive = routeHeaderSid ? sessionManager.getSession(routeHeaderSid) : undefined;
 		const routePs = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
+		const routeSession = routeLive ?? routePs;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
-		const routeSessionProjectId = routeHeaderSid
-			? (sessionManager.getSession(routeHeaderSid)?.projectId
-				?? routePs?.projectId)
-			: undefined;
+		const routeSessionProjectId = routeSession?.projectId;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
 			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
@@ -10637,16 +10415,46 @@ async function handleApiRoute(
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
+		// Resolve rich route scope only from the authenticated session's own live or
+		// persisted coordinates. This is the same host resolver used by lifecycle
+		// hooks; route bodies and flat compatibility fields cannot substitute for it.
+		const authenticatedRouteSession = sessionManager.getSession(guard.sessionId)
+			?? sessionManager.getPersistedSession(guard.sessionId);
+		const routeRepoWorktrees = authenticatedRouteSession
+			? (Array.isArray(authenticatedRouteSession.repoWorktrees)
+				? Object.fromEntries(authenticatedRouteSession.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
+				: authenticatedRouteSession.repoWorktrees)
+			: undefined;
+		const routeScopeContext = authenticatedRouteSession
+			? resolveHookScopeContext(projectContextManager, {
+				projectId: authenticatedRouteSession.projectId,
+				goalId: authenticatedRouteSession.goalId ?? authenticatedRouteSession.teamGoalId,
+				roleName: authenticatedRouteSession.role,
+				cwd: authenticatedRouteSession.cwd ?? process.cwd(),
+				worktreePath: authenticatedRouteSession.worktreePath,
+				repoPath: authenticatedRouteSession.repoPath,
+				repoWorktrees: routeRepoWorktrees,
+			})
+			: undefined;
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
-			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
+			const routeWorkingDir = authenticatedRouteSession?.worktreePath ?? authenticatedRouteSession?.cwd;
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, sessionArchived: routePs?.archived === true },
+				{
+					host,
+					sessionId: guard.sessionId,
+					toolUseId: toolUseId ?? "",
+					tool: ident.contributionId,
+					projectId: authenticatedRouteSession?.projectId,
+					...(routeScopeContext ? { scopeContext: routeScopeContext } : {}),
+					workingDir: routeWorkingDir,
+					sessionArchived: sessionManager.getArchivedSession(guard.sessionId) !== undefined,
+				},
 				{ method, query, body: init.body },
 			);
 			const durationMs = Date.now() - start;
@@ -11105,218 +10913,6 @@ async function handleApiRoute(
 			return ctxs;
 		};
 
-		// ── Vanilla extension adoption (EP-9) ───────────────────────
-		type AdoptionTarget = { scope: AdoptionScope; store: ProjectConfigStore; projectId?: string };
-		const adoptionTarget = (scope: AdoptionScope, rawProjectId: unknown): { ok: true; target: AdoptionTarget } | { ok: false; status: number; error: string } => {
-			if (scope !== "project") return { ok: true, target: { scope, store: projectConfigStore } };
-			if (typeof rawProjectId !== "string" || !rawProjectId.trim()) return { ok: false, status: 400, error: "projectId required for project scope" };
-			const projectId = normalizeConfigProjectId(rawProjectId);
-			if (!projectId) return { ok: false, status: 400, error: "project scope requires a normal project" };
-			const ctx = projectContextManager.getOrCreate(projectId);
-			return ctx ? { ok: true, target: { scope, store: ctx.projectConfigStore, projectId } } : { ok: false, status: 404, error: "Project not found" };
-		};
-		const adoptedFor = (projectId?: string): AdoptedExtension[] => aggregateAdoptedExtensions({
-			server: projectConfigStore.getAdoptedExtensions("server"),
-			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
-			...(projectId && projectContextManager.getOrCreate(projectId)
-				? { project: projectContextManager.getOrCreate(projectId)!.projectConfigStore.getAdoptedExtensions("project") }
-				: {}),
-		}, projectId);
-		const adoptionFailure = (code: "connection_failed" | "initialize_failed" | "tools_list_failed"): AdoptionConformance["failures"][number] => ({
-			code,
-			message: code === "initialize_failed" ? "The extension did not complete initialization." : code === "tools_list_failed" ? "The extension did not provide a tool list." : "The extension could not be reached.",
-		});
-		const skillConformance = (record: AdoptedExtension): AdoptionConformance => {
-			const directory = "directory" in record.source ? record.source.directory : "";
-			const scan = scanSkillDirResolved(directory, "custom");
-			const rejectedSkills = scan.diagnostics.map((diagnostic) => ({
-				path: diagnostic.path,
-				reason: diagnostic.reason === "unreadable_file" ? "missing_skill_file" : diagnostic.reason,
-			}));
-			const failures: AdoptionConformance["failures"] = [];
-			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "missing_directory")) failures.push({ code: "missing_directory", message: "The skills directory is unavailable." });
-			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "malformed_frontmatter")) failures.push({ code: "malformed_frontmatter", message: "A skill has malformed frontmatter." });
-			return {
-				state: scan.skills.length === 0 && scan.diagnostics.length > 0 ? "rejected" : scan.diagnostics.length > 0 ? "partial" : "loaded",
-				checkedAt: new Date().toISOString(),
-				skills: { loadedSkills: scan.skills.map((skill) => `adopt-${record.id}--${skill.name}`), rejectedSkills },
-				failures,
-			};
-		};
-		const refreshMcpConformance = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
-			// Disabled records intentionally have no runtime contribution. Reloading one
-			// would probe its source only to manufacture an absent-server failure.
-			if (!record.enabled) return record;
-
-			let reload: McpReloadResult | undefined;
-			try { reload = await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* status below is deliberately sanitized */ }
-			const manager = target.scope === "project" ? sessionManager.getMcpManager({ projectId: target.projectId }) : sessionManager.getMcpManager();
-			const runtimeServerKey = adoptionNamespace(record.id);
-			const status = manager?.getServerStatuses().find((row) => row.name === runtimeServerKey);
-			const managerInternals = manager as unknown as {
-				toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>>;
-				getRejectedToolDefinitions?: (serverName: string) => Array<{ name?: string; reason: "invalid_operation_schema" }>;
-			} | null;
-			// `connectServer` records an empty tool list for a failed tools/list too, so
-			// map presence alone is not authoritative. A connected server with a settled
-			// reload is the only source allowed to reconcile the durable operation list.
-			const hasLiveToolList = reload?.status !== "pending"
-				&& status?.status === "connected"
-				&& managerInternals?.toolDefs?.has(runtimeServerKey) === true;
-			const operations = hasLiveToolList
-				? reconcileAdoptionOperations(
-					record.operations ?? [],
-					managerInternals!.toolDefs!.get(runtimeServerKey) ?? [],
-					record.conformance.state === "pending" && (record.operations?.length ?? 0) === 0,
-				)
-				: record.operations ?? [];
-			const rejectedTools = hasLiveToolList
-				? managerInternals?.getRejectedToolDefinitions?.(runtimeServerKey) ?? []
-				: record.conformance.mcp?.rejectedTools ?? [];
-			const statusError = status?.status === "error" || !status;
-			const error = status?.error ?? "";
-			const failureCode = /initializ/i.test(error) ? "initialize_failed" : /tools.?list/i.test(error) ? "tools_list_failed" : "connection_failed";
-			const conformance: AdoptionConformance = {
-				state: statusError ? "unreachable" : rejectedTools.length > 0 ? "partial" : "loaded",
-				checkedAt: new Date().toISOString(),
-				mcp: {
-					...(status?.negotiation ? { requestedProtocol: status.negotiation.requestedProtocol, ...(status.negotiation.negotiatedProtocol ? { negotiatedProtocol: status.negotiation.negotiatedProtocol } : {}), ...(status.negotiation.serverName ? { serverName: status.negotiation.serverName } : {}), ...(status.negotiation.serverVersion ? { serverVersion: status.negotiation.serverVersion } : {}) } : {}),
-					loadedTools: operations.map((operation) => operation.name),
-					rejectedTools,
-				},
-				failures: statusError ? [adoptionFailure(failureCode)] : [],
-			};
-			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), operations, conformance, provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
-			try {
-				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
-			} catch { return record; }
-			const selectedNames = (entries: NonNullable<AdoptedExtension["operations"]> = []) => entries
-				.filter((operation) => operation.selected)
-				.map((operation) => operation.name)
-				.sort();
-			// The first reload used the pre-CAS selection. Rebuild only when the
-			// authoritative reconciliation genuinely changed the exposed selection.
-			if (reload && hasLiveToolList && JSON.stringify(selectedNames(record.operations)) !== JSON.stringify(selectedNames(operations))) {
-				try { await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* conformance remains visible */ }
-			}
-			return updated;
-		};
-		const refreshAdoption = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
-			if (record.kind === "mcp") return refreshMcpConformance(target, record);
-			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), conformance: skillConformance(record), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
-			try {
-				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
-			} catch { return record; }
-			return updated;
-		};
-		/** Adoption starts host commands or outbound connections, so localhost trust
-		 * alone is insufficient. Sandbox credentials are never operator authority. */
-		const requireAdoptionOperator = (): boolean => {
-			const bearer = req.headers.authorization;
-			const hasAdminBearer = typeof bearer === "string" && bearer.startsWith("Bearer ") && validateToken(bearer.slice(7), config.authToken);
-			const presentedSandbox = Boolean(sandboxScope) || [
-				typeof bearer === "string" && bearer.startsWith("Bearer ") ? bearer.slice(7) : undefined,
-				...url.searchParams.getAll("token"),
-			].some(token => typeof token === "string" && Boolean(sandboxTokenStore?.lookup(token)));
-			if (presentedSandbox) { json({ error: "Forbidden: sandbox token cannot mutate adoptions" }, 403); return false; }
-			// Bearer credentials are explicit operator intent; a signed browser cookie
-			// additionally needs unspoofable same-origin mutation evidence.
-			if (hasAdminBearer) return true;
-			if (cookieStore && cookieTryAuth(req, cookieStore) && hasSameOriginBrowserMutationEvidence({
-				method: req.method,
-				pathname: url.pathname,
-				headers: req.headers,
-				isTls: Boolean((req.socket as { encrypted?: boolean }).encrypted),
-			}, {
-				deployment: config.staticDir ? "direct" : "vite",
-				configuredHost: config.host,
-			})) return true;
-			json({ error: "Operator authentication required" }, 401);
-			return false;
-		};
-
-		// GET/POST/PATCH/refresh/DELETE deliberately live alongside the Market API so
-		// adopted assets inherit its scope and reload lifecycle without becoming packs.
-		if (url.pathname === "/api/marketplace/adoptions" && req.method === "GET") {
-			const requestedProjectId = url.searchParams.get("projectId") || undefined;
-			const projectId = requestedProjectId ? normalizeConfigProjectId(requestedProjectId) : undefined;
-			if (requestedProjectId && !projectId) { json({ error: "invalid projectId" }, 400); return; }
-			json({ adoptions: adoptedFor(projectId).map(redactAdoptedExtension) });
-			return;
-		}
-		if (url.pathname === "/api/marketplace/adoptions" && req.method === "POST") {
-			if (!requireAdoptionOperator()) return;
-			const body = await readBody(req) as Record<string, unknown> | null;
-			const scope = parseScope(body?.scope);
-			if (!scope || (body?.kind !== "mcp" && body?.kind !== "skills")) { json({ error: "kind and scope are required" }, 400); return; }
-			const resolved = adoptionTarget(scope, body?.projectId);
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
-			try {
-				const existing = Object.values(resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>);
-				const result = findOrCreateAdoptedExtension(existing, { kind: body.kind, scope, ...(resolved.target.projectId ? { projectId: resolved.target.projectId } : {}), source: body.source });
-				if (!result.created) { json({ adoption: redactAdoptedExtension(result.record) }); return; }
-				resolved.target.store.upsertAdoptedExtension(scope, result.record);
-				invalidateResolverCaches();
-				const adoption = await refreshAdoption(resolved.target, result.record);
-				json({ adoption: redactAdoptedExtension(adoption) }, 201);
-			} catch (err) {
-				if (err instanceof AdoptionValidationError) { json({ error: "invalid adoption request" }, 400); return; }
-				const persistence = projectConfigPersistenceFailure(err);
-				json(persistence.body, persistence.status);
-			}
-			return;
-		}
-		const adoptionMatch = url.pathname.match(/^\/api\/marketplace\/adoptions\/([^/]+)(\/refresh)?$/);
-		if (adoptionMatch) {
-			if ((req.method === "PATCH" || req.method === "DELETE" || (req.method === "POST" && adoptionMatch[2] === "/refresh")) && !requireAdoptionOperator()) return;
-			const id = decodeURIComponent(adoptionMatch[1]);
-			const body = req.method === "PATCH" ? await readBody(req) as Record<string, unknown> | null : undefined;
-			const scope = parseScope(req.method === "PATCH" ? body?.scope : url.searchParams.get("scope"));
-			if (!scope) { json({ error: "invalid scope" }, 400); return; }
-			const resolved = adoptionTarget(scope, req.method === "PATCH" ? body?.projectId : url.searchParams.get("projectId"));
-			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
-			const record = (resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>)[id];
-			if (!record || (scope === "project" && record.projectId !== resolved.target.projectId)) { json({ error: "adoption not found" }, 404); return; }
-			if (adoptionMatch[2] === "/refresh" && req.method === "POST") {
-				invalidateResolverCaches();
-				json({ adoption: redactAdoptedExtension(await refreshAdoption(resolved.target, record)) });
-				return;
-			}
-			if (!adoptionMatch[2] && req.method === "PATCH") {
-				if (!body || (body.enabled !== undefined && typeof body.enabled !== "boolean") || (body.operations !== undefined && !Array.isArray(body.operations))) { json({ error: "invalid adoption update" }, 400); return; }
-				let operations = record.operations;
-				if (body.operations !== undefined) {
-					if (record.kind !== "mcp") { json({ error: "skills adoptions have no operations" }, 400); return; }
-					const known = new Map((record.operations ?? []).map((operation) => [operation.name, operation]));
-					const requested = body.operations as Array<Record<string, unknown>>;
-					if (!requested.every((operation) => typeof operation?.name === "string" && typeof operation.selected === "boolean" && known.has(operation.name))) { json({ error: "operations must be known selections" }, 400); return; }
-					const requestedByName = new Map(requested.map(operation => [operation.name as string, operation.selected as boolean]));
-					operations = (record.operations ?? []).map(operation => {
-						const selected = requestedByName.get(operation.name);
-						// A full operation list is a UI transport detail. Only an actual
-						// value change is an operator decision; no-op resubmissions retain
-						// auto provenance so authoritative refresh can still revoke it.
-						return selected === undefined || selected === operation.selected
-							? operation
-							: { ...operation, selected, selection: "explicit" as const };
-					});
-				}
-				const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(operations ? { operations } : {}), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
-				try { resolved.target.store.upsertAdoptedExtension(scope, updated); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
-				invalidateResolverCaches();
-				if (updated.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* retain visible record */ } }
-				json({ adoption: redactAdoptedExtension(updated) });
-				return;
-			}
-			if (!adoptionMatch[2] && req.method === "DELETE") {
-				try { resolved.target.store.removeAdoptedExtension(scope, id); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
-				invalidateResolverCaches();
-				if (record.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* deletion is durable */ } }
-				noContent();
-				return;
-			}
-		}
-
 		// ── All-source Browse ─────────────────────────────────────
 		// GET /api/marketplace/browse?projectId=<optional>
 		if (url.pathname === "/api/marketplace/browse" && req.method === "GET") {
@@ -11651,20 +11247,11 @@ async function handleApiRoute(
 			store: PackOrderStore,
 			packName: string,
 			projectId?: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
-			const packOrder = store.getPackOrder(scope);
-			let entries = scopeMarketPackEntries(scope as PackScope, base, packOrder);
+			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
 			let entry = entries.find((e) => e.manifest?.name === packName);
-			// Direct installers can create a pack after an empty scan without using
-			// marketplace mutation routes. The activation catalogue is the canonical
-			// lookup for that pack, so only a miss refreshes this one scope root.
-			// Normal marketplace mutations already use invalidateResolverCaches().
-			if (!entry) {
-				entries = refreshScopeMarketPackEntries(scope as PackScope, base, packOrder);
-				entry = entries.find((e) => e.manifest?.name === packName);
-			}
 			// Built-in first-party packs (§7.4) have NO install-ledger entry but ARE
 			// toggleable at server scope — resolve their catalogue from the built-in band.
 			if ((!entry || !entry.manifest) && scope === "server") {
@@ -11803,7 +11390,6 @@ async function handleApiRoute(
 				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
 				workflows: [...(c.workflows ?? [])],
-				systemPrompts: [...(c.systemPrompts ?? [])],
 				descriptions,
 			};
 		};
@@ -11863,7 +11449,7 @@ async function handleApiRoute(
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
 			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows" | "systemPrompts", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -11902,7 +11488,6 @@ async function handleApiRoute(
 				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
-				systemPrompts: normaliseKind("systemPrompts", new Set(catalogue.systemPrompts ?? [])),
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
@@ -15899,7 +15484,7 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot|\/accept-extension-sections)?$/);
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];
 		const typeStr = proposalRouteMatch[2];
@@ -15914,102 +15499,6 @@ async function handleApiRoute(
 		}
 		const proposalType = typeStr as ProposalType;
 		const proposalStateDir = bobbitStateDir();
-		const isPromptOperator = isVerifiedPromptOperator();
-		const proposalMutationAgentSessionId = resolveAuthenticCallerFromSessionSecret();
-		const samePromptProposalSection = (left: PromptExtensionProposalSection, right: PromptExtensionProposalSection): boolean =>
-			left.packId === right.packId && left.sectionId === right.sectionId
-			&& left.content === right.content && left.expectedRevision === right.expectedRevision;
-		const promptProposalSections = (fields: Record<string, unknown> | undefined): PromptExtensionProposalSection[] =>
-			fields?.extensionPromptSections === undefined
-				? [] : validatePromptExtensionProposalSections(fields.extensionPromptSections);
-		const authorizeAgentPromptProposalCandidate = (before: Record<string, unknown> | undefined, candidate: Record<string, unknown>) => {
-			if (proposalType !== "project") return undefined;
-			const next = promptProposalSections(candidate);
-			const previous = promptProposalSections(before);
-			const involvesPromptSections = before?.extensionPromptSections !== undefined
-				|| candidate.extensionPromptSections !== undefined;
-			if (!involvesPromptSections) return undefined;
-
-			// A session secret identifies its owning session, not merely an agent class.
-			// Never permit one agent's secret to seed, edit, or restore another
-			// session's prompt proposal (or to lend that session its model attribution).
-			if (!isPromptOperator && proposalMutationAgentSessionId !== sessionId) {
-				throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require the authentic session secret for the route session");
-			}
-			const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
-			const persistedProposalSession = sessionManager.getPersistedSession(sessionId);
-			if (!proposalSession) {
-				throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing route session");
-			}
-			const targetProjectId = typeof candidate.projectId === "string" && candidate.projectId.trim()
-				? candidate.projectId.trim() : proposalSession.projectId;
-			const previousTargetProjectId = typeof before?.projectId === "string" && before.projectId.trim()
-				? before.projectId.trim() : proposalSession.projectId;
-			const targetChanged = before !== undefined && targetProjectId !== previousTargetProjectId;
-			const changes = next.filter(section => !previous.some(prior => samePromptProposalSection(prior, section)));
-			const removed = previous.filter(section => !next.some(candidateSection =>
-				candidateSection.packId === section.packId && candidateSection.sectionId === section.sectionId,
-			));
-			// Moving a draft to another project changes which installed pack and grant
-			// authorize every section, even where the section tuple is byte-identical.
-			const authorizationSections = (targetChanged ? [...previous, ...next] : [...changes, ...removed])
-				.filter((section, index, all) => index === all.findIndex(candidateSection =>
-					candidateSection.packId === section.packId && candidateSection.sectionId === section.sectionId,
-				));
-			if (authorizationSections.length === 0 || isPromptOperator) return undefined;
-			const context = targetProjectId && projectContextManager.getOrCreate(targetProjectId);
-			if (!context) throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing target project");
-			const packs = packContributionRegistry.list(targetProjectId);
-			const grants = context.projectConfigStore.getExtensionGrants();
-			for (const change of authorizationSections) {
-				const grant = grants.find(candidateGrant => candidateGrant.packId === change.packId
-					&& candidateGrant.capability === "prompt:system-author");
-				if (!grant) {
-					throw new PromptExtensionValidationError("GRANT_REQUIRED", "prompt:system-author grant is required for prompt extension proposals");
-				}
-			}
-			return { changes, context, targetProjectId, proposalSession, persistedProposalSession, packs, grants };
-		};
-		const recordAgentPromptProposalAudit = (
-			authoring: NonNullable<ReturnType<typeof authorizeAgentPromptProposalCandidate>>,
-			rev: number, trigger: string,
-		): void => {
-			try {
-				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, authoring.targetProjectId);
-				const after = before.map(section => {
-					const change = authoring.changes.find(candidate => candidate.packId === section.packId && candidate.sectionId === section.sectionId);
-					return change ? { ...section, content: change.content } : section;
-				});
-				const audit = new PromptExtensionAuthoringAuditStore(authoring.context.stateDir, fsImpl);
-				const promptParts = sessionManager.getPromptParts(sessionId);
-				const totalPromptBytes = promptParts
-					? getSystemPromptLayout({ ...promptParts, extensionPromptSections: after }).totalPromptBytes : 0;
-				const auditIds: string[] = [];
-				for (const change of authoring.changes) {
-					const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
-					const grant = authoring.grants.find(candidateGrant => candidateGrant.packId === change.packId
-						&& candidateGrant.capability === "prompt:system-author"
-						&& authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook => hook.id === candidateGrant.hookId));
-					if (!baseline || !grant) continue;
-					const record = audit.create({
-						packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
-						actor: "agent", sessionId, projectId: authoring.context.project.id,
-						...(authoring.proposalSession?.goalId ? { goalId: authoring.proposalSession.goalId } : {}), trigger,
-						...promptExtensionBaseline(baseline.content), proposalId: `${sessionId}:${rev}`,
-						diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
-						...(authoring.persistedProposalSession?.modelProvider && authoring.persistedProposalSession.modelId ? { model: `${authoring.persistedProposalSession.modelProvider}/${authoring.persistedProposalSession.modelId}`, provider: authoring.persistedProposalSession.modelProvider } : {}),
-						...(authoring.persistedProposalSession?.effectiveThinkingLevel ? { thinkingLevel: authoring.persistedProposalSession.effectiveThinkingLevel } : {}),
-						sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes,
-					});
-					auditIds.push(record.id);
-				}
-				sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds, {
-					projectId: authoring.context.project.id, stateDir: authoring.context.stateDir,
-				});
-			} catch (error) {
-				console.warn(`[prompt-extension] proposal audit unavailable for ${sessionId}:`, redactSensitive(String(error)));
-			}
-		};
 
 		// GET /api/sessions/:id/proposal/:type — read raw file
 		if (suffix === "" && req.method === "GET") {
@@ -16069,88 +15558,6 @@ async function handleApiRoute(
 			return;
 		}
 
-		// POST /api/sessions/:id/proposal/project/accept-extension-sections —
-		// the sole human approval path for static prompt edits. It reads the
-		// stored proposal itself, never trusting raw section text from the wire.
-		if (suffix === "/accept-extension-sections" && req.method === "POST") {
-			if (proposalType !== "project") { json({ error: "Method not allowed" }, 405); return; }
-			if (!requireVerifiedPromptOperator()) return;
-			const body = await readBody(req).catch(() => null);
-			const targetProjectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
-			if (!targetProjectId) { json({ error: "projectId is required", code: "PROJECT_ID_REQUIRED" }, 400); return; }
-			const context = projectContextManager.getOrCreate(targetProjectId);
-			if (!context) { json({ error: "Project not found", code: "UNKNOWN_PROJECT" }, 404); return; }
-			try {
-				const parsed = await parseProposalFile(proposalStateDir, sessionId, "project");
-				if (!parsed.ok) { json(parsed, 400); return; }
-				const changes = extensionPromptSectionsFromProposal(parsed.value);
-				if (!changes) { json({ error: "Project proposal has no extension prompt sections", code: "PROMPT_EXTENSION_PROPOSAL_REQUIRED" }, 422); return; }
-				const declaredTarget = typeof parsed.value.fields.projectId === "string" ? parsed.value.fields.projectId.trim() : "";
-				if (declaredTarget && declaredTarget !== targetProjectId) {
-					json({ error: "Project proposal target does not match approval target", code: "PROJECT_ID_MISMATCH" }, 409);
-					return;
-				}
-				const active = packContributionRegistry.list(targetProjectId);
-				const activeSections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
-				const caps = new Map(activeSections.map(section => [promptExtensionKey(section.packId, section.sectionId), section.maxBytes]));
-				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId);
-				acceptPromptExtensionProposal(context.projectConfigStore, changes, {
-					actor: extensionGrantActor,
-					hasStaticGrant: (packId) => context.projectConfigStore.getExtensionGrants().some(grant => {
-						if (grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
-						const hook = active.find(pack => pack.packId === packId)?.hooks.find(candidate => candidate.id === grant.hookId);
-						return !!hook && hook.capabilities.includes("prompt:system-static" as any);
-					}),
-					hasSection: (packId, sectionId) => activeSections.some(section => section.packId === packId && section.sectionId === sectionId),
-					resolveEffectiveSections: (overrides) => resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId, overrides),
-					declaredMaxBytes: caps,
-				});
-				const proposalRev = await latestRev(proposalStateDir, sessionId, "project");
-				const proposalId = `${sessionId}:${proposalRev}`;
-				const acceptedAuditIds: string[] = [];
-				// Override publication above is authoritative. Audit/trace availability
-				// must not turn an already-accepted proposal into a false client failure.
-				try {
-					const audit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
-					for (const change of changes) {
-						// Draft edits create a new proposal revision without changing the
-						// authoring request identity. Match the newest active record for the
-						// affected section, then attach the revision actually approved.
-						const entry = audit.list(200).filter(candidate =>
-							candidate.sessionId === sessionId
-							&& candidate.packId === change.packId
-							&& candidate.sectionId === change.sectionId
-							&& (candidate.status === "requested" || candidate.status === "proposed")
-						).at(-1);
-						const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
-						if (!entry || !baseline) continue;
-						audit.complete(entry.id, {
-							status: "accepted", terminal: false, proposalId,
-							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
-							sectionBytes: promptExtensionSectionBytes(change),
-						});
-						acceptedAuditIds.push(entry.id);
-					}
-					// Trace deliberately exposes only bounded ids/statuses; the authorized
-					// audit endpoint joins the exact diff/model/usage detail by these ids.
-					new ContextTraceStore(bobbitStateDir(), fsImpl).appendTrace(sessionId, {
-						ts: Date.now(), hook: "afterTurn", sessionId, providers: [],
-						outcomes: acceptedAuditIds.length > 0
-							? acceptedAuditIds.map(id => ({ kind: "audit" as const, hookId: id, event: "afterTurn" as const, outcome: "applied" as const, value: id }))
-							: [{ kind: "audit" as const, hookId: "prompt-extension-approval", event: "afterTurn" as const, outcome: "applied" as const }],
-					});
-				} catch {
-					console.warn("[prompt-extension] proposal acceptance audit unavailable");
-				}
-				invalidateResolverCaches();
-				json({ ok: true, proposalId });
-			} catch (error) {
-				const code = error instanceof PromptExtensionValidationError ? error.code : "PROMPT_EXTENSION_REJECTED";
-				json({ error: error instanceof Error ? error.message : "Prompt extension proposal rejected", code }, 422);
-			}
-			return;
-		}
-
 		// POST /api/sessions/:id/proposal/:type/edit — surgical edit
 		if (suffix === "/edit" && req.method === "POST") {
 			const body = await readBody(req);
@@ -16164,16 +15571,12 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
-				const before = existing?.ok ? existing.value.fields : undefined;
-				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
-				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text, candidate => { authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields); });
+				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
 				if (!result.ok) {
 					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
 					json(result, status);
 					return;
 				}
-				if (authoring) recordAgentPromptProposalAudit(authoring, result.rev, "edit_proposal");
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -16187,8 +15590,7 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newContent: result.newContent, rev: result.rev });
 			} catch (err) {
-				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
-				else json({ error: String((err as Error)?.message ?? err) }, 500);
+				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}
@@ -16205,44 +15607,113 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
-			let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
-			try {
-				authoring = authorizeAgentPromptProposalCandidate(undefined, args as Record<string, unknown>);
-			} catch (err) {
-				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
-				else jsonError(500, err);
-				return;
-			}
-			if (proposalType === "project" && authoring) {
-				try {
-					const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
-					recordAgentPromptProposalAudit(authoring, writeRes.rev, "propose_project");
-					json({ ok: true, rev: writeRes.rev });
-				} catch (err) { jsonError(500, err); }
-				return;
-			}
-			const proposalSeedService = new ProposalSeedService({
-				stateDir: proposalStateDir,
-				sessionManager,
-				projectRegistry,
-				projectContextManager,
-				configCascade,
-				getGoal: getGoalAcrossProjects,
-				getPreference: (key) => preferencesStore.get(key),
-				systemProjectId: SYSTEM_PROJECT_ID,
-				headquartersProjectId: HEADQUARTERS_PROJECT_ID,
-				broadcastToSession: _broadcastToSession,
-				packContributionRegistry,
-				readBody,
-			});
-			try {
-				const seeded = await proposalSeedService.seed(sessionId, proposalType, args as Record<string, unknown>);
-				if (!seeded.ok) {
-					json(seeded.body, seeded.status);
+			// Auto-inject parentGoalId for team-lead sessions proposing a goal,
+			// but only when the current goal is actually allowed to spawn a child.
+			// If subgoals are disabled globally or for this parent, an omitted
+			// parentGoalId must remain omitted so accepting the proposal creates a
+			// top-level goal instead of a hidden invalid child proposal.
+			let enrichedArgs = args as Record<string, unknown>;
+			// §1 cross-project target resolver — goal / staff / role / tool
+			// (NOT project). Resolve the TARGET project uniformly so that the
+			// tool path and direct API callers behave identically:
+			//   explicit trimmed args.projectId wins;
+			//   otherwise the session's project (system → headquarters).
+			// The resolved target is validated against the registry and stamped
+			// onto the draft, making `proposal.fields.projectId` the single
+			// source of truth for acceptance routing. When projectId is omitted
+			// this reduces to the previous behaviour byte-for-byte. `project`
+			// proposals are excluded: their client acceptance mode and dispatch are
+			// determined solely by `proposal.fields.projectId`; mutation endpoints
+			// validate any dispatched explicit target as defense in depth.
+			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
+				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+				const sessionProjectId = proposalSession?.projectId;
+				const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
+					? enrichedArgs.projectId.trim()
+					: undefined;
+				const defaultProjectId = sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
+				const targetProjectId = explicitProjectId ?? defaultProjectId;
+				if (!targetProjectId) {
+					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
 					return;
 				}
-				if (authoring) recordAgentPromptProposalAudit(authoring, seeded.rev, "propose_project");
-				json({ ok: true, rev: seeded.rev });
+				const targetRecord = projectRegistry.get(targetProjectId);
+				if (!targetRecord) {
+					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
+					return;
+				}
+				// A hidden/synthetic project (e.g. the `system` anchor) is never a
+				// valid user-facing cross-project target. The system→headquarters
+				// mapping above applies to the OMITTED default only; an EXPLICIT
+				// projectId naming a hidden project must be rejected. Guarded on
+				// `explicitProjectId` so a hidden target arriving via the session
+				// default is unaffected (byte-for-byte default path preserved).
+				if (explicitProjectId && targetRecord.hidden) {
+					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Project "${explicitProjectId}" is not a valid cross-project target.` }, 422);
+					return;
+				}
+				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
+			}
+			// Resolve workflow membership from the stamped TARGET project, then run
+			// parent injection and validation through the state-independent core.
+			if (proposalType === "goal") {
+				const liveSession = sessionManager.getSession(sessionId);
+				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
+					? enrichedArgs.projectId.trim()
+					: undefined)
+					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
+				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
+				if (projectId) {
+					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
+					if (workflows.length === 0) {
+						const ctx = projectContextManager.getOrCreate(projectId);
+						if (ctx) workflows = ctx.workflowStore.getAll();
+					}
+				}
+				const prepared = prepareGoalProposalSeed(enrichedArgs, {
+					session: liveSession,
+					workflows,
+					getGoal: (id) => getGoalAcrossProjects(id),
+					getPreference: (key) => preferencesStore.get(key),
+				});
+				if (!prepared.ok) { json(prepared.body, prepared.status); return; }
+				enrichedArgs = prepared.args;
+			}
+			try {
+				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
+				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
+				if (!parsed.ok) {
+					json(parsed, 400);
+					return;
+				}
+				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
+				await openSidePanelWorkspaceTab({
+					sessionManager,
+					readBody,
+					broadcastToSession: _broadcastToSession,
+					packContributionRegistry,
+				}, sessionId, {
+					id: `proposal:${proposalType}`,
+					kind: "proposal",
+					title: `${proposalLabel} Proposal`,
+					label: proposalLabel,
+					source: { type: "proposal", sessionId, proposalType },
+					updatedAt: Date.now(),
+				}, { focus: true, placeAfterActive: true }).catch((err) => {
+					console.warn(`[proposal/seed] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
+				});
+				if (_broadcastToSession) {
+					_broadcastToSession(sessionId, {
+						type: "proposal_update",
+						sessionId,
+						proposalType,
+						fields: parsed.value.fields,
+						rev: writeRes.rev,
+						streaming: false,
+						source: "seed",
+					});
+				}
+				json({ ok: true, rev: writeRes.rev });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
@@ -16262,10 +15733,7 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
-				const before = existing?.ok ? existing.value.fields : undefined;
-				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
-				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev, candidate => { authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields); });
+				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
 				if (!result.ok) {
 					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
 					json(result, status);
@@ -16287,7 +15755,6 @@ async function handleApiRoute(
 				}, { focus: true, placeAfterActive: true }).catch((err) => {
 					console.warn(`[proposal/restore] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
 				});
-				if (authoring) recordAgentPromptProposalAudit(authoring, result.newRev, "restore_proposal");
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -16301,8 +15768,7 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newRev: result.newRev, fields: result.fields });
 			} catch (err) {
-				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
-				else json({ error: String((err as Error)?.message ?? err) }, 500);
+				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}
