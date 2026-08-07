@@ -1,244 +1,144 @@
 # EP-14 — Tool-result filter seam
 
-**Status:** implemented platform capability. **Scope:** a core-owned post-tool-result gate that
-runs after tool execution and before result bytes reach Pi's model history, transcript JSONL, RPC,
-SessionManager, EventBuffer/WebSocket, UI, snapshots, search, traces, logs, audit, compaction, or
-persisted result artifacts. It is a seam for a later policy product, **not** credential
-containment, secret detection, or a general extension-result API.
+**Status:** implemented platform capability. **Scope:** a narrowly authorized, core-owned filter
+for a completed tool result. It protects result disclosure after the tool has executed and before
+Pi persists, sends, or exposes the result. It is not a credential detector, a general policy
+language, a tool-call authorization path, or a way to undo a tool's side effects.
 
-## Why this owner exists
+For the operator lifecycle, see [Extension Platform](../extension-platform.md). For exact grants,
+see [Extension capability grants](../extension-capability-grants.md); authors use the [post-tool-result
+filter declaration](../extension-host-authoring.md#post-tool-result-filter).
 
-Filtering in `SessionManager`, transcript readers, renderers, search, or a normal Pi extension
-would be too late: those consumers can observe a result after Pi has persisted or forwarded it.
-EP-14 therefore uses a patched Pi result gate as the one canonical interception owner. Pi holds
-protected updates privately, calls the generated core gate once for the terminal result, and
-applies only the value returned by core before ordinary Pi fan-out resumes.
+## The canonical boundary
+
+The filter runs at Pi's protected-result gate, before Pi releases a result to its model history,
+JSONL transcript, RPC, SessionManager, EventBuffer/WebSocket, UI, snapshots, search, compaction,
+or durable result artifacts.
 
 ```text
-Tool execution
-  -> patched Pi private protected-update handling
-  -> core-generated Pi result gate
-  -> authenticated gateway result-filter route
-  -> dispatcher / granted hook workers / final authority fence
-  -> pass, validated replacement, or synthetic rejection
-  -> ordinary Pi transcript, model context, RPC and Bobbit consumers
+completed tool handler
+  → patched Pi privately buffers protected updates and terminal result
+  → generated core result gate
+  → authenticated, attempt-bound gateway callback
+  → core dispatcher and eligible filter workers
+  → one core-owned result
+  → ordinary Pi persistence and fan-out
 ```
 
-No downstream consumer is an alternate filter. Truncation, transcript redaction, and search
-content policy are not result filtering and cannot repair an earlier exposure.
+This placement is essential. Filtering in SessionManager, a renderer, transcript/search cleanup,
+or an ordinary Pi extension is too late because Pi may already have persisted or shown the
+original bytes. Protected streaming updates are held until the terminal decision; a malformed,
+unholdable, or over-cap result releases no prefix. The peak protected-update limit is applied to
+one cumulative Pi snapshot, not summed across successive snapshots.
 
-## Authority and declaration
+## Authority and filter contract
 
-The closed EP-6 capability is `filter:tool-result`. A hook is eligible only when all of these are
-true:
+The exact project capability is **`filter:tool-result`**. A hook is eligible only when it is all
+of the following:
 
-- its winning, activation-filtered schema-2 declaration has `mode: decide`;
-- its **only** event is `afterToolResult`;
-- it declares `capabilities: [filter:tool-result]`; and
-- the project has the exact live `(packId, hookId, "filter:tool-result")` grant.
+- from the winning, active schema-2 pack;
+- `mode: decide` with **only** `events: [afterToolResult]`;
+- declared with `capabilities: [filter:tool-result]`; and
+- granted that exact live `(packId, hookId, capability)` tuple by the project operator.
 
-`decide`, `mutate`, pack activation, built-in provenance, and any other grant do not imply this
-capability. The dispatcher checks the live declaration and grant immediately before every worker
-invocation and again after all workers settle. A declaration or grant revoked during execution
-cannot apply a late candidate. If every selected candidate loses authority at that final fence, the
-feature has been explicitly turned off and the original result passes unchanged; otherwise an
-active-filter failure is fail-closed.
+Activation, `decide`, `mutate`, pack provenance, and a grant for another hook do not imply this
+authority. A hook worker receives a frozen canonical result inspection and server-derived
+session/project/tool identity. It receives no Host API, gateway bearer, signing key, session
+object, tool arguments, policy object, callback, transport handle, or persistence API.
 
-```yaml
-# hooks/result-filter.yaml
-id: result-filter
-module: ../lib/result-filter.mjs
-events: [afterToolResult]
-mode: decide
-capabilities: [filter:tool-result]
-budget: { timeoutMs: 1000, maxTokens: 64 }
-```
+A filter returns one strict proposal: `pass`, `replace`, `redact`, or `reject`. `replace` and
+`redact` provide a complete bounded safe replacement; they cannot patch original text, preserve
+`details`/usage, provide a callback/URL, or carry free-form explanation. Core validates every
+proposal and emits any synthetic withheld result itself.
 
-Hooks remain metadata-first. The result-filter dispatcher is the only consumer that imports this
-module; `LifecycleHub` does not treat `afterToolResult` as a normal post-persistence event. Filter
-hooks receive no Host API, credentials, session object, tool arguments, policy object, callback,
-or persistence/transport handle.
+## Ordered decision and live fences
 
-See [Extension capability grants](../extension-capability-grants.md) and the
-[Extension Host authoring guide](../extension-host-authoring.md#post-tool-result-filter) for the
-operator and author contracts.
+Core takes one ordered active-policy snapshot, invokes all eligible workers within fixed admission
+and timeout bounds, then reads the complete ordered policy again before applying anything. The
+ordered identity includes pack precedence and hook identity, so a pack-priority change is treated
+as a policy change, not as an arbitrary tie break.
 
-## Closed result and proposal contract
-
-Core accepts one strict canonical terminal result:
-
-```ts
-type SafeToolResultContent =
-  | { type: "text"; text: string }
-  | { type: "image"; mediaType: "image/png" | "image/jpeg" | "image/webp"; data: string };
-
-type CanonicalToolResult = {
-  content: readonly SafeToolResultContent[];
-  details?: JsonValue;
-  isError: boolean;
-  usage?: SafeUsage;
-};
-
-type ToolResultFilterProposal = {
-  kind: "tool-result-filter";
-  version: 1;
-  action: "pass" | "replace" | "redact" | "reject";
-  ruleId: string;
-  reasonCode: string;
-  replacement?: {
-    content: readonly SafeToolResultContent[];
-    isError?: boolean;
-  };
-};
-```
-
-The inspection also carries the server-derived `event`, session/project IDs, and tool call/name.
-All objects are closed and validated: unknown fields, accessors/prototypes, malformed text or
-base64, unsafe identifiers, unsupported media, malformed JSON, and excess size/depth are rejected.
-The relevant core ceilings are 256 KiB canonical input, 64 KiB text block, 128 KiB decoded image
-block, 32 blocks, 16 KiB `details`, 64 KiB complete replacement, 16 selected hooks, and 128-byte
-identifiers.
-
-`pass` and `reject` forbid `replacement`; `replace` and `redact` require a complete replacement.
-A replacement cannot preserve original `details` or `usage`, or introduce a patch/range, URL,
-callback, argument, free-form explanation, or arbitrary metadata. `redact` is an auditable action,
-not a generic redaction language. `ruleId` must equal the declaring hook ID. `reasonCode` is a
-bounded identifier; core maps it to its own fixed observability vocabulary rather than persisting
-worker prose.
-
-### Deterministic reduction and rejection
-
-The dispatcher runs up to 16 eligible hooks concurrently, then reduces valid still-authorized
-proposals in this order:
+The reducer is deterministic:
 
 ```text
 reject > redact > replace > pass
 ```
 
-This is EP-4-style deny-wins behavior: one valid `reject` beats every pass or transform. Within an
-action severity, active pack precedence and stable `extension:<packId>:<hookId>` identity choose
-attribution, never completion order. Losing valid proposals are recorded as `superseded` metadata.
+A valid reject always wins. Within an action level, project pack priority and stable hook identity
+choose attribution; worker completion time never does. Core records losing valid candidates as
+superseded metadata only.
 
-A rejection, malformed proposal, timeout, worker crash, authority failure, abort, gateway failure,
-or admission refusal produces only this core-owned synthetic result (with a fresh opaque reference):
+Each worker checks its exact grant before invocation and after it returns. The final snapshot
+revalidates the complete active ordered set immediately before reduction. A malformed proposal,
+timeout, abort, worker failure, admission failure, unavailable authority, or a partial policy
+rotation/replacement/removal fails closed to the fixed core synthetic result. A replacement
+session/runtime cannot reuse the predecessor's callback authority or apply its late work.
 
-```ts
-{
-  content: [{ type: "text", text: "Tool result withheld by project result policy [ref: <opaque-id>]." }],
-  isError: true,
-}
-```
+There is one intentional inert path: if no eligible filter exists when a result is handled, it
+passes unchanged. If every previously eligible filter is fully revoked or disabled by the final
+fence, core also returns the original result unchanged. That is a complete removal of the feature,
+not a partial failure. Any other authority change fails closed rather than guessing which stale
+policy should win.
 
-The original content, `details`, image bytes, and usage are absent. A valid replacement/redaction
-also drops original `details` and usage. No filter selected at invocation is normal pass-through.
+## Callback authentication and key containment
 
-## Pi gate and route
+The ordinary Bobbit bearer authenticates transport and session scope, but **a bearer alone is not
+enough** to submit a protected result. The result-gate callback must also present a short-lived,
+one-use attempt credential. The gateway consumes it synchronously before validation, worker
+admission, or audit, so replay, a wrong tool call, a wrong runtime, expiry, or a duplicate request
+gets only the fixed synthetic result.
 
-Bobbit installs one generated gate for a protected session through Pi's private loader input. The
-gate is installed before ordinary extensions and is checked at setup; a missing patched Pi API or a
-failed gate write fails protected-session setup rather than silently starting a raw-result session.
-The gate snapshots intrinsics, accepts only own-data canonical containers, caps its request at 256
-KiB, waits no more than 2.5 seconds, strictly validates the response, and never logs a body or
-caught error. A bad local value, timeout, non-success response, malformed response, or transport
-failure returns the synthetic result locally.
+The credential is bound to the live session, runtime generation, tool-call id, unique attempt,
+and issuance time. Its signing authority is a fresh runtime key held by SessionManager. The key is
+handed to the core Pi loader through a sealed, one-shot stdin bootstrap **before** normal RPC
+begins. The loader consumes and closes that bootstrap channel before Pi becomes ready.
 
-The gate makes exactly this internal bridge call:
+The signing key is deliberately absent from:
+
+- the generated/mounted gate source;
+- process environment and ordinary spawn arguments;
+- Marketplace pack code and filter-worker context;
+- transcript, trace, audit, logs, crash diagnostics, REST responses, WebSocket frames, and client state.
+
+The generated gate derives only a per-attempt callback credential and sends that credential with
+the normal bearer. A missing, malformed, or failed bootstrap, callback failure, bad response,
+timeout, abort, or gate/Pi compatibility failure fails closed locally with the same synthetic
+result. Runtime replacement, termination, and session removal invalidate the prior credential
+state, so an old gate cannot authenticate a later runtime.
+
+The final spawn boundary also rejects ordinary untrusted Marketplace Pi extensions from a
+protected Pi realm. Every permitted ordinary `--extension` path is realpath-checked against the
+shipped tools root or a closed list of core-owned state roots; symlink escapes and missing paths
+fail setup. Docker additionally verifies the patched Pi seam and a read-only core-gate mount. This
+is required because same-realm untrusted code could otherwise tamper with Pi internals before the
+protected gate runs.
+
+## Failure result and observability
+
+Whenever filtering is active and core cannot safely produce an authorized result, it returns only:
 
 ```text
-POST /api/sessions/:id/tool-result-filter
-{ toolCallId, toolName, result }
+Tool result withheld by project result policy [ref: opaque-id].
 ```
 
-The server derives the session project and dispatches the canonical inspection. This is not an
-extension or public policy endpoint. It accepts a bounded body, attaches a disconnect abort signal,
-and returns a synthetic result for a recognized malformed request or dispatch failure without
-echoing any raw input. The companion operator-only audit read is:
+The result is marked as an error and contains no original bytes, paths, worker prose, policy
+rationale, `details`, or usage. Valid replacement/redaction likewise drops original `details` and
+usage. Raw result bytes are transient callback/worker data only; they are not intentionally stored
+in trace, audit, logs, sidecars, or recovery state.
 
-```text
-GET /api/sessions/:id/tool-result-filter-audit?limit=1..200
-```
+The operator-only result-filter audit and the Context trace retain safe metadata such as identity,
+selected action/outcome, fixed reason/rule identifier, size bucket/count, and latency. They never
+retain result/replacement text, blobs, tool arguments, hashes, URLs, exceptions, or policy prose.
 
-See [REST API — Tool-result filter bridge and audit](../rest-api.md#tool-result-filter-bridge-and-audit).
+## Verification and limits
 
-### Streaming and peak cap
+Focused tests cover contract validation, deterministic reject-wins reduction, grant and
+activation fences, attempt-credential replay/binding/expiry, bootstrap failure, policy rotation,
+runtime replacement, worker timeout/throw/malformed output, abort/admission failure, protected
+streaming, Docker trust/mount checks, restart/respawn, and metadata redaction. Browser coverage
+uses the fixture pack to grant a filter, inspect a redacted/replaced result and safe metadata,
+revoke it, and prove the full revocation path is inert.
 
-The patched Pi core suppresses protected `tool_execution_update` events before ordinary event
-fan-out. Pi updates are cumulative snapshots, so the 256 KiB protected-update limit is the **peak
-size of one snapshot**, not the sum of all chunks. This corrects the earlier chunk-sum wording:
-multiple smaller cumulative snapshots do not consume a cumulative byte allowance. If the largest
-snapshot exceeds the cap, Pi emits no raw update and replaces the terminal result with a fixed
-protected-overflow synthetic error before the gateway route is called.
-
-The terminal canonical result is separately capped before the generated gate posts it. Structured
-JSON, text, image, binary-like content, and errors all use the same strict terminal path; invalid
-or oversized values never release a prefix or preview.
-
-## Protected-session trust boundary
-
-A result-gate session shares Pi's private realm with `--extension` code. That is not a safe place
-for untrusted Marketplace Pi extensions or non-built-in Bobbit tool-extension providers: either
-could alter Pi internals before result handling. Protected-session activation therefore rejects
-those combinations with `TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT`.
-
-The `RpcBridge` repeats the authoritative check immediately before direct or Docker spawn. It
-canonicalizes every final ordinary `--extension` path by realpath and permits it only below the
-shipped built-in tools root or a closed list of core-owned generated-extension state roots. It
-rejects missing files and symlink escapes. Earlier provenance checks provide useful setup errors,
-but this final spawn-time fence is the security boundary.
-
-For Docker sessions, the generated gate is a content-addressed regular file under the server-owned
-state root. The gate subtree is bind-mounted at `/bobbit-state/tool-result-filter` read-only; Docker
-preflight verifies both that read-only mount and the patched Pi markers. The sandbox cannot rewrite
-a gate reused by another session. The gateway verifies cached content before reuse and rejects
-symlinked roots/files. On POSIX, the generated root and digest directory are traversable (`0755`)
-and the gate is read-only (`0444`); Windows must not rely on POSIX mode bits, so path identity,
-regular-file/symlink checks, content validation, and the Docker read-only mount remain the
-portable enforcement points.
-
-## Admission, cancellation, and lifecycle
-
-The dispatcher takes synchronous all-or-nothing admission for the whole selected worker set. It
-does not queue a protected raw result. The platform caps global workers at 64 and in-flight calls
-per session at 64; worker execution is capped below the gate deadline (2 seconds). An admission
-failure fails closed.
-
-A request disconnect aborts the dispatch. An abort during Pi result handling discards the pending
-raw result and settles only with the fixed aborted synthetic result if Pi must settle; late workers
-cannot restore a pass. Buffered result state is volatile. Gateway restart, process exit, or
-respawn recomputes activation and never replays a raw pending result. Session creation, restore,
-role replacement, and force-abort replacement all use the same activation/setup path, so a session
-with an eligible live filter either installs the gate or fails to start safely.
-
-Concurrent calls are isolated by session/tool-call identity and independent admission state.
-Completion timing cannot change reduction order or cross-settle another call.
-
-## Metadata-only observability
-
-The project-owned capped JSONL audit and EP-5 Context trace record only core-normalized metadata:
-identity, selected action/outcome, fixed reason/rule identity, input/output byte counts, and
-latency. They never include result text, replacement text, `details`, usage, MIME/blob data,
-arguments, hashes/fingerprints, URLs, exception text, policy prose, or raw request/response
-bodies. Audit storage and trace failures are non-fatal and use fixed log labels only.
-
-The regular trace REST, WebSocket, browser normalizer, and component remain data firewalls. The
-operator audit route is likewise metadata-only. This makes observability useful for diagnosing a
-decision without becoming an escape path for withheld or replaced data.
-
-## Verification and scope
-
-The deterministic fixture pack in `tests2/_fixtures/tool-result-filter/` exists solely to prove
-interception. It matches unique test canaries and returns pass, replace, redact, or reject; its
-competing hook proves reject-wins ordering. It is not installed production policy and is not a
-credential detector.
-
-Focused core, integration, patched-Pi, and browser tests cover closed contract validation,
-pre/post-grant fences, live revocation, timeout/malformed/abort/admission failure, private update
-suppression, peak-cap overflow, trusted-extension and Docker mount checks, restart/respawn, and
-metadata-only audit. Canary assertions prove rejected and replaced originals do not reach model
-input, Pi/transcript persistence, RPC/EventBuffer/WebSocket/browser output, search, traces/audit,
-logs, compaction/recovery, or result artifacts.
-
-EP-14 filters disclosure after a tool has already run; it cannot undo side effects or authorize a
-tool call. Real gateway credential-containment policy — detector corpus, credential taxonomy,
-false-positive handling, policy configuration/UI, and remediation — is explicitly deferred to a
-later top-level goal.
+The fixture is transport coverage only. A real credential-containment policy—detector corpus,
+credential taxonomy, false-positive handling, policy configuration/UI, and remediation—is
+explicitly deferred to a later top-level goal.

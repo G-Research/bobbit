@@ -1492,8 +1492,8 @@ fence, and redaction boundary.
 | `POST` | `/api/sessions/:id/request-mutations/tool-safety` | **Internal generated tool-guard endpoint.** Body is exactly `{ toolName: string }`, where `toolName` is a safe identifier; invalid envelopes return `400` and an unknown session returns `404`. It returns only `200 { action: "deny" }` to block that tool, otherwise `200 { action: "pass" }`. Warnings, malformed results, timeouts, and transport failures remain non-blocking so normal policy continues. |
 | `GET` | `/api/sessions/:id/request-mutation-audit?limit=N` | **Public operator-facing audit endpoint.** Requires a verified signed `bobbit_session` prompt-operator cookie; bearer, sandbox, and agent-session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The target must be a project session (`404` otherwise). Returns `{ entries }`, the newest valid session rows in chronological order; `limit` defaults to 100 and is clamped to 1–200. A read failure returns `503 REQUEST_MUTATION_AUDIT_UNAVAILABLE`. Entries contain only fixed outcomes/reasons, extension source identity and tool name where applicable, and redacted/clipped prompt evidence for applied prompt replacements. |
 
-These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI is deferred to
-EP-7.
+EP-6 introduced these server routes; Market now supplies the project settings and exact-grant
+controls through the same authenticated mutations. See [Project extension settings](extension-settings.md#market-behavior).
 
 #### Tool-result filter bridge and audit
 
@@ -1503,17 +1503,26 @@ after privately holding the complete result and before it emits any result updat
 model-context, RPC, or UI event. The route derives the session's project; callers cannot supply a
 project, grant, source identity, rule, or policy.
 
+Normal bridge bearer authentication is necessary but insufficient. The generated gate also sends
+a short-lived, one-use credential bound to the live session, runtime generation, tool call, and
+attempt. The signing key reaches Pi only through its sealed one-shot pre-RPC bootstrap, never the
+mounted gate source, environment, logs, or client/API state. The route consumes the credential
+before it admits workers or writes audit metadata. Replay, a wrong binding, expiry, invalid
+bootstrap/callback, or policy-rotation failure gets the fixed synthetic result. A complete final
+revocation is the intentional inert pass-through path; a partial authority/order change fails
+closed. See [EP-14 — Tool-result filter seam](design/ep-14-tool-result-filter.md) for the full
+contract.
+
 The body is capped and strictly canonicalized. A recognized gate request with a malformed or
 oversized body, route/worker failure, disconnect/abort, or invalid outcome receives the fixed
 core-owned synthetic error result; it never receives an echoed error or raw-result prefix. A
 valid response is only the core-selected canonical result: `pass`, a complete validated
 `replace`/`redact` replacement, or the synthetic rejection. Reject wins over every less
-protective candidate. See [EP-14 — Tool-result filter seam](design/ep-14-tool-result-filter.md)
-for the wire contract and limits.
+protective candidate.
 
 | Method | Path | Request / response contract |
 |---|---|---|
-| `POST` | `/api/sessions/:id/tool-result-filter` | **Internal generated Pi-gate endpoint.** Requires the session's normal authenticated bridge request. Accepts exactly `{ toolCallId, toolName, result }`; the bounded canonical result is never logged or persisted by this route. An unknown/non-project session is `404`. A recognized malformed request or dispatch failure returns `200` with the fixed synthetic rejection, not a raw error; malformed route identity is a safe `400`. |
+| `POST` | `/api/sessions/:id/tool-result-filter` | **Internal generated Pi-gate endpoint.** Requires the normal authenticated bridge request **and** a valid one-use, runtime/session/tool/attempt-bound callback credential; bearer alone is rejected. Accepts exactly `{ toolCallId, toolName, result }`; the bounded canonical result is never logged or persisted by this route. An unknown/non-project session is `404`. A recognized malformed request, invalid callback credential, or dispatch failure returns `200` with the fixed synthetic rejection, not a raw error; malformed route identity is a safe `400`. |
 | `GET` | `/api/sessions/:id/tool-result-filter-audit?limit=N` | Operator-only metadata audit. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer, sandbox, and agent-session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The target must be a project session. Returns newest valid rows in chronological order, bounded 1–200 (default 100); `503 TOOL_RESULT_FILTER_AUDIT_UNAVAILABLE` reports an unavailable audit. Rows contain only IDs, action/outcome, fixed reason/rule identities, byte counts, and timing — never result bytes, details, usage, hashes, URLs, or extension error text. |
 
 This seam does not expose credential-containment policy through REST. The shipped deterministic
