@@ -110,6 +110,26 @@ async function readServerPackOrder(): Promise<string[]> {
 	return (await response.json()).order as string[];
 }
 
+async function mintOperatorCookie(): Promise<string> {
+	const response = await apiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const cookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie")!] : []);
+	const cookie = cookies.map(value => value.split(";")[0]).find(value => value.startsWith("bobbit_session="));
+	expect(cookie, "Hindsight route fixtures require the same signed operator proof as live EP-6 grants").toBeTruthy();
+	return cookie!;
+}
+
+async function grant(projectId: string, capability: "memory.read" | "memory.write", operatorCookie: string): Promise<void> {
+	const response = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, {
+		method: "PUT",
+		headers: { Cookie: operatorCookie },
+		body: JSON.stringify({ packId: PACK_NAME, principal: "pack", capability }),
+	});
+	expect(response.status, `live Hindsight ${capability} grant: ${await response.clone().text()}`).toBe(200);
+}
+
 /** Notify the gateway after this fixture's direct on-disk install/uninstall. */
 async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
 	const response = await apiFetch("/api/marketplace/pack-order", {
@@ -162,11 +182,13 @@ describe("hindsight installed-provider worker boundary", () => {
 	let projectId: string;
 	let originalPackOrder: string[];
 	let stub: HindsightStub;
+	let operatorCookie: string;
 
 	test.beforeAll(async ({ gateway }) => {
 		enableTsWorkerResolver();
 		bobbitDir = gateway.bobbitDir;
 		projectId = gateway.defaultProjectId;
+		operatorCookie = await mintOperatorCookie();
 		originalPackOrder = await readServerPackOrder();
 		packDir = installPack(bobbitDir);
 		await notifyPackFilesystemMutation(originalPackOrder);
@@ -255,6 +277,8 @@ describe("hindsight installed-provider worker boundary", () => {
 		cwds.push(cwd);
 		const scopedSession = await createSession({ cwd, projectId });
 		sessionIds.push(scopedSession);
+		await grant(projectId, "memory.read", operatorCookie);
+		await grant(projectId, "memory.write", operatorCookie);
 		const callsBeforeScopedRecall = stub.calls.length;
 		const recalled = await callHindsightRoute(scopedSession, "recall", { method: "POST", body: { query: "route scope" } });
 		expect(recalled.status).toBe(200);
@@ -283,6 +307,9 @@ describe("hindsight installed-provider worker boundary", () => {
 		// retaining a valid visible session-store partition for the route boundary.
 		const unscopedSession = await createSession({ cwd, projectId: "headquarters" });
 		sessionIds.push(unscopedSession);
+		// This request is deliberately authorized, then rejected by the route's
+		// missing authoritative scope. Do not conflate the two fail-closed seams.
+		await grant("headquarters", "memory.read", operatorCookie);
 		const callsBeforeUnscopedRecall = stub.calls.length;
 		const unscoped = await callHindsightRoute(unscopedSession, "recall", { method: "POST", body: { query: "must not reach remote" } });
 		expect(unscoped.status).toBe(200);

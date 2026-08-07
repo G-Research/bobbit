@@ -120,8 +120,26 @@ function scopedTags(scope: MemoryScope): Tags {
 	return { project: scope.projectId, ...(scope.goalId ? { goal: scope.goalId } : {}) };
 }
 
-function inactive(configured: boolean) {
-	return { configured, code: "SERVICE_UNHEALTHY" };
+type RouteConfig =
+	| { state: "active"; config: EffectiveConfig }
+	| { state: "dormant"; configured: false }
+	| { state: "unhealthy"; configured: boolean; code: "SERVICE_UNHEALTHY" }
+	| { state: "unavailable"; configured: false; error: "HINDSIGHT_CONFIG_UNAVAILABLE" };
+
+/** Read configuration before evaluating request scope or grants. A dormant or
+ * unreadable configuration is not a data-plane operation, so it cannot provoke
+ * a client construction or turn a missing grant into a misleading response. */
+async function routeConfig(ctx: MemoryRouteContext): Promise<RouteConfig> {
+	const loaded = await loadEffectiveConfig(ctx.host.store);
+	if (!loaded.available) return { state: "unavailable", configured: false, error: "HINDSIGHT_CONFIG_UNAVAILABLE" };
+	if (!isConfigured(loaded.config)) {
+		// A generic runtime context is injected only by the managed H-4 bridge.
+		// Its stopped/degraded status is meaningful even before the legacy provider
+		// store has an external URL; plain direct calls remain dormant.
+		return ctx.runtime ? { state: "unhealthy", configured: false, code: "SERVICE_UNHEALTHY" } : { state: "dormant", configured: false };
+	}
+	if (!isActive(loaded.config, ctx.runtime)) return { state: "unhealthy", configured: true, code: "SERVICE_UNHEALTHY" };
+	return { state: "active", config: loaded.config };
 }
 
 function clientMethod(client: unknown, name: string): ((...args: unknown[]) => Promise<unknown>) | undefined {
@@ -147,19 +165,21 @@ async function withinDataPlaneDeadline<T>(work: Promise<T>): Promise<T> {
  * an empty bank or falling back to a different endpoint. */
 async function withActiveClient<T>(
 	ctx: MemoryRouteContext,
+	config: EffectiveConfig,
 	work: (client: unknown, config: EffectiveConfig) => Promise<T>,
-): Promise<T | { configured: boolean; code: string }> {
-	const loaded = await loadEffectiveConfig(ctx.host.store);
-	if (!loaded.available) return { configured: false, code: "HINDSIGHT_CONFIG_UNAVAILABLE" };
-	if (!isActive(loaded.config, ctx.runtime)) return inactive(isConfigured(loaded.config));
+): Promise<T | { configured: true; code: "SERVICE_UNHEALTHY" }> {
 	try {
-		return await withinDataPlaneDeadline(work(await makeClient(clientConfig(loaded.config, ctx.runtime)), loaded.config));
+		return await withinDataPlaneDeadline(work(await makeClient(clientConfig(config, ctx.runtime)), config));
 	} catch {
 		return { configured: true, code: "SERVICE_UNHEALTHY" };
 	}
 }
 
 async function readRows(ctx: MemoryRouteContext, req: MemoryRouteRequest) {
+	const availability = await routeConfig(ctx);
+	if (availability.state === "unavailable") return { configured: false, error: availability.error, memories: [] };
+	if (availability.state === "dormant") return { configured: false, memories: [] };
+	if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 	const scope = resolveMemoryScope(ctx, req);
 	if (!scope) return { configured: true, code: "HINDSIGHT_SCOPE_UNAVAILABLE", memories: [] };
 	const permission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
@@ -168,7 +188,7 @@ async function readRows(ctx: MemoryRouteContext, req: MemoryRouteRequest) {
 	const query = text(body.query ?? req.query?.query, MAX_QUERY);
 	const cursor = text(body.cursor, MAX_CURSOR);
 	const limit = number(body.limit, 25);
-	return await withActiveClient(ctx, async (client, config) => {
+	return await withActiveClient(ctx, availability.config, async (client, config) => {
 		const browse = clientMethod(client, "browse");
 		if (!browse) return { configured: true, code: "MEMORY_API_UNSUPPORTED", memories: [] };
 		const result = await browse(config.bank, { query, cursor, limit, tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
@@ -189,12 +209,18 @@ export const memoryRoutes = {
 	 * provider route, so an all-scope request cannot be silently narrowed or
 	 * authorized with the wrong EP-6 capability. */
 	recall: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const availability = await routeConfig(ctx);
+		if (availability.state === "unavailable") return { configured: false, error: availability.error, memories: [] };
+		if (availability.state === "dormant") return { configured: false, memories: [] };
+		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		const query = text(bodyOf(req).query ?? req.query?.query, MAX_QUERY);
-		if (!scope || !query) return { configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_QUERY_REQUIRED", memories: [] };
+		// Do not read or contact a provider without the host-owned scope. The
+		// compatibility shape intentionally remains an empty read result.
+		if (!scope || !query) return { configured: true, ...(query ? {} : { code: "MEMORY_QUERY_REQUIRED" }), memories: [] };
 		const permission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
 		if (!permission.ok) return { configured: true, code: permission.code, memories: [] };
-		return await withActiveClient(ctx, async (client, config) => {
+		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const recall = clientMethod(client, "recall");
 			if (!recall) return { configured: true, code: "MEMORY_API_UNSUPPORTED", memories: [] };
 			const result = await recall(config.bank, query, { maxTokens: config.recallBudget, tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
@@ -204,22 +230,30 @@ export const memoryRoutes = {
 	},
 
 	retain: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const availability = await routeConfig(ctx);
+		if (availability.state === "unavailable") return { ok: false, configured: false, error: availability.error };
+		if (availability.state === "dormant") return { ok: false, configured: false, code: "SERVICE_UNHEALTHY" };
+		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		const content = text(bodyOf(req).content, MAX_CONTENT);
 		if (!scope || !content) return { ok: false, configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_CONTENT_REQUIRED" };
 		const permission = await authorize(ctx, "memory.write");
 		if (!permission.ok) return { ok: false, configured: true, code: permission.code };
-		return await withActiveClient(ctx, async (client, config) => {
+		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const retain = clientMethod(client, "retain");
 			const ensureBank = clientMethod(client, "ensureBank");
 			if (!retain || !ensureBank) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED" };
 			await ensureBank(config.bank);
-			await retain(config.bank, content, { tags: scopedTags(scope), sync: bodyOf(req).sync === true });
+			await retain(config.bank, content, { tags: { kind: "manual", ...scopedTags(scope) }, sync: bodyOf(req).sync === true });
 			return { ok: true, configured: true };
 		});
 	},
 
 	reflect: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const availability = await routeConfig(ctx);
+		if (availability.state === "unavailable") return { configured: false, error: availability.error, text: "" };
+		if (availability.state === "dormant") return { configured: false, text: "" };
+		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		const prompt = text(bodyOf(req).prompt, MAX_QUERY);
 		if (!scope || !prompt) return { configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_PROMPT_REQUIRED", text: "" };
@@ -227,7 +261,7 @@ export const memoryRoutes = {
 		if (!permission.ok) return { configured: true, code: permission.code, text: "" };
 		const readPermission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
 		if (!readPermission.ok) return { configured: true, code: readPermission.code, text: "" };
-		return await withActiveClient(ctx, async (client, config) => {
+		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			// Reflect must preserve the authoritative read scope. Older clients expose
 			// only an unscoped reflect endpoint, which is deliberately rejected rather
 			// than reflecting arbitrary project memories.
@@ -240,12 +274,16 @@ export const memoryRoutes = {
 	},
 
 	detail: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const availability = await routeConfig(ctx);
+		if (availability.state === "unavailable") return { configured: false, error: availability.error };
+		if (availability.state === "dormant") return { configured: false };
+		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		const id = safeId(bodyOf(req).id);
 		if (!scope || !id) return { configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_ID_REQUIRED" };
 		const permission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
 		if (!permission.ok) return { configured: true, code: permission.code };
-		return await withActiveClient(ctx, async (client, config) => {
+		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const detail = clientMethod(client, "detail");
 			if (!detail) return { configured: true, code: "MEMORY_API_UNSUPPORTED" };
 			const result = await detail(config.bank, id, { tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
@@ -254,12 +292,16 @@ export const memoryRoutes = {
 	},
 
 	history: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const availability = await routeConfig(ctx);
+		if (availability.state === "unavailable") return { configured: false, error: availability.error, history: [] };
+		if (availability.state === "dormant") return { configured: false, history: [] };
+		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		const id = safeId(bodyOf(req).id);
 		if (!scope || !id) return { configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_ID_REQUIRED", history: [] };
 		const permission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
 		if (!permission.ok) return { configured: true, code: permission.code, history: [] };
-		return await withActiveClient(ctx, async (client, config) => {
+		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const history = clientMethod(client, "history");
 			if (!history) return { configured: true, code: "MEMORY_API_UNSUPPORTED", history: [] };
 			const result = await history(config.bank, id, { tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
@@ -269,6 +311,10 @@ export const memoryRoutes = {
 	},
 
 	invalidate: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const availability = await routeConfig(ctx);
+		if (availability.state === "unavailable") return { ok: false, configured: false, error: availability.error };
+		if (availability.state === "dormant") return { ok: false, configured: false, code: "SERVICE_UNHEALTHY" };
+		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		const body = bodyOf(req);
 		const id = safeId(body.id);
@@ -278,7 +324,7 @@ export const memoryRoutes = {
 		if (body.confirmation !== id) return { ok: false, configured: true, code: "INVALIDATION_CONFIRMATION_REQUIRED", id };
 		const permission = await authorize(ctx, "memory.invalidate");
 		if (!permission.ok) return { ok: false, configured: true, code: permission.code, id };
-		return await withActiveClient(ctx, async (client, config) => {
+		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const invalidate = clientMethod(client, "invalidateMemory") ?? clientMethod(client, "invalidate");
 			if (!invalidate) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED", id };
 			await invalidate(config.bank, id, { tags: scopedTags(scope), tagsMatch: "all_strict", ...(text(body.reason, 1_000) ? { reason: text(body.reason, 1_000) } : {}) });
@@ -287,6 +333,10 @@ export const memoryRoutes = {
 	},
 
 	"retain-outcome": async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const availability = await routeConfig(ctx);
+		if (availability.state === "unavailable") return { ok: false, configured: false, error: availability.error };
+		if (availability.state === "dormant") return { ok: false, configured: false, code: "SERVICE_UNHEALTHY" };
+		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		if (!scope) return { ok: false, configured: true, code: "HINDSIGHT_SCOPE_UNAVAILABLE" };
 		const permission = await authorize(ctx, "memory.write");

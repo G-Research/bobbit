@@ -55,6 +55,12 @@ function scope(projectId = "proj-1", goalId = "goal-1", role = "coder") {
 	return { project: { id: projectId }, goal: { id: goalId }, role };
 }
 
+/** Routes receive live EP-6 decisions from the server; direct route fixtures
+ * must model that boundary instead of relying on the retired ambient access. */
+function liveMemoryGrant() {
+	return { requireCapability: () => ({ allowed: true as const }) };
+}
+
 function queueEntry(content: string, ts: number, projectId = "proj-1", goalId = "goal-1") {
 	const identity: HindsightIdentity = { projectId, goalId, sessionId: "queued-session", bank: "bobbit", namespace: "default", kind: "turn" };
 	return { version: 2, identity, scope: { projectId, goalId, sessionId: "queued-session" }, bank: "bobbit", namespace: "default", content, tags: { kind: "turn", project: projectId, goal: goalId, session: "queued-session" }, ts, documentId: documentId(identity) };
@@ -633,7 +639,7 @@ test("routes recall uses authoritative scope and fails closed without it", async
 		const store = makeStore();
 		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
 
-		await routes.recall({ host: { store }, scopeContext: scope("proj-7", "goal-7"), projectId: "forged-project" } as never, { body: { query: "q" } } as never);
+		await routes.recall({ host: { store, memory: liveMemoryGrant() }, scopeContext: scope("proj-7", "goal-7"), projectId: "forged-project" } as never, { body: { query: "q" } } as never);
 		const o1 = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
 		assert.deepEqual(o1.tags, { project: "proj-7", goal: "goal-7" });
 		assert.equal(o1.tagsMatch, "all_strict");
