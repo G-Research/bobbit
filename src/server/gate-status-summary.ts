@@ -14,22 +14,19 @@ export type GateEffectiveStatus = GateStatus | "running";
  * lightweight; full step text is fetched lazily on expand via the gate-DETAIL
  * / verification-snapshot / inspect paths (which are unaffected).
  *
- * The internal `verificationCache` is omitted before cloning because it holds
- * body-complete cache inputs that must never enter an ordinary response path.
- * For every signal step the projection then blanks `output`, deletes
- * `artifact.content` (keeping `artifact.contentType` + `artifact.metadata` so
- * the UI still knows an artifact exists), and deletes `diagnostics`. All other
- * fields — step name/type/status/passed/skipped/duration_ms/phase and
- * signal-level metadata/content/timestamp — are preserved.
+ * For every signal step it: blanks `output`, deletes `artifact.content` (keeps
+ * `artifact.contentType` + `artifact.metadata` so the UI still knows an
+ * artifact exists), and deletes `diagnostics`. All other fields — step
+ * name/type/status/passed/skipped/duration_ms/phase and signal-level
+ * metadata/content/timestamp — are preserved.
  *
  * The input is NOT mutated: a structured deep clone is returned so the
  * in-memory gate store keeps its full fidelity.
  */
-export function projectGateForList<T extends { signals: any[]; verificationCache?: unknown }>(gate: T): Omit<T, "verificationCache"> {
-	const { verificationCache: _verificationCache, ...responseGate } = gate;
-	const clone: Omit<T, "verificationCache"> = typeof structuredClone === "function"
-		? structuredClone(responseGate)
-		: JSON.parse(JSON.stringify(responseGate));
+export function projectGateForList<T extends { signals: any[] }>(gate: T): T {
+	const clone: T = typeof structuredClone === "function"
+		? structuredClone(gate)
+		: JSON.parse(JSON.stringify(gate));
 	for (const signal of clone.signals ?? []) {
 		const steps = signal?.verification?.steps;
 		if (!Array.isArray(steps)) continue;

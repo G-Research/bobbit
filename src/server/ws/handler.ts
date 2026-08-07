@@ -230,11 +230,9 @@ function sendLiveStateSnapshot(
 }
 
 function canReadLiveSessionState(
-	sessionManager: SessionManager,
 	session: ReturnType<SessionManager["getSession"]>,
 ): session is NonNullable<ReturnType<SessionManager["getSession"]>> {
 	return !!session
-		&& sessionManager.isSessionGenerationReadable(session)
 		&& session.status !== "preparing"
 		&& session.status !== "starting"
 		&& session.status !== "terminated"
@@ -258,7 +256,7 @@ async function sendCanonicalSessionState(
 	const diagStart = diagEnabled ? performance.now() : 0;
 	try {
 		const session = sessionManager.getSession(sessionId);
-		if (!canReadLiveSessionState(sessionManager, session)) {
+		if (!canReadLiveSessionState(session)) {
 			if (diagEnabled) getCpuDiagnostics().recordTimer(`ws-handler:${diagnosticOperation}`, performance.now() - diagStart, { fallback: 1 });
 			sendFallbackModelState(ws, sessionManager, sessionId);
 			return;
@@ -266,7 +264,7 @@ async function sendCanonicalSessionState(
 
 		const stateResponse = await Promise.resolve().then(() => session.rpcClient.getState());
 		const canonical = sessionManager.getSession(sessionId);
-		if (canonical !== session || !canReadLiveSessionState(sessionManager, canonical)) {
+		if (canonical !== session || !canReadLiveSessionState(canonical)) {
 			if (diagEnabled) getCpuDiagnostics().recordTimer(`ws-handler:${diagnosticOperation}`, performance.now() - diagStart, { fallback: 1 });
 			sendFallbackModelState(ws, sessionManager, sessionId);
 			return;
@@ -286,37 +284,6 @@ async function sendCanonicalSessionState(
 	} catch {
 		if (diagEnabled) getCpuDiagnostics().recordTimer(`ws-handler:${diagnosticOperation}`, performance.now() - diagStart, { errors: 1 });
 		sendFallbackModelState(ws, sessionManager, sessionId);
-	}
-}
-
-/**
- * Read messages only through the current live lifecycle generation. Dormant,
- * preparing, and stale generations use the durable transcript instead of a
- * stopped placeholder bridge. A failure from a still-current live generation
- * remains terminal and is deliberately rethrown to the command error path.
- */
-async function getCanonicalMessagesSnapshot(
-	sessionManager: SessionManager,
-	sessionId: string,
-): Promise<{ success: boolean; data?: unknown; error?: string }> {
-	const session = sessionManager.getSession(sessionId);
-	if (!canReadLiveSessionState(sessionManager, session)) {
-		return { success: true, data: await sessionManager.getPersistedMessages(sessionId) };
-	}
-
-	try {
-		const response = await Promise.resolve().then(() => sessionManager.getMessagesSnapshotBase(session));
-		const canonical = sessionManager.getSession(sessionId);
-		if (canonical !== session || !canReadLiveSessionState(sessionManager, canonical)) {
-			return { success: true, data: await sessionManager.getPersistedMessages(sessionId) };
-		}
-		return response;
-	} catch (err) {
-		const canonical = sessionManager.getSession(sessionId);
-		if (canonical !== session || !canReadLiveSessionState(sessionManager, canonical)) {
-			return { success: true, data: await sessionManager.getPersistedMessages(sessionId) };
-		}
-		throw err;
 	}
 }
 
@@ -907,7 +874,7 @@ export function handleWebSocketConnection(
 
 			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
-			send(ws, { type: "queue_update", sessionId, queue: sessionManager.getVisiblePromptQueue(sessionId) });
+			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
 			replayManualRetryRequiredOnAttach(ws, session);
 
 			// Rehydrate any on-disk proposal drafts for this session so the
@@ -1021,13 +988,10 @@ export function handleWebSocketConnection(
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					sendStateWithCost(ws, sessionManager, sessionId, { preparing: true });
 					return;
-				case "get_messages": {
+				case "get_messages":
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
-					const persisted = await sessionManager.getPersistedMessages(sessionId);
-					const data = sessionManager.buildVisibleMessageSnapshot(sessionId, persisted);
-					send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
+					send(ws, { type: "messages", data: stampSnapshotOrder([]) as unknown[] });
 					return;
-				}
 				case "prompt":
 					// Allow ordinary prompts — they'll be queued by enqueuePrompt since status
 					// != idle. Restricted-session policy was already enforced above.
@@ -1486,7 +1450,7 @@ export function handleWebSocketConnection(
 					const tStart = perf ? performance.now() : 0;
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
-					const msgsResp = await getCanonicalMessagesSnapshot(sessionManager, sessionId);
+					const msgsResp = await sessionManager.getMessagesSnapshotBase(session);
 					if (diagEnabled) {
 						getCpuDiagnostics().recordTimer("ws-handler:getMessages", performance.now() - diagStart, { success: msgsResp.success ? 1 : 0 });
 					}

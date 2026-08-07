@@ -188,31 +188,20 @@ function mergeRanges(ranges: Array<{ from: number; to: number }>): Array<{ from:
 	return merged;
 }
 
-export function validateTextSelectionOptions(options: TextSelectionOptions = {}): void {
+export function selectText(text: string, options: TextSelectionOptions = {}): TextSelectionResult {
 	const mode = options.mode ?? "tail";
+	const implicitDefault = options.implicitDefault ?? options.mode === undefined;
 	const maxResultsOption = options.maxResults ?? options.max_results;
 	if (!["full", "grep", "head", "tail", "slice"].includes(mode)) {
 		throw new TextSelectionError(`mode must be one of: full, grep, head, tail, slice`);
 	}
+
 	assertPositiveInteger("lines", options.lines);
 	assertNonNegativeInteger("context", options.context);
 	assertPositiveInteger("max_results", maxResultsOption);
 	assertPositiveInteger("from", options.from);
 	assertPositiveInteger("to", options.to);
-	if (mode === "grep" && (options.pattern === undefined || options.pattern === "")) {
-		throw new TextSelectionError(`grep mode requires a non-empty pattern`);
-	}
-	if (mode === "slice") {
-		if (options.from === undefined || options.to === undefined) throw new TextSelectionError(`slice mode requires from and to line numbers`);
-		if (options.from > options.to) throw new TextSelectionError(`from must be less than or equal to to`);
-	}
-}
 
-export function selectText(text: string, options: TextSelectionOptions = {}): TextSelectionResult {
-	validateTextSelectionOptions(options);
-	const mode = options.mode ?? "tail";
-	const implicitDefault = options.implicitDefault ?? options.mode === undefined;
-	const maxResultsOption = options.maxResults ?? options.max_results;
 	const rawLines = splitLines(text);
 	const totalLines = rawLines.length;
 	let selected: SelectedLine[] = [];
@@ -235,16 +224,25 @@ export function selectText(text: string, options: TextSelectionOptions = {}): Te
 		selected = rawLines.slice(start).map((line, i) => ({ number: start + i + 1, text: line }));
 	} else if (mode === "slice") {
 		numbered = true;
-		const start = Math.max(options.from!, 1);
-		const end = Math.min(options.to!, totalLines);
+		if (options.from === undefined || options.to === undefined) {
+			throw new TextSelectionError(`slice mode requires from and to line numbers`);
+		}
+		if (options.from > options.to) {
+			throw new TextSelectionError(`from must be less than or equal to to`);
+		}
+		const start = Math.max(options.from, 1);
+		const end = Math.min(options.to, totalLines);
 		selected = start <= end
 			? rawLines.slice(start - 1, end).map((line, i) => ({ number: start + i, text: line }))
 			: [];
 	} else if (mode === "grep") {
 		numbered = true;
+		if (options.pattern === undefined || options.pattern === "") {
+			throw new TextSelectionError(`grep mode requires a non-empty pattern`);
+		}
 		let regex: RegExp;
 		try {
-			regex = new RegExp(options.pattern!);
+			regex = new RegExp(options.pattern);
 		} catch (err: any) {
 			throw new TextSelectionError(`Invalid regex pattern: ${err?.message || err}`);
 		}

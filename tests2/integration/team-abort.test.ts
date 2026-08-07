@@ -123,11 +123,8 @@ test.describe("team abort — stuck agent", () => {
 
 		// Drive only this mock agent; the fork-scoped gateway clock stays untouched.
 		await agentClock.waitUntil(
-			() => {
-				const live = gateway.sessionManager.getSession(agentId);
-				return live?.status === "streaming" && !!live.rpcClient?._agent?.currentAbortController;
-			},
-			"the mock agent to enter its streaming turn",
+			() => gateway.sessionManager.getSession(agentId)?.status === "streaming",
+			"streaming",
 		);
 
 		// Force-abort

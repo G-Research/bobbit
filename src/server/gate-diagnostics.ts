@@ -2,7 +2,6 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { gateDiagnosticsRootDir, safeGateDiagnosticsSegment } from "./agent/gate-diagnostics-cleanup.js";
-import type { ManagedGatePayloadRef } from "./agent/gate-store.js";
 
 const DEFAULT_MAX_RETAINED_LOG_BYTES = 20 * 1024 * 1024;
 const TEST_MAX_RETAINED_LOG_BYTES = 5 * 1024 * 1024;
@@ -34,8 +33,6 @@ export interface GateStepDiagnosticArtifactMetadata {
 	bytes: number;
 	kind: "test-results" | "playwright-report";
 	content?: string;
-	/** Managed fallback when an inline legacy artifact had no authoritative retained file. */
-	contentRef?: ManagedGatePayloadRef;
 	contentType?: string;
 }
 

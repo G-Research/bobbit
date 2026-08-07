@@ -4454,15 +4454,9 @@ export class VerificationHarness {
 
 			// Build cache of previously-passed step results for the same commit SHA.
 			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
-			const signalGateStore = this.resolveGateStore(signal.goalId);
-			const gateState = signalGateStore.getGate(signal.goalId, signal.gateId);
-			// Lightweight harness fixtures may expose only getGate; production GateStore
-			// always supplies the body-complete projection accessor.
-			const cacheSignals = typeof signalGateStore.getVerificationCacheSignals === "function"
-				? signalGateStore.getVerificationCacheSignals(signal.goalId, signal.gateId)
-				: (gateState?.signals ?? []);
+			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
 			const cachedSteps = buildStepCache(
-				cacheSignals,
+				gateState?.signals ?? [],
 				signal.id,
 				signal.commitSha,
 				gateState?.verificationCacheInvalidatedAt,

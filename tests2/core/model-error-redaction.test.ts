@@ -110,7 +110,6 @@ async function makeRuntimeThinkingHarness(failRecovery = false): Promise<{
 		getSessionCostUpdate: () => undefined,
 		getPendingToolPermission: () => undefined,
 		getProjectContextManager: () => undefined,
-		getVisiblePromptQueue: () => session.promptQueue.toArray(),
 		persistSessionModel: () => assert.fail("failed thinking selection must not persist"),
 		updateModelNameFile: () => assert.fail("failed thinking selection must not update model file"),
 		async restartAgent() {
@@ -180,7 +179,6 @@ describe("manual retry attachment hydration", () => {
 			getSessionCostUpdate: () => undefined,
 			getPendingToolPermission: () => undefined,
 			getProjectContextManager: () => undefined,
-			getVisiblePromptQueue: () => session.promptQueue.toArray(),
 		};
 		handleWebSocketConnection(
 			ws as any,

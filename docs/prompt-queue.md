@@ -5,29 +5,28 @@ How user messages flow from the browser to the agent subprocess, how they queue 
 ## Architecture overview
 
 ```
-Browser (RemoteAgent)       Server (SessionManager)             Pi subprocess
-─────────────────────       ───────────────────────             ─────────────
- prompt() ──WS──► enqueue one durable FIFO row
-                  ├─ publish sessions.json acceptance ledger
-                  ├─ idle: send framed stable prompt id ──────► reserve id
-                  │                                             run one turn
-                  │       post-persistence ACK ◄─────────────── commit user row
-                  │       settle FIFO ownership
-                  └─ busy: expose pending row in queue_update
+Browser (RemoteAgent)          Server (SessionManager)         Agent subprocess
+─────────────────────          ───────────────────────         ─────────────────
+  prompt() ──WS──►  enqueuePrompt()
+                     ├─ idle + empty queue ──► rpcClient.prompt() ──► process
+                     └─ busy or queue has items
+                        ├─ PromptQueue.enqueue()
+                        └─ broadcastQueue() ──WS──► queue_update
+                                                     │
+                     agent_end event ◄────────────────┘
+                     ├─ drainQueue()
+                     │  └─ dequeue next ──► rpcClient.prompt()
+                     └─ broadcastQueue() ──WS──► queue_update
 
-                  agent_end ◄────────────────────────────────── finish turn
-                  └─ positive-delay drain of the same FIFO head
-
- steer() ──WS──► enqueue durable steered row ──► framed live steer / queued drain
+  steer()  ──WS──►  enqueue steered row ──► _dispatchSteer()
+                                      └─► rpcClient.steer() ──► injected mid-turn
 ```
-
-The durable queue is both the ordering source and the pre-dispatch acceptance ledger. No Pi RPC runs until the affected session-store snapshot has crossed its atomic publication barrier.
 
 ## Three dispatch paths
 
 ### 1. Direct dispatch (idle + empty queue)
 
-The fast path still creates one `PromptQueue` row first. Bobbit marks it `dispatching`, persists it through the `SessionStore` publication barrier, and only then sends the prompt to Pi. Production bridges frame the row's stable ID and body digest; the row remains privately owned until Pi durably acknowledges the corresponding transcript entry. Title generation also fires here for the first message.
+The fast path. Agent is idle and nothing is queued — the prompt goes straight to the agent subprocess via `rpcClient.prompt()`. Title generation also fires here for the first message.
 
 ### 2. Enqueue (busy or queue non-empty)
 
@@ -35,19 +34,7 @@ Agent is streaming or the queue already has items. The message is added to `Prom
 
 ### 3. Drain (agent becomes idle)
 
-On `agent_end`, if the queue has work and the turn did not end with a genuine error, Bobbit schedules `drainQueue()` on a positive-delay macrotask. Pi can emit `agent_end` before its internal `finishRun()` clears the busy guard, so draining synchronously can produce a false `Agent is already processing` rejection.
-
-`drainQueue()` peeks at the authoritative FIFO head rather than removing it. Consecutive steered rows are joined with `\n` and share one stable batch ID; otherwise the next row keeps its own ID. The selected rows are marked `dispatching`, durably published, and sent. Status becomes `"streaming"` optimistically so another sender cannot start a concurrent turn.
-
-## Dormant restore windows
-
-Client attachment owns dormant revival through SessionManager's coalesced restore coordinator. Read-only state does not call the stopped placeholder bridge:
-
-- `get_state` uses live RPC only for the current readable lifecycle generation. Dormant, terminated, fenced, stale-generation, failed, or raced live reads return persisted model state. Explicit reads during preparing/starting instead return `{ preparing: true }`; initial attachment may separately seed the persisted model fallback.
-- message snapshots use the durable transcript whenever the generation is not safely live, including preparing/starting.
-- if lifecycle replacement wins while a live read is awaiting RPC, the result is discarded and the persisted fallback is sent.
-
-Prompts arriving during restore join the replacement coordinator's ordered acceptance ledger rather than the stale `SessionInfo`. Each row is durably published, carried into the final canonical generation, and drained once that bridge is eligible. This is why a normal restore window must not surface `Agent process not running` or lose a prompt accepted by the WebSocket handler.
+On `agent_end`, if the queue has items and the turn did not end with a genuine error, `drainQueue()` dispatches the next work. A recognized cancellation-shaped terminal is reconciled as cancellation rather than a provider error, then reaches this same drain boundary. If steered messages are at the front of the queue, they are all popped as a batch via `dequeueAllSteered()` and concatenated (`\n`-joined) into a single prompt — this ensures multiple steered messages arrive as one coherent block rather than triggering separate agent turns. Otherwise, the next undispatched message is popped and sent via `rpcClient.prompt()`. Status is set to `"streaming"` optimistically to prevent a race where another `enqueuePrompt()` call sees idle+empty and dispatches a second concurrent prompt.
 
 ## Message types
 
@@ -59,24 +46,28 @@ Standard user message. Always routed through `enqueuePrompt()` — never sent di
 
 A mid-turn redirect. Behavior depends on agent state:
 
-- **Agent streaming**: Enqueued as a steered row, then dispatched **immediately** through `_dispatchSteer()` for injection between tool calls. Stable delivery marks and publishes the row before `steerWithId()` and keeps it through ACK; a legacy bridge transfers it to `inFlightSteerTexts` before `rpcClient.steer()`. The UI textarea always queues via `prompt` — it never sends `steer` directly.
+- **Agent streaming**: Enqueued as a steered row, then dispatched **immediately** through `_dispatchSteer()` — injected between tool calls in real time. `_dispatchSteer()` records the text in the in-flight ledger, removes the row from the visible queue, persists both changes together, and forwards it via `rpcClient.steer()`. The UI textarea always queues via `prompt` — it never sends `steer` directly.
 - **Agent idle**: Enqueued as a steered message. Steered messages sort before normal messages in the queue.
+
+### `follow_up` (client → server)
+
+Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcClient.prompt()`. Used when continuing a conversation after the agent finished (different RPC semantics in the agent subprocess). Routed through `enqueuePrompt()` like normal prompts. The `isFollowUp` flag is preserved on the `QueuedMessage` so that queued follow-ups dispatch via the correct RPC method on drain.
 
 ### `steer_queued` (client → server)
 
-Promotes an already-queued message to steered priority. If the agent is **streaming**, `_dispatchSteer()` peeks at the consecutive front steered group, joins it with `\n`, aborts any parked `bash_bg wait`, and sends it through the same stable live-steer path as a fresh steer. Stable rows remain durably owned until ACK; the legacy fallback transfers them to the shadow ledger. If the agent is **idle**, promotion broadcasts and `drainQueue()` drains normally with steered rows first.
+Promotes an already-queued message to steered priority. If the agent is **streaming**, promotion dequeues all consecutive steered rows from the front of the queue via `dequeueAllSteered()` and immediately hands them to the single `_dispatchSteer()` site, matching a fresh live steer instead of waiting for a later tool boundary; the dispatched rows leave the visible queue. `_dispatchSteer()` removes the rows, joins them with `\n`, aborts any parked `bash_bg wait`, forwards to `rpcClient.steer()`, and owns RPC-failure recovery. If the agent is **idle**, promotion broadcasts and `drainQueue()` drains normally with steered rows first.
 
 ### `remove_queued` (client → server)
 
-Removes only an ordinary client-owned row. Unknown IDs and protocol-owned rows are no-ops; the authoritative queue projection is still rebroadcast so stale tabs converge.
+Removes a message from the queue. Broadcasts an updated queue.
 
 ### `reorder_queue` (client → server)
 
-Reorders only client-owned rows. Unknown or duplicate IDs, or an attempt to move an explicitly listed protocol-owned row, fail closed. Hidden owned rows stay pinned at their absolute FIFO positions, and the authoritative projection is rebroadcast. Used by the drag-to-reorder UI on queue pills.
+Reorders the queue to match a given array of message IDs. Unknown IDs are ignored; messages not listed are appended at the end. Broadcasts updated queue. Used by the drag-to-reorder UI on queue pills.
 
 ### `queue_update` (server → client)
 
-Sent whenever visible queue state changes. It contains the replace-all client projection; `dispatching` and `awaiting-ack` rows plus all delivery bookkeeping remain private.
+Sent whenever the queue changes — enqueue, dequeue, steer, remove, reorder. Contains the full queue array so clients can replace their local state.
 
 ## PromptQueue internals
 
@@ -84,13 +75,13 @@ Sent whenever visible queue state changes. It contains the replace-all client pr
 
 **Ordering**: Steered messages always sort before non-steered. Within each group, insertion order is preserved (stable sort). The client can explicitly reorder via `reorder(messageIds)` — the queue adopts the given ID order, with unlisted items appended at the end.
 
-**Lifetime is pending → delivery-owned → settled.** A row starts as ordinary queued intent. Dispatch marks the same row `dispatching`, then `awaiting-ack` after Pi accepts the RPC; a rejected attempt marks it `retrying` without changing its ID or FIFO position. Dispatching and awaiting-ACK rows are hidden. Retrying rows are visible without delivery metadata, but generic controls cannot remove or reorder them. Rows leave the durable queue only after validated downstream settlement.
+**Lifetime is queued → dispatched (= removed).** A row is added by `enqueue()` and is removed exactly once: either by `_dispatchSteer()` as it records the in-flight ledger and starts `rpcClient.steer()` (steered batch dispatch), by `drainQueue()` when the agent goes idle (regular dispatch), or by an explicit `remove()` from the UI. The queue **does not** carry an in-flight `dispatched` flag — once Bobbit records the ledger and removes the row, the shadow ledger (and then the SDK's `_steeringMessages` mirror after RPC acceptance) owns that state. `enqueueAtFront()` is reserved for reconciliation paths that need to put a row back at index 0 after an RPC failure or post-abort drain.
 
-The queue does not use the old boolean `dispatched` flag. `deliveryState`, `deliveryAttempt`, and `deliveryPromptId` describe protocol ownership, not a second pending-work cache. On restore, a persisted `dispatching` or `awaiting-ack` row normalizes to `retrying` so the new bridge generation may redrive the same stable ID.
+Why this matters: the previous design carried a `dispatched: true` flag on rows after dispatch and relied on `removeDispatched()` / `resetDispatched()` to maintain it across normal completion vs force-kill. Three independent caches of "what's pending" — Bobbit's flag, the SDK's `_steeringMessages`, and pi-agent-core's `Agent.steeringQueue` — drifted under abort/restart and produced duplicate-steer-on-Stop. Removing the flag and treating row-removal-on-dispatch as the single source of truth at the Bobbit layer eliminates the drift. See [docs/design/steer-subsystem-rewrite.md](design/steer-subsystem-rewrite.md) for the design rationale.
 
-Legacy bridges retain the shadow-ledger flow described under [The shadow ledger](#the-shadow-ledger): a dispatched steer moves from the queue to `inFlightSteerTexts` until its correlated echo settles or reconciliation returns it to the queue. This fallback must not be confused with the production stable-ID path, where the original rows stay durable through ACK.
+**follow_up preservation**: `QueuedMessage` carries an optional `isFollowUp` flag. When set, `drainQueue()` dispatches via `rpcClient.followUp()` instead of `rpcClient.prompt()`, preserving the correct RPC semantics through the queue.
 
-**Persistence and acceptance**: Queue state lives in the owning project's `.bobbit/state/sessions.json`. Every direct, queued, restore-window, and live-steer send first publishes its exact row through `SessionStore.flushAsync()`. A queued return is reported as accepted only after that atomic barrier succeeds. `acceptedPromptDispatches` is a compact legacy-bridge tombstone for RPC acceptance before author-sidecar echo; production stable delivery keeps the FIFO row until Pi's ACK.
+**Persistence**: The queue is persisted to `.bobbit/state/sessions.json` (via `SessionStore.update`) on every mutation, and restored on server restart via `new PromptQueue(ps.messageQueue)`.
 
 ## Client-side rendering
 
@@ -115,7 +106,7 @@ Live user messages are tracked through the unified message reducer (`src/app/mes
 The client receives `queue_update` events and stores them in `_serverQueue`. The UI renders each queued message as a "pill" above the textarea:
 
 - **Non-steered pills** show four controls: drag handle (for reordering), edit button (pencil — removes pill and populates textarea for editing), steer button, and remove button (X).
-- **Steered pills** show a "Sent" badge and no interactive controls. Stable rows disappear from the client projection while `dispatching` or `awaiting-ack`; a rejected `retrying` row becomes visible again with private bookkeeping stripped but remains delivery-owned server-side. The legacy shadow-ledger path transfers a dispatched steer out of the queue.
+- **Steered pills** that remain in the queue show a "Sent" badge and no interactive controls. Streaming `steer_queued` promotions normally do not linger as Sent pills: the server removes the promoted front group from the queue in the same dispatch path, so the next `queue_update` drops the row.
 - **Edit flow**: Clicking the pencil icon fires `onEditQueued`, which removes the pill from the queue and places its text back in the textarea. On re-send, the message is added to the end of the queue (or dispatched directly if the agent is idle).
 - **Drag reorder**: Dragging a pill's handle fires `onReorder`, which sends a `reorder_queue` WS message. The server reorders and broadcasts the updated queue to all clients.
 
@@ -171,13 +162,13 @@ See [Auto-Retry](auto-retry.md) for classifier and scheduling policy.
 
 ### Dispatch failure
 
-The durable row remains the recovery source. A rejection marks that exact row `retrying` at the front; older legacy seams that transferred ownership recreate the rows in original order. An inbound turn event advancing `agentObservedTurnVersion` wins over a late negative RPC result because it proves Pi already observed the turn.
+If `rpcClient.prompt()` fails during direct dispatch or `drainQueue()`, Bobbit treats the text as not accepted by the agent. The rows that were already removed from `PromptQueue` are re-enqueued at the front in their original order.
 
-`Agent is already processing` is an expected finish-run race, not a terminal command failure. Bobbit returns queued/retrying state, restores idle, and redrains after bounded positive delays. After the short retry budget, the row waits for the next real idle/readiness boundary. There is no tick-zero retry loop and no user-facing `COMMAND_ERROR` for a prompt already preserved for retry.
+For ordinary dispatch rejections, the optimistic `"streaming"` status is reverted to `"idle"`, the updated queue is broadcast, and a follow-up drain is scheduled on the next tick. For provider-auth failures such as `No API key found for openrouter`, Bobbit stops there instead of redraining: it persists `wasStreaming: false`, clears `streamingStartedAt`, broadcasts `session_status: "idle"`, and emits `provider_auth_required` so the UI shows fix/retry/switch-provider/abort-respawn actions. The failed prompt stays at the front of the queue and is consumed by Retry after credentials or model choice are fixed.
 
-Protocol capability/envelope failures also retain the durable row rather than falling back to an unframed send. Provider-auth failures persist the row, clear the optimistic streaming state, and emit `provider_auth_required` for explicit recovery. Other exhausted retryable failures emit `manual_retry_required` instead of presenting healthy idle.
+For `drainQueue()` recovery, Bobbit suppresses re-enqueue only after an inbound agent event advances `agentObservedTurnVersion`, proving the turn was accepted. Local status-only changes such as Stop → `"aborting"` do not count; that distinction prevents duplicate recovered task notifications without dropping a prompt that was rejected during abort/restart reconciliation.
 
-The exception is a child-exit path where the session is already `terminated` or aborting after process exit. Bobbit does not write recovery state into a dead bridge; replacement, sandbox recovery, force-abort recovery, or explicit Retry owns the next process.
+The exception is a child-exit path where the session is already `terminated` or `aborting`. Bobbit does not re-enqueue into a dead bridge; sandbox recovery, force-abort recovery, or explicit Retry owns the next process.
 
 ## Abort and force-kill recovery
 
@@ -202,38 +193,22 @@ Cancellation reconciliation preserves durable intent before returning to idle:
 
 The same boundary serves user Stop and external cancellation so force-abort behavior remains unchanged. It also retains dangling tool-call and dispatch-rejection recovery in their existing owners.
 
-### Stable prompt-delivery protocol
-
-Production `RpcBridge` generations fail startup closed unless the built-in delivery extension completes its exact v1 handshake. The capability decision is immutable for that child generation; Bobbit never frames with one mode and settles with another.
-
-For each ordinary prompt, queued drain, and stable live steer:
-
-1. Bobbit publishes the exact FIFO row, stable prompt ID, author-sidecar body recipe, and `dispatching` ownership before sending.
-2. `RpcBridge` adds a private envelope containing protocol version, prompt ID, and SHA-256 body digest. Pi's input extension validates and strips the envelope before model or transcript exposure.
-3. The extension appends a durable reservation before transforming the input. The same ID/digest cannot create a second turn while pending, and the same ID with a different digest fails closed.
-4. After Pi commits the corresponding user transcript entry, the extension appends a durable ACK. Bobbit validates the ACK digest against the exact retained body recipe before removing FIFO ownership.
-5. If the gateway crashes after transcript append but before ACK handling, redrive uses the same ID. The extension finds the committed reservation/user pair, appends ACK, and handles the resend without starting another turn.
-
-A local failure while publishing settlement is not a delivery failure: Bobbit retries only the queue/tombstone snapshot and never resends an already accepted prompt. Settlement retries use bounded positive delays; restart transcript/ACK reconciliation is the final recovery boundary.
-
 ### Terminal ownership and exactly-once delivery
-
-Exactly-once here means one durable Pi user-turn entry per accepted stable prompt ID. It does not promise that arbitrary tool side effects inside a restarted turn are idempotent.
 
 Only the latest distinct assistant terminal seen before the final boundary classifies the turn. After a final `agent_end` is handled, its terminal identities and cancellation classification are consumed; a late `message_end` or duplicate `agent_end` cannot reclassify a later turn, repeat reconciliation, enqueue a second steer, or drain another queue row. A new `agent_start`, Retry, or accepted redrive establishes the next turn's terminal scope.
 
-**Legacy force-kill recovery flow** (exactly-once at the transcript level):
+**Force-kill recovery flow** (exactly-once at the transcript level):
 
 1. User clicks Stop. `SessionManager.forceAbort()` enters abort handling. The shadow ledger (`session.inFlightSteerTexts`) holds every dispatched steer that has not reached a proven user-role `message_end` echo.
 2. If the graceful abort does not settle, the agent process is stopped and `_reconcileAfterAbort()` re-enqueues only the unresolved ledger entries at the front of `promptQueue` with `isSteered: true` (via `enqueueAtFront()`), then clears the ledger. Reverse traversal preserves their original dispatch order and keeps recovered steers ahead of ordinary queued work.
 3. A synthetic `agent_end` is emitted and a fresh subprocess is spawned.
-4. `drainQueue()` runs. The re-enqueued steered front group is joined into a single prompt and dispatched once.
+4. `drainQueue()` runs. The re-enqueued steered rows are popped via `dequeueAllSteered()`, joined into a single prompt, and dispatched once.
 
 The same reconciliation runs on the graceful path: when `handleAgentLifecycle` sees `agent_end` while `wasAborting`, it calls `_reconcileAfterAbort()` before transitioning to `idle`. Either way the result is the same — every steer the user typed appears as exactly one `<user-message>` in the rendered chat, even if the abort race tore down the agent between dispatch and echo.
 
 ### The shadow ledger
 
-`SessionInfo.inFlightSteerTexts` is the compatibility ledger for a bridge generation without stable downstream delivery. Production v1 bridges retain queue rows through ACK instead. A legacy record's lifecycle is bounded between **dispatch start** (recorded by `_dispatchSteer()` before the row-removal store update) and a proven user-role echo. The record carries a stable author-correlation ID as well as the original text so settlement can distinguish repeated identical steers.
+`SessionInfo.inFlightSteerTexts` is a per-session array of durable steer records. A record's lifecycle is bounded between **dispatch start** (recorded by `_dispatchSteer()` before the row-removal store update) and a proven user-role echo. The record carries a stable prompt ID as well as the original text so settlement can distinguish repeated identical steers.
 
 - **Record + persist**: `_dispatchSteer()` appends the batch record before removing queue rows, then persists `messageQueue` and `inFlightSteerTexts` in the same store update. A gateway restart after row removal but before transcript echo can therefore recover the text exactly once.
 - **Settle**: `_consumeSteerEcho()` accepts only a user or user-with-attachments `message_end`. When a prompt-author binding is available, it matches by prompt ID; only legacy/unbound echoes fall back to the first matching text. A replayed terminal frame that is already settled is ignored, so it cannot consume a later same-text steer.
@@ -251,6 +226,7 @@ Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer
 |-----------|------|---------|
 | Client → Server | `prompt` | Send a user message (queued if busy) |
 | Client → Server | `steer` | Mid-turn interrupt or queued-as-steered |
+| Client → Server | `follow_up` | Continue after agent idle (different RPC) |
 | Client → Server | `steer_queued` | Promote queued message to steered priority |
 | Client → Server | `remove_queued` | Remove a message from the queue |
 | Client → Server | `reorder_queue` | Reorder queue to match given ID array |
@@ -265,11 +241,9 @@ Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer
 
 | File | Role |
 |------|------|
-| `src/server/agent/prompt-queue.ts` | Durable FIFO and delivery ownership (`dispatching`, `awaiting-ack`, `retrying`) with stable priority ordering. |
-| `src/server/agent/session-manager.ts` | Queue publication, dispatch/recovery, downstream ACK settlement, restore fencing, legacy steer reconciliation, and lifecycle. |
-| `src/server/agent/rpc-bridge.ts` | Versioned delivery handshake and framed prompt/steer transport. |
-| `defaults/tools/_prompt-delivery/extension.ts` | Pi input reservation, duplicate suppression, envelope stripping, and durable ACK publication. |
-| `src/server/ws/handler.ts` | WS command routing plus dormant-state fallback. |
+| `src/server/agent/prompt-queue.ts` | Queue data structure with priority sorting; `enqueue` / `dequeue` / `dequeueAllSteered` / `enqueueAtFront` / `remove` / `reorderByIds`. No `dispatched` flag, no `markDispatched`/`removeDispatched`/`resetDispatched`. |
+| `src/server/agent/session-manager.ts` | `enqueuePrompt()`, `drainQueue()`, `deliverLiveSteer()`, `steerQueued()`, single `_dispatchSteer()` site, `_consumeSteerEcho()`, `_reconcileAfterAbort()`, `forceAbort()`, lifecycle |
+| `src/server/ws/handler.ts` | WS command routing (`prompt`, `steer`, `follow_up`, etc.) |
 | `src/server/ws/protocol.ts` | `QueuedMessage`, `ManualRetryRequiredEvent`, `ProviderAuthRequiredEvent`, and client/server message unions |
 | `src/app/remote-agent.ts` | Client-side optimistic rendering, dedup, queue state |
 

@@ -197,12 +197,9 @@ opt-in.
 - `list_gates`, `list_tasks` (by arbitrary `goalId`), `get_task` — cross-goal
   gate/task boards.
 - `list_staff`, `list_mcp_servers` — staff agents and MCP servers.
-- `maintenance_inspect` (`probe=`) — GET-only maintenance probes. `gate_store`
-  requires `projectId` and reports partition bytes, migration/externalization,
-  retention cutoffs, compaction/reclaim metrics, and a bounded largest-record
-  inventory. Other probes cover orphaned worktrees/sessions, expired archives,
-  orphaned index rows, worktree/sandbox pools, and search stats. See
-  [Gate store persistence](gate-store-persistence.md#maintenance-and-metrics).
+- `maintenance_inspect` (`probe=`) — the GET-only maintenance probes (orphaned
+  worktrees/sessions, expired archives, orphaned index rows, worktree/sandbox
+  pools, search stats).
 
 ### `bobbit_orchestrate` — runtime state mutations
 

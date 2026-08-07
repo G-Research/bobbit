@@ -10,12 +10,6 @@ The Maintenance tab is user-facing, but the same actions are exposed through RES
 
 The card shows the active path, startup source, default path, persisted/pending path, effective next-start path, restart guidance, and environment override impact. It also exposes a copy-only migration flow from the active/historical directory to the pending directory. See [Configurable agent directory](configurable-agent-directory.md) and [REST API — Agent directory](rest-api.md#agent-directory).
 
-## Gate store inspection
-
-Gate persistence has a read-only project-scoped maintenance probe because large historical state must be diagnosable without destructive cleanup. Call `bobbit_read(operation="maintenance_inspect", probe="gate_store", projectId="<id>")` or `GET /api/maintenance/gate-store?projectId=<id>` to inspect migration bytes, externalization, partition totals, retention/compaction, payload reclaim state, and the bounded largest-record inventory.
-
-The scan runs in a worker, coalesces concurrent requests, and never falls back to a synchronous directory walk. Treat a retryable `503` as inspection unavailability, not as permission to delete `gates.json`, staging roots, or payloads manually. See [Gate store persistence](gate-store-persistence.md#maintenance-and-metrics).
-
 ## Worktree Cleanup
 
 **Settings → Maintenance → Worktree Cleanup** is the canonical surface for Bobbit-created host worktrees that outlive the active record that originally owned them. It replaces the older separate **Orphaned Worktrees** and **Archived Session Worktrees** cards while keeping their REST routes as compatibility adapters.

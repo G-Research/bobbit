@@ -290,7 +290,6 @@ function filterArchivedRows(data: unknown, itemKey: string, stripKeys: string[] 
 
 // GET-only maintenance probes for bobbit_read.maintenance_inspect.
 const PROBE_PATHS: Record<string, string> = {
-	gate_store: "/api/maintenance/gate-store",
 	orphaned_worktrees: "/api/maintenance/orphaned-worktrees",
 	orphaned_sessions: "/api/maintenance/orphaned-sessions",
 	expired_archives: "/api/maintenance/expired-archives",
@@ -303,7 +302,7 @@ const PROBE_PATHS: Record<string, string> = {
 	search_stats: "/api/search/stats",
 };
 
-const MAINTENANCE_PROJECT_FILTER_PROBES = new Set(["gate_store", "orphaned_index_rows", "search_stats", "worktree_pool", "sandbox_status"]);
+const MAINTENANCE_PROJECT_FILTER_PROBES = new Set(["orphaned_index_rows", "search_stats", "worktree_pool", "sandbox_status"]);
 
 const MAINTENANCE_PAGE_SPECS: Record<string, PageSpec | undefined> = {
 	orphaned_worktrees: { itemKey: "worktrees" },

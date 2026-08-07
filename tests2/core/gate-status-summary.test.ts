@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { buildGateStatusSummary, projectGateForList } from "../../src/server/gate-status-summary.js";
+import { buildGateStatusSummary } from "../../src/server/gate-status-summary.js";
 import type { GateState } from "../../src/server/agent/gate-store.js";
 import type { ActiveVerification } from "../../src/server/agent/verification-harness.js";
 
@@ -17,33 +17,6 @@ function gate(status: GateState["status"], gateId = "implementation"): GateState
 		updatedAt: Date.now(),
 	};
 }
-
-describe("projectGateForList", () => {
-	it("omits body-complete verification cache before cloning without mutating the source", () => {
-		const marker = `INTERNAL_CACHE_BODY_${"x".repeat(128 * 1024)}`;
-		const source = {
-			...gate("passed"),
-			verificationCache: [{
-				commitSha: "cache-commit",
-				updatedAt: 123,
-				stepResults: [{
-					sourceSignalId: "cache-signal",
-					sourceTimestamp: 123,
-					step: { name: "cached command", type: "command", passed: true, output: marker, duration_ms: 1 },
-				}],
-			}],
-		};
-		const originalCache = source.verificationCache;
-
-		const projected = projectGateForList(source);
-
-		assert.equal("verificationCache" in projected, false);
-		assert.equal(JSON.stringify(projected).includes(marker), false);
-		assert.equal(source.verificationCache, originalCache, "source cache identity must remain untouched");
-		assert.equal(source.verificationCache[0]?.stepResults[0]?.step.output, marker);
-		assert.equal(projected.status, "passed");
-	});
-});
 
 describe("buildGateStatusSummary", () => {
 	it("overlays active verification on an already-passed gate", () => {

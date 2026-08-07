@@ -105,7 +105,7 @@ export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): Ga
 	const gateState = gateStore.getGate(goalId, gate.id);
 	if (!gateState) return undefined;
 	const invalidatedAt = gateState.verificationCacheInvalidatedAt;
-	const priorPassed = gateStore.getVerificationCacheSignals(goalId, gate.id).find((signal) =>
+	const priorPassed = gateState.signals.find((signal) =>
 		signal.commitSha === commitSha
 		&& signal.verification.status === "passed"
 		&& (invalidatedAt === undefined || signal.timestamp > invalidatedAt)

@@ -124,8 +124,8 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			const humanDispatches = readAuthorSidecar(sessionId).filter(binding =>
 				promptAuthorBindingMatchesText(binding, STEER_TEXT),
 			);
-			expect(humanDispatches).toHaveLength(1);
-			expect(humanDispatches[0].settlement?.outcome).toBe("echoed");
+			expect(humanDispatches).toHaveLength(2);
+			expect(humanDispatches.map(binding => binding.settlement?.outcome).sort()).toEqual(["cancelled", "echoed"]);
 			expect(humanDispatches.every(binding => (binding as any).modelPrefix === undefined)).toBe(true);
 			expect(sm.resolveStoreForSession(sessionId).get(sessionId)?.inFlightSteerTexts ?? []).toHaveLength(0);
 		} finally {
@@ -196,8 +196,8 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			const agentDispatches = readAuthorSidecar(sessionId).filter(binding =>
 				promptAuthorBindingMatchesText(binding, piText),
 			);
-			expect(agentDispatches).toHaveLength(1);
-			expect(agentDispatches[0].settlement?.outcome).toBe("echoed");
+			expect(agentDispatches).toHaveLength(2);
+			expect(agentDispatches.map(binding => binding.settlement?.outcome).sort()).toEqual(["cancelled", "echoed"]);
 			expect(agentDispatches.every(binding => (binding as any).modelPrefix === AGENT_PREFIX)).toBe(true);
 			expect(sm.resolveStoreForSession(sessionId).get(sessionId)?.inFlightSteerTexts ?? []).toHaveLength(0);
 		} finally {
