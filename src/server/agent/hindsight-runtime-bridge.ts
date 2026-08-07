@@ -16,9 +16,7 @@ import {
 } from "../../shared/hindsight/runtime-settings.js";
 import {
 	createHindsightMigrationPlan,
-	executeHindsightMigration,
 	type HindsightMigrationPlan,
-	type LogicalMigrationRunner,
 	type MigrationStorage,
 } from "../../shared/hindsight/migration.js";
 import {
@@ -118,13 +116,15 @@ export class HindsightRuntimeSettingsResolver {
 		const materialized = materializeHindsightRuntimeSettings(publicRuntimeValues(runtime.values), runtime.revision, secretValues(runtime.values));
 		if (!materialized.ok) throw new ServiceRuntimeError(materialized.code);
 		if (materialized.mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
-		const dataDir = this.ownedDataDir(resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values)).dataDir);
+		const resolved = resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values));
+		const dataDir = this.ownedDataDir(resolved.dataDir);
 		return {
 			mode: materialized.mode,
 			revision: materialized.revision,
 			values: materialized.values,
 			storage: { dataPath: dataDir, ownedRoot: path.join(this.context.stateDir, "service-data") },
 			imageOverride: materialized.values.HINDSIGHT_OCI_IMAGE,
+			storageIdentity: hindsightStorageIdentity(this.projectId, materialized.mode, resolved.databaseMode, materialized.secrets.externalDatabaseUrl),
 		};
 	}
 
@@ -257,9 +257,11 @@ export class HindsightRuntimeBridge {
 		if (mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 		const request = { packId: HINDSIGHT_PACK_ID, runtimeId: HINDSIGHT_RUNTIME_ID, projectId };
 		if (action === "stop") return this.supervisor(projectId).stop(request);
-		if (action === "restart") await this.supervisor(projectId).stop(request);
 		const settings = this.settings(projectId);
-		return safeStatusDiagnostic(await this.supervisor(projectId).start(request), settings.modelDiagnostic(), settings.ociWarning());
+		const status = action === "restart"
+			? await this.supervisor(projectId).restart(request)
+			: await this.supervisor(projectId).start(request);
+		return safeStatusDiagnostic(status, settings.modelDiagnostic(), settings.ociWarning());
 	}
 
 	async logs(projectId: string): Promise<string | undefined> {
@@ -286,22 +288,12 @@ export class HindsightRuntimeBridge {
 		return plan.ok ? { ok: true, plan: plan.plan } : { ok: false, code: plan.code };
 	}
 
-	/** Server-owned execution refuses unsupported storage paths before writing.
-	 * This fail-closed adapter intentionally has no bind mount or raw connection
-	 * string in its public route surface. */
+	/** Logical migration requires a supplied connector. The generic runtime never
+	 * trusts a client plan or substitutes an empty target when none is present. */
 	async migrationExecute(projectId: string, body: unknown): Promise<HindsightMigrationRouteResult> {
+		void body;
 		this.require(projectId, "service.manage");
-		if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, code: "HINDSIGHT_MIGRATION_CONFIRMATION_REQUIRED" };
-		const input = body as { plan?: HindsightMigrationPlan; confirmation?: unknown };
-		if (!input.plan || typeof input.confirmation !== "string") return { ok: false, code: "HINDSIGHT_MIGRATION_CONFIRMATION_REQUIRED" };
-		const source = this.migrationStorage(projectId);
-		if (!source || !sameStorage(source, input.plan.source)) return { ok: false, code: "HINDSIGHT_MIGRATION_PLAN_STALE" };
-		// Generic runtime intentionally does not expose a PostgreSQL connector. Do
-		// not substitute a new blank volume. The route exists and is bounded/fail
-		// closed until an operator supplies the external logical migration adapter.
-		const runner: LogicalMigrationRunner = unavailableMigrationRunner();
-		const result = await executeHindsightMigration(input.plan, input.confirmation, runner, AbortSignal.timeout(30_000));
-		return result;
+		return { ok: false, code: "HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE" };
 	}
 
 	require(projectId: string, capability: HindsightCapability): void {
@@ -363,17 +355,18 @@ function safeProjectToken(projectId: string): string {
 	return createHash("sha256").update(projectId).digest("hex").slice(0, 24);
 }
 
-function sameStorage(a: MigrationStorage, b: MigrationStorage): boolean {
-	return a.kind === b.kind && (a.kind === "managed-volume" && b.kind === "managed-volume" ? a.volume === b.volume : a.kind === "external" && b.kind === "external" && a.target === b.target);
+/** Only a deterministic digest is persisted; external URLs and credentials stay
+ * in EP-7's write-only secret owner. */
+function hindsightStorageIdentity(projectId: string, mode: "local" | "docker" | "compose", databaseMode: "managed-volume" | "external", externalDatabaseUrl?: string): string {
+	// A managed bank belongs to the runtime-specific volume/data owner; switching
+	// modes is therefore a migration boundary. The same external DB is portable.
+	if (databaseMode === "managed-volume") return `hindsight-managed-${mode}-${safeProjectToken(projectId)}`;
+	if (!externalDatabaseUrl) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+	return `hindsight-external-${createHash("sha256").update(externalDatabaseUrl).digest("hex").slice(0, 48)}`;
 }
 
-function unavailableMigrationRunner(): LogicalMigrationRunner {
-	const unavailable = async (): Promise<never> => { throw new ServiceRuntimeError("HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE"); };
-	return {
-		stopWriters: unavailable, dumpCustom: unavailable, validateDump: unavailable,
-		createTarget: unavailable, restoreCustom: unavailable, verify: unavailable,
-		switchActive: unavailable, restoreSourceRouting: unavailable,
-	};
+function sameStorage(a: MigrationStorage, b: MigrationStorage): boolean {
+	return a.kind === b.kind && (a.kind === "managed-volume" && b.kind === "managed-volume" ? a.volume === b.volume : a.kind === "external" && b.kind === "external" && a.target === b.target);
 }
 
 function safeExternalEndpoint(value: ExtensionSettingValue | undefined): string | undefined {

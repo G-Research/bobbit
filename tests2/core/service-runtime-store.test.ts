@@ -38,10 +38,10 @@ describe("ServiceRuntimeStore", () => {
 		const store = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" });
 		const identity = store.identity("@bobbit/hindsight", "hindsight");
 
-		await store.replace(identity, record());
-		await store.replace(identity, record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2" }));
+		await store.replace(identity, record({ storageIdentity: "hindsight-managed-0123456789abcdef" }));
+		await store.replace(identity, record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2", storageIdentity: "hindsight-managed-0123456789abcdef" }));
 
-		assert.deepEqual(await store.load(identity), record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2" }));
+		assert.deepEqual(await store.load(identity), record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2", storageIdentity: "hindsight-managed-0123456789abcdef" }));
 		const runtimeDir = path.join(root, "service-runtimes", Buffer.from("@bobbit/hindsight").toString("base64url"), "hindsight");
 		assert.equal((await stat(path.join(runtimeDir, "state.json"))).mode & 0o777, 0o600);
 		assert.equal((await stat(runtimeDir)).mode & 0o777, 0o700);
@@ -54,6 +54,10 @@ describe("ServiceRuntimeStore", () => {
 		const identity = store.identity("pack", "runtime");
 		await assert.rejects(
 			store.replace(identity, { ...record(), secret: "not-allowed" } as PersistedServiceRuntime),
+			(error: unknown) => error instanceof ServiceRuntimeStoreError && error.code === "SERVICE_RUNTIME_STORE_CORRUPT",
+		);
+		await assert.rejects(
+			store.replace(identity, record({ storageIdentity: "postgres://user:secret@db.example/hindsight" })),
 			(error: unknown) => error instanceof ServiceRuntimeStoreError && error.code === "SERVICE_RUNTIME_STORE_CORRUPT",
 		);
 
