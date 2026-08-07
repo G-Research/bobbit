@@ -3,6 +3,7 @@ import {
 	createToolResultFilterAttemptToken,
 	ToolResultFilterAttemptCredentials,
 } from "../../src/server/agent/tool-result-filter-attempt-credentials.js";
+import { SessionManager } from "../../src/server/agent/session-manager.js";
 
 const sessionId = "session-attempt";
 const toolCallId = "tool-call-1";
@@ -29,6 +30,16 @@ describe("ToolResultFilterAttemptCredentials", () => {
 		expect(credentials.consume(sessionId, "other-tool", token, issuedAt + 1)).toBe(false);
 		expect(credentials.consume(sessionId, toolCallId, "v1.bad", issuedAt + 1)).toBe(false);
 		expect(credentials.consume(sessionId, toolCallId, token, issuedAt + 10_001)).toBe(false);
+	});
+
+	it("does not revoke a live gate for a coordinator-only generation advance", () => {
+		const manager: any = new SessionManager();
+		const runtime = manager.toolResultFilterAttemptCredentials.beginRuntime(sessionId, 0);
+		const token = createToolResultFilterAttemptToken(runtime, sessionId, toolCallId, "3f2d78f4-bdcb-40ee-b0e1-7ac99f2df8db", issuedAt);
+		// poison-redrive obtains a lifecycle coordinator token but does not replace
+		// the Pi process; its live private gate must stay usable.
+		manager._nextRespawnGeneration(sessionId);
+		expect(manager.toolResultFilterAttemptCredentials.consume(sessionId, toolCallId, token, issuedAt + 1)).toBe(true);
 	});
 
 	it("invalidates old attempts on runtime replacement and teardown", () => {

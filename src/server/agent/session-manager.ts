@@ -2060,9 +2060,10 @@ export class SessionManager {
 
 	private _nextRespawnGeneration(sessionId: string): number {
 		const next = this._currentRespawnGeneration(sessionId) + 1;
-		// A replacement fences the old private Pi gate before it can submit a
-		// late raw result. The replacement obtains a fresh key during activation.
-		this.toolResultFilterAttemptCredentials.invalidate(sessionId);
+		// This is a lifecycle sequencing counter, not a process fence: a
+		// poison-redrive can advance it without replacing the live Pi process.
+		// Tool-result credentials rotate only when a replacement gate is prepared
+		// (beginRuntime) or the session is actually removed.
 		this._sessionRespawnGenerations.set(sessionId, next);
 		return next;
 	}
@@ -3901,7 +3902,7 @@ export class SessionManager {
 		projectId?: string,
 		effectiveGoalId?: string,
 		grantedTools?: string[],
-	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
+	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[]; toolResultFilterBootstrap?: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
 		// so restart/respawn/force-abort keep the same disablement initial setup
@@ -3935,11 +3936,13 @@ export class SessionManager {
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 		let toolResultGateEnv: Record<string, string> | undefined;
+		let toolResultFilterBootstrap: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined;
 		if (toolResultFilter?.toolResult) {
 			assertToolResultGatePiCompatibility();
-			const gatePath = writeToolResultFilterExtension(sessionId, this.toolResultFilterAttemptCredentials.beginRuntime(
+			toolResultFilterBootstrap = this.toolResultFilterAttemptCredentials.beginRuntime(
 				sessionId, this._currentRespawnGeneration(sessionId),
-			));
+			);
+			const gatePath = writeToolResultFilterExtension(sessionId);
 			if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
 			toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
 		}
@@ -3996,7 +3999,7 @@ export class SessionManager {
 			args.push("--extension", aigwDnsGuardPath);
 		}
 
-		return { args, env: { ...activation.env, ...toolResultGateEnv }, runtimeExtensions: piExtensionActivation.runtimeExtensions };
+		return { args, env: { ...activation.env, ...toolResultGateEnv }, runtimeExtensions: piExtensionActivation.runtimeExtensions, toolResultFilterBootstrap };
 	}
 
 	private messageAuthorDependencies(
@@ -7929,6 +7932,7 @@ export class SessionManager {
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
+		bridgeOptions.toolResultFilterBootstrap = restoredActivation.toolResultFilterBootstrap;
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
@@ -10378,6 +10382,7 @@ export class SessionManager {
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		bridgeOptions.toolResultFilterBootstrap = respawnActivation.toolResultFilterBootstrap;
 
 		// Pin one exact model/thinking tuple for the replacement. Model selection
 		// prefers the assigned role, while thinking independently prefers an explicit
@@ -12862,6 +12867,7 @@ export class SessionManager {
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			bridgeOptions.toolResultFilterBootstrap = forceActivation.toolResultFilterBootstrap;
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);

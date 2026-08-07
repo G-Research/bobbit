@@ -68,6 +68,24 @@ function expectTrustFailure(run: () => unknown): void {
 }
 
 describe("protected RpcBridge extension trust boundary", () => {
+	it("delivers a filter key once through private stdin, never the environment", async () => {
+		const secret = "b".repeat(64);
+		const options: any = {
+			env: { BOBBIT_TOOL_RESULT_FILTER_GATE: "/fixture/gate.ts" },
+			toolResultFilterBootstrap: { runtimeGeneration: 9, runtimeKey: secret },
+		};
+		const bridge: any = new RpcBridge(options);
+		const writes: string[] = [];
+		bridge.process = { stdin: { write: (line: string, callback: (error?: Error) => void) => { writes.push(line); callback(); } } };
+
+		await bridge._writeToolResultFilterBootstrap();
+		expect(options.toolResultFilterBootstrap).toBeUndefined();
+		expect(options.env).not.toHaveProperty("BOBBIT_TOOL_RESULT_FILTER_BOOTSTRAP");
+		expect(writes).toEqual([JSON.stringify({ runtimeGeneration: 9, runtimeKey: secret }) + "\n"]);
+		expect(bridge.toolResultFilterBootstrap).toBeUndefined();
+		await expect(bridge._writeToolResultFilterBootstrap()).rejects.toThrow("bootstrap is unavailable");
+	});
+
 	it("allows only shipped and closed-list core-generated extension paths", () => {
 		const { builtinRoot, stateDir } = fixture();
 		const builtin = writeExtension(path.join(builtinRoot, "shell"));

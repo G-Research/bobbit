@@ -13,6 +13,7 @@ import {
 
 const sessionId = "ep14-extension-session";
 const canary = "EP14_EXTENSION_RAW_CANARY_must_not_escape";
+const bootstrap = { runtimeGeneration: 0, runtimeKey: "1".repeat(64) };
 let originalFetch: typeof globalThis.fetch;
 let originalGatewayUrl: string | undefined;
 let originalToken: string | undefined;
@@ -37,7 +38,7 @@ async function installGate(response: unknown): Promise<{ gate: (event: unknown) 
 	const coreFetch = vi.fn(async () => gatewayResponse);
 	globalThis.fetch = coreFetch as typeof globalThis.fetch;
 	const mod = await import(`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`);
-	const gate = mod.default();
+	const gate = mod.default(bootstrap);
 	await rm(temp, { recursive: true, force: true });
 	if (typeof gate !== "function") throw new Error("EP14 extension did not create its private Pi gate");
 	return { gate, coreFetch };
@@ -71,6 +72,8 @@ describe("generated tool-result filter Pi gate", () => {
 		expect(agentCorePatch).toContain("replaceResult?: boolean");
 		expect(codingAgentPatch).not.toContain("setToolResultGate");
 		expect(codingAgentPatch).toContain("BOBBIT_TOOL_RESULT_FILTER_GATE");
+		expect(codingAgentPatch).toContain("consumeCoreToolResultGateBootstrap");
+		expect(codingAgentPatch).toContain("input.pause()");
 		expect(codingAgentPatch).toContain("__bobbitCoreToolResultGate");
 		expect(codingAgentPatch).toContain("__bobbitCoreToolResultGateActive");
 		expect(codingAgentPatch).not.toContain("_toolResultGateState");
@@ -79,6 +82,8 @@ describe("generated tool-result filter Pi gate", () => {
 		expect(codingAgentPatch).not.toContain("$abort.call");
 		expect(codingAgentPatch).toContain("replaceResult: true");
 		const generatedGate = generateToolResultFilterExtension(sessionId);
+		expect(generatedGate).not.toContain(bootstrap.runtimeKey);
+		expect(generatedGate).not.toContain("const $runtimeKey =");
 		expect(generatedGate).toContain("const $abortCall = $call.bind($abort);");
 		expect(generatedGate).toContain("const $signalAddCall = $signalAdd ? $call.bind($signalAdd) : undefined;");
 		expect(generatedGate).toContain("$abortCall(controller)");
@@ -108,6 +113,9 @@ describe("generated tool-result filter Pi gate", () => {
 			expect(fs.statSync(mountRoot).mode & 0o777).toBe(0o755);
 			expect(fs.statSync(path.dirname(gatePath!)).mode & 0o777).toBe(0o755);
 			expect(fs.statSync(gatePath!).mode & 0o777).toBe(0o444);
+			const mountedSource = fs.readFileSync(gatePath!, "utf8");
+			expect(mountedSource).not.toContain(bootstrap.runtimeKey);
+			expect(mountedSource).not.toContain("BOBBIT_TOOL_RESULT_FILTER_BOOTSTRAP");
 		} finally {
 			resetToolResultFilterExtensionCache();
 			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
