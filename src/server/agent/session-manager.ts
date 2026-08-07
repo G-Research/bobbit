@@ -8475,9 +8475,11 @@ export class SessionManager {
 				const slash = selected.indexOf("/");
 				selectedProvider = selected.slice(0, slash);
 				selectedModelId = selected.slice(slash + 1);
+				// Recovery may only use the caller's explicit selection or the exact
+				// durable tuple. Do not manufacture a default: without either authority,
+				// activation must fail closed rather than silently changing behaviour.
 				const requestedThinking = isKnownThinkingLevel(preferredThinkingLevel)
-					?? isKnownThinkingLevel(persisted.effectiveThinkingLevel)
-					?? "medium";
+					?? isKnownThinkingLevel(persisted.effectiveThinkingLevel);
 				const clamped = await this.clampCurrentCatalogThinkingCandidate(
 					selected,
 					requestedThinking,
