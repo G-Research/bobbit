@@ -19,6 +19,11 @@ import { normalizeBasePath } from "../shared/base-path.js";
 
 export { isLoopbackHost, loopbackForBind };
 
+export function readPackageVersion(): string {
+	const cliDir = path.dirname(fileURLToPath(import.meta.url));
+	return (JSON.parse(fs.readFileSync(path.resolve(cliDir, "../../package.json"), "utf-8")) as { version: string }).version;
+}
+
 export interface CliArgs {
 	host: string;
 	port: number;
@@ -212,9 +217,15 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 }
 
 async function main() {
+	const argv = process.argv.slice(2);
+	if (argv.includes("--version")) {
+		process.stdout.write(`v${readPackageVersion()}\n`);
+		return;
+	}
+
 	// Wall-clock anchor for boot instrumentation — process-start (approx) to listen.
 	const bootWallT0 = Date.now();
-	const args = parseArgs(process.argv.slice(2));
+	const args = parseArgs(argv);
 
 	// --show-token: print token and exit
 	if (args.showToken) {
@@ -342,8 +353,7 @@ async function main() {
 		forceAuth: args.forceAuth,
 	});
 
-	const __cliDir = path.dirname(fileURLToPath(import.meta.url));
-	const pkgVersion = JSON.parse(fs.readFileSync(path.resolve(__cliDir, "../../package.json"), "utf-8")).version;
+	const pkgVersion = readPackageVersion();
 	// Set terminal tab title
 	process.stdout.write(`\x1b]0;Bobbit Server\x07`);
 	console.log(formatStartupBanner({
