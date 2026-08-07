@@ -22,7 +22,7 @@ const PRODUCTION_LIFECYCLE_BUDGET = "budget: { maxTokens: 1200, timeoutMs: 1500 
 const TEST_LIFECYCLE_BUDGET = "budget: { maxTokens: 1200, timeoutMs: 10000 }";
 const PACK_SRC = path.resolve(__dirname, "..", "..", "market-packs", PACK_NAME);
 const STUB_PATH = path.resolve(__dirname, "..", "..", "tests", "e2e", "hindsight-stub.mjs");
-const CONFIG_STORE_KEY = "provider-config:memory";
+const EXTERNAL_TEST_SECRET = "HINDSIGHT_EXTERNAL_FIXTURE_SECRET_MUST_NOT_ESCAPE";
 const DEPS_READY =
 	fs.existsSync(path.join(PACK_SRC, "pack.yaml")) &&
 	fs.existsSync(path.join(PACK_SRC, "lib", "provider.mjs")) &&
@@ -77,23 +77,27 @@ function installPack(headquartersDir: string): string {
 	return packDir;
 }
 
-function encodeStoreKey(key: string): string {
-	let out = "";
-	for (const byte of Buffer.from(key, "utf8")) {
-		const isAlnum = (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a);
-		out += isAlnum ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-	}
-	return out;
+function settingsPath(projectId: string): string {
+	return `/api/projects/${encodeURIComponent(projectId)}/extension-settings`;
 }
 
-function seedConfig(bobbitDir: string, config: Record<string, unknown> | null): void {
-	const file = path.join(bobbitDir, "state", "ext-store", PACK_NAME, `${encodeStoreKey(CONFIG_STORE_KEY)}.json`);
-	if (config === null) {
-		fs.rmSync(file, { force: true });
-		return;
-	}
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, JSON.stringify({ v: 1, value: config }), "utf-8");
+/** EP-7 is the sole Hindsight configuration owner. This fixture must not seed
+ * the retired pack-global record, which bypasses revisioning and redaction. */
+async function configureProvider(projectId: string, externalUrl: string, operatorCookie: string): Promise<void> {
+	const initial = await apiFetch(settingsPath(projectId));
+	expect(initial.status).toBe(200);
+	const { revision } = await initial.json() as { revision: number };
+	const saved = await apiFetch(`${settingsPath(projectId)}/${PACK_NAME}/provider/${PROVIDER_ID}`, {
+		method: "PATCH",
+		headers: { Cookie: operatorCookie },
+		body: JSON.stringify({
+			expectedRevision: revision,
+			values: { runtimeMode: "external", externalUrl, apiKey: EXTERNAL_TEST_SECRET },
+		}),
+	});
+	const body = await saved.text();
+	expect(saved.status, `canonical Hindsight settings save: ${body}`).toBe(200);
+	expect(body).not.toContain(EXTERNAL_TEST_SECRET);
 }
 
 async function setProviderDisabled(providers: string[]): Promise<void> {
@@ -197,7 +201,6 @@ describe("hindsight installed-provider worker boundary", () => {
 
 	test.afterAll(async () => {
 		await setProviderDisabled([PROVIDER_ID]).catch(() => {});
-		seedConfig(bobbitDir, null);
 		for (const sessionId of sessionIds) await deleteSession(sessionId).catch(() => {});
 		for (const cwd of cwds) fs.rmSync(cwd, { recursive: true, force: true });
 		if (stub) await stub.close().catch(() => {});
@@ -206,16 +209,12 @@ describe("hindsight installed-provider worker boundary", () => {
 	});
 
 	test("configured pack recalls and retains through ModuleHost and the host-store proxy", async () => {
-		seedConfig(bobbitDir, {
-			mode: "external",
-			externalUrl: stub.url,
-			bank: "bobbit",
-			namespace: "default",
-			autoRecall: true,
-			autoRetain: true,
-			recallBudget: 1200,
-			timeoutMs: 1500,
-		});
+		const callsBeforeConfig = stub.calls.length;
+		await configureProvider(projectId, stub.url, operatorCookie);
+		// EP-7 save is inert: configuration cannot probe the provider.
+		expect(stub.calls).toHaveLength(callsBeforeConfig);
+		await grant(projectId, "memory.read", operatorCookie);
+		await grant(projectId, "memory.write", operatorCookie);
 		await setProviderDisabled([]);
 		stub.seedMemories("bobbit", [{
 			text: "Use a feature flag for risky rollouts.",
@@ -258,14 +257,10 @@ describe("hindsight installed-provider worker boundary", () => {
 	});
 
 	test("routes receive authoritative scope through the real worker boundary and fail closed when it is missing", async () => {
-		seedConfig(bobbitDir, {
-			mode: "external",
-			externalUrl: stub.url,
-			bank: "bobbit",
-			namespace: "default",
-			recallBudget: 1200,
-			timeoutMs: 1500,
-		});
+		const callsBeforeConfig = stub.calls.length;
+		await configureProvider(projectId, stub.url, operatorCookie);
+		// Saving a newer EP-7 revision cannot contact the configured endpoint.
+		expect(stub.calls).toHaveLength(callsBeforeConfig);
 		await setProviderDisabled([]);
 		stub.seedMemories("bobbit", [{
 			text: "Route scope is host derived.",
@@ -277,8 +272,6 @@ describe("hindsight installed-provider worker boundary", () => {
 		cwds.push(cwd);
 		const scopedSession = await createSession({ cwd, projectId });
 		sessionIds.push(scopedSession);
-		await grant(projectId, "memory.read", operatorCookie);
-		await grant(projectId, "memory.write", operatorCookie);
 		const callsBeforeScopedRecall = stub.calls.length;
 		const recalled = await callHindsightRoute(scopedSession, "recall", { method: "POST", body: { query: "route scope" } });
 		expect(recalled.status).toBe(200);
@@ -307,8 +300,12 @@ describe("hindsight installed-provider worker boundary", () => {
 		// retaining a valid visible session-store partition for the route boundary.
 		const unscopedSession = await createSession({ cwd, projectId: "headquarters" });
 		sessionIds.push(unscopedSession);
-		// This request is deliberately authorized, then rejected by the route's
-		// missing authoritative scope. Do not conflate the two fail-closed seams.
+		// Configure and authorize this *separate* EP-7/EP-6 project so the result
+		// proves missing host scope itself fails closed, rather than merely dormant
+		// configuration doing so first.
+		const callsBeforeHeadquartersConfig = stub.calls.length;
+		await configureProvider("headquarters", stub.url, operatorCookie);
+		expect(stub.calls).toHaveLength(callsBeforeHeadquartersConfig);
 		await grant("headquarters", "memory.read", operatorCookie);
 		const callsBeforeUnscopedRecall = stub.calls.length;
 		const unscoped = await callHindsightRoute(unscopedSession, "recall", { method: "POST", body: { query: "must not reach remote" } });

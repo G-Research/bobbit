@@ -465,6 +465,7 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen([
 			"market-packs/hindsight/runtimes/hindsight.yaml",
 			"market-packs/hindsight/runtime/compose.yaml",
+			"market-packs/hindsight/providers/memory.yaml",
 		]),
 	},
 	{
@@ -1809,13 +1810,6 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary project configuration output",
 		reads: frozen([
 			{ expression: "path.join(tmpDir, \"project.yaml\")", count: 3 },
-		]),
-	},
-	{
-		consumer: "tests2/core/extension-settings-store.test.ts",
-		allowReason: "test-owned temporary project configuration output",
-		reads: frozen([
-			{ expression: "path.join(configDir, \"project.yaml\")", count: 2 },
 		]),
 	},
 	{

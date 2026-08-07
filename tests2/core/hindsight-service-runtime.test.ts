@@ -30,6 +30,9 @@ const authoritativeScopeContext = {
   goal: { id: "runtime-goal" },
 };
 
+/** Direct provider fixtures must model the host's live EP-6 allowance. */
+const liveMemoryGrant = { requireCapability: () => undefined };
+
 function store() {
   const values = new Map<string, unknown>();
   return {
@@ -91,7 +94,7 @@ describe("Hindsight generic runtime linkage", () => {
           },
           runtime: variant.runtime,
           prompt: "does every adapter use this endpoint?",
-          host: { store: store() },
+          host: { store: store(), memory: liveMemoryGrant },
           scopeContext: authoritativeScopeContext,
         } as never);
         assert.equal(result.blocks[0]?.content, "- same endpoint contract");

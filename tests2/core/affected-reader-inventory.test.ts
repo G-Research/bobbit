@@ -64,6 +64,7 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/integration/hindsight-external.test.ts", input: "tests/e2e/hindsight-stub.mjs" },
 	{ consumer: "tests2/core/hindsight-service-runtime.test.ts", input: "market-packs/hindsight/runtimes/hindsight.yaml" },
 	{ consumer: "tests2/core/hindsight-service-runtime.test.ts", input: "market-packs/hindsight/runtime/compose.yaml" },
+	{ consumer: "tests2/core/hindsight-service-runtime.test.ts", input: "market-packs/hindsight/providers/memory.yaml" },
 	{ consumer: "tests2/integration/service-runtime-docker.test.ts", input: "tests2/fixtures/service-runtime/compose.yaml" },
 	{ consumer: "tests2/integration/service-runtime-docker.test.ts", input: "tests2/fixtures/service-runtime/Dockerfile" },
 	{ consumer: "tests2/integration/service-runtime-docker.test.ts", input: "tests2/fixtures/service-runtime/runtime.yaml" },
@@ -220,7 +221,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(66);
+		expect(declared).toHaveLength(67);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
