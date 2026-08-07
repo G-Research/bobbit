@@ -133,10 +133,17 @@ describe("extension settings store", () => {
 			return originalWrite(file, ...args);
 		};
 
-		expect(() => store.compareAndSwap(ref, 1, {
-			values: { endpoint: "https://unpublished.example" },
-			secrets: { credential: unpublishedSecret },
-		})).toThrow(ExtensionSettingsSecretPersistenceError);
+		let thrown: unknown;
+		try {
+			store.compareAndSwap(ref, 1, {
+				values: { endpoint: "https://unpublished.example" },
+				secrets: { credential: unpublishedSecret },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ExtensionSettingsSecretPersistenceError);
+		expect(thrown).not.toHaveProperty("committedRevision");
 		expect(store.getPublicState()).toEqual({ schema: 1, revision: 1, targets: { [targetKey]: { values: { endpoint: "https://previous.example" } } } });
 		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toEqual({ endpoint: "https://previous.example", credential: oldSecret });
 
@@ -173,7 +180,11 @@ describe("extension settings store", () => {
 			thrown = error;
 		}
 		expect(thrown).toBeInstanceOf(ExtensionSettingsUnavailableError);
+		expect(thrown).toMatchObject({ code: "EXTENSION_SETTINGS_UNAVAILABLE", committedRevision: 1 });
+		expect(store.getPublicState()).toEqual({ schema: 1, revision: 1, targets: { [targetKey]: { values: {} } } });
 		expect(String(thrown)).not.toContain("must-not-escape");
+		expect(JSON.stringify(thrown)).not.toContain("must-not-escape");
+		expect(thrown).not.toHaveProperty("cause");
 	});
 
 	it("publishes multiple target secrets all-or-nothing in one owner-only replacement", () => {

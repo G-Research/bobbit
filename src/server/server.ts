@@ -89,7 +89,7 @@ import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surfa
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
-import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
+import { ExtensionSettingsUnavailableError, type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
 import { isValidExtensionSettingValue, reconcileExtensionSettingsValues, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
@@ -5735,6 +5735,11 @@ async function handleApiRoute(
 		invalidateResolverCaches();
 		broadcastToProject(projectId, { type: "extension_settings_updated", projectId, revision, ts: clock?.now() ?? Date.now() });
 	};
+	const broadcastCommittedExtensionSettingsInvalidation = (projectId: string, error: unknown): void => {
+		if (error instanceof ExtensionSettingsUnavailableError && error.committedRevision !== undefined) {
+			broadcastExtensionSettingsInvalidation(projectId, error.committedRevision);
+		}
+	};
 	const extensionGrantHook = (projectId: string | undefined, packId: string, hookId: string) => {
 		const pack = packContributionRegistry.list(projectId).find(candidate => candidate.packId === packId);
 		return pack?.hooks.find(hook => hook.id === hookId);
@@ -10342,7 +10347,11 @@ async function handleApiRoute(
 			try {
 				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, { ...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}), ...(Object.keys(publicValues).length ? { values: publicValues } : {}), ...(Object.keys(secrets).length ? { secrets } : {}) });
 				emitMutation(result, [ref]);
-			} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+			} catch (error) {
+				broadcastCommittedExtensionSettingsInvalidation(resolved.projectId, error);
+				const failure = extensionSettingsMutationFailure(error);
+				json(failure.body, failure.status);
+			}
 			return;
 		}
 		if (input.values !== undefined || input.enabled === undefined) { json({ error: "Pack settings changes require enabled", code: "EXTENSION_SETTINGS_INVALID_PACK_MUTATION" }, 400); return; }
@@ -10356,7 +10365,11 @@ async function handleApiRoute(
 			const refs = packTargets.map(target => target.ref);
 			const result = context.extensionSettingsStore.compareAndSwapMany(refs.map(ref => ({ ref, enabled: input.enabled as boolean })), input.expectedRevision);
 			emitMutation(result, refs);
-		} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+		} catch (error) {
+			broadcastCommittedExtensionSettingsInvalidation(resolved.projectId, error);
+			const failure = extensionSettingsMutationFailure(error);
+			json(failure.body, failure.status);
+		}
 		return;
 	}
 

@@ -79,10 +79,13 @@ export class ExtensionSettingsRevisionConflictError extends Error {
 
 export class ExtensionSettingsUnavailableError extends Error {
   readonly code = "EXTENSION_SETTINGS_UNAVAILABLE";
+  /** Candidate public revision that remained committed after failed compensation. */
+  readonly committedRevision?: number;
 
-  constructor() {
+  constructor(committedRevision?: number) {
     super("Extension settings are unavailable until the project configuration is repaired.");
     this.name = "ExtensionSettingsUnavailableError";
+    if (typeof committedRevision === "number" && Number.isSafeInteger(committedRevision) && committedRevision >= 0) this.committedRevision = committedRevision;
   }
 }
 
@@ -280,8 +283,8 @@ export class ExtensionSettingsStore {
     }
 
     // Fail before public publication when the owner-only state cannot be read.
-    // This is a value-free probe; a later filesystem persistence failure is the
-    // intentional partial-publication path below.
+    // This is a value-free probe; a later owner-only persistence failure attempts
+    // durable compensation of the already-published public candidate below.
     for (const mutation of mutations) {
       for (const field of Object.keys(mutation.secrets ?? {})) this.secretStore.has(mutation.ref, field);
     }
@@ -320,9 +323,9 @@ export class ExtensionSettingsStore {
       try {
         this.projectConfigStore.mutate(draft => draft.setExtensionSettings(current));
       } catch {
-        // We cannot claim atomic success if the compensation itself was not
-        // durable. Keep the response loud, unavailable, and value-free.
-        throw new ExtensionSettingsUnavailableError();
+        // Compensation did not persist, so the candidate public revision remains
+        // authoritative. Expose only that revision for metadata invalidation.
+        throw new ExtensionSettingsUnavailableError(candidate.revision);
       }
       if (error instanceof ExtensionSettingsSecretPersistenceError) throw error;
       // Secret owner errors must never expose a cause or any secret bytes.
