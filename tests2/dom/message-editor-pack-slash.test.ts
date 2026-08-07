@@ -24,6 +24,7 @@ let messageSendEvents: string[];
 let launcherFeedbackEvents: Array<{ kind?: string; message?: string }>;
 let feedbackListener: (e: Event) => void;
 let slashSkills: any[];
+let collisionClaims: Array<{ name: string }>;
 
 function installPrWalkthroughLauncher(): void {
 	installLaunchers([
@@ -76,11 +77,11 @@ async function setValue(el: any, value: string): Promise<void> {
 	t.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
 	await el.updateComplete;
 }
-async function pressEnter(el: any): Promise<void> {
+async function pressEnter(el: any, modifiers: KeyboardEventInit = {}): Promise<void> {
 	await el.updateComplete;
 	const t = textarea(el);
 	t.focus();
-	t.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+	t.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...modifiers }));
 	await new Promise((r) => setTimeout(r, 30));
 	await el.updateComplete;
 }
@@ -99,13 +100,14 @@ const isSlashMenuOpen = (el: any): boolean => !!el.querySelector(".slash-menu");
 
 beforeEach(() => {
 	slashSkills = [];
+	collisionClaims = [];
 	sendCalls = [];
 	messageSendEvents = [];
 	callRouteCalls = [];
 	vi.stubGlobal("fetch", async (input: any): Promise<Response> => {
 		const url = typeof input === "string" ? input : input?.url || String(input);
 		if (url.includes("/api/slash-skills")) {
-			return new Response(JSON.stringify({ skills: slashSkills }), { status: 200, headers: { "Content-Type": "application/json" } });
+			return new Response(JSON.stringify({ skills: slashSkills, collisionClaims }), { status: 200, headers: { "Content-Type": "application/json" } });
 		}
 		return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
 	});
@@ -247,8 +249,10 @@ describe("MessageEditor pack composer slash dispatch", () => {
 		expect(sendCalls).toEqual([{ text: "/review ", attachmentCount: 0 }]);
 	});
 
-	it("a menu-hidden server skill still masks a same-name launcher at send time", async () => {
-		slashSkills = [{ name: "hidden", description: "Not invocable", source: "project", userInvocable: false }];
+	it("a server collision claim masks a same-name launcher without exposing it in the menu", async () => {
+		// This is the production wire shape: hidden winners are body-free claims,
+		// not fabricated invisible menu rows.
+		collisionClaims = [{ name: "hidden" }];
 		installLaunchers([{
 			id: "hidden", packId: "pack-hidden", kind: "composer-slash", label: "Hidden pack",
 			target: { action: "spawn", route: "run", panelId: "hidden.panel" },
@@ -261,6 +265,19 @@ describe("MessageEditor pack composer slash dispatch", () => {
 		await pressEnter(el);
 		expect(callRouteCalls).toEqual([]);
 		expect(sendCalls).toEqual([{ text: "/hidden", attachmentCount: 0 }]);
+	});
+
+	it("refuses launcher commands on Ctrl/Cmd+Enter instead of raw-steering them", async () => {
+		const steers: string[] = [];
+		const el = mount();
+		el.onSteerSend = (text: string) => { steers.push(text); return true; };
+		await setValue(el, "/pr-walkthrough 764");
+		await pressEnter(el, { ctrlKey: true });
+
+		expect(steers).toEqual([]);
+		expect(callRouteCalls).toEqual([]);
+		expect(sendCalls).toEqual([]);
+		expect(el.querySelector('[role="alert"]')?.textContent).toBe("Slash commands can’t be sent as steers. Press Enter to send a normal prompt.");
 	});
 
 	it("attachments and near-prefixes remain ordinary prompts instead of launcher dispatches", async () => {

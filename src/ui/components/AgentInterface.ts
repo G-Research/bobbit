@@ -2512,7 +2512,7 @@ export class AgentInterface extends LitElement {
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
 							.projectId=${this.projectId}
-							.runtime=${(state as { runtime?: unknown }).runtime === "claude-agent-sdk" ? "claude-agent-sdk" : "pi"}
+							.runtime=${(state as { runtime?: "pi" | "claude-agent-sdk" }).runtime}
 							.isStreaming=${state.isStreaming}
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}

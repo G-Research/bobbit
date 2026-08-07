@@ -461,7 +461,9 @@ test.describe("Slash Skills API", () => {
 		const { join } = await import("node:path");
 		const project = await defaultProject();
 		const skillDir = join(project.rootPath, ".claude", "skills", "test-skill");
+		const hiddenSkillDir = join(project.rootPath, ".claude", "skills", "hidden-skill");
 		mkdirSync(skillDir, { recursive: true });
+		mkdirSync(hiddenSkillDir, { recursive: true });
 		writeFileSync(join(skillDir, "SKILL.md"), `---
 name: test-skill
 description: A test skill for E2E
@@ -470,19 +472,31 @@ argument-hint: <thing>
 
 Do something with $ARGUMENTS.
 `);
+		writeFileSync(join(hiddenSkillDir, "SKILL.md"), `---
+name: hidden-skill
+description: Hidden collision claim
+user-invocable: false
+---
+
+Never expose this body to the composer.
+`);
 
 		try {
 			const resp = await apiFetch(`/api/slash-skills?projectId=${encodeURIComponent(project.id)}`);
 			expect(resp.status).toBe(200);
-			const { skills } = await resp.json();
+			const { skills, collisionClaims } = await resp.json();
 			expect(Array.isArray(skills)).toBe(true);
 			const testSkill = skills.find((s: any) => s.name === "test-skill");
 			expect(testSkill).toBeTruthy();
 			expect(testSkill.description).toBe("A test skill for E2E");
 			expect(testSkill.argumentHint).toBe("<thing>");
 			expect(testSkill.source).toBe("project");
+			expect(skills.find((s: any) => s.name === "hidden-skill")).toBeUndefined();
+			expect(collisionClaims).toContainEqual({ name: "hidden-skill" });
+			expect(collisionClaims.find((claim: any) => claim.name === "hidden-skill")).toEqual({ name: "hidden-skill" });
 		} finally {
 			rmSync(skillDir, { recursive: true, force: true });
+			rmSync(hiddenSkillDir, { recursive: true, force: true });
 		}
 	});
 
