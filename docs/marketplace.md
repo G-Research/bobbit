@@ -817,7 +817,8 @@ provider-bridge pi extension and are delivered as hidden `bobbit:dynamic-context
 custom/user-side messages, not appended to `systemPrompt`; `beforeCompact` also fires through the
 bridge but does not amend prompt content. `afterTurn` / `sessionShutdown` fire server-side. The
 first built-in production provider is the **[Hindsight memory pack](hindsight-memory.md)** —
-shipped in the built-in band but **dormant until a Hindsight URL is configured**, so a fresh
+shipped in the built-in band but **dormant until an external endpoint is configured or its selected
+managed runtime reaches ready**. Saving or selecting a managed mode does not start it, so a fresh
 install still contributes nothing until you opt in.
 #### Why providers are pack-scoped, *not* name-merged
 

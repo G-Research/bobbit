@@ -6,12 +6,12 @@
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 203
+    "v2-integration": 204
   },
   "methods": {
-    "adapter": 276,
+    "adapter": 277,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -1202,7 +1202,7 @@
     },
     {
       "path": "tests2/browser/e2e/pr-walkthrough-default-off.spec.ts",
-      "reason": "Part 1+2 of 'Hide/Disable PR & Hindsight': fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; plus hindsight is absent from the built-in group and from /api/marketplace/installed. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts.",
+      "reason": "Fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; Hindsight remains a visible first-party built-in. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2693,6 +2693,105 @@
         "runner": "vitest",
         "tier": "e2e",
         "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-experience-routes.test.ts",
+      "reason": "Typed Hindsight route and thin-tool adapter contract: canonical surface registration, live capability enforcement, authoritative scope, and bounded unavailable behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-runtime-settings.test.ts",
+      "reason": "Hindsight EP-7 runtime settings contract for redacted local-model, OCI, and database configuration without save-time activation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-migration.test.ts",
+      "reason": "Logical PostgreSQL migration contract: owned volume, compatibility and fingerprint confirmation, backup, rollback, and no legacy pg0 bind mount.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-experience-api.test.ts",
+      "reason": "Gateway integration coverage for Hindsight EP-7 revisions/redaction, EP-6 grants, and typed runtime and memory routes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-local-residency.test.ts",
+      "reason": "Integration contract for resident local-model diagnostics, sequential typed operations, no fallback, and bounded unhealthy behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/hindsight-experience.spec.ts",
+      "reason": "Browser journey for Hindsight configuration, grants, runtime controls, scoped memory actions, accessibility, and close/reload/uninstall cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/model-selection-required-recovery.test.ts",
+      "reason": "Failing-first actual-SessionManager cold-restore regression proving an authoritatively retired durable model tuple becomes an attachable, history-readable MODEL_SELECTION_REQUIRED capsule without Pi spawn, fallback, persistence mutation, or repeated attachment retries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/model-selection-required-prompt-boundary.test.ts",
+      "reason": "Server prompt-admission and model-change transport coverage proving conditioned sessions reject before preprocessing or durable/RPC mutation, retain parked prompts, route exact replacement tuples through cold recovery, and sanitize activation failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/model-selection-required-ux.test.ts",
+      "reason": "DOM regression coverage proving retired-model sessions remain readable and interactive, display the exact unavailable tuple, preserve the warning until verified recovery, and retain composer text and attachment drafts when sending is fenced.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/model-selection-recovery.journey.spec.ts",
+      "reason": "Registered Chromium journey proving cold-restored retired-model history remains navigable, rejected sends retain text and attachment drafts without mutation, the existing picker activates an exact selectable replacement, and recovered sends survive reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/vite-bundled-dev.test.ts",
+      "reason": "Vite config regression coverage proving development uses bundled browser chunks to avoid the large native-ESM request waterfall, guards Tailwind's unreleased bundled-dev hot-update fix, and keeps production asset URL rewriting separate.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],
@@ -17722,6 +17821,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
+    },
+    {
+      "file": "tests/e2e/hindsight-runtime-matrix.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
     }
   ]
 }

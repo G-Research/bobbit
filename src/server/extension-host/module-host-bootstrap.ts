@@ -158,11 +158,18 @@ interface SerializableCtx {
 	tool: string;
 	/** Host-resolved, structured-cloned advisory scope for route handlers. */
 	scopeContext?: HookScopeContext;
+	/** Generic service runtime projection supplied by the server route boundary. */
+	runtime?: { endpoint?: string; state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable"; diagnostic?: { code: string; retryAt?: string } };
 	workingDir?: string;
 	sessionArchived?: boolean;
+	/** Bounded, server-derived completed-goal snapshot for retain-outcome only. */
+	outcome?: unknown;
+	/** EP-7 effective configuration and bounded outcome copied from the server host. */
+	providerConfig?: Readonly<Record<string, unknown>>;
+	completedOutcome?: unknown;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean; memory: boolean };
 }
 
 /** Recreate the parent-owned absolute deadline as a worker-local AbortSignal.
@@ -506,6 +513,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			session: flags.session,
 			store: flags.store,
 			agents: flags.agents,
+			memory: flags.memory,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
 		store: {
@@ -528,6 +536,11 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		// SUB-GOAL C: the ambient `host.agents` namespace. Each verb marshals to the
 		// PARENT's live ServerHostApi (where owner/source scoping + recursion denial are
 		// enforced). Poll-based only — NO blocking `wait`.
+		memory: {
+			requireCapability: (capability: string) => callHost(["memory", "requireCapability"], [capability]),
+		},
+		...(ctx.providerConfig === undefined ? {} : { providerConfig: ctx.providerConfig }),
+		...(ctx.completedOutcome === undefined ? {} : { completedOutcome: ctx.completedOutcome }),
 		agents: {
 			spawn: (spawnOpts: unknown) => callHost(["agents", "spawn"], [spawnOpts]),
 			prompt: (childSessionId: string, message: string) => callHost(["agents", "prompt"], [childSessionId, message]),
@@ -732,6 +745,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				toolUseId: msg.ctx.toolUseId,
 				tool: msg.ctx.tool,
 				...(msg.ctx.scopeContext === undefined ? {} : { scopeContext: msg.ctx.scopeContext }),
+				...(msg.ctx.runtime === undefined ? {} : { runtime: msg.ctx.runtime }),
 				workingDir: msg.ctx.workingDir,
 				sessionArchived: msg.ctx.sessionArchived,
 			};

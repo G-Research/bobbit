@@ -80,7 +80,8 @@ function hostApi(store: PackStore, rejectQueueWrite = false): ServerHostApi {
 		packId: "hindsight",
 		contributionId: "providers/memory",
 		packStore: store,
-		capabilityMask: { store: true, session: false, agents: false },
+		memory: { requireCapability: () => {} },
+		capabilityMask: { store: true, session: false, agents: false, memory: true },
 	});
 	if (!rejectQueueWrite) return api;
 	return {

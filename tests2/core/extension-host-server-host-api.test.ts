@@ -60,6 +60,18 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 		const host = createServerHostApi({ sessionId: "s", packId: "", contributionId: "g/t" });
 		assert.equal((host as unknown as Record<string, unknown>).gateway, undefined);
 	});
+
+	it("confines injected provider secrets to the host context rather than capability projections", () => {
+		const secret = "hindsight-internal-api-key";
+		const host = createServerHostApi({
+			sessionId: "s", packId: "hindsight", contributionId: "routes/memory",
+			providerConfig: { externalUrl: "https://memory.test", apiKey: secret },
+			completedOutcome: { goal: { id: "goal-1", state: "complete" } },
+		});
+		assert.equal(host.providerConfig?.apiKey, secret, "the confined worker host receives the effective EP-7 auth material");
+		assert.deepEqual(host.completedOutcome, { goal: { id: "goal-1", state: "complete" } });
+		assert.doesNotMatch(JSON.stringify({ version: host.version, capabilities: host.capabilities }), new RegExp(secret));
+	});
 });
 
 describe("createServerHostApi — Fix B: NO server-side session.postMessage", () => {

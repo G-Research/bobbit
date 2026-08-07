@@ -1,8 +1,8 @@
 # Cold-restart re-prompt recovery
 
-When the gateway restarts, it restores every persisted session and revives its
-agent process. Two boot-recovery mechanisms then re-prompt restored sessions so
-work resumes without operator intervention:
+When the gateway restarts, it revives the agent process for each ordinarily
+restorable persisted session. Two boot-recovery mechanisms then re-prompt those
+sessions so work resumes without operator intervention:
 
 1. **Mid-turn re-prompt** — a session that was *streaming* (mid-turn) when the
    gateway died is told to continue from where it left off.
@@ -10,10 +10,16 @@ work resumes without operator intervention:
    outstanding work (an unresolved workflow gate or an open task) is nudged to
    pick that work back up, rather than sitting idle until the stuck-sweep tick.
 
-This document covers the shared readiness/timeout plumbing both paths use, the
-`coldStart` enqueue option, and the coordination that stops them double-prompting
-the same agent. For the verification-harness reviewer-resume path — which is a
-third consumer of the same helper — see
+A session in `MODEL_SELECTION_REQUIRED` is the exception: it remains a
+processless, attachable recovery capsule, so boot recovery does not start,
+re-prompt, or nudge it. It stays readable until the user activates a verified
+replacement through the model picker. See
+[Restored session requires a model](debugging.md#restored-session-requires-a-model).
+
+This document covers the shared readiness/timeout plumbing both ordinary paths
+use, the `coldStart` enqueue option, and the coordination that stops them
+double-prompting the same agent. For the verification-harness reviewer-resume
+path — which is a third consumer of the same helper — see
 [verification-restart.md](verification-restart.md) and
 [internals.md — Cold-reviewer resume](internals.md#cold-reviewer-resume-readiness-wait--restart-interrupt-routing).
 
@@ -84,7 +90,9 @@ false interrupted-turn prompt.
 with a "the server restarted, continue where you left off" system message. It
 dispatches through `rpcClient.promptWhenReady(...)` (fire-and-forget with a
 `.catch()` so a failure is logged and never throws), so a cold agent is woken
-before the prompt is sent and the prompt itself gets the generous timeout.
+before the prompt is sent and the prompt itself gets the generous timeout. A
+`MODEL_SELECTION_REQUIRED` capsule never reaches this restore path and is not
+re-prompted when a client attaches.
 
 `nonInteractive` reviewer / QA sessions are **excluded** here — they are re-driven
 exclusively by the verification harness (`resumeInterruptedVerifications` →

@@ -2,7 +2,7 @@ import path from "node:path";
 import pRetry from "p-retry";
 import type { RuntimeContribution } from "../agent/pack-contributions.js";
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
-import type { ServiceRuntimeManifest } from "./service-manifest.js";
+import { isSafeServiceImageReference, type ServiceRuntimeManifest } from "./service-manifest.js";
 import {
 	SERVICE_RUNTIME_STORE_ERROR,
 	ServiceRuntimeStore,
@@ -27,10 +27,22 @@ export interface ServiceRuntimeContext {
 	diagnostic?: { code: string; retryAt?: string };
 }
 
+/** Public status can also describe a configured external endpoint. External has
+ * no generic runner and therefore is never accepted by a control request. */
+export type ServiceRuntimeStatusMode = ServiceRuntimeMode | "external";
+
 export interface ServiceRuntimeStatus extends ServiceRuntimeContext {
 	identity: ServiceRuntimeIdentity;
 	desired: "stopped" | "running";
-	mode?: ServiceRuntimeMode;
+	mode?: ServiceRuntimeStatusMode;
+}
+
+/** The control result retains the exact settings snapshot revision that the
+ * supervisor applied. It is separate from the public status wire so callers
+ * cannot accidentally replace it with a later EP-7 read. */
+export interface ServiceRuntimeControlResult {
+	status: ServiceRuntimeStatus;
+	settingsRevision: string;
 }
 
 export interface ServiceRuntimeControlRequest extends ServiceRuntimeIdentity {
@@ -46,6 +58,18 @@ export interface ServiceRuntimeSettings {
 	values: Readonly<Record<string, string | undefined>>;
 	/** A canonical, descriptor-owned host path for the declared storage bind. */
 	storage?: RuntimeStorageDeclaration;
+	/** Validated user-selected OCI ref. It is materialized only for explicit start. */
+	imageOverride?: string;
+	/** Opaque settings-owner continuity key. The supervisor compares but never interprets it. */
+	storageIdentity?: string;
+	/**
+	 * Secrets resolved alongside `values` and `revision` for this exact explicit
+	 * control request. When present, materialization must not re-read the secret
+	 * owner: doing so could combine a new credential with old public settings.
+	 */
+	resolvedSecrets?: Readonly<Record<string, string | undefined>>;
+	/** A settings owner may fail closed where a selected backing is not durable. */
+	storageContinuity?: "verified" | "unsupported";
 }
 
 /** Settings are resolved only for explicit control or durable reconciliation. */
@@ -95,6 +119,18 @@ export class ServiceRuntimeError extends Error {
 		super(message, options);
 		this.name = "ServiceRuntimeError";
 	}
+}
+
+const STATUS_INSPECTION_TIMEOUT_MS = 2_000;
+
+function boundedStatusInspection<T>(work: Promise<T>): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new ServiceRuntimeError("SERVICE_UNAVAILABLE")), STATUS_INSPECTION_TIMEOUT_MS);
+		work.then(
+			value => { clearTimeout(timer); resolve(value); },
+			error => { clearTimeout(timer); reject(error); },
+		);
+	});
 }
 
 const realClock: ServiceRuntimeClock = {
@@ -184,7 +220,7 @@ function asControl(identity: ServiceRuntimeIdentity, request: Partial<ServiceRun
  * call the authorizer, settings, secret owner, runner start, or storage writer.
  */
 export class ServiceRuntimeSupervisor {
-	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeStatus> }>();
+	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeControlResult> }>();
 	private readonly lifecycle = new Map<string, Promise<void>>();
 	private readonly restartTokens = new Map<string, number>();
 	/** Cancels detached periodic health work without letting reads schedule it. */
@@ -215,10 +251,19 @@ export class ServiceRuntimeSupervisor {
 				: base;
 		}
 		const contribution = this.options.registry.getRuntime(projectId, identity.packId, identity.runtimeId);
-		if (!contribution) return base;
+		// A persisted endpoint is never authority to use a removed or disabled
+		// contribution. Keep the durable ownership record for a pre-invalidation
+		// cleanup retry, but fail closed for every status/context reader.
+		if (!contribution) {
+			return {
+				...withoutEndpoint(base),
+				state: "unavailable",
+				diagnostic: { code: "SERVICE_RUNTIME_NOT_FOUND" },
+			};
+		}
 		try {
 			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
-			const inspected = await runner.inspect(await this.inspectInput(identity, contribution, record.runnerIdentity));
+			const inspected = await boundedStatusInspection(runner.inspect(await this.inspectInput(identity, contribution, record.runnerIdentity)));
 			if (!inspected) {
 				return { ...withoutEndpoint(base), state: "degraded", diagnostic: { code: "SERVICE_DOWN" } };
 			}
@@ -234,15 +279,39 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	start(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		return this.startWithResult(request).then(result => result.status);
+	}
+
+	/** Resolves and applies one settings-owner snapshot for explicit control. */
+	startWithResult(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
 		// Authorization is intentionally outside the shared in-flight operation:
 		// every public caller is checked before it can observe another caller's
-		// endpoint or status. Scheduled restarts call doStart directly below.
+		// endpoint or status. doStart rechecks the live grant when queued work applies.
 		return Promise.resolve()
 			.then(() => this.authorize(request, "start"))
 			.then(() => this.startAuthorized(request));
 	}
 
-	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
+		return this.enqueueStart(request, () => this.doStart(request, false));
+	}
+
+	/**
+	 * Restart retains the established stop-then-start lifecycle. It resolves one
+	 * immutable settings-owner snapshot, preflights continuity before stopping,
+	 * then applies that same snapshot without a second settings read.
+	 */
+	restart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		return this.restartWithResult(request).then(result => result.status);
+	}
+
+	restartWithResult(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
+		return Promise.resolve()
+			.then(() => this.authorize(request, "start"))
+			.then(() => this.enqueueStart(request, () => this.doRestart(request)));
+	}
+
+	private enqueueStart(request: ServiceRuntimeControlRequest, operation: () => Promise<ServiceRuntimeControlResult>): Promise<ServiceRuntimeControlResult> {
 		const key = identityKey(request);
 		const prior = this.inFlight.get(key);
 		if (prior) {
@@ -250,7 +319,7 @@ export class ServiceRuntimeSupervisor {
 			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 		}
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, true));
+		const promise = this.enqueueLifecycle(identity, operation);
 		this.inFlight.set(key, { mode: request.mode, promise });
 		void promise.finally(() => {
 			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
@@ -258,23 +327,50 @@ export class ServiceRuntimeSupervisor {
 		return promise;
 	}
 
+	private async doRestart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
+		// The queued restart rechecks the live start grant before resolving settings
+		// or touching the old resource. doStop and doStart retain their own live
+		// action fences as they apply their respective lifecycle changes.
+		await this.authorize(request, "start");
+		const contribution = this.requireContribution(request);
+		const settings = this.immutableSettingsSnapshot(await this.resolveControlSettings(request, contribution));
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		this.assertStorageContinuity(await this.options.store.load(identity), settings);
+		await this.doStop(request);
+		return this.doStart(request, false, false, settings);
+	}
+
 	stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		this.cancelRestart(identity);
-		this.cancelHealthMonitor(identity);
 		return this.enqueueLifecycle(identity, () => this.doStop(request));
+	}
+
+	/**
+	 * Removes only the runner-owned process/container/Compose project while the
+	 * old descriptor is still resolvable. This is intentionally distinct from
+	 * purge: it retains the durable record, environment artifact, generated
+	 * secrets, and any declared/named storage for diagnostics and retry.
+	 *
+	 * Marketplace lifecycle code must call this before invalidating a runtime
+	 * contribution; otherwise the descriptor needed to prove runner ownership is
+	 * no longer available and cleanup cannot be performed safely.
+	 */
+	removeOwnedResource(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		return this.enqueueLifecycle(identity, () => this.doRemoveOwnedResource(request));
 	}
 
 	purge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		this.cancelRestart(identity);
-		this.cancelHealthMonitor(identity);
 		return this.enqueueLifecycle(identity, () => this.doPurge(request));
 	}
 
 	private async doStop(request: ServiceRuntimeControlRequest, alreadyAuthorized = false): Promise<ServiceRuntimeStatus> {
 		if (!alreadyAuthorized) await this.authorize(request, "stop");
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		// A denied control request must leave detached restart/health work alone.
+		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
 		const old = await this.options.store.load(identity);
 		if (!old) return recordContext(identity, undefined);
 		// Persist stopped intent and clear the endpoint before teardown, but retain
@@ -297,9 +393,52 @@ export class ServiceRuntimeSupervisor {
 		}
 	}
 
+	private async doRemoveOwnedResource(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		// Resolve the contribution before changing marketplace state. This also
+		// prevents a stale cleanup request from operating on an unrelated runner.
+		const contribution = this.requireContribution(request);
+		const old = await this.options.store.load(identity);
+		if (!old) return recordContext(identity, undefined);
+
+		// Authorization is deliberately reread at both mutation boundaries: a
+		// grant revoked while this cleanup was queued must prevent the persistent
+		// state change and the subsequent runner side effect.
+		await this.authorize(request, "stop");
+		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
+		const stopped = this.nextRecord(old, {
+			desired: "stopped",
+			endpoint: undefined,
+			lastDiagnostic: undefined,
+			restartAttempts: [],
+		});
+		await this.options.store.replace(identity, stopped);
+		if (!old.runnerIdentity) return recordContext(identity, stopped);
+
+		try {
+			const runner = selectServiceRunner(this.options.runners, old.runnerIdentity.kind);
+			const input = await this.controlInput(identity, contribution, old.runnerIdentity);
+			await this.authorize(request, "stop");
+			await runner.remove(input);
+			const removed = this.nextRecord(stopped, { runnerIdentity: undefined, lastDiagnostic: undefined });
+			await this.options.store.replace(identity, removed);
+			return recordContext(identity, removed);
+		} catch (error) {
+			const failed = this.nextRecord(stopped, { lastDiagnostic: toDiagnostic(error) });
+			try { await this.options.store.replace(identity, failed); }
+			catch (persistError) { this.options.logger?.warn("service runtime cleanup failure could not be recorded", { code: toDiagnostic(persistError).code }); }
+			this.options.logger?.warn("service runtime cleanup failed", { code: toDiagnostic(error).code });
+			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime cleanup failed", { cause: error });
+		}
+	}
+
 	private async doPurge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
 		await this.authorize(request, "purge");
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		// A denied purge must not suppress an independently authorized restart.
+		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
 		const contribution = this.requireContribution(request);
 		const settings = await this.options.settings.resolve({ ...request, contribution });
 		const old = await this.options.store.load(identity);
@@ -338,7 +477,7 @@ export class ServiceRuntimeSupervisor {
 				// happens to report a matching in-memory resource.
 				try {
 					const request = asControl(identity, { projectId, mode: "local" });
-					results.push(await this.enqueueLifecycle(identity, () => this.doStart(request, false, true)));
+					results.push((await this.enqueueLifecycle(identity, () => this.doStart(request, false, true))).status);
 				} catch { results.push(await this.status(identity, projectId)); }
 				continue;
 			}
@@ -348,26 +487,46 @@ export class ServiceRuntimeSupervisor {
 		return results;
 	}
 
-	private async doStart(request: ServiceRuntimeControlRequest, alreadyAuthorized: boolean, forceFresh = false): Promise<ServiceRuntimeStatus> {
+	private async doStart(
+		request: ServiceRuntimeControlRequest,
+		alreadyAuthorized: boolean,
+		forceFresh = false,
+		settingsSnapshot?: ServiceRuntimeSettings,
+	): Promise<ServiceRuntimeControlResult> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		try {
 			if (!alreadyAuthorized) await this.authorize(request, "start");
 			const contribution = this.requireContribution(request);
-			const settings = await this.options.settings.resolve({ ...request, contribution });
-			if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
+			const settings = settingsSnapshot ?? this.immutableSettingsSnapshot(await this.resolveControlSettings(request, contribution));
 			const prior = await this.options.store.load(identity);
+			// An unsupported backing may keep serving its exact already-ready
+			// resource, but it must fail closed before any start path could remove
+			// and recreate it. Inspection is read-only and does not resolve secrets.
+			if (prior && settings.storageContinuity === "unsupported") {
+				if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
+					this.startHealthMonitor(identity, this.restartRequest(request), contribution);
+					return { status: recordContext(identity, prior), settingsRevision: settings.revision };
+				}
+				throw new ServiceRuntimeError("SERVICE_CONTINUITY_REQUIRED");
+			}
+			this.assertStorageContinuity(prior, settings);
 			// A durable endpoint is only reusable when it names the current settings
 			// revision and the adapter proves that exact resource is still present.
 			if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
 				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
-				return recordContext(identity, prior!);
+				return { status: recordContext(identity, prior!), settingsRevision: settings.revision };
 			}
 			this.cancelHealthMonitor(identity);
+			// Settings resolution and ready-resource inspection are asynchronous. The
+			// live grant is therefore read again at the application boundary, directly
+			// before the first durable desired-state mutation.
+			await this.authorize(request, "start");
 			// Keep a prior ownership identity durable until its resource has actually
 			// been removed. A replacement must never launch over an unremoved stale
 			// resource, even though desired-running was committed first.
 			let desired = this.nextRecord(prior, {
 				desired: "running", selectedMode: settings.mode, settingsRevision: settings.revision,
+				storageIdentity: settings.storageIdentity,
 				endpoint: undefined, runnerIdentity: prior?.runnerIdentity, lastDiagnostic: undefined,
 			});
 			await this.options.store.replace(identity, desired);
@@ -377,17 +536,32 @@ export class ServiceRuntimeSupervisor {
 			try {
 				if (prior?.runnerIdentity) {
 					const staleRunner = selectServiceRunner(this.options.runners, prior.runnerIdentity.kind);
-					try { await staleRunner.remove(await this.controlInput(identity, contribution, prior.runnerIdentity)); }
-					catch (error) { return this.failStart(identity, desired, contribution, request, error, undefined, false); }
+					const staleInput = await this.controlInput(identity, contribution, prior.runnerIdentity);
+					await this.authorize(request, "start");
+					try { await staleRunner.remove(staleInput); }
+					catch (error) {
+						return {
+							status: await this.failStart(identity, desired, contribution, request, error, undefined, false),
+							settingsRevision: settings.revision,
+						};
+					}
 					desired = this.nextRecord(desired, { runnerIdentity: undefined });
 					await this.options.store.replace(identity, desired);
 				}
+				// Secret generation/resolution and environment persistence are mutations.
+				// Do not enter that materialization boundary on a revoked live grant.
+				await this.authorize(request, "start");
 				materialized = await this.materialize(identity, request, contribution, settings);
 				runner = selectServiceRunner(this.options.runners, settings.mode);
+				// Materialization awaits secret/storage-owner work, so fence the actual
+				// launch separately. Ownership persistence below deliberately has no
+				// intervening authorization await: a started resource is always recorded.
+				await this.authorize(request, "start");
 				started = await runner.start({
 					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile),
 					serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,
-					environment: materialized.environment, ...(materialized.envFile ? { envFile: materialized.envFile } : {}), storage: materialized.storage, redactions: materialized.secrets,
+					environment: materialized.environment, ...(materialized.envFile ? { envFile: materialized.envFile } : {}), storage: materialized.storage,
+					...(settings.imageOverride ? { imageOverride: settings.imageOverride } : {}), redactions: materialized.secrets,
 					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized!.secrets).catch(() => undefined); },
 				});
 				// A running resource is durably owned before readiness can fail.
@@ -397,14 +571,17 @@ export class ServiceRuntimeSupervisor {
 				const ready = this.nextRecord(desired, { endpoint: started.endpoint, lastDiagnostic: undefined });
 				await this.options.store.replace(identity, ready);
 				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
-				return recordContext(identity, ready);
+				return { status: recordContext(identity, ready), settingsRevision: settings.revision };
 			} catch (error) {
-				return this.failStart(identity, desired, contribution, request, error, started && runner
-					? async () => runner!.remove(await this.controlInput(identity, contribution, started!.runnerIdentity, materialized?.secrets))
-					: undefined);
+				return {
+					status: await this.failStart(identity, desired, contribution, request, error, started && runner
+						? async () => runner!.remove(await this.controlInput(identity, contribution, started!.runnerIdentity, materialized?.secrets))
+						: undefined),
+					settingsRevision: settings.revision,
+				};
 			}
 		} catch (error) {
-			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET/.test(error.code)) throw error;
+			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET|CONTINUITY/.test(error.code)) throw error;
 			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime start failed", { cause: error });
 		}
 	}
@@ -456,6 +633,33 @@ export class ServiceRuntimeSupervisor {
 		}
 		if (delay !== undefined) this.scheduleRestart(identity, request, delay);
 		return recordContext(identity, finalRecord);
+	}
+
+	private async resolveControlSettings(request: ServiceRuntimeControlRequest, contribution: RuntimeContribution): Promise<ServiceRuntimeSettings> {
+		const settings = await this.options.settings.resolve({ ...request, contribution });
+		if (settings.imageOverride !== undefined && !isSafeServiceImageReference(settings.imageOverride)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+		if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
+		return settings;
+	}
+
+	private immutableSettingsSnapshot(settings: ServiceRuntimeSettings): ServiceRuntimeSettings {
+		return Object.freeze({
+			...settings,
+			values: Object.freeze({ ...settings.values }),
+			...(settings.resolvedSecrets ? { resolvedSecrets: Object.freeze({ ...settings.resolvedSecrets }) } : {}),
+			...(settings.storage ? { storage: Object.freeze({ ...settings.storage }) } : {}),
+		});
+	}
+
+	private assertStorageContinuity(prior: PersistedServiceRuntime | undefined, settings: ServiceRuntimeSettings): void {
+		// Both sides are optional to preserve generic runtimes that do not own a
+		// continuity key. A legacy record without one is safely blocked if its
+		// settings owner now resolves one, rather than guessing that an unknown
+		// existing bank can be replaced. An explicitly unsupported backing must
+		// never be torn down/replaced as though it preserved durable state.
+		if (prior && (settings.storageContinuity === "unsupported" || prior.storageIdentity !== settings.storageIdentity)) {
+			throw new ServiceRuntimeError("SERVICE_CONTINUITY_REQUIRED");
+		}
 	}
 
 	private async isReusableReady(
@@ -536,10 +740,18 @@ export class ServiceRuntimeSupervisor {
 				const value = await this.options.store.getOrCreateGeneratedSecret(identity, source.generatedSecret);
 				environment[name] = value; secrets.push(value);
 			} else {
-				const value = this.options.settings.resolveSecret
-					? await this.options.settings.resolveSecret(source.secret, { ...request, contribution })
-					: await this.options.store.resolveUserSecret(source.secret);
-				if (!value) throw new ServiceRuntimeError("SERVICE_SECRET_UNAVAILABLE");
+				// A resolver-provided map is an immutable EP-7 snapshot. Never fall
+				// through to resolveSecret when it is present: a concurrent settings
+				// save must not splice new secret bytes into old public settings.
+				const value = settings.resolvedSecrets
+					? settings.resolvedSecrets[source.secret]
+					: this.options.settings.resolveSecret
+						? await this.options.settings.resolveSecret(source.secret, { ...request, contribution })
+						: await this.options.store.resolveUserSecret(source.secret);
+				if (!value) {
+					if (source.optional === true) continue;
+					throw new ServiceRuntimeError("SERVICE_SECRET_UNAVAILABLE");
+				}
 				environment[name] = value; secrets.push(value);
 			}
 		}
@@ -597,7 +809,9 @@ export class ServiceRuntimeSupervisor {
 			if (this.restartTokens.get(key) !== token) return;
 			const record = await this.options.store.load(identity).catch(() => undefined);
 			if (record?.desired !== "running") return;
-			try { await this.enqueueLifecycle(identity, () => this.doStart(this.restartRequest(request), true)); }
+			// A restart is detached from the caller that originally opted in. Resolve
+			// the live grant again only when its queued lifecycle work applies.
+			try { await this.enqueueLifecycle(identity, () => this.doStart(this.restartRequest(request), false)); }
 			catch (error) { this.options.logger?.warn("service runtime restart failed", { code: toDiagnostic(error).code }); }
 		})();
 	}

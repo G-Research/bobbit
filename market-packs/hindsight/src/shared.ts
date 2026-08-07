@@ -11,8 +11,14 @@ export interface HindsightClientLike {
 	retain(bank: string, content: string, opts?: { tags?: Tags; sync?: boolean; id?: string }): Promise<void>;
 	reflect(bank: string, prompt: string): Promise<{ text: string }>;
 	listBanks(): Promise<{ banks: string[] }>;
+	browse?(bank: string, opts?: { query?: string; cursor?: string; limit?: number; tags?: Tags; tagsMatch?: TagsMatch }): Promise<{ memories: Record<string, unknown>[]; cursor?: string }>;
+	detail?(bank: string, id: string): Promise<Record<string, unknown> | null>;
+	history?(bank: string, id: string): Promise<{ history: Record<string, unknown>[] }>;
+	reflectScoped?(bank: string, prompt: string, opts: { tags?: Tags; tagsMatch?: TagsMatch }): Promise<{ text: string }>;
+	invalidateMemory?(bank: string, id: string, opts?: { tags?: Tags; tagsMatch?: TagsMatch; reason?: string }): Promise<void>;
+	invalidate?(bank: string, id: string, opts?: { tags?: Tags; tagsMatch?: TagsMatch; reason?: string }): Promise<void>;
 }
-export interface ClientConfig { baseUrl: string; apiKey?: string; namespace?: string; timeoutMs?: number }
+export interface ClientConfig { baseUrl: string; apiKey?: string; namespace?: string; timeoutMs?: number; signal?: AbortSignal }
 export interface RuntimeContext { endpoint?: string; state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable"; diagnostic?: { code: string; retryAt?: string } }
 export type ManagedRuntimeMode = "local" | "docker" | "compose";
 export type ClientFactory = (cfg: ClientConfig) => HindsightClientLike | Promise<HindsightClientLike>;
@@ -113,6 +119,89 @@ export function isPendingEnvelope(v: unknown, expected?: HindsightIdentity): v i
 	return i.kind === "pending" && i.seq === undefined && scopeMatchesIdentity(s, i, true) && (!expected || sameIdentity(i, expected)) && (v.flushSeq === undefined || typeof v.flushSeq === "number" && Number.isSafeInteger(v.flushSeq) && v.flushSeq >= 0) && v.turns.every(t => isObj(t) && typeof t.summary === "string" && typeof t.capturedAt === "number" && Number.isFinite(t.capturedAt)) && v.overlap.every(x => typeof x === "string");
 }
 export function tagsForRecord(scope: ScopeProvenance, kind: "turn" | "compaction" | "outcome"): Tags { return { kind, project: scope.projectId, ...(scope.goalId ? { goal: scope.goalId } : {}), ...(scope.role ? { agent: scope.role } : {}), ...(scope.sessionId ? { session: scope.sessionId } : {}) }; }
+
+export interface CompletedOutcomeRetention {
+	content: string;
+	identity: HindsightIdentity;
+	documentId: string;
+	tags: Tags;
+	scope: ScopeProvenance;
+}
+
+function outcomeText(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** Render the server-owned completion snapshot once for both lifecycle delivery
+ * and the explicit route. It deliberately accepts the older flat shape as a
+ * migration compatibility input, but never receives a request body. */
+export function completionOutcomeSummary(outcome: unknown): string | undefined {
+	const lines = ["Goal outcome"];
+	const add = (label: string, value: unknown, cap = 480) => {
+		const valueText = typeof value === "string" ? value.trim() : typeof value === "number" || typeof value === "boolean" ? String(value) : "";
+		if (valueText) lines.push(`${label}: ${truncate(valueText.replace(/\s+/g, " "), cap)}`);
+	};
+	const addItems = (label: "Task" | "Gate", items: unknown) => {
+		if (!Array.isArray(items)) return;
+		for (const item of items.slice(0, 100)) if (isObj(item)) {
+			add(label, [item.title ?? item.name ?? item.id, item.state ?? item.status, item.resultSummary ?? item.summary ?? item.content].filter(value => typeof value === "string" && value.trim()).join(" — "));
+		}
+	};
+	if (typeof outcome === "string") add("Summary", outcome, 7_600);
+	else if (isObj(outcome)) {
+		const goal = outcome.goal;
+		if (isObj(goal)) {
+			const before = lines.length;
+			add("Goal title", goal.title);
+			add("Goal state", goal.state);
+			add("Goal spec", goal.spec);
+			if (lines.length === before) add("Goal", goal.id ?? "completed");
+		} else {
+			for (const key of ["title", "state", "spec", "summary", "content", "result", "decision", "completedAt"]) add(key[0]!.toUpperCase() + key.slice(1), outcome[key]);
+		}
+		addItems("Task", outcome.tasks);
+		addItems("Gate", outcome.gates);
+	}
+	let result = "";
+	for (const line of lines) {
+		if (result.length + line.length + 1 > 8_000) break;
+		result += `${result ? "\n" : ""}${line}`;
+	}
+	return result === "Goal outcome" ? undefined : result;
+}
+
+function completionRevision(input: unknown): string | undefined {
+	if (!isObj(input)) return undefined;
+	const revision = outcomeText(input.completionRevision)
+		?? (typeof input.completionRevision === "number" && Number.isFinite(input.completionRevision) ? String(input.completionRevision) : undefined)
+		?? (typeof input.completedAt === "number" && Number.isFinite(input.completedAt) ? String(input.completedAt) : undefined)
+		// Older host snapshots used an outcome id. It remains host-only and is
+		// treated as a revision, never passed through as a document id.
+		?? outcomeText(input.outcomeId)
+		?? outcomeText(input.id);
+	return revision ? `goal-completion:${revision}` : undefined;
+}
+
+/** Derive the one stable completion document identity shared by lifecycle and
+ * route retention. Outcome documents intentionally omit session/role tags: a
+ * goal completion belongs to its project and goal, not the panel session that
+ * happened to request an idempotent replay. */
+export function completedOutcomeRetention(
+	input: unknown,
+	scope: Pick<ScopeProvenance, "projectId" | "goalId">,
+	config: Pick<EffectiveConfig, "bank" | "namespace">,
+): CompletedOutcomeRetention | undefined {
+	if (!scope.projectId || !scope.goalId) return undefined;
+	const envelope = isObj(input) && "outcome" in input ? input : undefined;
+	const outcome = envelope ? envelope.outcome : input;
+	const eventId = completionRevision(envelope ?? input);
+	const content = completionOutcomeSummary(outcome);
+	if (!eventId || !content) return undefined;
+	const outcomeScope: ScopeProvenance = { projectId: scope.projectId, goalId: scope.goalId };
+	const identity: HindsightIdentity = { projectId: outcomeScope.projectId, goalId: outcomeScope.goalId, sessionId: eventId, bank: config.bank, namespace: config.namespace, kind: "outcome" };
+	return { content, identity, documentId: documentId(identity), tags: tagsForRecord(outcomeScope, "outcome"), scope: outcomeScope };
+}
+
 export function isQueueEntry(v: unknown): v is QueueEntry {
 	if (!isObj(v) || v.version !== 2 || !validIdentity(v.identity) || !validScope(v.scope) || typeof v.bank !== "string" || typeof v.namespace !== "string" || typeof v.content !== "string" || !isObj(v.tags) || typeof v.ts !== "number" || !Number.isFinite(v.ts) || typeof v.documentId !== "string" || (v.sync !== undefined && typeof v.sync !== "boolean")) return false;
 	const i = v.identity; if (i.kind !== "turn" && i.kind !== "compaction" && i.kind !== "outcome") return false;

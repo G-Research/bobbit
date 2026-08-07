@@ -30,6 +30,9 @@ const authoritativeScopeContext = {
   goal: { id: "runtime-goal" },
 };
 
+/** Direct provider fixtures must model the host's live EP-6 allowance. */
+const liveMemoryGrant = { requireCapability: () => undefined };
+
 function store() {
   const values = new Map<string, unknown>();
   return {
@@ -91,7 +94,7 @@ describe("Hindsight generic runtime linkage", () => {
           },
           runtime: variant.runtime,
           prompt: "does every adapter use this endpoint?",
-          host: { store: store() },
+          host: { store: store(), memory: liveMemoryGrant },
           scopeContext: authoritativeScopeContext,
         } as never);
         assert.equal(result.blocks[0]?.content, "- same endpoint contract");
@@ -213,8 +216,7 @@ describe("Hindsight generic runtime linkage", () => {
     assert.deepEqual(manifest.environment.HINDSIGHT_API_PORT, {
       endpointPort: true,
     });
-    assert.equal(manifest.storage.setting, "dataDir");
-    assert.equal(manifest.storage.survival, "preserve");
+    assert.equal("storage" in manifest, false, "Compose storage is owned by its durable named volume or a configured external database, never a host path descriptor");
     assert.deepEqual(Object.keys(manifest.modes).sort(), [
       "compose",
       "docker",
@@ -235,7 +237,9 @@ describe("Hindsight generic runtime linkage", () => {
       "compose",
     ]);
     assert.equal("llmApiKey" in providerDeclaration.config, false, "managed runtime secrets must not enter ordinary provider config");
-    assert.deepEqual(manifest.environment.HINDSIGHT_API_LLM_API_KEY, { secret: "llmApiKey" }, "the descriptor retains the write-only secret resolver seam");
+    assert.deepEqual(manifest.environment.HINDSIGHT_API_LLM_API_KEY, { secret: "localLlmApiKey", optional: true }, "loopback model starts do not require a placeholder key");
+    assert.deepEqual(manifest.environment.HINDSIGHT_API_DATABASE_URL, { secret: "externalDatabaseUrl", optional: true }, "managed-volume starts do not require an external database secret");
+    assert.deepEqual(providerDeclaration.config.localLlmResidency.values, ["resident"], "request-scoped model residency is unsupported");
     const projected = resolveConfig({ llmApiKey: "must-not-reach-provider" });
     assert.equal("llmApiKey" in projected, false, "legacy ordinary config never reaches the provider/client contract");
 
@@ -245,6 +249,9 @@ describe("Hindsight generic runtime linkage", () => {
     const compose = fs.readFileSync(composePath, "utf8");
     assert.match(compose, /127\.0\.0\.1::8888/);
     assert.match(compose, /restart: "no"/);
+    assert.match(compose, /hindsight-postgres:\/var\/lib\/postgresql\/data/, "Compose owns PostgreSQL through a durable named volume");
+    assert.match(compose, /HINDSIGHT_API_DATABASE_URL:-postgresql:\/\/hindsight:\$\{HINDSIGHT_DB_PASSWORD\}@db:5432\/hindsight/, "Compose falls back to its durable named-volume database when the external secret is absent");
+    assert.doesNotMatch(compose, /^\s*-\s*[^#\n]*pg0[^#\n]*:/m, "Compose must never bind-mount the live legacy pg0 directory");
     const source = fs.readFileSync(
       path.join(root, "market-packs/hindsight/src/shared.ts"),
       "utf8",

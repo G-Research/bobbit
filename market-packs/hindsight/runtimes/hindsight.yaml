@@ -1,5 +1,6 @@
-# Hindsight declares an endpoint consumer contract. The service supervisor owns all
-# lifecycle work; this descriptor supplies only validated runner inputs.
+# Hindsight's generic service-runtime descriptor. This is declarative only:
+# settings are resolved on explicit control and neither this file nor the provider
+# starts/probes/pulls a service during settings save or status reads.
 apiVersion: 1
 id: hindsight
 title: Hindsight
@@ -21,28 +22,42 @@ lifecycle:
     initialBackoffMs: 1000
     maxBackoffMs: 30000
 environment:
-  # The provider settings owner resolves this only for explicit starts.
+  # All local-model fields are materialized by the EP-7 bridge only after an
+  # explicit control request. No fallback provider is declared.
+  HINDSIGHT_LOCAL_LLM_PROVIDER:
+    setting: HINDSIGHT_LOCAL_LLM_PROVIDER
+  HINDSIGHT_LOCAL_LLM_MODEL_ID:
+    setting: HINDSIGHT_LOCAL_LLM_MODEL_ID
+  HINDSIGHT_LOCAL_LLM_BASE_URL:
+    setting: HINDSIGHT_LOCAL_LLM_BASE_URL
+  HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS:
+    setting: HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS
+  HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS:
+    setting: HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS
+  HINDSIGHT_LOCAL_LLM_KEEP_ALIVE:
+    setting: HINDSIGHT_LOCAL_LLM_KEEP_ALIVE
+  HINDSIGHT_OCI_IMAGE:
+    setting: HINDSIGHT_OCI_IMAGE
+  HINDSIGHT_DATABASE_MODE:
+    setting: HINDSIGHT_DATABASE_MODE
+  # The generic runtime secret owner receives these only for explicit starts.
   HINDSIGHT_API_LLM_API_KEY:
-    secret: llmApiKey
-  # Generated credentials remain in the runtime secret sink, never metadata.
+    secret: localLlmApiKey
+    optional: true
+  HINDSIGHT_API_DATABASE_URL:
+    secret: externalDatabaseUrl
+    optional: true
   HINDSIGHT_DB_PASSWORD:
     generatedSecret: databasePassword
-  # Local launch receives the supervisor-selected listener port through this key.
   HINDSIGHT_API_PORT:
     endpointPort: true
-  HINDSIGHT_DATA_DIR:
-    setting: dataDir
-storage:
-  setting: dataDir
-  target: /var/lib/postgresql/data
-  survival: preserve
 modes:
   local:
     command: hindsight
     args: [serve]
     portEnv: HINDSIGHT_API_PORT
   docker:
-    image: ghcr.io/vectorize-io/hindsight:latest@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
+    image: ghcr.io/vectorize-io/hindsight:0.8.6@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
   compose:
     file: ../runtime/compose.yaml
     service: api

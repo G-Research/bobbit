@@ -66,6 +66,7 @@ class FakeStore {
 	readonly environmentCalls: Array<Record<string, string>> = [];
 	readonly logCalls: Array<{ output: string; redactions: readonly string[] }> = [];
 	readonly generated = new Map<string, string>();
+	generatedSecretCalls = 0;
 	failReplace = false;
 	failLoad = false;
 
@@ -91,6 +92,7 @@ class FakeStore {
 		this.environmentCalls.push(structuredClone(environment));
 	}
 	async getOrCreateGeneratedSecret(_value: ServiceRuntimeIdentity, name: string): Promise<string> {
+		this.generatedSecretCalls += 1;
 		const existing = this.generated.get(name);
 		if (existing) return existing;
 		const created = `generated-${name}`;
@@ -104,29 +106,30 @@ class FakeStore {
 	async readLog(): Promise<string | undefined> { return "bounded diagnostic"; }
 }
 
-function runner(mode: ServiceRunner["mode"], hooks: Partial<Pick<ServiceRunner, "start" | "inspect" | "stop">> = {}): ServiceRunner {
+function runner(mode: ServiceRunner["mode"], hooks: Partial<Pick<ServiceRunner, "start" | "inspect" | "stop" | "remove">> = {}): ServiceRunner {
 	return {
 		mode,
 		start: vi.fn(hooks.start ?? (async () => ({ endpoint, runnerIdentity: { kind: mode, id: `${mode}-1` }, services: [] }))),
 		inspect: vi.fn(hooks.inspect ?? (async () => undefined)),
 		stop: vi.fn(hooks.stop ?? (async () => {})),
-		remove: vi.fn(async () => {}),
+		remove: vi.fn(hooks.remove ?? (async () => {})),
 	};
 }
 
 function supervisor(input: {
 	store?: FakeStore;
-	contribution?: RuntimeContribution | undefined;
+	contribution?: RuntimeContribution | null;
 	runners?: ServiceRunner[];
 	clock?: ServiceRuntimeClock;
 	probe?: ReturnType<typeof vi.fn>;
-	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined> };
+	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined>; storageIdentity?: string; storageContinuity?: "verified" | "unsupported"; resolvedSecrets?: Readonly<Record<string, string | undefined>> };
+	resolve?: ReturnType<typeof vi.fn>;
 	authorize?: ReturnType<typeof vi.fn>;
 	resolveSecret?: ReturnType<typeof vi.fn>;
 } = {}) {
 	const store = input.store ?? new FakeStore();
 	const authorize = input.authorize ?? vi.fn(async () => true);
-	const resolve = vi.fn(async () => input.settings ?? { mode: "local" as const, revision: "revision-1", values: { configValue: "configured" } });
+	const resolve = input.resolve ?? vi.fn(async () => input.settings ?? { mode: "local" as const, revision: "revision-1", values: { configValue: "configured" } });
 	const resolveSecret = input.resolveSecret ?? vi.fn(async () => "user-secret");
 	const runners = input.runners ?? [runner("local"), runner("docker"), runner("compose")];
 	const instance = new ServiceRuntimeSupervisor({
@@ -194,6 +197,28 @@ describe("ServiceRuntimeSupervisor", () => {
 		assert.deepEqual(store.logCalls, [{ output: "USER_SECRET=user-secret generated-TOKEN", redactions: ["user-secret", "generated-TOKEN"] }]);
 	});
 
+	it("materializes only the resolved secret snapshot and redacts it without a second secret lookup", async () => {
+		const local = runner("local", { start: async (input) => {
+			assert.equal(input.environment.USER_SECRET, "snapshot-secret");
+			assert.deepEqual(input.redactions, ["snapshot-secret", "generated-TOKEN"]);
+			return { endpoint, runnerIdentity: { kind: "local", id: "local-snapshot" }, services: [] };
+		} });
+		const resolveSecret = vi.fn(async () => "newly-rotated-secret");
+		const { instance, store } = supervisor({
+			runners: [local],
+			resolveSecret,
+			settings: {
+				mode: "local", revision: "revision-snapshot", values: { configValue: "configured" },
+				resolvedSecrets: { apiKey: "snapshot-secret" },
+			},
+		});
+
+		await expect(instance.start({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready" });
+		assert.equal(resolveSecret.mock.calls.length, 0, "a control uses its immutable settings/secret snapshot");
+		assert.deepEqual(store.environmentCalls[0], { FIXED: "fixed", CONFIG: "configured", USER_SECRET: "snapshot-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080" });
+		assert.ok(!JSON.stringify(store.replaceCalls).includes("snapshot-secret"));
+	});
+
 	it("keeps context, status, and diagnostics read-only while reporting a missing inspected service as degraded", async () => {
 		const store = new FakeStore();
 		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
@@ -223,6 +248,81 @@ describe("ServiceRuntimeSupervisor", () => {
 		});
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
 		assert.equal((local.inspect as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+	});
+
+	it("never projects a persisted ready endpoint after its contribution disappears", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+		const { instance } = supervisor({ store, contribution: null, runners: [runner("local")] });
+		assert.deepEqual(await instance.status(identity), {
+			identity,
+			desired: "running",
+			mode: "local",
+			state: "unavailable",
+			diagnostic: { code: "SERVICE_RUNTIME_NOT_FOUND" },
+		});
+		assert.deepEqual(await instance.context(identity), {
+			state: "unavailable",
+			diagnostic: { code: "SERVICE_RUNTIME_NOT_FOUND" },
+		});
+	});
+
+	for (const mode of ["local", "docker", "compose"] as const) {
+		it(`removes the owned ${mode} resource before contribution removal without purging durable state`, async () => {
+			const store = new FakeStore();
+			store.records.set(store.key(identity), record({
+				selectedMode: mode,
+				endpoint,
+				runnerIdentity: { kind: mode, id: `${mode}-1`, ...(mode === "compose" ? { composeProject: "fixture-server-1" } : {}) },
+			}));
+			const ownedRunner = runner(mode);
+			const { instance, authorize } = supervisor({ store, runners: [ownedRunner] });
+
+			assert.deepEqual(await instance.removeOwnedResource(identity), {
+				identity, desired: "stopped", mode, state: "stopped",
+			});
+			assert.equal((ownedRunner.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+			assert.equal((ownedRunner.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+			assert.equal(authorize.mock.calls.length, 2, "authorization is live at both cleanup side-effect boundaries");
+			const persisted = await store.load(identity);
+			assert.equal(persisted?.desired, "stopped");
+			assert.equal(persisted?.selectedMode, mode);
+			assert.equal(persisted?.endpoint, undefined);
+			assert.equal(persisted?.runnerIdentity, undefined);
+			assert.equal(persisted?.lastDiagnostic, undefined);
+			assert.equal(store.generated.size, 0, "runner cleanup never purges generated secrets");
+		});
+	}
+
+	it("fails closed before contribution cleanup when the live stop grant is denied", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+		const local = runner("local");
+		const { instance } = supervisor({ store, runners: [local], authorize: vi.fn(async () => false) });
+
+		await assert.rejects(instance.removeOwnedResource(identity), (error: unknown) => error instanceof ServiceRuntimeError && error.code === "SERVICE_AUTHORIZATION_DENIED");
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.deepEqual(await store.load(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+	});
+
+	it("keeps ownership durable and retryable when contribution cleanup fails", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "docker", id: "docker-1" } }));
+		const remove = vi.fn()
+			.mockRejectedValueOnce(Object.assign(new Error("daemon unavailable"), { code: "SERVICE_DOCKER_UNAVAILABLE" }))
+			.mockResolvedValueOnce(undefined);
+		const docker = runner("docker", { remove });
+		const { instance } = supervisor({ store, runners: [docker] });
+
+		await assert.rejects(instance.removeOwnedResource(identity), (error: unknown) => error instanceof ServiceRuntimeError && error.code === "SERVICE_UNAVAILABLE");
+		const failed = await store.load(identity);
+		assert.equal(failed?.desired, "stopped");
+		assert.equal(failed?.endpoint, undefined);
+		assert.deepEqual(failed?.runnerIdentity, { kind: "docker", id: "docker-1" });
+		assert.deepEqual(failed?.lastDiagnostic, { code: "SERVICE_UNAVAILABLE" });
+		await expect(instance.removeOwnedResource(identity)).resolves.toMatchObject({ desired: "stopped", state: "stopped" });
+		assert.equal(remove.mock.calls.length, 2);
+		assert.equal((await store.load(identity))?.runnerIdentity, undefined);
 	});
 
 	it("maps durable records to stopped, starting, blocked, unavailable, and ready without inventing endpoints", async () => {
@@ -267,15 +367,94 @@ describe("ServiceRuntimeSupervisor", () => {
 			await launched;
 			return { endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] };
 		} });
-		const authorize = vi.fn(async () => authorize.mock.calls.length !== 2);
+		const authorize = vi.fn(async () => authorize.mock.calls.length !== 6);
 		const { instance } = supervisor({ authorize, runners: [local], probe: vi.fn(async () => true) });
 
 		const permitted = instance.start({ ...identity, mode: "local" });
 		await flush();
 		await expect(instance.start({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
-		assert.equal(authorize.mock.calls.length, 2);
+		assert.equal(authorize.mock.calls.length, 6);
 		release();
 		await expect(permitted).resolves.toMatchObject({ state: "ready", endpoint });
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+	});
+
+	it("re-reads the live grant when applying a queued public start", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+		let releaseStop!: () => void;
+		const stopping = new Promise<void>((resolve) => { releaseStop = resolve; });
+		let allowed = true;
+		const authorize = vi.fn(async (_request: unknown) => allowed);
+		const local = runner("local", { stop: async () => stopping });
+		const { instance } = supervisor({ store, authorize, runners: [local] });
+
+		const stop = instance.stop({ ...identity, mode: "local" });
+		await flush();
+		const start = instance.start({ ...identity, mode: "local" });
+		await flush();
+		allowed = false;
+		releaseStop();
+		await stop;
+		await expect(start).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(authorize.mock.calls.length, 3);
+	});
+
+	it("fails closed after deferred settings revoke without applying any start side effects", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ runnerIdentity: { kind: "local", id: "stale-resource" } }));
+		let releaseSettings!: () => void;
+		let settingsResolving!: () => void;
+		const settingsReady = new Promise<void>((resolve) => { releaseSettings = resolve; });
+		const settingsResolvingPromise = new Promise<void>((resolve) => { settingsResolving = resolve; });
+		const resolve = vi.fn(async () => {
+			settingsResolving();
+			await settingsReady;
+			return { mode: "local" as const, revision: "revision-2", values: { configValue: "configured" } };
+		});
+		let allowed = true;
+		const authorize = vi.fn(async () => allowed);
+		const local = runner("local");
+		const { instance } = supervisor({ store, resolve, authorize, runners: [local] });
+
+		const start = instance.start({ ...identity, mode: "local" });
+		await settingsResolvingPromise;
+		allowed = false;
+		releaseSettings();
+
+		await expect(start).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		assert.equal(store.replaceCalls.length, 0, "revocation before desired persistence leaves the record untouched");
+		assert.equal(store.environmentCalls.length, 0);
+		assert.equal(store.generatedSecretCalls, 0);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(authorize.mock.calls.length, 3, "the application grant fence runs after settings resolve");
+	});
+
+	it("continues a start when the grant remains live through deferred settings", async () => {
+		let releaseSettings!: () => void;
+		let settingsResolving!: () => void;
+		const settingsReady = new Promise<void>((resolve) => { releaseSettings = resolve; });
+		const settingsResolvingPromise = new Promise<void>((resolve) => { settingsResolving = resolve; });
+		const resolve = vi.fn(async () => {
+			settingsResolving();
+			await settingsReady;
+			return { mode: "local" as const, revision: "revision-2", values: { configValue: "configured" } };
+		});
+		const authorize = vi.fn(async () => true);
+		const local = runner("local");
+		const { instance, store } = supervisor({ resolve, authorize, runners: [local] });
+
+		const start = instance.start({ ...identity, mode: "local" });
+		await settingsResolvingPromise;
+		releaseSettings();
+
+		await expect(start).resolves.toMatchObject({ state: "ready", endpoint });
+		assert.equal(authorize.mock.calls.length, 5, "each start application boundary reads the current grant");
+		assert.equal(store.environmentCalls.length, 1);
+		assert.equal(store.generatedSecretCalls, 1);
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 	});
 
@@ -310,6 +489,252 @@ describe("ServiceRuntimeSupervisor", () => {
 		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 3);
 		assert.deepEqual(clock.waits, []);
 		assert.deepEqual(store.replaceCalls.at(-1)?.restartAttempts, [0, 10]);
+	});
+
+	it("re-reads the live grant when applying a queued crash restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async (_request: unknown) => allowed);
+		const failing = runner("local", { start: async () => { throw Object.assign(new Error("unhealthy"), { code: "SERVICE_LAUNCH_FAILED" }); } });
+		const { instance, store } = supervisor({
+			clock,
+			authorize,
+			contribution: contribution(manifest({ lifecycle: { startPolicy: "manual", restart: { policy: "on-failure", maxAttempts: 1, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 } } })),
+			runners: [failing],
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		assert.deepEqual(clock.waits.map((wait) => wait.ms), [10]);
+		allowed = false;
+		clock.advance();
+		await flush();
+
+		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 1, "revocation prevents the queued restart launch");
+		assert.equal(authorize.mock.calls.length, 6);
+		assert.deepEqual(authorize.mock.calls[5]?.[0], { ...identity, action: "start" });
+		assert.deepEqual(store.replaceCalls.at(-1)?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.010Z" });
+	});
+
+	it("does not let a denied stop cancel an authorized queued restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async () => allowed);
+		const failing = runner("local", { start: async () => { throw Object.assign(new Error("unhealthy"), { code: "SERVICE_LAUNCH_FAILED" }); } });
+		const { instance } = supervisor({
+			clock,
+			authorize,
+			contribution: contribution(manifest({ lifecycle: { startPolicy: "manual", restart: { policy: "on-failure", maxAttempts: 2, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 } } })),
+			runners: [failing],
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		allowed = false;
+		await expect(instance.stop({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		allowed = true;
+		clock.advance();
+		await flush();
+
+		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 2, "the denied stop did not alter restart scheduling");
+	});
+
+	it("does not let a denied purge cancel an authorized queued restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async () => allowed);
+		const failing = runner("local", { start: async () => { throw Object.assign(new Error("unhealthy"), { code: "SERVICE_LAUNCH_FAILED" }); } });
+		const { instance } = supervisor({
+			clock,
+			authorize,
+			contribution: contribution(manifest({ lifecycle: { startPolicy: "manual", restart: { policy: "on-failure", maxAttempts: 2, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 } } })),
+			runners: [failing],
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		allowed = false;
+		await expect(instance.purge({ ...identity, confirmation: identity })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		allowed = true;
+		clock.advance();
+		await flush();
+
+		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 2, "the denied purge did not alter restart scheduling");
+	});
+
+	it("preflights restart continuity before mutating an existing resource", async () => {
+		const store = new FakeStore();
+		const old = record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:old-bank",
+		});
+		store.records.set(store.key(identity), old);
+		const local = runner("local");
+		const { instance, resolve } = supervisor({
+			store,
+			runners: [local],
+			settings: { mode: "docker", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-external:new-bank" },
+		});
+		const before = JSON.stringify(store.records.get(store.key(identity)));
+
+		await expect(instance.restartWithResult({ ...identity, mode: "docker" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		assert.equal(resolve.mock.calls.length, 1, "restart resolves one snapshot before continuity preflight");
+		assert.equal(JSON.stringify(store.records.get(store.key(identity))), before, "mismatch leaves the persisted record byte-for-byte unchanged");
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		const status = await instance.status(identity);
+		assert.deepEqual(status, { identity, desired: "running", mode: "local", state: "degraded", diagnostic: { code: "SERVICE_DOWN" } });
+		assert.ok(!JSON.stringify(status).includes("new-bank"), "continuity identities never surface in status");
+	});
+
+	it("blocks an unverified managed backing before a restart removes it", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "ephemeral-hindsight" },
+			storageIdentity: "hindsight-unverified-managed:local",
+		}));
+		const local = runner("local");
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			settings: {
+				mode: "local", revision: "revision-2", values: { configValue: "configured" },
+				storageIdentity: "hindsight-unverified-managed:local", storageContinuity: "unsupported",
+			},
+		});
+
+		await expect(instance.restart({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, "hindsight-unverified-managed:local");
+	});
+
+	it("uses the established stop-then-start path when restart continuity matches", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:stable-bank",
+		}));
+		const local = runner("local", {
+			start: async () => ({ endpoint: `${endpoint}/restarted`, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] }),
+		});
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			settings: { mode: "local", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-managed:stable-bank" },
+			probe: vi.fn(async () => true),
+		});
+
+		await expect(instance.restart({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready", endpoint: `${endpoint}/restarted` });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1, "restart keeps the normal stop phase after preflight");
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1, "restart keeps normal stale ownership removal");
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, "hindsight-managed:stable-bank");
+	});
+
+	it("restarts from one immutable settings snapshot despite a concurrent save", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:stable-bank",
+		}));
+		let resolvedSnapshot!: () => void;
+		const snapshotRead = new Promise<void>((resolve) => { resolvedSnapshot = resolve; });
+		let releaseResolution!: () => void;
+		const release = new Promise<void>((resolve) => { releaseResolution = resolve; });
+		let current = {
+			mode: "local" as const, revision: "revision-2", values: { configValue: "old-public" },
+			resolvedSecrets: { apiKey: "old-secret" }, storageIdentity: "hindsight-managed:stable-bank",
+		};
+		const resolve = vi.fn(async () => {
+			const captured = structuredClone(current);
+			resolvedSnapshot();
+			await release;
+			return captured;
+		});
+		const local = runner("local", {
+			start: async (input) => {
+				assert.equal(input.environment.CONFIG, "old-public");
+				assert.equal(input.environment.USER_SECRET, "old-secret");
+				return { endpoint: `${endpoint}/restarted`, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] };
+			},
+		});
+		const { instance, resolveSecret } = supervisor({ store, runners: [local], resolve, probe: vi.fn(async () => true) });
+
+		const restarting = instance.restartWithResult({ ...identity, mode: "local" });
+		await snapshotRead;
+		current = {
+			mode: "local", revision: "revision-3", values: { configValue: "new-public" },
+			resolvedSecrets: { apiKey: "new-secret" }, storageIdentity: "hindsight-managed:stable-bank",
+		};
+		releaseResolution();
+
+		await expect(restarting).resolves.toMatchObject({ settingsRevision: "revision-2", status: { state: "ready", endpoint: `${endpoint}/restarted` } });
+		assert.equal(resolve.mock.calls.length, 1, "restart never resolves a second generation after stop");
+		assert.equal(resolveSecret.mock.calls.length, 0, "the captured EP-7 secret pair is never mixed with a later generation");
+		assert.deepEqual(store.environmentCalls.at(-1), {
+			FIXED: "fixed", CONFIG: "old-public", USER_SECRET: "old-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080",
+		});
+		assert.equal(store.records.get(store.key(identity))?.settingsRevision, "revision-2");
+	});
+
+	it("rechecks a live grant after stop before launching a restart", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:stable-bank",
+		}));
+		let stopped = false;
+		const authorize = vi.fn(async ({ action }: { action: string }) => action !== "start" || !stopped);
+		const local = runner("local", { stop: async () => { stopped = true; } });
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			authorize,
+			settings: { mode: "local", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-managed:stable-bank" },
+		});
+
+		await expect(instance.restartWithResult({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0, "revocation prevents stale-resource removal and launch");
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(store.environmentCalls.length, 0);
+		const persisted = store.records.get(store.key(identity));
+		assert.equal(persisted?.desired, "stopped", "stopped ownership stays durable for an authorized retry");
+		assert.equal(persisted?.endpoint, undefined);
+		assert.deepEqual(persisted?.runnerIdentity, { kind: "local", id: "old-resource" });
+	});
+
+	it("blocks a legacy runtime without an identity when a settings owner now resolves one", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "legacy-resource" } }));
+		const local = runner("local");
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			settings: { mode: "local", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-managed:known-bank" },
+		});
+
+		await expect(instance.restart({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0, "legacy records require explicit migration rather than replacement");
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, undefined);
+	});
+
+	it("keeps legacy generic records compatible when no settings owner opts into continuity", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "legacy-resource" } }));
+		const local = runner("local", {
+			start: async () => ({ endpoint: `${endpoint}/legacy-restarted`, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] }),
+		});
+		const { instance } = supervisor({ store, runners: [local], probe: vi.fn(async () => true) });
+
+		await expect(instance.restart({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready", endpoint: `${endpoint}/legacy-restarted` });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, undefined);
 	});
 
 	it("persists stopped intent before teardown and cancels a pending restart", async () => {

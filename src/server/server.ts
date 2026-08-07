@@ -36,6 +36,7 @@ import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-
 import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { BOBBIT_APP_INFO } from "./app-info.js";
+import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "./cors.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
@@ -87,7 +88,9 @@ import type { StoreMutationOptions, StorePutOptions } from "../shared/extension-
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
 import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
+import { HindsightCapabilityError, HindsightRuntimeBridge, HindsightRuntimeSettingsResolver, isHindsightCapability } from "./agent/hindsight-runtime-bridge.js";
 import { isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
+import { ComposeServiceRunner, DockerServiceRunner, LocalServiceRunner, ServiceRuntimeStore, ServiceRuntimeSupervisor, type ServiceRuntimeContext } from "./service-runtime/index.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
@@ -631,7 +634,7 @@ import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, typ
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
-import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
+import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
@@ -3014,7 +3017,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return packs;
 	};
-	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
+	const extensionSettingsRuntimeLookup: ExtensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
 		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
 		if (!context) return { state: "absent" as const };
 		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
@@ -3035,7 +3038,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
 		try {
 			const store = context.extensionSettingsStore;
-			if (!store.hasTargetRecord(ref)) return { state: "absent" as const };
+			// Hindsight's lifecycle/runtime path has one canonical owner: its typed
+			// EP-7 provider settings. Do not resurrect a legacy pack-store config
+			// when no project row has been written; EP-7 defaults are the dormant,
+			// project-scoped source of truth from first use onward.
+			const canonicalHindsightProvider = packId === "hindsight" && kind === "provider" && id === "memory";
+			if (!canonicalHindsightProvider && !store.hasTargetRecord(ref)) return { state: "absent" as const };
 			const schema = kind === "provider" ? (contribution as any).configSchema : contribution.config;
 			const secretFields = Object.entries(schema ?? {})
 				.filter(([, descriptor]) => !!descriptor && typeof descriptor === "object" && (descriptor as { type?: unknown }).type === "secret")
@@ -3081,6 +3089,43 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		undefined,
 		extensionSettingsRuntimeLookup,
 	);
+	// Hindsight uses the existing project-scoped settings and live EP-6 resolver.
+	// Construction is inert: it neither resolves settings nor touches a service.
+	const hindsightServiceRunners = [new LocalServiceRunner(), new DockerServiceRunner(), new ComposeServiceRunner()];
+	const hindsightServerIdentity = `hindsight-${createHash("sha256").update(stateDir).digest("hex").slice(0, 24)}`;
+	const hindsightRuntimeBridge = new HindsightRuntimeBridge({
+		contributions: packContributionRegistry,
+		contextForProject: (projectId) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			return context ? { stateDir: context.stateDir, extensionSettingsStore: context.extensionSettingsStore } : undefined;
+		},
+		grants: (projectId, principal, capability) => createExtensionCapabilityGrantResolver({
+			contextForProject: (id) => {
+				const context = projectContextManager.getOrCreate(id);
+				return context ? { projectConfigStore: context.projectConfigStore } : undefined;
+			},
+			contributions: packContributionRegistry,
+		})(projectId, principal, capability),
+		supervisorForProject: (projectId, settings: HindsightRuntimeSettingsResolver) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			if (!context) throw new Error("PROJECT_NOT_FOUND");
+			return new ServiceRuntimeSupervisor({
+				registry: packContributionRegistry,
+				store: new ServiceRuntimeStore({ stateDir: context.stateDir, serverIdentity: hindsightServerIdentity }),
+				runners: hindsightServiceRunners,
+				authorizer: { authorize: request => createExtensionCapabilityGrantResolver({
+					contextForProject: (id) => {
+						const current = projectContextManager.getOrCreate(id);
+						return current ? { projectConfigStore: current.projectConfigStore } : undefined;
+					},
+					contributions: packContributionRegistry,
+				})(projectId, { kind: "pack", packId: request.packId }, "service.manage").allowed },
+				settings,
+				serverIdentity: hindsightServerIdentity,
+				logger: { warn: (message, details) => console.warn(`[hindsight-runtime] ${message}`, details?.code ?? "") },
+			});
+		},
+	});
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -3103,16 +3148,28 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// only coordinates owned by the dispatched session and never falls back to
 		// another project by goal id.
 		scopeContextResolver: (input) => resolveHookScopeContext(projectContextManager, input),
-		// Least-privilege, store-only host for provider hooks (capabilities.store ===
-		// true; session/agents denied) — gives a provider its own pack-scoped durable
-		// store via the same parent-authorized path routes use.
-		providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+		// Lifecycle providers receive only their pack store plus Hindsight's exact
+		// live EP-6 check. The resolver is re-read by the provider immediately before
+		// each automatic read/write, so an absent, denied, or revoked grant is a
+		// non-fatal no-op before queue mutation or network work.
+		providerHostApi: ({ sessionId, packId, projectId }) => createServerHostApi({
 			sessionId,
 			packId,
 			contributionId: "",
 			packStore: getPackStore(),
-			capabilityMask: { store: true, session: false, agents: false },
+			...(packId === "hindsight" && projectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (capability !== "memory.read" && capability !== "memory.write") throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(projectId, capability);
+					},
+				},
+			} : {}),
+			capabilityMask: { store: true, session: false, agents: false, memory: packId === "hindsight" && !!projectId },
 		}),
+		runtimeContextResolver: (input) => hindsightRuntimeBridge
+			? hindsightRuntimeBridge.context(input)
+			: { state: "unavailable", diagnostic: { code: "SERVICE_UNAVAILABLE" } },
 		gatewayInfo: () => {
 			try {
 				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -3873,10 +3930,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
 			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
-			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
+			res.setHeader("Access-Control-Allow-Methods", API_CORS_ALLOWED_METHODS.join(", "));
+			res.setHeader("Access-Control-Allow-Headers", API_CORS_ALLOWED_HEADERS.join(", "));
 
 			if (req.method === "OPTIONS") {
+				res.setHeader("Access-Control-Max-Age", API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 				res.writeHead(204);
 				res.end();
 				return;
@@ -3993,7 +4051,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionSettingsRuntimeLookup, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes, hindsightRuntimeBridge);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5273,6 +5331,16 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
+type ExtensionSettingsRuntimeLookup = (
+	projectId: string | undefined,
+	packId: string,
+	kind: "pack" | "provider" | "hook",
+	id?: string,
+) =>
+	| { state: "absent" }
+	| { state: "present"; enabled: boolean; values: Record<string, unknown> }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -5312,6 +5380,7 @@ async function handleApiRoute(
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
+	extensionSettingsRuntimeLookup?: ExtensionSettingsRuntimeLookup,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
 	commandRunner: CommandRunner = realCommandRunner,
@@ -5320,6 +5389,7 @@ async function handleApiRoute(
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
+	hindsightRuntimeBridge?: HindsightRuntimeBridge,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5334,6 +5404,7 @@ async function handleApiRoute(
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
 	const settingsCatalogue = extensionSettingsCatalogue!;
+	const settingsRuntimeLookup = extensionSettingsRuntimeLookup!;
 	type SettingsField = ExtensionSettingDefinition;
 	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
 	const isSettingsIdentifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
@@ -5435,6 +5506,36 @@ async function handleApiRoute(
 	};
 	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 
+	/**
+	 * The runtime descriptor is needed to prove runner ownership, so cleanup must
+	 * happen while the old contribution remains active. A failed cleanup rejects
+	 * the marketplace mutation before its activation/install state changes,
+	 * leaving the record and descriptor available for a later retry.
+	 */
+	const removeHindsightRuntimeBeforeContributionChange = async (
+		packName: string,
+		targetScope: InstallScope,
+		targetProjectId: string | undefined,
+		targetPackRoot: string,
+	): Promise<void> => {
+		if (packName !== "hindsight" || !hindsightRuntimeBridge) return;
+		const projectIds = targetScope === "project"
+			? (targetProjectId ? [targetProjectId] : [])
+			: [...projectContextManager.all()].map((context) => context.project.id);
+		for (const projectId of projectIds) {
+			const runtime = packContributionRegistry.getRuntime(projectId, "hindsight", "hindsight");
+			// A higher-precedence contribution with the same pack id belongs to a
+			// different scope and is not affected by this mutation.
+			if (!runtime || path.resolve(runtime.packRoot) !== path.resolve(targetPackRoot)) continue;
+			await hindsightRuntimeBridge.removeOwnedRuntimeForContributionChange(projectId);
+		}
+	};
+	const marketplacePackRoot = (scope: InstallScope, projectBase: string | undefined, packName: string, builtin = false): string => {
+		if (builtin) return path.join(resolveBuiltinPacksDir(config.builtinPacksDir), packName);
+		const base = scope === "project" ? projectBase : scope === "global-user" ? os.homedir() : headquartersDir();
+		return path.join(scopePaths(scope as PackScope, base ?? "").marketPacksRoot, packName);
+	};
+
 	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
 	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
 	// This is the one application-time resolver for server-owned pack principals.
@@ -5447,6 +5548,18 @@ async function handleApiRoute(
 		},
 		contributions: packContributionRegistry,
 	});
+	const hindsightRouteCapability = (routeName: string, body: unknown): "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all" | undefined => {
+		if (["runtime-control", "migration-plan", "migration-execute", "migration-rollback", "migration-purge"].includes(routeName)) return "service.manage";
+		if (["retain", "retain-outcome"].includes(routeName)) return "memory.write";
+		if (routeName === "reflect") return "memory.reflect";
+		if (routeName === "invalidate") return "memory.invalidate";
+		if (["browse", "search", "detail", "history", "recall"].includes(routeName)) {
+			const allScope = !!body && typeof body === "object" && !Array.isArray(body)
+				&& ((body as Record<string, unknown>).scope === "all" || (body as Record<string, unknown>).allScope === true);
+			return allScope ? "memory.read.all" : "memory.read";
+		}
+		return undefined;
+	};
 	const extensionPackGrantCapabilities: readonly ExtensionPackCapability[] = [
 		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
 	];
@@ -5579,7 +5692,7 @@ async function handleApiRoute(
 	const extensionSettingsMutationFailure = (error: unknown): { status: number; body: Record<string, unknown> } => {
 		const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
 		if (code === "EXTENSION_SETTINGS_REVISION_CONFLICT") return { status: 409, body: { error: "Extension settings changed elsewhere. Reload and review before saving.", code } };
-		if (code === "EXTENSION_SETTINGS_UNAVAILABLE" || code === "EXTENSION_SETTINGS_SECRET_READ_FAILED") return { status: 503, body: { error: "Extension settings are unavailable. Retry after repairing project state.", code } };
+		if (code === "EXTENSION_SETTINGS_UNAVAILABLE" || code === "EXTENSION_SETTINGS_SECRET_READ_FAILED" || code === "EXTENSION_SETTINGS_SECRET_COMMIT_MISMATCH") return { status: 503, body: { error: "Extension settings are unavailable. Retry after repairing project state.", code } };
 		if (code === "EXTENSION_SETTINGS_INVALID" || code === "EXTENSION_SETTINGS_SECRET_INVALID") return { status: 422, body: { error: "Invalid extension settings mutation", code } };
 		return { status: 503, body: { error: "Extension settings could not be saved", code: "EXTENSION_SETTINGS_PERSIST_FAILED" } };
 	};
@@ -7960,6 +8073,7 @@ async function handleApiRoute(
 			spawnPinnedModel: session.spawnPinnedModel,
 			spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 			restoreError: session.restoreError,
+			condition: session.condition,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 			completedTurnCount: session.completedTurnCount ?? 0,
@@ -9693,17 +9807,17 @@ async function handleApiRoute(
 		}
 		const allTargets = settingsTargets(resolved.projectId);
 		const invalidRefs = invalidSettingsTargetRefs(resolved.projectId);
-		const emitMutation = (result: { outcome: "updated" | "secret-persist-failed"; revision: number }, responseTargets: ExtensionSettingsTargetRef[]) => {
+		const emitMutation = (result: { outcome: "updated" | "secret-persist-failed"; revision: number }, responseTargets: ExtensionSettingsTargetRef[], warnings: readonly string[] = []) => {
 			broadcastExtensionSettingsInvalidation(resolved.projectId, result.revision);
 			let projection: ReturnType<typeof extensionSettingsProjection>;
 			try { projection = extensionSettingsProjection(resolved.projectId); }
 			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); return; }
 			const targets = projection.targets.filter(target => responseTargets.some(ref => ref.packId === target.ref.packId && ref.kind === target.ref.kind && ref.id === target.ref.id));
 			if (result.outcome === "secret-persist-failed") {
-				json({ error: "Extension settings saved but the secret was not persisted; re-enter it and retry.", code: "EXTENSION_SETTINGS_SECRET_PERSIST_FAILED", revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) }, 503);
+				json({ error: "Extension settings saved but the secret was not persisted; re-enter it and retry.", code: "EXTENSION_SETTINGS_SECRET_PERSIST_FAILED", revision: result.revision, ...(warnings.length ? { warnings } : {}), ...(targets.length === 1 ? { target: targets[0] } : { targets }) }, 503);
 				return;
 			}
-			json({ revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
+			json({ revision: result.revision, ...(warnings.length ? { warnings } : {}), ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
 		};
 		if (kind) {
 			if (!id) { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
@@ -9732,8 +9846,22 @@ async function handleApiRoute(
 				if (field.type === "secret") secrets[key] = value as string; else publicValues[key] = value as ExtensionSettingValue;
 			}
 			try {
+				// Settings targets are resolved from the installed-pack catalogue above,
+				// not the active runtime registry. This keeps a disabled Hindsight
+				// target repairable without starting or otherwise consulting its provider.
+				const hindsightValidation = ref.packId === "hindsight" && ref.kind === "provider" && ref.id === "memory" && hindsightRuntimeBridge
+					? hindsightRuntimeBridge.validateSettingsSave(
+						resolved.projectId,
+						Object.fromEntries(target.fields.filter(field => field.default !== undefined).map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>,
+						publicValues,
+					)
+					: undefined;
+				if (hindsightValidation && !hindsightValidation.ok) {
+					json({ error: "Invalid Hindsight runtime settings", code: hindsightValidation.code }, 422);
+					return;
+				}
 				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, { ...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}), ...(Object.keys(publicValues).length ? { values: publicValues } : {}), ...(Object.keys(secrets).length ? { secrets } : {}) });
-				emitMutation(result, [ref]);
+				emitMutation(result, [ref], hindsightValidation?.ok ? hindsightValidation.warnings : []);
 			} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
 			return;
 		}
@@ -10097,6 +10225,14 @@ async function handleApiRoute(
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
 			// Drop activation caches when an action persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
+			...(ident.packId === "hindsight" && actionSessionProjectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(actionSessionProjectId, capability);
+					},
+				},
+			} : {}),
 		});
 		// The session working dir the confined worker uses as its process.cwd() (tool
 		// parity — prefer the worktree path; fall back to the recorded cwd).
@@ -10509,21 +10645,6 @@ async function handleApiRoute(
 			const jsonl = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return projectOwnTranscriptJsonl(guard.sessionId, jsonl);
 		};
-		const host = createServerHostApi({
-			sessionId: guard.sessionId,
-			toolUseId,
-			packId: ident.packId,
-			contributionId: ident.contributionId,
-			packStore: getPackStore(),
-			readOwnTranscript,
-			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
-			orchestrationCore,
-			// Sub-goal C: live status reader for host.agents.status/list (the core has
-			// no public status accessor).
-			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
-			// Drop activation caches when a route persists provider config (host-owned).
-			onStoreWrite: notePackStoreWrite,
-		});
 		// Resolve rich route scope only from the authenticated session's own live or
 		// persisted coordinates. This is the same host resolver used by lifecycle
 		// hooks; route bodies and flat compatibility fields cannot substitute for it.
@@ -10545,6 +10666,128 @@ async function handleApiRoute(
 				repoWorktrees: routeRepoWorktrees,
 			})
 			: undefined;
+		// Retain-outcome receives the same bounded durable snapshot used by the
+		// goal-completion lifecycle hook. The request body can never choose a goal
+		// or supply replacement outcome content.
+		const routeOutcome = (() => {
+			if (ident.packId !== "hindsight" || routeName !== "retain-outcome") return undefined;
+			const goalId = authenticatedRouteSession?.goalId ?? authenticatedRouteSession?.teamGoalId;
+			const projectId = authenticatedRouteSession?.projectId;
+			if (!goalId || !projectId) return undefined;
+			const context = projectContextManager.getContextForGoal(goalId);
+			const goal = context?.goalManager.getGoal(goalId);
+			if (!context || !goal || context.project.id !== projectId || goal.state !== "complete") return undefined;
+			return {
+				outcome: boundedGoalCompletionOutcome(goal, context.taskStore.getByGoalId(goalId), context.gateStore.getGatesForGoal(goalId)),
+				completedAt: goal.updatedAt,
+				completionRevision: goal.updatedAt,
+			};
+		})();
+		let routeRuntime: ServiceRuntimeContext | undefined;
+		// This value stays inside the server→worker route context. It intentionally
+		// includes EP-7 write-only values for authenticated Hindsight calls, but no
+		// response/status/log/diagnostic serializes this field.
+		let routeProviderConfig: Record<string, unknown> | undefined;
+		try {
+			if (ident.packId === "hindsight") {
+				const capability = hindsightRouteCapability(routeName, init.body);
+				if (capability) {
+					if (!authenticatedRouteSession?.projectId) throw new ActionError(403, "Hindsight project scope is unavailable");
+					hindsightRuntimeBridge?.require(authenticatedRouteSession.projectId, capability);
+				}
+				const projectId = authenticatedRouteSession?.projectId;
+				if (projectId) {
+					const providerSettings = settingsRuntimeLookup(projectId, "hindsight", "provider", "memory");
+					if (providerSettings.state === "error") throw new Error("HINDSIGHT_CONFIG_UNAVAILABLE");
+					if (providerSettings.state === "present" && providerSettings.enabled) routeProviderConfig = { ...providerSettings.values };
+				}
+				if (projectId && routeName === "runtime-status") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), runtime: await hindsightRuntimeBridge?.status(projectId) });
+					return;
+				}
+				if (projectId && routeName === "runtime-logs") {
+					const body = init.body;
+					const requestedTail = body && typeof body === "object" && !Array.isArray(body) ? (body as { tail?: unknown }).tail : undefined;
+					const tail = typeof requestedTail === "number" && Number.isSafeInteger(requestedTail)
+						? Math.min(200, Math.max(1, requestedTail)) : 100;
+					const logs = await hindsightRuntimeBridge?.logs(projectId) ?? "";
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), lines: logs.split("\n").filter(Boolean).slice(-tail) });
+					return;
+				}
+				if (projectId && routeName === "runtime-control") {
+					const body = init.body;
+					const action = body && typeof body === "object" && !Array.isArray(body) ? (body as { action?: unknown }).action : undefined;
+					const consent = body && typeof body === "object" && !Array.isArray(body) ? (body as { consent?: unknown }).consent : undefined;
+					if ((action !== "start" && action !== "stop" && action !== "restart") || consent !== true) {
+						json({ error: "Explicit runtime control consent is required", code: "HINDSIGHT_CONTROL_CONSENT_REQUIRED" }, 422);
+						return;
+					}
+					const controlled = await hindsightRuntimeBridge?.control(projectId, action);
+					json(controlled ?? { error: "Hindsight runtime is unavailable", code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }, controlled ? 200 : 503);
+					return;
+				}
+				if (projectId && routeName === "migration-plan") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), ...(hindsightRuntimeBridge?.migrationPlan(projectId, init.body) ?? { ok: false, code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }) });
+					return;
+				}
+				if (projectId && routeName === "migration-execute") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), ...(await hindsightRuntimeBridge?.migrationExecute(projectId, init.body) ?? { ok: false, code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }) });
+					return;
+				}
+				// Runtime status is advisory for data-plane routes. A transient generic
+				// store/runner read must degrade to the typed no-service response below,
+				// not turn an otherwise granted recall into an HTTP 503 or trigger a
+				// provider fallback. Capability checks above remain strict and fail closed.
+				try {
+					routeRuntime = await hindsightRuntimeBridge?.context({
+						packId: ident.packId,
+						runtimeId: "hindsight",
+						providerId: "memory",
+						projectId,
+					});
+				} catch {
+					routeRuntime = { state: "unavailable", diagnostic: { code: "SERVICE_UNAVAILABLE" } };
+				}
+			}
+		} catch (err) {
+			const runtimeCode = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
+			const continuityRequired = runtimeCode === "SERVICE_CONTINUITY_REQUIRED";
+			const externalDatabaseRequired = runtimeCode === "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED";
+			const status = continuityRequired ? 409 : externalDatabaseRequired ? 422 : err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;
+			json({
+				error: continuityRequired
+					? "Hindsight storage continuity requires a migration"
+					: externalDatabaseRequired
+						? "Local and Docker Hindsight runtimes require a configured external PostgreSQL database."
+						: status === 403 ? "Hindsight capability is required" : "Hindsight runtime is unavailable",
+				code: continuityRequired ? "HINDSIGHT_STORAGE_CONTINUITY_REQUIRED" : externalDatabaseRequired ? runtimeCode : err instanceof HindsightCapabilityError ? "EXTENSION_CAPABILITY_DENIED" : "HINDSIGHT_RUNTIME_UNAVAILABLE",
+				...(err instanceof HindsightCapabilityError ? { capability: err.capability } : {}),
+			}, status);
+			return;
+		}
+		const host = createServerHostApi({
+			sessionId: guard.sessionId,
+			toolUseId,
+			packId: ident.packId,
+			contributionId: ident.contributionId,
+			packStore: getPackStore(),
+			readOwnTranscript,
+			orchestrationCore,
+			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			onStoreWrite: notePackStoreWrite,
+			...(ident.packId === "hindsight" && authenticatedRouteSession?.projectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(authenticatedRouteSession.projectId!, capability);
+					},
+				},
+				...(routeProviderConfig ? { providerConfig: routeProviderConfig } : {}),
+				// The route gets the same completion envelope as lifecycle delivery so
+				// both paths derive an identical revision-stable document identity.
+				...(routeOutcome ? { completedOutcome: routeOutcome } : {}),
+			} : {}),
+		});
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
@@ -10561,6 +10804,7 @@ async function handleApiRoute(
 					tool: ident.contributionId,
 					projectId: authenticatedRouteSession?.projectId,
 					...(routeScopeContext ? { scopeContext: routeScopeContext } : {}),
+					...(routeRuntime ? { runtime: routeRuntime } : {}),
 					workingDir: routeWorkingDir,
 					sessionArchived: sessionManager.getArchivedSession(guard.sessionId) !== undefined,
 				},
@@ -11197,6 +11441,7 @@ async function handleApiRoute(
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
+				await removeHindsightRuntimeBeforeContributionChange(body.packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, body.packName));
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
@@ -11224,6 +11469,7 @@ async function handleApiRoute(
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
+				await removeHindsightRuntimeBeforeContributionChange(body.packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, body.packName));
 				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
@@ -11600,6 +11846,21 @@ async function handleApiRoute(
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
+			const disablingHindsightRuntime = packName === "hindsight"
+				&& catalogue.runtimes?.includes("hindsight")
+				&& !beforeActivation.runtimes?.includes("hindsight")
+				&& normalized.runtimes.includes("hindsight");
+			if (disablingHindsightRuntime) {
+				const builtin = isBuiltinPackName(packName) && !hasUserInstall(targetScope, packName, targetProjectId);
+				try {
+					await removeHindsightRuntimeBeforeContributionChange(packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, packName, builtin));
+				} catch (err) {
+					// Leave the activation record unchanged so the old descriptor remains
+					// resolvable and the operator can retry the failed owned cleanup.
+					jsonError(409, err);
+					return;
+				}
+			}
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});

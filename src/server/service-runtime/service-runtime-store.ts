@@ -35,6 +35,8 @@ export interface PersistedServiceRuntime {
 	desired: ServiceRuntimeDesiredState;
 	selectedMode: ServiceRuntimeMode;
 	settingsRevision: string;
+	/** Opaque owner-derived continuity key. It must never contain a path, URL, or secret. */
+	storageIdentity?: string;
 	runnerIdentity?: ServiceRuntimeRunnerIdentity;
 	endpoint?: string;
 	restartAttempts: number[];
@@ -100,6 +102,7 @@ const MAX_ARTIFACT_LINES = 200;
 const ID_RE = /^@?[A-Za-z0-9][A-Za-z0-9._@/-]{0,199}$/;
 const RUNTIME_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const DIAGNOSTIC_CODE_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
+const STORAGE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 function isNotFound(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
@@ -138,7 +141,7 @@ function assertSafeString(value: unknown, name: string, max = 1024): asserts val
 }
 
 function assertRecord(record: PersistedServiceRuntime, serverIdentity: string): void {
-	const allowed = new Set(["version", "serverIdentity", "desired", "selectedMode", "settingsRevision", "runnerIdentity", "endpoint", "restartAttempts", "lastDiagnostic", "updatedAt"]);
+	const allowed = new Set(["version", "serverIdentity", "desired", "selectedMode", "settingsRevision", "storageIdentity", "runnerIdentity", "endpoint", "restartAttempts", "lastDiagnostic", "updatedAt"]);
 	if (!record || typeof record !== "object" || Object.keys(record).some((key) => !allowed.has(key)) || record.version !== 1 || record.serverIdentity !== serverIdentity) {
 		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted runtime record");
 	}
@@ -149,6 +152,9 @@ function assertRecord(record: PersistedServiceRuntime, serverIdentity: string): 
 		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted runtime mode");
 	}
 	assertSafeString(record.settingsRevision, "settings revision", 512);
+	if (record.storageIdentity !== undefined && (typeof record.storageIdentity !== "string" || !STORAGE_ID_RE.test(record.storageIdentity))) {
+		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted storage identity");
+	}
 	assertSafeString(record.updatedAt, "timestamp", 64);
 	if (!Array.isArray(record.restartAttempts) || record.restartAttempts.some((value) => !Number.isFinite(value) || value < 0)) {
 		throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "invalid persisted restart attempts");
@@ -175,10 +181,90 @@ function cloneRecord(record: PersistedServiceRuntime): PersistedServiceRuntime {
 	return JSON.parse(JSON.stringify(record)) as PersistedServiceRuntime;
 }
 
-function redact(value: string, secrets: readonly string[]): string {
+const MAX_EXTERNAL_DATABASE_URL_BYTES = 8 * 1024;
+const MAX_EXTERNAL_DATABASE_REDACTION_VARIANTS = 32;
+const SUPPRESSED_RUNTIME_ARTIFACT = "[REDACTED]";
+
+function isCredentialQueryComponent(name: string): boolean {
+	const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+	return /(?:pass(?:word|phrase)?|pwd|token|credential|secret|auth(?:entication|orization)?|apikey|sslkey|sslcert|privatekey)/.test(normalized);
+}
+
+/** Match percent-encoded bytes regardless of hexadecimal casing, but never case-fold secret text. */
+function escapeSecretForPattern(secret: string): string {
+	let pattern = "";
+	for (let index = 0; index < secret.length;) {
+		const encodedByte = secret.slice(index, index + 3);
+		if (/^%[0-9a-f]{2}$/i.test(encodedByte)) {
+			pattern += `%[${encodedByte[1]!.toLowerCase()}${encodedByte[1]!.toUpperCase()}][${encodedByte[2]!.toLowerCase()}${encodedByte[2]!.toUpperCase()}]`;
+			index += 3;
+			continue;
+		}
+		pattern += secret[index]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		index++;
+	}
+	return pattern;
+}
+
+function formEncode(value: string): string {
+	return new URLSearchParams([["value", value]]).toString().slice("value=".length);
+}
+
+/**
+ * External database URLs may be echoed by adapters as either whole URLs or
+ * individual URL/userinfo/query components. Derive only bounded, local
+ * redaction variants from a valid PostgreSQL URL; never persist them.
+ */
+function externalDatabaseRedactionVariants(secret: string): readonly string[] | undefined {
+	if (!/^postgres(?:ql)?:/i.test(secret)) return [];
+	if (Buffer.byteLength(secret, "utf8") > MAX_EXTERNAL_DATABASE_URL_BYTES) return undefined;
+	try {
+		const url = new URL(secret);
+		const protocol = url.protocol.toLowerCase();
+		if ((protocol !== "postgres:" && protocol !== "postgresql:") || !url.hostname || !url.pathname || url.pathname === "/") return undefined;
+
+		const variants: string[] = [url.href];
+		const add = (candidate: string): boolean => {
+			if (!candidate || variants.includes(candidate)) return true;
+			if (variants.length >= MAX_EXTERNAL_DATABASE_REDACTION_VARIANTS) return false;
+			variants.push(candidate);
+			return true;
+		};
+		const addComponentVariants = (encoded: string, decoded: string): boolean =>
+			add(encoded) && add(decoded) && add(encodeURIComponent(decoded)) && add(formEncode(decoded));
+
+		if (url.password && !addComponentVariants(url.password, decodeURIComponent(url.password))) return undefined;
+		for (const queryComponent of url.search.slice(1).split("&")) {
+			if (!queryComponent) continue;
+			const separator = queryComponent.indexOf("=");
+			const rawName = separator === -1 ? queryComponent : queryComponent.slice(0, separator);
+			const rawValue = separator === -1 ? "" : queryComponent.slice(separator + 1);
+			const name = decodeURIComponent(rawName.replace(/\+/g, " "));
+			const decodedValue = decodeURIComponent(rawValue.replace(/\+/g, " "));
+			if (isCredentialQueryComponent(name) && !addComponentVariants(rawValue, decodedValue)) return undefined;
+		}
+		return variants;
+	} catch {
+		return undefined;
+	}
+}
+
+function redactionVariants(secrets: readonly string[]): readonly string[] | undefined {
+	const variants = [...new Set(secrets.filter((item) => item.length > 0))];
+	for (const secret of variants.slice()) {
+		const externalDatabaseVariants = externalDatabaseRedactionVariants(secret);
+		if (!externalDatabaseVariants) return undefined;
+		for (const variant of externalDatabaseVariants) if (!variants.includes(variant)) variants.push(variant);
+	}
+	return variants;
+}
+
+function redact(value: string, secrets: readonly string[]): string | undefined {
+	const variants = redactionVariants(secrets);
+	if (!variants) return undefined;
 	let sanitized = value;
-	for (const secret of [...new Set(secrets.filter((item) => item.length > 0))].sort((a, b) => b.length - a.length)) {
-		const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	for (const secret of [...variants].sort((a, b) => b.length - a.length)) {
+		const escaped = escapeSecretForPattern(secret);
 		sanitized = sanitized.replace(new RegExp(`\\b[A-Za-z_][A-Za-z0-9_]*=${escaped}`, "g"), (entry) => {
 			const equals = entry.indexOf("=");
 			return `${entry.slice(0, equals)}=[REDACTED]`;
@@ -190,7 +276,9 @@ function redact(value: string, secrets: readonly string[]): string {
 
 /** Redact resolved secret values and retain only a bounded artifact tail. */
 export function sanitizeRuntimeArtifact(value: string, secrets: readonly string[] = []): string {
-	const lines = redact(value, secrets).split(/\r?\n/).slice(-MAX_ARTIFACT_LINES);
+	const redacted = redact(value, secrets);
+	if (redacted === undefined) return SUPPRESSED_RUNTIME_ARTIFACT;
+	const lines = redacted.split(/\r?\n/).slice(-MAX_ARTIFACT_LINES);
 	let result = lines.join("\n");
 	while (Buffer.byteLength(result, "utf8") > MAX_ARTIFACT_BYTES) result = result.slice(1);
 	return result;

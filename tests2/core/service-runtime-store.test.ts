@@ -38,10 +38,14 @@ describe("ServiceRuntimeStore", () => {
 		const store = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" });
 		const identity = store.identity("@bobbit/hindsight", "hindsight");
 
-		await store.replace(identity, record());
-		await store.replace(identity, record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2" }));
+		const storageIdentity = "hindsight-managed:0123456789abcdef";
+		await store.replace(identity, record({ storageIdentity }));
+		await store.replace(identity, record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2", storageIdentity }));
 
-		assert.deepEqual(await store.load(identity), record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2" }));
+		// A new store instance simulates a gateway restart: the opaque continuity
+		// identity must survive independently of in-memory runtime state.
+		const afterRestart = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" });
+		assert.deepEqual(await afterRestart.load(identity), record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2", storageIdentity }));
 		const runtimeDir = path.join(root, "service-runtimes", Buffer.from("@bobbit/hindsight").toString("base64url"), "hindsight");
 		assert.equal((await stat(path.join(runtimeDir, "state.json"))).mode & 0o777, 0o600);
 		assert.equal((await stat(runtimeDir)).mode & 0o777, 0o700);
@@ -56,6 +60,10 @@ describe("ServiceRuntimeStore", () => {
 			store.replace(identity, { ...record(), secret: "not-allowed" } as PersistedServiceRuntime),
 			(error: unknown) => error instanceof ServiceRuntimeStoreError && error.code === "SERVICE_RUNTIME_STORE_CORRUPT",
 		);
+		await assert.rejects(
+			store.replace(identity, record({ storageIdentity: "postgresql://user:secret@db.example/hindsight" })),
+			(error: unknown) => error instanceof ServiceRuntimeStoreError && error.code === "SERVICE_RUNTIME_STORE_CORRUPT",
+		);
 
 		const state = path.join(root, "service-runtimes", Buffer.from("pack").toString("base64url"), "runtime", "state.json");
 		await mkdir(path.dirname(state), { recursive: true });
@@ -64,6 +72,14 @@ describe("ServiceRuntimeStore", () => {
 			store.load(identity),
 			(error: unknown) => error instanceof ServiceRuntimeStoreError && error.code === "SERVICE_RUNTIME_STORE_CORRUPT",
 		);
+	});
+
+	it("reads legacy records without a continuity key for explicit safe compatibility handling", async () => {
+		const root = await temporaryRoot();
+		const store = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" });
+		const identity = store.identity("pack", "runtime");
+		await store.replace(identity, record());
+		assert.deepEqual(await new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" }).load(identity), record());
 	});
 
 	it("keeps generated and user secrets in injected owners while artifacts are redacted and bounded", async () => {
@@ -143,5 +159,25 @@ describe("ServiceRuntimeStore", () => {
 	it("sanitizes assignment forms before bounding artifacts", () => {
 		const output = sanitizeRuntimeArtifact("PASSWORD=abc123 and abc123", ["abc123"]);
 		assert.equal(output, "PASSWORD=[REDACTED] and [REDACTED]");
+	});
+
+	it("redacts encoded and decoded PostgreSQL userinfo passwords", () => {
+		const databaseUrl = "postgresql://hindsight:p%40ss%2Fword@db.example:5432/hindsight";
+		const output = sanitizeRuntimeArtifact(
+			`connection=${databaseUrl}\npassword=p%40ss%2fword\npassword=p@ss/word`,
+			[databaseUrl],
+		);
+		assert.ok(!output.includes(databaseUrl));
+		assert.ok(!output.includes("p%40ss%2Fword") && !output.includes("p%40ss%2fword") && !output.includes("p@ss/word"));
+	});
+
+	it("redacts decoded and encoded PostgreSQL credential query values", () => {
+		const databaseUrl = "postgresql://hindsight@db.example:5432/hindsight?sslmode=require&password=query%2Dpassword&access_token=token%2Fvalue";
+		const output = sanitizeRuntimeArtifact(
+			`url=${databaseUrl}\npassword=query%2dpassword\npassword=query-password\naccess_token=token%2fvalue\naccess_token=token/value`,
+			[databaseUrl],
+		);
+		assert.ok(!output.includes(databaseUrl));
+		assert.ok(!output.includes("query%2Dpassword") && !output.includes("query%2dpassword") && !output.includes("query-password") && !output.includes("token%2Fvalue") && !output.includes("token%2fvalue") && !output.includes("token/value"));
 	});
 });

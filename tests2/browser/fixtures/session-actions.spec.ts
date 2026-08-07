@@ -308,6 +308,9 @@ test.describe("unified session actions", () => {
 		test.slow(); // staff-session sidebar lookup: extend timeout for concurrent verification load
 		await page.setViewportSize({ width: 900, height: 900 });
 
+		const referenceSessionId = await createSession();
+		sessionsToDelete.add(referenceSessionId);
+		await waitForSessionStatus(referenceSessionId, "idle");
 		const staff = await createStaffAgent(`ActionsBot-${Date.now()}`);
 		staffToDelete.add(staff.id);
 		const staffSessionId = await waitForStaffSession(staff.id);
@@ -321,9 +324,42 @@ test.describe("unified session actions", () => {
 
 		await openSessionView(page, staffSessionId);
 		const staffRow = staffSessionRow(page, staffSessionId);
-		await expect(staffRow, "staff sidebar rows use nav ids and expose an existing Edit button").toBeVisible({ timeout: 30_000 });
+		await expect(staffRow, "staff sidebar rows use nav ids and expose session actions").toBeVisible({ timeout: 30_000 });
+		const referenceRow = sessionRow(page, referenceSessionId);
+		await expect(referenceRow, "reference non-staff session should be visible").toBeVisible({ timeout: 10_000 });
+		const typography = async (row: Locator) => row.evaluate((element) => {
+			const styleOf = (selector: string) => {
+				const target = element.querySelector<HTMLElement>(selector);
+				if (!target) throw new Error(`Missing typography target: ${selector}`);
+				const style = getComputedStyle(target);
+				return {
+					fontFamily: style.fontFamily,
+					fontSize: style.fontSize,
+					fontStyle: style.fontStyle,
+					letterSpacing: style.letterSpacing,
+					lineHeight: style.lineHeight,
+					fontVariantNumeric: style.fontVariantNumeric,
+				};
+			};
+			return {
+				title: styleOf('[data-testid="sidebar-session-title-text"]'),
+				lastActivity: styleOf('[data-testid="sidebar-session-last-activity"]'),
+			};
+		});
+		expect(await typography(staffRow), "staff title and last-activity typography should match non-staff sessions").toEqual(await typography(referenceRow));
+
 		await staffRow.hover();
-		const staffSidebarEdit = staffRow.locator(`button[title="Edit"]`).first();
+		const staffTrigger = sidebarTrigger(staffRow, staffSessionId);
+		await expect(staffTrigger, "staff rows should expose the same hamburger as regular sessions").toBeVisible({ timeout: 5_000 });
+		await staffTrigger.click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		expectCanonicalActionsPresentInPriorityOrder(await popoverActionIds(page));
+		await expect(popoverAction(page, "modify")).toContainText("Edit staff");
+		expect(await popoverSourceActionIds(page), "staff menus should animate their quick actions into the popover").toEqual(["modify", "terminate"]);
+		await closePopover(page);
+
+		await staffRow.hover();
+		const staffSidebarEdit = staffRow.locator(`[data-session-action-id="modify"][data-sidebar-action-quick="true"]`).first();
 		await expect(staffSidebarEdit).toBeVisible({ timeout: 5_000 });
 		await staffSidebarEdit.click();
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(`#/staff/${staff.id}`);

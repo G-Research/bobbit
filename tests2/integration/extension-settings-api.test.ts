@@ -20,6 +20,7 @@ const SECRET_B = "HINDSIGHT_API_KEY_MUST_NEVER_ESCAPE_B";
 
 let packDir = "";
 let operatorCookie = "";
+let initialServerPackOrder: string[] = [];
 const projectRoots: string[] = [];
 
 function settingsPath(projectId: string): string {
@@ -32,6 +33,14 @@ function targetPath(projectId: string): string {
 
 function operatorHeaders(): Record<string, string> {
 	return { Cookie: operatorCookie };
+}
+
+async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order }),
+	});
+	expect(response.status, `fixture filesystem refresh failed: ${await response.clone().text()}`).toBe(200);
 }
 
 async function readJson(response: Response): Promise<any> {
@@ -169,22 +178,20 @@ async function patchTarget(projectId: string, expectedRevision: number, values: 
 
 test.describe("extension settings API", () => {
 	test.beforeAll(async ({ gateway }) => {
+		const order = await apiFetch("/api/marketplace/pack-order?scope=server");
+		expect(order.status).toBe(200);
+		initialServerPackOrder = (await readJson(order)).order;
 		writeFixturePack(gateway.bobbitDir);
-		const activation = await apiFetch("/api/marketplace/pack-activation", {
-			method: "PUT",
-			body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
-		});
-		expect(activation.status, `fixture pack activation refresh failed: ${await activation.clone().text()}`).toBe(200);
+		// Fixture directories are injected directly for speed, so notify the same
+		// public Marketplace mutation a real install uses to refresh live resolvers.
+		await notifyPackFilesystemMutation(initialServerPackOrder);
 		operatorCookie = await mintOperatorCookie();
 	});
 
 	test.afterAll(async () => {
-		await apiFetch("/api/marketplace/pack-activation", {
-			method: "PUT",
-			body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
-		}).catch(() => {});
 		await getPackStore().delete(PACK_ID, providerConfigStoreKey(PROVIDER_ID)).catch(() => {});
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		await notifyPackFilesystemMutation(initialServerPackOrder).catch(() => {});
 		for (const root of projectRoots) fs.rmSync(root, { recursive: true, force: true });
 	});
 

@@ -1,0 +1,8 @@
+name: hindsight_retain
+group: Hindsight
+description: Retain a durable memory in the current project scope. Requires the memory.write capability grant.
+summary: Retain a scoped memory
+params: [content, kind?]
+provider:
+  type: bobbit-extension
+  extension: ../../lib/tools.mjs

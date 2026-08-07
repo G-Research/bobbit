@@ -67,13 +67,28 @@ function packRow(page: Page) {
 	return page.locator(`[data-testid="market-project-pack-row"][data-contribution-id="${PACK_ID}"]`);
 }
 
+async function serverPackOrder(): Promise<string[]> {
+	const response = await apiFetch("/api/marketplace/pack-order?scope=server");
+	expect(response.status).toBe(200);
+	return (await response.json()).order as string[];
+}
+
+async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order }),
+	});
+	expect(response.status, `fixture filesystem refresh failed: ${await response.clone().text()}`).toBe(200);
+}
+
 async function openProjectMarket(page: Page, projectId: string): Promise<void> {
 	await openApp(page);
 	// The ordinary browser bootstrap request mints the signed operator cookie;
 	// grant controls then use that same browser-held proof, never a test header.
 	await browserApi(page, { path: "/api/goals" });
 	await page.evaluate((id) => { window.location.hash = `#/market/${encodeURIComponent(id)}/installed`; }, projectId);
-	await expect(page.locator(`[data-testid="market-project-runtime"][data-project-id="${projectId}"][data-pack-id="${PACK_ID}"]`)).toBeVisible({ timeout: 20_000 });
+	// A grants-only fixture has no provider runtime row. Its project-owned Pack
+	// target is the public Marketplace surface that owns these grant controls.
 	await expect(packRow(page)).toBeVisible({ timeout: 20_000 });
 }
 
@@ -148,9 +163,12 @@ test.describe("extension capability grants", () => {
 	let packDir: string | undefined;
 	let projectId: string | undefined;
 	let projectRoot: string | undefined;
+	let initialServerPackOrder: string[] = [];
 
 	test.beforeAll(async ({ gateway }) => {
+		initialServerPackOrder = await serverPackOrder();
 		packDir = installFixturePack(gateway.bobbitDir);
+		await notifyPackFilesystemMutation(initialServerPackOrder);
 		projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "extension-capability-grants-browser-project-"));
 		const project = await registerProject({
 			name: `extension-capability-grants-browser-${Date.now()}`,
@@ -166,6 +184,7 @@ test.describe("extension capability grants", () => {
 			await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 		}
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		await notifyPackFilesystemMutation(initialServerPackOrder).catch(() => {});
 		if (projectRoot) fs.rmSync(projectRoot, { recursive: true, force: true });
 	});
 

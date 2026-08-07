@@ -221,6 +221,7 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 			"tests2/core/gateway-nondelete-push-boundary.test.ts",
 			"tests2/core/perm-frame-late-joiner-seq-gap.test.ts",
 			"tests2/core/spawn-node-execpath-invariant.test.ts",
+			"tests2/integration/extension-host-surface-token.test.ts",
 		]),
 	},
 	{
@@ -465,6 +466,7 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen([
 			"market-packs/hindsight/runtimes/hindsight.yaml",
 			"market-packs/hindsight/runtime/compose.yaml",
+			"market-packs/hindsight/providers/memory.yaml",
 		]),
 	},
 	{
@@ -785,6 +787,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/hindsight-experience-api.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "PACK_SOURCE", "copies the reviewed installed Hindsight pack into an isolated marketplace fixture"),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
@@ -831,6 +839,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  * second read through an existing expression an intentional review event too.
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
+	{
+		consumer: "tests2/integration/extension-host-surface-token.test.ts",
+		declarations: frozen(["scan:server-typescript-source-guards"]),
+		reads: frozen([
+			{ expression: "sourcePath", count: 1 },
+		]),
+	},
 	{
 		consumer: "tests2/integration/verification-restart-resignal.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",

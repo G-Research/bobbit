@@ -2,9 +2,9 @@
 // host's immutable scopeContext snapshot; compatibility flat fields are never a
 // fallback for project, goal, or role.
 import {
-	clientConfig, detectLegacyQueue, documentId, enqueueRetain, isActive, isPendingEnvelope, isQueueEntry,
+	clientConfig, completedOutcomeRetention, detectLegacyQueue, documentId, enqueueRetain, isActive, isPendingEnvelope, isQueueEntry,
 	loadQueue, makeClient, pendingKey, pendingPrefix, recordError, removeQueuedEntry, resolveConfig, sweepKey,
-	tagsForRecord, truncate, updateRecord, type EffectiveConfig, type HindsightIdentity, type PendingEnvelope,
+	tagsForRecord, truncate, updateRecord, type CompletedOutcomeRetention, type EffectiveConfig, type HindsightIdentity, type PendingEnvelope,
 	type RuntimeContext, type ScopeProvenance, type StoreLike, type SweepControl, type Tags,
 	DEFAULT_STRANDED_AFTER_MS, RETAIN_SWEEP_INTERVAL_MS,
 } from "./shared.js";
@@ -14,9 +14,11 @@ interface ScopeContext { project?: { id: string }; goal?: { id: string }; role?:
 interface Deadline { deadlineEpochMs?: number; isExpired?: boolean }
 interface ProviderCtx {
 	sessionId?: string; prompt?: string; userText?: string; response?: string; assistantText?: string; summary?: string; span?: string;
-	config?: unknown; runtime?: RuntimeContext; host?: { store?: StoreLike }; scopeContext?: ScopeContext;
+	config?: unknown; runtime?: RuntimeContext;
+	host?: { store?: StoreLike; memory?: { requireCapability(capability: "memory.read" | "memory.write"): Promise<void> | void } };
+	scopeContext?: ScopeContext;
 	signal?: AbortSignal; deadline?: Deadline; now?: number;
-	/** Host-originated, already bounded outcome snapshot. */ outcome?: unknown; completedAt?: number; completionRevision?: string;
+	/** Host-originated, already bounded outcome snapshot. */ outcome?: unknown; completedAt?: number; completionRevision?: string | number;
 }
 interface ContextBlock { id: string; title: string; authority: string; priority: number; reason: string; content: string }
 const TITLE = "Relevant memory"; const SUMMARY_CAP = 2000;
@@ -24,7 +26,20 @@ const RETAIN_QUEUE_PERSISTENCE_ERROR = "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILE
 const DRAIN_QUEUE_PERSISTENCE_ERROR = "HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED";
 const OUTCOME_NOT_DURABLE_ERROR = "HINDSIGHT_OUTCOME_NOT_DURABLE";
 function storeOf(ctx: ProviderCtx): StoreLike | null { return ctx.host?.store ?? null; }
+/** Live EP-6 grants are evaluated by the server-owned host adapter. A missing,
+ * denied, or revoked adapter is deliberately a non-fatal no-op; automatic memory
+ * work must never mutate a queue or contact a provider without its exact grant. */
+async function hasMemoryCapability(ctx: ProviderCtx, capability: "memory.read" | "memory.write"): Promise<boolean> {
+	const requireCapability = ctx.host?.memory?.requireCapability;
+	// A lifecycle invocation without the live server adapter has no grant proof.
+	// Fail closed before it can create a client, queue, or diagnostic record.
+	if (!requireCapability) return false;
+	try { await requireCapability(capability); return true; } catch { return false; }
+}
 function textOf(v: unknown): string | undefined { return typeof v === "string" && v.trim() ? v.trim() : undefined; }
+async function recordAutomaticError(ctx: ProviderCtx, store: StoreLike, error: unknown): Promise<void> {
+	if (await hasMemoryCapability(ctx, "memory.write")) await recordError(store, error);
+}
 function nowOf(ctx: ProviderCtx): number { return typeof ctx.now === "number" ? ctx.now : Date.now(); }
 function deadlineOf(ctx: ProviderCtx): number | undefined { return ctx.deadline?.deadlineEpochMs; }
 function canContinue(ctx: ProviderCtx, now = nowOf(ctx)): boolean { return !ctx.signal?.aborted && ctx.deadline?.isExpired !== true && (deadlineOf(ctx) === undefined || now < deadlineOf(ctx)!); }
@@ -41,17 +56,21 @@ function scopedClientConfig(cfg: EffectiveConfig, namespace: string, runtime?: R
 async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query?: string): Promise<ContextBlock[]> {
 	if (!cfg.autoRecall || !textOf(query)) return [];
 	const scope = scopeOf(ctx); // Fail closed before constructing a client.
-	if (!scope?.projectId || !canContinue(ctx)) return [];
+	if (!scope?.projectId || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.read")) return [];
 	try {
-		const res = await (await makeClient(clientConfig(cfg, ctx.runtime))).recall(cfg.bank, textOf(query)!, { maxTokens: cfg.recallBudget, tags: { project: scope.projectId, ...(scope.goalId ? { goal: scope.goalId } : {}) }, tagsMatch: "all_strict" });
+		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		// Client construction can yield to the event loop; the initial check above
+		// is not authority for this disclosure.
+		if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.read")) return [];
+		const res = await client.recall(cfg.bank, textOf(query)!, { maxTokens: cfg.recallBudget, tags: { project: scope.projectId, ...(scope.goalId ? { goal: scope.goalId } : {}) }, tagsMatch: "all_strict" });
 		const memories = res?.memories ?? []; return memories.length ? [{ id: "memory:0", title: TITLE, authority: "memory", priority: 50, reason: `Recall for: ${truncate(textOf(query)!, 80)}`, content: memories.map(m => `- ${m.text}`).join("\n") }] : [];
-	} catch (e) { const store = storeOf(ctx); if (store) await recordError(store, e); return []; }
+	} catch (e) { const store = storeOf(ctx); if (store) await recordAutomaticError(ctx, store, e); return []; }
 }
 
 function pendingIdentity(scope: ScopeProvenance, cfg: EffectiveConfig): HindsightIdentity | undefined { return scope.sessionId ? { projectId: scope.projectId, ...(scope.goalId ? { goalId: scope.goalId } : {}), sessionId: scope.sessionId, bank: cfg.bank, namespace: cfg.namespace, kind: "pending" } : undefined; }
 function pendingDue(record: PendingEnvelope, cfg: EffectiveConfig, now: number): boolean { return record.turns.length >= cfg.retainEveryNTurns || (!!record.turns[0] && now - record.turns[0].capturedAt >= cfg.retainMaxDelayMs); }
 async function appendTurn(ctx: ProviderCtx, cfg: EffectiveConfig, summary: string): Promise<{ key: string; identity: HindsightIdentity } | undefined> {
-	const store = storeOf(ctx); const scope = scopeOf(ctx); if (!store || !scope || !canContinue(ctx)) return undefined; const identity = pendingIdentity(scope, cfg); if (!identity) return undefined; const key = pendingKey(identity);
+	const store = storeOf(ctx); const scope = scopeOf(ctx); if (!store || !scope || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return undefined; const identity = pendingIdentity(scope, cfg); if (!identity) return undefined; const key = pendingKey(identity);
 	const appended = await updateRecord<PendingEnvelope>(store, key, current => {
 		if (current !== undefined && !isPendingEnvelope(current, identity)) return undefined;
 		return current ? { ...current, turns: [...current.turns, { summary, capturedAt: nowOf(ctx) }], updatedAt: nowOf(ctx) } : { version: 2, identity, scope, turns: [{ summary, capturedAt: nowOf(ctx) }], overlap: [], updatedAt: nowOf(ctx), flushSeq: 0 };
@@ -62,22 +81,24 @@ function eventIdentity(scope: ScopeProvenance, cfg: EffectiveConfig, kind: "turn
 	return { projectId: scope.projectId, ...(scope.goalId ? { goalId: scope.goalId } : {}), sessionId: eventId, bank: cfg.bank, namespace: cfg.namespace, kind, ...(seq !== undefined ? { seq } : {}) };
 }
 async function queueRecord(store: StoreLike, scope: ScopeProvenance, identity: HindsightIdentity, content: string, tags: Tags, sync: boolean, ts: number, ctx: ProviderCtx): Promise<boolean> {
+	if (!await hasMemoryCapability(ctx, "memory.write")) return false;
 	return (await enqueueRetain(store, { version: 2, identity, scope, bank: identity.bank, namespace: identity.namespace, content, tags, ts, ...(sync ? { sync } : {}), documentId: documentId(identity) }, deadlineOf(ctx), ctx.signal)).durable;
 }
 /** Retain exactly the durable snapshot. Advancement happens only after remote
  * success or a confirmed queue append; an advance CAS failure intentionally leaves
  * a duplicate-eligible record rather than losing an appended suffix. */
 async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, key: string, identity: HindsightIdentity): Promise<boolean> {
-	const store = storeOf(ctx); if (!store || !canContinue(ctx)) return false;
+	const store = storeOf(ctx); if (!store || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false;
 	const read = await store.read<unknown>(key); if (read.state !== "present" || !isPendingEnvelope(read.value, identity)) return false;
 	const record = read.value; if (!record.turns.length) return true;
 	const primary = record.turns.map(t => t.summary); const content = primary.join("\n\n").slice(0, SUMMARY_CAP * 4);
 	const target = eventIdentity(record.scope, { ...cfg, bank: record.identity.bank, namespace: record.identity.namespace }, "turn", record.identity.sessionId, record.flushSeq ?? 0);
 	let durableOutcome = false;
-	try { const client = await makeClient(scopedClientConfig(cfg, record.identity.namespace, ctx.runtime)); if (!canContinue(ctx)) return false; await client.ensureBank(record.identity.bank); if (!canContinue(ctx)) return false; await client.retain(record.identity.bank, content, { tags: tagsFor(record.scope, "turn"), sync: false, id: documentId(target) }); durableOutcome = true; }
-	catch (e) { durableOutcome = await queueRecord(store, record.scope, target, content, tagsFor(record.scope, "turn"), false, nowOf(ctx), ctx); if (!durableOutcome) { await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); } await recordError(store, e); }
+	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(scopedClientConfig(cfg, record.identity.namespace, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.ensureBank(record.identity.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(record.identity.bank, content, { tags: tagsFor(record.scope, "turn"), sync: false, id: documentId(target) }); durableOutcome = true; }
+	catch (e) { durableOutcome = await queueRecord(store, record.scope, target, content, tagsFor(record.scope, "turn"), false, nowOf(ctx), ctx); if (!durableOutcome) { await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); } await recordAutomaticError(ctx, store, e); }
 	if (!durableOutcome || !canContinue(ctx)) return false;
 	const processed = record.turns.map(t => `${t.capturedAt}\u0000${t.summary}`);
+	if (!await hasMemoryCapability(ctx, "memory.write")) return false;
 	const advanced = await updateRecord<PendingEnvelope>(store, key, current => {
 		if (!isPendingEnvelope(current, identity)) return undefined;
 		const currentPrefix = current.turns.slice(0, processed.length).map(t => `${t.capturedAt}\u0000${t.summary}`); if (currentPrefix.join("\u0001") !== processed.join("\u0001")) return undefined;
@@ -91,33 +112,34 @@ function authorizedEntry(entry: unknown, projectId: string) {
 	return entry;
 }
 async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, ctx: ProviderCtx): Promise<void> {
-	const scope = scopeOf(ctx); if (!scope || !canContinue(ctx)) return;
-	const loaded = await loadQueue(store, scope.projectId); if (!loaded.loaded) { await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
-	const entry = authorizedEntry(loaded.queue[0], scope.projectId); if (!entry) { if (loaded.queue[0] !== undefined) await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
+	const scope = scopeOf(ctx); if (!scope || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
+	const loaded = await loadQueue(store, scope.projectId); if (!loaded.loaded) { await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
+	const entry = authorizedEntry(loaded.queue[0], scope.projectId); if (!entry) { if (loaded.queue[0] !== undefined) await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
 	try {
-		const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); if (!canContinue(ctx)) return; await client.ensureBank(entry.bank); if (!canContinue(ctx)) return;
+		if (!await hasMemoryCapability(ctx, "memory.write")) return; const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return; await client.ensureBank(entry.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
 		await client.retain(entry.bank, entry.content, { tags: entry.tags, sync: entry.sync, id: entry.documentId });
-		if (!await removeQueuedEntry(store, scope.projectId, entry, deadlineOf(ctx), ctx.signal)) await recordError(store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR));
-	} catch (e) { await recordError(store, e); }
+		if (await hasMemoryCapability(ctx, "memory.write") && !await removeQueuedEntry(store, scope.projectId, entry, deadlineOf(ctx), ctx.signal)) await recordAutomaticError(ctx, store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR));
+	} catch (e) { await recordAutomaticError(ctx, store, e); }
 }
 async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig, ctx: ProviderCtx): Promise<void> {
-	const scope = scopeOf(ctx); if (!scope || !canContinue(ctx)) return;
-	const loaded = await loadQueue(store, scope.projectId); if (!loaded.loaded) { await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
+	const scope = scopeOf(ctx); if (!scope || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
+	const loaded = await loadQueue(store, scope.projectId); if (!loaded.loaded) { await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
 	for (const candidate of loaded.queue) {
 		if (!canContinue(ctx)) return;
-		const entry = authorizedEntry(candidate, scope.projectId); if (!entry) { if (candidate !== undefined) await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
+		const entry = authorizedEntry(candidate, scope.projectId); if (!entry) { if (candidate !== undefined) await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
 		try {
-			const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); await client.ensureBank(entry.bank); if (!canContinue(ctx)) return;
+			if (!await hasMemoryCapability(ctx, "memory.write")) return; const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return; await client.ensureBank(entry.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
 			await client.retain(entry.bank, entry.content, { tags: entry.tags, sync: entry.sync, id: entry.documentId });
-			if (!await removeQueuedEntry(store, scope.projectId, entry, deadlineOf(ctx), ctx.signal)) { await recordError(store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR)); return; }
-		} catch (e) { await recordError(store, e); return; }
+			if (!await hasMemoryCapability(ctx, "memory.write") || !await removeQueuedEntry(store, scope.projectId, entry, deadlineOf(ctx), ctx.signal)) { await recordAutomaticError(ctx, store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR)); return; }
+		} catch (e) { await recordAutomaticError(ctx, store, e); return; }
 	}
 }
 
 /** Claim an injected-clock, durable, project-partitioned sweep lease. */
 async function recoverStranded(ctx: ProviderCtx, cfg: EffectiveConfig): Promise<void> {
-	const store = storeOf(ctx); const scope = scopeOf(ctx); const now = nowOf(ctx); const deadline = deadlineOf(ctx); if (!store || !scope || !store.list || !canContinue(ctx, now)) return;
-	if (await detectLegacyQueue(store)) await recordError(store, new Error("HINDSIGHT_QUEUE_LEGACY_QUARANTINED"));
+	const store = storeOf(ctx); const scope = scopeOf(ctx); const now = nowOf(ctx); const deadline = deadlineOf(ctx); if (!store || !scope || !store.list || !canContinue(ctx, now) || !await hasMemoryCapability(ctx, "memory.write")) return;
+	if (await detectLegacyQueue(store)) await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_LEGACY_QUARANTINED"));
+	if (!await hasMemoryCapability(ctx, "memory.write")) return;
 	const controlKey = sweepKey(scope.projectId); const runId = `${now}-${scope.sessionId ?? "recovery"}`;
 	const claimed = await updateRecord<SweepControl>(store, controlKey, current => {
 		if (current !== undefined && (!current || current.version !== 2)) return undefined;
@@ -141,63 +163,33 @@ async function recoverStranded(ctx: ProviderCtx, cfg: EffectiveConfig): Promise<
 			try {
 				const advanced = await flushPending(ctx, { ...cfg, bank: record.identity.bank, namespace: record.identity.namespace }, key, record.identity);
 				if (!advanced) { completed = false; break; }
+				if (!await hasMemoryCapability(ctx, "memory.write")) { completed = false; break; }
 				const checkpointed = await updateRecord<SweepControl>(store, controlKey, control => control?.version === 2 && control.active?.runId === runId ? { ...control, checkpoint: { recordKey: key, updatedAt: now } } : undefined, deadline, ctx.signal);
 				if (!checkpointed.durable) { completed = false; break; }
 			} catch { completed = false; break; }
 		}
 	} catch { completed = false; }
-	if (canContinue(ctx)) await updateRecord<SweepControl>(store, controlKey, control => {
+	if (canContinue(ctx) && await hasMemoryCapability(ctx, "memory.write")) await updateRecord<SweepControl>(store, controlKey, control => {
 		if (control?.version !== 2 || control.active?.runId !== runId) return undefined;
 		return { version: 2, lastAttemptedAt: now, ...(completed ? { lastCompletedAt: now } : control.lastCompletedAt !== undefined ? { lastCompletedAt: control.lastCompletedAt } : {}), ...(control.checkpoint ? { checkpoint: control.checkpoint } : {}) };
 	}, deadline, ctx.signal);
 }
 
-function outcomeSummary(ctx: ProviderCtx): string {
-	const outcome = ctx.outcome; const lines = ["Goal outcome"];
-	const add = (label: string, value: unknown, cap = 480) => { const text = typeof value === "string" ? value.trim() : typeof value === "number" || typeof value === "boolean" ? String(value) : ""; if (text) lines.push(`${label}: ${truncate(text.replace(/\s+/g, " "), cap)}`); };
-	const addItems = (label: "Task" | "Gate", items: unknown) => {
-		if (!Array.isArray(items)) return;
-		for (const item of items.slice(0, 100)) if (item && typeof item === "object") {
-			const record = item as Record<string, unknown>;
-			add(label, [record.title ?? record.name ?? record.id, record.state ?? record.status, record.resultSummary ?? record.summary ?? record.content].filter(v => typeof v === "string" && v.trim()).join(" — "));
-		}
-	};
-	if (typeof outcome === "string") add("Summary", outcome, 7_600);
-	else if (outcome && typeof outcome === "object" && !Array.isArray(outcome)) {
-		const data = outcome as Record<string, unknown>;
-		const goal = data.goal;
-		if (goal && typeof goal === "object" && !Array.isArray(goal)) {
-			// Host completion snapshots are nested: retain the useful goal fields
-			// before potentially numerous tasks/gates, while preserving flat legacy
-			// payload support below.
-			const record = goal as Record<string, unknown>;
-			const before = lines.length;
-			add("Goal title", record.title);
-			add("Goal state", record.state);
-			add("Goal spec", record.spec);
-			// A valid host goal always contributes more than the bare document header,
-			// even if its optional display fields were blanked by upstream bounding.
-			if (lines.length === before) add("Goal", record.id ?? "completed");
-		} else {
-			for (const key of ["title", "state", "spec", "summary", "result", "decision", "completedAt"]) add(key[0].toUpperCase() + key.slice(1), data[key]);
-		}
-		addItems("Task", data.tasks);
-		addItems("Gate", data.gates);
-	}
-	let result = ""; for (const line of lines) { if ((result.length + line.length + 1) > 8_000) break; result += `${result ? "\n" : ""}${line}`; }
-	return result;
+function completionRetention(ctx: ProviderCtx, scope: ScopeProvenance, cfg: EffectiveConfig): CompletedOutcomeRetention | undefined {
+	return completedOutcomeRetention({ outcome: ctx.outcome, completionRevision: ctx.completionRevision, completedAt: ctx.completedAt }, scope, cfg);
 }
-function completionEventId(ctx: ProviderCtx): string | undefined { const revision = textOf(ctx.completionRevision) ?? (typeof ctx.completedAt === "number" && Number.isFinite(ctx.completedAt) ? String(ctx.completedAt) : undefined); return revision ? `goal-completion:${revision}` : undefined; }
 /** A compaction's injected event time is the retry-stable per-session sequence.
  * It is encoded in the canonical identity so a queued replay uses the same id. */
 function compactionEventSeq(ctx: ProviderCtx): number { const now = nowOf(ctx); return Number.isSafeInteger(now) && now >= 0 ? now : Date.now(); }
-async function retainImmediate(ctx: ProviderCtx, cfg: EffectiveConfig, content: string, kind: "compaction" | "outcome", sync: boolean): Promise<boolean> {
-	const store = storeOf(ctx); const scope = scopeOf(ctx); if (!store || !scope || !canContinue(ctx)) return false;
+async function retainImmediate(ctx: ProviderCtx, cfg: EffectiveConfig, content: string, kind: "compaction" | "outcome", sync: boolean, completed?: CompletedOutcomeRetention): Promise<boolean> {
+	const store = storeOf(ctx); const scope = scopeOf(ctx); if (!store || !scope || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false;
 	const seq = kind === "compaction" ? compactionEventSeq(ctx) : undefined;
-	const eventId = kind === "outcome" ? completionEventId(ctx) : (scope.sessionId ?? `compaction:${seq}`); if (!eventId) return false;
-	const identity = eventIdentity(scope, cfg, kind, eventId, seq);
-	try { const client = await makeClient(clientConfig(cfg, ctx.runtime)); await client.ensureBank(cfg.bank); if (!canContinue(ctx)) return false; await client.retain(cfg.bank, content, { tags: tagsFor(scope, kind), sync, id: documentId(identity) }); return true; }
-	catch (e) { const queued = await queueRecord(store, scope, identity, content, tagsFor(scope, kind), sync, nowOf(ctx), ctx); if (!queued) throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); await recordError(store, e); return true; }
+	const eventId = scope.sessionId ?? `compaction:${seq}`;
+	const identity = completed?.identity ?? eventIdentity(scope, cfg, kind, eventId, seq);
+	const recordScope = completed?.scope ?? scope;
+	const tags = completed?.tags ?? tagsFor(scope, kind);
+	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(clientConfig(cfg, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.ensureBank(cfg.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(cfg.bank, content, { tags, sync, id: completed?.documentId ?? documentId(identity) }); return true; }
+	catch (e) { const queued = await queueRecord(store, recordScope, identity, content, tags, sync, nowOf(ctx), ctx); if (!queued) throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); await recordAutomaticError(ctx, store, e); return true; }
 }
 const provider = {
 	async sessionSetup(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); if (!isActive(cfg, ctx.runtime)) return { blocks: [] }; await recoverStranded(ctx, cfg); return { blocks: await doRecall(ctx, cfg, ctx.prompt) }; },
@@ -205,6 +197,6 @@ const provider = {
 	async afterTurn(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain || !scopeOf(ctx)) return { blocks: [] }; const store = storeOf(ctx); if (!store) return { blocks: [] }; await drainQueueHead(store, cfg, ctx); const summary = turnSummary(ctx); const appended = summary ? await appendTurn(ctx, cfg, summary) : undefined; if (appended) { const read = await store.read<unknown>(appended.key); if (read.state === "present" && isPendingEnvelope(read.value, appended.identity) && pendingDue(read.value, cfg, nowOf(ctx))) await flushPending(ctx, cfg, appended.key, appended.identity); } return { blocks: [] }; },
 	async beforeCompact(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); const content = compactSummary(ctx); if (isActive(cfg, ctx.runtime) && cfg.autoRetain && content) await retainImmediate(ctx, cfg, content, "compaction", true); return { blocks: [] }; },
 	async sessionShutdown(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); if (isActive(cfg, ctx.runtime) && storeOf(ctx)) await drainQueueAll(storeOf(ctx)!, cfg, ctx); return { blocks: [] }; },
-	async goalCompleted(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); const content = outcomeSummary(ctx); if (!isActive(cfg, ctx.runtime) || !scopeOf(ctx)?.goalId || !completionEventId(ctx) || !content || !await retainImmediate(ctx, cfg, content, "outcome", true)) throw new Error(OUTCOME_NOT_DURABLE_ERROR); return { blocks: [] }; },
+	async goalCompleted(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> { const cfg = resolveConfig(ctx.config); const scope = scopeOf(ctx); const completed = scope ? completionRetention(ctx, scope, cfg) : undefined; if (!await hasMemoryCapability(ctx, "memory.write")) return { blocks: [] }; if (!isActive(cfg, ctx.runtime) || !completed || !await retainImmediate(ctx, cfg, completed.content, "outcome", true, completed)) throw new Error(OUTCOME_NOT_DURABLE_ERROR); return { blocks: [] }; },
 };
 export default provider;

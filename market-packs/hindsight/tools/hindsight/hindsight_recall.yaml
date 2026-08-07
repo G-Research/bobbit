@@ -1,0 +1,8 @@
+name: hindsight_recall
+group: Hindsight
+description: Recall memories in the current project scope; use scope=all only with an explicit all-memory grant.
+summary: Recall scoped long-term memories
+params: [query, scope?]
+provider:
+  type: bobbit-extension
+  extension: ../../lib/tools.mjs

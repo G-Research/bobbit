@@ -107,6 +107,8 @@ before changing `node_modules`.
 
 **Rule of thumb**: UI is hot. Server is compiled. If you touched anything under `src/server/`, you need a rebuild + restart.
 
+Development uses Vite's bundled dev mode: Rolldown serves the large eager browser graph as a small set of in-memory chunks instead of one request per source module, while preserving incremental HMR for edits and multi-file operations. Dev mode also unregisters Bobbit's production service worker and removes only the current mount's worker caches. A proxy `ECONNABORTED` during navigation means the page cancelled its API request; confirm separate `[harness]` or gateway `[boot]` logs before treating it as a server restart.
+
 ---
 
 ## `node_modules` gets wiped while the dev server is running
@@ -427,7 +429,7 @@ A practical loop is:
    BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
    ```
 
-The affected cache under `.profiles/test-cache/` is ignored, checkout-local optimization state. Do not copy or share it, use it as evidence, or upload/restore it in CI. The PR affected-feedback job deliberately passes an explicit base SHA with `--no-cache`; a separate cross-platform job still runs the full unit suite, and browser/E2E gates are unchanged.
+The affected cache under `.profiles/test-cache/` is ignored, checkout-local optimization state. Do not copy or share it, use it as evidence, or upload/restore it in CI. Affected testing is local developer feedback only; CI runs the cross-platform full unit suite, and browser/E2E gates are unchanged.
 
 When changing test ownership or dynamically loaded repository inputs, run `npm run test:unit:inventory` and the relevant affected-runner pins. New shipped role/tool/skill/pack/workflow/config families and computed readers need declared selector edges because the same closure controls both selection and cache invalidation. Declare deletion-safe ownership for dynamic families; tombstones retain declared impact, scan, and indirect-reader edges but cannot recover undeclared or old static source imports.
 

@@ -106,17 +106,19 @@ function createSupervisor(input: {
 	probe?: ReturnType<typeof vi.fn>;
 	restart?: ServiceRuntimeManifest["lifecycle"]["restart"];
 	settingsRevision?: string;
+	authorize?: ReturnType<typeof vi.fn>;
 }): { instance: ServiceRuntimeSupervisor; store: Store; runner: ServiceRunner } {
 	const store = input.store ?? new Store();
 	const runner = input.runner ?? localRunner();
 	const runtime = input.restart ? { ...manifest, lifecycle: { ...manifest.lifecycle, restart: input.restart } } : manifest;
 	const runtimeContribution = { ...contribution, manifest: runtime };
+	const authorize = input.authorize ?? vi.fn(async () => true);
 	return {
 		instance: new ServiceRuntimeSupervisor({
 			registry: { getRuntime: vi.fn(() => runtimeContribution) } as any,
 			store: store as any,
 			runners: [runner],
-			authorizer: { authorize: async () => true },
+			authorizer: { authorize: authorize as any },
 			settings: { resolve: async () => ({ mode: "local", revision: input.settingsRevision ?? "revision-1", values: {} }) },
 			serverIdentity: "server",
 			clock: input.clock,
@@ -131,6 +133,14 @@ async function flush(): Promise<void> {
 	// Health work crosses the detached monitor, lifecycle queue, probe, durable
 	// update, and owned-resource cleanup; drain every deterministic microtask.
 	for (let index = 0; index < 16; index++) await Promise.resolve();
+}
+
+async function flushUntil(settled: () => boolean): Promise<void> {
+	for (let index = 0; index < 64; index++) {
+		if (settled()) return;
+		await Promise.resolve();
+	}
+	assert.fail("expected deterministic lifecycle work to settle");
 }
 
 describe("ServiceRuntimeSupervisor health monitor", () => {
@@ -235,11 +245,40 @@ describe("ServiceRuntimeSupervisor health monitor", () => {
 		assert.deepEqual(store.record?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.020Z" });
 		assert.deepEqual(clock.waits.map((wait) => wait.ms), [10]);
 		clock.advance();
-		await flush();
+		// A replacement launch is not settled until its ready endpoint is durable.
+		// Do not couple this assertion to a particular number of implementation
+		// microtasks between `runner.start` and `store.replace`.
+		await flushUntil(() => store.record?.endpoint === endpoint);
 
 		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 2);
 		assert.equal(store.record?.endpoint, endpoint);
 		assert.equal(store.record?.lastDiagnostic, undefined);
+	});
+
+	it("re-reads the live grant when applying a queued health restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async (_request: unknown) => allowed);
+		let probes = 0;
+		const probe = vi.fn(async () => ++probes !== 2);
+		const { instance, store, runner } = createSupervisor({
+			clock,
+			probe,
+			authorize,
+			restart: { policy: "on-failure", maxAttempts: 1, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 },
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		clock.advance();
+		await flush();
+		assert.deepEqual(clock.waits.map((wait) => wait.ms), [10]);
+		allowed = false;
+		clock.advance();
+		await flush();
+
+		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 1, "revocation prevents the queued replacement launch");
+		assert.deepEqual(authorize.mock.calls.at(-1)?.[0], { ...identity, action: "start" });
+		assert.deepEqual(store.record?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.020Z" });
 	});
 
 	it("reuses explicitly only after revision and inspect verification, while local reconciliation always starts fresh", async () => {
