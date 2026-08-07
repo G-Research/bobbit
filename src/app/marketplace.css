@@ -1519,10 +1519,14 @@
 }
 
 .market-settings-status {
-	min-height: 1rem;
-	margin-top: 0.5rem;
+	margin-top: 0.625rem;
 	font-size: 0.6875rem;
 	color: var(--positive, var(--chart-2));
+}
+
+/* The live outcome is project-scoped, so do not reserve one blank region per pack. */
+.market-settings-status:empty {
+	display: none;
 }
 
 @media (max-width: 640px) {
