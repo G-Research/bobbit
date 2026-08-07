@@ -472,6 +472,33 @@
       }
     },
     {
+      "path": "tests2/core/model-selection-required-prompt-boundary.test.ts",
+      "reason": "Server prompt-admission and model-change transport coverage proving conditioned sessions reject before preprocessing or durable/RPC mutation, retain parked prompts, route exact replacement tuples through cold recovery, and sanitize activation failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/model-selection-required-ux.test.ts",
+      "reason": "DOM regression coverage proving retired-model sessions remain readable and interactive, display the exact unavailable tuple, preserve the warning until verified recovery, and retain composer text and attachment drafts when sending is fenced.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/model-selection-recovery.journey.spec.ts",
+      "reason": "Registered Chromium journey proving cold-restored retired-model history remains navigable, rejected sends retain text and attachment drafts without mutation, the existing picker activates an exact selectable replacement, and recovered sends survive reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/reviewer-diff-scope-prompts.test.ts",
       "reason": "Pure prompt-contract coverage ensuring every first-party reviewer raises only issues introduced or materially worsened by the reviewed change and does not expand goals or PRs to fix unchanged pre-existing issues.",
       "execution": {
