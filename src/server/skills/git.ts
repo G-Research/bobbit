@@ -11,6 +11,11 @@ import {
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "../agent/project-config-store.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
+import {
+	canonicalGitCommonDir,
+	repositoryMutationCoordinator,
+	type RepositoryMutationCoordinator,
+} from "./repository-mutation-coordinator.js";
 
 const primaryBranchFallbackWarningCwds = new Set<string>();
 
@@ -595,6 +600,8 @@ export interface CreateWorktreeOptions {
 	worktreeRoot?: string;
 	configuredBaseRef?: string;
 	commandRunner?: CommandRunner;
+	/** Test seam; production uses the process-wide common-directory coordinator. */
+	repositoryMutationCoordinator?: RepositoryMutationCoordinator;
 	remotePolicy?: RemoteGitPolicy;
 	/** @deprecated Ignored. Worktree creation is always local-only. */
 	pushPolicy?: "local-only" | "publish";
@@ -606,6 +613,8 @@ export interface CreateWorktreeSetOptions {
 	worktreeRoot?: string;
 	configuredBaseRef?: string;
 	commandRunner?: CommandRunner;
+	/** Test seam; production uses the process-wide common-directory coordinator. */
+	repositoryMutationCoordinator?: RepositoryMutationCoordinator;
 	remotePolicy?: RemoteGitPolicy;
 	/** Exact authoritative start commit/ref for each repository key. */
 	startPointsByRepo?: Record<string, string>;
@@ -720,7 +729,7 @@ export interface WorktreeResult {
  *   callers (for example hierarchical local branching) do not gain an upstream
  *   merely by creating a worktree.
  */
-export async function createWorktree(repoPath: string, branchName: string, opts?: CreateWorktreeOptions): Promise<WorktreeResult> {
+async function createWorktreeUncoordinated(repoPath: string, branchName: string, opts?: CreateWorktreeOptions): Promise<WorktreeResult> {
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
 	const remotePolicy = opts?.remotePolicy ?? DEFAULT_REMOTE_GIT_POLICY;
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
@@ -807,13 +816,18 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 				}
 			}
 			// Re-create worktree using existing branch (no -b)
-			await runGit(["worktree", "add", worktreePath, branchName], { cwd: repoPath });
+			await runGit(worktreeAddArgs(worktreePath, branchName), { cwd: repoPath });
 			console.log(`[git] Re-created worktree for existing branch "${branchName}" at ${worktreePath}`);
 		}
 	} else {
 		// Branch doesn't exist — create branch and worktree in one step
 		try {
-			await runGit(["worktree", "add", "-b", branchName, worktreePath, startPoint], {
+			await runGit(worktreeAddArgs(
+				worktreePath,
+				branchName,
+				startPoint,
+				{ noTrack: !!configuredBaseRefTrimmed },
+			), {
 				cwd: repoPath,
 			});
 		} catch (err) {
@@ -835,26 +849,202 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	}
 
 	// A configured `base_ref` is a comparison/upstream baseline, not a request to
-	// publish the work branch. Runs whether the base is local (`master`) or
-	// remote (`origin/develop`) — save-time validation guarantees the ref
-	// resolves at PUT time; the defence-in-depth try/catch below catches the
-	// edge case where it has been deleted between save and worktree creation.
+	// publish the work branch. `--no-track` above keeps the worktree command from
+	// writing shared config; this is the one explicit, serialized config mutation.
 	if (configuredBaseRefTrimmed) {
-		try {
-			await runGit(["branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branchName], {
-				cwd: worktreePath,
-				timeout: 10_000,
-			});
-		} catch (err) {
-			const stderr = err instanceof Error ? err.message : String(err);
-			throw new Error(
-				`Failed to set upstream for branch '${branchName}' to '${configuredBaseRefTrimmed}': ${stderr}. ` +
-				`Check that the ref is still a valid branch.`,
-			);
-		}
+		await setBranchUpstream(repoPath, worktreePath, branchName, configuredBaseRefTrimmed, commandRunner, opts?.repositoryMutationCoordinator, true);
 	}
+	await validateWorktreePostconditions(repoPath, worktreePath, branchName, configuredBaseRefTrimmed || undefined, commandRunner);
 
 	return { worktreePath, branchName };
+}
+
+/**
+ * Create a worktree under the mutation transaction for its Git common dir.
+ * This covers branch creation, worktree registration, explicit upstream setup,
+ * and final validation as one operation rather than locking only the last write.
+ */
+export async function createWorktree(repoPath: string, branchName: string, opts?: CreateWorktreeOptions): Promise<WorktreeResult> {
+	const commandRunner = opts?.commandRunner ?? realCommandRunner;
+	const coordinator = opts?.repositoryMutationCoordinator ?? repositoryMutationCoordinator;
+	const commonDir = await resolveGitCommonDir(repoPath, commandRunner);
+	return coordinator.run(commonDir, () => createWorktreeUncoordinated(repoPath, branchName, opts));
+}
+
+function worktreeAddArgs(
+	worktreePath: string,
+	branchName: string,
+	startPoint?: string,
+	opts?: { noTrack?: boolean },
+): string[] {
+	// `--no-track` is valid only when `git worktree add` also creates its
+	// branch. Reusing an existing branch must omit it; Git otherwise rejects
+	// the command before the recovery worktree is created. It is used only when
+	// the caller immediately performs a serialized explicit upstream write.
+	// Without that compensating write, preserve Git's implicit remote tracking.
+	if (startPoint === undefined) return ["worktree", "add", worktreePath, branchName];
+
+	return [
+		"worktree", "add",
+		...(opts?.noTrack ? ["--no-track"] : []),
+		"-b", branchName, worktreePath, startPoint,
+	];
+}
+
+async function resolveGitCommonDir(repoPath: string, commandRunner: CommandRunner): Promise<string> {
+	try {
+		let commonDir = "";
+		try {
+			const { stdout } = await execGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+				cwd: repoPath,
+				timeout: 5_000,
+			}, commandRunner);
+			commonDir = stdout.toString().trim();
+		} catch {
+			const { stdout } = await execGit(["rev-parse", "--git-common-dir"], {
+				cwd: repoPath,
+				timeout: 5_000,
+			}, commandRunner);
+			commonDir = stdout.toString().trim();
+		}
+		if (commonDir) return canonicalGitCommonDir(path.isAbsolute(commonDir) ? commonDir : path.resolve(repoPath, commonDir));
+	} catch {
+		// Preserve the public createWorktree error from the operation itself. A
+		// missing/malformed repo is not disguised as a coordinator failure.
+	}
+	return canonicalGitCommonDir(repoPath);
+}
+
+function gitErrorText(err: unknown): string {
+	const child = err as { message?: unknown; stderr?: unknown } | null;
+	const stderr = child?.stderr;
+	return [
+		err instanceof Error ? err.message : String(err),
+		typeof stderr === "string" ? stderr : stderr == null ? "" : String(stderr),
+	].join("\n");
+}
+
+function isConfigLockContention(err: unknown): boolean {
+	// Git's usual collision spelling is either ".../config.lock: File exists"
+	// or ".../config: File exists". Do not retry locks for refs, indexes, or
+	// arbitrary files: those can signal invalid repos or genuine permissions bugs.
+	return /could not lock config file\b[\s\S]*(?:\.git(?:[\\/])config(?:\.lock)?|config(?:\.lock)?):\s*file exists/i.test(gitErrorText(err));
+}
+
+function upstreamMatchesOrIsUnavailable(observed: string | undefined, expected: string, commandRunner: CommandRunner): boolean {
+	// Older in-memory runners record a successful config write but cannot answer
+	// the subsequent rev-parse query. That is test-seam compatibility only; it
+	// is never used to suppress an initial write or reconcile a failed command.
+	return observed === expected || (observed === undefined && commandRunner !== realCommandRunner);
+}
+
+function waitForConfigLockRetry(attempt: number): Promise<void> {
+	// Bounded short backoff: only a verified config.lock collision is retried.
+	return new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+}
+
+async function readBranchUpstream(
+	worktreePath: string,
+	branchName: string,
+	commandRunner: CommandRunner,
+): Promise<string | undefined> {
+	try {
+		const { stdout } = await execGit([
+			"rev-parse", "--abbrev-ref", "--symbolic-full-name", `${branchName}@{upstream}`,
+		], { cwd: worktreePath, timeout: 5_000 }, commandRunner);
+		return stdout.toString().trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function setBranchUpstream(
+	repoPath: string,
+	worktreePath: string,
+	branchName: string,
+	upstream: string,
+	commandRunner: CommandRunner,
+	injectedCoordinator?: RepositoryMutationCoordinator,
+	alreadyCoordinated = false,
+): Promise<void> {
+	const operation = async (): Promise<void> => {
+		// Reconciliation comes first: retries/partial setup never write config if
+		// the desired upstream is already present.
+		if (await readBranchUpstream(worktreePath, branchName, commandRunner) === upstream) return;
+		let lastLockError: unknown;
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try {
+				await execGit(["branch", `--set-upstream-to=${upstream}`, branchName], {
+					cwd: worktreePath,
+					timeout: 10_000,
+				}, commandRunner);
+				if (upstreamMatchesOrIsUnavailable(await readBranchUpstream(worktreePath, branchName, commandRunner), upstream, commandRunner)) return;
+				throw new Error(`Git reported success but branch '${branchName}' does not track '${upstream}'`);
+			} catch (err) {
+				// A command can report a config.lock error after the write became
+				// visible. Always reconcile before deciding to retry or fail.
+				if (await readBranchUpstream(worktreePath, branchName, commandRunner) === upstream) return;
+				if (!isConfigLockContention(err)) {
+					throw new Error(`Failed to set upstream for branch '${branchName}' to '${upstream}': ${gitErrorText(err)}. Check that the ref is still a valid branch.`);
+				}
+				lastLockError = err;
+				if (attempt < 2) await waitForConfigLockRetry(attempt);
+			}
+		}
+		throw new Error(`Failed to set upstream for branch '${branchName}' to '${upstream}' after config-lock retries: ${gitErrorText(lastLockError)}. Check that the ref is still a valid branch.`);
+	};
+	if (alreadyCoordinated) return operation();
+	const coordinator = injectedCoordinator ?? repositoryMutationCoordinator;
+	const commonDir = await resolveGitCommonDir(repoPath, commandRunner);
+	return coordinator.run(commonDir, operation);
+}
+
+async function validateWorktreePostconditions(
+	repoPath: string,
+	worktreePath: string,
+	branchName: string,
+	expectedUpstream: string | undefined,
+	commandRunner: CommandRunner,
+): Promise<void> {
+	// Production must verify a usable worktree. Legacy in-memory CommandRunner
+	// seams do not materialize their simulated worktrees, so retain their
+	// established contract while still checking every value they expose.
+	if (!await pathExists(worktreePath) || !await pathExists(path.join(worktreePath, ".git"))) {
+		if (commandRunner === realCommandRunner) {
+			throw new Error(`Worktree validation failed: expected usable worktree at ${worktreePath}`);
+		}
+		return;
+	}
+	try {
+		const { stdout } = await execGit(["rev-parse", "--show-toplevel"], { cwd: worktreePath, timeout: 5_000 }, commandRunner);
+		const reportedPath = stdout.toString().trim();
+		if (reportedPath && !samePath(await canonicalizePath(reportedPath), await canonicalizePath(worktreePath))) {
+			throw new Error(`Worktree validation failed: ${worktreePath} resolves to ${reportedPath}`);
+		}
+		const branch = await execGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath, timeout: 5_000 }, commandRunner);
+		const reportedBranch = branch.stdout.toString().trim();
+		if (reportedBranch && reportedBranch !== branchName) {
+			throw new Error(`Worktree validation failed: expected branch '${branchName}', found '${reportedBranch}'`);
+		}
+	} catch (err) {
+		if (commandRunner === realCommandRunner) {
+			throw new Error(`Worktree validation failed for ${worktreePath}: ${gitErrorText(err)}`);
+		}
+		return;
+	}
+	if (expectedUpstream) {
+		const actualUpstream = await readBranchUpstream(worktreePath, branchName, commandRunner);
+		if (actualUpstream !== expectedUpstream && (actualUpstream !== undefined || commandRunner === realCommandRunner)) {
+			throw new Error(`Worktree validation failed: branch '${branchName}' does not track '${expectedUpstream}'`);
+		}
+	}
+	// Also prove the source still resolves as a repository; this catches a
+	// malformed/replaced source instead of mistaking an old worktree for success.
+	try {
+		await execGit(["rev-parse", "--git-common-dir"], { cwd: repoPath, timeout: 5_000 }, commandRunner);
+	} catch (err) {
+		if (commandRunner === realCommandRunner) throw err;
+	}
 }
 
 /**
@@ -869,7 +1059,7 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
  *
  * See docs/design/multi-repo-components.md §4 + §5.
  */
-export async function createWorktreeSet(
+async function createWorktreeSetUncoordinated(
 	rootPath: string,
 	components: Component[],
 	branchName: string,
@@ -908,6 +1098,7 @@ export async function createWorktreeSet(
 			configuredBaseRef: opts?.configuredBaseRef,
 			commandRunner,
 			remotePolicy,
+			repositoryMutationCoordinator: opts?.repositoryMutationCoordinator,
 		});
 		return {
 			container: result.worktreePath,
@@ -1006,9 +1197,14 @@ export async function createWorktreeSet(
 
 			try {
 				if (branchExists) {
-					await runGit(["worktree", "add", wtPath, branchName], { cwd: repoSrc });
+					await runGit(worktreeAddArgs(wtPath, branchName), { cwd: repoSrc });
 				} else {
-					await runGit(["worktree", "add", "-b", branchName, wtPath, startPoint], { cwd: repoSrc });
+					await runGit(worktreeAddArgs(
+						wtPath,
+						branchName,
+						startPoint,
+						{ noTrack: !!configuredBaseRefTrimmed },
+					), { cwd: repoSrc });
 				}
 			} catch (err) {
 				if (startPointFromConfiguredBase && !branchExists) {
@@ -1027,22 +1223,12 @@ export async function createWorktreeSet(
 			out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
 			if (!branchExists) createdBranchRepos.add(repo);
 
-			// When the project has a configured `base_ref`, set it as the per-branch
-			// upstream so each component's `@{u}` reflects the integration target.
+			// `--no-track` keeps registration/config independent; serialize the one
+			// explicit shared-config write for this component's common directory.
 			if (configuredBaseRefTrimmed) {
-				try {
-					await runGit(["branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branchName], {
-						cwd: wtPath,
-						timeout: 10_000,
-					});
-				} catch (err) {
-					const stderr = err instanceof Error ? err.message : String(err);
-					throw new Error(
-						`Failed to set upstream for branch '${branchName}' to '${configuredBaseRefTrimmed}' in component "${repo}": ${stderr}. ` +
-						`Check that the ref is still a valid branch.`,
-					);
-				}
+				await setBranchUpstream(repoSrc, wtPath, branchName, configuredBaseRefTrimmed, commandRunner, opts?.repositoryMutationCoordinator, true);
 			}
+			await validateWorktreePostconditions(repoSrc, wtPath, branchName, configuredBaseRefTrimmed || undefined, commandRunner);
 
 		}
 	} catch (err) {
@@ -1054,6 +1240,54 @@ export async function createWorktreeSet(
 	}
 
 	return { container, worktrees: out, createdBranchRepos };
+}
+
+async function runWithRepositoryMutationKeys<T>(
+	keys: readonly string[],
+	coordinator: RepositoryMutationCoordinator,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const uniqueKeys = [...new Set(keys)].sort();
+	const run = async (index: number): Promise<T> => index === uniqueKeys.length
+		? operation()
+		: coordinator.run(uniqueKeys[index], () => run(index + 1));
+	return run(0);
+}
+
+/**
+ * Create a coordinated set of worktrees. Multi-repository setup takes every
+ * common-directory lock in canonical order, so two overlapping sets cannot
+ * deadlock or mutate one repository's config concurrently.
+ */
+export async function createWorktreeSet(
+	rootPath: string,
+	components: Component[],
+	branchName: string,
+	baseBranch?: string,
+	opts?: CreateWorktreeSetOptions,
+): Promise<{
+	container: string;
+	worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }>;
+	createdBranchRepos?: ReadonlySet<string>;
+}> {
+	const repos = [...new Set(components.map(component => component.repo))];
+	if (repos.length === 0) repos.push(".");
+	// The single-repo implementation delegates to createWorktree(), which owns
+	// the whole transaction itself. Do not acquire the same non-reentrant queue
+	// twice.
+	if (repos.length === 1 && repos[0] === ".") {
+		return createWorktreeSetUncoordinated(rootPath, components, branchName, baseBranch, opts);
+	}
+	const commandRunner = opts?.commandRunner ?? realCommandRunner;
+	const keys = await Promise.all(repos.map(repo => resolveGitCommonDir(
+		path.join(rootPath, repo === "." ? "" : repo),
+		commandRunner,
+	)));
+	return runWithRepositoryMutationKeys(
+		keys,
+		opts?.repositoryMutationCoordinator ?? repositoryMutationCoordinator,
+		() => createWorktreeSetUncoordinated(rootPath, components, branchName, baseBranch, opts),
+	);
 }
 
 /**
@@ -1370,12 +1604,12 @@ export async function recoverWorktree(
 			return null;
 		}
 
-		// Create the worktree — use existing branch (no -b) or track from remote
+		// Create the worktree — use existing branch (no -b) or let Git restore
+		// implicit tracking when recreating a branch that exists only on origin.
 		if (branchExists) {
-			await runGit(["worktree", "add", worktreePath, branchName], { cwd: repoPath });
+			await runGit(worktreeAddArgs(worktreePath, branchName), { cwd: repoPath });
 		} else {
-			// Create local branch tracking the remote
-			await runGit(["worktree", "add", "-b", branchName, worktreePath, `origin/${branchName}`], { cwd: repoPath });
+			await runGit(worktreeAddArgs(worktreePath, branchName, `origin/${branchName}`), { cwd: repoPath });
 		}
 
 		console.log(`[git] Recovered worktree for branch "${branchName}" at ${worktreePath}`);
