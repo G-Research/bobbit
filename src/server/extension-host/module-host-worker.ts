@@ -8,9 +8,10 @@
 // Pack SERVER code is TRUSTED — the same tier as a tool or MCP server the user
 // chose to install. Actions, routes, and providers retain FULL ambient parity:
 // normal `node:` built-ins, normal network globals, and the normal `process` (full
-// env). Scheduled advisors are the narrow exception: their data-only worker gets
-// only a small portable runtime environment, so gateway environment secrets are not
-// inherited. That is not a general capability sandbox: trusted advisor code still has ambient Node,
+// env). Scheduled advisors and protected result filters are the narrow exceptions:
+// their data-only workers get only a small portable runtime environment, so gateway
+// environment secrets are not inherited. That is not a general capability sandbox:
+// trusted advisor code still has ambient Node,
 // filesystem, and network access and can defeat in-process restrictions. The ONLY
 // isolation kept is the kind that is genuine:
 //
@@ -53,7 +54,7 @@ export interface ModuleHostOptions {
 	stackSizeMb?: number;
 }
 
-export type ModuleHostExportKind = "actions" | "routes" | "providers" | "advisors" | "hooks";
+export type ModuleHostExportKind = "actions" | "routes" | "providers" | "advisors" | "hooks" | "result-filters";
 
 /** Hook invocations intentionally receive no live Host API. */
 export type HookInvocationContext = DecisionHookContext | DecisionResolutionContext;
@@ -182,8 +183,12 @@ function advisorRuntimeEnv(): NodeJS.ProcessEnv {
 /** A custom Worker `env` is not re-parsed as `NODE_OPTIONS`, so move only the safe
  * loader flags to `execArgv`. Other export kinds retain their historical execArgv
  * and full inherited environment unchanged. */
+function hasCredentialFreeRuntimeEnv(exportKind: InvokeRequest["exportKind"]): boolean {
+	return exportKind === "advisors" || exportKind === "result-filters";
+}
+
 function workerExecArgv(exportKind: InvokeRequest["exportKind"]): string[] {
-	return exportKind === "advisors"
+	return hasCredentialFreeRuntimeEnv(exportKind)
 		? workerSafeExecArgv([...process.execArgv, ...parseNodeOptions(process.env.NODE_OPTIONS)])
 		: workerSafeExecArgv(process.execArgv);
 }
@@ -295,7 +300,7 @@ export class ModuleHost {
 		// (a server module reaches its own routes directly).
 		const { host: _liveProviderHost, ...ctxNoHost } = providerCtx;
 		const { gateway: _advisorGateway, ...advisorCtx } = ctxNoHost;
-		const serCtx = req.exportKind === "hooks"
+		const serCtx = req.exportKind === "hooks" || req.exportKind === "result-filters"
 			? { ...ctxNoHost, capabilities: { callRoute: false, session: false, store: false, agents: false } }
 			: req.exportKind === "providers"
 				? {
@@ -327,11 +332,12 @@ export class ModuleHost {
 				};
 
 		const worker = new Worker(this.bootstrapUrl(), {
-			// Advisors receive only portable Node runtime variables, never the inherited
-			// gateway environment or its credentials. This is a narrow data-exposure
-			// reduction, not a filesystem/network sandbox; they remain trusted installed
-			// pack code. All other server-module exports retain Model-A full env parity.
-			env: req.exportKind === "advisors" ? advisorRuntimeEnv() : undefined,
+			// Advisors and protected result filters receive only portable Node runtime
+			// variables, never the inherited gateway environment or its credentials.
+			// This is a narrow data-exposure reduction, not a filesystem/network sandbox;
+			// they remain trusted installed pack code. All other server-module exports
+			// retain Model-A full env parity.
+			env: hasCredentialFreeRuntimeEnv(req.exportKind) ? advisorRuntimeEnv() : undefined,
 			//
 			// `wallCapMs` lets the bootstrap bound a SYNCHRONOUS child's injected
 			// `timeout` BELOW this cap: a blocking sync call (`spawnSync`/`execSync`/

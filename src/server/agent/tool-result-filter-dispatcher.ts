@@ -141,20 +141,25 @@ export class ToolResultFilterDispatcher {
 				return rejectedResolution(initialOutcomes, "filter-authority-unavailable");
 			}
 			if (signal?.aborted) return rejectedResolution(initialOutcomes, "filter-aborted");
-			const selected = new Set(initial.eligible.map(target => sourceKey(target.source)));
-			const live = new Set(final.eligible.map(target => sourceKey(target.source)).filter(key => selected.has(key)));
-			const fenced = settled.map(item => live.has(sourceKey(item.source)) ? item : {
-				source: item.source,
-				outcome: { ...item.outcome, outcome: "denied" as const, reasonCode: "filter-disabled-or-revoked" as const, ruleId: undefined },
-			});
-
-			// Only a completed, non-aborted all-revocation is allowed to pass through.
-			if (live.size === 0) return passResolution(input.result, fenced.map(item => item.outcome));
-			const candidates = fenced.flatMap(item => item.candidate ? [item.candidate] : []);
+			// An authority change cannot be reduced against a partial stale worker set.
+			// The exact ordered identity includes priority, so an order change is also
+			// fail-closed: it could change which proposal wins. Explicitly disabling all
+			// filters remains the one intentional raw pass-through path.
+			if (final.eligible.length === 0) {
+				const revoked = settled.map(item => ({
+					source: item.source,
+					outcome: { ...item.outcome, outcome: "denied" as const, reasonCode: "filter-disabled-or-revoked" as const, ruleId: undefined },
+				}));
+				return passResolution(input.result, revoked.map(item => item.outcome));
+			}
+			if (!sameEligibleAuthorities(initial.eligible, final.eligible)) {
+				return rejectedResolution(initialOutcomes, "filter-authority-changed");
+			}
+			const candidates = settled.flatMap(item => item.candidate ? [item.candidate] : []);
 			const reduction = reduceToolResultFilters(candidates);
 			const winner = reduction.source && reduction.proposal ? { source: reduction.source, proposal: reduction.proposal } : undefined;
-			if (!winner) return rejectedResolution(fenced.map(item => item.outcome), "filter-unavailable");
-			return selectedResolution(input.result, winner, markWinner(fenced.map(item => item.outcome), winner));
+			if (!winner) return rejectedResolution(initialOutcomes, "filter-unavailable");
+			return selectedResolution(input.result, winner, markWinner(initialOutcomes, winner));
 		} finally {
 			admission.release(input.sessionId, workerCount);
 		}
@@ -192,7 +197,7 @@ export class ToolResultFilterDispatcher {
 			if (signal?.aborted) return { source: target.source, outcome: outcome("denied", "filter-aborted") };
 			const raw = await this.deps.moduleHost.invoke({
 				url: pathToFileURL(path.resolve(path.dirname(target.hook.sourceFile), target.hook.module)).href,
-				packRoot: target.hook.packRoot, epoch: 0, exportKind: "hooks", member: "decide",
+				packRoot: target.hook.packRoot, epoch: 0, exportKind: "result-filters", member: "decide",
 				ctx: Object.freeze({ event: "afterToolResult", sessionId: input.sessionId, projectId: input.projectId, toolCallId: input.toolCallId, toolName: input.toolName, result: input.result }),
 				arg: undefined, workingDir: this.cwd(input),
 			} as InvokeRequest<Record<string, unknown>>, workerTimeout(target.hook.budget.timeoutMs), signal);
@@ -241,5 +246,10 @@ function rejectedResolution(outcomes: ToolResultFilterDispatchOutcome[], reasonC
 	return Object.freeze({ result: createSyntheticRejectedToolResult(randomUUID()), action: "reject", reasonCode, ...(ruleId ? { ruleId } : {}), ...(source ? { source: publicSource(source) } : {}), outcomes: Object.freeze(outcomes) });
 }
 function sourceKey(source: Source): string { return `extension:${source.packId}:${source.hookId}`; }
+/** Ordered identity protects reducer priority as well as the pack/hook principal. */
+function authorityKey(source: Source): string { return `${sourceKey(source)}:${source.priority}`; }
+function sameEligibleAuthorities(initial: readonly Target[], final: readonly Target[]): boolean {
+	return initial.length === final.length && initial.every((target, index) => authorityKey(target.source) === authorityKey(final[index].source));
+}
 function publicSource(source: Source): { id: string; packId: string; hookId: string } { return { id: sourceKey(source), packId: source.packId, hookId: source.hookId }; }
 function isTimeout(error: unknown): boolean { return error instanceof ModuleHostAbortError || error instanceof ActionError ? error.status === 504 : error instanceof Error && /timed out|timeout/i.test(error.message); }

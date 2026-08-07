@@ -36,6 +36,13 @@ function request(url: string, member: "decide" | "onDecision" | "selectSkills" |
 	return { url, packRoot: tmp, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir: tmp };
 }
 
+function filterRequest(url: string): InvokeRequest<Record<string, unknown>> {
+	return {
+		url, packRoot: tmp, epoch: 0, exportKind: "result-filters", member: "decide", arg: undefined, workingDir: tmp,
+		ctx: { event: "afterToolResult", sessionId: "session-1", projectId: "project-1", toolCallId: "call-1", toolName: "bash", result: { content: [{ type: "text", text: "safe-input" }], isError: false } },
+	};
+}
+
 beforeAll(() => {
 	enableTsWorkerResolver();
 	tmp = makeTmpDir("decision-hook-worker-");
@@ -86,6 +93,46 @@ describe("ModuleHost decision hooks", () => {
 			});
 		} finally {
 			host.dispose();
+		}
+	});
+
+	it("runs protected result filters with a credential-free environment and default decide export", async () => {
+		const priorToken = process.env.BOBBIT_TOKEN;
+		const priorProviderSecret = process.env.EP14_PROVIDER_SECRET;
+		process.env.BOBBIT_TOKEN = "EP14_GATEWAY_BEARER_CANARY";
+		process.env.EP14_PROVIDER_SECRET = "EP14_PROVIDER_SECRET_CANARY";
+		const host = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeHook(`
+				export default {
+					decide(ctx) {
+						return {
+							event: ctx.event,
+							hasHost: Object.hasOwn(ctx, "host"),
+							capabilities: ctx.capabilities,
+							token: process.env.BOBBIT_TOKEN ?? null,
+							providerSecret: process.env.EP14_PROVIDER_SECRET ?? null,
+							path: process.env.PATH ?? process.env.Path ?? null,
+							temp: process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? null,
+						};
+					}
+				};
+			`);
+			await expect(host.invoke(filterRequest(url))).resolves.toEqual({
+				event: "afterToolResult",
+				hasHost: false,
+				capabilities: { callRoute: false, session: false, store: false, agents: false },
+				token: null,
+				providerSecret: null,
+				path: process.env.PATH ?? process.env.Path ?? null,
+				temp: process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? null,
+			});
+		} finally {
+			host.dispose();
+			if (priorToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = priorToken;
+			if (priorProviderSecret === undefined) delete process.env.EP14_PROVIDER_SECRET;
+			else process.env.EP14_PROVIDER_SECRET = priorProviderSecret;
 		}
 	});
 
