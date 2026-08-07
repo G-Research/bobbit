@@ -42,6 +42,7 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 function websocketHarness(
 	recoverModelSelectionRequired = vi.fn(async () => {}),
 	activationInProgress = false,
+	options: { live?: boolean } = {},
 ) {
 	const ws = new FakeWebSocket();
 	const clients = new Set<any>();
@@ -49,18 +50,26 @@ function websocketHarness(
 	const enqueuePrompt = vi.fn(async () => ({ status: "queued" as const }));
 	const rpcPrompt = vi.fn();
 	const projectConfigGet = vi.fn();
+	const rpcGetState = vi.fn(async () => ({
+		success: true,
+		data: {
+			model: { provider: "replacement-provider", id: "replacement-model" },
+			thinkingLevel: "medium",
+		},
+	}));
 	let cwdReads = 0;
+	let recoveryCondition: ModelSelectionRequiredCondition | undefined = CONDITION;
 	const session: any = {
 		id: "conditioned-session",
 		title: "Retired model history",
-		status: "terminated",
+		status: options.live ? "idle" : "terminated",
 		statusVersion: 4,
 		condition: CONDITION,
-		dormant: true,
+		dormant: !options.live,
 		clients,
-		eventBuffer: { size: 0 },
+		eventBuffer: { size: options.live ? 1 : 0 },
 		promptQueue: { toArray: () => queueRows },
-		rpcClient: { prompt: rpcPrompt },
+		rpcClient: { prompt: rpcPrompt, getState: rpcGetState },
 		get cwd() {
 			cwdReads++;
 			throw new Error("prompt preprocessing read cwd");
@@ -92,7 +101,7 @@ function websocketHarness(
 		restartAgent,
 		persistSessionModel: persistMutation,
 		recoverModelSelectionRequired,
-		getModelSelectionRecoveryAdmission: () => ({ condition: CONDITION, activationInProgress }),
+		getModelSelectionRecoveryAdmission: () => ({ condition: recoveryCondition, activationInProgress }),
 	};
 
 	handleWebSocketConnection(
@@ -113,12 +122,22 @@ function websocketHarness(
 		queueRows,
 		enqueuePrompt,
 		rpcPrompt,
+		rpcGetState,
 		projectConfigGet,
 		persistMutation,
 		recoverModelSelectionRequired,
 		retryLastPrompt,
 		restartAgent,
 		deliverLiveSteer,
+		setRecoveryCondition: (condition: ModelSelectionRequiredCondition | undefined) => {
+			recoveryCondition = condition;
+			session.condition = condition;
+		},
+		setPersistedModel: (provider: string, modelId: string, thinkingLevel: string) => {
+			persisted.modelProvider = provider;
+			persisted.modelId = modelId;
+			persisted.effectiveThinkingLevel = thinkingLevel;
+		},
 		cwdReads: () => cwdReads,
 	};
 }
@@ -204,6 +223,72 @@ describe("MODEL_SELECTION_REQUIRED prompt boundaries", () => {
 				h.ws.sent.some((frame) => frame.type === "error" && frame.code === "COMMAND_ERROR"),
 				false,
 			);
+		} finally {
+			h.ws.close();
+		}
+	});
+
+	it("publishes the admission condition and explicit clear in fallback snapshots", async () => {
+		const h = websocketHarness();
+		try {
+			await waitFor(
+				() => h.ws.sent.some((frame) => frame.type === "state"),
+				"conditioned fallback snapshot",
+			);
+			const initialState = h.ws.sent.find((frame) => frame.type === "state");
+			assert.deepEqual(initialState.data.condition, CONDITION);
+
+			h.setRecoveryCondition(undefined);
+			const stateCount = h.ws.sent.filter((frame) => frame.type === "state").length;
+			h.ws.emit("message", JSON.stringify({ type: "get_state" }));
+			await waitFor(
+				() => h.ws.sent.filter((frame) => frame.type === "state").length > stateCount,
+				"cleared fallback snapshot",
+			);
+			const clearedState = h.ws.sent.filter((frame) => frame.type === "state").at(-1);
+			assert.equal(Object.prototype.hasOwnProperty.call(clearedState.data, "condition"), true);
+			assert.equal(clearedState.data.condition, null);
+			assert.equal(h.rpcGetState.mock.calls.length, 0, "dormant fallback must not read live state");
+		} finally {
+			h.ws.close();
+		}
+	});
+
+	it("publishes the prompt-owner condition in live attach and get_state snapshots until recovery commits", async () => {
+		const h = websocketHarness(vi.fn(async () => {}), true, { live: true });
+		try {
+			await waitFor(
+				() => h.ws.sent.some((frame) => frame.type === "state"),
+				"conditioned live attach snapshot",
+			);
+			const attachState = h.ws.sent.find((frame) => frame.type === "state");
+			assert.deepEqual(attachState.data.condition, CONDITION);
+			assert.equal(attachState.data.model.provider, CONDITION.provider, "staging must retain the durable provider");
+			assert.equal(attachState.data.model.id, CONDITION.modelId, "staging must retain the durable model");
+
+			const stateCount = h.ws.sent.filter((frame) => frame.type === "state").length;
+			h.ws.emit("message", JSON.stringify({ type: "get_state" }));
+			await waitFor(
+				() => h.ws.sent.filter((frame) => frame.type === "state").length > stateCount,
+				"conditioned live get_state snapshot",
+			);
+			const explicitState = h.ws.sent.filter((frame) => frame.type === "state").at(-1);
+			assert.deepEqual(explicitState.data.condition, CONDITION);
+
+			h.setPersistedModel("replacement-provider", "replacement-model", "medium");
+			h.setRecoveryCondition(undefined);
+			const committedStateCount = h.ws.sent.filter((frame) => frame.type === "state").length;
+			h.ws.emit("message", JSON.stringify({ type: "get_state" }));
+			await waitFor(
+				() => h.ws.sent.filter((frame) => frame.type === "state").length > committedStateCount,
+				"post-recovery live snapshot",
+			);
+			const committedState = h.ws.sent.filter((frame) => frame.type === "state").at(-1);
+			assert.equal(Object.prototype.hasOwnProperty.call(committedState.data, "condition"), true);
+			assert.equal(committedState.data.condition, null);
+			assert.equal(committedState.data.model.provider, "replacement-provider");
+			assert.equal(committedState.data.model.id, "replacement-model");
+			assert.ok(h.rpcGetState.mock.calls.length >= 3);
 		} finally {
 			h.ws.close();
 		}

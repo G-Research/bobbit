@@ -188,9 +188,9 @@ function normalizeStateModelSnapshot(
 /** Send persisted model info as fallback when getState() is unavailable. */
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
-	const data: Record<string, unknown> = {};
-	const condition = sessionModelSelectionRequired(sessionManager.getSession(sessionId));
-	if (condition) data.condition = condition;
+	const session = sessionManager.getSession(sessionId);
+	const condition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+	const data: Record<string, unknown> = { condition: condition ?? null };
 	if (persisted?.modelProvider && persisted?.modelId) {
 		data.model = buildResolvedModelStateModel(persisted.modelProvider, persisted.modelId);
 		if (persisted.effectiveThinkingLevel !== undefined) {
@@ -266,6 +266,12 @@ function sendLiveStateSnapshot(
 		normalized = { ...normalized, thinkingLevel: persisted.effectiveThinkingLevel };
 	}
 
+	const condition = modelSelectionRecoveryAdmission(
+		sessionManager,
+		sessionId,
+		sessionManager.getSession(sessionId),
+	).condition;
+	normalized = { ...normalized, condition: condition ?? null };
 	sendStateWithCost(ws, sessionManager, sessionId, normalized);
 	sendImageModelState(ws, sessionManager, sessionId);
 	if (!hadLiveModel && !rebuiltFromDurableTuple) sendFallbackModelState(ws, sessionManager, sessionId);
