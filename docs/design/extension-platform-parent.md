@@ -637,6 +637,28 @@ interface ServiceStatus { state: "stopped" | "starting" | "ready" | "unhealthy" 
 
 The runtime adapter owns start → readiness/health → status → graceful stop/restart; Hindsight and a future LangFlow implementation supply only their spec/config. Mode selection must not change extension code. Secret references are resolved by the existing secret/config owner and never serialized into status, logs, images, or traces. Port ownership/conflicts, volume/data ownership, bounded diagnostics, and crash policy are core runtime responsibilities. Hindsight proves equivalent local/Docker/Compose behaviour and clean degradation when unavailable; LangFlow is not implemented here.
 
+### Generic non-hook grant handoff
+
+EP-6 extends its single project-owned `extension_grants` and audit/outbox owner with a compatible
+principal union. Legacy hook rows remain discriminator-free; a new pack row is exactly
+`{ packId, principal: "pack", capability, grantedAt, grantedBy }`. The six pack-only closed values
+are `service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`, and
+`memory.read.all`. No hook receives those values, and no pack declaration can mint another one.
+
+The public Hindsight seam is `ExtensionGrantPrincipal`, `ExtensionGrantDecision`,
+`ExtensionCapabilityGrantResolver`, and `createExtensionCapabilityGrantResolver()` from the
+extension-grant policy module. A consumer retains the resolver, passes server-derived
+`{ kind: "pack", packId }`, and calls it at every application fence; it never reads a grant
+snapshot or accepts a panel/tool-supplied principal. The resolver re-resolves active winning pack
+identity and reads current durable state, so revoke wins over stale work. The generic service
+manager consumes the same seam for `service.manage`.
+
+This handoff intentionally does not implement Hindsight memory or service behavior, private
+Hindsight configuration, a Hindsight endpoint/store, extension-defined capabilities, or another
+permissions UI/state owner. Existing hook REST paths, audit rows, activation ceilings, and
+operator-auth requirements remain compatible; pack mutations use the generalized authenticated
+surface and audit/outbox recovery.
+
 ## Compatibility and failure rules
 
 - Schema remains 2. Omitted hooks/grants/settings/system-prompt catalogues are inactive and preserve existing provider/session behavior; no enabled static section means byte-identical existing prompt output.
