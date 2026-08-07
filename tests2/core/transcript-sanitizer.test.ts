@@ -543,6 +543,10 @@ describe("transcript write path validation", () => {
 		return file;
 	}
 
+	function readFixture(file: string): string {
+		return fs.readFileSync(file, "utf-8");
+	}
+
 	it("isWithinAgentSessionsDir accepts a path inside the sessions root", () => {
 		const active = path.join(sessionsRoot, "--slug--", "2026_x.jsonl");
 		const historical = path.join(historicalSessionsRoot, "--slug--", "2025_x.jsonl");
@@ -565,7 +569,7 @@ describe("transcript write path validation", () => {
 
 		const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, file, null, rootPolicy);
 		assert.equal(rewritten, 1);
-		assert.equal(JSON.parse(fs.readFileSync(file, "utf-8")).message.content[0].text, "Attachments:");
+		assert.equal(JSON.parse(readFixture(file)).message.content[0].text, "Attachments:");
 	});
 
 	it("atomically restores an exact transcript snapshot without leaking staging files", () => {
@@ -574,7 +578,7 @@ describe("transcript write path validation", () => {
 		const file = makeRollbackTarget("restore-success.jsonl", original);
 
 		assert.equal(restoreAgentTranscriptSnapshot({ sandboxed: false }, file, snapshot, rootPolicy), true);
-		assert.equal(fs.readFileSync(file, "utf-8"), snapshot);
+		assert.equal(readFixture(file), snapshot);
 		assert.deepEqual(rollbackTempsFor(file), []);
 	});
 
@@ -599,7 +603,7 @@ describe("transcript write path validation", () => {
 		}
 
 		assert.equal(stagingWrites, 2, "fixture must fail after a real partial staging write");
-		assert.equal(fs.readFileSync(file, "utf-8"), original);
+		assert.equal(readFixture(file), original);
 		assert.deepEqual(rollbackTempsFor(file), []);
 	});
 
@@ -626,7 +630,7 @@ describe("transcript write path validation", () => {
 		}
 
 		assert.equal(replacementAttempts, 1, "fixture must reach the atomic publish boundary");
-		assert.equal(fs.readFileSync(file, "utf-8"), original);
+		assert.equal(readFixture(file), original);
 		assert.deepEqual(rollbackTempsFor(file), []);
 	});
 
@@ -637,7 +641,7 @@ describe("transcript write path validation", () => {
 		const link = path.join(sessionsRoot, "rollback-symlink.jsonl");
 		const assertRejected = async () => {
 			assert.equal(restoreAgentTranscriptSnapshot({ sandboxed: false }, link, "replacement\n", rootPolicy), false);
-			assert.equal(fs.readFileSync(target, "utf-8"), targetBytes);
+			assert.equal(readFixture(target), targetBytes);
 			assert.deepEqual(rollbackTempsFor(link), []);
 		};
 		if (trySymlink(target, link)) await assertRejected();
