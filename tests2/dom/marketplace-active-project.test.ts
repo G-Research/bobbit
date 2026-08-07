@@ -88,17 +88,18 @@ describe("Market extension capability grant API", () => {
 
 		await expect(grantExtensionCapability("project A", tuple)).resolves.toMatchObject({ ok: true });
 		expect(fetchRequests).toHaveLength(1);
-		expect(fetchRequests[0]).toMatchObject({
-			url: "/api/projects/project%20A/extension-grants",
-			init: { method: "PUT", body: JSON.stringify(tuple) },
-		});
+		// apiFetch/gatewayFetch correctly resolves the relative request against the
+		// DOM harness origin. Assert the exact route and tuple, not a fragile
+		// relative-vs-absolute URL representation.
+		expect(new URL(fetchRequests[0].url).pathname).toBe("/api/projects/project%20A/extension-grants");
+		expect(fetchRequests[0].init.method).toBe("PUT");
+		expect(JSON.parse(String(fetchRequests[0].init.body))).toEqual(tuple);
 
 		await expect(revokeExtensionCapability("project A", tuple)).resolves.toMatchObject({ ok: true });
 		expect(fetchRequests).toHaveLength(2);
-		expect(fetchRequests[1]).toMatchObject({
-			url: "/api/projects/project%20A/extension-grants/fixture-pack/decision.hook/filter%3Atool-result",
-			init: { method: "DELETE" },
-		});
+		expect(new URL(fetchRequests[1].url).pathname).toBe("/api/projects/project%20A/extension-grants/fixture-pack/decision.hook/filter%3Atool-result");
+		expect(fetchRequests[1].init.method).toBe("DELETE");
+		expect(fetchRequests[1].init.body).toBeUndefined();
 	});
 
 	it("preserves an operator-route 403 for the Market UI's browser-operator guidance", async () => {

@@ -3092,6 +3092,15 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/extension-platform-lifecycle.spec.ts",
+      "reason": "Parent extension-platform browser journey: real Market source/install and exact EP-6 grant confirmation, a UI-triggered scheduled-advisor trace, uninstall, reload, and source cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/tool-result-filter-extension.test.ts",
       "reason": "EP-14 generated Pi gate coverage for one bounded route handoff, strict safe gateway output acceptance, and fixed local failure fallback without raw malformed or oversized result forwarding.",
       "execution": {
