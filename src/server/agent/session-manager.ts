@@ -8246,6 +8246,10 @@ export class SessionManager {
 					data: {
 						...buildModelStateData(selectedProvider, selectedModelId),
 						thinkingLevel: selectedThinking,
+						// Generic state frames are partial and must not clear recovery state.
+						// Publish the explicit clear only here, after the verified durable tuple
+						// commits and the recovered candidate becomes canonical.
+						condition: null,
 					},
 				});
 				return {
