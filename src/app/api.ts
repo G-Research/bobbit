@@ -2977,13 +2977,25 @@ export interface PackEntrypointWire {
 }
 
 /** Public vocabulary for exact, project-owned extension capability grants. */
-export type ExtensionCapabilityWire = "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
+export type ExtensionCapabilityWire = "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author"
+	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all";
 
-export interface ExtensionCapabilityGrantTuple {
+/** A durable authority always names one exact hook or the active pack principal. */
+export type ExtensionCapabilityGrantTuple =
+	| { packId: string; hookId: string; capability: ExtensionCapabilityWire }
+	| { packId: string; principal: "pack"; capability: ExtensionCapabilityWire };
+
+/** Server-resolved non-hook capability status for one active pack principal. */
+export interface PackGrantStatusWire {
 	packId: string;
-	hookId: string;
-	capability: ExtensionCapabilityWire;
+	requestedCapabilities: ExtensionCapabilityWire[];
+	grants: ExtensionCapabilityWire[];
 }
+
+/** Backward-readable project grant audit record. */
+export type ExtensionGrantAuditEntryWire =
+	| { at: string; actor: string; action: "granted" | "revoked"; packId: string; hookId: string; capability: ExtensionCapabilityWire }
+	| { at: string; actor: string; action: "granted" | "revoked"; packId: string; principal: "pack"; capability: ExtensionCapabilityWire };
 
 /** Grant-state metadata for an active inert hook declaration. */
 export interface HookGrantStatusWire {
@@ -3959,7 +3971,7 @@ export function setMcpOperationActivation(opts: {
 
 export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
 export type ExtensionSettingValue = string | boolean | number;
-export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime";
+export type ExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime";
 
 export interface ExtensionSettingsTargetRef {
 	packId: string;
@@ -3999,6 +4011,8 @@ export interface ExtensionSettingsTargetWire {
 	};
 	fields: ExtensionSettingsFieldWire[];
 	hookGrant?: HookGrantStatusWire;
+	/** Present on the server's active pack owner projection. */
+	packGrant?: PackGrantStatusWire;
 }
 
 export interface ExtensionSettingsResponse {
@@ -4061,8 +4075,18 @@ export function revokeExtensionCapability(
 	projectId: string,
 	tuple: ExtensionCapabilityGrantTuple,
 ): Promise<MarketResult<{ revoked: boolean }>> {
+	const principalPath = "principal" in tuple
+		? `principals/pack/${encodeURIComponent(tuple.capability)}`
+		: `${encodeURIComponent(tuple.hookId)}/${encodeURIComponent(tuple.capability)}`;
 	return marketFetch(
-		`/api/projects/${encodeURIComponent(projectId)}/extension-grants/${encodeURIComponent(tuple.packId)}/${encodeURIComponent(tuple.hookId)}/${encodeURIComponent(tuple.capability)}`,
+		`/api/projects/${encodeURIComponent(projectId)}/extension-grants/${encodeURIComponent(tuple.packId)}/${principalPath}`,
 		jsonInit("DELETE"),
 	);
+}
+
+/** Read bounded, project-owned grant history without requesting mutation authority. */
+export function getExtensionGrantAudit(
+	projectId: string,
+): Promise<MarketResult<{ entries: ExtensionGrantAuditEntryWire[] }>> {
+	return marketFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grant-audit`);
 }

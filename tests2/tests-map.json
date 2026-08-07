@@ -2625,7 +2625,7 @@
     },
     {
       "path": "tests2/browser/e2e/extension-capability-grants.spec.ts",
-      "reason": "Authenticated browser journey from the production app origin proving an active decision hook remains inert by default, grant then revoke updates the projection, and reload preserves revoked state without leaking credentials.",
+      "reason": "Authenticated browser journey through the existing Market Pack and Hook grant controls, proving exact non-hook pack grant/revoke persistence, browser-operator confirmation, server-refetched audit attribution, and retained legacy hook compatibility.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
