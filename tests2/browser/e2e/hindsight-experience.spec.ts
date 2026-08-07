@@ -24,6 +24,8 @@ import {
 test.describe.configure({ mode: "serial", retries: 0 });
 
 const PANEL = '[data-testid="hindsight-panel"]';
+const HINDSIGHT_EXPERIENCE_DATABASE_SECRET = "hindsight-browser-postgres-secret-1b36";
+const HINDSIGHT_EXPERIENCE_DATABASE_URL = `postgresql://hindsight:${HINDSIGHT_EXPERIENCE_DATABASE_SECRET}@db.example.test:5432/hindsight`;
 const CAPABILITIES = [
 	"service.manage",
 	"memory.read",
@@ -72,6 +74,21 @@ async function grant(page: Page, capability: typeof CAPABILITIES[number]): Promi
 	await expect(row).toHaveAttribute("data-state", "Granted", { timeout: 15_000 });
 }
 
+async function expectHindsightExperienceSettingsSecretsRedacted(page: Page, additional: unknown[] = []): Promise<void> {
+	await expectHindsightExperienceSecretRedacted(page, additional);
+	const browserSurfaces = await page.evaluate(() => ({
+		text: document.body.innerText,
+		html: document.documentElement.outerHTML,
+		localStorage: Object.entries(localStorage),
+		sessionStorage: Object.entries(sessionStorage),
+	}));
+	for (const value of [...additional, browserSurfaces]) {
+		if (JSON.stringify(value).includes(HINDSIGHT_EXPERIENCE_DATABASE_SECRET)) {
+			throw new Error("Hindsight external PostgreSQL secret leaked into a public browser surface");
+		}
+	}
+}
+
 test.describe("Hindsight experience", () => {
 	let project: HindsightExperienceProject | undefined;
 	let sessionId = "";
@@ -101,12 +118,25 @@ test.describe("Hindsight experience", () => {
 		await settings.getByLabel("Local model ID").fill("qwen3-coder-30b-mlx");
 		await settings.getByLabel("Local model URL").fill("http://127.0.0.1:12345/v1");
 		await settings.getByLabel("Local model API key").fill(HINDSIGHT_EXPERIENCE_SECRET);
+		// Configure the separate PostgreSQL storage through the rendered EP-7
+		// fields, not an API fixture. Its connection URL is a second write-only
+		// secret and saving this dormant local configuration must remain inert.
+		await settings.getByLabel("PostgreSQL storage").selectOption("external");
+		await settings.getByLabel("External PostgreSQL URL").fill(HINDSIGHT_EXPERIENCE_DATABASE_URL);
 		const patch = page.waitForResponse(response => response.url().includes(`/extension-settings/${HINDSIGHT_EXPERIENCE_PACK_ID}/provider/${HINDSIGHT_EXPERIENCE_PROVIDER_ID}`) && response.request().method() === "PATCH");
 		await settings.getByTestId("market-settings-save").click();
 		const response = await patch;
 		expect(response.status()).toBe(200);
 		const body = await response.json();
-		await expectHindsightExperienceSecretRedacted(page, [body]);
+		await expectHindsightExperienceSettingsSecretsRedacted(page, [body]);
+		// Saving rerenders the provider row. Reopen the actual settings form to
+		// verify the redacted persisted projection rather than its discarded draft.
+		await provider.getByTestId("market-settings-toggle").click();
+		const savedSettings = provider.getByTestId("market-settings-form");
+		await expect(savedSettings.getByLabel("Local model API key")).toHaveValue("");
+		await expect(savedSettings.getByLabel("External PostgreSQL URL")).toHaveValue("");
+		await expect(savedSettings.locator('[data-field-key="localLlmApiKey"] [data-testid="market-settings-secret-state"]')).toHaveAttribute("data-state", "set");
+		await expect(savedSettings.locator('[data-field-key="externalDatabaseUrl"] [data-testid="market-settings-secret-state"]')).toHaveAttribute("data-state", "set");
 		await expect(provider.getByTestId("market-runtime-status")).toHaveAttribute("data-state", /active|configured|stopped|blocked/);
 
 		const grants = await openMarketGrants(page);
