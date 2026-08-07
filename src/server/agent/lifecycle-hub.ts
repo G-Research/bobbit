@@ -9,6 +9,7 @@ import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceOutcomeRow, type TraceProviderRow } from "./context-trace-store.js";
 import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
+import type { CapabilitySelectorStage } from "./dynamic-capability-contract.js";
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 
@@ -114,7 +115,10 @@ export interface HookCtx {
 }
 
 /** Existing dispatch fields, without per-provider values or event-local scope. */
-export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
+export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext"> & {
+	/** Core-only persisted every-N cadence; never exposed to provider hook contexts. */
+	cadenceTurnIndex?: number;
+};
 
 export interface HubDiagnostic {
 	providerId: string;
@@ -144,6 +148,28 @@ interface ScheduledAdvisorInvocation {
 }
 
 /** Bounded decision branch injected after ordinary provider dispatch is complete. */
+export interface CapabilitySelectionContext {
+	readonly event: "sessionSetup";
+	readonly sessionId: string;
+	readonly projectId?: string;
+	readonly goalId?: string;
+	readonly roleName?: string;
+	readonly cwd: string;
+	/** Bounded query text only; no plan, policy, config, path, or credential. */
+	readonly query: string;
+	/** Core-derived active/permitted candidate ids, never hook-proposed ids. */
+	readonly available: readonly string[];
+	/** Fixed skills-stage result, present only for the MCP stage. */
+	readonly selectedSkills?: readonly string[];
+}
+
+export interface CapabilityStageResult {
+	readonly selected: readonly string[];
+	/** True only when a valid, still-authorized selector proposal won this stage. */
+	readonly authoritative: boolean;
+	readonly outcomes: readonly TraceOutcomeRow[];
+}
+
 export interface DecisionLifecycleDispatcher {
 	dispatch(event: LifecycleHook, context: {
 		projectId: string;
@@ -153,7 +179,19 @@ export interface DecisionLifecycleDispatcher {
 		cwd: string;
 		/** Direct gateway terminal usage snapshot; forwarded without derivation. */
 		usage?: TurnUsageSnapshot;
+		/** Ordinary completed-turn index, present only for afterTurn. */
+		turnIndex?: number;
+		/** Persisted every-N advisor cadence, distinct from ordinary turn telemetry. */
+		cadenceTurnIndex?: number;
 	}): Promise<TraceOutcomeRow[]>;
+	selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult>;
+	dispatchSetup?(context: {
+		projectId: string;
+		sessionId: string;
+		goalId?: string;
+		roleName?: string;
+		cwd: string;
+	}): Promise<{ outcomes: TraceOutcomeRow[]; thinkingLevel?: string }>;
 }
 
 interface ProviderTraceState {
@@ -217,6 +255,25 @@ export class LifecycleHub {
 	/** Late binding keeps gateway construction order acyclic. */
 	setDecisionDispatcher(dispatcher: DecisionLifecycleDispatcher | undefined): void {
 		this.decisionDispatcher = dispatcher;
+	}
+
+	/**
+	 * Session setup calls this twice in sequence: skills first, then MCP with the
+	 * fixed skills result. This hub is only a transient forwarding boundary;
+	 * execution, grants, and reduction remain owned by the decision dispatcher.
+	 */
+	async selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult> {
+		const dispatcher = context.projectId ? this.decisionDispatcher : undefined;
+		if (!dispatcher) return emptyCapabilityStageResult();
+		try {
+			const result = await dispatcher.selectCapabilities(stage, context);
+			if (!result || !Array.isArray(result.selected) || !Array.isArray(result.outcomes) || typeof result.authoritative !== "boolean") return emptyCapabilityStageResult();
+			return Object.freeze({ selected: Object.freeze([...result.selected]), authoritative: result.authoritative, outcomes: Object.freeze([...result.outcomes]) });
+		} catch {
+			// A selector-runtime failure is deliberately isolated from session setup;
+			// the next stage still runs with its caller-provided pinned input.
+			return emptyCapabilityStageResult();
+		}
 	}
 
 	/**
@@ -417,7 +474,7 @@ export class LifecycleHub {
 		hook: LifecycleHook,
 		base: HookDispatchBase,
 		scopeInput?: Readonly<HookScopeResolutionInput>,
-	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
+	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[]; thinkingLevel?: string }> {
 		let scopeContext: HookScopeContext | undefined;
 		if (this.scopeContextResolver) {
 			try {
@@ -432,9 +489,10 @@ export class LifecycleHub {
 		const collected: ContextBlock[] = [];
 		const traceStates = new Map<string, ProviderTraceState>();
 
+		const { cadenceTurnIndex: _cadenceTurnIndex, ...providerBase } = base;
 		for (const provider of providers) {
 			const hookCtx: HookCtx = {
-				...base,
+				...providerBase,
 				...(scopeContext ? { scopeContext } : {}),
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
@@ -502,16 +560,34 @@ export class LifecycleHub {
 		});
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
 
-		// Decision hooks are post-provider and detached from the agent response path.
-		// Their durable resolution rows are appended independently by the manager.
+		// Setup selection must complete before bridge construction. All other decision
+		// events remain detached; never dispatch sessionSetup twice.
 		const dispatcher = base.projectId ? this.decisionDispatcher : undefined;
-		if (dispatcher) {
+		let thinkingLevel: string | undefined;
+		if (dispatcher?.dispatchSetup && hook === "sessionSetup") {
+			try {
+				const result = await dispatcher.dispatchSetup({
+					projectId: base.projectId!, sessionId: base.sessionId,
+					...(base.goalId ? { goalId: base.goalId } : {}),
+					...(base.roleName ? { roleName: base.roleName } : {}),
+					cwd: base.cwd,
+				});
+				thinkingLevel = result.thinkingLevel;
+				if (result.outcomes.length > 0) {
+					this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: [], outcomes: result.outcomes });
+				}
+			} catch {
+				// Decision hooks are isolated: setup continues with no extension choice.
+			}
+		} else if (dispatcher) {
 			void Promise.resolve()
 				.then(() => dispatcher.dispatch(hook, {
 					projectId: base.projectId!, sessionId: base.sessionId,
 					...(base.goalId ? { goalId: base.goalId } : {}),
 					...(base.roleName ? { roleName: base.roleName } : {}),
 					...(base.usage ? { usage: base.usage } : {}),
+					...(hook === "afterTurn" && base.turn ? { turnIndex: base.turn.index } : {}),
+					...(hook === "afterTurn" && base.cadenceTurnIndex !== undefined ? { cadenceTurnIndex: base.cadenceTurnIndex } : {}),
 					cwd: base.cwd,
 				}))
 				.then((outcomes) => {
@@ -521,8 +597,12 @@ export class LifecycleHub {
 				.catch(() => { /* decision dispatch never blocks an agent turn */ });
 		}
 
-		return { blocks: budgeted.kept, diagnostics };
+		return { blocks: budgeted.kept, diagnostics, ...(thinkingLevel ? { thinkingLevel } : {}) };
 	}
+}
+
+function emptyCapabilityStageResult(): CapabilityStageResult {
+	return Object.freeze({ selected: Object.freeze([] as string[]), authoritative: false, outcomes: Object.freeze([] as TraceOutcomeRow[]) });
 }
 
 function elapsedMs(start: number): number {

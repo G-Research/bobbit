@@ -8,7 +8,7 @@ import {
 
 /** Values admitted by the flat, schema-2 extension-settings contract. */
 export type ExtensionSettingValue = string | boolean | number;
-export type ExtensionSettingsTargetKind = "provider" | "hook";
+export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime";
 export interface ExtensionSettingsTargetRef extends ExtensionSettingsSecretTargetRef {
   kind: ExtensionSettingsTargetKind;
 }
@@ -129,7 +129,7 @@ function cloneState(state: ExtensionSettingsState): ExtensionSettingsState {
 
 function assertRef(ref: ExtensionSettingsTargetRef): void {
   if (!ref || typeof ref.packId !== "string" || ref.packId.length === 0 || ref.packId.includes("\0")
-    || (ref.kind !== "provider" && ref.kind !== "hook")
+    || (ref.kind !== "provider" && ref.kind !== "hook" && ref.kind !== "runtime")
     || typeof ref.id !== "string" || ref.id.length === 0 || ref.id.includes("\0")) {
     throw new ExtensionSettingsMutationError();
   }

@@ -2867,6 +2867,15 @@
       }
     },
     {
+      "path": "tests2/core/thinking-selector-extraction.test.ts",
+      "reason": "EP-12 first-party thinking selector package contract and regression guard: default-disabled pure medium proposal, ordinary built-in shipping, no implicit server registration, and no residual core fallback or post-spawn selector pipeline.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/runtime-model-selection.test.ts",
       "reason": "EP-2 runtime model-selection coverage for isolated explicit human pin provenance, durable round-trip, verified thinking read-back/persistence/broadcast, and post-success websocket pin writes.",
       "execution": {
@@ -2923,6 +2932,114 @@
     {
       "path": "tests2/browser/e2e/extension-settings.spec.ts",
       "reason": "Production Market browser journey for project-scoped Hindsight settings: accessible save and clear controls, redacted secrets, disablement isolation, reload, navigation, and mobile layout.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/first-party-thinking-selector.spec.ts",
+      "reason": "EP-12 browser journey proving the default-disabled built-in selector requires ordinary activation plus an exact grant, respects pins and model clamps across reload, and safely returns to no-op after disable or revoke.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-contract.test.ts",
+      "reason": "EP-10 pure dynamic-capability contract coverage for strict proposals, deterministic reduction, ceiling filtering, and redacted durable snapshot validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-dispatcher.test.ts",
+      "reason": "EP-10 selector dispatch coverage for ordered stage exports, exact grant rechecks, core candidate ceilings, and lifecycle failure isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-session-runtime.test.ts",
+      "reason": "EP-10 session setup runtime regression coverage for ordered skills/MCP snapshots, role-policy candidate ceilings, selector and telemetry isolation, and persisted replay without reinvocation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pack-selector-metadata.test.ts",
+      "reason": "EP-10 hook declaration coverage for strict selectors metadata normalization and schema-v2 compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/slash-skill-selection-ceiling.test.ts",
+      "reason": "EP-10 session-local skill ceiling coverage for discovery cache isolation and fail-closed activation and expansion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-extension-contract.test.ts",
+      "reason": "Pure validation, normalized-status, and redaction coverage for the declarative managed-service extension contract.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-extension-runtime.test.ts",
+      "reason": "Injected lifecycle coverage for service launch selection, readiness, port leases, restart limits, and shutdown cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/service-extension-registry.test.ts",
+      "reason": "Active winning-pack and project-settings isolation coverage for service extension declarations without secret projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/staff-improvement-signals.test.ts",
+      "reason": "Bounded fixed-label/count staff-improvement signal boundary rejects transcript-like data and invalid shapes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/staff-proposal-fixture.test.ts",
+      "reason": "Default-uninstalled fixture pack proves due scheduled decision declarations and consent-only ordinary proposal seeds.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/staff-proposal-fixture.spec.ts",
+      "reason": "Server-backed browser coverage for the fixture's due consent, decline/reload no-draft path, and ordinary editable goal proposal dismissal without an applied change.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

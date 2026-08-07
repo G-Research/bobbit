@@ -102,6 +102,47 @@ function hub(tmp: string, providers: ProviderContribution[], moduleHost: ModuleH
 }
 
 describe("LifecycleHub", () => {
+	it("awaits setup selection once instead of also launching the detached decision branch", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const lifecycleHub = hub(tmp, [], moduleHost);
+			let setupCalls = 0;
+			let detachedCalls = 0;
+			lifecycleHub.setDecisionDispatcher({
+				dispatch: async () => { detachedCalls++; return []; },
+				dispatchSetup: async () => { setupCalls++; return { outcomes: [], thinkingLevel: "medium" }; },
+			} as any);
+
+			const result: any = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			await Promise.resolve();
+			assert.equal(setupCalls, 1);
+			assert.equal(detachedCalls, 0);
+			assert.equal(result.thinkingLevel, "medium");
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("forwards persisted decision cadence separately from ordinary after-turn telemetry", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const lifecycleHub = hub(tmp, [], moduleHost);
+			const calls: unknown[][] = [];
+			lifecycleHub.setDecisionDispatcher({ dispatch: async (...args: unknown[]) => { calls.push(args); return []; } } as any);
+			await lifecycleHub.dispatch("afterTurn", { ...base(tmp), turn: { index: 42 }, cadenceTurnIndex: 6 });
+			await vi.waitFor(() => assert.equal(calls.length, 1));
+			const context = calls[0]?.[1] as { turnIndex?: number; cadenceTurnIndex?: number };
+			assert.equal(context.turnIndex, 42);
+			assert.equal(context.cadenceTurnIndex, 6);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("merges provider blocks, applies budgets, and forces provenance", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });

@@ -89,7 +89,7 @@ import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
 import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
-import { isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
+import { isValidExtensionSettingValue, reconcileExtensionSettingsValues, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
@@ -2978,7 +2978,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return packs;
 	};
-	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
+	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime", id?: string) => {
 		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
 		if (!context) return { state: "absent" as const };
 		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
@@ -2986,6 +2986,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const refs: ExtensionSettingsTargetRef[] = [
 				...(pack?.providers ?? []).map(provider => ({ packId, kind: "provider" as const, id: provider.id })),
 				...(pack?.hooks ?? []).map(hook => ({ packId, kind: "hook" as const, id: hook.id })),
+				...(pack?.runtimes ?? []).map(runtime => ({ packId, kind: "runtime" as const, id: runtime.id })),
 			];
 			const overrides = refs.map(ref => context.extensionSettingsStore.getTarget(ref));
 			if (refs.length > 0 && overrides.every(override => override?.enabled === false)) return { state: "present" as const, enabled: false, values: {} };
@@ -2994,18 +2995,40 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		const contribution = kind === "provider"
 			? pack?.providers.find(candidate => candidate.id === id)
-			: pack?.hooks.find(candidate => candidate.id === id);
+			: kind === "hook"
+				? pack?.hooks.find(candidate => candidate.id === id)
+				: pack?.runtimes.find(candidate => candidate.id === id);
 		if (!contribution) return { state: "absent" as const };
 		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
 		try {
 			const store = context.extensionSettingsStore;
-			if (!store.hasTargetRecord(ref)) return { state: "absent" as const };
-			const schema = kind === "provider" ? (contribution as any).configSchema : contribution.config;
-			const secretFields = Object.entries(schema ?? {})
-				.filter(([, descriptor]) => !!descriptor && typeof descriptor === "object" && (descriptor as { type?: unknown }).type === "secret")
-				.map(([key]) => key);
-			const defaults = kind === "provider" ? ((contribution as any).config ?? {}) : {};
-			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: store.getForRuntime(ref, defaults, { secretFields }) };
+			const fields = contribution.settingsSchema?.fields ?? [];
+			const defaults = Object.fromEntries(fields
+				.filter(field => field.type !== "secret" && field.default !== undefined)
+				.map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>;
+			const secretFields = fields.filter(field => field.type === "secret").map(field => field.key);
+			const hasTargetRecord = store.hasTargetRecord(ref);
+			let legacyValues: Record<string, ExtensionSettingValue> | undefined;
+			// The old provider store remains a read-only compatibility source until a
+			// project target exists. Current declared values must pass the current
+			// schema, while undeclared primitive values remain in the runtime overlay
+			// for legacy providers (for example Hindsight's mode: managed).
+			if (!hasTargetRecord && kind === "provider" && contribution.settingsSchema) {
+				const legacy = getPackStore().readSync<Record<string, unknown>>(packId, providerConfigStoreKey(id!));
+				if (legacy.state === "error") return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: legacy.diagnostic.retryable } };
+				if (legacy.state === "present" && legacy.value && typeof legacy.value === "object" && !Array.isArray(legacy.value)) {
+					legacyValues = Object.fromEntries(Object.entries(legacy.value).filter(([, value]) => typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value))) as Record<string, ExtensionSettingValue>;
+				}
+			}
+			if (!hasTargetRecord && !legacyValues) return { state: "absent" as const };
+			const values = store.getForRuntime(ref, defaults, { legacyValues, secretFields });
+			const reconciled = reconcileExtensionSettingsValues(fields, values, { includeSecrets: true });
+			if (reconciled.invalidKeys.length > 0) return { state: "error" as const, diagnostic: { code: "SETTINGS_VALUES_INVALID", retryable: false } };
+			const declaredKeys = new Set(fields.map(field => field.key));
+			const legacyOverlay = !hasTargetRecord
+				? Object.fromEntries(Object.entries(legacyValues ?? {}).filter(([key]) => !declaredKeys.has(key)))
+				: {};
+			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: { ...legacyOverlay, ...reconciled.values } };
 		} catch {
 			return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
 		}
@@ -3050,6 +3073,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			);
 		},
 		extensionSettingsRuntimeLookup,
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
 	);
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
@@ -3284,6 +3308,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// fences the bridge against this exact manager-owned object.
 		getSession: sessionManager.getSession.bind(sessionManager),
 		getPersistedSession: (sessionId) => sessionManager.getPersistedSession(sessionId),
+		hasExplicitThinkingChoice: (sessionId) => sessionManager.hasExplicitThinkingChoice(sessionId),
 		isAuthorized: ({ projectId, source }) => {
 			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
 				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
@@ -5486,12 +5511,18 @@ async function handleApiRoute(
 				const schema = hook.settingsSchema;
 				targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: hook });
 			}
+			for (const runtime of pack.runtimes) {
+				if (runtime.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = runtime.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "runtime", id: runtime.id }, packName: pack.packName, listName: runtime.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: runtime });
+			}
 		}
 		return targets;
 	};
 	const invalidSettingsTargetRefs = (projectId: string): ExtensionSettingsTargetRef[] => settingsCatalogue(projectId).flatMap(pack => [
 		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
 		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
+		...pack.runtimes.filter(runtime => runtime.settingsSchemaDiagnostic !== undefined).map(runtime => ({ packId: pack.packId, kind: "runtime" as const, id: runtime.id })),
 	]);
 	const mutationDispatcher = requestMutationDispatcher!;
 	const resultFilterDispatcher = toolResultFilterDispatcher!;
@@ -5639,9 +5670,10 @@ async function handleApiRoute(
 				}
 			}
 			const effective = store.getEffective(target.ref, defaults, { legacyValues, secretFields });
+			const reconciled = reconcileExtensionSettingsValues(target.fields, effective.values);
 			const missing = target.requiresConfig.filter(key => {
 				if (secretFields.includes(key)) return !effective.secretSet[key];
-				const value = effective.values[key];
+				const value = reconciled.values[key];
 				return value === undefined || value === null || typeof value === "string" && value.trim().length === 0;
 			});
 			const enabled = effective.enabled !== false;
@@ -5652,20 +5684,27 @@ async function handleApiRoute(
 				const granted = requestedCapabilities.filter(capability => supportsExtensionGrantCapability(hook, capability)
 					&& grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
 				const runnable = hook.mode === "decide" && granted.includes("decide");
-				return { id: target.ref.id, listName: target.listName, mode: hook.mode, events: hook.events, requestedCapabilities, grants: granted, runnable, status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required" };
+				// Request mutation dispatch is intentionally authorized by its exact
+				// `mutate` grant; it does not also require the generic `decide` tuple.
+				const mutationAuthorized = hook.mode === "decide"
+					&& hook.capabilities.includes("mutate")
+					&& hook.events.some(event => event === "beforePrompt" || event === "beforeToolCall")
+					&& granted.includes("mutate");
+				const runtimeAuthorized = hook.mode === "observe" || runnable || mutationAuthorized;
+				return { id: target.ref.id, listName: target.listName, mode: hook.mode, events: hook.events, requestedCapabilities, grants: granted, runnable, status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required", runtimeAuthorized };
 			})() : undefined;
 			return {
 				ref: target.ref,
 				packName: target.packName,
 				listName: target.listName,
 				enabled: { effective: enabled, ...(effective.enabled !== undefined ? { projectOverride: effective.enabled } : {}) },
-				configuration: { state: enabled ? missing.length > 0 ? "requires-config" : "ready" : "disabled", missing },
+				configuration: { state: reconciled.invalidKeys.length > 0 ? "invalid-values" : enabled ? missing.length > 0 ? "requires-config" : "ready" : "disabled", missing },
 				fields: target.fields.map(field => ({
 					key: field.key, type: field.type, ...(field.label ? { label: field.label } : {}), ...(field.description ? { description: field.description } : {}), ...(field.optional ? { optional: true } : {}), ...(field.values ? { values: field.values } : {}), ...(field.min !== undefined ? { min: field.min } : {}), ...(field.max !== undefined ? { max: field.max } : {}),
 					// Defaults are declaration metadata for public controls only. Secrets
 					// cannot have a declaration default and never expose one on the wire.
 					...(field.type !== "secret" && field.default !== undefined ? { default: field.default } : {}),
-					...(field.type === "secret" ? { secretSet: effective.secretSet[field.key] === true } : effective.values[field.key] !== undefined ? { value: effective.values[field.key] } : {}),
+					...(field.type === "secret" ? { secretSet: effective.secretSet[field.key] === true } : reconciled.values[field.key] !== undefined ? { value: reconciled.values[field.key] } : {}),
 					source: effective.sources[field.key] ?? "default",
 				})),
 				...(hookGrant ? { hookGrant } : {}),
@@ -5673,7 +5712,11 @@ async function handleApiRoute(
 		});
 		for (const ref of invalidSettingsTargetRefs(projectId)) {
 			const pack = settingsCatalogue(projectId).find(candidate => candidate.packId === ref.packId);
-			const contribution = ref.kind === "provider" ? pack?.providers.find(candidate => candidate.id === ref.id) : pack?.hooks.find(candidate => candidate.id === ref.id);
+			const contribution = ref.kind === "provider"
+				? pack?.providers.find(candidate => candidate.id === ref.id)
+				: ref.kind === "hook"
+					? pack?.hooks.find(candidate => candidate.id === ref.id)
+					: pack?.runtimes.find(candidate => candidate.id === ref.id);
 			if (!pack || !contribution) continue;
 			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
 		}
@@ -7723,7 +7766,13 @@ async function handleApiRoute(
 				if (session.sandboxed) skillCwd = ctx.project.rootPath;
 			}
 		}
-		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null));
+		// The immutable startup snapshot is a ceiling, not a new discovery source:
+		// an unknown/stale selected id fails closed and the ordinary no-snapshot
+		// route remains byte-for-byte unchanged.
+		const skill = getSlashSkill(
+			skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null),
+			session.dynamicCapabilities?.skillsAuthoritative ? session.dynamicCapabilities.skills : undefined,
+		);
 		if (!skill) {
 			json({ error: `Skill "${skillName}" not found` }, 404);
 			return;
@@ -10208,7 +10257,7 @@ async function handleApiRoute(
 	// Extension settings are project-owned and always redacted. The outer gateway
 	// guard authenticates reads; browser prompt-operator proof is required before
 	// any request can deposit a secret or change a project's runtime enablement.
-	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook)\/([^/]+))?)?$/);
+	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook|runtime)\/([^/]+))?)?$/);
 	if (extensionSettingsMatch && (req.method === "GET" || req.method === "PATCH")) {
 		let projectId: string;
 		let packId: string | undefined;
@@ -10218,7 +10267,7 @@ async function handleApiRoute(
 			packId = extensionSettingsMatch[2] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[2]);
 			id = extensionSettingsMatch[4] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[4]);
 		} catch { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
-		const kind = extensionSettingsMatch[3] as "provider" | "hook" | undefined;
+		const kind = extensionSettingsMatch[3] as "provider" | "hook" | "runtime" | undefined;
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const context = projectContextManager.getOrCreate(resolved.projectId);

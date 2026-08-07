@@ -93,6 +93,7 @@ import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, w
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
+import type { DynamicCapabilitySelection } from "./dynamic-capability-contract.js";
 import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "../skills/adopted-skill-entries.js";
 import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
@@ -724,6 +725,8 @@ export interface SessionInfo {
 	projectId?: string;
 	/** Allowed tools for this session */
 	allowedTools?: string[];
+	/** Immutable startup selector snapshot; never rerun selectors on restore/respawn. */
+	dynamicCapabilities?: DynamicCapabilitySelection;
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
 	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
@@ -805,8 +808,8 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
-	/** Durable monotonic turn index used only by every-N-turn advisors. Unlike
-	 * completedTurnCount it survives restore, respawn, and compaction. */
+	/** Durable monotonic every-N cadence used by advisors and scheduled decisions.
+	 * Unlike completedTurnCount it survives restore, respawn, and compaction. */
 	scheduledAdvisorTurnCount?: number;
 	/** Monotonic counter bumped only by inbound agent events that prove the
 	 * agent observed/advanced a turn. Local status changes such as aborting do
@@ -977,7 +980,7 @@ type VerifiedSessionModelTuple = {
 	thinkingLevel: ThinkingLevel;
 };
 
-type SetupInitialThinkingAuthority = Readonly<{
+type SetupCallerThinkingAuthority = Readonly<{
 	initialThinkingLevel: ThinkingLevel;
 }>;
 
@@ -2001,7 +2004,7 @@ export class SessionManager {
 	 * verifying its spawn tuple. The provisional spawn pin may already have been
 	 * clamped for a model that controlled fallback later replaces.
 	 */
-	private _setupInitialThinkingAuthorities = new Map<string, SetupInitialThinkingAuthority>();
+	private _setupCallerThinkingAuthorities = new Map<string, SetupCallerThinkingAuthority>();
 	/** User-driven orphan-history recoveries include their redrive so duplicate Retry clicks join instead of dispatching twice. */
 	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
@@ -2021,14 +2024,14 @@ export class SessionManager {
 		this._aigwModelCache = null;
 	}
 
-	private retainSetupInitialThinkingAuthority(sessionId: string, rawInitialThinkingLevel: string | undefined): () => void {
+	private retainSetupCallerThinkingAuthority(sessionId: string, rawInitialThinkingLevel: string | undefined): () => void {
 		const initialThinkingLevel = isKnownThinkingLevel(rawInitialThinkingLevel);
 		if (!initialThinkingLevel) return () => {};
-		const authority: SetupInitialThinkingAuthority = { initialThinkingLevel };
-		this._setupInitialThinkingAuthorities.set(sessionId, authority);
+		const authority: SetupCallerThinkingAuthority = { initialThinkingLevel };
+		this._setupCallerThinkingAuthorities.set(sessionId, authority);
 		return () => {
-			if (this._setupInitialThinkingAuthorities.get(sessionId) === authority) {
-				this._setupInitialThinkingAuthorities.delete(sessionId);
+			if (this._setupCallerThinkingAuthorities.get(sessionId) === authority) {
+				this._setupCallerThinkingAuthorities.delete(sessionId);
 			}
 		};
 	}
@@ -2839,6 +2842,46 @@ export class SessionManager {
 			lifecycleHub: this.lifecycleHub,
 			requestMutationActivation: this.requestMutationActivationResolver ?? undefined,
 			toolResultFilterActivation: this.toolResultFilterActivationResolver ?? undefined,
+			resolveDynamicSkillCandidates: (scope) => this.computeSkillsCatalog(
+				undefined,
+				scope.cwd,
+				scope.projectId && this.projectContextManager
+					? this.projectContextManager.getOrCreate(scope.projectId)?.projectConfigStore
+					: resolvedProjectConfigStore ?? undefined,
+				scope.projectId,
+			)?.map(skill => skill.name) ?? [],
+			resolveDynamicSkillsCatalog: (scope) => this.computeSkillsCatalog(
+				scope.allowedTools ? [...scope.allowedTools] : undefined,
+				scope.cwd,
+				scope.projectId && this.projectContextManager
+					? this.projectContextManager.getOrCreate(scope.projectId)?.projectConfigStore
+					: resolvedProjectConfigStore ?? undefined,
+				scope.projectId,
+				scope.selectedNames,
+			),
+			recordDynamicCapabilitySelection: (input) => {
+				try {
+					const trace = new ContextTraceStore(this.stateDir);
+					const stageRows = (stage: "skills" | "mcp", result: { outcomes: readonly unknown[]; selected: readonly string[]; authoritative: boolean }, candidateCount: number, contextBytesSaved: number) => [
+						...result.outcomes.map(row => ({
+							...(row as Record<string, unknown>), capabilityStage: stage,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}),
+							candidateCount, selectedCount: result.selected.length,
+							selectorCount: result.outcomes.length, contextBytesSaved,
+						})),
+						{ kind: "decision", hookId: "core", event: "sessionSetup", outcome: result.authoritative ? "applied" : "dropped", capabilityStage: stage,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}), candidateCount, selectedCount: result.selected.length,
+							selectorCount: result.outcomes.length, contextBytesSaved },
+					];
+					trace.appendTrace(input.sessionId, {
+						ts: Date.now(), hook: "sessionSetup", sessionId: input.sessionId, providers: [],
+						outcomes: [
+							...stageRows("skills", input.skills, input.skillCandidateCount, input.skillsContextBytesSaved),
+							...stageRows("mcp", input.mcp, input.mcpCandidateCount, input.mcpContextBytesSaved),
+						] as any,
+					});
+				} catch { /* telemetry is deliberately isolated from setup */ }
+			},
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -2855,7 +2898,7 @@ export class SessionManager {
 			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: async (session) => { await this.tryAutoSelectModel(session); },
-			tryApplyDefaultThinkingLevel: async (session) => { await this.tryApplyDefaultThinkingLevel(session); },
+			clampSetupThinkingLevel: (model, candidate) => this.clampCurrentCatalogThinkingCandidate(model, candidate),
 			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
 			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
@@ -3855,9 +3898,15 @@ export class SessionManager {
 		// so restart/respawn/force-abort keep the same disablement initial setup
 		// applied — without this a restored session re-acquires disabled tools.
 		const disabledTools = this.disabledToolsForGoal(effectiveGoalId, projectId);
-		const filteredAllowed = disabledTools && allowedTools
+		const filteredAllowedByMetadata = disabledTools && allowedTools
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
+		const selection = this.resolveStoreForSession(sessionId).get(sessionId)?.dynamicCapabilities;
+		// A pinned selector snapshot may narrow only MCP meta-tools. It never
+		// grants a YAML tool and an absent snapshot remains the legacy surface.
+		const filteredAllowed = selection?.mcpAuthoritative && filteredAllowedByMetadata
+			? filteredAllowedByMetadata.filter(tool => tool.kind !== "mcp" || selection.mcp.includes(tool.name))
+			: filteredAllowedByMetadata;
 		const flatNames = filteredAllowed?.map(e => e.name);
 		const toolScope = scopedToolContext(projectId, cwd);
 		const requestMutation = this.requestMutationActivationResolver?.(projectId);
@@ -3867,7 +3916,7 @@ export class SessionManager {
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
-			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope, selection?.selectionFingerprint)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
@@ -4006,8 +4055,12 @@ export class SessionManager {
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
 		// the activator) or when explicitly already populated.
 		if (!parts.skillsCatalog) {
-			const catalogProjectId = this.sessions.get(sessionId)?.projectId;
-			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId);
+			const catalogSession = this.sessions.get(sessionId);
+			const catalogProjectId = catalogSession?.projectId;
+			parts.skillsCatalog = this.computeSkillsCatalog(
+				parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId,
+				catalogSession?.dynamicCapabilities?.skillsAuthoritative ? catalogSession.dynamicCapabilities.skills : undefined,
+			);
 		}
 		// Stamp the user-configured skills-catalog byte budget onto the parts so it flows
 		// into both the assembled prompt and the persisted prompt-sections snapshot.
@@ -4035,6 +4088,7 @@ export class SessionManager {
 		discoveryRoot: string,
 		projectConfigStore?: { get(key: string): string | undefined },
 		projectId?: string,
+		selectedNames?: readonly string[],
 	): import("../skills/slash-skills.js").SlashSkill[] | undefined {
 		// allowedTools=undefined => unrestricted; include the catalog.
 		// allowedTools=[] (EXPLICIT no tools, e.g. a recursion-stripped delegate or
@@ -4075,7 +4129,7 @@ export class SessionManager {
 					projectId: headquartersScope ? undefined : projectId,
 				}),
 			};
-			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext);
+			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext, selectedNames);
 			// Filter: omit disable-model-invocation and skills with empty descriptions.
 			// userInvocable=false skills are already filtered by discoverSlashSkills.
 			return all.filter(s => s.disableModelInvocation !== true && (s.description?.trim() || "").length > 0);
@@ -4155,6 +4209,8 @@ export class SessionManager {
 		catch { persisted = undefined; }
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+		const dynamicSelection = session.dynamicCapabilities ?? persisted?.dynamicCapabilities;
+		const selectedSkillNames = dynamicSelection?.skillsAuthoritative ? dynamicSelection.skills : undefined;
 
 		// Delegate task instructions are durable store data, not ordinary cached prompt
 		// state. A provider hook can run after an early incomplete cache was created;
@@ -4184,6 +4240,7 @@ export class SessionManager {
 					parts.projectRoot || parts.cwd,
 					parts.projectConfigStore,
 					session.projectId ?? persisted.projectId,
+					selectedSkillNames,
 				);
 			}
 			if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
@@ -4285,6 +4342,7 @@ export class SessionManager {
 				parts.projectRoot || parts.cwd,
 				parts.projectConfigStore,
 				session.projectId ?? persisted?.projectId,
+				selectedSkillNames,
 			);
 		}
 		if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
@@ -5741,7 +5799,10 @@ export class SessionManager {
 					prompt: session.latestTurnUserText,
 					userText: session.latestTurnUserText,
 					assistantText: session.latestTurnAssistantText,
+					// Keep ordinary lifecycle telemetry on completedTurnCount; only the
+					// decision scheduler consumes the persisted cadence below.
 					turn: { index: turnIndex },
+					cadenceTurnIndex: session.scheduledAdvisorTurnCount,
 					usage,
 				};
 				const scope = lifecycleScopeInput(session);
@@ -7586,6 +7647,7 @@ export class SessionManager {
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
 			allowedTools: ps.allowedTools,
+			dynamicCapabilities: ps.dynamicCapabilities,
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
@@ -7833,9 +7895,13 @@ export class SessionManager {
 		// a restored session keeps its goal's custom order instead of reverting to
 		// the default after a gateway restart. Undefined ⇒ byte-identical default.
 		const restoreSectionOrder = this.promptSectionOrderForGoal(restoreEffectiveGoalId, ps.projectId);
-		const restoredFiltered = restoreDisabled
+		const restoredFilteredByMetadata = restoreDisabled
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
+		const restoredSelection = ps.dynamicCapabilities;
+		const restoredFiltered = restoredSelection?.mcpAuthoritative
+			? restoredFilteredByMetadata.filter(tool => tool.kind !== "mcp" || restoredSelection.mcp.includes(tool.name))
+			: restoredFilteredByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. A genuinely unrestricted session (role-less / no
 		// toolManager, NO persisted/override allowlist) resolves `effectiveAllowed`
@@ -7982,19 +8048,15 @@ export class SessionManager {
 			psPersistedModel
 			&& isKnownThinkingLevel(ps.effectiveThinkingLevel)
 		);
-		const initThinking = restoreHasDurableTuple
-			? await this.resolveCurrentCatalogPreferredThinkingLevel(
-				bridgeOptions.initialModel,
+		const initThinking = await this.clampCurrentCatalogThinkingCandidate(
+			bridgeOptions.initialModel,
+			this.resolveExplicitThinkingCandidate(
 				ps.role,
 				ps.projectId,
 				ps.effectiveThinkingLevel,
-			)
-			: await this.resolveCurrentCatalogThinkingLevel(
-				bridgeOptions.initialModel,
-				ps.role,
-				ps.projectId,
-				ps.effectiveThinkingLevel,
-			);
+				restoreHasDurableTuple,
+			),
+		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
@@ -8053,6 +8115,7 @@ export class SessionManager {
 			accessory: ps.accessory,
 			preview: ps.preview,
 			allowedTools: restoredAllowedNames,
+			dynamicCapabilities: ps.dynamicCapabilities,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			restoreStartupWasStreaming: ps.wasStreaming === true,
@@ -8161,20 +8224,6 @@ export class SessionManager {
 			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			await rpcClient.stop();
 			throw err;
-		}
-		try {
-			await this.tryApplyDefaultThinkingLevel(session);
-		} catch (err) {
-			// Rows created before effectiveThinkingLevel was persisted have no exact
-			// thinking contract to enforce. Keep them readable and let a later complete
-			// state frame migrate them; a verified durable tuple must fail closed.
-			if (ps.effectiveThinkingLevel === undefined) {
-				console.warn(`[session-manager] Legacy session ${ps.id} could not verify effective thinking during restore:`, err);
-			} else {
-				try { unsub(); } catch { /* best-effort listener cleanup */ }
-				await rpcClient.stop();
-				throw err;
-			}
 		}
 
 		// For sandbox sessions, resolve the container ID so git-status and other
@@ -8379,11 +8428,9 @@ export class SessionManager {
 		}
 		const exactInitialThinkingLevel = opts?.skipAutoThinking && !opts?.initialThinkingLevel
 			? undefined
-			: await this.resolveCurrentCatalogThinkingLevel(
+			: await this.clampCurrentCatalogThinkingCandidate(
 				selectedSpawnModel,
-				initialRole,
-				projectId,
-				opts?.initialThinkingLevel,
+				this.resolveExplicitThinkingCandidate(initialRole, projectId, opts?.initialThinkingLevel),
 				currentModels,
 			);
 
@@ -8520,7 +8567,7 @@ export class SessionManager {
 			// and let setup complete in the background. Continue-Archived opts in to
 			// awaiting setup so fresh worktree/base-ref failures are returned by the POST
 			// instead of surfacing later as an asynchronously archived session.
-			const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+			const releaseSetupThinkingAuthority = this.retainSetupCallerThinkingAuthority(
 				id,
 				opts?.initialThinkingLevel,
 			);
@@ -8604,7 +8651,7 @@ export class SessionManager {
 			bridgeOptions: { cwd },
 		};
 
-		const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+		const releaseSetupThinkingAuthority = this.retainSetupCallerThinkingAuthority(
 			id,
 			opts?.initialThinkingLevel,
 		);
@@ -8773,11 +8820,9 @@ export class SessionManager {
 			: await this.resolveCurrentCatalogSpawnModel([]);
 		const delegateThinkingCandidate = opts.initialThinkingLevel
 			?? parentMeta?.effectiveThinkingLevel;
-		const delegateInitialThinking = await this.resolveCurrentCatalogThinkingLevel(
+		const delegateInitialThinking = await this.clampCurrentCatalogThinkingCandidate(
 			delegateInitialModel,
-			opts.role,
-			parentProjectId,
-			delegateThinkingCandidate,
+			this.resolveExplicitThinkingCandidate(opts.role, parentProjectId, delegateThinkingCandidate),
 		);
 
 		// Role injection (§Gap 2): resolve the role prompt cascade-first, mirroring
@@ -8836,7 +8881,7 @@ export class SessionManager {
 			bridgeOptions: { cwd: opts.cwd },
 		};
 
-		const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+		const releaseSetupThinkingAuthority = this.retainSetupCallerThinkingAuthority(
 			plan.id,
 			delegateThinkingCandidate,
 		);
@@ -9248,6 +9293,17 @@ export class SessionManager {
 		return undefined;
 	}
 
+	/**
+	 * Resolve configured role/default thinking authority for the same model that
+	 * setup will pin. This compatibility surface never manufactures a fallback.
+	 */
+	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): ThinkingLevel | undefined {
+		return this.clampThinkingCandidateForModel(
+			this.resolveInitialModel(role, projectId),
+			this.resolveExplicitThinkingCandidate(role, projectId),
+		);
+	}
+
 	/** Require one exact provider/model tuple to remain in Bobbit's current catalog. */
 	private async requireCurrentCatalogSpawnModel(
 		model: string,
@@ -9311,101 +9367,61 @@ export class SessionManager {
 		return `${catalogDefault.provider}/${catalogDefault.id}`;
 	}
 
-	/** Resolve and clamp a spawn thinking level against the exact chosen model. */
-	private resolveThinkingLevelForModel(
-		model: string | undefined,
+	/** Resolve only operator/caller/durable thinking authority; never manufacture a fallback. */
+	private resolveExplicitThinkingCandidate(
 		role: string | undefined,
 		projectId: string | undefined,
 		preferred?: string,
-		catalogModel?: Awaited<ReturnType<typeof getAvailableModels>>[number],
 		preferPreferred = false,
 	): ThinkingLevel | undefined {
 		const preferredCandidate = isKnownThinkingLevel(preferred);
 		const roleCandidate = role
 			? isKnownThinkingLevel(this.resolveRoleThinkingLevelValue(role, projectId))
 			: undefined;
-		let candidate = preferPreferred ? preferredCandidate : roleCandidate;
-		if (!candidate) candidate = preferPreferred ? roleCandidate : preferredCandidate;
-		if (!candidate) {
-			candidate = isKnownThinkingLevel(
-				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
-			);
-		}
-		if (!candidate) candidate = "medium";
-		if (!model) return candidate;
-		if (catalogModel) return clampThinkingLevel(candidate, catalogModel);
-		const slash = model.indexOf("/");
-		if (slash <= 0 || slash === model.length - 1) return candidate;
-		return clampThinkingLevelForModel(
-			candidate,
-			model.slice(0, slash),
-			model.slice(slash + 1),
+		const defaultCandidate = isKnownThinkingLevel(
+			this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
 		);
+		return preferPreferred
+			? preferredCandidate ?? roleCandidate ?? defaultCandidate
+			: roleCandidate ?? preferredCandidate ?? defaultCandidate;
 	}
 
-	/** Final spawn/restore clamp using the exact current session-selectable row. */
-	private async resolveCurrentCatalogThinkingLevel(
+	/** Clamp one core- or dispatcher-provenanced candidate, without selecting one. */
+	private clampThinkingCandidateForModel(
 		model: string | undefined,
-		role: string | undefined,
-		projectId: string | undefined,
-		preferred?: string,
+		candidate: string | undefined,
+		catalogModel?: Awaited<ReturnType<typeof getAvailableModels>>[number],
+	): ThinkingLevel | undefined {
+		const known = isKnownThinkingLevel(candidate);
+		if (!known) return undefined;
+		if (!model) return known;
+		if (catalogModel) return clampThinkingLevel(known, catalogModel);
+		const slash = model.indexOf("/");
+		if (slash <= 0 || slash === model.length - 1) return known;
+		return clampThinkingLevelForModel(known, model.slice(0, slash), model.slice(slash + 1));
+	}
+
+	/** Final exact-catalog clamp for a candidate selected outside this helper. */
+	private async clampCurrentCatalogThinkingCandidate(
+		model: string | undefined,
+		candidate: string | undefined,
 		models?: Awaited<ReturnType<typeof getAvailableModels>>,
 		allowUnlistedRawModel = false,
-		preferPreferred = false,
 	): Promise<ThinkingLevel | undefined> {
-		if (!model || !this.preferencesStore) {
-			return this.resolveThinkingLevelForModel(model, role, projectId, preferred, undefined, preferPreferred);
-		}
+		if (!model || !this.preferencesStore) return this.clampThinkingCandidateForModel(model, candidate);
 		const normalized = normalizeAigwModelString(model);
 		const slash = normalized.indexOf("/");
-		if (slash <= 0 || slash === normalized.length - 1) {
-			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
-		}
-		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
+		if (slash <= 0 || slash === normalized.length - 1) return this.clampThinkingCandidateForModel(normalized, candidate);
 		const catalogModel = findSessionSelectableModel(
-			currentModels,
+			models ?? await getAvailableModels(this.preferencesStore),
 			normalized.slice(0, slash),
 			normalized.slice(slash + 1),
 		);
 		if (!catalogModel) {
-			if (allowUnlistedRawModel) {
-				return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
-			}
+			if (allowUnlistedRawModel) return this.clampThinkingCandidateForModel(normalized, candidate);
 			throw new Error(`Model "${normalized}" is not currently available for session selection`);
 		}
-		return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, catalogModel, preferPreferred);
-	}
-
-	/** Preserve an already-chosen explicit/durable candidate ahead of role defaults. */
-	private resolveCurrentCatalogPreferredThinkingLevel(
-		model: string | undefined,
-		role: string | undefined,
-		projectId: string | undefined,
-		preferred: string | undefined,
-	): Promise<ThinkingLevel | undefined> {
-		return this.resolveCurrentCatalogThinkingLevel(
-			model,
-			role,
-			projectId,
-			preferred,
-			undefined,
-			false,
-			true,
-		);
-	}
-
-	/**
-	 * Resolve the thinking level to pin at spawn time for a session.
-	 * Mirrors `tryApplyDefaultThinkingLevel`: role override →
-	 * `default.sessionThinkingLevel` pref → "medium", clamped against the
-	 * exact model selected by the same role/preferences resolution.
-	 */
-	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
-		return this.resolveThinkingLevelForModel(
-			this.resolveInitialModel(role, projectId),
-			role,
-			projectId,
-		);
+		return this.clampThinkingCandidateForModel(normalized, candidate, catalogModel);
 	}
 
 	/**
@@ -9451,17 +9467,12 @@ export class SessionManager {
 			const persisted = this.resolveStoreForSession(session.id).get(session.id);
 			const requestedThinking = explicitPreferredThinking
 				?? isKnownThinkingLevel(session.spawnPinnedThinkingLevel)
-				?? isKnownThinkingLevel(this.resolveRoleThinkingLevel(session))
-				?? isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
-				?? isKnownThinkingLevel(this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined)
-				?? "medium";
-			const effectiveThinking = await this.resolveCurrentCatalogPreferredThinkingLevel(
-				modelString,
-				session.role,
-				session.projectId,
-				requestedThinking,
-			);
-			if (!effectiveThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
+				?? this.resolveExplicitThinkingCandidate(session.role, session.projectId,
+					persisted?.modelProvider === provider && persisted?.modelId === modelId
+						? persisted.effectiveThinkingLevel
+						: undefined,
+					true,
+				);
 
 			const beforeResp = await session.rpcClient.getState();
 			if (beforeResp?.success === false) throw new Error("get_state failed before thinking selection");
@@ -9469,7 +9480,17 @@ export class SessionManager {
 			if (before?.model?.provider !== provider || before?.model?.id !== modelId) {
 				throw new Error(`model read-back changed before thinking selection for ${modelString}`);
 			}
-			if (isKnownThinkingLevel(before?.thinkingLevel) !== effectiveThinking) {
+			const liveThinking = isKnownThinkingLevel(before?.thinkingLevel);
+			const effectiveThinking = requestedThinking
+				? await this.clampCurrentCatalogThinkingCandidate(modelString, requestedThinking)
+				: liveThinking;
+			if (!effectiveThinking) {
+				if (requestedThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
+				// Pi did not report a canonical thinking level to adopt.
+				session.spawnPinnedModel = modelString;
+				return;
+			}
+			if (requestedThinking && liveThinking !== effectiveThinking) {
 				const setResp = await session.rpcClient.setThinkingLevel(effectiveThinking);
 				if (setResp?.success === false) throw new Error(`thinking level "${effectiveThinking}" was rejected`);
 			}
@@ -9486,8 +9507,6 @@ export class SessionManager {
 			}
 
 			const tuple = { provider, modelId, thinkingLevel: effectiveThinking };
-			// Staged role candidates verify against Pi through the ordinary helper but
-			// cannot advance shared authority until their lifecycle commit wins.
 			if (session._deferVerifiedTupleCommit !== true) {
 				this.persistSessionModel(session.id, provider, modelId, effectiveThinking);
 				this._writeModelNameFile(session.id, modelString);
@@ -9509,7 +9528,7 @@ export class SessionManager {
 			const durableThinking = persisted?.modelProvider && persisted?.modelId
 				? isKnownThinkingLevel(persisted.effectiveThinkingLevel)
 				: undefined;
-			const explicitInitialThinking = this._setupInitialThinkingAuthorities.get(
+			const explicitInitialThinking = this._setupCallerThinkingAuthorities.get(
 				session.id,
 			)?.initialThinkingLevel;
 			const defaultThinking = isKnownThinkingLevel(
@@ -9517,19 +9536,9 @@ export class SessionManager {
 			);
 			const provisionalThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
 			if (session._deferVerifiedTupleCommit === true) {
-				return roleThinking
-					?? durableThinking
-					?? explicitInitialThinking
-					?? defaultThinking
-					?? provisionalThinking
-					?? "medium";
+				return roleThinking ?? durableThinking ?? explicitInitialThinking ?? defaultThinking ?? provisionalThinking;
 			}
-			return durableThinking
-				?? roleThinking
-				?? explicitInitialThinking
-				?? defaultThinking
-				?? provisionalThinking
-				?? "medium";
+			return durableThinking ?? roleThinking ?? explicitInitialThinking ?? defaultThinking ?? provisionalThinking;
 		};
 
 		// Spawn-pinned models are explicit selections too (restore/respawn persisted
@@ -9722,90 +9731,6 @@ export class SessionManager {
 		return verifiedSpawnTuple;
 	}
 
-	/** Apply, read back, and atomically persist thinking with the exact live model. */
-	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<VerifiedSessionModelTuple> {
-		const persisted = this.resolveStoreForSession(session.id).get(session.id);
-		const spawnPinnedThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
-		const spawnPinnedModel = session.spawnPinnedModel
-			? normalizeAigwModelString(session.spawnPinnedModel)
-			: undefined;
-		const spawnModelSlash = spawnPinnedModel?.indexOf("/") ?? -1;
-		// tryAutoSelectModel has already read back and atomically persisted this exact
-		// spawn tuple. Return before the first await so the normal setup path cannot
-		// leave a detached redundant thinking read that races a newer live selection.
-		if (
-			spawnPinnedThinking
-			&& spawnPinnedModel
-			&& spawnModelSlash > 0
-			&& persisted?.modelProvider === spawnPinnedModel.slice(0, spawnModelSlash)
-			&& persisted?.modelId === spawnPinnedModel.slice(spawnModelSlash + 1)
-			&& persisted?.effectiveThinkingLevel === spawnPinnedThinking
-		) {
-			return {
-				provider: spawnPinnedModel.slice(0, spawnModelSlash),
-				modelId: spawnPinnedModel.slice(spawnModelSlash + 1),
-				thinkingLevel: spawnPinnedThinking,
-			};
-		}
-		const roleThinking = isKnownThinkingLevel(this.resolveRoleThinkingLevel(session));
-		const durableThinking = isKnownThinkingLevel(persisted?.effectiveThinkingLevel);
-		const preferenceThinking = isKnownThinkingLevel(
-			this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
-		);
-		const requested = spawnPinnedThinking ?? roleThinking ?? durableThinking ?? preferenceThinking ?? "medium";
-
-		const applyAndVerify = async (candidate: ThinkingLevel): Promise<VerifiedSessionModelTuple> => {
-			const beforeResp = await session.rpcClient.getState();
-			if (beforeResp?.success === false) throw new Error("get_state failed before thinking selection");
-			const before = beforeResp?.data ?? beforeResp;
-			const provider = typeof before?.model?.provider === "string" ? before.model.provider : undefined;
-			const modelId = typeof before?.model?.id === "string" ? before.model.id : undefined;
-			if (!provider || !modelId) throw new Error("get_state returned no exact model before thinking selection");
-			const effective = await this.resolveCurrentCatalogThinkingLevel(
-				`${provider}/${modelId}`,
-				session.role,
-				session.projectId,
-				candidate,
-				undefined,
-				!session.spawnPinnedModel,
-			);
-			if (!effective) throw new Error(`thinking level "${candidate}" could not be normalized`);
-			if (
-				persisted?.modelProvider === provider
-				&& persisted?.modelId === modelId
-				&& persisted?.effectiveThinkingLevel === effective
-				&& isKnownThinkingLevel(before?.thinkingLevel) === effective
-			) {
-				return { provider, modelId, thinkingLevel: effective };
-			}
-			if (before?.thinkingLevel !== effective) {
-				const setResp = await session.rpcClient.setThinkingLevel(effective);
-				if (setResp?.success === false) throw new Error(`thinking level "${effective}" was rejected`);
-			}
-
-			const verifiedResp = await session.rpcClient.getState();
-			if (verifiedResp?.success === false) throw new Error("get_state failed after thinking selection");
-			const verified = verifiedResp?.data ?? verifiedResp;
-			const verifiedProvider = verified?.model?.provider;
-			const verifiedModelId = verified?.model?.id;
-			const verifiedThinking = isKnownThinkingLevel(verified?.thinkingLevel);
-			if (verifiedProvider !== provider || verifiedModelId !== modelId || verifiedThinking !== effective) {
-				throw new Error(`thinking selection read-back mismatch for ${provider}/${modelId}`);
-			}
-			if (session._deferVerifiedTupleCommit !== true) {
-				this.persistSessionModel(session.id, provider, modelId, effective);
-			}
-			session.spawnPinnedModel = `${provider}/${modelId}`;
-			session.spawnPinnedThinkingLevel = effective;
-			return { provider, modelId, thinkingLevel: effective };
-		};
-
-		const verifiedTuple = await applyAndVerify(requested);
-		if (process.env.BOBBIT_DEBUG) {
-			console.log(`[session-manager] Verified effective thinking level "${verifiedTuple.thinkingLevel}" for session ${session.id}`);
-		}
-		return verifiedTuple;
-	}
 
 	async persistSessionMetadata(session: SessionInfo): Promise<void> {
 		const maxRetries = 3;
@@ -10367,9 +10292,13 @@ export class SessionManager {
 		const respawnEffectiveGoalId = session.goalId ?? session.teamGoalId;
 		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, session.projectId);
 		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
-		const effectiveAllowed = respawnDisabled
+		const effectiveAllowedByMetadata = respawnDisabled
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowedRaw;
+		const roleSelection = persistedBeforeRole?.dynamicCapabilities ?? session.dynamicCapabilities;
+		const effectiveAllowed = roleSelection?.mcpAuthoritative
+			? effectiveAllowedByMetadata.filter(tool => tool.kind !== "mcp" || roleSelection.mcp.includes(tool.name))
+			: effectiveAllowedByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
 		// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a
@@ -10464,11 +10393,14 @@ export class SessionManager {
 		const roleThinkingOverride = isKnownThinkingLevel(
 			this.resolveRoleThinkingLevelValue(role.name, session.projectId),
 		);
-		const initThinking = await this.resolveCurrentCatalogThinkingLevel(
+		const initThinking = await this.clampCurrentCatalogThinkingCandidate(
 			bridgeOptions.initialModel,
-			role.name,
-			session.projectId,
-			roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+			this.resolveExplicitThinkingCandidate(
+				role.name,
+				session.projectId,
+				roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+				true,
+			),
 		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 
@@ -10546,17 +10478,6 @@ export class SessionManager {
 				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
 			verifiedReplacementTuple = await this.tryAutoSelectModel(stagedSession);
-			// tryAutoSelectModel verifies a complete tuple. Only use the standalone
-			// thinking helper when model selection produced no tuple; re-reading an
-			// already-complete legacy candidate can fail and must not discard it.
-			if (!verifiedReplacementTuple) {
-				try {
-					verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession);
-				} catch (err) {
-					if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
-				}
-			}
 			if (respawnPersisted?.effectiveThinkingLevel !== undefined && !verifiedReplacementTuple) {
 				throw new Error(`Cannot assign role for session ${id}: replacement model tuple was not verified`);
 			}
@@ -10821,6 +10742,23 @@ export class SessionManager {
 			modelId,
 			effectiveThinkingLevel,
 		});
+	}
+
+	/**
+	 * The extension boundary's shared explicit-choice fence. It intentionally
+	 * remains in core because it distinguishes operator/user authority from an
+	 * advisory result and is re-read inside the command serialiser. Verified
+	 * durable tuples are recovery state, not live advisory provenance.
+	 */
+	hasExplicitThinkingChoice(sessionId: string): boolean {
+		const persisted = this.getPersistedSession(sessionId);
+		const session = this.sessions.get(sessionId);
+		if (!persisted) return false;
+		if (persisted.humanSelectionPins?.thinkingLevel) return true;
+		if (this._setupCallerThinkingAuthorities.has(sessionId)) return true;
+		const role = session?.role ?? persisted.role;
+		const projectId = session?.projectId ?? persisted.projectId;
+		return !!this.resolveExplicitThinkingCandidate(role, projectId);
 	}
 
 	/** Persist an authenticated user's verified model tuple as explicit provenance. */
@@ -12938,19 +12876,15 @@ export class SessionManager {
 				forceRespawnPersistedModel
 				&& isKnownThinkingLevel(forceRespawnPersisted?.effectiveThinkingLevel)
 			);
-			const initThinking = forceRespawnHasDurableTuple
-				? await this.resolveCurrentCatalogPreferredThinkingLevel(
-					bridgeOptions.initialModel,
+			const initThinking = await this.clampCurrentCatalogThinkingCandidate(
+				bridgeOptions.initialModel,
+				this.resolveExplicitThinkingCandidate(
 					session.role,
 					session.projectId,
 					forceRespawnPersisted?.effectiveThinkingLevel,
-				)
-				: await this.resolveCurrentCatalogThinkingLevel(
-					bridgeOptions.initialModel,
-					session.role,
-					session.projectId,
-					forceRespawnPersisted?.effectiveThinkingLevel,
-				);
+					forceRespawnHasDurableTuple,
+				),
+			);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
@@ -13037,12 +12971,6 @@ export class SessionManager {
 
 			try {
 				await this.tryAutoSelectModel(session);
-				try {
-					await this.tryApplyDefaultThinkingLevel(session);
-				} catch (err) {
-					if (forceRespawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during force-abort recovery:`, err);
-				}
 			} catch (err) {
 				unsub();
 				await rpcClient.stop().catch(() => {});

@@ -202,6 +202,48 @@ describe("ContextTraceStore", () => {
 		expect(persisted).not.toContain(secret);
 	});
 
+	it("persists only aggregate dynamic capability telemetry at the session-setup decision boundary", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "query proposal reason candidate-id denied-id /private/config token";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{
+					kind: "decision", packId: "extension-pack", hookId: "select-skills", event: "sessionSetup", outcome: "applied",
+					capabilityStage: "skills", selectionFingerprint: "a".repeat(64),
+					candidateCount: 8, selectedCount: 2, selectorCount: 3, contextBytesSaved: 512,
+					query: secret, proposal: { reason: secret, add: [secret] }, deniedIds: [secret], config: { secret },
+				} as any,
+				{
+					kind: "advisory", packId: "extension-pack", hookId: "not-a-selector", event: "sessionSetup", outcome: "applied",
+					capabilityStage: "mcp", selectionFingerprint: secret, candidateCount: 1, selectedCount: 1, selectorCount: 1, contextBytesSaved: 1,
+				} as any,
+				{
+					kind: "decision", hookId: "too-late", event: "beforePrompt", outcome: "applied",
+					capabilityStage: "mcp", selectionFingerprint: secret, candidateCount: 1, selectedCount: 1, selectorCount: 1, contextBytesSaved: 1,
+				} as any,
+				{
+					kind: "decision", hookId: "invalid-selector", event: "sessionSetup", outcome: "error",
+					capabilityStage: "tools", selectionFingerprint: secret, candidateCount: -1, selectedCount: Infinity, selectorCount: -1, contextBytesSaved: -1,
+				} as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{
+				kind: "decision", packId: "extension-pack", hookId: "select-skills", event: "sessionSetup", outcome: "applied",
+				capabilityStage: "skills", selectionFingerprint: "a".repeat(64),
+				candidateCount: 8, selectedCount: 2, selectorCount: 3, contextBytesSaved: 512,
+			},
+			{ kind: "advisory", packId: "extension-pack", hookId: "not-a-selector", event: "sessionSetup", outcome: "applied" },
+			{ kind: "decision", hookId: "too-late", event: "beforePrompt", outcome: "applied" },
+			{ kind: "decision", hookId: "invalid-selector", event: "sessionSetup", outcome: "error" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
 	it("requires safe scheduled-advisor pack attribution and fixed lifecycle labels", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);

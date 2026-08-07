@@ -172,7 +172,11 @@ interface ExtensionDecisionRequest {
   deadlineAt: string;
   intent?: string;
   effect?: { kind: "none" }
-    | { kind: "proposal"; proposals: Record<string, ProposalSeed> };
+    | {
+        kind: "proposal";
+        proposals: Record<string, ProposalSeed>;
+        noEffectValues?: string[];
+      };
 }
 ```
 
@@ -197,8 +201,11 @@ seed.
 
 ### Effects
 
-`effect` defaults to `{ kind: "none" }`. A proposal effect maps **every**
-option value and the mandatory `other` key to a seed:
+`effect` defaults to `{ kind: "none" }`. A proposal effect partitions every option value and
+the mandatory `other` key **exactly once** between a proposal seed and `noEffectValues`. The two
+sets are mutually exclusive: a seeded value cannot appear in `noEffectValues`, `noEffectValues`
+cannot contain duplicates or unknown values, and no option/Other value can be omitted. Ordinary
+proposal effects may seed every answer:
 
 ```js
 effect: {
@@ -211,12 +218,31 @@ effect: {
 }
 ```
 
+An effect can instead seed only an affirmative choice and make decline and Other explicitly
+effect-free:
+
+```js
+effect: {
+  kind: "proposal",
+  proposals: {
+    create: { proposalType: "goal", args: { title: "Create review draft" } },
+  },
+  noEffectValues: ["decline", "other"],
+}
+```
+
 `proposalType` is one of `goal`, `project`, `workflow`, `role`, `tool`, or
 `staff`. Seed arguments are bounded JSON data; they are validated before the
 question is shown. On a durable answer, the server creates an **editable
 proposal draft** using the normal proposal seed path. It never applies a
 configuration change. Proposal creation failure is recorded separately and
 never rolls back the already durable answer.
+
+A scheduled `kind: decision` proposal is narrower still: it must have exactly
+`create` with label `Create draft` as its sole seed, list every remaining option
+and `other` in `noEffectValues`, and is forced to `consent-required` before
+persistence. See the [staff-improvement proposal fixture](staff-improvement-proposals.md)
+for the complete constrained example.
 
 ## Resolution, defaults, and memory
 

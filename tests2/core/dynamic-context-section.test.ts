@@ -109,6 +109,28 @@ describe("Dynamic Context prompt section", () => {
 		assert.equal(plan.dynamicContextBlocks, returnedBlocks);
 	});
 
+	it("dispatches sessionSetup once but does not consume a selector under an explicit thinking choice", async () => {
+		const returnedBlocks = [block("provider", "provider context")];
+		const dispatch = vi.fn(async () => ({ blocks: returnedBlocks, diagnostics: [], thinkingLevel: "medium" }));
+		const clampSetupThinkingLevel = vi.fn(async () => "medium");
+		const plan = {
+			id: "explicit-thinking-session",
+			mode: "normal",
+			title: "Explicit thinking",
+			cwd: "/work/project",
+			projectId: "project-1",
+			bridgeOptions: { cwd: "/work/project", initialThinkingLevel: "high" },
+		} as SessionSetupPlan;
+
+		await resolveDynamicContext(plan, { lifecycleHub: { dispatch }, clampSetupThinkingLevel } as any);
+
+		assert.equal(dispatch.mock.calls.length, 1, "sessionSetup selection must dispatch exactly once even when it cannot be consumed");
+		assert.equal((dispatch.mock.calls as any)[0]?.length, 3, "explicit thinking must not alter or suppress the setup dispatch path");
+		assert.equal(plan.bridgeOptions.initialThinkingLevel, "high", "an explicit thinking choice wins over extension selection");
+		assert.equal(clampSetupThinkingLevel.mock.calls.length, 0, "the fenced selector result is never consumed or clamped");
+		assert.equal(plan.dynamicContextBlocks, returnedBlocks);
+	});
+
 	it("swallows LifecycleHub rejection without mutating existing dynamic context blocks", async () => {
 		const existingBlocks = [block("existing", "existing context")];
 		const dispatch = vi.fn(async () => { throw new Error("provider unavailable"); });

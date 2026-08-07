@@ -15,6 +15,7 @@ import { providerConfigStoreKey } from "../../src/server/agent/pack-contribution
 
 const PACK_ID = `hindsight-settings-fixture-${Date.now()}`;
 const PROVIDER_ID = "memory";
+const RECONCILIATION_HOOK_ID = "schema.reconciliation";
 const SECRET_A = "HINDSIGHT_API_KEY_MUST_NEVER_ESCAPE_A";
 const SECRET_B = "HINDSIGHT_API_KEY_MUST_NEVER_ESCAPE_B";
 
@@ -28,6 +29,14 @@ function settingsPath(projectId: string): string {
 
 function targetPath(projectId: string): string {
 	return `${settingsPath(projectId)}/${encodeURIComponent(PACK_ID)}/provider/${PROVIDER_ID}`;
+}
+
+function reconciliationHookPath(projectId: string): string {
+	return `${settingsPath(projectId)}/${encodeURIComponent(PACK_ID)}/hook/${encodeURIComponent(RECONCILIATION_HOOK_ID)}`;
+}
+
+function grantsPath(projectId: string): string {
+	return `/api/projects/${encodeURIComponent(projectId)}/extension-grants`;
 }
 
 function operatorHeaders(): Record<string, string> {
@@ -51,12 +60,23 @@ function target(body: any): any {
 	return targetByRef(body, "provider", PROVIDER_ID);
 }
 
-function runtimeProviderIds(gateway: any, projectId: string): string[] {
+function runtimeProviders(gateway: any, projectId: string): any[] {
 	const registry = gateway.sessionManager.lifecycleHub?.registry;
 	expect(registry, "gateway lifecycle hub exposes the live project resolver").toBeTruthy();
 	return registry.listProviders(projectId)
-		.filter((provider: any) => provider.packRoot?.endsWith(PACK_ID))
-		.map((provider: any) => provider.id);
+		.filter((provider: any) => provider.packRoot?.endsWith(PACK_ID));
+}
+
+function runtimeProviderIds(gateway: any, projectId: string): string[] {
+	return runtimeProviders(gateway, projectId).map((provider: any) => provider.id);
+}
+
+function runtimeHookIds(gateway: any, projectId: string): string[] {
+	const registry = gateway.sessionManager.lifecycleHub?.registry;
+	expect(registry, "gateway lifecycle hub exposes the live project resolver").toBeTruthy();
+	return registry.listHooks(projectId)
+		.filter((hook: any) => hook.packRoot?.endsWith(PACK_ID))
+		.map((hook: any) => hook.id);
 }
 
 function writeFixturePack(headquartersDir: string): void {
@@ -85,7 +105,7 @@ function writeFixturePack(headquartersDir: string): void {
 		"  skills: []",
 		"  entrypoints: []",
 		"  providers: [memory, activation-only, no-config, opaque-config]",
-		"  hooks: [activation-only, no-config, opaque-config]",
+		"  hooks: [activation-only, no-config, opaque-config, reconciliation]",
 		"  mcp: []",
 		"  pi-extensions: []",
 		"  runtimes: []",
@@ -123,6 +143,7 @@ function writeFixturePack(headquartersDir: string): void {
 		"activation:",
 		"  requiresConfig: [externalUrl]",
 	].join("\n") + "\n", "utf8");
+	writeReconciliationHookV1();
 	for (const kind of ["providers", "hooks"] as const) {
 		const module = kind === "providers" ? "../lib/provider.mjs" : "../lib/hook.mjs";
 		const base = kind === "providers"
@@ -133,6 +154,47 @@ function writeFixturePack(headquartersDir: string): void {
 	}
 	fs.writeFileSync(path.join(packDir, "lib", "provider.mjs"), "export default {};\n", "utf8");
 	fs.writeFileSync(path.join(packDir, "lib", "hook.mjs"), "export default {};\n", "utf8");
+}
+
+function writeReconciliationHookV1(): void {
+	fs.writeFileSync(path.join(packDir, "hooks", "reconciliation.yaml"), [
+		`id: ${RECONCILIATION_HOOK_ID}`,
+		"module: ../lib/hook.mjs",
+		"events: [sessionSetup, beforePrompt]",
+		"mode: decide",
+		"capabilities: [mutate]",
+		"selectors: [skills, mcp]",
+		"config:",
+		"  endpoint: { type: string, optional: true }",
+		"  legacyEnum: { type: enum, values: [legacy, strict], default: legacy }",
+		"  legacyText: { type: string, optional: true }",
+		"  legacyNumber: { type: number, min: 1, max: 10, default: 4 }",
+		"  removedValue: { type: string, optional: true }",
+		"  apiKey: { type: secret, optional: true }",
+		"activation:",
+		"  requiresConfig: [endpoint]",
+	].join("\n") + "\n", "utf8");
+}
+
+function writeReconciliationHookV2(): void {
+	fs.writeFileSync(path.join(packDir, "hooks", "reconciliation.yaml"), [
+		`id: ${RECONCILIATION_HOOK_ID}`,
+		"module: ../lib/hook.mjs",
+		"events: [sessionSetup, beforePrompt]",
+		"mode: decide",
+		"capabilities: [mutate]",
+		"selectors: [skills, mcp]",
+		"config:",
+		"  endpoint: { type: string, optional: true }",
+		"  legacyEnum: { type: enum, values: [strict], default: strict }",
+		"  legacyText: { type: boolean, optional: true }",
+		"  legacyNumber: { type: number, min: 5, max: 8, default: 6 }",
+		"  optionalAdded: { type: string, optional: true }",
+		"  defaultAdded: { type: string, default: evolved-default }",
+		"  apiKey: { type: secret, optional: true }",
+		"activation:",
+		"  requiresConfig: [endpoint]",
+	].join("\n") + "\n", "utf8");
 }
 
 async function createProject(gateway: any, suffix: string): Promise<{ id: string; rootPath: string }> {
@@ -351,15 +413,25 @@ test.describe("extension settings API", () => {
 		}
 	});
 
-	test("keeps grants untouched, retains legacy values only before a project record, and isolates configured Hindsight projects", async ({ gateway }) => {
+	test("keeps grants untouched, preserves legacy Hindsight mode only at runtime before a project record, and isolates configured projects", async ({ gateway }) => {
 		const projectA = await createProject(gateway, "isolation-a");
 		const projectB = await createProject(gateway, "isolation-b");
 		const grantsBefore = await readJson(await apiFetch(`/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`));
 
 		const legacyUrl = "https://legacy-hindsight.example.test";
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl });
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, mode: "managed" });
 		const beforeRecord = target(await settings(projectB.id));
 		expect(beforeRecord.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "legacy" });
+		expect(beforeRecord.fields.find((field: any) => field.key === "mode")).toBeUndefined();
+		expect(JSON.stringify(beforeRecord)).not.toContain("managed");
+		expect(runtimeProviders(gateway, projectB.id).find((provider: any) => provider.id === PROVIDER_ID)?.config)
+			.toMatchObject({ externalUrl: legacyUrl, mode: "managed" });
+
+		const invalidLegacyProject = await createProject(gateway, "legacy-invalid");
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, recallScope: "invalid", mode: "managed" });
+		expect(target(await settings(invalidLegacyProject.id)).configuration).toMatchObject({ state: "invalid-values" });
+		expect(runtimeProviderIds(gateway, invalidLegacyProject.id)).not.toContain(PROVIDER_ID);
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, mode: "managed" });
 
 		const aInitial = await settings(projectA.id);
 		const aSaved = await patchTarget(projectA.id, aInitial.revision, {
@@ -367,6 +439,9 @@ test.describe("extension settings API", () => {
 			apiKey: SECRET_A,
 		});
 		expect(aSaved.status).toBe(200);
+		const projectAConfig = runtimeProviders(gateway, projectA.id).find((provider: any) => provider.id === PROVIDER_ID)?.config;
+		expect(projectAConfig).toMatchObject({ externalUrl: "https://project-a-hindsight.example.test" });
+		expect(projectAConfig).not.toHaveProperty("mode");
 		const bInitial = await settings(projectB.id);
 		const bSaved = await patchTarget(projectB.id, bInitial.revision, {
 			externalUrl: "https://project-b-hindsight.example.test",
@@ -398,5 +473,90 @@ test.describe("extension settings API", () => {
 		expect(JSON.stringify(afterReload)).not.toContain(SECRET_B);
 		expect(JSON.stringify(afterReload)).not.toContain(SECRET_A);
 		expect(await readJson(await apiFetch(`/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`))).toEqual(grantsBefore);
+	});
+
+	test("fails closed after hook schema evolution while preserving redaction, compatible additions, and mutate-only authority", async ({ gateway }) => {
+		const project = await createProject(gateway, "hook-schema-evolution");
+		const initial = await settings(project.id);
+		const secretCanary = `EVOLVED_HOOK_SECRET_MUST_NEVER_ESCAPE_${Date.now()}`;
+		const saved = await apiFetch(reconciliationHookPath(project.id), {
+			method: "PATCH",
+			headers: operatorHeaders(),
+			body: JSON.stringify({
+				expectedRevision: initial.revision,
+				values: {
+					endpoint: "https://schema-evolution.example.test",
+					legacyEnum: "legacy",
+					legacyText: "stored-before-boolean",
+					legacyNumber: 3,
+					removedValue: "must-not-return-after-removal",
+					apiKey: secretCanary,
+				},
+			}),
+		});
+		expect(saved.status).toBe(200);
+		const savedBody = await readJson(saved);
+		expect(JSON.stringify(savedBody)).not.toContain(secretCanary);
+		expect(savedBody.target.fields.find((field: any) => field.key === "apiKey"))
+			.toEqual(expect.objectContaining({ type: "secret", secretSet: true }));
+		expect(runtimeHookIds(gateway, project.id)).toContain(RECONCILIATION_HOOK_ID);
+
+		const mutationGrant = await apiFetch(grantsPath(project.id), {
+			method: "PUT",
+			headers: operatorHeaders(),
+			body: JSON.stringify({ packId: PACK_ID, hookId: RECONCILIATION_HOOK_ID, capability: "mutate" }),
+		});
+		expect(mutationGrant.status).toBe(200);
+		const mutateOnly = targetByRef(await settings(project.id), "hook", RECONCILIATION_HOOK_ID);
+		expect(mutateOnly.hookGrant).toMatchObject({
+			requestedCapabilities: ["decide", "mutate"],
+			grants: ["mutate"],
+			runnable: false,
+			status: "grant-required",
+			runtimeAuthorized: true,
+		});
+
+		writeReconciliationHookV2();
+		const refresh = await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT",
+			body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
+		});
+		expect(refresh.status, `schema evolution must invalidate the pack resolver: ${await refresh.clone().text()}`).toBe(200);
+
+		const evolvedResponse = await settings(project.id);
+		const evolved = targetByRef(evolvedResponse, "hook", RECONCILIATION_HOOK_ID);
+		expect(evolved).toMatchObject({
+			enabled: { effective: true },
+			configuration: { state: "invalid-values", missing: [] },
+		});
+		for (const key of ["legacyEnum", "legacyText", "legacyNumber"]) {
+			expect(evolved.fields.find((field: any) => field.key === key)).not.toHaveProperty("value");
+		}
+		expect(evolved.fields.find((field: any) => field.key === "removedValue")).toBeUndefined();
+		expect(evolved.fields.find((field: any) => field.key === "optionalAdded")).not.toHaveProperty("value");
+		expect(evolved.fields.find((field: any) => field.key === "defaultAdded"))
+			.toMatchObject({ value: "evolved-default", default: "evolved-default", source: "default" });
+		expect(evolved.fields.find((field: any) => field.key === "apiKey")).toEqual(expect.objectContaining({ type: "secret", secretSet: true }));
+		expect(JSON.stringify(evolvedResponse)).not.toContain(secretCanary);
+		const diagnostics: string[] = [];
+		const warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => { diagnostics.push(args.map(String).join(" ")); });
+		try {
+			expect(runtimeHookIds(gateway, project.id)).not.toContain(RECONCILIATION_HOOK_ID);
+		} finally {
+			warn.mockRestore();
+		}
+		expect(JSON.stringify(diagnostics)).not.toContain(secretCanary);
+
+		const repaired = await apiFetch(reconciliationHookPath(project.id), {
+			method: "PATCH",
+			headers: operatorHeaders(),
+			body: JSON.stringify({ expectedRevision: evolvedResponse.revision, values: { legacyEnum: "strict", legacyText: true, legacyNumber: 6 } }),
+		});
+		expect(repaired.status).toBe(200);
+		const repairedTarget = (await readJson(repaired)).target;
+		expect(repairedTarget.configuration).toMatchObject({ state: "ready", missing: [] });
+		expect(repairedTarget.fields.find((field: any) => field.key === "defaultAdded"))
+			.toMatchObject({ value: "evolved-default", source: "default" });
+		expect(runtimeHookIds(gateway, project.id)).toContain(RECONCILIATION_HOOK_ID);
 	});
 });

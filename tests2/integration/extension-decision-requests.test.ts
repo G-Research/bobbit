@@ -136,6 +136,79 @@ describe("extension decision gateway seams", () => {
 		assert.deepEqual(proposals, [], "revocation must not seed a proposal or mutate configuration");
 	});
 
+	it("admits only the exact scheduled Create draft action and never seeds declining answers", async () => {
+		const scheduledHook = {
+			id: "scheduled-hook", mode: "decide" as const, events: ["afterTurn" as const],
+			schedule: { everyNTurns: 3, kind: "decision" as const }, packRoot: "/packs/scheduled",
+			sourceFile: "/packs/scheduled/hooks.yaml", module: "hook.mjs", capabilities: [], budget: { timeoutMs: 100, maxTokens: 1 },
+		};
+		const grants = () => [{ packId: "scheduled", hookId: "scheduled-hook", capability: "decide" as const, grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" }];
+		const scheduledProposal = (overrides: Record<string, unknown> = {}) => ({
+			...request("scheduled-proposal"), requestedClass: "deferrable" as const,
+			options: [{ value: "create", label: "Create draft" }, { value: "decline", label: "Not now" }],
+			default: { kind: "option" as const, value: "create" },
+			effect: { kind: "proposal" as const, proposals: {
+				create: { proposalType: "goal" as const, args: { title: "Explicit draft" } },
+			}, noEffectValues: ["decline", "other"] },
+			...overrides,
+		});
+		const setup = (decision: unknown, headless = false) => {
+			const fs = createMemFs();
+			const dir = path.join("/memfs", `scheduled-proposal-${headless}-${Date.now()}`);
+			fs.mkdirSync(dir, { recursive: true });
+			const store = new DecisionRequestStore(dir, fs);
+			const seeds: Array<{ type: string; args: Record<string, unknown> }> = [];
+			const manager = new DecisionRequestManager({
+				storeForProject: () => store, isHeadless: () => headless, recheckConsentOperation: () => true,
+				proposalSeedService: { seedFromDecision: async (_session, type, args) => {
+					seeds.push({ type, args });
+					return { ok: true as const, status: 200 as const, rev: 1, fields: {} };
+				} },
+			});
+			const dispatcher = new DecisionHookDispatcher({
+				manager, registry: { list: () => [{ packId: "scheduled", hooks: [scheduledHook] }], listHooks: () => [scheduledHook] } as unknown as PackContributionRegistry,
+				moduleHost: { invoke: async () => ({ kind: "request", request: decision }) } as unknown as ModuleHost,
+				grantsForProject: grants,
+			});
+			return { store, seeds, manager, dispatcher };
+		};
+		const dispatch = (fixture: ReturnType<typeof setup>) => fixture.dispatcher.dispatch("afterTurn", { ...origin(), cadenceTurnIndex: 3 });
+
+		const seededDecline = setup(scheduledProposal({ effect: { kind: "proposal", proposals: {
+			decline: { proposalType: "goal", args: { title: "Must not seed" } },
+		}, noEffectValues: ["create", "other"] } }));
+		assert.equal((await dispatch(seededDecline))[0]?.outcome, "dropped");
+		assert.deepEqual(seededDecline.store.list(), [], "a decline seed is rejected before persistence");
+
+		const swappedLabels = setup(scheduledProposal({ options: [{ value: "create", label: "Not now" }, { value: "decline", label: "Create draft" }] }));
+		assert.equal((await dispatch(swappedLabels))[0]?.outcome, "dropped");
+		assert.deepEqual(swappedLabels.store.list(), [], "a misleading create label is rejected before persistence");
+
+		for (const answer of [{ kind: "option" as const, value: "decline" }, { kind: "other" as const, text: "Later" }]) {
+			const declined = setup(scheduledProposal());
+			await dispatch(declined);
+			await declined.manager.answer("project", declined.store.listPending()[0]!.id, answer);
+			assert.deepEqual(declined.seeds, [], `${answer.kind} answers must never create a draft`);
+		}
+
+		const interactive = setup(scheduledProposal());
+		await dispatch(interactive);
+		const pending = interactive.store.listPending()[0]!;
+		assert.equal(pending.decisionClass, "consent-required");
+		assert.equal(pending.request.default, undefined);
+		assert.equal(pending.timeoutAction, "deny-operation");
+		await interactive.manager.answer("project", pending.id, { kind: "option", value: "create" });
+		await interactive.manager.answer("project", pending.id, { kind: "option", value: "create" });
+		assert.deepEqual(interactive.seeds, [{ type: "goal", args: { title: "Explicit draft" } }], "only the exact create answer seeds once");
+
+		const headless = setup(scheduledProposal(), true);
+		await dispatch(headless);
+		const denied = headless.store.list()[0]!;
+		assert.equal(denied.status, "denied");
+		assert.equal(denied.request.default, undefined);
+		assert.deepEqual(headless.seeds, []);
+	});
+
 	it("fails closed after revocation for direct consent proposal effects and releases only still-granted hooks", async () => {
 		for (const proposalType of ["goal", "staff", "workflow"] as const) {
 			const fs = createMemFs();
@@ -212,6 +285,44 @@ describe("extension decision gateway seams", () => {
 			assert.equal(delivered, 1);
 			assert.ok(rechecks >= 3, "answer and pre-continuation fences must re-read the exact grant");
 		}
+	});
+
+	it("persists a non-thinking sessionSetup request alongside setup selection", async () => {
+		const fs = createMemFs();
+		const dir = path.join("/memfs", `decision-explicit-setup-${Date.now()}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const store = new DecisionRequestStore(dir, fs);
+		const trace = new ContextTraceStore(dir, fs);
+		const manager = new DecisionRequestManager({ storeForProject: () => store });
+		const hook = {
+			id: "setup-request", mode: "decide" as const, events: ["sessionSetup" as const], packRoot: "/packs/decision-pack",
+			sourceFile: "/packs/decision-pack/hooks.yaml", module: "decision.mjs", capabilities: [], budget: { timeoutMs: 100, maxTokens: 1 },
+		};
+		const registry = { listHooks: () => [hook], listProviders: () => [] } as unknown as PackContributionRegistry;
+		const moduleHost = {
+			invoke: async () => ({ kind: "request", request: request("setup-confirmation") }),
+		} as unknown as ModuleHost;
+		const dispatcher = new DecisionHookDispatcher({
+			manager, registry, moduleHost,
+			grantsForProject: () => [{ packId: "decision-pack", hookId: "setup-request", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" }],
+		});
+		const lifecycleHub = new LifecycleHub({
+			registry, moduleHost, trace,
+			gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+		});
+		lifecycleHub.setDecisionDispatcher(dispatcher);
+
+		await lifecycleHub.dispatch("sessionSetup", {
+			sessionId: "explicit-thinking", projectId: "project", goalId: "goal", cwd: "/work", scope: "project",
+		});
+
+		const pending = store.listPending();
+		assert.equal(pending.length, 1, "a non-thinking request must remain available alongside setup selection");
+		assert.equal(pending[0]?.request.key, "setup-confirmation");
+		const outcomes = trace.readTrace("explicit-thinking").flatMap(row => row.outcomes ?? []);
+		assert.deepEqual(outcomes.map(({ event, outcome, requestId }) => ({ event, outcome, requestId: Boolean(requestId) })), [
+			{ event: "sessionSetup", outcome: "applied", requestId: true },
+		]);
 	});
 
 	it("persists detached grant-denied and budget-exhausted dispatch outcomes without delaying provider output", async () => {

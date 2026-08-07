@@ -671,7 +671,7 @@ EP-10 adds `selectSkills` first, then `selectMcp`:
 interface CapabilityProposal { add: string[]; omit?: string[]; reason: string; confidence: number; }
 ```
 
-Core intersects `add` with installed, active, permitted assets; intersects `omit` only with optional assets; records the result; and persists the selected set against the session for reproducibility. It invokes selection before `resolveSkillExpansions` / skill activation, and only later before the existing MCP proxy/activation path. It cannot invent an id, defeat a denial, or broaden `computeEffectiveAllowedTools()`.
+Core intersects `add` with installed, active, permitted assets; intersects `omit` only with optional assets; and makes a stage authoritative only when a valid, still-authorized proposal wins. An authoritative empty set explicitly removes that stage's optional surface. If neither stage is authoritative, the session keeps the legacy optional surface and no selection snapshot is persisted; otherwise the immutable per-stage selection is persisted for reproducibility. It invokes selection before `resolveSkillExpansions` / skill activation, and only later before the existing MCP proxy/activation path. It cannot invent an id, defeat a denial, or broaden `computeEffectiveAllowedTools()`.
 
 ### Service-extension lifecycle surface
 

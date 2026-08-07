@@ -686,7 +686,11 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		// Own-property + function check (mirrors the former dispatcher parent-side guard):
 		// never invoke an INHERITED member (`constructor`, `toString`, …) — defense-in-depth
 		// against a prototype-walk. An unknown/own-non-function member is a 404.
-		const allowedHookMember = msg.exportKind !== "hooks" || msg.member === "decide" || msg.member === "onDecision";
+		const allowedHookMember = msg.exportKind !== "hooks"
+			|| msg.member === "decide"
+			|| msg.member === "onDecision"
+			|| msg.member === "selectSkills"
+			|| msg.member === "selectMcp";
 		const fn = allowedHookMember && Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
 		if (typeof fn !== "function") {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });

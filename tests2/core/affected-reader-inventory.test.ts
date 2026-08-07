@@ -71,7 +71,15 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/ledger-lease-bridge-interop.test.ts", input: "scripts/testing-v2/ledger.mjs" },
 	{ consumer: "tests2/core/qa-seed.test.ts", input: "scripts/qa-seed/seed.mjs" },
 	{ consumer: "tests2/core/run-unit-heartbeat-diagnostics.test.ts", input: "scripts/lib/unit-heartbeat.mjs" },
+	{ consumer: "tests2/integration/staff-proposal-fixture.test.ts", input: "market-packs/_fixtures/staff-proposal-advisor/lib/staff-improvement.mjs" },
 	{ consumer: "tests2/core/team-extension-dismiss-gateway.test.ts", input: "defaults/tools/agent/gateway.js" },
+	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "market-packs/thinking-selector/pack.yaml" },
+	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "market-packs/thinking-selector/hooks/default-thinking.yaml" },
+	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "market-packs/thinking-selector/lib/default-thinking-selector.mjs" },
+	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "scripts/copy-builtin-packs.mjs" },
+	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "src/server/server.ts" },
+	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "src/server/agent/session-manager.ts" },
+	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "src/server/agent/session-setup.ts" },
 	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-e2e.config.ts" },
 	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-v2.config.ts" },
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "package.json" },
@@ -219,7 +227,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(64);
+		expect(declared).toHaveLength(72);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
@@ -306,17 +314,17 @@ describe("affected repository reader inventory", () => {
 	it("pins the exact dynamic-operation and computed-scan inventories", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
 		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
-		expect(audit).toHaveLength(45);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(61);
+		expect(audit).toHaveLength(47);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(63);
 		expect([...observedOperations.values()].reduce(
 			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
 			0,
-		)).toBe(66);
+		)).toBe(68);
 		expect(REPOSITORY_SCAN_RULES).toHaveLength(17);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(observedOperations.size).toBe(45);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(45);
+		expect(observedOperations.size).toBe(47);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(47);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {

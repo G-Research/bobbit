@@ -1430,7 +1430,7 @@ The value-free descriptor changes remain in `project.yaml`; secret values remain
 
 #### Project extension settings
 
-Schema-2 pack providers and hooks may declare typed, project-scoped settings. This is a separate
+Schema-2 pack providers, hooks, and declarative runtimes may declare typed, project-scoped settings. This is a separate
 API from the generic project-config writer: `extension_settings` is native public YAML state,
 while secret values are held only by the project secret owner. Reads use normal gateway
 authentication and always redact secrets; mutations require a verified signed
@@ -1439,8 +1439,8 @@ receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects/:id/extension-settings` | Returns `{ schema: 2, revision, targets }`, a redacted server-resolved catalogue of declared provider/hook settings, effective enablement/configuration state, and visible hook grant state. Secrets are represented only by `secretSet`. |
-| `PATCH` | `/api/projects/:id/extension-settings/:packId/:kind/:targetId` | Revisioned (`expectedRevision`) update of one `provider` or `hook` target's enabled override and/or declared values. `null` clears an optional public override or a secret. Returns a redacted target projection. |
+| `GET` | `/api/projects/:id/extension-settings` | Returns `{ schema: 2, revision, targets }`, a redacted server-resolved catalogue of declared provider/hook/runtime settings, effective enablement/configuration state, and visible hook grant state. Secrets are represented only by `secretSet`. A runtime target controls declaration eligibility only; no service process is currently wired by this API. |
+| `PATCH` | `/api/projects/:id/extension-settings/:packId/:kind/:targetId` | Revisioned (`expectedRevision`) update of one `provider`, `hook`, or `runtime` target's enabled override and/or declared values. `null` clears an optional public override or a secret. Returns a redacted target projection. |
 | `PATCH` | `/api/projects/:id/extension-settings/:packId` | Revisioned pack runtime switch with exact body `{ expectedRevision, enabled }`; updates all declared targets in that pack and returns their redacted projections. |
 
 A stale revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT`; callers must reload and

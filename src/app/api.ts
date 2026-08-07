@@ -2988,6 +2988,8 @@ export interface HookGrantStatusWire {
 	grants: ExtensionCapabilityWire[];
 	runnable: boolean;
 	status: "observe" | "grant-required" | "granted";
+	/** Capability-specific authorization; omitted by pre-EP-7 servers. */
+	runtimeAuthorized?: boolean;
 }
 
 /** All pack-scoped contributions for ONE installed + active pack (§6.4). */
@@ -3950,7 +3952,7 @@ export function setMcpOperationActivation(opts: {
 
 export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
 export type ExtensionSettingValue = string | boolean | number;
-export type ExtensionSettingsTargetKind = "provider" | "hook";
+export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime";
 
 export interface ExtensionSettingsTargetRef {
 	packId: string;
@@ -3985,7 +3987,7 @@ export interface ExtensionSettingsTargetWire {
 		blockedBy?: "pack-activation" | "missing-or-shadowed";
 	};
 	configuration: {
-		state: "ready" | "requires-config" | "disabled" | "invalid-schema" | "unavailable";
+		state: "ready" | "requires-config" | "disabled" | "invalid-schema" | "invalid-values" | "unavailable";
 		missing: string[];
 	};
 	fields: ExtensionSettingsFieldWire[];

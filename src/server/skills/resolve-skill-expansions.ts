@@ -25,6 +25,7 @@ import {
 	buildSlashSkillPrompt,
 	type SkillMarketContext,
 	type SlashSkill,
+	type SlashSkillNameCeiling,
 } from "./slash-skills.js";
 import { buildActivationHeader, type PathRewrite } from "./skill-manifest.js";
 
@@ -70,6 +71,7 @@ export function resolveSkillExpansions(
 	store?: StoreLike,
 	pathRewrite?: PathRewrite,
 	marketContext?: SkillMarketContext,
+	selectedNames?: SlashSkillNameCeiling,
 ): ResolvedSkills {
 	const originalText = text;
 	const unknown: string[] = [];
@@ -82,7 +84,7 @@ export function resolveSkillExpansions(
 	if (prefixMatch) {
 		const skillName = prefixMatch[1];
 		const argsPart = prefixMatch[2] ?? "";
-		const skill = getSlashSkill(cwd, skillName, store, marketContext);
+		const skill = getSlashSkill(cwd, skillName, store, marketContext, selectedNames);
 		if (skill) {
 			const args = argsPart.trim();
 			const body = buildSlashSkillPrompt(skill, args);
@@ -117,7 +119,7 @@ export function resolveSkillExpansions(
 	let m: RegExpExecArray | null;
 	while ((m = inlineRe.exec(text)) !== null) {
 		const skillName = m[2];
-		const skill = getSlashSkill(cwd, skillName, store, marketContext);
+		const skill = getSlashSkill(cwd, skillName, store, marketContext, selectedNames);
 		if (!skill) {
 			if (!unknown.includes(skillName)) unknown.push(skillName);
 			continue;

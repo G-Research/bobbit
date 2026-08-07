@@ -201,4 +201,20 @@ describe("decision hook contract", () => {
 		expectCode({ kind: "selection", selection: { kind: "workflow", workflowId: "release" }, effect: { kind: "none" } }, "UNKNOWN_HOOK_OUTPUT_FIELD");
 		expectCode({ kind: "selection", selection: { kind: "model", provider: "openai", modelId: "gpt-5.2", callback: "apply" } }, "UNKNOWN_SELECTION_FIELD");
 	});
+
+	it("allows declared negative options to have no proposal seed", () => {
+		const request = validRequest();
+		delete request.default;
+		request.requestedClass = "consent-required";
+		request.effect = {
+			kind: "proposal",
+			proposals: { quick: { proposalType: "goal", args: { title: "Draft" } } },
+			noEffectValues: ["thorough", "other"],
+		};
+		expect(validateDecisionHookOutput(requestOutput(request), { now })).toMatchObject({
+			kind: "request", request: { effect: { noEffectValues: ["thorough", "other"] } },
+		});
+		(request.effect as Record<string, unknown>).noEffectValues = ["quick"];
+		expectCode(requestOutput(request), "INVALID_EFFECT");
+	});
 });

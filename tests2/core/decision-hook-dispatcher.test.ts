@@ -45,6 +45,83 @@ describe("decision hook dispatcher selections", () => {
 		]));
 	});
 
+	it("dispatches the setup selector once, reduces by active-pack priority, and never sends it to the live consumer", async () => {
+		const low = hook("low", "/packs/low");
+		const high = hook("high", "/packs/high");
+		low.events = ["sessionSetup"];
+		high.events = ["sessionSetup"];
+		let imports = 0;
+		const apply = async () => { throw new Error("setup advice must not use the live afterTurn consumer"); };
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: { list: () => [{ packId: "low", hooks: [low] }, { packId: "high", hooks: [high] }], listHooks: () => [low, high] } as any,
+			moduleHost: {
+				invoke: async (request: any) => {
+					imports++;
+					if (request.packRoot === "/packs/low") await new Promise(resolve => setTimeout(resolve, 10));
+					return { kind: "selection", selection: { kind: "thinking", thinkingLevel: request.packRoot === "/packs/low" ? "low" : "high" } };
+				},
+			} as any,
+			grantsForProject: () => [
+				{ packId: "low", hookId: "low", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" },
+				{ packId: "high", hookId: "high", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" },
+			] as any,
+			availabilityForProject: () => ({ models: [], thinkingLevels: ["low", "high"], roles: [], workflows: [] }),
+			thinkingConsumer: { apply } as any,
+		});
+
+		const result: any = await (dispatcher as any).dispatchSetup(base);
+		expect(imports).toBe(2);
+		expect(result.thinkingLevel).toBe("high");
+		expect(result.outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({ packId: "low", outcome: "superseded", selectionKind: "thinking" }),
+			expect.objectContaining({ packId: "high", outcome: "advised", selectionKind: "thinking", selectionValue: "high" }),
+		]));
+	});
+
+	it("does not import or return a setup candidate without an exact active decide grant", async () => {
+		const selector = hook("default-thinking", "/packs/thinking-selector");
+		selector.events = ["sessionSetup"];
+		let imports = 0;
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: { list: () => [{ packId: "thinking-selector", hooks: [selector] }], listHooks: () => [selector] } as any,
+			moduleHost: { invoke: async () => { imports++; return { kind: "selection", selection: { kind: "thinking", thinkingLevel: "medium" } }; } } as any,
+			grantsForProject: () => [],
+			availabilityForProject: () => ({ models: [], thinkingLevels: ["medium"], roles: [], workflows: [] }),
+		});
+
+		const result: any = await (dispatcher as any).dispatchSetup(base);
+		expect(imports).toBe(0);
+		expect(result).toMatchObject({ outcomes: [expect.objectContaining({ outcome: "denied", reason: "Grant required" })] });
+		expect(result.thinkingLevel).toBeUndefined();
+	});
+
+	it("rejects a setup candidate when the exact grant is revoked while its worker runs", async () => {
+		const selector = hook("default-thinking", "/packs/thinking-selector");
+		selector.events = ["sessionSetup"];
+		let granted = true;
+		let release!: () => void;
+		let started!: () => void;
+		const workerStarted = new Promise<void>(resolve => { started = resolve; });
+		const workerReleased = new Promise<void>(resolve => { release = resolve; });
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: { list: () => [{ packId: "thinking-selector", hooks: [selector] }], listHooks: () => [selector] } as any,
+			moduleHost: { invoke: async () => { started(); await workerReleased; return { kind: "selection", selection: { kind: "thinking", thinkingLevel: "medium" } }; } } as any,
+			grantsForProject: () => granted ? [{ packId: "thinking-selector", hookId: "default-thinking", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" }] as any : [],
+			availabilityForProject: () => ({ models: [], thinkingLevels: ["medium"], roles: [], workflows: [] }),
+		});
+
+		const pending = (dispatcher as any).dispatchSetup(base);
+		await workerStarted;
+		granted = false;
+		release();
+		const result: any = await pending;
+		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.outcomes).toEqual([expect.objectContaining({ outcome: "denied", reason: "Grant required", selectionKind: "thinking" })]);
+	});
+
 	it("does not import a hook whose exact decide grant is absent", async () => {
 		let imports = 0;
 		const one = hook("hook", "/packs/one");
@@ -133,5 +210,53 @@ describe("decision hook dispatcher selections", () => {
 			expect.objectContaining({ hookId: "grant-failure", outcome: "error" }),
 			expect.objectContaining({ hookId: "valid", outcome: "applied", selectionKind: "thinking", selectionValue: "high" }),
 		]));
+	});
+
+	it("keeps unscheduled decisions dispatchable while excluding advisor every-N hooks", async () => {
+		const ordinary = hook("ordinary", "/packs/ordinary");
+		const wallClockOnly = hook("wall-clock", "/packs/wall-clock");
+		wallClockOnly.schedule = { wallClockMs: 100 };
+		const kindOnly = hook("kind-only", "/packs/kind-only");
+		kindOnly.schedule = { kind: "decision" };
+		const advisorEveryN = hook("advisor-every-n", "/packs/advisor");
+		advisorEveryN.schedule = { everyNTurns: 3 };
+		const hooks = [ordinary, wallClockOnly, kindOnly, advisorEveryN];
+		const imports: string[] = [];
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: { list: () => hooks.map(item => ({ packId: item.id, hooks: [item] })), listHooks: () => hooks } as any,
+			moduleHost: { invoke: async (request: any) => { imports.push(request.member); return undefined; } } as any,
+			grantsForProject: () => hooks.map(item => ({ packId: item.id, hookId: item.id, capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" })) as any,
+		});
+
+		await expect(dispatcher.dispatch("afterTurn", base)).resolves.toEqual([]);
+		expect(imports).toEqual(["decide", "decide", "decide"]);
+	});
+
+	it("runs a scheduled decision only at its persisted due turn and fences a late revocation", async () => {
+		const scheduled = hook("staff-improvement", "/packs/staff");
+		scheduled.schedule = { everyNTurns: 3, kind: "decision" };
+		let granted = true;
+		let imports = 0;
+		let release!: () => void;
+		let started!: () => void;
+		const entered = new Promise<void>(resolve => { started = resolve; });
+		const blocked = new Promise<void>(resolve => { release = resolve; });
+		const created: unknown[] = [];
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {}, create: async (_origin: unknown, request: unknown) => { created.push(request); return { status: "created" }; } } as any,
+			registry: { list: () => [{ packId: "staff", hooks: [scheduled] }], listHooks: () => [scheduled] } as any,
+			moduleHost: { invoke: async () => { imports++; started(); await blocked; return { kind: "advisory", advisory: { version: 1, staffId: "staff", key: "suggestion", title: "Suggestion", body: "Use an editable draft." } }; } } as any,
+			grantsForProject: () => granted ? [{ packId: "staff", hookId: "staff-improvement", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" }] as any : [],
+		});
+
+		await expect(dispatcher.dispatch("afterTurn", { ...base, turnIndex: 99, cadenceTurnIndex: 2 })).resolves.toEqual([]);
+		expect(imports).toBe(0);
+		const pending = dispatcher.dispatch("afterTurn", { ...base, turnIndex: 1, cadenceTurnIndex: 3 });
+		await entered;
+		granted = false;
+		release();
+		await expect(pending).resolves.toEqual([expect.objectContaining({ outcome: "denied", reason: "Grant required" })]);
+		expect(created).toEqual([]);
 	});
 });

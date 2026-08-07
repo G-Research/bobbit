@@ -506,9 +506,28 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["scripts/lib/unit-heartbeat.mjs"]),
 	},
 	{
+		// The fixture test dynamically executes this committed pack implementation.
+		id: "staff-proposal-advisor-fixture-module",
+		consumer: "tests2/integration/staff-proposal-fixture.test.ts",
+		inputs: frozen(["market-packs/_fixtures/staff-proposal-advisor/lib/staff-improvement.mjs"]),
+	},
+	{
 		id: "team-agent-gateway-module",
 		consumer: "tests2/core/team-extension-dismiss-gateway.test.ts",
 		inputs: frozen(["defaults/tools/agent/gateway.js"]),
+	},
+	{
+		id: "thinking-selector-extraction-contract",
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		inputs: frozen([
+			"market-packs/thinking-selector/pack.yaml",
+			"market-packs/thinking-selector/hooks/default-thinking.yaml",
+			"market-packs/thinking-selector/lib/default-thinking-selector.mjs",
+			"scripts/copy-builtin-packs.mjs",
+			"src/server/server.ts",
+			"src/server/agent/session-manager.ts",
+			"src/server/agent/session-setup.ts",
+		]),
 	},
 	{
 		id: "run-isolation-playwright-configs",
@@ -776,6 +795,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "`${pathToFileURL(path.join(packDir, \"lib\", \"default-thinking-selector.mjs\")).href}?test=${Date.now()}`", ["indirect:thinking-selector-extraction-contract"]),
+		]),
+	},
+	{
 		consumer: "tests2/core/tool-result-error-bridge-extension.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("dynamic-import", "`data:text/javascript,${encodeURIComponent(source)}`", "in-memory generated data URL module"),
@@ -837,6 +862,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		consumer: "tests2/integration/server-prebundle-runtime.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("dynamic-import", "pathToFileURL(join(cacheDir, ...emittedServer.split(\"/\"))).href", "content-addressed generated server prebundle"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/staff-proposal-fixture.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "pathToFileURL(path.join(root, \"lib/staff-improvement.mjs\")).href", ["indirect:staff-proposal-advisor-fixture-module"]),
 		]),
 	},
 	{
@@ -1882,6 +1913,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "`${file}.corrupt`", count: 5 },
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		declarations: frozen(["indirect:thinking-selector-extraction-contract"]),
+		reads: frozen([
+			{ expression: "path.join(root, ...parts)", count: 1 },
 		]),
 	},
 	{

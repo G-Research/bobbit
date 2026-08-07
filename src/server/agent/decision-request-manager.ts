@@ -15,6 +15,7 @@ import {
 	validateDecisionValue,
 	type DecisionHookContext,
 	type DecisionLifecycleEvent,
+	type StaffImprovementSignals,
 	type DecisionValue,
 	type ExtensionAdvisory,
 	type ValidatedDecisionHookOutput,
@@ -33,6 +34,7 @@ import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-poli
 import type { InboxManager } from "./inbox-manager.js";
 import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace-store.js";
 import { trustedOperationForExtensionDecision } from "./trusted-decision-operation.js";
+import { snapshotStaffImprovementSignals } from "./staff-improvement-signals.js";
 import {
 	admitAdvisorySelection,
 	reduceAdvisorySelectionCandidates,
@@ -42,6 +44,16 @@ import {
 	type ValidatedAdvisorySelectionProposal,
 } from "./advisory-selection-contract.js";
 import type { AdvisoryThinkingConsumer } from "./advisory-thinking-consumer.js";
+import {
+	canonicalizeCapabilityQuery,
+	DynamicCapabilityContractError,
+	reduceCapabilitySelectionCandidates,
+	snapshotCapabilityAvailability,
+	validateCapabilityProposal,
+	type CapabilitySelectorStage,
+	type CapabilitySelectionCandidate,
+} from "./dynamic-capability-contract.js";
+import type { CapabilitySelectionContext, CapabilityStageResult } from "./lifecycle-hub.js";
 
 export const DECISION_SESSION_PENDING_LIMIT = 2;
 export const DECISION_SESSION_24H_LIMIT = 6;
@@ -697,6 +709,8 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		grantsForProject: (projectId: string) => readonly import("./project-config-store.js").ExtensionGrant[];
 		/** Evaluated only when at least one active decision hook may run. */
 		availabilityForProject?: (projectId: string) => Promise<AdvisorySelectionAvailability> | AdvisorySelectionAvailability;
+		/** Fixture seam only until core has a transcript-safe bounded histogram owner. */
+		staffImprovementSignalsForSession?: (sessionId: string) => StaffImprovementSignals | undefined;
 		thinkingConsumer?: AdvisoryThinkingConsumer;
 	}) {
 		deps.manager.setContinuation(this);
@@ -704,34 +718,64 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 
 	async dispatch(
 		event: DecisionLifecycleEvent,
-		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { usage?: import("./lifecycle-hub.js").TurnUsageSnapshot },
+		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & {
+			usage?: import("./lifecycle-hub.js").TurnUsageSnapshot;
+			/** Ordinary completed-turn index, retained for non-scheduled decisions. */
+			turnIndex?: number;
+			/** Persisted advisor cadence; required for every-N scheduled decisions. */
+			cadenceTurnIndex?: number;
+		},
 	): Promise<TraceDecisionOutcomeRow[]> {
+		return (await this.dispatchInternal(event, context, false)).outcomes;
+	}
+
+	/**
+	 * Awaited setup-only decision path. It shares the ordinary active-pack, exact
+	 * grant, isolation, validation, admission, and reduction fences, but returns
+	 * the reduced thinking candidate instead of trying to mutate a not-yet-live
+	 * session. Callers receive no raw hook output.
+	 */
+	async dispatchSetup(
+		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId">,
+	): Promise<{ outcomes: TraceDecisionOutcomeRow[]; thinkingLevel?: string }> {
+		const result = await this.dispatchInternal("sessionSetup", context, true);
+		const thinking = result.reduction.thinking?.selection;
+		return { outcomes: result.outcomes, ...(thinking?.kind === "thinking" ? { thinkingLevel: thinking.thinkingLevel } : {}) };
+	}
+
+	private async dispatchInternal(
+		event: DecisionLifecycleEvent,
+		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & {
+			usage?: import("./lifecycle-hub.js").TurnUsageSnapshot;
+			turnIndex?: number;
+			cadenceTurnIndex?: number;
+		},
+		returnSetupSelection: boolean,
+	): Promise<{ outcomes: TraceDecisionOutcomeRow[]; reduction: ReturnType<typeof reduceAdvisorySelectionCandidates> }> {
 		this.deps.manager.registerProject(context.projectId);
 		const hooks = this.dispatchHooks(event, context);
 		// This is also the strict no-hook fast path: no availability lookup, worker
 		// import, trace selection row, store write, or runtime mutation occurs.
-		if (hooks.length === 0) return [];
+		if (hooks.length === 0) return { outcomes: [], reduction: Object.freeze({}) };
 
 		let availability: Readonly<AdvisorySelectionAvailability>;
 		try {
 			availability = snapshotAdvisorySelectionAvailability(await this.deps.availabilityForProject?.(context.projectId) ?? emptyAvailability());
 		} catch {
-			// Request/advisory compatibility remains intact when a host availability
-			// source is temporarily unavailable; selections simply cannot be admitted.
 			availability = emptyAvailability();
 		}
 
 		const settled = await Promise.all(hooks.map(async ({ hook, origin, priority }) => {
 			const started = Date.now();
 			try {
-				// Registry and grant lookups are per-hook authorization boundaries. Keep
-				// them in the same isolation frame as the worker so one unavailable host
-				// read cannot prevent independently-authorized hooks from running.
 				const active = resolvedHooks(this.deps.registry, context.projectId);
 				if (!resolveExtensionGrant(active, this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
 					return { immediate: outcome(origin, "denied", "Grant required", Math.max(0, Date.now() - started)) };
 				}
-				const value = await this.invoke(hook, "decide", hookContext(origin, context.usage, availability));
+				const signals = hook.schedule?.kind === "decision"
+					? snapshotStaffImprovementSignals(this.deps.staffImprovementSignalsForSession?.(context.sessionId))
+					: undefined;
+				const value = await this.invoke(hook, "decide", hookContext(origin, context.usage, availability, signals));
 				const parsed = validateDecisionHookOutput(value);
 				if (!parsed) return {};
 				const ms = Math.max(0, Date.now() - started);
@@ -739,11 +783,12 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 				// decision request. Keep this boundary even though this validator call
 				// currently rejects it without its event/request application context.
 				if (parsed.kind === "request-mutation") return {};
-				if (parsed.kind !== "selection") return { immediate: await this.apply(origin, parsed, ms) };
+				if (parsed.kind !== "selection") {
+					if (!this.isStillDispatchable(event, context, origin)) return { immediate: outcome(origin, "denied", "Grant required", ms) };
+					return { immediate: await this.apply(origin, parsed, ms, isScheduledDecisionHook(hook)) };
+				}
 				const selection = admitAdvisorySelection(parsed.selection, availability);
 				if (!selection) return { immediate: selectionOutcome(origin, parsed.selection, "dropped", "Unavailable value", ms) };
-				// Re-resolve declarations and grants after worker completion. A hook that
-				// was revoked while it ran may not enter the reducer or consumer.
 				if (!resolveExtensionGrant(resolvedHooks(this.deps.registry, context.projectId), this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
 					return { immediate: selectionOutcome(origin, selection, "denied", "Grant required", ms) };
 				}
@@ -765,19 +810,115 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 				outcomes.push(selectionOutcome(entry.origin, entry.candidate.selection, "superseded", "Lower-priority selection", entry.ms));
 				continue;
 			}
+			if (returnSetupSelection && entry.candidate.selection.kind === "thinking") {
+				outcomes.push(selectionOutcome(entry.origin, entry.candidate.selection, "advised", undefined, entry.ms, selectionValue(entry.candidate.selection)));
+				continue;
+			}
 			outcomes.push(await this.applySelection(event, entry.origin, entry.candidate.selection, entry.ms));
 		}
-		return outcomes;
+		return { outcomes, reduction };
 	}
 
-	private dispatchHooks(event: DecisionLifecycleEvent, context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId">): Array<{ hook: HookContribution; origin: DecisionRequestOrigin; priority: number }> {
-		// Registry `list` is the sole active, shadow-collapsed low→high pack order.
+	/**
+	 * Executes the narrowly declared startup selector surface. Capability ids are
+	 * admitted only by the pure reducer against the core-provided ceiling; hooks
+	 * never receive policy, config, paths, or mutable session state.
+	 */
+	async selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult> {
+		if (!context.projectId) return emptyCapabilityStageResult();
+		const safeContext = capabilityContext(context);
+		const hooks = this.capabilityHooks(stage, safeContext);
+		if (hooks.length === 0) return emptyCapabilityStageResult();
+
+		const settled = await Promise.all(hooks.map(async ({ hook, origin }) => {
+			const started = Date.now();
+			try {
+				// Both fences re-enumerate the active, shadow-collapsed registry and
+				// grants. A selector disabled or revoked while running cannot reduce.
+				const active = this.capabilityHooks(stage, safeContext).find(candidate =>
+					candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId,
+				);
+				if (!active || !resolveExtensionGrant(
+					resolvedHooks(this.deps.registry, context.projectId!), this.deps.grantsForProject(context.projectId!),
+					{ packId: origin.packId, hookId: origin.hookId }, "decide",
+				).allowed) return { outcome: capabilityOutcome(origin, stage, "denied", "Grant required", elapsed(started)) };
+
+				const member = stage === "skills" ? "selectSkills" : "selectMcp";
+				const proposal = validateCapabilityProposal(await this.invoke(hook, member, safeContext));
+				const ms = elapsed(started);
+				const after = this.capabilityHooks(stage, safeContext).find(candidate =>
+					candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId,
+				);
+				if (!after || !resolveExtensionGrant(
+					resolvedHooks(this.deps.registry, context.projectId!), this.deps.grantsForProject(context.projectId!),
+					{ packId: origin.packId, hookId: origin.hookId }, "decide",
+				).allowed) return { outcome: capabilityOutcome(origin, stage, "denied", "Grant required", ms) };
+				const candidate: CapabilitySelectionCandidate = Object.freeze({
+					source: Object.freeze({ packId: origin.packId, hookId: origin.hookId }),
+					priority: after.priority,
+					proposal,
+				});
+				return { candidate, origin, ms };
+			} catch (error) {
+				const ms = elapsed(started);
+				if (isTimeout(error)) return { outcome: capabilityOutcome(origin, stage, "dropped", "Timed out", ms) };
+				if (error instanceof DynamicCapabilityContractError) return { outcome: capabilityOutcome(origin, stage, "dropped", "Malformed result", ms) };
+				return { outcome: capabilityOutcome(origin, stage, "error", undefined, ms) };
+			}
+		}));
+
+		const candidates = settled.flatMap(result => result.candidate ? [result.candidate] : []);
+		const reduction = reduceCapabilitySelectionCandidates(candidates, safeContext.available);
+		const outcomes = settled.flatMap(result => result.outcome ? [result.outcome] : []);
+		for (const result of settled) {
+			if (!result.candidate || !result.origin || result.ms === undefined) continue;
+			const winner = reduction.winner;
+			outcomes.push(capabilityOutcome(
+				result.origin, stage,
+				winner && sameCapabilityCandidate(winner, result.candidate) ? "advised" : "superseded",
+				winner && sameCapabilityCandidate(winner, result.candidate) ? undefined : "Lower-priority selection",
+				result.ms,
+			));
+		}
+		return Object.freeze({ selected: reduction.selected, authoritative: reduction.winner !== undefined, outcomes: Object.freeze(outcomes) });
+	}
+
+	private capabilityHooks(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Array<{ hook: HookContribution; origin: DecisionRequestOrigin; priority: number }> {
+		if (!context.projectId) return [];
 		return activePacks(this.deps.registry, context.projectId).flatMap((pack, priority) =>
 			pack.hooks
-				.filter(hook => hook.mode === "decide" && hook.events.includes(event))
+				.filter(hook => hook.mode === "decide" && hook.events.includes("sessionSetup") && hookSelectors(hook).includes(stage))
+				.map(hook => {
+					const origin: DecisionRequestOrigin = {
+						projectId: context.projectId!, sessionId: context.sessionId, goalId: context.goalId,
+						roleName: context.roleName, cwd: context.cwd, event: "sessionSetup",
+						packId: pack.packId, hookId: hook.id,
+					};
+					return { hook, priority, origin };
+				})
+				.sort((a, b) => a.hook.id.localeCompare(b.hook.id) || (a.hook.listName ?? "").localeCompare(b.hook.listName ?? "")),
+		);
+	}
+
+	private dispatchHooks(event: DecisionLifecycleEvent, context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { turnIndex?: number; cadenceTurnIndex?: number }): Array<{ hook: HookContribution; origin: DecisionRequestOrigin; priority: number }> {
+		// Registry `list` is the sole active, shadow-collapsed low→high pack order.
+		// Scheduled advisors remain on LifecycleHub's advisory-only path; only due,
+		// explicitly decision-kind declarations enter this ordinary dispatcher.
+		return activePacks(this.deps.registry, context.projectId).flatMap((pack, priority) =>
+			pack.hooks
+				.filter(hook => hook.mode === "decide" && hook.events.includes(event) && isDispatchableDecisionHook(hook, event, context.cadenceTurnIndex))
 				.map(hook => ({ hook, priority, origin: { ...context, event, packId: pack.packId, hookId: hook.id } }))
 				.sort((a, b) => a.hook.id.localeCompare(b.hook.id) || (a.hook.listName ?? "").localeCompare(b.hook.listName ?? "")),
 		);
+	}
+
+	private isStillDispatchable(
+		event: DecisionLifecycleEvent,
+		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { turnIndex?: number; cadenceTurnIndex?: number },
+		origin: Pick<DecisionRequestOrigin, "packId" | "hookId">,
+	): boolean {
+		return this.dispatchHooks(event, context).some(candidate => candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId)
+			&& resolveExtensionGrant(resolvedHooks(this.deps.registry, context.projectId), this.deps.grantsForProject(context.projectId), origin, "decide").allowed;
 	}
 
 	private async applySelection(event: DecisionLifecycleEvent, origin: DecisionRequestOrigin, selection: ValidatedAdvisorySelectionProposal, ms: number): Promise<TraceDecisionOutcomeRow> {
@@ -823,7 +964,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		this.contexts.delete(record.id);
 	}
 
-	private async apply(origin: DecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" } | { kind: "request-mutation" }>, ms: number): Promise<TraceDecisionOutcomeRow> {
+	private async apply(origin: DecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" } | { kind: "request-mutation" }>, ms: number, scheduledDecision: boolean): Promise<TraceDecisionOutcomeRow> {
 		if (parsed.kind === "advisory") {
 			const advised = this.deps.manager.advisory(origin, parsed.advisory);
 			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");
@@ -831,14 +972,20 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		// This adapter is the only extension-output path into `create()`. It derives
 		// sensitive change facts from validated proposal semantics; a hook cannot
 		// submit an operation, lower the class, or select its timeout behavior.
-		const created = await this.deps.manager.create(origin, parsed.request, trustedOperationForExtensionDecision(parsed.request));
+		const request = scheduledDecision && parsed.request.effect.kind === "proposal"
+			? admitScheduledProposalConsent(parsed.request)
+			: parsed.request;
+		// A scheduled proposal is an opt-in draft action, not a generic effect
+		// router. Reject misleading or inverted mappings before they become durable.
+		if (!request) return outcome(origin, "dropped", "Malformed result", ms);
+		const created = await this.deps.manager.create(origin, request, trustedOperationForExtensionDecision(request));
 		if (created.requestId) this.contexts.set(created.requestId, origin);
 		if (created.status === "rejected") return outcome(origin, "dropped", created.code === "DECISION_SCOPE_UNAVAILABLE" ? "Unavailable value" : "Budget exhausted", ms);
 		if (created.status === "store_unavailable") return outcome(origin, "dropped", "Unavailable value", ms);
 		return { ...outcome(origin, created.status === "deduplicated" ? "superseded" : "applied", created.status === "deduplicated" ? "Duplicate" : undefined, ms), requestId: created.requestId, questionId: created.request?.questionId };
 	}
 
-	private invoke(hook: HookContribution, member: "decide" | "onDecision", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext): Promise<unknown> {
+	private invoke(hook: HookContribution, member: "decide" | "onDecision" | "selectSkills" | "selectMcp", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext | CapabilitySelectionContext): Promise<unknown> {
 		const url = pathToFileURL(path.resolve(path.dirname(hook.sourceFile), hook.module)).href;
 		return this.deps.moduleHost.invoke({ url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir: ctx.cwd } as InvokeRequest<DecisionHookContext>, hook.budget.timeoutMs);
 	}
@@ -892,6 +1039,7 @@ function hookContext(
 	origin: DecisionRequestOrigin,
 	usage?: import("./lifecycle-hub.js").TurnUsageSnapshot,
 	availableSelections?: Readonly<AdvisorySelectionAvailability>,
+	staffImprovementSignals?: StaffImprovementSignals,
 ): DecisionHookContext {
 	return Object.freeze({
 		event: origin.event, sessionId: origin.sessionId, projectId: origin.projectId,
@@ -900,8 +1048,42 @@ function hookContext(
 		cwd: origin.cwd,
 		...(origin.event === "afterTurn" && usage ? { usage } : {}),
 		...(availableSelections ? { availableSelections } : {}),
+		...(staffImprovementSignals ? { staffImprovementSignals } : {}),
 	}) as DecisionHookContext;
 }
+function isScheduledDecisionHook(hook: HookContribution): boolean {
+	return hook.schedule?.kind === "decision" && hook.schedule.everyNTurns !== undefined;
+}
+
+function isDispatchableDecisionHook(hook: HookContribution, event: DecisionLifecycleEvent, cadenceTurnIndex: number | undefined): boolean {
+	const schedule = hook.schedule;
+	// A wall-clock-only or kind-only declaration has no scheduler semantics. It
+	// remains an ordinary decide hook; only every-N declarations opt into cadence.
+	if (!schedule || schedule.everyNTurns === undefined) return true;
+	if (schedule.kind !== "decision") return false;
+	return event === "afterTurn" && Number.isSafeInteger(cadenceTurnIndex) && cadenceTurnIndex! > 0 && cadenceTurnIndex! % schedule.everyNTurns === 0;
+}
+
+/**
+ * Scheduled staff proposals are a deliberately narrow consent surface: only the
+ * exact `create` / `Create draft` option may seed, while every decline and Other
+ * answer is explicitly effect-free. This is checked after general hook-output
+ * validation but before a durable consent record is created.
+ */
+function admitScheduledProposalConsent(request: ValidatedExtensionDecisionRequest): ValidatedExtensionDecisionRequest | undefined {
+	if (request.effect.kind !== "proposal") return undefined;
+	const create = request.options.find(option => option.value === "create");
+	if (!create || create.label !== "Create draft") return undefined;
+	const noEffect = request.effect.noEffectValues;
+	const expectedNoEffect = new Set([...request.options.filter(option => option.value !== "create").map(option => option.value), "other"]);
+	if (!noEffect || noEffect.length !== expectedNoEffect.size || noEffect.some(value => !expectedNoEffect.delete(value))) return undefined;
+	if (expectedNoEffect.size !== 0) return undefined;
+	const proposalKeys = Object.keys(request.effect.proposals);
+	if (proposalKeys.length !== 1 || proposalKeys[0] !== "create" || !request.effect.proposals.create) return undefined;
+	const { default: _default, ...withoutDefault } = request;
+	return { ...withoutDefault, requestedClass: "consent-required" };
+}
+
 function activePacks(registry: PackContributionRegistry, projectId: string): Array<{ packId: string; hooks: HookContribution[] }> {
 	const list = (registry as unknown as { list?: (id: string) => Array<{ packId: string; hooks: HookContribution[] }> }).list;
 	if (typeof list === "function") return list.call(registry, projectId);
@@ -916,6 +1098,45 @@ function resolvedHooks(registry: PackContributionRegistry, projectId: string): R
 }
 function outcome(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">, state: TraceDecisionOutcomeRow["outcome"], reason?: TraceDecisionOutcomeRow["reason"], ms?: number, kind: "decision" | "advisory" = "decision"): TraceDecisionOutcomeRow {
 	return { kind, packId: origin.packId, hookId: origin.hookId, event: origin.event, outcome: state, ...(reason ? { reason } : {}), ...(ms === undefined ? {} : { ms }) };
+}
+function emptyCapabilityStageResult(): CapabilityStageResult {
+	return Object.freeze({ selected: Object.freeze([] as string[]), authoritative: false, outcomes: Object.freeze([] as TraceDecisionOutcomeRow[]) });
+}
+function capabilityContext(context: CapabilitySelectionContext): CapabilitySelectionContext {
+	const query = canonicalizeCapabilityQuery(context.query);
+	const available = snapshotCapabilityAvailability(context.available);
+	const selectedSkills = snapshotCapabilityAvailability(context.selectedSkills ?? []);
+	return Object.freeze({
+		event: "sessionSetup",
+		sessionId: context.sessionId,
+		...(context.projectId ? { projectId: context.projectId } : {}),
+		...(context.goalId ? { goalId: context.goalId } : {}),
+		...(context.roleName ? { roleName: context.roleName } : {}),
+		cwd: context.cwd,
+		query,
+		available,
+		...(context.selectedSkills === undefined ? {} : { selectedSkills }),
+	});
+}
+function hookSelectors(hook: HookContribution): readonly CapabilitySelectorStage[] {
+	const selectors = (hook as HookContribution & { selectors?: unknown }).selectors;
+	if (!Array.isArray(selectors)) return [];
+	return selectors.filter((selector): selector is CapabilitySelectorStage => selector === "skills" || selector === "mcp");
+}
+function elapsed(started: number): number { return Math.max(0, Date.now() - started); }
+function sameCapabilityCandidate(a: CapabilitySelectionCandidate, b: CapabilitySelectionCandidate): boolean {
+	return a.source.packId === b.source.packId && a.source.hookId === b.source.hookId;
+}
+function capabilityOutcome(
+	origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">,
+	stage: CapabilitySelectorStage,
+	state: TraceDecisionOutcomeRow["outcome"],
+	reason: TraceDecisionOutcomeRow["reason"] | undefined,
+	ms: number,
+): TraceDecisionOutcomeRow {
+	// `capabilityStage` is independently allow-listed by ContextTraceStore. No
+	// proposal reason, candidate id, raw output, or query text is retained here.
+	return { ...outcome(origin, state, reason, ms), capabilityStage: stage } as TraceDecisionOutcomeRow;
 }
 function emptyAvailability(): Readonly<AdvisorySelectionAvailability> {
 	return Object.freeze({ models: Object.freeze([]), thinkingLevels: Object.freeze([]), roles: Object.freeze([]), workflows: Object.freeze([]) });

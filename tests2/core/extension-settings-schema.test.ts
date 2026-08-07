@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	isValidExtensionSettingValue,
 	normalizeExtensionSettingsSchema,
+	reconcileExtensionSettingsValues,
 } from "../../src/server/agent/extension-settings-schema.js";
 
 describe("extension settings schema", () => {
@@ -36,6 +37,40 @@ describe("extension settings schema", () => {
 		expect(isValidExtensionSettingValue(fields[3], "false")).toBe(false);
 		expect(isValidExtensionSettingValue(fields[4], 10)).toBe(true);
 		expect(isValidExtensionSettingValue(fields[4], 11)).toBe(false);
+	});
+
+	it("reconciles only own values for prototype-named fields", () => {
+		const definitions = [
+			{ key: "constructor", type: "string" as const },
+			{ key: "toString", type: "number" as const },
+			{ key: "credential", type: "secret" as const },
+		];
+		const inheritedValues = Object.create({
+			constructor: "inherited",
+			toString: 7,
+			credential: "inherited-secret",
+		}) as Record<string, unknown>;
+
+		expect(reconcileExtensionSettingsValues(definitions, inheritedValues)).toEqual({
+			values: {},
+			invalidKeys: [],
+		});
+
+		const ownValues: Record<string, unknown> = {
+			constructor: "configured",
+			toString: 9,
+			credential: "runtime-secret",
+		};
+		const publicResult = reconcileExtensionSettingsValues(definitions, ownValues);
+		expect(publicResult).toEqual({
+			values: { constructor: "configured", toString: 9 },
+			invalidKeys: [],
+		});
+		expect(Object.getPrototypeOf(publicResult.values)).toBeNull();
+		expect(reconcileExtensionSettingsValues(definitions, ownValues, { includeSecrets: true })).toEqual({
+			values: { constructor: "configured", toString: 9, credential: "runtime-secret" },
+			invalidKeys: [],
+		});
 	});
 
 	it("fails closed for malformed descriptors and hook-style requiresConfig metadata", () => {

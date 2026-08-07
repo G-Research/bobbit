@@ -29,6 +29,8 @@ This guide is the practical how-to.
 - [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants. Exact active `decide` grants enable bounded decision/advisor paths; a hook that declares `mutate` needs a separate exact `mutate` grant for [gated request mutation](request-mutation.md). Grants never change the Extension Host API.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
+- [Managed service-extension contract](service-extension-runtime.md) — schema-2 declarative services. The contract is implemented but dormant until an explicit core consumer wires it; it does not change the existing Hindsight external provider.
+- [Staff-improvement proposal fixture](staff-improvement-proposals.md) — the test-only scheduled decision/consented draft example; it is not a production transcript classifier.
 
 **Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`; `host.capabilities` reports all flags `true` on a current host.
 
@@ -46,6 +48,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Managed service extension** *(schema 2; declarative and currently dormant)* | `runtimes/<name>.yaml` (listed in `contents.runtimes`) | Core-owned lifecycle manager when a future consumer wires it | Closed service declaration only; packs never receive a process handle — see [Managed service-extension contract](service-extension-runtime.md) |
 | **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
 | **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
 | **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; bounded consumers are eligible scheduled advisors, the exact-granted decision dispatcher, and [gated request mutation](request-mutation.md) for a `mode: decide` hook that declares and is separately granted `mutate` | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
@@ -101,6 +104,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
+  runtimes/<name>.yaml            # schema-2 declarative managed-service contract (listed in contents.runtimes; dormant until core wiring)
   system-prompts/<id>.yaml        # schema-2 static prompt sections (listed in contents.system-prompts)
   hooks/<name>.yaml               # schema-2 metadata-first hooks; may declare advisors, decision hooks, or gated request mutation hooks
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
@@ -133,6 +137,7 @@ contents:
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
   hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2
+  runtimes:    [memory-service]         # runtimes/<name>.yaml declarative service basenames; schema 2
   system-prompts: [review-rules]         # system-prompts/<name>.yaml; schema 2 static sections
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
@@ -160,6 +165,10 @@ Rules:
   `system-prompts/<name>.yaml`. An unlisted file is never read. It is an activation catalogue;
   authoring text still requires explicit project grants and approval. See [Static system-prompt
   sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2).
+- **`contents.runtimes: string[]`** — schema-2 managed-service declaration basenames under
+  `runtimes/<name>.yaml`. These are validated and activation/settings-filtered declarations only;
+  they currently start nothing because no gateway consumer has wired the lifecycle manager. See
+  [Managed service-extension contract](service-extension-runtime.md).
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1617,10 +1626,11 @@ The project separately records an exact [extension capability grant](extension-c
 for an active hook. That administrative decision is not part of the pack manifest or Host API: a
 declaration cannot grant itself authority, and enabling a pack does not grant `decide` or any other
 capability. An active `decide` grant permits only the bounded runtimes documented here: the
-scheduled-advisor path below, or the [decision-request dispatcher](extension-decision-requests.md)
-for a supported session lifecycle event. A separately exact `mutate` grant for a `mode: decide`
-hook that declares `mutate` permits the [gated request-mutation](request-mutation.md) consumer
-only. Neither path creates a working Host API or a general hook runtime.
+scheduled-advisor path below, the [decision-request dispatcher](extension-decision-requests.md)
+for a supported lifecycle event, the [gated request-mutation](request-mutation.md) consumer for a
+`mode: decide` hook with an exact `mutate` grant, or an explicitly declared startup
+capability-selector stage. Each runtime rechecks the active declaration and exact grant at its
+application fence, and creates neither a working Host API nor a general hook runtime.
 
 A `decide()` hook may also return the strict advisory-selection envelope
 `{ kind: "selection", selection: { ... } }`. It can recommend one bounded
@@ -1662,11 +1672,89 @@ activation:
   requiresConfig: [auditEndpoint]
 ```
 
-#### Every-N-turn advisor
+#### Startup capability selectors
 
-An advisor is a narrow runnable hook contract. It must be an exact `mode: decide` declaration
-with exactly `events: [afterTurn]` and `schedule.everyNTurns`. Other active exact-granted
-`mode: decide` hooks use the separate bounded decision-request dispatcher, not this advisor path:
+A hook may narrow the optional skill or MCP surface for a newly created session. This is a
+session-start capability-selection contract, not a loader, installer, policy API, or generic tool
+selector. It exists to reduce context while keeping the existing installation, adoption, role, and
+group-policy owners as hard ceilings. See [Dynamic capability selection](design/dynamic-capability-selection.md)
+for the full lifecycle and persistence contract.
+
+Declare one or both supported stages on a decision hook whose `events` include `sessionSetup`.
+The declaration is valid only with `mode: decide`; any other event or mode drops the declaration.
+Selectors run only for project-associated sessions and still need that project's exact `decide` grant
+before they can run.
+
+```yaml
+# hooks/capability-selector.yaml
+id: choose.capabilities
+module: ../lib/capability-selector.mjs
+events: [sessionSetup]
+mode: decide
+capabilities: []
+selectors: [skills, mcp]
+budget:
+  maxTokens: 1200
+  timeoutMs: 1000
+```
+
+Export the selected members from the module's `hooks` object. `selectSkills` runs first;
+`selectMcp` runs only after it settles and receives the fixed selected skill ids. Only stages listed
+by `selectors` are invoked.
+
+```js
+export const hooks = {
+  async selectSkills(ctx) {
+    // `available` is the server-built, sorted list of selectable slash names.
+    return {
+      add: ctx.available.filter((name) => name.startsWith("review")),
+      reason: "Review request",
+      confidence: 0.8,
+    };
+  },
+
+  async selectMcp(ctx) {
+    // `selectedSkills` is present only in this stage.
+    return {
+      add: ctx.selectedSkills?.includes("review") ? ["mcp_github"] : [],
+      reason: "Repository inspection",
+      confidence: 0.8,
+    };
+  },
+};
+```
+
+Each function receives frozen server-derived data: `event: "sessionSetup"`, session/project/goal
+and role identifiers where available, `cwd`, a UTF-8-bounded setup query, sorted identifier-only
+`available`, and (for MCP) sorted `selectedSkills`. It receives no policy details, plan or session
+object, skill content or paths, MCP configuration/operations, credentials, or Host API.
+
+Return exactly `{ add, omit?, reason, confidence }`. `add` and optional `omit` are arrays of 0–128
+safe identifiers; they are de-duplicated and lexicalized, and overlap resolves to `omit`. An empty
+`add` is valid and is authoritative when its valid, still-authorized proposal wins. `confidence` is
+finite in `[0, 1]`; `reason` is bounded diagnostic text and is never persisted. Core intersects
+`add` with `available`, so an unknown, disabled, shadowed, ungranted, or policy-denied id is never
+admitted. The winning valid proposal is ordered by confidence, active pack precedence, then pack
+and hook ids; completion timing does not matter.
+
+A valid winner makes only that stage authoritative. Its admitted `add` ids form the optional set;
+an empty list explicitly disables the stage's optional capabilities. When no stage has a valid,
+still-authorized winner, Bobbit retains the legacy optional skill/MCP surface. A snapshot is
+persisted only when at least one stage is authoritative, and is reused for restore, respawn, prompt
+rebuild, slash-skill expansion, and skill activation without rerunning selectors.
+
+#### Every-N-turn schedules
+
+`schedule` admits only `everyNTurns`, inert `wallClockMs`, and optional `kind: advisor | decision`.
+`everyNTurns` is a safe integer from 1 through 10,000 and is valid only on an exact
+`mode: decide`, `events: [afterTurn]` declaration. The durable completed-turn index starts at zero,
+so `everyNTurns: 5` is due on turns 5, 10, 15, and so on. It survives compaction, restore, and
+respawn; an interrupted due invocation is not replayed. `wallClockMs` has the same bounded integer
+syntax but is inert metadata: it creates no timer, deadline, catch-up work, retry, or wall-clock
+invocation.
+
+With omitted `kind`, or `kind: advisor`, an every-N declaration is a trace-only advisor. It exports
+an `advisors` object keyed by the declared hook id:
 
 ```yaml
 # hooks/turn-audit.yaml
@@ -1675,20 +1763,8 @@ module: ../lib/audit-turn.mjs
 events: [afterTurn]
 mode: decide
 capabilities: []
-budget:
-  maxTokens: 1200
-  timeoutMs: 1000
-schedule:
-  everyNTurns: 5
+schedule: { everyNTurns: 5, kind: advisor }
 ```
-
-`everyNTurns` is a safe integer from 1 through 10,000. The durable completed-turn index starts at
-zero, so this example is due on turns 5, 10, 15, and so on. It survives compaction, restore, and
-respawn; a missed or interrupted due invocation is not replayed. `schedule.wallClockMs` accepts
-the same bounded integer range as inert, forward-compatible metadata only: it creates no timer,
-deadline, catch-up work, or wall-clock invocation.
-
-The module must export an `advisors` object keyed by the declared hook id:
 
 ```js
 export const advisors = {
@@ -1705,6 +1781,12 @@ read-only `scopeContext`. It deliberately contains no `host`, gateway credential
 transcript, session object, or mutation surface. The only accepted return values are `undefined`
 or `{ advisory?: { value?: string } }`; `value` must be a safe identifier. Advice is trace
 metadata, not prompt text, a model message, a decision, or an instruction to the gateway.
+
+With `kind: decision`, the same every-N declaration instead enters the normal decision dispatcher:
+it calls the module's ordinary `hooks.decide` export only on due persisted cadence turns. The hook
+still requires its exact active `decide` grant; no timer, catch-up, or advisor invocation is
+created. The [staff-improvement proposal fixture](staff-improvement-proposals.md) is the focused,
+test-only example of this constrained scheduled-decision route.
 
 The Session Manager launches due advisors after the main turn on a fire-and-forget path. They
 never delay idle status, queue draining, or a later turn. There is at most one live invocation per
@@ -1741,10 +1823,16 @@ The declaration fields are strict:
 - **`config`**, when present, must be a mapping and is retained verbatim. **`activation`**,
   when present, must be a mapping containing no keys other than optional `requiresConfig`.
   That value, when present, is a non-empty, duplicate-free array of non-empty strings.
-- **`schedule`**, when present, is a mapping with only optional `everyNTurns` and
-  `wallClockMs`, each a safe integer from 1 through 10,000. `everyNTurns` is valid only with
-  `mode: decide` and exactly `events: [afterTurn]`; any other pairing drops the declaration.
-  `wallClockMs` alone remains inert metadata.
+- **`schedule`**, when present, is a mapping with optional `everyNTurns`, `wallClockMs`, and
+  `kind`. The numeric fields are safe integers from 1 through 10,000; `kind` is `advisor` or
+  `decision`. `everyNTurns` is valid only with `mode: decide` and exactly `events: [afterTurn]`;
+  any other pairing drops the declaration. `wallClockMs` alone is inert metadata. `kind: decision`
+  requires `everyNTurns` and that same exact mode/event pairing; without an every-N schedule,
+  omitted `kind` or `kind: advisor` has no scheduling effect.
+- **`selectors`**, when present, is a non-empty duplicate-free array containing only `skills`
+  and/or `mcp`. It is valid only with `mode: decide` and an `events` list containing
+  `sessionSetup`; any other pairing drops the declaration. It does not grant authority or make
+  the hook runnable by itself.
 
 Basenames must be safe pack-local names. The loader resolves `hooks/<basename>.yaml`, then
 `hooks/<basename>.yml`, and never scans the directory. A malformed YAML file or invalid field
@@ -1782,13 +1870,18 @@ for the operator API, audit, and live-revocation contract.
 **Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
 execute code, dispatch an event, establish authorization, evaluate `config` or `activation`, start
 timers, mutate state, or register a UI surface. The bounded runtime consumers are a due scheduled
-advisor meeting the exact contract above; an active exact-granted `mode: decide` hook invoked by
-the decision-request dispatcher; and an active exact-granted `mode: decide`/`mutate` hook invoked
-by [gated request mutation](request-mutation.md). The decision dispatcher rechecks the grant
-before `decide()` and optional `onDecision()`; request mutation also rechecks every extension
-candidate after all workers settle and immediately before core applies a result. Inactive and
-ungranted hooks remain metadata-only. See [Extension decision requests](extension-decision-requests.md)
-for the strict decision contract, safe defaults, deadlines, UI, and failure behavior.
+advisor with omitted/`advisor` kind meeting the exact contract above; an active exact-granted
+`mode: decide` hook invoked by the decision-request dispatcher (including only-due `kind: decision`
+every-N hooks); an active exact-granted `mode: decide`/`mutate` hook invoked by [gated request
+mutation](request-mutation.md); and an active exact-granted declared selector during session setup.
+The decision dispatcher rechecks the grant before `decide()` and optional `onDecision()`; request
+mutation rechecks every extension candidate after all workers settle and immediately before core
+applies a result; selectors recheck at their application fence. A scheduled `kind: decision`
+proposal is additionally forced through the constrained consent/draft route described in the
+[staff-improvement proposal fixture](staff-improvement-proposals.md). Inactive and ungranted hooks
+remain metadata-only. See [Extension decision requests](extension-decision-requests.md), [gated request
+mutation](request-mutation.md), and [Dynamic capability selection](design/dynamic-capability-selection.md)
+for their strict contracts and failure behavior.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 

@@ -30,7 +30,18 @@ export type DecisionValue =
 export interface DecisionOption { value: string; label: string; }
 export interface DecisionOtherSchema { minLength?: number; maxLength: number; pattern?: string; }
 export interface ProposalSeed { proposalType: ProposalType; args: Record<string, unknown>; }
-export type DecisionEffect = { kind: "none" } | { kind: "proposal"; proposals: Record<string, ProposalSeed> };
+export type DecisionEffect = { kind: "none" } | {
+	kind: "proposal";
+	proposals: Record<string, ProposalSeed>;
+	/** Declared negative choices which must terminalize without creating a draft. */
+	noEffectValues?: readonly string[];
+};
+
+export type StaffTranscriptPattern = "repeated-user-correction" | "repeated-tool-failure" | "repeated-goal-blocker";
+export interface StaffImprovementSignals {
+	readonly windowTurns: number;
+	readonly patterns: readonly Readonly<{ kind: StaffTranscriptPattern; count: number }>[];
+}
 
 /** Untrusted value returned by a pack hook. It is validated before persistence. */
 export interface ExtensionDecisionRequest {
@@ -80,6 +91,8 @@ export interface DecisionHookContext {
 	readonly cwd: string;
 	readonly scopeContext?: HookScopeContext;
 	readonly config?: Readonly<Record<string, unknown>>;
+	/** Optional core-owned fixed-label/count summary; never carries transcript data. */
+	readonly staffImprovementSignals?: StaffImprovementSignals;
 	readonly priorDecision?: DecisionValue;
 }
 
@@ -167,7 +180,7 @@ const OTHER_KEYS = new Set(["minLength", "maxLength", "pattern"]);
 const OPTION_VALUE_KEYS = new Set(["kind", "value"]);
 const OTHER_VALUE_KEYS = new Set(["kind", "text"]);
 const EFFECT_NONE_KEYS = new Set(["kind"]);
-const EFFECT_PROPOSAL_KEYS = new Set(["kind", "proposals"]);
+const EFFECT_PROPOSAL_KEYS = new Set(["kind", "proposals", "noEffectValues"]);
 const SEED_KEYS = new Set(["proposalType", "args"]);
 const MAX_PATTERN_LENGTH = 256;
 const MAX_SAFE_PATTERN_QUANTIFIER = 280;
@@ -383,18 +396,22 @@ function validateEffect(raw: unknown, optionValues: readonly string[]): Readonly
 	onlyKeys(effect, EFFECT_PROPOSAL_KEYS, "UNKNOWN_EFFECT_FIELD");
 	const rawProposals = requireRecord(effect.proposals, "INVALID_EFFECT");
 	const expected = new Set([...optionValues, "other"]);
-	if (Object.keys(rawProposals).length !== expected.size) fail("INVALID_EFFECT");
+	const noEffectValues = effect.noEffectValues === undefined ? [] : effect.noEffectValues;
+	if (!Array.isArray(noEffectValues) || noEffectValues.some(value => typeof value !== "string" || !expected.has(value))) fail("INVALID_EFFECT");
+	const noEffect = new Set(noEffectValues);
+	if (noEffect.size !== noEffectValues.length) fail("INVALID_EFFECT");
+	if (Object.keys(rawProposals).length !== expected.size - noEffect.size) fail("INVALID_EFFECT");
 	const proposals: Record<string, ProposalSeed> = {};
 	for (const [value, seedRaw] of Object.entries(rawProposals)) {
-		if (!expected.has(value)) fail("INVALID_EFFECT");
+		if (!expected.has(value) || noEffect.has(value)) fail("INVALID_EFFECT");
 		const seed = requireRecord(seedRaw, "INVALID_EFFECT");
 		onlyKeys(seed, SEED_KEYS, "UNKNOWN_PROPOSAL_FIELD");
 		if (typeof seed.proposalType !== "string" || !PROPOSAL_TYPES.has(seed.proposalType as ProposalType)) fail("INVALID_EFFECT");
 		const args = validateJson(requireRecord(seed.args, "INVALID_PROPOSAL_ARGS")) as Record<string, unknown>;
 		proposals[value] = Object.freeze({ proposalType: seed.proposalType as ProposalType, args: Object.freeze(args) });
 	}
-	for (const value of expected) if (!proposals[value]) fail("INVALID_EFFECT");
-	return Object.freeze({ kind: "proposal" as const, proposals: Object.freeze(proposals) });
+	for (const value of expected) if (!noEffect.has(value) && !proposals[value]) fail("INVALID_EFFECT");
+	return Object.freeze({ kind: "proposal" as const, proposals: Object.freeze(proposals), ...(noEffect.size > 0 ? { noEffectValues: Object.freeze([...noEffect]) } : {}) });
 }
 
 function validateRequest(raw: unknown, now: number): ValidatedExtensionDecisionRequest {

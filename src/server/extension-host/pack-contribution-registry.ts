@@ -24,6 +24,7 @@ import {
 	type ChannelContribution,
 	type HookContribution,
 	type SystemPromptSectionContribution,
+	type ServiceExtensionContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -41,8 +42,13 @@ export interface PackContributionResolver {
 	listProviders(projectId: string | undefined): ProviderContribution[];
 	/** List active inert hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
+	/** List active declarative service extensions across winning packs. Optional so
+	 * existing resolver fakes remain source-compatible during adoption. */
+	listServiceExtensions?(projectId: string | undefined): ServiceExtensionContribution[];
 	/** List active, runnable every-N-turn advisor declarations. */
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
+	/** List active scheduled decision declarations due at the server-owned turn index. */
+	listScheduledDecisionHooks(projectId: string | undefined, turnIndex: number): HookContribution[];
 	/** List active, explicitly authorized static prompt sections in pack-priority order.
 	 * Optional so existing resolver fakes stay source-compatible during adoption. */
 	listSystemPromptSections?(projectId: string | undefined): ActiveSystemPromptSection[];
@@ -109,7 +115,7 @@ export type ProviderConfigOverrideLookup = (
 
 /** Project settings targets the contribution registry may activate. `pack` is a
  * control lookup only: persisted setting target identities remain provider/hook. */
-export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook";
+export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime";
 
 /** Runtime-only effective settings for one project target. `values` can contain
  * secret bytes, so this contract must never be used by a public/API projection. */
@@ -134,8 +140,8 @@ export type ProjectExtensionSettingsLookup = (
 interface IndexedScope {
 	list: PackContributions[];
 	byId: Map<string, PackContributions>;
-	/** Never retain an index built from unreadable durable config: the next
-	 * lookup must retry rather than leaving a provider permanently stale. */
+	/** A transient settings read failure leaves this index uncached so the next
+	 * lookup can retry; permanent failures remain cached and fail closed. */
 	retryableConfigError: boolean;
 }
 
@@ -159,6 +165,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly disabledSystemPrompts?: DisabledEntrypointsLookup,
 		private readonly hasSystemPromptStaticAuthorization?: SystemPromptStaticAuthorizationLookup,
 		private readonly projectExtensionSettings?: ProjectExtensionSettingsLookup,
+		private readonly disabledRuntimes?: DisabledEntrypointsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -190,8 +197,21 @@ export class PackContributionRegistry implements PackContributionResolver {
 		return this.index(projectId).list.flatMap((pack) => pack.hooks);
 	}
 
+	listServiceExtensions(projectId: string | undefined): ServiceExtensionContribution[] {
+		return this.index(projectId).list.flatMap((pack) => pack.runtimes);
+	}
+
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[] {
-		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined);
+		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined && hook.schedule.kind !== "decision");
+	}
+
+	listScheduledDecisionHooks(projectId: string | undefined, turnIndex: number): HookContribution[] {
+		if (!Number.isSafeInteger(turnIndex) || turnIndex < 1) return [];
+		return this.listHooks(projectId).filter(hook => {
+			const everyNTurns = hook.schedule?.everyNTurns;
+			return hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn"
+				&& hook.schedule?.kind === "decision" && everyNTurns !== undefined && turnIndex % everyNTurns === 0;
+		});
 	}
 
 	listSystemPromptSections(projectId: string | undefined): ActiveSystemPromptSection[] {
@@ -261,7 +281,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 				"pack",
 			);
 			if (packSettings.state === "error") {
-				retryableConfigError = true;
+				retryableConfigError ||= packSettings.diagnostic.retryable;
 				console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} code=${safeDiagnosticCode(packSettings.diagnostic)}`);
 				continue;
 			}
@@ -302,7 +322,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 					p.id,
 				);
 				if (projectSettings.state === "error") {
-					retryableConfigError = true;
+					retryableConfigError ||= projectSettings.diagnostic.retryable;
 					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} providerId=${p.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
 					continue;
 				}
@@ -315,9 +335,9 @@ export class PackContributionRegistry implements PackContributionResolver {
 				const normalized = normalizeProviderConfigRead(configRead);
 				if (normalized.state === "error") {
 					// Fail closed: an unreadable durable config is not the same as an
-					// absent config. Do not activate with defaults or cache this result;
-					// subsequent registry calls deliberately retry the store read.
-					retryableConfigError = true;
+					// absent config. Do not activate with defaults. Transient diagnostics
+					// retry; permanent diagnostics cache this fail-closed index.
+					retryableConfigError ||= normalized.diagnostic.retryable;
 					console.warn(`[pack-contributions] provider config unavailable packId=${contrib.packId} providerId=${p.id} code=${safeDiagnosticCode(normalized.diagnostic)}`);
 					continue;
 				}
@@ -331,8 +351,9 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
 				contrib = { ...contrib, providers: resolvedProviders };
 			}
-			// Hook declarations remain inert metadata. Activation only filters their
-			// manifest listName; it never evaluates config or confers capabilities.
+			// Hooks remain inert declaration metadata, but their project enablement and
+			// declared configuration gate determine whether dispatch consumers can see
+			// them. Capability authority is evaluated separately.
 			const disabledHooks = this.disabledHooks
 				? new Set(this.disabledHooks(e.scope, projectId, contrib.packName))
 				: undefined;
@@ -352,13 +373,43 @@ export class PackContributionRegistry implements PackContributionResolver {
 					hook.id,
 				);
 				if (projectSettings.state === "error") {
-					retryableConfigError = true;
+					retryableConfigError ||= projectSettings.diagnostic.retryable;
 					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} hookId=${hook.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
 					continue;
 				}
-				if (projectSettings.state !== "present" || projectSettings.enabled) resolvedHooks.push(hook);
+				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
+				const values = hook.settingsSchema
+					? projectSettings.state === "present"
+						? projectSettings.values
+						: settingsDefaults(hook.settingsSchema.fields)
+					: hook.config ?? emptySettings();
+				if (!activationSatisfied(hook.activation, values)) continue;
+				resolvedHooks.push(hook);
 			}
 			if (resolvedHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: resolvedHooks };
+
+			// Runtime declarations follow the same activation/settings projection as
+			// hooks. They remain data only here: this registry never starts a process.
+			const disabledRuntimes = this.disabledRuntimes
+				? new Set(this.disabledRuntimes(e.scope, projectId, contrib.packName))
+				: undefined;
+			const resolvedRuntimes: ServiceExtensionContribution[] = [];
+			for (const runtime of contrib.runtimes) {
+				if (runtime.settingsSchemaDiagnostic !== undefined || disabledRuntimes?.has(runtime.listName)) continue;
+				const projectSettings = readProjectExtensionSettings(this.projectExtensionSettings, projectId, contrib.packId, "runtime", runtime.id);
+				if (projectSettings.state === "error") {
+					retryableConfigError ||= projectSettings.diagnostic.retryable;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} runtimeId=${runtime.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
+				}
+				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
+				const values = runtime.settingsSchema
+					? projectSettings.state === "present" ? projectSettings.values : settingsDefaults(runtime.settingsSchema.fields)
+					: emptySettings();
+				if (!activationSatisfied(runtime.activation, values)) continue;
+				resolvedRuntimes.push(runtime);
+			}
+			if (resolvedRuntimes.length !== contrib.runtimes.length) contrib = { ...contrib, runtimes: resolvedRuntimes };
 
 			// Static sections need both the ordinary manifest-list activation toggle
 			// and explicit EP-6 authorization. Missing authorization is deny-by-default;
@@ -502,14 +553,31 @@ function safeDiagnosticCode(diagnostic: unknown): string {
 		: "STORE_READ_UNAVAILABLE";
 }
 
-function providerActivationSatisfied(provider: ProviderContribution): boolean {
-	const required = provider.activation?.requiresConfig;
+function emptySettings(): Record<string, unknown> {
+	return Object.create(null) as Record<string, unknown>;
+}
+
+function settingsDefaults(fields: readonly { key: string; type: string; default?: unknown }[] | undefined): Record<string, unknown> {
+	const values = emptySettings();
+	for (const field of fields ?? []) {
+		if (field.type !== "secret" && field.default !== undefined) values[field.key] = field.default;
+	}
+	return values;
+}
+
+/** A declaration is config-active only when every required field has an
+ * effective value; whitespace-only strings deliberately remain dormant. */
+function activationSatisfied(activation: { requiresConfig: string[] } | undefined, values: Readonly<Record<string, unknown>>): boolean {
+	const required = activation?.requiresConfig;
 	if (!required || required.length === 0) return true;
-	const config = provider.config ?? {};
 	return required.every((key) => {
-		const value = config[key];
+		if (!Object.hasOwn(values, key)) return false;
+		const value = values[key];
 		if (value === undefined || value === null) return false;
-		if (typeof value === "string") return value.trim().length > 0;
-		return true;
+		return typeof value !== "string" || value.trim().length > 0;
 	});
+}
+
+function providerActivationSatisfied(provider: ProviderContribution): boolean {
+	return activationSatisfied(provider.activation, provider.config ?? {});
 }

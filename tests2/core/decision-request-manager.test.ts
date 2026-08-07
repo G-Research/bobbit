@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Clock, TimerHandle } from "../../src/server/gateway-deps.ts";
 import {
 	DECISION_ADVISORY_PENDING_LIMIT,
@@ -262,16 +262,29 @@ describe("DecisionRequestManager", () => {
 		assert.equal(duplicate.requestId, second.requestId);
 	});
 
-	it("denies silent consent headlessly without a memory, continuation, or protected work", async () => {
+	it("denies consent proposal effects headlessly and at deadline without a draft, memory, continuation, or protected work", async () => {
 		let delivered = 0;
-		const { manager, clock, store } = fixture({ headless: true, continuation: async () => { delivered++; return "delivered"; } });
-		const created = await manager.create(origin(), request(clock), { id: "unsafe-tool", kind: "tool", toolSafety: "unsafe" });
-		const persisted = store.get(created.requestId!)!;
+		const effect = { kind: "proposal" as const, proposals: {
+			quick: { proposalType: "goal" as const, args: { title: "Must not seed" } },
+			thorough: { proposalType: "goal" as const, args: { title: "Must not seed" } },
+			other: { proposalType: "goal" as const, args: { title: "Must not seed" } },
+		} };
+		const headless = fixture({ headless: true, proposal: true, continuation: async () => { delivered++; return "delivered"; } });
+		const created = await headless.manager.create(origin(), request(headless.clock, { effect }), { id: "unsafe-tool", kind: "tool", toolSafety: "unsafe" });
+		const persisted = headless.store.get(created.requestId!)!;
 		assert.equal(persisted.status, "denied");
 		assert.equal(persisted.resolution, undefined);
 		assert.equal(persisted.continuationState, "skipped");
-		assert.equal(store.listMemories().length, 0);
+		assert.equal(headless.store.listMemories().length, 0);
+		assert.deepEqual(headless.proposals, []);
 		assert.equal(delivered, 0);
+
+		const deadline = fixture({ proposal: true });
+		const overdue = await deadline.manager.create(origin(), request(deadline.clock, { effect }), { id: "unsafe-deadline", kind: "tool", toolSafety: "unsafe" });
+		deadline.clock.advance(30_000);
+		await deadline.manager.reconcile();
+		assert.equal(deadline.store.get(overdue.requestId!)?.status, "denied");
+		assert.deepEqual(deadline.proposals, []);
 	});
 
 	it("pauses consent durably, surfaces one non-waking inbox reference, and resumes through one answer", async () => {
@@ -469,5 +482,19 @@ describe("DecisionRequestManager", () => {
 			assert.equal(manager.advisory(origin(), { ...notice, key: `notice-${index}` }), "enqueued");
 		}
 		assert.equal(manager.advisory(origin(), { ...notice, key: "over-budget" }), "rejected");
+	});
+
+	it("does not seed a proposal for declared negative or Other answers", async () => {
+		const { manager, clock, proposals, store } = fixture({ proposal: true });
+		const created = await manager.create(origin(), request(clock, {
+			effect: {
+				kind: "proposal",
+				proposals: { quick: { proposalType: "goal", args: { title: "Create only" } } },
+				noEffectValues: ["thorough", "other"],
+			},
+		}));
+		await manager.answer("project-1", created.requestId!, { kind: "option", value: "thorough" });
+		expect(proposals).toEqual([]);
+		expect(store.get(created.requestId!)?.proposal).toBeUndefined();
 	});
 });
