@@ -220,16 +220,49 @@ On success, the gateway:
 5. Persists and broadcasts only that verified tuple in one authoritative
    `state` frame containing both `model` and `thinkingLevel`.
 
-`set_model` and `set_thinking_level` use the existing per-session command FIFO,
-so a prompt or later selection cannot overtake an in-flight tuple mutation.
+For an ordinary live session, `set_model` and `set_thinking_level` use the
+existing per-session command FIFO, so a prompt or later selection cannot
+overtake an in-flight tuple mutation.
+
+#### Recovering an unavailable persisted model
+
+When `state.data.condition` is
+`{ code: "MODEL_SELECTION_REQUIRED", provider, modelId }`, `set_model` is a
+recovery request rather than an ordinary live mutation. The gateway accepts
+only an exact currently session-selectable tuple, clamps thinking, starts a
+replacement pinned to that tuple, rehydrates the existing transcript, and
+verifies model read-back. It persists and publishes the replacement tuple with
+`condition: null` only after activation succeeds.
+
+An ordinary retryable activation failure returns
+`MODEL_SELECTION_RECOVERY_FAILED` with a sanitized message that says to choose
+another available model or retry. It preserves the unavailable durable tuple,
+transcript, and condition. A second `set_model` while activation is running
+returns the same code instead of waiting behind the first request.
+
+An unverified transcript rollback also returns
+`MODEL_SELECTION_RECOVERY_FAILED`, but its sanitized fail-closed message says
+that the original conversation transcript could not be restored and **Do not
+retry model selection**. The unavailable durable tuple and
+`MODEL_SELECTION_REQUIRED` condition remain authoritative, but transcript
+integrity is not guaranteed. The user must stop selecting models and ask an
+administrator to inspect server logs and restore the transcript before
+continuing; clients must not reinterpret this same-code message as the ordinary
+retryable case.
+
+While the condition remains, `prompt`, `steer`, `retry`, `restart_agent`, and
+`set_thinking_level` return `MODEL_SELECTION_REQUIRED`. Before activation and
+after an ordinary retryable failure, `get_state` and `get_messages` remain
+available so the session stays navigable and readable. See
+[Restored session requires a model](debugging.md#restored-session-requires-a-model).
 
 #### Failed selection and correction
 
-The client treats `state` as authoritative over its optimistic model and
-thinking values. If either write fails, the gateway keeps the previous durable
-tuple unchanged and broadcasts a complete correction—both `model` and
-`thinkingLevel`—from live read-back when available, otherwise from complete
-durable state.
+For ordinary live model or thinking changes, the client treats `state` as
+authoritative over its optimistic values. If either write fails, the gateway
+keeps the previous durable tuple unchanged and broadcasts a complete
+correction—both `model` and `thinkingLevel`—from live read-back when available,
+otherwise from complete durable state.
 
 After a partial mutation, the gateway makes one bounded rollback attempt on the
 same RPC bridge that received the request. If exact rollback cannot be verified,
@@ -272,7 +305,7 @@ would destroy the replacement rather than fence the stale target. The client
 should reconnect before retrying. This also prevents an older durable snapshot
 from overwriting a tuple committed by the replacement.
 
-A thinking-only UI change remains supported with:
+For an ordinary live session, a thinking-only UI change remains supported with:
 
 ```json
 { "type": "set_thinking_level", "level": "high" }
@@ -294,7 +327,7 @@ semantics and the shared clamp order.
 |---|---|---|
 | `auth_ok` | — | Authentication succeeded |
 | `auth_failed` | — | Authentication failed |
-| `state` | `data` | Current agent state snapshot |
+| `state` | `data` | Current agent state snapshot. `data.condition` may be `{ code: "MODEL_SELECTION_REQUIRED", provider: string, modelId: string }`; partial snapshots that omit it do not clear it, and the server sends explicit `condition: null` only after verified recovery. |
 | `messages` | `data` | Full message history array |
 | `event` | `data`, `seq?`, `ts?` | Streaming agent event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. |
 | `resume_gap` | `lastSeq` | Server's reply when `resume` cannot safely replay the missed tail. This can mean the requested `fromSeq` is outside the retained EventBuffer window, the replay would exceed the resume byte budget, or the socket is already backed up. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |

@@ -11,6 +11,33 @@ export interface GateResetReopenOutcome {
 	state: GoalState;
 }
 
+export const MODEL_SELECTION_REQUIRED = "MODEL_SELECTION_REQUIRED" as const;
+export const MODEL_SELECTION_RECOVERY_FAILED = "MODEL_SELECTION_RECOVERY_FAILED" as const;
+
+/** A processless session whose exact persisted text model is no longer selectable. */
+export interface ModelSelectionRequiredCondition {
+	code: typeof MODEL_SELECTION_REQUIRED;
+	provider: string;
+	modelId: string;
+}
+
+/** Orthogonal session conditions; these do not replace the lifecycle status. */
+export type SessionCondition = ModelSelectionRequiredCondition;
+
+export function isModelSelectionRequiredCondition(value: unknown): value is ModelSelectionRequiredCondition {
+	if (!value || typeof value !== "object") return false;
+	const condition = value as Partial<ModelSelectionRequiredCondition>;
+	return condition.code === MODEL_SELECTION_REQUIRED
+		&& typeof condition.provider === "string"
+		&& condition.provider.length > 0
+		&& typeof condition.modelId === "string"
+		&& condition.modelId.length > 0;
+}
+
+export function modelSelectionRequiredMessage(condition: ModelSelectionRequiredCondition): string {
+	return `Model ${condition.provider}/${condition.modelId} is unavailable for this session. Choose a replacement model to continue.`;
+}
+
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
 

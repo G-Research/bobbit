@@ -7540,6 +7540,7 @@ async function handleApiRoute(
 			spawnPinnedModel: session.spawnPinnedModel,
 			spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 			restoreError: session.restoreError,
+			condition: session.condition,
 			lastTurnErrored: session.lastTurnErrored ?? false,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 			completedTurnCount: session.completedTurnCount ?? 0,
