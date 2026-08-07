@@ -16505,7 +16505,7 @@ async function handleApiRoute(
 						!isPackExtensionGrant(candidateGrant)
 						&& candidateGrant.packId === change.packId
 						&& candidateGrant.capability === "prompt:system-author"
-						&& authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook => hook.id === candidateGrant.hookId));
+						&& !!authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook => hook.id === candidateGrant.hookId));
 					if (!baseline || !grant) continue;
 					const record = audit.create({
 						packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
