@@ -5637,7 +5637,7 @@ async function handleApiRoute(
 	const extensionPackGrantCapabilities: readonly ExtensionCapability[] = [
 		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
 	];
-	const isPackExtensionGrant = (grant: ExtensionGrant): boolean =>
+	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
 		(grant as { principal?: unknown }).principal === "pack";
 	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
 		const grants = store.getExtensionGrants();
@@ -16501,7 +16501,9 @@ async function handleApiRoute(
 				const auditIds: string[] = [];
 				for (const change of authoring.changes) {
 					const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
-					const grant = authoring.grants.find(candidateGrant => candidateGrant.packId === change.packId
+					const grant = authoring.grants.find((candidateGrant): candidateGrant is Exclude<ExtensionGrant, { principal: "pack" }> =>
+						!isPackExtensionGrant(candidateGrant)
+						&& candidateGrant.packId === change.packId
 						&& candidateGrant.capability === "prompt:system-author"
 						&& authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook => hook.id === candidateGrant.hookId));
 					if (!baseline || !grant) continue;
@@ -16611,7 +16613,7 @@ async function handleApiRoute(
 				acceptPromptExtensionProposal(context.projectConfigStore, changes, {
 					actor: extensionGrantActor,
 					hasStaticGrant: (packId) => context.projectConfigStore.getExtensionGrants().some(grant => {
-						if (grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
+						if (isPackExtensionGrant(grant) || grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
 						const hook = active.find(pack => pack.packId === packId)?.hooks.find(candidate => candidate.id === grant.hookId);
 						return !!hook && hook.capabilities.includes("prompt:system-static" as any);
 					}),
