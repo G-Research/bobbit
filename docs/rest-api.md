@@ -1498,28 +1498,32 @@ error codes, storage isolation, Market behavior, and Hindsight migration.
 #### Extension capability grants
 
 Extension grants are a separate, project-owned native YAML field (`extension_grants`), not a
-value accepted by the generic config writer. The `GET` grant and grant-audit routes use normal
-gateway authentication. Normal gateway authentication permits exact grants and revokes for
-`decide`, `filter:tool-result`, `store`, `session`, and `agents`. `mutate`,
-`prompt:system-static`, and `prompt:system-author` additionally require a verified signed
-`bobbit_session` cookie; bearer-only, sandbox, and agent-session credentials receive
-`403 PROMPT_EXTENSION_OPERATOR_REQUIRED` only for those protected capabilities. The server, not
-the caller, assigns the actor and timestamp. These are exact, fail-closed grants for active
-schema-2 hooks and do not replace pack activation, Host API guards, session policy, or add Host API
-authority. Static prompt sections require `prompt:system-static`; `prompt:system-author` permits
-only an authenticated owning agent session to create or edit an approval proposal, never a direct
-write.
-`filter:tool-result` is eligible only for a `mode: decide` hook with exactly
-`events: [afterToolResult]` and that declared capability; it enables only core's pre-fan-out
-filter seam. See [Extension capability grants](extension-capability-grants.md) for the
-configuration, audit-outbox, live-revocation, and extension-author contract.
+value accepted by the generic config writer. It is one backward-compatible union: an existing
+discriminator-free row names an exact hook, while `{ packId, principal: "pack", capability }`
+names an exact non-hook pack principal. The server, not the caller, assigns the actor and
+timestamp. Both forms remain exact and fail closed; neither replaces activation, Host API guards,
+or session policy.
+
+The closed vocabulary adds the pack-only `service.manage`, `memory.read`, `memory.write`,
+`memory.reflect`, `memory.invalidate`, and `memory.read.all` values. A current active pack can
+receive only those six values; hooks cannot receive them, and existing hook declaration support
+rules are unchanged. All pack-principal mutations require a verified signed `bobbit_session`
+operator cookie. Hook mutations retain their existing rules: normal gateway authentication is
+enough for `decide`, `filter:tool-result`, `store`, `session`, and `agents`, while `mutate`,
+`prompt:system-static`, and `prompt:system-author` require the signed operator cookie.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects/:id/extension-grants` | Normal-auth read of durable exact grants and active hook grant-status projection; no signed operator cookie is required. |
-| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Normal gateway authentication is sufficient for `decide`, `filter:tool-result`, `store`, `session`, and `agents`; protected `mutate`, `prompt:system-static`, and `prompt:system-author` grants require the verified signed `bobbit_session` cookie. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
-| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Normal gateway authentication is sufficient for `decide`, `filter:tool-result`, `store`, `session`, and `agents`; protected `mutate`, `prompt:system-static`, and `prompt:system-author` revokes require the verified signed `bobbit_session` cookie. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
-| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe audit rows; no signed operator cookie is required. |
+| `GET` | `/api/projects/:id/extension-grants` | Normal-auth read of durable exact grants plus active hook (`hooks`) and pack-principal (`packs`) status projections; no signed operator cookie is required. |
+| `PUT` | `/api/projects/:id/extension-grants` | Grants one active exact tuple: `{ packId, hookId, capability }` for a hook, or `{ packId, principal: "pack", capability }` for a pack. Pack mutations require the signed operator cookie; inactive principals return 404 and unsupported current pairings return `422 EXTENSION_CAPABILITY_UNSUPPORTED`. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Unchanged exact hook revoke path, including stale removed-hook rows. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/principals/pack/:capability` | Exact pack-principal revoke path. It is distinct so a hook named `pack` remains unambiguous, requires the signed operator cookie, and can revoke a stale removed-pack row. |
+| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe hook/pack audit rows; no signed operator cookie is required. |
+
+A completed revoke is an audit-free no-op. An exact retry after a
+`503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers the pending durable audit row without
+restoring authority. See [Extension capability grants](extension-capability-grants.md) for the
+union shapes, live resolver fence, outbox recovery, and Market behavior.
 
 #### Gated request-mutation bridge and audit
 

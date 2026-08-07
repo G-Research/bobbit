@@ -2,7 +2,12 @@
 
 Schema-2 packs can declare a small, declarative managed-service contract. It separates a pack's description of a service from the core-owned process lifecycle so packs cannot smuggle commands, paths, ports, or secrets through a general runtime API.
 
-**Current status:** the declaration loader, active registry, and lifecycle manager are implemented and covered by focused tests, but the gateway does not yet instantiate the manager or call `reconcile()`. The surface is dormant until Hindsight or another explicit core consumer wires it. Declaring a runtime today starts no process, adds no endpoint, and changes no existing provider behavior. The existing Hindsight external-provider configuration remains unchanged.
+**Current status:** the declaration loader, active registry, lifecycle manager, and its
+`service.manage` authorization seam are implemented and covered by focused tests, but the gateway
+does not yet instantiate the manager or call `reconcile()`. The surface is dormant until Hindsight
+or another explicit core consumer wires it. Declaring a runtime today starts no process, adds no
+endpoint, and changes no existing provider behavior. The existing Hindsight external-provider
+configuration remains unchanged.
 
 ## Declare a service
 
@@ -66,10 +71,10 @@ There is no runtime-specific public launch, stop, log, or status endpoint. Do no
 
 ## Lifecycle ownership
 
-When a future core consumer explicitly constructs `ServiceExtensionRuntimeManager`, the manager owns lifecycle behavior:
+When a future core consumer explicitly constructs `ServiceExtensionRuntimeManager`, the manager owns lifecycle behavior. It receives the shared `ExtensionCapabilityGrantResolver` through its structural authorization seam and calls it with the server-derived `{ kind: "pack", packId }` principal and `service.manage`; it never reads YAML grants itself.
 
-1. It obtains active declarations for one project, validates and copies them, and keys each service by `(projectId, packId, serviceId)`.
-2. It resolves an owned data directory, obtains each declared port lease, reads settings, launches through a core adapter, and probes readiness. Pack code receives none of these capabilities or the process handle.
+1. It obtains active declarations for one project, validates and copies them, requires the current exact `service.manage` grant, and keys each service by `(projectId, packId, serviceId)`.
+2. It resolves an owned data directory, obtains each declared port lease, reads settings, launches through a core adapter, and probes readiness. It rechecks authorization at asynchronous lifecycle fences, so a revoke stops stale work from becoming a running service. Pack code receives none of these capabilities or the process handle.
 3. It publishes only `{ id, state, updatedAt, detail? }`. Valid states are `stopped`, `starting`, `ready`, `unhealthy`, and `failed`; details are the fixed values `starting`, `readiness-timeout`, `port-conflict`, `process-exited`, and `configuration-unavailable`. Logs, paths, command lines, settings, and secrets are deliberately absent.
 4. It stops the whole adapter-owned process/container with the declared grace period and releases leases on removal, failed start, project stop, and global shutdown. `on-failure` permits one restart for the current active declaration; `never` does not restart.
 

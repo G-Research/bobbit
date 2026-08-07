@@ -19,18 +19,21 @@ function fixture(overrides: {
 	active?: ActiveServiceExtension[];
 	ready?: boolean;
 	portAvailable?: boolean;
+	authorized?: boolean;
 	listActive?: (projectId: string) => Promise<readonly ActiveServiceExtension[]> | readonly ActiveServiceExtension[];
 } = {}) {
 	let active = overrides.active ?? [{ packId: "pack", spec }];
 	let now = 0;
 	let ready = overrides.ready ?? true;
 	let portAvailable = overrides.portAvailable ?? true;
+	let authorized = overrides.authorized ?? true;
 	const launches: string[] = [];
 	const stops: number[] = [];
 	const releases: number[] = [];
 	const processes: Array<{ process: ServiceExtensionProcess; exit: () => void }> = [];
 	const manager = new ServiceExtensionRuntimeManager({
 		listActive: projectId => overrides.listActive?.(projectId) ?? active,
+		authorize: () => ({ allowed: authorized }),
 		launchers: {
 			local: async request => makeProcess("local", request.spec.stopGraceMs),
 			docker: async request => makeProcess("docker", request.spec.stopGraceMs),
@@ -58,6 +61,7 @@ function fixture(overrides: {
 		setActive: (value: ActiveServiceExtension[]) => { active = value; },
 		setReady: (value: boolean) => { ready = value; },
 		setPortAvailable: (value: boolean) => { portAvailable = value; },
+		setAuthorized: (value: boolean) => { authorized = value; },
 	};
 }
 
@@ -79,6 +83,23 @@ describe("service extension runtime", () => {
 			expect(f.launches).toEqual([runMode]);
 			expect(f.manager.status("project-a", "service")).toMatchObject({ state: "ready" });
 		}
+	});
+
+	it("does not launch without exact pack service.manage authorization", async () => {
+		const f = fixture({ authorized: false });
+		await f.manager.reconcile("project-a");
+		expect(f.launches).toEqual([]);
+		expect(f.manager.status("project-a", "service")).toBeUndefined();
+	});
+
+	it("stops a previously authorized service when a later reconcile denies it", async () => {
+		const f = fixture();
+		await f.manager.reconcile("project-a");
+		f.setAuthorized(false);
+		await f.manager.reconcile("project-a");
+
+		expect(f.stops).toEqual([100]);
+		expect(f.manager.status("project-a", "service")).toMatchObject({ state: "stopped" });
 	});
 
 	it("does not launch on a port collision and publishes a bounded status", async () => {
@@ -167,11 +188,40 @@ describe("service extension runtime", () => {
 		expect(f.manager.status("project-b", "service")).toMatchObject({ state: "ready" });
 	});
 
+	it("abandons an awaited launch when service.manage authorization changes before publication", async () => {
+		const pendingLaunch = deferred<ServiceExtensionProcess>();
+		let authorized = true;
+		const stops: number[] = [];
+		const manager = new ServiceExtensionRuntimeManager({
+			listActive: () => [{ packId: "pack", spec }],
+			authorize: () => ({ allowed: authorized }),
+			launchers: {
+				local: async () => pendingLaunch.promise,
+				docker: async () => { throw new Error("not selected"); },
+				compose: async () => { throw new Error("not selected"); },
+			},
+			probe: async () => true,
+			ports: { lease: async () => ({ release: async () => {} }) },
+			filesystem: { ensureDirectory: async () => {} },
+			clock: { now: () => new Date(0), sleep: async () => {} },
+			resolveDataDir: () => "/owned/service",
+		});
+		const reconcile = manager.reconcile("project-a");
+		await turn();
+		authorized = false;
+		pendingLaunch.resolve({ stop: async grace => { stops.push(grace); }, onExit: () => () => {} });
+		await reconcile;
+
+		expect(stops).toEqual([100]);
+		expect(manager.status("project-a", "service")).toMatchObject({ state: "stopped" });
+	});
+
 	it("passes resolved settings only to core launch seams, never status", async () => {
 		let received: unknown;
 		const process: ServiceExtensionProcess = { stop: async () => {}, onExit: () => () => {} };
 		const manager = new ServiceExtensionRuntimeManager({
 			listActive: () => [{ packId: "pack", spec }],
+			authorize: () => ({ allowed: true }),
 			launchers: { local: async request => { received = request.settings; return process; }, docker: async () => process, compose: async () => process },
 			probe: async () => true,
 			ports: { lease: async () => ({ release: async () => {} }) },

@@ -157,7 +157,9 @@ selection:
 - A provider, hook, or runtime still needs a satisfied `requiresConfig` gate. A project settings read or
   secret read failure is not treated as absent values or defaults; the resolver fails closed.
 - Extension grants remain exact, project-owned EP-6 records. A settings switch neither creates
-  nor bypasses one. Exact grants persist while their target is disabled, dormant, awaiting review,
+  nor bypasses one. This includes the active pack principal's six platform-owned non-hook values:
+  `service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`, and
+  `memory.read.all`. Exact grants persist while their target is disabled, dormant, awaiting review,
   or unavailable; Market labels each such granted capability **Granted · inactive** until the
   target is eligible again.
 
@@ -174,7 +176,7 @@ prompt-operator cookie; bearer-only, sandbox, and agent-session credentials rece
 
 | Method | Path | Contract |
 |---|---|---|
-| `GET` | `/api/projects/:projectId/extension-settings` | Returns the redacted catalogue: `{ schema: 2, revision, targets }`. A target includes its server-resolved reference, effective enablement, configuration status, declared fields and non-secret effective values/default source, plus hook-grant status where applicable. |
+| `GET` | `/api/projects/:projectId/extension-settings` | Returns the redacted catalogue: `{ schema: 2, revision, targets }`. A target includes its server-resolved reference, effective enablement, configuration status, declared fields and non-secret effective values/default source, plus hook grant status where applicable and the active Pack row's non-hook grant status. |
 | `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider`, `hook`, or `runtime` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
 | `PATCH` | `/api/projects/:projectId/extension-settings/:packId` | Changes a pack's project runtime switch. Body is exactly `{ expectedRevision, enabled }`. Returns `{ revision, targets }` for the affected declared targets. |
 
@@ -234,11 +236,14 @@ forms, and the runtime block are cleared before another project can paint; this 
 from one project briefly appearing under another.
 
 Each installed pack card shows a project runtime block with separate pack, provider, hook, and runtime
-switches, configuration state, and hook grant state. A runtime setting controls declaration eligibility
-only until a core service consumer is wired; it does not launch a process today. Declared fields use native labelled controls
-and an explicit revisioned Save action. Status distinguishes disabled, needs configuration,
-grant required, granted but inactive, **Settings need review** for invalid schema or incompatible
-evolved non-secret values, unavailable, and active states.
+switches, configuration state, and grant state. The existing **Review grants** disclosure on the
+Pack row lists the six non-hook capabilities individually, requires a confirmation for each grant,
+and offers exact revoke actions; it is not a second permissions screen. **Grant history** in the
+same Installed surface shows both pack and legacy-hook audit records. A runtime setting controls
+declaration eligibility only until a core service consumer is wired; it does not launch a process
+today. Declared fields use native labelled controls and an explicit revisioned Save action. Status
+distinguishes disabled, needs configuration, grant required, granted but inactive, **Settings need
+review** for invalid schema or incompatible evolved non-secret values, unavailable, and active states.
 
 Secret controls are password inputs that begin empty. They show only presence (`Stored for this
 project` or `Not set`), offer an explicit removal action, and clear their DOM value after any

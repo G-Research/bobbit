@@ -173,6 +173,20 @@ shown read-only as "support surfaces").
 > [pack.yaml schema 2](#packyaml-schema-2-extension-platform), and the
 > [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-metadata-first).
 
+### Exact grant controls
+
+Activation and authorization are deliberately separate. With a project selected, an installed
+schema-2 pack's existing **Project runtime** block has a Pack row with **Review grants**. It lists
+the six platform-owned non-hook capabilities individually and shows the exact capability string,
+current server-projected state, and one confirmed Grant or Revoke action. `memory.read.all` is
+called out as broader project-memory access. No toggle, bulk grant, Hindsight-specific panel, or
+client-created capability is involved.
+
+The same Installed surface has **Grant history**, backed by the project grant audit. It shows both
+new pack-principal and legacy hook records, so an operator can inspect an authority change after a
+pack has become inactive. Market always reloads server-owned projection after a mutation; an
+active-looking card is never treated as authorization by itself.
+
 What disabling does:
 
 - **Disable a tool / role / skill** — it is dropped from its resolved list (in the cascade
@@ -797,9 +811,12 @@ Most schema-2 contribution paths are live: providers run through the Lifecycle H
 bounded advisors, decisions, request mutation, capability selection, static-prompt grants, and
 post-tool-result filtering; MCP and standalone Pi extensions load through their normal runtime
 owners. Market is the operator surface for activation, per-project settings, and exact grants.
-The [Extension Platform overview](extension-platform.md) describes the complete install-to-removal
-lifecycle. The first built-in production provider, [Hindsight](hindsight-memory.md), remains
-inactive until its required project configuration is supplied.
+Its existing Pack row also exposes the six closed non-hook grants—`service.manage`, `memory.read`,
+`memory.write`, `memory.reflect`, `memory.invalidate`, and `memory.read.all`—through the same
+**Review grants** control and exact audit history used by hooks. The [Extension Platform overview](extension-platform.md)
+describes the complete install-to-removal lifecycle. The first built-in production provider,
+[Hindsight](hindsight-memory.md), remains inactive until its required project configuration is
+supplied.
 
 The sole intentionally dormant schema-2 contribution is `runtimes`: its declaration, settings
 filtering, and core-owned lifecycle contract are implemented, but no gateway consumer starts a

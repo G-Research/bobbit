@@ -31,6 +31,10 @@ function auditPath(): string {
 	return `/api/projects/${encodeURIComponent(projectId)}/extension-grant-audit`;
 }
 
+function settingsPath(): string {
+	return `/api/projects/${encodeURIComponent(projectId)}/extension-settings`;
+}
+
 function writeFixturePack(headquartersDir: string): void {
 	packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
@@ -147,6 +151,74 @@ test.describe("extension capability grants API", () => {
 		});
 		expect(unsupported.status, `${REPRO}: mutation is never implied by an active decision hook`).toBe(422);
 		expect((await json(unsupported)).code).toBe("EXTENSION_CAPABILITY_UNSUPPORTED");
+
+		for (const capability of ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"]) {
+			const packOnly = await apiFetch(grantsPath(), {
+				method: "PUT", headers: operatorHeaders(),
+				body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability }),
+			});
+			expect(packOnly.status, `${REPRO}: hook routes explicitly reject pack-only ${capability} authority`).toBe(422);
+			expect((await json(packOnly)).code).toBe("EXTENSION_CAPABILITY_UNSUPPORTED");
+		}
+	});
+
+	test("requires signed operator consent for exact active pack grants and revokes the pack tuple", async () => {
+		const packGrant = { packId: PACK_NAME, principal: "pack", capability: "memory.read" };
+		for (const capability of ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"]) {
+			const anonymousMutation = await apiFetch(grantsPath(), {
+				method: "PUT", body: JSON.stringify({ packId: PACK_NAME, principal: "pack", capability }),
+			});
+			expect(anonymousMutation.status, `${REPRO}: every pack capability mutation requires a verified signed operator cookie`).toBe(403);
+			expect((await json(anonymousMutation)).code).toBe("PROMPT_EXTENSION_OPERATOR_REQUIRED");
+		}
+
+		for (const body of [
+			{ ...packGrant, hookId: DECIDE_HOOK },
+			{ packId: PACK_NAME, principal: "pack", capability: "unknown.authority" },
+			{ packId: PACK_NAME, principal: "pack", capability: "decide" },
+		]) {
+			const response = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(body) });
+			expect(response.status, `${REPRO}: pack tuples admit only their exact closed principal/capability matrix`).toBe(body.capability === "decide" ? 422 : 400);
+		}
+		const absentPack = await apiFetch(grantsPath(), {
+			method: "PUT", headers: operatorHeaders(), body: JSON.stringify({ packId: "missing.pack", principal: "pack", capability: "memory.read" }),
+		});
+		expect(absentPack.status).toBe(404);
+		expect((await json(absentPack)).code).toBe("EXTENSION_GRANT_PRINCIPAL_NOT_FOUND");
+
+		const settingsBefore = await apiFetch(settingsPath());
+		expect(settingsBefore.status).toBe(200);
+		const packTargetBefore = (await json(settingsBefore)).targets.find((candidate: any) =>
+			candidate.ref?.packId === PACK_NAME && candidate.ref?.kind === "pack",
+		);
+		expect(packTargetBefore, `${REPRO}: the existing Market Pack target must expose the server-owned pack grant projection`).toMatchObject({
+			ref: { packId: PACK_NAME, kind: "pack", id: PACK_NAME },
+			packGrant: {
+				requestedCapabilities: ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"],
+				grants: [],
+			},
+		});
+
+		const granted = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(packGrant) });
+		expect(granted.status).toBe(200);
+		expect((await json(granted)).grant).toMatchObject({ ...packGrant, grantedBy: "admin" });
+		const projection = await apiFetch(grantsPath());
+		const activePack = (await json(projection)).packs.find((candidate: any) => candidate.packId === PACK_NAME);
+		expect(activePack).toMatchObject({ requestedCapabilities: expect.arrayContaining(["memory.read", "memory.read.all", "service.manage"]), grants: ["memory.read"] });
+		const settingsAfterGrant = await apiFetch(settingsPath());
+		const packTargetAfterGrant = (await json(settingsAfterGrant)).targets.find((candidate: any) =>
+			candidate.ref?.packId === PACK_NAME && candidate.ref?.kind === "pack",
+		);
+		expect(packTargetAfterGrant?.packGrant?.grants).toEqual(["memory.read"]);
+
+		const revoke = await apiFetch(`${grantsPath()}/${encodeURIComponent(PACK_NAME)}/principals/pack/memory.read`, { method: "DELETE", headers: operatorHeaders() });
+		expect(revoke.status, `${REPRO}: pack principal revoke must target only its exact tuple`).toBe(200);
+		expect((await json(revoke)).revoked).toBe(true);
+		const settingsAfterRevoke = await apiFetch(settingsPath());
+		const packTargetAfterRevoke = (await json(settingsAfterRevoke)).targets.find((candidate: any) =>
+			candidate.ref?.packId === PACK_NAME && candidate.ref?.kind === "pack",
+		);
+		expect(packTargetAfterRevoke?.packGrant?.grants, `${REPRO}: the Pack target must re-read the live resolver after revocation`).toEqual([]);
 	});
 
 	test("projects inert hook state, grants one exact hook, invalidates contribution state, and revokes without restart", async () => {
@@ -389,12 +461,18 @@ test.describe("extension capability grants API", () => {
 		expect(audit.status).toBe(200);
 		const entries = (await json(audit)).entries;
 		expect(entries).toEqual(expect.arrayContaining([
+			expect.objectContaining({ action: "granted", actor: "admin", packId: PACK_NAME, principal: "pack", capability: "memory.read" }),
+			expect.objectContaining({ action: "revoked", actor: "admin", packId: PACK_NAME, principal: "pack", capability: "memory.read" }),
 			expect.objectContaining({ action: "granted", actor: "admin", packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
 			expect.objectContaining({ action: "granted", actor: "admin", packId: PACK_NAME, hookId: OBSERVE_HOOK, capability: "store" }),
 			expect.objectContaining({ action: "revoked", actor: "admin", packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
 		]));
 		for (const entry of entries) {
-			expect(Object.keys(entry).sort(), `${REPRO}: audit rows must contain only the safe administrative tuple`).toEqual(["action", "actor", "at", "capability", "hookId", "packId"]);
+			expect(Object.keys(entry).sort(), `${REPRO}: audit rows must contain only the safe administrative tuple`).toEqual(
+				entry.principal === "pack"
+					? ["action", "actor", "at", "capability", "packId", "principal"]
+					: ["action", "actor", "at", "capability", "hookId", "packId"],
+			);
 			expect(new Date(entry.at).toISOString()).toBe(entry.at);
 		}
 		expect(JSON.stringify(entries)).not.toContain("attacker");

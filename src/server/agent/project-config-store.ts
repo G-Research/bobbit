@@ -255,9 +255,22 @@ export interface SandboxTokenEntry {
 }
 
 /** Closed vocabulary for explicit extension capability grants. */
-export type ExtensionCapability = "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
+export type ExtensionCapability =
+	| "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents"
+	| "prompt:system-static" | "prompt:system-author"
+	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect"
+	| "memory.invalidate" | "memory.read.all";
 export const EXTENSION_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
-	"decide", "mutate", "filter:tool-result", "store", "session", "agents", "prompt:system-static", "prompt:system-author",
+	"decide", "mutate", "filter:tool-result", "store", "session", "agents",
+	"prompt:system-static", "prompt:system-author",
+	"service.manage", "memory.read", "memory.write", "memory.reflect",
+	"memory.invalidate", "memory.read.all",
+]);
+
+/** The platform-owned capabilities available only to a non-hook pack principal. */
+export const EXTENSION_PACK_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
+	"service.manage", "memory.read", "memory.write", "memory.reflect",
+	"memory.invalidate", "memory.read.all",
 ]);
 
 /** Server-derived hook identity. Wildcards are deliberately unsupported. */
@@ -266,12 +279,41 @@ export interface ExtensionHookRef {
 	hookId: string;
 }
 
-/** A durable, exact per-project capability grant. */
-export interface ExtensionGrant extends ExtensionHookRef {
+/** Discriminated server-derived principal identity for capability resolution. */
+export interface ExtensionHookPrincipal extends ExtensionHookRef {
+	kind: "hook";
+}
+
+/** A pack principal covers its service, panels/routes, and tools—not arbitrary child identities. */
+export interface ExtensionPackPrincipal {
+	kind: "pack";
+	packId: string;
+}
+
+export type ExtensionGrantPrincipal = ExtensionHookPrincipal | ExtensionPackPrincipal;
+
+/** Legacy persisted shape. An absent discriminator permanently means hook. */
+export interface ExtensionHookGrant extends ExtensionHookRef {
+	/** Deliberately absent from persisted hook rows; `principal: "hook"` is invalid. */
+	principal?: never;
 	capability: ExtensionCapability;
 	grantedAt: string;
 	grantedBy: string;
 }
+
+/** Durable exact grant for a non-hook pack principal. */
+export interface ExtensionPackGrant {
+	packId: string;
+	principal: "pack";
+	/** Pack rows must not name a hook. */
+	hookId?: never;
+	capability: ExtensionCapability;
+	grantedAt: string;
+	grantedBy: string;
+}
+
+/** A durable, exact per-project capability grant. */
+export type ExtensionGrant = ExtensionHookGrant | ExtensionPackGrant;
 
 export type ExtensionGrantMap = ExtensionGrant[];
 
@@ -364,6 +406,11 @@ export const EXTENSION_GRANT_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function isExtensionCapability(value: unknown): value is ExtensionCapability {
 	return typeof value === "string" && EXTENSION_CAPABILITIES.has(value as ExtensionCapability);
+}
+
+/** Pack-only capability matrix; hook capability support remains declaration-owned. */
+export function isExtensionPackCapability(value: unknown): value is ExtensionCapability {
+	return typeof value === "string" && EXTENSION_PACK_CAPABILITIES.has(value as ExtensionCapability);
 }
 
 export function isSafeExtensionGrantIdentifier(value: unknown): value is string {
@@ -521,20 +568,39 @@ function normalizeSandboxTokens(raw: unknown): { value: SandboxTokenEntry[]; ok:
 	return { value: out, ok: true };
 }
 
+function hasOnlyExtensionGrantFields(candidate: Record<string, unknown>, fields: readonly string[]): boolean {
+	return Object.keys(candidate).every(key => fields.includes(key));
+}
+
 /** Normalize, validate, and de-duplicate grants by their exact authority tuple. */
 export function normalizeExtensionGrants(raw: unknown): { value: ExtensionGrantMap; ok: boolean } {
 	if (!Array.isArray(raw)) return { value: [], ok: false };
 	const byTuple = new Map<string, ExtensionGrant>();
 	for (const candidate of raw) {
 		if (!isPlainObject(candidate)) continue;
-		const { packId, hookId, capability, grantedAt, grantedBy } = candidate;
+		const { packId, capability, grantedAt, grantedBy } = candidate;
 		if (!isSafeExtensionGrantIdentifier(packId)
-			|| !isSafeExtensionGrantIdentifier(hookId)
 			|| !isExtensionCapability(capability)
 			|| !isCanonicalExtensionGrantTimestamp(grantedAt)
 			|| !isSafeExtensionGrantIdentifier(grantedBy)) continue;
-		const grant: ExtensionGrant = { packId, hookId, capability, grantedAt, grantedBy };
-		byTuple.set(`${packId}\u0000${hookId}\u0000${capability}`, grant);
+
+		// Legacy hook rows keep their exact discriminator-free persisted shape.
+		if (candidate.principal === undefined) {
+			const { hookId } = candidate;
+			// Legacy hook rows historically tolerated unknown keys. Retain that
+			// compatibility while canonicalizing them to the durable hook shape.
+			if (!isSafeExtensionGrantIdentifier(hookId)
+				|| isExtensionPackCapability(capability)) continue;
+			const grant: ExtensionHookGrant = { packId, hookId, capability, grantedAt, grantedBy };
+			byTuple.set(`${packId}\u0000hook\u0000${hookId}\u0000${capability}`, grant);
+			continue;
+		}
+
+		if (candidate.principal !== "pack"
+			|| !hasOnlyExtensionGrantFields(candidate, ["packId", "principal", "capability", "grantedAt", "grantedBy"])
+			|| !isExtensionPackCapability(capability)) continue;
+		const grant: ExtensionPackGrant = { packId, principal: "pack", capability, grantedAt, grantedBy };
+		byTuple.set(`${packId}\u0000pack\u0000${capability}`, grant);
 	}
 	return { value: [...byTuple.values()], ok: true };
 }

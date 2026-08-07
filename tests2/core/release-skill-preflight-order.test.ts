@@ -306,6 +306,9 @@ describe("push-triggered release workflow", () => {
 		assert.match(tagStep, /git\/ref\/tags\/\$TAG/);
 		assert.match(tagStep, /points at \$existing, not \$GITHUB_SHA/);
 		assert.match(tagStep, /-f ref="refs\/tags\/\$TAG" -f sha="\$GITHUB_SHA"/);
+		assert.match(tagStep, /existing=""/);
+		assert.match(tagStep, /if found="\$\(gh api/);
+		assert.doesNotMatch(tagStep, /gh api[^\n]*\|\| true/);
 
 		assert.match(releaseStep("release", "Create release").run ?? "", /--verify-tag/);
 
@@ -375,6 +378,7 @@ describe("push-triggered release workflow", () => {
 		assert.deepEqual(releaseJob("release").needs, ["verify", "tag"]);
 		const release = releaseStep("release", "Create release").run ?? "";
 		assert.match(release, /gh release create "\$TAG"/);
+		assert.match(release, /--repo "\$GITHUB_REPOSITORY"/);
 		assert.match(release, /--notes-file release-artifact\/release-notes\.md/);
 		assert.match(release, /--generate-notes/);
 		assert.match(release, /PRERELEASE=\(\)/);

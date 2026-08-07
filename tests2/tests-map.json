@@ -329,7 +329,7 @@
     },
     {
       "path": "tests2/core/base-path-cli.test.ts",
-      "reason": "Focused CLI coverage for flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
+      "reason": "Focused CLI coverage for standalone version-flag recognition without consuming option values, flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -383,7 +383,7 @@
     },
     {
       "path": "tests2/integration/base-path-cli-entrypoint.test.ts",
-      "reason": "Real executable CLI entrypoint smoke in the E2E Vitest lane proving an isolated nested mount binds an ephemeral port, persists its mounted gateway URL, serves mounted health and static routes, prints the truthful loopback-auth banner, and terminates cleanly within a bound.",
+      "reason": "Real package-bin CLI entrypoint smoke in the E2E Vitest lane proving --version prints exact package metadata and exits without gateway state or port binding, while an isolated nested mount binds an ephemeral port, persists its mounted gateway URL, serves mounted health and static routes, prints the truthful loopback-auth banner, and terminates cleanly within a bound.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",
@@ -2373,7 +2373,7 @@
     },
     {
       "path": "tests2/core/build-unit-gate-ci.test.ts",
-      "reason": "Structural CI qualification pin: validates YAML syntax plus main-only push/PR triggers, native Ubuntu/Windows/macOS coverage, the Ubuntu Node 26 qualifier, and an exact retry-free Vitest invocation so qualification cannot pass on retry-masked flakes.",
+      "reason": "Structural CI qualification pin: validates YAML syntax, main-only push/PR triggers, native Ubuntu/Windows/macOS coverage, the Ubuntu Node 26 qualifier, the full standard unit invocation, and the temporary exclusion of affected testing from CI.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2625,7 +2625,7 @@
     },
     {
       "path": "tests2/browser/e2e/extension-capability-grants.spec.ts",
-      "reason": "Authenticated browser journey from the production app origin proving an active decision hook remains inert by default, grant then revoke updates the projection, and reload preserves revoked state without leaking credentials.",
+      "reason": "Authenticated browser journey through the existing Market Pack and Hook grant controls, proving exact non-hook pack grant/revoke persistence, browser-operator confirmation, server-refetched audit attribution, and retained legacy hook compatibility.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

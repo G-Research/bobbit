@@ -303,14 +303,13 @@ an idempotent “already resumed” result. If a later/manual pause replaces the
 route leaves that pause intact and tells the user it requires normal resume. No automatic session turn is resurrected;
 the resumed goal/session proceeds through its ordinary queue/next-turn path.
 
-EP-6 adds two distinct per-project grants through `ProjectConfigStore`: `ask:decision` permits creating a decision
-record, and `ask:interrupt` permits a deferrable/consent card to interrupt. The latter has server-owned,
-configuration-validated `maxPerSession` and `maxPerGoal` hard caps. The manager checks grant and cap before creating
-interrupting UI, and
-counts only a newly persisted, deduplicated request. Revoke is rechecked at the answer/terminal transition: it cannot
-turn a pending unsafe operation into an allow; a revoked consent request resolves through its fail-closed deny/pause
-policy. Exceeding a cap returns `BUDGET_EXCEEDED`, writes a loud audit result, and creates no card—never a silent
-drop. Advisory inbox publication is not an interrupt and needs no interruption grant/cap.
+EP-11 requires its own reviewed, typed decision-authorization contract if it needs to gate record creation or
+interruption. It must not add `ask:*` strings, quota fields, or another principal shape to EP-6's implemented closed
+grant vocabulary. Its manager checks its approved authorization and cap before creating interrupting UI, counts only a
+newly persisted, deduplicated request, and rechecks at the answer/terminal transition so revocation cannot turn a
+pending unsafe operation into an allow. Exceeding a cap returns `BUDGET_EXCEEDED`, writes a loud audit result, and
+creates no card—never a silent drop. Advisory inbox publication is not an interrupt and needs no interruption
+authorization or cap.
 
 `ContextTraceStore` remains the sole activity audit stream. Extend its exact allow-lists with core-owned decision
 status/reason identifiers and a bounded request id; do not put question prose, answers, options, tool arguments, or
@@ -575,25 +574,44 @@ The migration removes the superseded core heuristic/call path rather than adding
 
 ### Grants, precedence, and hard denial
 
-EP-6 adds a native, per-project configuration record through `ProjectConfigStore`:
+EP-6 uses one native, per-project `ProjectConfigStore.extension_grants` union and one compatible
+audit/outbox owner:
 
 ```ts
-interface ExtensionGrant {
-  hookId: string;
-  capability: string;
-  grantedAt: string;
-  grantedBy: string;
-  // Present only for ask:interrupt; server validates, persists, and enforces it.
-  maxPerSession?: number;
-  maxPerGoal?: number;
-}
+type ExtensionGrant =
+  | {
+      packId: string; hookId: string; capability: ExtensionCapability;
+      grantedAt: string; grantedBy: string;
+    }
+  | {
+      packId: string; principal: "pack"; capability: ExtensionCapability;
+      grantedAt: string; grantedBy: string;
+    };
 ```
 
-The server owns write validation, audit rows, revoke, and cache invalidation; the Market UI only requests them. A missing grant is deny-by-default. Revocation takes effect for the next resolution without process restart. The grant surface gates core application only and must be visibly distinct from pack activation.
+The closed vocabulary is `decide`, `mutate`, `filter:tool-result`, `store`, `session`, `agents`,
+`prompt:system-static`, `prompt:system-author`, `service.manage`, `memory.read`, `memory.write`,
+`memory.reflect`, `memory.invalidate`, and `memory.read.all`. The last six are pack-only; hook
+eligibility remains declaration-owned and is not broadened. The exact keys are `(packId, "hook",
+hookId, capability)` and `(packId, "pack", capability)`. There are no wildcards, inherited
+permissions, extension-defined capabilities, or quota fields in a grant row.
 
-Resolution is deterministic:
+Legacy hook rows stay discriminator-free. For backward compatibility their loader tolerates
+unrelated extra fields, canonicalizing a valid row to the durable hook shape on a later write.
+Those fields never add authority. `principal` is intentionally not tolerated on a hook row:
+`principal: "hook"` and unknown principal values are invalid, while a pack row must have exactly
+`principal: "pack"` and no `hookId`.
 
-1. Inactive pack/entity, malformed result, unavailable value, ungranted capability, or user/operator pin: no application; record why.
+The server owns write validation, audit rows, revoke, and cache invalidation; Market uses the
+existing grant controls. A missing grant is deny-by-default. Revocation is visible to the shared
+live resolver on its next application-fence call without a process restart. The grant surface
+gates core application only and remains visibly distinct from pack activation.
+
+Resolution and core application remain deterministic:
+
+1. A malformed request, inactive server-resolved pack/hook, unsupported principal/capability
+   pairing, unavailable value, ungranted capability, or user/operator pin permits no application;
+   record the applicable reason.
 2. Within a pack, highest valid confidence wins; ties use stable hook id order.
 3. Across packs, configured project `pack_order` priority breaks the tie; the highest-priority pack wins deterministically.
 4. For tool safety, validate all granted verdicts and apply the most restrictive result: `deny > warn > allow`. A granted hard deny wins over every allow, cannot alter unrelated tools, and records its reason.
@@ -637,6 +655,30 @@ interface ServiceStatus { state: "stopped" | "starting" | "ready" | "unhealthy" 
 
 The runtime adapter owns start → readiness/health → status → graceful stop/restart; Hindsight and a future LangFlow implementation supply only their spec/config. Mode selection must not change extension code. Secret references are resolved by the existing secret/config owner and never serialized into status, logs, images, or traces. Port ownership/conflicts, volume/data ownership, bounded diagnostics, and crash policy are core runtime responsibilities. Hindsight proves equivalent local/Docker/Compose behaviour and clean degradation when unavailable; LangFlow is not implemented here.
 
+### Generic non-hook grant handoff
+
+EP-6 extends its single project-owned `extension_grants` and audit/outbox owner with a compatible
+principal union. Legacy hook rows remain discriminator-free; their loader tolerates unrelated
+extra fields but canonicalizes them on write, while treating any `principal` field as invalid. A
+new pack row is exactly `{ packId, principal: "pack", capability, grantedAt, grantedBy }`. The six
+pack-only closed values are `service.manage`, `memory.read`, `memory.write`, `memory.reflect`,
+`memory.invalidate`, and `memory.read.all`. No hook receives those values, and no pack declaration
+can mint another one.
+
+The public Hindsight seam is `ExtensionGrantPrincipal`, `ExtensionGrantDecision`,
+`ExtensionCapabilityGrantResolver`, and `createExtensionCapabilityGrantResolver()` from the
+extension-grant policy module. A consumer retains the resolver, passes server-derived
+`{ kind: "pack", packId }`, and calls it at every application fence; it never reads a grant
+snapshot or accepts a panel/tool-supplied principal. The resolver re-resolves active winning pack
+identity and reads current durable state, so revoke wins over stale work. The generic service
+manager consumes the same seam for `service.manage`.
+
+This handoff intentionally does not implement Hindsight memory or service behavior, private
+Hindsight configuration, a Hindsight endpoint/store, extension-defined capabilities, or another
+permissions UI/state owner. Existing hook REST paths, audit rows, activation ceilings, and
+operator-auth requirements remain compatible; pack mutations use the generalized authenticated
+surface and audit/outbox recovery.
+
 ## Compatibility and failure rules
 
 - Schema remains 2. Omitted hooks/grants/settings/system-prompt catalogues are inactive and preserve existing provider/session behavior; no enabled static section means byte-identical existing prompt output.
@@ -669,8 +711,9 @@ Before the parent PR requests merge: rebase on current `origin/main`, run `npm r
 EP-11 focused tests belong in `tests2/core`/`tests2/integration` and are registered in
 `tests2/tests-map.json`. They use an injected clock and real persistence boundary to prove:
 
-1. Missing `ask:decision` and `ask:interrupt` grants reject loudly; a chatty extension reaches the durable
-   session/goal hard cap, receives `BUDGET_EXCEEDED`, writes audit activity, and gets no extra card.
+1. An active decision hook without its exact `(packId, hookId, "decide")` grant rejects loudly. Separately,
+   EP-11's typed decision authorization and interruption cap reject a chatty extension at the durable session/goal
+   hard cap with `BUDGET_EXCEEDED`, audit activity, and no extra card.
 2. A valid answer is cross-validated before `get()` exposes it; malformed, out-of-range, duplicate, or
    Other-without-text input remains pending and never reaches hook code.
 3. Same fingerprints dedupe both pending and terminal records without a quota charge; changed payloads return
@@ -694,13 +737,16 @@ Add `tests2/browser/journeys/extension-platform-parent.journey.spec.ts`, registe
 deterministic local Marketplace fixture packs and mock agents. It exercises real UI/API paths—not seeded grants,
 answers, or hook endpoints:
 
+### EP-11 decision-request journey
+
 1. Open Market for fixture project `extension-platform-e2e`; install the fixture and verify its advisory hook,
-   requested `decide:selectThinking`, `ask:decision`, and `ask:interrupt` capabilities, quotas, and disabled grants.
+   decision hook, typed decision authorization/caps, and disabled exact `(packId, hookId, "decide")` grant.
 2. Start a mock-agent session and send the fixture prompt. Open **Context**; verify the advisory and an advisory inbox
    item appear while thinking remains the operator default and no question interrupts.
-3. Grant the interruption capability. Send an ambiguous deferrable prompt; use the shared multiple-choice widget,
-   submit a valid answer, and verify the read-only/audited result affects only the later fixture turn. Repeat it and
-   verify dedupe/no quota charge; submit malformed input and verify the pending card remains until a valid answer.
+3. Grant the fixture decision hook's exact `(packId, hookId, "decide")` tuple. Send an ambiguous deferrable prompt;
+   use the shared multiple-choice widget, submit a valid answer, and verify the read-only/audited result affects only
+   the later fixture turn. Repeat it and verify dedupe/no quota charge; submit malformed input and verify the pending
+   card remains until a valid answer.
 4. Leave a deferrable question unanswered; advance the injected clock and reload. Verify its validated safe default
    continues the later turn and Context says **defaulted**. Verify the non-interactive fixture defaults immediately.
 5. Trigger an unsafe-tool fixture decision that asks for deferrable/default allow. Verify Context shows platform
@@ -709,10 +755,19 @@ answers, or hook endpoints:
    failed or stalled—and no protected operation proceeds. Answer the Context card once; verify the matching goal
    resumes, the normal queue continues, and reload preserves answer, pause reason/audit, and resume result.
 7. Set a one-question interruption cap, consume it, then trigger another request. Verify the loud budget failure and
-   absence of a second card. Grant `decide:selectThinking`, verify a safe selected value, reload Context, then revoke
-   both decision grants and verify advisory-only behaviour. Re-grant, remove the extension, and verify no later
-   bridge effect while historical trace/decision audit remains readable.
-8. Enable a static-section fixture; grant `prompt:system-static`; inspect **View System Prompt** for its named,
+   absence of a second card. Revoke the fixture decision hook's exact `(packId, hookId, "decide")` tuple and verify
+   advisory-only behaviour. Re-grant, remove the extension, and verify no later bridge effect while historical
+   trace/decision audit remains readable.
+
+### EP-12 thinking-migration journey
+
+8. Enable the default-disabled thinking selector, grant its exact `(packId: "thinking-selector", hookId:
+   "default-thinking", capability: "decide")` tuple, and verify a safe selected value after reload. Revoke that
+   same tuple and verify the operator default remains in effect.
+
+### EP-13 static-section journey
+
+9. Enable a static-section fixture; grant `prompt:system-static`; inspect **View System Prompt** for its named,
    attributed text and per-section/total bytes; then enable/reorder a second fixture and inspect deterministic order
    plus cache-boundary activity in **Context**. Disable/remove it and verify the original prompt bytes/core cache
    evidence return while audit persists. Submit an agent-authored replacement, inspect its proposal diff and usage
