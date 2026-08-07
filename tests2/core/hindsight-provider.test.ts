@@ -305,6 +305,51 @@ test("automatic memory work rechecks live grants and leaves denial or revocation
 	} finally { __setClientFactory(null); }
 });
 
+test("automatic recall rechecks a grant revoked while client construction is pending", async () => {
+	const { client, calls } = makeClient();
+	let readAllowed = true;
+	__setClientFactory(async () => {
+		await Promise.resolve();
+		readAllowed = false;
+		return client;
+	});
+	try {
+		const store = makeStore();
+		const host = {
+			store,
+			memory: { requireCapability: (capability: "memory.read" | "memory.write") => {
+				if (capability === "memory.read" && !readAllowed) throw new Error("EXTENSION_CAPABILITY_DENIED");
+			} },
+		};
+		assert.deepEqual(await provider.beforePrompt({ config: { ...ACTIVE }, host, scopeContext: scope(), prompt: "must not disclose after revocation" }), { blocks: [] });
+		assert.equal(calls.recall.length, 0, "no client method follows a post-construction denial");
+		assert.equal(store.map.size, 0, "a nonfatal automatic denial must not write diagnostics");
+	} finally { __setClientFactory(null); }
+});
+
+test("automatic writes do not ensure, retain, or queue after delayed-client revocation", async () => {
+	const { client, calls } = makeClient();
+	let writeAllowed = true;
+	__setClientFactory(async () => {
+		await Promise.resolve();
+		writeAllowed = false;
+		return client;
+	});
+	try {
+		const store = makeStore();
+		const host = {
+			store,
+			memory: { requireCapability: (capability: "memory.read" | "memory.write") => {
+				if (capability === "memory.write" && !writeAllowed) throw new Error("EXTENSION_CAPABILITY_DENIED");
+			} },
+		};
+		assert.deepEqual(await provider.beforeCompact({ config: { ...ACTIVE }, host, scopeContext: scope(), sessionId: "s", summary: "must not be retained" }), { blocks: [] });
+		assert.deepEqual(calls.ensureBank, [], "a revoked write grant must prevent ensureBank");
+		assert.deepEqual(calls.retain, [], "a revoked write grant must prevent retain");
+		assert.equal(store.map.size, 0, "a revoked write grant must not enqueue or record diagnostics");
+	} finally { __setClientFactory(null); }
+});
+
 test("afterTurn retains a compact summary with the full auto-tag taxonomy", async () => {
 	const { client, calls } = makeClient();
 	__setClientFactory(() => client);
