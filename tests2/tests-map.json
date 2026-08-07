@@ -2489,6 +2489,24 @@
       }
     },
     {
+      "path": "tests2/core/claude-runtime-review-roles.test.ts",
+      "reason": "Shipped Claude runtime reviewer-role schema, builtin PackResolver resolution, normalized policy ceilings, required protocol/parity/billing concerns, verifier boundaries, and UTF-8 prompt budgets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-runtime-review-workflow.test.ts",
+      "reason": "Real project claude-runtime inline-workflow validation, canonical DAG and command phases, specialist role resolution, no-custom-engine guard, real-model dogfood evidence, and UTF-8 prompt budgets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/session-runtime-status-protocol.test.ts",
       "reason": "Happy-dom coverage for applying server runtime and model-availability projections without violating status-version ownership.",
       "execution": {
