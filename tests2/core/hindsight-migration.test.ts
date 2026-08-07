@@ -5,50 +5,72 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import YAML from "yaml";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const packRoot = path.join(root, "market-packs/hindsight");
-const migrationPath = path.join(packRoot, "src/migration.ts");
-const composePath = path.join(packRoot, "runtime/compose.yaml");
-const implemented = fs.existsSync(migrationPath);
+import {
+	createHindsightMigrationPlan,
+	executeHindsightMigration,
+	migrationConfirmationFor,
+	type LogicalMigrationRunner,
+} from "../../market-packs/hindsight/src/migration.ts";
 
-function source(file: string): string {
-	return fs.readFileSync(file, "utf8");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const composePath = path.join(root, "market-packs/hindsight/runtime/compose.yaml");
+
+function compatibleInput() {
+	return {
+		source: { kind: "managed-volume" as const, volume: "hindsight-old" },
+		target: { kind: "managed-volume" as const, volume: "hindsight-new" },
+		backupDirectory: "/operator/backups",
+		compatibility: {
+			bankExists: true, markerPresent: true, sourcePostgresMajor: 16, targetPostgresMajor: 16,
+			sourceSchemaVersion: "1", targetSchemaVersion: "1", freeBytes: 2_000, requiredBytes: 1_000,
+		},
+		createdAt: "2026-01-01T00:00:00.000Z",
+	};
 }
 
-describe.skipIf(!implemented)("Hindsight logical PostgreSQL migration", () => {
-	it("uses a durable owned named volume and never bind-mounts legacy pg0 data", () => {
-		const compose = source(composePath);
-		const parsed = YAML.parse(compose) as { services?: { db?: { volumes?: string[] } }; volumes?: Record<string, unknown> };
-		const dbVolumes = parsed.services?.db?.volumes ?? [];
-		assert.ok(dbVolumes.some(volume => /^[A-Za-z0-9_-]+:\/var\/lib\/postgresql\/data/.test(volume)),
-			"Compose must own PostgreSQL data through a named volume, not a host data directory");
-		assert.ok(parsed.volumes && Object.keys(parsed.volumes).length > 0, "the durable named volume must be declared at Compose top level");
-		assert.doesNotMatch(compose, /pg0|(?:HINDSIGHT_DATA_DIR|\$\{[^}]*DATA[^}]*\}):\/var\/lib\/postgresql\/data/i,
-			"the live legacy pg0/data directory must never be bind-mounted into a container");
+function runner(calls: string[], failVerify = false): LogicalMigrationRunner {
+	return {
+		stopWriters: async () => { calls.push("stop-writers"); },
+		dumpCustom: async () => { calls.push("pg_dump-custom"); },
+		validateDump: async () => { calls.push("validate-dump"); },
+		createTarget: async () => { calls.push("create-target"); },
+		restoreCustom: async () => { calls.push("pg_restore-custom"); },
+		verify: async () => { calls.push("verify-retain-recall-reflect"); return { healthy: !failVerify, markerPresent: true, retainRecallReflect: !failVerify }; },
+		switchActive: async () => { calls.push("switch-active"); },
+		restoreSourceRouting: async () => { calls.push("restore-source-routing"); },
+	};
+}
+
+describe("Hindsight logical PostgreSQL migration", () => {
+	it("uses a named durable volume rather than a host PostgreSQL data mount", () => {
+		const compose = YAML.parse(fs.readFileSync(composePath, "utf8")) as { services: { db: { volumes: string[] } }; volumes: Record<string, unknown> };
+		assert.deepEqual(compose.services.db.volumes, ["hindsight-postgres:/var/lib/postgresql/data"]);
+		assert.deepEqual(compose.volumes, { "hindsight-postgres": {} });
 	});
 
-	it("makes plans compatibility-checked, fingerprinted, backed up, and reversible", () => {
-		const text = source(migrationPath);
-		for (const required of ["fingerprint", "pg_dump", "pg_restore", "backup", "rollback", "schema", "Postgres", "free"])
-			assert.match(text, new RegExp(required, "i"), `migration source must account for ${required}`);
-		assert.match(text, /custom(?:-format| format)|\s-F\s*c/i, "backup must use pg_dump custom format");
-		assert.match(text, /confirm/i, "execution must require explicit operator confirmation");
-		assert.match(text, /writer|quiesce|stop/i, "writers must be stopped before dumping");
-		assert.match(text, /marker/i, "restore verification must include a known retained marker");
-		assert.match(text, /retain/i);
-		assert.match(text, /recall/i);
-		assert.match(text, /reflect/i);
+	it("creates a compatibility-checked, fingerprinted custom backup plan and verifies before switching", async () => {
+		const planned = createHindsightMigrationPlan(compatibleInput());
+		assert.equal(planned.ok, true);
+		if (!planned.ok) return;
+		assert.equal(planned.plan.backup.format, "custom");
+		assert.equal(planned.plan.confirmation, migrationConfirmationFor(planned.plan));
+		assert.equal(planned.plan.rollback.action, "restore-source-routing");
+		const calls: string[] = [];
+		const result = await executeHindsightMigration(planned.plan, planned.plan.confirmation, runner(calls));
+		assert.deepEqual(result, { ok: true, planId: planned.plan.id, fingerprint: planned.plan.fingerprint });
+		assert.deepEqual(calls, ["stop-writers", "pg_dump-custom", "validate-dump", "create-target", "pg_restore-custom", "verify-retain-recall-reflect", "switch-active"]);
 	});
 
-	it("refuses destructive replacement without the exact plan fingerprint and preserves the old authority on failure", () => {
-		const text = source(migrationPath);
-		assert.match(text, /confirmation[^\n]*(?:fingerprint|plan)|(?:fingerprint|plan)[^\n]*confirmation/i,
-			"execution must bind the typed confirmation to the reviewed plan fingerprint");
-		assert.match(text, /(?:keep|preserve|retain)[^\n]*(?:old|source|volume|endpoint)|(?:old|source|volume|endpoint)[^\n]*(?:keep|preserve|retain)/i,
-			"source storage remains authoritative until a verified restore succeeds");
-		assert.match(text, /(?:catch|failure|error)[\s\S]{0,500}(?:rollback|source|old)/i,
-			"a restore failure must leave a rollback path rather than selecting an empty target bank");
-		assert.doesNotMatch(text, /rm\s+-rf|--volumes|volume\s+rm/i,
-			"ordinary migration planning/execution must not destroy an existing volume");
+	it("rejects unsafe plans and restores source routing when a verified replacement fails", async () => {
+		assert.deepEqual(createHindsightMigrationPlan({ ...compatibleInput(), source: { kind: "managed-volume", volume: "pg0" } }), { ok: false, code: "HINDSIGHT_MIGRATION_INVALID" });
+		assert.deepEqual(createHindsightMigrationPlan({ ...compatibleInput(), compatibility: { ...compatibleInput().compatibility, targetSchemaVersion: "2" } }), { ok: false, code: "HINDSIGHT_MIGRATION_INCOMPATIBLE" });
+		const planned = createHindsightMigrationPlan(compatibleInput());
+		assert.equal(planned.ok, true);
+		if (!planned.ok) return;
+		assert.deepEqual(await executeHindsightMigration(planned.plan, "MIGRATE HINDSIGHT wrong", runner([])), { ok: false, code: "HINDSIGHT_MIGRATION_CONFIRMATION_REQUIRED" });
+		const calls: string[] = [];
+		const result = await executeHindsightMigration(planned.plan, planned.plan.confirmation, runner(calls, true));
+		assert.deepEqual(result, { ok: false, code: "HINDSIGHT_MIGRATION_FAILED", rolledBack: true });
+		assert.deepEqual(calls, ["stop-writers", "pg_dump-custom", "validate-dump", "create-target", "pg_restore-custom", "verify-retain-recall-reflect", "restore-source-routing"]);
 	});
 });

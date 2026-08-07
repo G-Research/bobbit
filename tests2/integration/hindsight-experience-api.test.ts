@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { test as base, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createSession, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
 import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.ts";
+import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.ts";
+
+// This fixture installs the source pack in an unbuilt in-process gateway.
+// Its route worker therefore needs the standard test-only TypeScript resolver.
+enableTsWorkerResolver();
 
 const test = base;
 const PACK_ID = "hindsight";
@@ -161,14 +166,18 @@ describe.serial("Hindsight experience API", () => {
 		const initial = await json(await apiFetch(settingsPath(project.id)));
 		const configured = await apiFetch(providerPath(project.id), {
 			method: "PATCH", headers: operatorHeaders(),
-			body: JSON.stringify({ expectedRevision: initial.revision, values: { runtimeMode: "external", externalUrl: "http://127.0.0.1:65531" } }),
+			body: JSON.stringify({ expectedRevision: initial.revision, values: { runtimeMode: "docker" } }),
 		});
 		expect(configured.status).toBe(200);
 
 		const status = await route(sessionId, "runtime-status");
 		expect(status.status).toBe(200);
 		const statusBody = await json(status);
-		expect(statusBody.runtime).toMatchObject({ state: expect.stringMatching(/^(stopped|starting|ready|degraded|blocked|unavailable)$/), mode: "external" });
+		expect(statusBody.runtime).toMatchObject({
+			identity: { packId: PACK_ID, runtimeId: "hindsight" },
+			state: expect.stringMatching(/^(stopped|starting|ready|degraded|blocked|unavailable)$/),
+			desired: expect.stringMatching(/^(running|stopped)$/),
+		});
 		expect(JSON.stringify(statusBody)).not.toContain(SECRET);
 
 		const logs = await route(sessionId, "runtime-logs", { tail: 10 });
@@ -183,7 +192,10 @@ describe.serial("Hindsight experience API", () => {
 		await grant(project.id, "memory.read");
 		const readAllowed = await route(sessionId, "recall", { query: "configured but unavailable is bounded" });
 		expect(readAllowed.status).toBe(200);
-		expect(await json(readAllowed)).toMatchObject({ code: expect.stringMatching(/SERVICE_(?:UNHEALTHY|UNAVAILABLE)|INACTIVE/) });
+		const readBody = await json(readAllowed);
+		expect(readBody).toMatchObject({ configured: expect.any(Boolean), memories: expect.any(Array) });
+		expect(readBody.memories).toEqual([]);
+		expect(JSON.stringify(readBody)).not.toContain(SECRET);
 		await revoke(project.id, "memory.read");
 		const readRevoked = await route(sessionId, "recall", { query: "revoked before dispatch" });
 		denied(readRevoked, await json(readRevoked), "memory.read");
@@ -191,7 +203,7 @@ describe.serial("Hindsight experience API", () => {
 		const controlDenied = await route(sessionId, "runtime-control", { action: "stop" });
 		denied(controlDenied, await json(controlDenied), "service.manage");
 		await grant(project.id, "service.manage");
-		const controlled = await route(sessionId, "runtime-control", { action: "stop" });
+		const controlled = await route(sessionId, "runtime-control", { action: "stop", consent: true });
 		expect(controlled.status).toBe(200);
 		expect((await json(controlled)).runtime).toMatchObject({ state: expect.any(String) });
 		await revoke(project.id, "service.manage");

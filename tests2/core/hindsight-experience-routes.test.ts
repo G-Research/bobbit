@@ -2,57 +2,107 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
+import YAML from "yaml";
+
+import toolsExtension from "../../market-packs/hindsight/src/tools.ts";
+import { memoryRoutes, requiredMemoryCapability, resolveMemoryScope } from "../../market-packs/hindsight/src/memory-routes.ts";
+import { routes, __setClientFactory } from "../../market-packs/hindsight/src/routes.ts";
+import { CONFIG_KEY, type StoreLike } from "../../market-packs/hindsight/src/shared.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const packRoot = path.join(root, "market-packs/hindsight");
-const routeSource = path.join(packRoot, "src/memory-routes.ts");
-const toolSource = path.join(packRoot, "src/tools.ts");
-const toolDir = path.join(packRoot, "tools/hindsight");
-const implemented = fs.existsSync(routeSource) && fs.existsSync(toolSource);
 
-function source(file: string): string {
-	return fs.readFileSync(file, "utf8");
+class MemoryStore implements StoreLike {
+	private readonly values = new Map<string, unknown>();
+	async get<T>(key: string): Promise<T | null> { return this.values.has(key) ? this.values.get(key) as T : null; }
+	async read<T>(key: string) { return this.values.has(key) ? { state: "present" as const, value: this.values.get(key) as T } : { state: "absent" as const }; }
+	async put<T>(key: string, value: T): Promise<void> { this.values.set(key, value); }
 }
 
-/** These tests deliberately inspect pack-owned adapters rather than a private
- * Hindsight client. Route integration supplies the EP-6 resolver at runtime. */
-describe.skipIf(!implemented)("Hindsight typed memory routes and tool adapters", () => {
-	it("uses every exact live EP-6 capability and never accepts caller-selected scope", () => {
-		const text = source(routeSource);
-		for (const capability of [
-			"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
-		]) assert.match(text, new RegExp(`['\"]${capability.replace(".", "\\.")}['\"]`));
+function configuredStore(): MemoryStore {
+	const store = new MemoryStore();
+	void store.put(CONFIG_KEY, { runtimeMode: "external", externalUrl: "http://127.0.0.1:8848" });
+	return store;
+}
 
-		assert.match(text, /scopeContext/, "routes must derive scope from the authoritative host context");
-		assert.match(text, /project/, "project scope must be applied by the adapter");
-		assert.match(text, /goal/, "goal scope must be applied by the adapter when supplied by the host");
-		assert.match(text, /grant|required|denied|forbidden/i, "a missing or revoked grant must fail closed");
-		assert.doesNotMatch(text, /(?:body|request)\s*\.\s*(?:projectId|scopeContext)/i,
-			"request bodies must not be allowed to forge a project or scope context");
+afterEach(() => __setClientFactory(null));
+
+describe("Hindsight typed memory routes and tool adapters", () => {
+	it("derives narrow scope from the host and requires the exact live read grant", async () => {
+		const store = configuredStore();
+		const capabilities: string[] = [];
+		const scope = resolveMemoryScope({ host: { store }, scopeContext: { project: { id: "project-a" }, goal: { id: "goal-a" } } }, {
+			body: { projectId: "forged-project", scopeContext: { project: { id: "forged" } }, scope: "all" },
+		});
+		assert.deepEqual(scope, { projectId: "project-a", goalId: "goal-a", all: true });
+		assert.equal(requiredMemoryCapability("recall", { body: { scope: "all" } }), "memory.read.all");
+		assert.equal(requiredMemoryCapability("recall", { body: {} }), "memory.read");
+		assert.equal(requiredMemoryCapability("retain", { body: {} }), "memory.write");
+		assert.equal(requiredMemoryCapability("reflect", { body: {} }), "memory.reflect");
+		assert.equal(requiredMemoryCapability("invalidate", { body: {} }), "memory.invalidate");
+
+		const denied = await memoryRoutes.browse({
+			host: { store, memory: { requireCapability: capability => { capabilities.push(capability); return { allowed: false, reason: "denied" }; } } },
+			scopeContext: { project: { id: "project-a" } },
+		}, { body: { query: "only this project" } });
+		assert.deepEqual(capabilities, ["memory.read"]);
+		assert.deepEqual(denied, { configured: true, code: "EXTENSION_CAPABILITY_DENIED", memories: [] });
 	});
 
-	it("declares the complete typed route surface with bounded unavailable behavior", () => {
-		const text = source(routeSource);
-		for (const route of [
+	it("declares the complete public route surface and returns a bounded result while unavailable", async () => {
+		const manifest = YAML.parse(fs.readFileSync(path.join(packRoot, "pack.yaml"), "utf8")) as { routes: { names: string[] } };
+		assert.deepEqual(manifest.routes.names, [
 			"runtime-status", "runtime-control", "runtime-logs", "migration-plan", "migration-execute",
 			"browse", "detail", "recall", "retain", "reflect", "invalidate", "retain-outcome",
-		]) assert.match(text, new RegExp(`['\"]${route}['\"]`), `missing ${route} route`);
-		assert.match(text, /ServiceRuntimeStatus/, "status responses must use the generic runtime status wire");
-		assert.match(text, /AbortSignal|signal|deadline/i, "down or unhealthy calls must have a cancellation/deadline path");
-		assert.match(text, /unavailable|degraded|blocked/i, "unavailable services must return a discriminated result, not wait for recovery");
+		]);
+
+		const store = new MemoryStore();
+		await store.put(CONFIG_KEY, { runtimeMode: "local" });
+		__setClientFactory(() => { throw new Error("a degraded runtime must not dispatch a data-plane client"); });
+		const result = await memoryRoutes.browse({
+			host: { store, memory: { requireCapability: () => ({ allowed: true }) } },
+			scopeContext: { project: { id: "project-a" } },
+			runtime: { state: "degraded", diagnostic: { code: "SERVICE_UNHEALTHY" } },
+		}, { body: {} });
+		assert.deepEqual(result, { configured: true, code: "SERVICE_UNHEALTHY" });
+		assert.equal(typeof routes.recall, "function");
 	});
 
-	it("ships exactly five thin tool adapters that do not own a client or lifecycle", () => {
-		const text = source(toolSource);
+	it("ships exactly five registered tools that dispatch only their corresponding typed route", async () => {
+		const registered: Array<{ name: string; execute: (id: string, params: any, signal?: AbortSignal) => Promise<unknown> }> = [];
+		(toolsExtension as any)({ registerTool: (tool: any) => registered.push(tool) });
 		const names = ["hindsight_recall", "hindsight_retain", "hindsight_reflect", "hindsight_invalidate", "hindsight_retain_outcome"];
-		for (const name of names) {
-			assert.match(text, new RegExp(name));
-			assert.ok(fs.existsSync(path.join(toolDir, `${name}.yaml`)), `missing ${name} descriptor`);
+		assert.deepEqual(registered.map(tool => tool.name), names);
+		const toolDir = path.join(packRoot, "tools/hindsight");
+		assert.deepEqual(fs.readdirSync(toolDir).filter(file => file.endsWith(".yaml")).sort(), names.map(name => `${name}.yaml`).sort());
+
+		const previousFetch = globalThis.fetch;
+		const previousToken = process.env.BOBBIT_TOKEN;
+		const previousUrl = process.env.BOBBIT_GATEWAY_URL;
+		const previousSession = process.env.BOBBIT_SESSION_ID;
+		const dispatched: string[] = [];
+		process.env.BOBBIT_TOKEN = "test-token";
+		process.env.BOBBIT_GATEWAY_URL = "http://gateway.test";
+		process.env.BOBBIT_SESSION_ID = "session-a";
+		globalThis.fetch = (async (input: string | URL) => {
+			const url = String(input);
+			if (url.endsWith("/api/ext/surface-token")) return new Response(JSON.stringify({ token: "surface" }), { status: 200 });
+			dispatched.push(decodeURIComponent(url.slice(url.lastIndexOf("/") + 1)));
+			return new Response(JSON.stringify({ ok: true }), { status: 200 });
+		}) as typeof fetch;
+		try {
+			await registered[0]!.execute("id", { query: "q" });
+			await registered[1]!.execute("id", { content: "c" });
+			await registered[2]!.execute("id", { prompt: "p" });
+			await registered[3]!.execute("id", { id: "memory-1", confirmation: "memory-1" });
+			await registered[4]!.execute("id", {});
+		} finally {
+			globalThis.fetch = previousFetch;
+			if (previousToken === undefined) delete process.env.BOBBIT_TOKEN; else process.env.BOBBIT_TOKEN = previousToken;
+			if (previousUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL; else process.env.BOBBIT_GATEWAY_URL = previousUrl;
+			if (previousSession === undefined) delete process.env.BOBBIT_SESSION_ID; else process.env.BOBBIT_SESSION_ID = previousSession;
 		}
-		assert.equal(fs.readdirSync(toolDir).filter(file => file.endsWith(".yaml")).sort().join(","), names.map(name => `${name}.yaml`).sort().join(","));
-		assert.doesNotMatch(text, /from\s+["'][^"']*(?:hindsight-client|docker|secret-store|extension-settings-store)[^"']*["']/i,
-			"tools must delegate to typed routes rather than constructing a client, runtime, or settings owner");
-		assert.match(text, /route|adapter|dispatch/i, "tools must call the shared typed-route adapter");
+		assert.deepEqual(dispatched, ["recall", "retain", "reflect", "invalidate", "retain-outcome"]);
 	});
 });
