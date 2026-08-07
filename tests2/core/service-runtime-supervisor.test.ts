@@ -312,6 +312,74 @@ describe("ServiceRuntimeSupervisor", () => {
 		assert.deepEqual(store.replaceCalls.at(-1)?.restartAttempts, [0, 10]);
 	});
 
+	it("re-reads the live grant when applying a queued crash restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async (_request: unknown) => allowed);
+		const failing = runner("local", { start: async () => { throw Object.assign(new Error("unhealthy"), { code: "SERVICE_LAUNCH_FAILED" }); } });
+		const { instance, store } = supervisor({
+			clock,
+			authorize,
+			contribution: contribution(manifest({ lifecycle: { startPolicy: "manual", restart: { policy: "on-failure", maxAttempts: 1, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 } } })),
+			runners: [failing],
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		assert.deepEqual(clock.waits.map((wait) => wait.ms), [10]);
+		allowed = false;
+		clock.advance();
+		await flush();
+
+		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 1, "revocation prevents the queued restart launch");
+		assert.equal(authorize.mock.calls.length, 2);
+		assert.deepEqual(authorize.mock.calls[1]?.[0], { ...identity, action: "start" });
+		assert.deepEqual(store.replaceCalls.at(-1)?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.010Z" });
+	});
+
+	it("does not let a denied stop cancel an authorized queued restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async () => allowed);
+		const failing = runner("local", { start: async () => { throw Object.assign(new Error("unhealthy"), { code: "SERVICE_LAUNCH_FAILED" }); } });
+		const { instance } = supervisor({
+			clock,
+			authorize,
+			contribution: contribution(manifest({ lifecycle: { startPolicy: "manual", restart: { policy: "on-failure", maxAttempts: 2, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 } } })),
+			runners: [failing],
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		allowed = false;
+		await expect(instance.stop({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		allowed = true;
+		clock.advance();
+		await flush();
+
+		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 2, "the denied stop did not alter restart scheduling");
+	});
+
+	it("does not let a denied purge cancel an authorized queued restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async () => allowed);
+		const failing = runner("local", { start: async () => { throw Object.assign(new Error("unhealthy"), { code: "SERVICE_LAUNCH_FAILED" }); } });
+		const { instance } = supervisor({
+			clock,
+			authorize,
+			contribution: contribution(manifest({ lifecycle: { startPolicy: "manual", restart: { policy: "on-failure", maxAttempts: 2, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 } } })),
+			runners: [failing],
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		allowed = false;
+		await expect(instance.purge({ ...identity, confirmation: identity })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		allowed = true;
+		clock.advance();
+		await flush();
+
+		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 2, "the denied purge did not alter restart scheduling");
+	});
+
 	it("persists stopped intent before teardown and cancels a pending restart", async () => {
 		const store = new FakeStore();
 		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));

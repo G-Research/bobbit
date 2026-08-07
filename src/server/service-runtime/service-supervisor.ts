@@ -278,21 +278,20 @@ export class ServiceRuntimeSupervisor {
 
 	stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		this.cancelRestart(identity);
-		this.cancelHealthMonitor(identity);
 		return this.enqueueLifecycle(identity, () => this.doStop(request));
 	}
 
 	purge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		this.cancelRestart(identity);
-		this.cancelHealthMonitor(identity);
 		return this.enqueueLifecycle(identity, () => this.doPurge(request));
 	}
 
 	private async doStop(request: ServiceRuntimeControlRequest, alreadyAuthorized = false): Promise<ServiceRuntimeStatus> {
 		if (!alreadyAuthorized) await this.authorize(request, "stop");
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		// A denied control request must leave detached restart/health work alone.
+		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
 		const old = await this.options.store.load(identity);
 		if (!old) return recordContext(identity, undefined);
 		// Persist stopped intent and clear the endpoint before teardown, but retain
@@ -318,6 +317,9 @@ export class ServiceRuntimeSupervisor {
 	private async doPurge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
 		await this.authorize(request, "purge");
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		// A denied purge must not suppress an independently authorized restart.
+		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
 		const contribution = this.requireContribution(request);
 		const settings = await this.options.settings.resolve({ ...request, contribution });
 		const old = await this.options.store.load(identity);
@@ -620,7 +622,9 @@ export class ServiceRuntimeSupervisor {
 			if (this.restartTokens.get(key) !== token) return;
 			const record = await this.options.store.load(identity).catch(() => undefined);
 			if (record?.desired !== "running") return;
-			try { await this.enqueueLifecycle(identity, () => this.doStart(this.restartRequest(request), true)); }
+			// A restart is detached from the caller that originally opted in. Resolve
+			// the live grant again only when its queued lifecycle work applies.
+			try { await this.enqueueLifecycle(identity, () => this.doStart(this.restartRequest(request), false)); }
 			catch (error) { this.options.logger?.warn("service runtime restart failed", { code: toDiagnostic(error).code }); }
 		})();
 	}

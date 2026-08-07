@@ -106,17 +106,19 @@ function createSupervisor(input: {
 	probe?: ReturnType<typeof vi.fn>;
 	restart?: ServiceRuntimeManifest["lifecycle"]["restart"];
 	settingsRevision?: string;
+	authorize?: ReturnType<typeof vi.fn>;
 }): { instance: ServiceRuntimeSupervisor; store: Store; runner: ServiceRunner } {
 	const store = input.store ?? new Store();
 	const runner = input.runner ?? localRunner();
 	const runtime = input.restart ? { ...manifest, lifecycle: { ...manifest.lifecycle, restart: input.restart } } : manifest;
 	const runtimeContribution = { ...contribution, manifest: runtime };
+	const authorize = input.authorize ?? vi.fn(async () => true);
 	return {
 		instance: new ServiceRuntimeSupervisor({
 			registry: { getRuntime: vi.fn(() => runtimeContribution) } as any,
 			store: store as any,
 			runners: [runner],
-			authorizer: { authorize: async () => true },
+			authorizer: { authorize: authorize as any },
 			settings: { resolve: async () => ({ mode: "local", revision: input.settingsRevision ?? "revision-1", values: {} }) },
 			serverIdentity: "server",
 			clock: input.clock,
@@ -240,6 +242,33 @@ describe("ServiceRuntimeSupervisor health monitor", () => {
 		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 2);
 		assert.equal(store.record?.endpoint, endpoint);
 		assert.equal(store.record?.lastDiagnostic, undefined);
+	});
+
+	it("re-reads the live grant when applying a queued health restart", async () => {
+		const clock = new ManualClock();
+		let allowed = true;
+		const authorize = vi.fn(async (_request: unknown) => allowed);
+		let probes = 0;
+		const probe = vi.fn(async () => ++probes !== 2);
+		const { instance, store, runner } = createSupervisor({
+			clock,
+			probe,
+			authorize,
+			restart: { policy: "on-failure", maxAttempts: 1, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 },
+		});
+
+		await instance.start({ ...identity, mode: "local" });
+		clock.advance();
+		await flush();
+		assert.deepEqual(clock.waits.map((wait) => wait.ms), [10]);
+		allowed = false;
+		clock.advance();
+		await flush();
+
+		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 1, "revocation prevents the queued replacement launch");
+		assert.equal(authorize.mock.calls.length, 2);
+		assert.deepEqual(authorize.mock.calls[1]?.[0], { ...identity, action: "start" });
+		assert.deepEqual(store.record?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.020Z" });
 	});
 
 	it("reuses explicitly only after revision and inspect verification, while local reconciliation always starts fresh", async () => {
