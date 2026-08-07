@@ -22,19 +22,21 @@ import { MessageEditor } from "../../src/ui/components/MessageEditor.js";
 // under vitest isolate:false.
 if (!customElements.get("message-editor")) customElements.define("message-editor", MessageEditor);
 
-const SLASH_SKILLS = [
+const DEFAULT_SLASH_SKILLS = [
 	{ name: "deploy", description: "Deploy to production", argumentHint: "<env>", source: "project" },
 	{ name: "deploy-staging", description: "Deploy to staging", source: "project" },
 	{ name: "skill-name", description: "A test skill", source: "personal" },
 	{ name: "status", description: "Check status", source: "project" },
 	{ name: "test", description: "Run tests", argumentHint: "<pattern>", source: "project" },
 ];
+let slashSkills: any[];
 
 beforeEach(() => {
+	slashSkills = [...DEFAULT_SLASH_SKILLS];
 	vi.stubGlobal("fetch", async (input: any): Promise<Response> => {
 		const url = typeof input === "string" ? input : (input && input.url) || String(input);
 		if (url.includes("/api/slash-skills")) {
-			return new Response(JSON.stringify({ skills: SLASH_SKILLS }), {
+			return new Response(JSON.stringify({ skills: slashSkills }), {
 				status: 200, headers: { "Content-Type": "application/json" },
 			});
 		}
@@ -46,8 +48,21 @@ afterEach(() => {
 	document.body.innerHTML = "";
 });
 
-async function mount(): Promise<any> {
+interface MountOptions {
+	runtime?: "pi" | "claude-agent-sdk";
+	onSend?: (text: string, attachments: unknown[]) => void;
+	onCompact?: () => void;
+	attachments?: unknown[];
+}
+
+async function mount(options: MountOptions = {}): Promise<any> {
 	const el = document.createElement("message-editor") as any;
+	// Runtime and onCompact are the composer dispatch boundary. Keep these tests
+	// on the real component rather than reproducing the resolver in a fixture.
+	el.runtime = options.runtime ?? "pi";
+	el.onCompact = options.onCompact;
+	el.onSend = options.onSend;
+	el.attachments = options.attachments ?? [];
 	el.cwd = "/tmp";
 	el.showModelSelector = false;
 	el.showThinkingSelector = false;
@@ -159,5 +174,101 @@ describe("Slash autocomplete", () => {
 		const el = await mount();
 		await setComposer(el, "line1\n/dep", 10);
 		expect(isMenuOpen(el)).toBe(true);
+	});
+
+	it("selected skills only complete in the editor, then take the ordinary send path", async () => {
+		const sends: string[] = [];
+		const el = await mount({ onSend: (text) => sends.push(text) });
+		await setComposer(el, "/tes", 4);
+		await key(el, "Enter");
+		expect(el.value).toBe("/test ");
+		expect(sends).toEqual([]);
+
+		await setComposer(el, "/test src/ui", "/test src/ui".length);
+		await key(el, "Enter");
+		expect(sends).toEqual(["/test src/ui"]);
+	});
+
+	it("ordinary text, unknown commands, and near-prefix commands pass through unchanged", async () => {
+		const sends: string[] = [];
+		const el = await mount({ runtime: "claude-agent-sdk", onSend: (text) => sends.push(text) });
+		for (const value of ["explain /goal", "/unknown arg", "/review-notes", "/compact-notes"]) {
+			await setComposer(el, value, value.length);
+			await key(el, "Enter");
+		}
+		expect(sends).toEqual(["explain /goal", "/unknown arg", "/review-notes", "/compact-notes"]);
+	});
+
+	it("Bobbit /goal and /review skills own exact Claude collisions while near-prefixes stay ordinary", async () => {
+		slashSkills = [
+			{ name: "goal", description: "Bobbit goal skill", source: "project" },
+			{ name: "review", description: "Bobbit review skill", source: "project" },
+		];
+		const sends: string[] = [];
+		const el = await mount({ runtime: "claude-agent-sdk", onSend: (text) => sends.push(text) });
+
+		await setComposer(el, "/goal", 5);
+		expect(filtered(el)).toEqual(["goal"]);
+		await key(el, "Enter");
+		expect(el.value).toBe("/goal ");
+		await key(el, "Enter");
+		expect(sends).toEqual(["/goal "]);
+
+		await setComposer(el, "/review", 7);
+		expect(filtered(el)).toEqual(["review"]);
+		await setComposer(el, "/review-notes", 13);
+		await key(el, "Enter");
+		expect(sends).toEqual(["/goal ", "/review-notes"]);
+	});
+
+	it("shows /compact only for Pi and locally dispatches the exact command", async () => {
+		slashSkills = [{ name: "compact", description: "Compact context", source: "built-in" }];
+		const compact = vi.fn();
+		const pi = await mount({ runtime: "pi", onCompact: compact });
+		await setComposer(pi, "/", 1);
+		expect(filtered(pi)).toContain("compact");
+		await setComposer(pi, "  /CoMpAcT  ", "  /CoMpAcT  ".length);
+		await key(pi, "Enter");
+		expect(compact).toHaveBeenCalledTimes(1);
+
+		document.body.innerHTML = "";
+		const sdk = await mount({ runtime: "claude-agent-sdk" });
+		await setComposer(sdk, "/", 1);
+		expect(filtered(sdk)).not.toContain("compact");
+	});
+
+	it("consumes exact SDK /compact without sending and preserves draft, files, and focus", async () => {
+		const sends: string[] = [];
+		const attachment = { id: "a1", type: "image", fileName: "keep.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" };
+		const el = await mount({
+			runtime: "claude-agent-sdk",
+			onSend: (text) => sends.push(text),
+			attachments: [attachment],
+		});
+		const command = "  /CoMpAcT  ";
+		await setComposer(el, command, command.length);
+		textarea(el).focus();
+		await key(el, "Enter");
+
+		expect(sends).toEqual([]);
+		expect(el.value).toBe(command);
+		expect(el.attachments).toEqual([attachment]);
+		expect(document.activeElement).toBe(textarea(el));
+		const alert = el.querySelector('[role="alert"]');
+		expect(alert?.textContent).toBe("Manual compaction isn’t available for Claude Agent SDK sessions.");
+	});
+
+	it("does not discard attachments when Pi /compact is requested", async () => {
+		const compact = vi.fn();
+		const sends: string[] = [];
+		const attachment = { id: "a1", type: "image", fileName: "keep.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" };
+		const el = await mount({ runtime: "pi", onCompact: compact, onSend: (text) => sends.push(text), attachments: [attachment] });
+		await setComposer(el, "/compact", 8);
+		await key(el, "Enter");
+		expect(compact).not.toHaveBeenCalled();
+		expect(sends).toEqual([]);
+		expect(el.value).toBe("/compact");
+		expect(el.attachments).toEqual([attachment]);
+		expect(el.querySelector('[role="alert"]')?.textContent).toMatch(/attachment/i);
 	});
 });
