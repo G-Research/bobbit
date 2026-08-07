@@ -1502,7 +1502,7 @@ settings saves validate and persist but do not probe, pull, or start a runtime.
 | `runtime-logs` | `{ tail? }` | — | `{ settingsRevision, lines }`; `tail` is an integer clamped to 1–200 and defaults to 100. |
 | `runtime-control` | `{ action: "start" \| "stop" \| "restart", consent: true }` | `service.manage` | `{ settingsRevision, runtime }` from the exact settings snapshot used for control. |
 | `migration-plan` | `{ target: "managed-volume" \| "external" }` | `service.manage` | `{ settingsRevision, ok: true, plan }` or `{ settingsRevision, ok: false, code }`. Planning is redacted and does not run a command, start a service, pull an image, or mutate storage. |
-| `migration-execute` | `{ plan, confirmation }` | `service.manage` | `{ settingsRevision, ok: true, planId, fingerprint }` or `{ settingsRevision, ok: false, code, rolledBack? }`. The confirmation must equal the plan confirmation. |
+| `migration-execute` | `{ plan, confirmation }` | `service.manage` | `{ settingsRevision, ok: true, planId, fingerprint }` or `{ settingsRevision, ok: false, code, rolledBack? }`. The confirmation must equal the plan confirmation. The current built-in bridge returns `HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE` rather than executing a migration. |
 | `browse`, `search` | `{ query?, cursor?, limit?, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memories, cursor? }`. `limit` defaults to 25 and is capped at 100. |
 | `detail` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memory }` or a typed result without `memory`. The returned record is checked against the authoritative scope. |
 | `history` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, history }`; the route verifies the scoped record before reading its history. |
@@ -1535,7 +1535,9 @@ its form state rather than treat an expected down service as a transport failure
 `MEMORY_NOT_FOUND`, `MEMORY_API_UNSUPPORTED`, and `MEMORY_RESPONSE_INVALID`. A service-down,
 degraded, or timed-out data-plane request returns its typed unhealthy result without constructing a
 fallback client or falling back to another provider. Migration failures are returned in their typed
-result (`HINDSIGHT_MIGRATION_*`) rather than as a new empty bank.
+result (`HINDSIGHT_MIGRATION_*`) rather than as a new empty bank. The current built-in bridge
+returns `HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE`; it does not change storage. See the
+[Hindsight migration execution limit](hindsight-memory.md#protect-existing-memories-and-postgresql-data).
 
 Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 

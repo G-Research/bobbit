@@ -279,9 +279,11 @@ configured.
 ## Hindsight migration and isolation
 
 The built-in Hindsight memory provider is a normal consumer of this contract. Configure it in the
-Hindsight pack card for each project: `externalUrl` is the required non-secret URL and `apiKey`
-is an optional secret; its other declared fields supply the memory defaults and behavior. Hindsight
-is dormant until the selected project's effective `externalUrl` is non-blank.
+Hindsight pack card for each project. `runtimeMode: external` needs a non-secret `externalUrl`;
+`local`, `docker`, and `compose` use their selected managed runtime only after an explicit,
+consented start reaches ready. Saving persists only redacted EP-7 configuration and never probes
+or starts a runtime. Local and Docker modes require an external PostgreSQL database; Compose can
+use its owned durable volume or an external database.
 
 For compatibility, an old Hindsight provider PackStore override is considered only before that
 project gets a Hindsight target row. Before that boundary, undeclared primitive legacy runtime
@@ -291,8 +293,9 @@ project has a row, including one created to clear a value, every legacy value is
 is no cross-project or legacy secret fallback. The old pack `config` route is read-only migration
 diagnostics; it cannot write configuration or expose legacy values.
 
-Consequently, two projects can use different Hindsight URLs and keys. Disabling Hindsight in one
-project removes only that project's resolved provider; it does not disable or alter a configured
-provider in another project. This configuration isolation is separate from Hindsight's own
-optional memory-recall scope, which governs remote bank query tags rather than Bobbit settings
-ownership. See [Hindsight memory pack](hindsight-memory.md) for provider behavior.
+Consequently, projects can use different Hindsight configurations, endpoints, and write-only
+secrets. Disabling Hindsight in one project removes only that project's resolved provider; it does
+not disable or alter a configured provider in another project. This configuration isolation is
+separate from Hindsight's own optional memory-recall scope, which governs remote bank query tags
+rather than Bobbit settings ownership. See [Hindsight memory pack](hindsight-memory.md) for
+provider behavior.

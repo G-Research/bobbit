@@ -471,8 +471,9 @@ produces a byte-identical prompt to before this wiring — the invariant a unit 
 ### What ships out of the box
 
 The [Hindsight memory pack](hindsight-memory.md) ships in the built-in band as the first production
-provider, but it is **dormant until a Hindsight URL is configured** — so a fresh install contributes
-no Dynamic Context until you opt in. The wiring itself is also exercised by a
+provider, but it is **dormant until an external endpoint is configured or its selected managed
+runtime reaches ready**. Saving or selecting a managed mode does not start it, so a fresh install
+contributes no Dynamic Context until you opt in. The wiring itself is also exercised by a
 deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, whose `sessionSetup` returns a
 `DEMO_SETUP_BLOCK` and a throwing variant proves the failure path still spawns the session. The
 E2E test (`tests/e2e/provider-session-setup.spec.ts`) **copies that fixture into the per-gateway
@@ -687,9 +688,10 @@ ambient context a session received and why blocks were dropped.
   transition, with bounded outcome data and durable delivery fencing — see
   [Host goal completion delivery](#host-goal-completion-delivery).
 - **G2** ships the first built-in production provider, the [Hindsight memory pack](hindsight-memory.md).
-  It is dormant until a Hindsight URL is configured, so out of the box behaviour is unchanged —
-  with no active provider, no Dynamic Context section is added and the per-turn bridge is never
-  spawned.
+  It is dormant until an external endpoint is configured or its selected managed runtime reaches
+  ready. Saving or selecting a managed mode does not start it, so out of the box behaviour is
+  unchanged — with no active provider, no Dynamic Context section is added and the per-turn bridge
+  is never spawned.
 - Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
 ## See also
