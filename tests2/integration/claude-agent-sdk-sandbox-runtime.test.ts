@@ -1,0 +1,251 @@
+// v2-native — sandbox SDK runtime composition using only deterministic SDK/Docker seams.
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const dockerSpawn = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", async (importOriginal) => ({
+	...await importOriginal<typeof import("node:child_process")>(),
+	spawn: dockerSpawn,
+}));
+
+import { ClaudeAgentSdkBridge } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
+import { createSandboxClaudeAgentSdkSessionAccess } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
+
+const SDK_ID = "00000000-0000-4000-8000-000000000009";
+const OAUTH = "subscription-oauth-must-never-leak";
+
+class FakeChild extends EventEmitter {
+	stdin = new PassThrough();
+	stdout = new PassThrough();
+	stderr = new PassThrough();
+	killed = false;
+	exitCode: number | null = null;
+	signalCode: NodeJS.Signals | null = null;
+	kill = vi.fn((signal?: NodeJS.Signals | number) => {
+		this.killed = true;
+		this.signalCode = typeof signal === "string" ? signal : "SIGTERM";
+		return true;
+	});
+}
+
+class FakeQuery implements AsyncIterable<unknown> {
+	readonly inputs: any[] = [];
+	readonly models: string[] = [];
+	readonly budgets: Array<number | null> = [];
+	readonly efforts: unknown[] = [];
+	interrupts = 0;
+	closes = 0;
+	private readonly events: unknown[] = [];
+	private readonly eventWaiters: Array<(result: IteratorResult<unknown>) => void> = [];
+	private closed = false;
+
+	constructor(readonly prompt: AsyncIterable<unknown>, readonly options: any) {
+		void this.collectInputs();
+	}
+	async initializationResult() {
+		return {
+			session_id: SDK_ID,
+			models: [{ value: "sandbox-sonnet", supportsEffort: true, supportedEffortLevels: ["high"] }],
+		};
+	}
+	async collectInputs() {
+		for await (const input of this.prompt) this.inputs.push(input);
+	}
+	async setModel(model: string) { this.models.push(model); }
+	async setMaxThinkingTokens(value: number | null) { this.budgets.push(value); }
+	async applyFlagSettings(value: unknown) { this.efforts.push(value); }
+	async interrupt() { this.interrupts++; }
+	async close() {
+		this.closes++;
+		this.closed = true;
+		for (const waiter of this.eventWaiters.splice(0)) waiter({ done: true, value: undefined });
+	}
+	emitSdk(event: unknown) {
+		const waiter = this.eventWaiters.shift();
+		if (waiter) waiter({ done: false, value: event });
+		else this.events.push(event);
+	}
+	[Symbol.asyncIterator](): AsyncIterator<unknown> {
+		return {
+			next: () => {
+				const event = this.events.shift();
+				if (event !== undefined) return Promise.resolve({ done: false, value: event });
+				if (this.closed) return Promise.resolve({ done: true, value: undefined });
+				return new Promise(resolve => this.eventWaiters.push(resolve));
+			},
+		};
+	}
+}
+
+async function flush(): Promise<void> {
+	for (let index = 0; index < 8; index++) await Promise.resolve();
+}
+
+function launch(sessionId: string, containerId: string, cwd: string) {
+	return {
+		containerId,
+		cwd,
+		sessionId,
+		sessionSecret: "session-authority",
+		goalId: "goal-authority",
+		gatewayToken: "scoped-gateway-authority",
+		gatewayUrl: "http://gateway.test",
+		oauthAccessToken: OAUTH,
+	};
+}
+
+function bridgeFixture(input: { sessionId: string; containerId: string; cwd: string; resume?: string }) {
+	let query!: FakeQuery;
+	let queryCalls = 0;
+	const bridge = new ClaudeAgentSdkBridge({
+		runtime: "claude-agent-sdk",
+		sandboxed: true,
+		cwd: input.cwd,
+		initialModel: "claude-agent-sdk/sandbox-sonnet",
+		initialThinkingLevel: "high",
+		env: { ANTHROPIC_API_KEY: "host-key-must-not-leak", BOBBIT_TOKEN: "host-token-must-not-leak" },
+		claudeSdkSandboxLaunch: launch(input.sessionId, input.containerId, input.cwd),
+		...(input.resume ? { claudeAgentSdkSessionId: input.resume } : {}),
+	}, {
+		query: ((request: any) => {
+			queryCalls++;
+			const spawned = request.options.spawnClaudeCodeProcess({
+				args: ["--sdk-protocol", "opaque-sdk-argument"],
+				env: { CLAUDE_AGENT_SDK_VERSION: "0.3.222", EVIL_HOST_ENV: "must-not-pass" },
+				signal: new AbortController().signal,
+			});
+			expect(spawned.stdin).toBeDefined();
+			query = new FakeQuery(request.prompt, request.options);
+			return query;
+		}) as never,
+		clock: { now: () => 0, setTimeout, setInterval, clearTimeout, clearInterval },
+	});
+	return { bridge, get query() { return query; }, get queryCalls() { return queryCalls; } };
+}
+
+afterEach(() => dockerSpawn.mockReset());
+
+describe("Claude Agent SDK sandbox runtime", () => {
+	it("runs fresh and worktree SDK queries in their current pooled containers with isolated state", async () => {
+		const children: FakeChild[] = [];
+		dockerSpawn.mockImplementation(() => {
+			const child = new FakeChild();
+			children.push(child);
+			return child;
+		});
+		const fresh = bridgeFixture({ sessionId: "fresh-session", containerId: "container-fresh", cwd: "/workspace" });
+		const worktree = bridgeFixture({ sessionId: "worktree-session", containerId: "container-worktree", cwd: "/workspace-wt/goal-branch" });
+
+		await Promise.all([fresh.bridge.start(), worktree.bridge.start()]);
+		expect(fresh.queryCalls).toBe(1);
+		expect(worktree.queryCalls).toBe(1);
+		expect(children).toHaveLength(2);
+
+		const first = dockerSpawn.mock.calls[0];
+		const second = dockerSpawn.mock.calls[1];
+		expect(first[0]).toBe("docker");
+		expect(first[1]).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace", "container-fresh", "/usr/local/bin/bobbit-claude-agent-sdk", "--sdk-protocol", "opaque-sdk-argument"]));
+		expect(second[0]).toBe("docker");
+		expect(second[1]).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/goal-branch", "container-worktree"]));
+		const firstArgs = first[1] as string[];
+		const secondArgs = second[1] as string[];
+		expect(firstArgs).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/fresh-session");
+		expect(secondArgs).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/worktree-session");
+		expect(firstArgs).toContain(`CLAUDE_CODE_OAUTH_TOKEN=${OAUTH}`);
+		for (const args of [firstArgs, secondArgs]) {
+			expect(args.join(" ")).not.toContain("ANTHROPIC_API_KEY");
+			expect(args.join(" ")).not.toContain("host-key-must-not-leak");
+			expect(args.join(" ")).not.toContain("EVIL_HOST_ENV");
+			expect(args.join(" ")).not.toContain("switch_session");
+		}
+		expect(fresh.query.options.env).toMatchObject({ HOME: "/home/node", BOBBIT_SESSION_ID: "fresh-session" });
+		expect(fresh.query.options.env).not.toHaveProperty("ANTHROPIC_API_KEY");
+		await Promise.all([fresh.bridge.stop(), worktree.bridge.stop()]);
+	});
+
+	it("preserves SDK prompt, steer, interruption, model, thinking, tool, and permission behavior inside Docker", async () => {
+		dockerSpawn.mockImplementation(() => new FakeChild());
+		const fixture = bridgeFixture({ sessionId: "interactive", containerId: "container-live", cwd: "/workspace" });
+		const events: any[] = [];
+		fixture.bridge.onEvent(event => events.push(event));
+		await fixture.bridge.start();
+
+		await fixture.bridge.prompt("first prompt");
+		await fixture.bridge.steer("redirect now");
+		await flush();
+		expect(fixture.query.inputs.map(input => [input.message.content, input.priority])).toEqual([
+			["first prompt", undefined], ["redirect now", "now"],
+		]);
+		await fixture.bridge.abort();
+		expect(fixture.query.interrupts).toBe(1);
+		await fixture.bridge.setModel("claude-agent-sdk", "sandbox-sonnet");
+		await fixture.bridge.setThinkingLevel("high");
+		expect(fixture.query.models).toEqual(["sandbox-sonnet"]);
+		expect(fixture.query.efforts).toEqual([{ effortLevel: "high" }]);
+		expect(await fixture.query.options.canUseTool("Bash", {}, { signal: new AbortController().signal })).toMatchObject({ behavior: "deny" });
+
+		fixture.query.emitSdk({ type: "assistant", uuid: "tool-message", message: { content: [
+			{ type: "tool_use", id: "tool-1", name: "Read", input: { path: "note" } },
+			{ type: "tool_use", id: "permission-1", name: "Bash", input: { command: "false" } },
+		], stop_reason: "tool_use" } });
+		fixture.query.emitSdk({ type: "system", subtype: "permission_denied", uuid: "permission-message", tool_name: "Bash", tool_use_id: "permission-1", message: "Permission denied" });
+		fixture.query.emitSdk({ type: "result", subtype: "success" });
+		await flush();
+		expect(events).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "Read" }),
+			expect.objectContaining({ type: "tool_execution_end", toolCallId: "permission-1", toolName: "Bash", isError: true }),
+			expect.objectContaining({ type: "agent_end" }),
+		]));
+		await fixture.bridge.stop();
+		expect(fixture.query.closes).toBe(1);
+	});
+
+	it("reads SDK history in the pooled container with a read-only closed environment", async () => {
+		const executions: string[][] = [];
+		const access = createSandboxClaudeAgentSdkSessionAccess({
+			containerId: "container-history",
+			cwd: "/workspace-wt/history",
+			bobbitSessionId: "history-session",
+			exec: async (args) => {
+				executions.push(args);
+				return args.includes("info")
+					? JSON.stringify({ sessionId: SDK_ID, summary: "SDK owned", lastModified: 1 })
+					: JSON.stringify([{ type: "user", uuid: "message-1", session_id: SDK_ID, message: { role: "user", content: "container transcript" }, parent_tool_use_id: null, parent_agent_id: null }]);
+			},
+		});
+		await expect(access.getSessionInfo(SDK_ID)).resolves.toMatchObject({ summary: "SDK owned" });
+		await expect(access.getSessionMessages(SDK_ID)).resolves.toHaveLength(1);
+		expect(executions).toHaveLength(2);
+		for (const args of executions) {
+			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/history", "container-history", "node", "--input-type=module"]));
+			expect(args.join(" ")).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/history-session");
+			expect(args.join(" ")).not.toMatch(/OAUTH|BOBBIT_TOKEN|ANTHROPIC_API_KEY/);
+		}
+	});
+
+	it("rebuilds launch authority for replacement and rejects missing image or OAuth before querying", async () => {
+		dockerSpawn.mockImplementation(() => new FakeChild());
+		const original = bridgeFixture({ sessionId: "replace", containerId: "container-old", cwd: "/workspace" });
+		await original.bridge.start();
+		await original.bridge.stop();
+		const recovered = bridgeFixture({ sessionId: "replace", containerId: "container-new", cwd: "/workspace", resume: SDK_ID });
+		await recovered.bridge.start();
+		expect(recovered.query.options.resume).toBe(SDK_ID);
+		expect(dockerSpawn.mock.calls[1][1]).toContain("container-new");
+		await recovered.bridge.stop();
+
+		let queryCalls = 0;
+		for (const badLaunch of [
+			{ ...launch("bad-image", "", "/workspace") },
+			{ ...launch("bad-auth", "container", "/workspace"), oauthAccessToken: "" },
+		]) {
+			const bridge = new ClaudeAgentSdkBridge({ runtime: "claude-agent-sdk", sandboxed: true, cwd: "/workspace", claudeSdkSandboxLaunch: badLaunch }, {
+				query: (() => { queryCalls++; throw new Error("host SDK must not start"); }) as never,
+				clock: { now: () => 0, setTimeout, setInterval, clearTimeout, clearInterval },
+			});
+			await expect(bridge.start()).rejects.toMatchObject({ code: "CLAUDE_AGENT_SDK_UNAVAILABLE", message: expect.not.stringContaining(OAUTH) });
+		}
+		expect(queryCalls).toBe(0);
+	});
+});
