@@ -1054,6 +1054,219 @@ workflows:
             type: command
             run: sleep 60 && echo ok
             phase: 0
+  claude-runtime:
+    id: claude-runtime
+    name: Claude Runtime
+    description: Review workflow for Claude Agent SDK runtime, parity, and subscription safety changes
+    gates:
+      - id: protocol-spike
+        name: Protocol Spike
+        content: true
+        inject_downstream: true
+        verify:
+          - name: Empirical protocol evidence review
+            type: llm-review
+            role: architect
+            prompt: >-
+              Review the protocol-spike content as empirical Agent SDK evidence.
+              Require installed SDK/Claude version tags, sanitized fixture or
+              transcript/inventory evidence, observed setup and tool surfaces,
+              and explicit unresolved questions. Fail stale, malformed,
+              unsanitized, or inferred protocol claims; never accept credentials
+              or raw environment/auth-file material.
+          - name: Protocol scope analysis
+            type: llm-review
+            role: spec-auditor
+            prompt: >-
+              Compare the goal specification with the protocol-spike content.
+              Confirm it records only observed Agent SDK initialization, session,
+              event, and tool evidence needed for the goal; lists unresolved
+              questions; and does not claim behavior without captured evidence.
+      - id: design-doc
+        name: Design Document
+        content: true
+        inject_downstream: true
+        depends_on:
+          - protocol-spike
+        verify:
+          - name: Runtime design review
+            type: llm-review
+            role: architect
+            prompt: >-
+              Review the design against the upstream empirical SDK evidence.
+              Verify the smallest existing-system composition covers runtime
+              selection, bridge/session behavior, fixtures, transcript/usage
+              translation, failure modes, and focused tests without adding a
+              Claude-specific gate engine or transport.
+          - name: Pi and SDK parity design review
+            type: llm-review
+            role: backend-parity-reviewer
+            prompt: >-
+              Review the design for change-caused Pi/SDK parity risk. Require an
+              explicit claude-agent-sdk selection boundary while absent or other
+              providers remain Pi, named shared IRpcBridge/SessionManager seams,
+              Pi regression guards, SDK fixture-version handling, canonical tool
+              identity normalization, root/child transcript partitioning, and
+              usage fidelity tests.
+          - name: Subscription safety design review
+            type: llm-review
+            role: billing-safety-auditor
+            prompt: >-
+              Review the design for subscription-only Agent SDK safety. Require
+              closed environment and settings construction, apiKeySource proof,
+              no API/auth/Bedrock/Vertex/cloud credential fallback, fail-closed
+              unsupported sandbox behavior, environment-pollution tests at
+              changed spawn boundaries, and separation of billed from notional
+              cost.
+      - id: implementation
+        name: Implementation
+        depends_on:
+          - design-doc
+        verify:
+          - name: Build
+            type: command
+            phase: 0
+            timeout: 600
+            component: bobbit
+            command: build
+          - name: Type check passes
+            type: command
+            phase: 1
+            component: bobbit
+            command: check
+          - name: Unit tests
+            type: command
+            phase: 1
+            component: bobbit
+            command: unit
+          - name: Browser tests
+            type: command
+            phase: 1
+            timeout: 900
+            component: bobbit
+            command: browser
+          - name: E2E tests
+            type: command
+            phase: 1
+            timeout: 900
+            component: bobbit
+            command: e2e
+          - name: Pi and SDK parity review
+            type: llm-review
+            role: backend-parity-reviewer
+            phase: 4
+            prompt: >-
+              Review branch {{branch}} versus origin/{{baseBranch}} only for
+              change-caused Claude Agent SDK and Pi parity regressions. Check
+              SDK fixture drift/versioning, explicit claude-agent-sdk selection
+              with Pi defaults preserved for absent/other providers, shared
+              bridge/session behavior, Pi command snapshots, root/subagent
+              partitioning, canonical rather than mcp__bobbit__ tool identities,
+              translated transcript events, usage accounting, and focused Pi
+              guards. Report file/line, causal path, minimal fix, and test.
+          - name: Subscription safety review
+            type: llm-review
+            role: billing-safety-auditor
+            phase: 4
+            prompt: >-
+              Review branch {{branch}} versus origin/{{baseBranch}} only for
+              change-caused subscription-only safety defects. Inspect inherited
+              credentials, env/settings creation, apiKeySource, API/auth/
+              Bedrock/Vertex/cloud or container fallbacks, sandbox fail-closed
+              behavior, pollution tests for changed spawn boundaries, and
+              billed-versus-notional cost separation. Report the exact leak path,
+              minimal fix, and regression test.
+          - name: Spec and regression conformance
+            type: llm-review
+            role: spec-auditor
+            phase: 4
+            prompt: >-
+              Compare the goal, upstream protocol/design evidence, implementation,
+              and tests on {{branch}} versus origin/{{baseBranch}}. Find unmet
+              requirements or concrete regressions, excluding documentation-only
+              gaps. Every blocker needs an exact minimal remediation and focused
+              regression test.
+          - name: Integrated implementation review
+            type: llm-review
+            role: code-reviewer
+            phase: 4
+            prompt: >-
+              Review the implementation on {{branch}} versus origin/{{baseBranch}}
+              for correctness, error handling, edge and mixed states, lifecycle,
+              cross-layer interactions, maintainability, and independently
+              verifiable regressions. Exclude documentation-only gaps. Deduplicate
+              root causes and give each blocker a minimal fix and focused test.
+          - name: Verifiable bug hunt
+            type: llm-review
+            role: verifiable-bug-hunter
+            phase: 4
+            prompt: >-
+              Hunt for critical or high, change-caused, independently verifiable
+              bugs in {{branch}} versus origin/{{baseBranch}}. Include exact
+              file/line, trigger, causal path, observable consequence, minimal
+              fix, and focused regression test; do not report speculative or
+              unchanged defects.
+          - name: Security review
+            type: llm-review
+            role: security-reviewer
+            phase: 4
+            prompt: >-
+              Review changed trust boundaries, authentication, authorization,
+              validation, secrets, destructive/resource ownership, dependency
+              risk, and security races on {{branch}} versus
+              origin/{{baseBranch}}. Exclude documentation-only gaps. Each blocker
+              requires minimal remediation and abuse/regression tests.
+      - id: dogfood
+        name: Dogfood
+        content: true
+        depends_on:
+          - implementation
+        verify:
+          - name: Real subscription manual evidence review
+            type: llm-review
+            role: qa-tester
+            prompt: >-
+              Review the submitted dogfood matrix; deterministic tests alone do
+              not satisfy this gate. Require the opt-in real-subscription/model
+              command, installed SDK/Claude version, unprefixed model id,
+              sanitized apiKeySource/subscription proof, readiness/prompt/steer/
+              interrupt/stop results, transcript and usage observations, and
+              screenshots for exercised browser-visible rendering. Fail missing,
+              unsanitized, or inferred real-model evidence.
+      - id: documentation
+        name: Documentation
+        content: true
+        depends_on:
+          - implementation
+        verify:
+          - name: Claude runtime documentation review
+            type: llm-review
+            role: docs-writer
+            prompt: >-
+              Review documentation for {{branch}} versus origin/{{baseBranch}}.
+              Require docs/claude-agent-sdk-sessions.md to accurately describe
+              claude-agent-sdk selection, subscription-only behavior, accepted
+              runtime gaps, and when to select full or reduced claude-runtime
+              versus general. Do not require AGENTS.md changes unless separately
+              warranted by its one-line pointer policy.
+      - id: ready-to-merge
+        name: Ready to Merge
+        depends_on:
+          - dogfood
+          - documentation
+        verify:
+          - name: Branch pushed to remote
+            type: command
+            run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads
+              origin {{branch}} | grep -q .
+          - name: Base ref merged into branch
+            type: command
+            run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
+              origin/{{baseBranch}} {{branch}}
+          - name: PR raised
+            type: command
+            run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url
+              -q ".[0].url" | grep -q .
 config_directories:
   - path: C:\tmp\.bobbit
     types:
