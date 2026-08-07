@@ -62,9 +62,21 @@ export interface ServiceExtensionPortAllocator {
 	lease(identity: ServiceExtensionIdentity, port: number): Promise<ServicePortLease | undefined>;
 }
 
+/**
+ * Structural view of the public ExtensionCapabilityGrantResolver seam. The
+ * server injects that resolver; this runtime never reads grant state itself.
+ */
+export type ServiceExtensionGrantResolver = (
+	projectId: string,
+	principal: { kind: "pack"; packId: string },
+	capability: "service.manage",
+) => { allowed: boolean };
+
 export interface ServiceExtensionRuntimeDeps {
 	/** Active declarations only. A thrown error fails closed for this reconcile. */
 	listActive(projectId: string): Promise<readonly ActiveServiceExtension[]> | readonly ActiveServiceExtension[];
+	/** Required authorization fence for every service lifecycle action. */
+	grantResolver: ServiceExtensionGrantResolver;
 	launchers: Readonly<Record<ServiceRunMode, ServiceExtensionLauncher>>;
 	probe: ServiceReadinessProbe;
 	ports: ServiceExtensionPortAllocator;
@@ -170,6 +182,9 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 			const validated = validateServiceExtensionSpec(declaration.spec);
 			if (!validated.ok) continue; // Registry input is untrusted; a bad declaration never starts.
 			const identity = { projectId, packId: declaration.packId, serviceId: validated.value.id };
+			// A denied declaration is removed like any inactive declaration, so
+			// ordinary reconciliation stops an already-running service.
+			if (!this.isAuthorized(identity)) continue;
 			const key = identityKey(identity);
 			if (wanted.has(key)) continue; // Duplicate active identity is fail-closed.
 			wanted.set(key, { identity, spec: validated.value, fingerprint: fingerprint(validated.value) });
@@ -242,6 +257,23 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 			&& fence.project === this.projectGenerations.get(projectId);
 	}
 
+	/** Never cache an allow: revocation must win over awaited lifecycle work. */
+	private isAuthorized(identity: ServiceExtensionIdentity): boolean {
+		try {
+			return this.deps.grantResolver(
+				identity.projectId,
+				{ kind: "pack", packId: identity.packId },
+				"service.manage",
+			).allowed === true;
+		} catch {
+			return false;
+		}
+	}
+
+	private canRun(fence: LifecycleFence, identity: ServiceExtensionIdentity): boolean {
+		return this.isCurrent(fence, identity.projectId) && this.isAuthorized(identity);
+	}
+
 	private enqueue(key: string, operation: () => Promise<void>): Promise<void> {
 		const prior = this.queues.get(key) ?? Promise.resolve();
 		const next = prior.catch(() => undefined).then(operation);
@@ -262,27 +294,27 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 	}
 
 	private async start(key: string, desired: DesiredService, restarts: number, fence: LifecycleFence): Promise<void> {
-		if (!this.isCurrent(fence, desired.identity.projectId)) return;
+		if (!this.canRun(fence, desired.identity)) return;
 		const entry: RunningService = { ...desired, generation: ++this.nextGeneration, fence, restarts, stopping: false, leases: [] };
 		this.running.set(key, entry);
 		this.publish(entry.identity, "starting", "starting");
 		try {
 			if (this.deps.resolveSettings) entry.settings = await this.deps.resolveSettings(entry.identity);
-			if (!this.isCurrent(fence, entry.identity.projectId)) {
+			if (!this.canRun(fence, entry.identity)) {
 				await this.abandonStart(key, entry);
 				return;
 			}
 			if (entry.spec.dataDir !== undefined) {
 				entry.dataDir = this.deps.resolveDataDir(entry.identity, entry.spec.dataDir);
 				await this.deps.filesystem.ensureDirectory(entry.dataDir);
-				if (!this.isCurrent(fence, entry.identity.projectId)) {
+				if (!this.canRun(fence, entry.identity)) {
 					await this.abandonStart(key, entry);
 					return;
 				}
 			}
 			for (const port of entry.spec.ports ?? []) {
 				const lease = await this.deps.ports.lease(entry.identity, port);
-				if (!this.isCurrent(fence, entry.identity.projectId)) {
+				if (!this.canRun(fence, entry.identity)) {
 					if (lease) await releaseLeases([lease]);
 					await this.abandonStart(key, entry);
 					return;
@@ -294,8 +326,12 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 				entry.leases.push(lease);
 			}
 			const launch = this.deps.launchers[entry.spec.runMode];
+			if (!this.canRun(fence, entry.identity)) {
+				await this.abandonStart(key, entry);
+				return;
+			}
 			entry.process = await launch({ identity: entry.identity, spec: entry.spec, ...(entry.dataDir === undefined ? {} : { dataDir: entry.dataDir }), ...(entry.settings === undefined ? {} : { settings: entry.settings }) });
-			if (!this.isCurrent(fence, entry.identity.projectId)) {
+			if (!this.canRun(fence, entry.identity)) {
 				await this.abandonStart(key, entry);
 				return;
 			}
@@ -304,9 +340,9 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 				void this.enqueue(key, () => this.processExited(key, entry, generation));
 			});
 			const deadline = this.deps.clock.now().getTime() + entry.spec.readiness.timeoutMs;
-			while (this.running.get(key) === entry && !entry.stopping && this.isCurrent(fence, entry.identity.projectId)) {
+			while (this.running.get(key) === entry && !entry.stopping && this.canRun(fence, entry.identity)) {
 				const ready = await this.deps.probe({ identity: entry.identity, spec: entry.spec, ...(entry.dataDir === undefined ? {} : { dataDir: entry.dataDir }), ...(entry.settings === undefined ? {} : { settings: entry.settings }) });
-				if (!this.isCurrent(fence, entry.identity.projectId)) {
+				if (!this.canRun(fence, entry.identity)) {
 					await this.abandonStart(key, entry);
 					return;
 				}
@@ -323,7 +359,7 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 			}
 			if (this.running.get(key) === entry && !entry.stopping) await this.abandonStart(key, entry);
 		} catch {
-			if (!this.isCurrent(fence, entry.identity.projectId)) await this.abandonStart(key, entry);
+			if (!this.canRun(fence, entry.identity)) await this.abandonStart(key, entry);
 			else await this.failStart(key, entry, "failed", "configuration-unavailable");
 		}
 	}
