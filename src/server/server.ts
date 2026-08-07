@@ -551,6 +551,7 @@ import {
 	isSafeExtensionGrantIdentifier,
 	type ExtensionCapability,
 	type ExtensionGrant,
+	type ExtensionPackCapability,
 	type PackOrderScope,
 } from "./agent/project-config-store.js";
 import { ExtensionGrantAuditStore } from "./agent/extension-grant-audit-store.js";
@@ -5446,11 +5447,11 @@ async function handleApiRoute(
 		},
 		contributions: packContributionRegistry,
 	});
-	const extensionPackGrantCapabilities: readonly ExtensionCapability[] = [
+	const extensionPackGrantCapabilities: readonly ExtensionPackCapability[] = [
 		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
 	];
 	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
-		(grant as { principal?: unknown }).principal === "pack";
+		"principal" in grant && grant.principal === "pack";
 	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
 		const grants = store.getExtensionGrants();
 		const packs = packContributionRegistry.list(projectId);
@@ -5591,7 +5592,7 @@ async function handleApiRoute(
 		return pack?.hooks.find(hook => hook.id === hookId);
 	};
 	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[] }, capability: ExtensionCapability): boolean =>
-		!extensionPackGrantCapabilities.includes(capability)
+		!isExtensionPackCapability(capability)
 		&& capability !== "mutate"
 		&& ((capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
 	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
@@ -9807,9 +9808,13 @@ async function handleApiRoute(
 			json({ error: "Invalid extension grant tuple" }, 400);
 			return;
 		}
-		const validHookId = hookId as string;
 		const requiresOperator = isPackPrincipal || capability === "mutate";
 		if (requiresOperator && !requireVerifiedPromptOperator()) return;
+
+		// Keep the raw request tuple narrowed in the principal branch that owns it.
+		// A pack grant's capability must pass the smaller pack vocabulary before it
+		// can become an ExtensionPackGrant; hook-only authority never crosses over.
+		let grant: ExtensionGrant;
 		if (isPackPrincipal) {
 			if (!packContributionRegistry.getPack(resolved.projectId, packId)) {
 				json({ error: "Active extension principal not found", code: "EXTENSION_GRANT_PRINCIPAL_NOT_FOUND" }, 404);
@@ -9819,8 +9824,15 @@ async function handleApiRoute(
 				json({ error: "Capability is not supported by this pack principal", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
 				return;
 			}
+			grant = { packId, principal: "pack", capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
 		} else {
-			const hook = extensionGrantHook(resolved.projectId, packId, validHookId);
+			// Recheck inside this branch so TypeScript narrows the untrusted request
+			// value to string without asserting a hook identity.
+			if (!isSafeExtensionGrantIdentifier(hookId)) {
+				json({ error: "Invalid extension grant tuple" }, 400);
+				return;
+			}
+			const hook = extensionGrantHook(resolved.projectId, packId, hookId);
 			if (!hook) {
 				json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
 				return;
@@ -9829,28 +9841,27 @@ async function handleApiRoute(
 				json({ error: "Capability is not supported by this hook", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
 				return;
 			}
+			grant = { packId, hookId, capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
 		}
-		const grant: ExtensionGrant = isPackPrincipal
-			? { packId, principal: "pack", capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor }
-			: { packId, hookId: validHookId, capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
 		try {
-			const retained = store.getExtensionGrants().filter(current => isPackPrincipal
-				? !isPackExtensionGrant(current) || current.packId !== packId || current.capability !== capability
-				: isPackExtensionGrant(current) || current.packId !== packId || current.hookId !== validHookId || current.capability !== capability,
+			const retained = store.getExtensionGrants().filter(current => isPackExtensionGrant(grant)
+				? !isPackExtensionGrant(current) || current.packId !== grant.packId || current.capability !== grant.capability
+				: isPackExtensionGrant(current) || current.packId !== grant.packId || current.hookId !== grant.hookId || current.capability !== grant.capability,
 			);
 			store.setExtensionGrants([...retained, grant]);
 		} catch (err) {
 			jsonError(503, err);
 			return;
 		}
+		const auditEntry = isPackExtensionGrant(grant)
+			? { at: grant.grantedAt, actor: grant.grantedBy, action: "granted" as const, packId: grant.packId, principal: "pack" as const, capability: grant.capability }
+			: { at: grant.grantedAt, actor: grant.grantedBy, action: "granted" as const, packId: grant.packId, hookId: grant.hookId, capability: grant.capability };
 		let auditAvailable = true;
 		try {
-			extensionGrantAudit(context.stateDir).appendOrQueue(isPackPrincipal
-				? { at: grant.grantedAt, actor: grant.grantedBy, action: "granted", packId, principal: "pack", capability }
-				: { at: grant.grantedAt, actor: grant.grantedBy, action: "granted", packId, hookId: validHookId, capability });
+			extensionGrantAudit(context.stateDir).appendOrQueue(auditEntry);
 		} catch {
 			auditAvailable = false;
-			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : validHookId} capability=${capability}`);
+			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${grant.packId} principal=${isPackExtensionGrant(grant) ? "pack" : grant.hookId} capability=${grant.capability}`);
 		}
 		broadcastExtensionGrantInvalidation(resolved.projectId);
 		const projection = extensionGrantProjection(resolved.projectId, store);

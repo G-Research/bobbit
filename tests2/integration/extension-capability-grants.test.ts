@@ -11,6 +11,22 @@ const REPRO = "EXTENSION_CAPABILITY_GRANTS_API_REGRESSION";
 
 let packDir = "";
 let projectId = "";
+let operatorCookie = "";
+
+function operatorHeaders(): Record<string, string> {
+	return { Cookie: operatorCookie };
+}
+
+async function mintOperatorCookie(): Promise<string> {
+	const probe = await apiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const cookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
+		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
+	const cookie = cookies.map(value => value.split(";")[0]).find(value => value.startsWith("bobbit_session="));
+	expect(cookie, "browser-signaled gateway requests mint the verified operator cookie").toBeTruthy();
+	return cookie!;
+}
 
 function grantsPath(): string {
 	return `/api/projects/${encodeURIComponent(projectId)}/extension-grants`;
@@ -97,6 +113,7 @@ test.describe("extension capability grants API", () => {
 			body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: {} }),
 		});
 		expect(activation.status, `${REPRO}: fixture activation refresh failed; body=${await activation.clone().text()}`).toBe(200);
+		operatorCookie = await mintOperatorCookie();
 	});
 
 	test.afterAll(async () => {
@@ -128,7 +145,7 @@ test.describe("extension capability grants API", () => {
 		expect((await json(inactive)).code).toBe("EXTENSION_HOOK_NOT_FOUND");
 
 		const unsupported = await apiFetch(grantsPath(), {
-			method: "PUT",
+			method: "PUT", headers: operatorHeaders(),
 			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "mutate" }),
 		});
 		expect(unsupported.status, `${REPRO}: mutation is never implied by an active decision hook`).toBe(422);
@@ -157,10 +174,17 @@ test.describe("extension capability grants API", () => {
 		for (const body of [
 			{ ...packGrant, hookId: DECIDE_HOOK },
 			{ packId: PACK_NAME, principal: "pack", capability: "unknown.authority" },
-			{ packId: PACK_NAME, principal: "pack", capability: "decide" },
 		]) {
 			const response = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(body) });
-			expect(response.status, `${REPRO}: pack tuples admit only their exact closed principal/capability matrix`).toBe(body.capability === "decide" ? 422 : 400);
+			expect(response.status, `${REPRO}: malformed pack tuples never create authority`).toBe(400);
+		}
+		for (const capability of ["decide", "mutate", "store", "session", "agents"]) {
+			const response = await apiFetch(grantsPath(), {
+				method: "PUT", headers: operatorHeaders(),
+				body: JSON.stringify({ packId: PACK_NAME, principal: "pack", capability }),
+			});
+			expect(response.status, `${REPRO}: pack principals reject hook-only ${capability} authority`).toBe(422);
+			expect((await json(response)).code).toBe("EXTENSION_CAPABILITY_UNSUPPORTED");
 		}
 		const absentPack = await apiFetch(grantsPath(), {
 			method: "PUT", headers: operatorHeaders(), body: JSON.stringify({ packId: "missing.pack", principal: "pack", capability: "memory.read" }),
@@ -182,7 +206,7 @@ test.describe("extension capability grants API", () => {
 		});
 
 		const granted = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(packGrant) });
-		expect(granted.status).toBe(200);
+		expect(granted.status, `${REPRO}: valid pack capability authority remains grantable after hook-only denials`).toBe(200);
 		expect((await json(granted)).grant).toMatchObject({ ...packGrant, grantedBy: "admin" });
 		const projection = await apiFetch(grantsPath());
 		const activePack = (await json(projection)).packs.find((candidate: any) => candidate.packId === PACK_NAME);
