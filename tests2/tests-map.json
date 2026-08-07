@@ -463,6 +463,15 @@
       }
     },
     {
+      "path": "tests2/core/model-selection-required-recovery.test.ts",
+      "reason": "Failing-first actual-SessionManager cold-restore regression proving an authoritatively retired durable model tuple becomes an attachable, history-readable MODEL_SELECTION_REQUIRED capsule without Pi spawn, fallback, persistence mutation, or repeated attachment retries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/reviewer-diff-scope-prompts.test.ts",
       "reason": "Pure prompt-contract coverage ensuring every first-party reviewer raises only issues introduced or materially worsened by the reviewed change and does not expand goals or PRs to fix unchanged pre-existing issues.",
       "execution": {
