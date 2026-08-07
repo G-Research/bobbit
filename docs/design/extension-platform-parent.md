@@ -711,8 +711,9 @@ Before the parent PR requests merge: rebase on current `origin/main`, run `npm r
 EP-11 focused tests belong in `tests2/core`/`tests2/integration` and are registered in
 `tests2/tests-map.json`. They use an injected clock and real persistence boundary to prove:
 
-1. Missing `ask:decision` and `ask:interrupt` grants reject loudly; a chatty extension reaches the durable
-   session/goal hard cap, receives `BUDGET_EXCEEDED`, writes audit activity, and gets no extra card.
+1. An active decision hook without its exact `(packId, hookId, "decide")` grant rejects loudly. Separately,
+   EP-11's typed decision authorization and interruption cap reject a chatty extension at the durable session/goal
+   hard cap with `BUDGET_EXCEEDED`, audit activity, and no extra card.
 2. A valid answer is cross-validated before `get()` exposes it; malformed, out-of-range, duplicate, or
    Other-without-text input remains pending and never reaches hook code.
 3. Same fingerprints dedupe both pending and terminal records without a quota charge; changed payloads return
@@ -736,13 +737,16 @@ Add `tests2/browser/journeys/extension-platform-parent.journey.spec.ts`, registe
 deterministic local Marketplace fixture packs and mock agents. It exercises real UI/API paths—not seeded grants,
 answers, or hook endpoints:
 
+### EP-11 decision-request journey
+
 1. Open Market for fixture project `extension-platform-e2e`; install the fixture and verify its advisory hook,
-   requested `decide:selectThinking`, `ask:decision`, and `ask:interrupt` capabilities, quotas, and disabled grants.
+   decision hook, typed decision authorization/caps, and disabled exact `(packId, hookId, "decide")` grant.
 2. Start a mock-agent session and send the fixture prompt. Open **Context**; verify the advisory and an advisory inbox
    item appear while thinking remains the operator default and no question interrupts.
-3. Grant the interruption capability. Send an ambiguous deferrable prompt; use the shared multiple-choice widget,
-   submit a valid answer, and verify the read-only/audited result affects only the later fixture turn. Repeat it and
-   verify dedupe/no quota charge; submit malformed input and verify the pending card remains until a valid answer.
+3. Grant the fixture decision hook's exact `(packId, hookId, "decide")` tuple. Send an ambiguous deferrable prompt;
+   use the shared multiple-choice widget, submit a valid answer, and verify the read-only/audited result affects only
+   the later fixture turn. Repeat it and verify dedupe/no quota charge; submit malformed input and verify the pending
+   card remains until a valid answer.
 4. Leave a deferrable question unanswered; advance the injected clock and reload. Verify its validated safe default
    continues the later turn and Context says **defaulted**. Verify the non-interactive fixture defaults immediately.
 5. Trigger an unsafe-tool fixture decision that asks for deferrable/default allow. Verify Context shows platform
@@ -751,10 +755,19 @@ answers, or hook endpoints:
    failed or stalled—and no protected operation proceeds. Answer the Context card once; verify the matching goal
    resumes, the normal queue continues, and reload preserves answer, pause reason/audit, and resume result.
 7. Set a one-question interruption cap, consume it, then trigger another request. Verify the loud budget failure and
-   absence of a second card. Grant `decide:selectThinking`, verify a safe selected value, reload Context, then revoke
-   both decision grants and verify advisory-only behaviour. Re-grant, remove the extension, and verify no later
-   bridge effect while historical trace/decision audit remains readable.
-8. Enable a static-section fixture; grant `prompt:system-static`; inspect **View System Prompt** for its named,
+   absence of a second card. Revoke the fixture decision hook's exact `(packId, hookId, "decide")` tuple and verify
+   advisory-only behaviour. Re-grant, remove the extension, and verify no later bridge effect while historical
+   trace/decision audit remains readable.
+
+### EP-12 thinking-migration journey
+
+8. Enable the default-disabled thinking selector, grant its exact `(packId: "thinking-selector", hookId:
+   "default-thinking", capability: "decide")` tuple, and verify a safe selected value after reload. Revoke that
+   same tuple and verify the operator default remains in effect.
+
+### EP-13 static-section journey
+
+9. Enable a static-section fixture; grant `prompt:system-static`; inspect **View System Prompt** for its named,
    attributed text and per-section/total bytes; then enable/reorder a second fixture and inspect deterministic order
    plus cache-boundary activity in **Context**. Disable/remove it and verify the original prompt bytes/core cache
    evidence return while audit persists. Submit an agent-authored replacement, inspect its proposal diff and usage
