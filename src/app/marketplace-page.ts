@@ -2349,13 +2349,13 @@ function isActionableCapability(capability: string, state?: string): capability 
 	return state !== "Unavailable" && marketGrantCapabilities.has(capability as ExtensionCapabilityWire);
 }
 
-async function changeCapabilityGrant(target: ExtensionSettingsTarget, capability: string, state?: string): Promise<void> {
+async function changeCapabilityGrant(target: ExtensionSettingsTarget, capability: string, grantState?: string): Promise<void> {
 	const projectId = currentProjectId();
-	if (!projectId || !isActionableCapability(capability, state)) return;
+	if (!projectId || !isActionableCapability(capability, grantState)) return;
 	const tuple: ExtensionCapabilityGrantTuple = { packId: target.packId, hookId: target.id, capability };
 	const key = capabilityGrantKey(projectId, tuple);
 	if (capabilityGrantBusy.has(key)) return;
-	const granted = isGrantedCapability(state);
+	const granted = isGrantedCapability(grantState);
 	if (!granted) {
 		const { confirmAction } = await import("./dialogs.js");
 		const projectName = state.projects.find((project) => project.id === projectId)?.name || "this project";
