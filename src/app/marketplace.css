@@ -1333,7 +1333,7 @@
 	font-size: 0.625rem;
 }
 
-.market-runtime-target > .market-hook-grants,
+.market-runtime-target > .market-extension-grants,
 .market-runtime-target > .market-settings-form {
 	grid-column: 1 / -1;
 }
