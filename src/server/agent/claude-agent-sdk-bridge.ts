@@ -245,6 +245,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			fs.chmodSync(this.isolatedConfigDir, 0o700);
 			if (this.abortController.signal.aborted || this.closed) throw new Error("Claude Agent SDK startup cancelled");
 			env.CLAUDE_CONFIG_DIR = this.isolatedConfigDir;
+			// Bounded SDK definitions plus this process-local depth ceiling prevent
+			// approved foreground helpers from creating grandchildren.
+			env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = "1";
 			const sdkBase = {
 				cwd: this.options.cwd,
 				env,
@@ -329,6 +332,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				for (const event of events) this.emit(event);
 				const rootTurnEnd = events.some(event => event.type === "agent_end" && event.parentToolUseId === undefined);
 				this.translatorState = rootTurnEnd ? createClaudeSdkTranslatorState() : translated.state;
+				if (rootTurnEnd) this.options.claudeSdkToolSurface?.subagentPolicy?.clear();
 				if (rootTurnEnd && this.state === "running") this.state = "ready";
 			}
 			if (!this.closed && this.state === "starting") this.fail(new Error("Claude Agent SDK ended before initialization"));
