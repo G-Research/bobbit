@@ -256,6 +256,12 @@ export class HindsightRuntimeBridge {
 		return result.ok ? { ok: true, warnings: result.warnings } : result;
 	}
 
+	/** Startup-only recovery path. Gateway composition invokes this once after its
+	 * project dependencies are ready; status, context, and provider reads never do. */
+	async reconcile(projectId: string): Promise<ServiceRuntimeStatus[]> {
+		return this.supervisor(projectId).reconcile(projectId);
+	}
+
 	async status(projectId: string): Promise<ServiceRuntimeStatus> {
 		const settings = this.settings(projectId);
 		const effective = settings.getRuntimeValues(this.provider(projectId));

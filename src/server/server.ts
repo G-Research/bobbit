@@ -3111,7 +3111,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			if (!context) throw new Error("PROJECT_NOT_FOUND");
 			return new ServiceRuntimeSupervisor({
 				registry: packContributionRegistry,
-				store: new ServiceRuntimeStore({ stateDir: context.stateDir, serverIdentity: hindsightServerIdentity }),
+				// ServiceRuntimeStore supplies the collision-safe runtime namespace;
+				// the project SecretsStore is the durable owner of generated values.
+				store: new ServiceRuntimeStore({
+					stateDir: context.stateDir,
+					serverIdentity: hindsightServerIdentity,
+					generatedSecrets: context.secretsStore,
+				}),
 				runners: hindsightServiceRunners,
 				authorizer: { authorize: request => createExtensionCapabilityGrantResolver({
 					contextForProject: (id) => {
@@ -5086,9 +5092,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			});
 			gatewayReady = true;
 			bootLog(`[boot] start() ready on port ${actualPort} at ${Date.now() - bootStart}ms`);
-			bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
-				console.warn("[boot] background tasks failed (non-fatal):", err);
-			});
+			// Startup-only runtime reconciliation is deliberately detached from all
+			// status/read/discovery paths. It runs after the gateway is usable, and
+			// its bounded supervisor outcome cannot prevent ordinary sessions.
+			const runtimeReconciliationTask = (async () => {
+				for (const ctx of projectContextManager.all()) {
+					try {
+						await hindsightRuntimeBridge.reconcile(ctx.project.id);
+					} catch {
+						// Do not surface adapter/configuration text here because it can contain a secret.
+						console.warn("[hindsight-runtime] startup reconciliation failed", "SERVICE_UNAVAILABLE");
+					}
+				}
+			})();
+			bootBackgroundTask = Promise.all([runBootBackgroundTasks(), runtimeReconciliationTask])
+				.then(() => undefined)
+				.catch((err) => {
+					console.warn("[boot] background tasks failed (non-fatal):", err);
+				});
 			return actualPort;
 			} catch (error) {
 				await closeBoundServer();
