@@ -6,7 +6,8 @@ import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../sh
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
-import type { ThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
+import { validateDynamicCapabilitySelection, type DynamicCapabilitySelection } from "./dynamic-capability-contract.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -20,6 +21,29 @@ function defaultVerifierAccessory(id: string): string {
 
 /** Legacy persisted value. Retained only so older session records remain readable. */
 export type WorktreePushPolicy = "local-only" | "publish";
+
+/** Explicit selections verified through the authenticated user WebSocket path. */
+export interface HumanSelectionPins {
+	model?: { provider: string; modelId: string };
+	thinkingLevel?: ThinkingLevel;
+}
+
+/** Drop malformed persisted provenance without treating a durable runtime tuple as a human choice. */
+export function normalizeHumanSelectionPins(value: unknown): HumanSelectionPins | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const source = value as { model?: unknown; thinkingLevel?: unknown };
+	const model = source.model;
+	const provider = model && typeof model === "object" ? (model as { provider?: unknown }).provider : undefined;
+	const modelId = model && typeof model === "object" ? (model as { modelId?: unknown }).modelId : undefined;
+	const thinkingLevel = isKnownThinkingLevel(source.thinkingLevel);
+	const normalized: HumanSelectionPins = {
+		...(typeof provider === "string" && provider.length > 0 && typeof modelId === "string" && modelId.length > 0
+			? { model: { provider, modelId } }
+			: {}),
+		...(thinkingLevel ? { thinkingLevel } : {}),
+	};
+	return normalized.model || normalized.thinkingLevel ? normalized : undefined;
+}
 
 /** A steer accepted for dispatch but not yet echoed into the Pi transcript. */
 export interface InFlightSteerRecord {
@@ -120,6 +144,8 @@ export interface PersistedSession {
 	terminalAt?: number;
 	/** Explicit session-scoped tool allowlist captured at creation. Undefined means derive from role/default policy. */
 	allowedTools?: string[];
+	/** Immutable selector result pinned before spawn. Absent preserves legacy sessions. */
+	dynamicCapabilities?: DynamicCapabilitySelection;
 	/** Which project this session belongs to */
 	projectId?: string;
 	/** Role in a team goal (e.g., 'coder', 'reviewer', 'tester') */
@@ -177,6 +203,8 @@ export interface PersistedSession {
 	modelId?: string;
 	/** Effective thinking level verified with the exact persisted provider/model pair. */
 	effectiveThinkingLevel?: ThinkingLevel;
+	/** Explicit user selections, distinct from the multi-writer runtime tuple. */
+	humanSelectionPins?: HumanSelectionPins;
 	/** Image generation model provider for this session, if overridden from the default. */
 	imageModelProvider?: string;
 	/** Image generation model ID for this session, if overridden from the default. */
@@ -187,6 +215,8 @@ export interface PersistedSession {
 	repoWorktrees?: Record<string, string>;
 	/** Server-authoritative right-hand side-panel workspace. */
 	sidePanelWorkspace?: SidePanelWorkspace;
+	/** Monotonic completed-turn cadence for scheduled advisors. */
+	scheduledAdvisorTurnCount?: number;
 }
 
 /**
@@ -207,6 +237,7 @@ export type UpdatableSessionFields = Pick<
 	| "parentSessionId"
 	| "childKind"
 	| "readOnly"
+	| "dynamicCapabilities"
 	| "childTerminal"
 	| "terminalAt"
 	| "role"
@@ -234,12 +265,14 @@ export type UpdatableSessionFields = Pick<
 	| "modelProvider"
 	| "modelId"
 	| "effectiveThinkingLevel"
+	| "humanSelectionPins"
 	| "imageModelProvider"
 	| "imageModelId"
 	| "sandboxed"
 	| "projectId"
 	| "repoWorktrees"
 	| "sidePanelWorkspace"
+	| "scheduledAdvisorTurnCount"
 >;
 
 /**
@@ -265,6 +298,12 @@ type DiskFingerprint = {
 export interface PersistenceMetrics {
 	bytes: number;
 	durationMs: number;
+}
+
+/** Legacy/malformed cadence values restart safely at zero; only a non-negative
+ * safe integer is a durable completed-turn index. */
+export function normalizeScheduledAdvisorTurnCount(value: unknown): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 export class SessionStore {
@@ -339,6 +378,18 @@ export class SessionStore {
 				s.inFlightSteerTexts = normalizePersistedInFlightSteers(s.inFlightSteerTexts);
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
+			}
+			// Preserve absence for sessions that predate scheduled advisors. Runtime
+			// hydration supplies its zero baseline without rewriting an unrelated
+			// session record on the next persistence operation.
+			if (s.scheduledAdvisorTurnCount !== undefined) {
+				s.scheduledAdvisorTurnCount = normalizeScheduledAdvisorTurnCount(s.scheduledAdvisorTurnCount);
+			}
+			if (s.humanSelectionPins !== undefined) {
+				s.humanSelectionPins = normalizeHumanSelectionPins(s.humanSelectionPins);
+			}
+			if (s.dynamicCapabilities !== undefined) {
+				s.dynamicCapabilities = validateDynamicCapabilitySelection(s.dynamicCapabilities);
 			}
 			this.sessions.set(s.id, s);
 		}
@@ -710,12 +761,12 @@ export class SessionStore {
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
 		"repoWorktrees", "archived", "archivedAt",
 		"sandboxed", "projectId", "goalId", "delegateOf",
-		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
+		"parentSessionId", "childKind", "readOnly", "dynamicCapabilities", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
-		"modelProvider", "modelId", "effectiveThinkingLevel",
+		"modelProvider", "modelId", "effectiveThinkingLevel", "humanSelectionPins",
 		"manualRetryRequired", "inFlightSteerTexts",
-		"sidePanelWorkspace",
+		"sidePanelWorkspace", "scheduledAdvisorTurnCount",
 	];
 
 	/** Update a subset of fields for an existing session */

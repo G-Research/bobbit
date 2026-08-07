@@ -1,16 +1,36 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
-import { ActionError } from "../extension-host/action-dispatcher.js";
+import { ActionError } from "../extension-host/action-error.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
-import { packIdFromRoot } from "./pack-contributions.js";
+import { packIdFromRoot, type HookContribution } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
-import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
+import { ContextTraceStore, type TraceOutcomeRow, type TraceProviderRow } from "./context-trace-store.js";
 import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
+import type { CapabilitySelectorStage } from "./dynamic-capability-contract.js";
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
+
+/** Direct, per-turn terminal telemetry; never a derived CostTracker value. */
+export type TurnUsageSnapshot =
+	| {
+		telemetry: "known";
+		inputTokens?: number;
+		outputTokens?: number;
+		cacheReadTokens?: number;
+		cacheWriteTokens?: number;
+		cost?: number;
+		/** Present only when the active runtime provides a verified pair. */
+		provider?: string;
+		modelId?: string;
+	}
+	| { telemetry: "unknown" };
+
+/** Lifecycle-provider scope vocabulary. Project is the default session scope. */
+export type HookScopeKind = "project" | "global";
+export const DEFAULT_HOOK_SCOPE: HookScopeKind = "project";
 
 /** Arbitrary, hierarchically-resolved per-goal metadata (see goal-metadata.ts). */
 export type GoalMetadata = Record<string, unknown>;
@@ -69,13 +89,15 @@ export interface HookScopeContext {
 export interface HookCtx {
 	sessionId: string;
 	projectId?: string;
-	scope: "project" | "global";
+	scope: HookScopeKind;
 	cwd: string;
 	goalId?: string;
 	roleName?: string;
 	prompt?: string;
 	userText?: string;
 	assistantText?: string;
+	/** Present for gateway-dispatched afterTurn only. */
+	usage?: TurnUsageSnapshot;
 	/** The about-to-be-lost conversation span (beforeCompact): the concatenated
 	 *  text of the messages compaction is about to summarize away. Providers retain
 	 *  it before the context is dropped. */
@@ -93,7 +115,10 @@ export interface HookCtx {
 }
 
 /** Existing dispatch fields, without per-provider values or event-local scope. */
-export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
+export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext"> & {
+	/** Core-only persisted every-N cadence; never exposed to provider hook contexts. */
+	cadenceTurnIndex?: number;
+};
 
 export interface HubDiagnostic {
 	providerId: string;
@@ -101,6 +126,72 @@ export interface HubDiagnostic {
 	error?: string;
 	timeout?: boolean;
 	ms: number;
+}
+
+/** Live, exact-grant authorization supplied by the server. It intentionally
+ * re-reads declarations and grants on each fence; no scheduled grant is cached. */
+export type ScheduledAdvisorAuthorizer = (ref: {
+	projectId?: string;
+	packId: string;
+	hookId: string;
+}) => boolean;
+
+export interface ScheduledAdvisorCancellationFilter {
+	sessionId?: string;
+	packId?: string;
+	hookId?: string;
+}
+
+interface ScheduledAdvisorInvocation {
+	controller: AbortController;
+	generation: symbol;
+}
+
+/** Bounded decision branch injected after ordinary provider dispatch is complete. */
+export interface CapabilitySelectionContext {
+	readonly event: "sessionSetup";
+	readonly sessionId: string;
+	readonly projectId?: string;
+	readonly goalId?: string;
+	readonly roleName?: string;
+	readonly cwd: string;
+	/** Bounded query text only; no plan, policy, config, path, or credential. */
+	readonly query: string;
+	/** Core-derived active/permitted candidate ids, never hook-proposed ids. */
+	readonly available: readonly string[];
+	/** Fixed skills-stage result, present only for the MCP stage. */
+	readonly selectedSkills?: readonly string[];
+}
+
+export interface CapabilityStageResult {
+	readonly selected: readonly string[];
+	/** True only when a valid, still-authorized selector proposal won this stage. */
+	readonly authoritative: boolean;
+	readonly outcomes: readonly TraceOutcomeRow[];
+}
+
+export interface DecisionLifecycleDispatcher {
+	dispatch(event: LifecycleHook, context: {
+		projectId: string;
+		sessionId: string;
+		goalId?: string;
+		roleName?: string;
+		cwd: string;
+		/** Direct gateway terminal usage snapshot; forwarded without derivation. */
+		usage?: TurnUsageSnapshot;
+		/** Ordinary completed-turn index, present only for afterTurn. */
+		turnIndex?: number;
+		/** Persisted every-N advisor cadence, distinct from ordinary turn telemetry. */
+		cadenceTurnIndex?: number;
+	}): Promise<TraceOutcomeRow[]>;
+	selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult>;
+	dispatchSetup?(context: {
+		projectId: string;
+		sessionId: string;
+		goalId?: string;
+		roleName?: string;
+		cwd: string;
+	}): Promise<{ outcomes: TraceOutcomeRow[]; thinkingLevel?: string }>;
 }
 
 interface ProviderTraceState {
@@ -124,6 +215,10 @@ export class LifecycleHub {
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
 	private readonly scopeContextResolver?: HookScopeContextResolver;
+	private readonly scheduledAdvisorAuthorizer?: ScheduledAdvisorAuthorizer;
+	/** Exactly one active worker per session + pack + hook; overlaps are dropped. */
+	private readonly scheduledAdvisors = new Map<string, ScheduledAdvisorInvocation>();
+	private decisionDispatcher?: DecisionLifecycleDispatcher;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -143,6 +238,8 @@ export class LifecycleHub {
 		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
 		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
 		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+		/** Exact active-declaration + decide-grant check, read at launch and completion. */
+		scheduledAdvisorAuthorizer?: ScheduledAdvisorAuthorizer;
 	}) {
 		this.registry = deps.registry;
 		this.moduleHost = deps.moduleHost;
@@ -152,6 +249,31 @@ export class LifecycleHub {
 		this.providerHostApi = deps.providerHostApi;
 		this.goalMetadataResolver = deps.goalMetadataResolver;
 		this.scopeContextResolver = deps.scopeContextResolver;
+		this.scheduledAdvisorAuthorizer = deps.scheduledAdvisorAuthorizer;
+	}
+
+	/** Late binding keeps gateway construction order acyclic. */
+	setDecisionDispatcher(dispatcher: DecisionLifecycleDispatcher | undefined): void {
+		this.decisionDispatcher = dispatcher;
+	}
+
+	/**
+	 * Session setup calls this twice in sequence: skills first, then MCP with the
+	 * fixed skills result. This hub is only a transient forwarding boundary;
+	 * execution, grants, and reduction remain owned by the decision dispatcher.
+	 */
+	async selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult> {
+		const dispatcher = context.projectId ? this.decisionDispatcher : undefined;
+		if (!dispatcher) return emptyCapabilityStageResult();
+		try {
+			const result = await dispatcher.selectCapabilities(stage, context);
+			if (!result || !Array.isArray(result.selected) || !Array.isArray(result.outcomes) || typeof result.authoritative !== "boolean") return emptyCapabilityStageResult();
+			return Object.freeze({ selected: Object.freeze([...result.selected]), authoritative: result.authoritative, outcomes: Object.freeze([...result.outcomes]) });
+		} catch {
+			// A selector-runtime failure is deliberately isolated from session setup;
+			// the next stage still runs with its caller-provided pinned input.
+			return emptyCapabilityStageResult();
+		}
 	}
 
 	/**
@@ -235,11 +357,124 @@ export class LifecycleHub {
 		}
 	}
 
+	/**
+	 * Launch due every-N-turn advisors. This method is deliberately asynchronous;
+	 * SessionManager starts it fire-and-forget after ordinary afterTurn dispatch.
+	 */
+	async dispatchScheduledAdvisors(
+		base: HookDispatchBase,
+		scopeInput?: Readonly<HookScopeResolutionInput>,
+	): Promise<void> {
+		const due = this.registry.listScheduledAdvisorHooks(base.projectId).filter((hook) => {
+			const everyNTurns = hook.schedule?.everyNTurns;
+			return !!everyNTurns && !!base.turn && base.turn.index % everyNTurns === 0;
+		});
+		// Start every independently-keyed advisor now. The returned aggregate is
+		// observed only by SessionManager's logging catch, never awaited by it.
+		await Promise.all(due.map((hook) => this.launchScheduledAdvisor(hook, base, scopeInput)));
+	}
+
+	/** Abort matching live advisors. No missed work is queued or retried. */
+	cancelScheduledAdvisors(filter: ScheduledAdvisorCancellationFilter = {}): void {
+		for (const [key, invocation] of this.scheduledAdvisors) {
+			const [sessionId, packId, hookId] = key.split("\u0000");
+			if ((filter.sessionId && filter.sessionId !== sessionId)
+				|| (filter.packId && filter.packId !== packId)
+				|| (filter.hookId && filter.hookId !== hookId)) continue;
+			invocation.controller.abort();
+		}
+	}
+
+	private async launchScheduledAdvisor(
+		hook: HookContribution,
+		base: HookDispatchBase,
+		scopeInput?: Readonly<HookScopeResolutionInput>,
+	): Promise<void> {
+		const packId = packIdFromRoot(hook.packRoot);
+		const ref = { projectId: base.projectId, packId, hookId: hook.id };
+		// The server owns exact active-declaration + decide-grant checks. Omit the
+		// advisor entirely when unavailable so ineligible code is never imported.
+		if (!this.scheduledAdvisorAuthorizer?.(ref)) return;
+
+		const key = [base.sessionId, packId, hook.id].join("\u0000");
+		if (this.scheduledAdvisors.has(key)) {
+			this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Overlapping invocation", 0);
+			return;
+		}
+
+		const controller = new AbortController();
+		const generation = Symbol(key);
+		this.scheduledAdvisors.set(key, { controller, generation });
+		const t0 = performance.now();
+		try {
+			let scopeContext: HookScopeContext | undefined;
+			if (this.scopeContextResolver) {
+				try { scopeContext = this.scopeContextResolver(scopeInput ?? base); }
+				catch { console.warn("[lifecycle-hub] scopeContextResolver threw; continuing without scope context"); }
+			}
+			// Advisors intentionally receive no gateway credential or Host API. Their
+			// returned value is only a trace identifier, never prose or an action.
+			const ctx = Object.freeze({
+				sessionId: base.sessionId,
+				projectId: base.projectId,
+				goalId: base.goalId,
+				roleName: base.roleName,
+				cwd: base.cwd,
+				turn: Object.freeze({ index: base.turn!.index }),
+				config: Object.freeze({ ...(hook.config ?? {}) }),
+				budget: Object.freeze({ maxTokens: hook.budget.maxTokens }),
+				...(scopeContext ? { scopeContext } : {}),
+				workingDir: base.cwd,
+			});
+			const url = pathToFileURL(path.resolve(path.dirname(hook.sourceFile), hook.module)).href;
+			const result = await this.moduleHost.invoke({
+				url,
+				packRoot: hook.packRoot,
+				epoch: 0,
+				exportKind: "advisors",
+				member: hook.id,
+				ctx: ctx as unknown as InvokeRequest["ctx"],
+				arg: undefined,
+				workingDir: base.cwd,
+			}, hook.budget.timeoutMs, controller.signal);
+			const ms = elapsedMs(t0);
+			if (controller.signal.aborted) {
+				this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Cancelled", ms);
+			} else if (!this.scheduledAdvisorAuthorizer?.(ref)) {
+				this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Disabled or revoked", ms);
+			} else {
+				const advisory = validateAdvisoryResult(result);
+				if (!advisory.valid) this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Malformed result", ms);
+				else this.appendAdvisorTrace(base.sessionId, packId, hook.id, "advised", undefined, ms, advisory.value);
+			}
+		} catch (err) {
+			const ms = elapsedMs(t0);
+			const message = err instanceof Error ? err.message : String(err);
+			if (controller.signal.aborted) this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Cancelled", ms);
+			else if ((err instanceof ActionError && err.status === 504) || message.includes("timed out")) this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Timed out", ms);
+			else this.appendAdvisorTrace(base.sessionId, packId, hook.id, "error", undefined, ms);
+		} finally {
+			// A late completion from an older invocation must never release a newer key.
+			if (this.scheduledAdvisors.get(key)?.generation === generation) this.scheduledAdvisors.delete(key);
+		}
+	}
+
+	private appendAdvisorTrace(
+		sessionId: string, packId: string, hookId: string,
+		outcome: "advised" | "dropped" | "error", reason: "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | undefined,
+		ms: number, value?: string,
+	): void {
+		this.trace.appendTrace(sessionId, {
+			ts: Date.now(), hook: "afterTurn", sessionId, providers: [],
+			outcomes: [{ kind: "advisory", packId, hookId, event: "afterTurn", outcome, ...(reason ? { reason } : {}), ...(value ? { value } : {}), ms }],
+		});
+	}
+
 	async dispatch(
 		hook: LifecycleHook,
 		base: HookDispatchBase,
 		scopeInput?: Readonly<HookScopeResolutionInput>,
-	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
+	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[]; thinkingLevel?: string }> {
 		let scopeContext: HookScopeContext | undefined;
 		if (this.scopeContextResolver) {
 			try {
@@ -254,9 +489,10 @@ export class LifecycleHub {
 		const collected: ContextBlock[] = [];
 		const traceStates = new Map<string, ProviderTraceState>();
 
+		const { cadenceTurnIndex: _cadenceTurnIndex, ...providerBase } = base;
 		for (const provider of providers) {
 			const hookCtx: HookCtx = {
-				...base,
+				...providerBase,
 				...(scopeContext ? { scopeContext } : {}),
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
@@ -324,8 +560,63 @@ export class LifecycleHub {
 		});
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
 
-		return { blocks: budgeted.kept, diagnostics };
+		// Setup selection must complete before bridge construction. All other decision
+		// events remain detached; never dispatch sessionSetup twice.
+		const dispatcher = base.projectId ? this.decisionDispatcher : undefined;
+		let thinkingLevel: string | undefined;
+		if (dispatcher?.dispatchSetup && hook === "sessionSetup") {
+			try {
+				const result = await dispatcher.dispatchSetup({
+					projectId: base.projectId!, sessionId: base.sessionId,
+					...(base.goalId ? { goalId: base.goalId } : {}),
+					...(base.roleName ? { roleName: base.roleName } : {}),
+					cwd: base.cwd,
+				});
+				thinkingLevel = result.thinkingLevel;
+				if (result.outcomes.length > 0) {
+					this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: [], outcomes: result.outcomes });
+				}
+			} catch {
+				// Decision hooks are isolated: setup continues with no extension choice.
+			}
+		} else if (dispatcher) {
+			void Promise.resolve()
+				.then(() => dispatcher.dispatch(hook, {
+					projectId: base.projectId!, sessionId: base.sessionId,
+					...(base.goalId ? { goalId: base.goalId } : {}),
+					...(base.roleName ? { roleName: base.roleName } : {}),
+					...(base.usage ? { usage: base.usage } : {}),
+					...(hook === "afterTurn" && base.turn ? { turnIndex: base.turn.index } : {}),
+					...(hook === "afterTurn" && base.cadenceTurnIndex !== undefined ? { cadenceTurnIndex: base.cadenceTurnIndex } : {}),
+					cwd: base.cwd,
+				}))
+				.then((outcomes) => {
+					if (!Array.isArray(outcomes) || outcomes.length === 0) return;
+					try { this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: [], outcomes }); } catch { /* isolated */ }
+				})
+				.catch(() => { /* decision dispatch never blocks an agent turn */ });
+		}
+
+		return { blocks: budgeted.kept, diagnostics, ...(thinkingLevel ? { thinkingLevel } : {}) };
 	}
+}
+
+function emptyCapabilityStageResult(): CapabilityStageResult {
+	return Object.freeze({ selected: Object.freeze([] as string[]), authoritative: false, outcomes: Object.freeze([] as TraceOutcomeRow[]) });
+}
+
+function elapsedMs(start: number): number {
+	return Math.max(0, Math.round(performance.now() - start));
+}
+
+function validateAdvisoryResult(result: unknown): { valid: true; value?: string } | { valid: false } {
+	if (result === undefined) return { valid: true };
+	if (!isPlainObject(result) || Object.keys(result).some((key) => key !== "advisory")) return { valid: false };
+	if (result.advisory === undefined) return { valid: true };
+	if (!isPlainObject(result.advisory) || Object.keys(result.advisory).some((key) => key !== "value")) return { valid: false };
+	const value = result.advisory.value;
+	if (value !== undefined && (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value))) return { valid: false };
+	return { valid: true, ...(typeof value === "string" ? { value } : {}) };
 }
 
 function extractBlocks(result: unknown): unknown[] {

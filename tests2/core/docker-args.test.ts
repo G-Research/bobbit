@@ -213,6 +213,48 @@ describe("buildDockerRunArgs", () => {
 		}
 	});
 
+	it("makes fresh named-volume mount roots writable before the init clone", async () => {
+		const calls: string[][] = [];
+		const commandRunner: CommandRunner = {
+			async execFile(_file, args) {
+				const call = [...args];
+				calls.push(call);
+				if (call[0] === "run") return { stdout: "sandbox-container\n", stderr: "" };
+				if (call[0] === "ps") return { stdout: "", stderr: "" };
+				const command = call.join(" ");
+				if (command.includes("test -d /workspace/.git") || command.includes("test -f /workspace/package-lock.json") || command.includes("test -f /workspace/node_modules") || command.includes("if(!p.scripts?.build)")) {
+					throw new Error("not present in fresh workspace");
+				}
+				return { stdout: "", stderr: "" };
+			},
+			execFileSync() { return ""; },
+		};
+		const sandbox = new ProjectSandbox({
+			projectId: "fresh-volume-owner",
+			projectDir: fixtureDir("fresh-volume-owner"),
+			repoUrl: "https://example.test/repo.git",
+			image: "test",
+		}, { commandRunner });
+
+		await sandbox.init();
+
+		const runIndex = calls.findIndex((args) => args[0] === "run");
+		const ownershipIndex = calls.findIndex((args) =>
+			args[0] === "exec" && args[1] === "-u" && args[2] === "root" &&
+			args.at(-1)?.includes("chown node:node /workspace /workspace-wt"),
+		);
+		const cloneIndex = calls.findIndex((args) => args.includes("git") && args.includes("clone"));
+
+		assert.ok(runIndex >= 0, "expected a sandbox container to be created");
+		assert.ok(ownershipIndex > runIndex, "must initialize named-volume ownership after creating the container");
+		assert.ok(cloneIndex > ownershipIndex, "must initialize named-volume ownership before cloning as the image user");
+		assert.match(
+			calls[ownershipIndex].at(-1) ?? "",
+			/mkdir -p \/workspace \/workspace-wt/,
+			"must create both persistent mount roots before assigning them to the image user",
+		);
+	});
+
 	it("does not mount worktrees volume when projectId is not set", () => {
 		const args = buildDockerRunArgs({
 			image: "test", workspaceDir: "/tmp/test",
@@ -257,7 +299,7 @@ describe("buildDockerRunArgs", () => {
 				stateDir,
 			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
-			for (const sub of ["google-code-assist", "tool-result-error-bridge", "aigw-dns-guard"]) {
+			for (const sub of ["tool-guard", "google-code-assist", "tool-result-error-bridge", "tool-result-filter", "aigw-dns-guard"]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
 				assert.ok(
@@ -267,7 +309,7 @@ describe("buildDockerRunArgs", () => {
 				assert.ok(fs.existsSync(path.join(stateDir, sub)), `${sub} subdir should be created before mounting`);
 			}
 			// The writable state subdirs must NOT have picked up :ro.
-			for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
+			for (const sub of ["sessions", "html-snapshots"]) {
 				const m = mounts.find((x) => x.includes(`:/bobbit-state/${sub}`));
 				assert.ok(m, `expected a /bobbit-state/${sub} mount`);
 				assert.ok(

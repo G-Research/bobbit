@@ -20,6 +20,11 @@ export interface ToolPolicyEntry {
 	group: string;
 }
 
+/** Server-derived only; generated guards never embed a grant or hook identity. */
+export interface RequestMutationToolActivation {
+	toolSafety?: boolean;
+}
+
 /**
  * Generate the TypeScript source for a tool_call guard extension.
  *
@@ -32,6 +37,7 @@ export function generateToolGuardExtension(
 	_sessionId: string,
 	policies: Record<string, ToolPolicyEntry>,
 	grantedTools: string[],
+	requestMutation?: RequestMutationToolActivation,
 ): string {
 	// Only include 'ask' and 'never' policies in the generated code —
 	// 'allow' tools don't need the guard.
@@ -44,6 +50,43 @@ export function generateToolGuardExtension(
 			neverPolicies[name] = entry;
 		}
 	}
+
+	// Keep the default source unchanged: only generated guards with a live
+	// server-derived safety source receive the additional transport.
+	const requestMutationSafety = requestMutation?.toolSafety ? `
+
+  async function inspectToolSafety(toolName) {
+    if (!sessionId) return false;
+    try {
+      const gwUrl = gatewayUrlFromEnv || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8").trim();
+      const token = tokenFromEnv || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8").trim();
+      if (!gwUrl) return false;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      try {
+        const response = await globalThis.fetch(gwUrl + "/api/sessions/" + sessionId + "/request-mutations/tool-safety", {
+          method: "POST",
+          headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+          body: JSON.stringify({ toolName }),
+          signal: controller.signal,
+        });
+        if (!response.ok) return false;
+        const result = await response.json();
+        // Only a schema-shaped explicit deny can block. Warnings, pass-through,
+        // malformed replies and every transport failure preserve existing policy.
+        return !!result && typeof result === "object" && !Array.isArray(result) && result.action === "deny";
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      return false;
+    }
+  }` : "";
+	const requestMutationInspection = requestMutation?.toolSafety ? `
+
+    if (await inspectToolSafety(toolName)) {
+      return { block: true, reason: "Tool call denied by project safety policy." };
+    }` : "";
 
 	return `import * as fs from "node:fs";
 import * as path from "node:path";
@@ -77,7 +120,7 @@ export default function(pi) {
   const bobbitDir = process.env.BOBBIT_DIR || path.join(os.homedir(), ".bobbit");
   const gatewayUrlFromEnv = process.env.BOBBIT_GATEWAY_URL;
   const tokenFromEnv = process.env.BOBBIT_TOKEN;
-  const sessionId = process.env.BOBBIT_SESSION_ID;
+  const sessionId = process.env.BOBBIT_SESSION_ID;${requestMutationSafety}
 
   pi.on("tool_call", async (event) => {
     const toolName = event.toolName || event.tool;
@@ -94,7 +137,7 @@ export default function(pi) {
         block: true,
         reason: 'Tool "' + toolName + '" is not permitted for this role. Do not call it again — choose a different approach.'
       };
-    }
+    }${requestMutationInspection}
 
     const askPolicy = policyEntry(askPolicies, askPolicyNamesByLower, toolName);
 

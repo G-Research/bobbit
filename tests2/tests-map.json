@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1140,
+  "censusTotal": 1139,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -20,6 +20,24 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/tool-guard-artifact-trust.test.ts",
+      "reason": "Pins trusted tool-guard publication, cross-platform exact-content cache validation, POSIX-only mode enforcement, Windows no-chmod publication, symlink rejection, and fail-closed integrity errors.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/rpc-bridge-tool-result-filter-extension-trust.test.ts",
+      "reason": "Pins RpcBridge's final protected-session extension trust boundary, including generated core state roots, config and arbitrary path rejection, symlink escape rejection, and inactive-gate compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
     {
       "path": "tests2/core/pack-list-scan-cache.test.ts",
       "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
@@ -140,6 +158,15 @@
     {
       "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
       "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/context-trace-inspector.spec.ts",
+      "reason": "Real-browser Context trace inspector journey with an isolated provider pack: it pins ordered safe provider rows, raw-content/error redaction, active-session isolation, post-append WebSocket refresh, persisted historical reload, focus restoration, and cleanup.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2165,8 +2192,26 @@
       }
     },
     {
+      "path": "tests2/core/scheduled-advisor-lifecycle.test.ts",
+      "reason": "Deterministic lifecycle coverage for exact every-N advisor cadence, advisory-only context, overlap dropping, revocation fencing, cancellation, and malformed-result isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-boot-restore-lag.test.ts",
       "reason": "Native v2 core coverage for event-loop-lag-aware eager restore batching without skipped or deferred sessions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-lifecycle-dispatch.test.ts",
+      "reason": "Focused SessionManager lifecycle boundary coverage for after-turn and shutdown dispatch payloads, effective-goal fallback, scope coordinates, exactly-once delivery, and rejection isolation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2417,6 +2462,24 @@
       }
     },
     {
+      "path": "tests2/dom/context-trace-controller.test.ts",
+      "reason": "DOM controller coverage for bounded active-session trace fetches, pagination, stale-response fencing, scoped invalidation, and sanitized refresh failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/context-trace-inspector.test.ts",
+      "reason": "DOM rendering coverage for safe newest-first Context trace rows, provider ordering, state feedback, controls, and tabpanel accessibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/bg-spawn-failure.journey.spec.ts",
       "reason": "Real browser journey through WebSocket delivery, persisted REST rehydration, distinct spawn-failed diagnostic rendering, and user removal of a background process whose container runtime cannot start.",
       "execution": {
@@ -2523,9 +2586,598 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/extension-grant-policy.test.ts",
+      "reason": "Fail-closed extension-grant policy coverage for exact active tuples, mutate eligibility (active decide declaration plus exact grant), malformed or wildcard-looking grants, unsupported capability requests, and defensive grant snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/request-mutation-contract.test.ts",
+      "reason": "Closed-schema request-mutation proposal validation, UTF-8 and exact-tool bounds, stable prompt ordering, and deny-over-warn reduction coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/request-mutation-dispatcher.test.ts",
+      "reason": "Dispatcher coverage for deny-by-default mutate grants, revocation rechecks, isolated timeout/throw/schema failures, extension/core composition, and zero-extension typed core shapers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/request-mutation-audit-store.test.ts",
+      "reason": "Bounded append-only request-mutation audit coverage for fixed metadata, high-confidence evidence redaction, UTF-8 clipping, corrupt-history filtering, and safe persistence failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/request-mutation-routes.test.ts",
+      "reason": "Authenticated in-process request-mutation route coverage for closed and bounded transient envelopes, grant-gated pass-through, prompt replacement, warn-versus-deny bridge responses, and signed-operator redacted audit access.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/extension-grant-config-store.test.ts",
+      "reason": "Project-owned extension_grants YAML persistence coverage for normalized exact tuples, malformed-row rejection, defensive reads, empty replacement cleanup, and atomic-publication failure safety.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-grant-audit-store.test.ts",
+      "reason": "Append-only project extension-grant audit coverage for normalized secret-free rows, bounded chronological reads, corrupt-history filtering, and redacted persistence failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/budget-enforcement.test.ts",
+      "reason": "Pure grant-gated budget enforcement reducer coverage for strict proposal validation, restrictive deterministic resolution, fail-closed pause and halt, revocation, hard-cap classification, and secret-free immutable audit metadata.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-capability-grants.test.ts",
+      "reason": "Authenticated gateway integration coverage for exact grant and revoke routes, server-derived administrative metadata, live contribution invalidation, activation ceilings, and durable secret-free audit history.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-capability-grants.spec.ts",
+      "reason": "Authenticated browser journey through the existing Market Pack and Hook grant controls, proving exact non-hook pack grant/revoke persistence, browser-operator confirmation, server-refetched audit attribution, and retained legacy hook compatibility.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/turn-usage.test.ts",
+      "reason": "Direct terminal assistant usage normalization: aliases, finite validation, omitted cache telemetry, explicit zeroes, authoritative cost, and complete-only attribution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/adopted-extension-ledger.test.ts",
+      "reason": "EP-9 unit coverage for scope-aware adoption identity, idempotence, durable config persistence, source redaction, and least-privilege MCP contribution mapping.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/adopted-skills.test.ts",
+      "reason": "EP-9 shared skill-loader coverage for namespaced adopted Claude-style skills, provenance, parser diagnostics, and collision-safe precedence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/mcp-negotiation-status.test.ts",
+      "reason": "EP-9 MCP client and manager coverage for sanitized stdio/HTTP initialize handshake protocol and server identity reporting.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-extension-harness-version.test.ts",
+      "reason": "EP-9 bounded Pi discovery coverage for exposing the probe harness version in successful, skipped, failed, and contribution diagnostics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/adopted-extension-runtime.test.ts",
+      "reason": "EP-9 runtime API coverage for stock stdio/HTTP MCP and Claude-style skill adoption, conservative operation selection, idempotence, removal, and project isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts",
+      "reason": "EP-9 browser journey through Market adoption inspection, least-privilege conformance display, durable reload, and confirmed cleanup for project-scoped skills and MCP assets.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/ws-skill-activation.test.ts",
+      "reason": "WebSocket prompt expansion must honor scoped market skill activation and cannot seed the shared catalog cache with disabled skills.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-decision-request.spec.ts",
+      "reason": "Real-browser schema-2 decision-hook journey covering pack activation, explicit decide grant, lifecycle dispatch, shared AskUserChoicesWidget Other submission, reload persistence, session-scoped durable memory, no agent prompt, and Context trace redaction.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/consent-pause-recovery.spec.ts",
+      "reason": "Browser journey for a seeded durable paused-consent projection: reload, shared-card Review link, one typed answer, no prompt/default/failure surface, and advisory inbox-only behavior.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-decision-requests.test.ts",
+      "reason": "Gateway-facing decision dispatch seams: grants/revocation, session-owned answers, malformed values, and no-prompt isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/decision-proposal-routing.test.ts",
+      "reason": "Decision proposal effects create only editable drafts after durable resolution and isolate seed failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/consent-pause-recovery.test.ts",
+      "reason": "Composed durable consent recovery coverage for forced classification, deny/pause timeout settlement, restart replay, exact goal resume, inbox projection, advisory isolation, and proposal-only configuration effects.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/decision-hook-contract.test.ts",
+      "reason": "Strict extension decision contract validation, bounded defaults, deadlines, effects, and typed answers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-hook-module-host.test.ts",
+      "reason": "Decision hook worker invocation remains isolated and bounded.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-request-manager.test.ts",
+      "reason": "Decision persistence lifecycle: deadlines, headless defaults, dedupe, scope memory, budgets, advisories, and isolated continuations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-request-store.test.ts",
+      "reason": "Atomic project-owned decision store persistence, corruption isolation, retention, and exact scope memory.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/inbox-nudger-advisory.test.ts",
+      "reason": "Extension advisory inbox entries persist as non-waking, remain actionable, survive reload, and never nudge staff beside ordinary wakeable work.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/decision-request-renderer.test.ts",
+      "reason": "Existing ask-user-choices adapter transports durable decision answers without ask envelopes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/consent-inbox-reference.test.ts",
+      "reason": "Consent inbox references remain non-destructive and focus the existing typed decision card rather than creating an answer route.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/goal-pause-service.test.ts",
+      "reason": "Canonical pause lifecycle and exact awaiting-consent resume ownership preserve manual pause protection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-prompt-layout-cache-boundary.test.ts",
+      "reason": "Focused static extension prompt layout coverage for canonical assembly/inspector parity, byte-identical no-extension output, stable UTF-8 prefix digest across extension changes, and wrapper-inclusive budget rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/prompt-extension-registry-proposal-audit.test.ts",
+      "reason": "Real gateway integration coverage for grant-gated deterministic prompt-section registry resolution, generic-config rejection with stored-proposal CAS acceptance, requested/proposed audit lifecycle and terminal usage, plus wrapper-inclusive override budget safety.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/prompt-extension-inspector.spec.ts",
+      "reason": "Production browser E2E journey for static prompt contributions: it grants and orders fixture packs, inspects attributed UTF-8 bytes across reload, disables sections, and preserves the stable core cache identity.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/advisory-selection-contract.test.ts",
+      "reason": "EP-2 pure advisory-selection contract coverage for the strict closed union, immutable exact host availability admission, trusted candidate provenance, and deterministic priority/pack/hook reduction.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-hook-dispatcher.test.ts",
+      "reason": "EP-2 dispatcher coverage proving concurrent afterTurn advisory selections reduce in deterministic active-pack order and an absent exact decide grant prevents hook import.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/thinking-selector-extraction.test.ts",
+      "reason": "EP-12 first-party thinking selector package contract and regression guard: default-disabled pure medium proposal, ordinary built-in shipping, no implicit server registration, and no residual core fallback or post-spawn selector pipeline.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/runtime-model-selection.test.ts",
+      "reason": "EP-2 runtime model-selection coverage for isolated explicit human pin provenance, durable round-trip, verified thinking read-back/persistence/broadcast, and post-success websocket pin writes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/advisory-thinking-consumer.test.ts",
+      "reason": "EP-2 advisory thinking consumer coverage proving human pins and fresh grant authorization short-circuit before runtime RPC mutation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-advisory-thinking.spec.ts",
+      "reason": "EP-2 production browser journey proving granted afterTurn thinking advice uses terminal usage, clamps and persists, while unavailable values, human pins, revocation, reload, and redacted Context trace remain safe.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/extension-settings-schema.test.ts",
+      "reason": "Strict schema normalization and flat string, secret, enum, boolean, and number value validation, including fail-closed malformed descriptors and requires-config metadata.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-settings-store.test.ts",
+      "reason": "Project-scoped revision/CAS public YAML overlays, owner-only secret persistence, redacted projections, and safe partial-publication behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-settings-api.test.ts",
+      "reason": "Authenticated gateway settings API coverage for redaction, prompt-operator writes, target validation, cache/WS invalidation, legacy fallback, and two-project runtime isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-settings.spec.ts",
+      "reason": "Production Market browser journey for project-scoped Hindsight settings: accessible save and clear controls, redacted secrets, disablement isolation, reload, navigation, and mobile layout.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/first-party-thinking-selector.spec.ts",
+      "reason": "EP-12 browser journey proving the default-disabled built-in selector requires ordinary activation plus an exact grant, respects pins and model clamps across reload, and safely returns to no-op after disable or revoke.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-contract.test.ts",
+      "reason": "EP-10 pure dynamic-capability contract coverage for strict proposals, deterministic reduction, ceiling filtering, and redacted durable snapshot validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-dispatcher.test.ts",
+      "reason": "EP-10 selector dispatch coverage for ordered stage exports, exact grant rechecks, core candidate ceilings, and lifecycle failure isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-session-runtime.test.ts",
+      "reason": "EP-10 session setup runtime regression coverage for ordered skills/MCP snapshots, role-policy candidate ceilings, selector and telemetry isolation, and persisted replay without reinvocation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pack-selector-metadata.test.ts",
+      "reason": "EP-10 hook declaration coverage for strict selectors metadata normalization and schema-v2 compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/slash-skill-selection-ceiling.test.ts",
+      "reason": "EP-10 session-local skill ceiling coverage for discovery cache isolation and fail-closed activation and expansion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-extension-contract.test.ts",
+      "reason": "Pure validation, normalized-status, and redaction coverage for the declarative managed-service extension contract.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-extension-runtime.test.ts",
+      "reason": "Injected lifecycle coverage for service launch selection, readiness, port leases, restart limits, and shutdown cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/service-extension-registry.test.ts",
+      "reason": "Active winning-pack and project-settings isolation coverage for service extension declarations without secret projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/staff-improvement-signals.test.ts",
+      "reason": "Bounded fixed-label/count staff-improvement signal boundary rejects transcript-like data and invalid shapes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/staff-proposal-fixture.test.ts",
+      "reason": "Default-uninstalled fixture pack proves due scheduled decision declarations and consent-only ordinary proposal seeds.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/staff-proposal-fixture.spec.ts",
+      "reason": "Server-backed browser coverage for the fixture's due consent, decline/reload no-draft path, and ordinary editable goal proposal dismissal without an applied change.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-contract.test.ts",
+      "reason": "Closed EP-14 result-filter contract coverage for strict canonical inputs, closed pass/replace/redact/reject proposals, deny-wins reduction, and safe synthetic rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-attempt-credentials.test.ts",
+      "reason": "EP-14 private Pi callback credential coverage for one-use atomic consumption, replay/cross-settlement rejection, expiry, and runtime invalidation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-dispatcher.test.ts",
+      "reason": "EP-14 dispatcher coverage for exact filter grants, revoke fencing, deterministic reject-wins reduction, fail-closed worker isolation, and concurrent call isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-audit-store.test.ts",
+      "reason": "EP-14 metadata-only audit-store coverage for bounded normalized rows, rotation, corrupt-row rejection, and no canary persistence or diagnostic leakage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/tool-result-filter-routes.test.ts",
+      "reason": "Authenticated gateway route coverage for the deterministic EP-14 fixture: exact-grant activation, pass/redact/replace/reject output, deny-wins ordering, live revoke, and malformed or oversized fail-closed outputs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/tool-result-filter.spec.ts",
+      "reason": "Browser-origin EP-14 callback journey proving UI/cookie transport cannot mint a private Pi attempt credential or expose raw result bytes in DOM, snapshots, trace, or audit views.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-platform-lifecycle.spec.ts",
+      "reason": "Parent extension-platform browser journey: real Market source/install and exact EP-6 grant confirmation, a UI-triggered scheduled-advisor trace, uninstall, reload, and source cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-extension.test.ts",
+      "reason": "EP-14 generated Pi gate coverage for one bounded route handoff, strict safe gateway output acceptance, and fixed local failure fallback without raw malformed or oversized result forwarding.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/tool-result-filter-pi-gate.test.ts",
+      "reason": "Patched Pi pre-fan-out gate integration coverage for private streamed updates, authoritative safe result fan-out to model/session/transcript owners, and abort buffer disposal.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
+    {
+      "path": "tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts",
+      "type": "smoke-journey"
+    },
     {
       "path": "tests2/browser/journeys/app-smoke.journey.spec.ts",
       "type": "smoke-journey"

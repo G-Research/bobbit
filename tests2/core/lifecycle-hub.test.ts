@@ -22,7 +22,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { ContextTraceStore } from "../../src/server/agent/context-trace-store.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { LifecycleHub, type HookCtx } from "../../src/server/agent/lifecycle-hub.ts";
+import { DEFAULT_HOOK_SCOPE, LifecycleHub, type HookCtx, type HookScopeKind } from "../../src/server/agent/lifecycle-hub.ts";
 import type { ProviderContribution } from "../../src/server/agent/pack-contributions.ts";
 import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
 import { ModuleHost } from "../../src/server/extension-host/module-host-worker.ts";
@@ -102,6 +102,47 @@ function hub(tmp: string, providers: ProviderContribution[], moduleHost: ModuleH
 }
 
 describe("LifecycleHub", () => {
+	it("awaits setup selection once instead of also launching the detached decision branch", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const lifecycleHub = hub(tmp, [], moduleHost);
+			let setupCalls = 0;
+			let detachedCalls = 0;
+			lifecycleHub.setDecisionDispatcher({
+				dispatch: async () => { detachedCalls++; return []; },
+				dispatchSetup: async () => { setupCalls++; return { outcomes: [], thinkingLevel: "medium" }; },
+			} as any);
+
+			const result: any = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			await Promise.resolve();
+			assert.equal(setupCalls, 1);
+			assert.equal(detachedCalls, 0);
+			assert.equal(result.thinkingLevel, "medium");
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("forwards persisted decision cadence separately from ordinary after-turn telemetry", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const lifecycleHub = hub(tmp, [], moduleHost);
+			const calls: unknown[][] = [];
+			lifecycleHub.setDecisionDispatcher({ dispatch: async (...args: unknown[]) => { calls.push(args); return []; } } as any);
+			await lifecycleHub.dispatch("afterTurn", { ...base(tmp), turn: { index: 42 }, cadenceTurnIndex: 6 });
+			await vi.waitFor(() => assert.equal(calls.length, 1));
+			const context = calls[0]?.[1] as { turnIndex?: number; cadenceTurnIndex?: number };
+			assert.equal(context.turnIndex, 42);
+			assert.equal(context.cadenceTurnIndex, 6);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("merges provider blocks, applies budgets, and forces provenance", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
@@ -264,6 +305,65 @@ describe("LifecycleHub", () => {
 			assert.deepEqual(rows[0].providers.map((p) => ({ id: p.id, blocks: p.blocks, omitted: p.omitted })), [{ id: "p1", blocks: 1, omitted: 0 }]);
 		} finally {
 			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("exports the lifecycle scope vocabulary with project as the default", () => {
+		const vocabulary: readonly HookScopeKind[] = ["project", "global"];
+		assert.deepEqual(vocabulary, ["project", "global"]);
+		assert.equal(DEFAULT_HOOK_SCOPE, "project");
+	});
+
+	it("preserves provider dispatch compatibility without a scope resolver", async () => {
+		const tmp = tmpDir();
+		const observed: Array<{ id: string; ctx: Record<string, unknown> }> = [];
+		const moduleHost = {
+			invoke: async (request: any) => {
+				// This provider intentionally ignores optional lifecycle fields.
+				observed.push({ id: request.ctx.config.id as string, ctx: request.ctx });
+				return {
+					blocks: [{
+						id: request.ctx.config.id,
+						title: request.ctx.config.id,
+						authority: "memory",
+						content: request.ctx.config.id,
+						reason: "compatibility",
+						priority: request.ctx.config.priority,
+					}],
+				};
+			},
+		} as unknown as ModuleHost;
+		const trace = new ContextTraceStore(path.join(tmp, "state"));
+		try {
+			const first = fixtureProvider(tmp, "first", "export default {};", { maxTokens: 111 });
+			first.config = { id: "first", priority: 2 };
+			const second = fixtureProvider(tmp, "second", "export default {};", { maxTokens: 222 });
+			second.config = { id: "second", priority: 1 };
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([first, second]),
+				moduleHost,
+				trace,
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "compat-sess"));
+
+			assert.deepEqual(observed.map(({ id }) => id), ["first", "second"], "providers retain their invocation order");
+			assert.deepEqual(observed.map(({ ctx }) => ctx.config), [{ id: "first", priority: 2 }, { id: "second", priority: 1 }]);
+			assert.deepEqual(observed.map(({ ctx }) => ctx.budget), [{ maxTokens: 111 }, { maxTokens: 222 }]);
+			assert.deepEqual(observed.map(({ ctx }) => ctx.gateway), [
+				{ baseUrl: "https://gateway.test", token: "token-1" },
+				{ baseUrl: "https://gateway.test", token: "token-1" },
+			]);
+			assert.ok(observed.every(({ ctx }) => !Object.hasOwn(ctx, "scopeContext")), "absent scope resolution does not add scopeContext");
+			assert.deepEqual(result.blocks.map((block) => block.id), ["first", "second"]);
+			assert.deepEqual(result.diagnostics, []);
+			assert.deepEqual(trace.readTrace("compat-sess")[0]?.providers.map(({ id, blocks, omitted }) => ({ id, blocks, omitted })), [
+				{ id: "first", blocks: 1, omitted: 0 },
+				{ id: "second", blocks: 1, omitted: 0 },
+			]);
+		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});

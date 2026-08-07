@@ -28,10 +28,10 @@ import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { ProviderContribution } from "./pack-contributions.js";
 import type { LifecycleHub, LifecycleHook } from "./lifecycle-hub.js";
+import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "./prompt-delimiters.js";
 
 /** Delimiters wrapping the per-turn dynamic-context region in the system prompt. */
-export const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-export const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
+export { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "./prompt-delimiters.js";
 
 /** The per-turn hooks that require the in-process bridge extension. */
 export const TURN_BRIDGE_HOOKS: readonly LifecycleHook[] = ["beforePrompt", "beforeCompact"];
@@ -94,7 +94,70 @@ export function hasProviderBridgeHooks(hub: LifecycleHub, projectId?: string, go
  * @param sessionId - The session ID (used to POST hook callbacks to the gateway)
  * @returns TypeScript source string for the extension
  */
-export function generateProviderBridgeExtension(sessionId: string): string {
+export interface RequestMutationBridgeActivation {
+	/** Install the core-owned transient prompt replacement bridge. */
+	prompt?: boolean;
+}
+
+export function generateProviderBridgeExtension(
+	sessionId: string,
+	requestMutation?: RequestMutationBridgeActivation,
+): string {
+	// Keep the no-mutation output byte-compatible: sessions without an active
+	// mutation source must not gain a transport or an extra lifecycle result.
+	const requestMutationSection = requestMutation?.prompt ? `
+
+  async function postCoreDecision(route, body, timeoutMs) {
+    const response = await postHook(route, body, timeoutMs);
+    if (!response || typeof response !== "object" || Array.isArray(response)) return undefined;
+    return response;
+  }
+
+  function validPromptReplacement(response) {
+    if (!response || response.action !== "replace" || typeof response.text !== "string") return undefined;
+    if (!response.text || Buffer.byteLength(response.text, "utf8") > 32 * 1024) return undefined;
+    return response.text;
+  }` : "";
+	const beforeAgentStartHandler = requestMutation?.prompt ? `  // Per-turn beforePrompt: provider context stays a hidden custom/user-side
+  // message. The optional core mutation bridge returns only a transient prompt
+  // replacement and never touches the provider's dynamic-context contract.
+  pi.on("before_agent_start", async (event) => {
+    const [resp, mutationResponse] = await Promise.all([
+      postHook("/provider-hooks/before-prompt", { prompt: event.prompt }, ${BEFORE_PROMPT_TIMEOUT_MS}),
+      postCoreDecision("/request-mutations/prompt", { prompt: event.prompt }, ${BEFORE_PROMPT_TIMEOUT_MS}),
+    ]);
+    const content = resp && typeof resp.content === "string" ? resp.content : "";
+    const replacement = validPromptReplacement(mutationResponse);
+    if (!replacement && !content) return undefined;
+    const result = {};
+    if (replacement) result.prompt = replacement;
+    if (content) result.message = {
+      customType: "bobbit:dynamic-context",
+      content,
+      display: false,
+    };
+    return result;
+  });` : `  // Per-turn beforePrompt: inject recall as a hidden custom/user-side message.
+  // The user's prompt text (event.prompt) is forwarded read-only and never
+  // mutated; the system prompt is never amended here so provider prompt-cache
+  // system bytes stay stable across turns.
+  pi.on("before_agent_start", async (event) => {
+    const resp = await postHook(
+      "/provider-hooks/before-prompt",
+      { prompt: event.prompt },
+      ${BEFORE_PROMPT_TIMEOUT_MS},
+    );
+    if (!resp) return undefined; // failure / timeout — proceed unchanged
+    const content = typeof resp.content === "string" ? resp.content : "";
+    if (!content) return undefined;
+    return {
+      message: {
+        customType: "bobbit:dynamic-context",
+        content,
+        display: false,
+      },
+    };
+  });`;
 	return `import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -230,27 +293,7 @@ export default function(pi) {
     }
   }
 
-  // Per-turn beforePrompt: inject recall as a hidden custom/user-side message.
-  // The user's prompt text (event.prompt) is forwarded read-only and never
-  // mutated; the system prompt is never amended here so provider prompt-cache
-  // system bytes stay stable across turns.
-  pi.on("before_agent_start", async (event) => {
-    const resp = await postHook(
-      "/provider-hooks/before-prompt",
-      { prompt: event.prompt },
-      ${BEFORE_PROMPT_TIMEOUT_MS},
-    );
-    if (!resp) return undefined; // failure / timeout — proceed unchanged
-    const content = typeof resp.content === "string" ? resp.content : "";
-    if (!content) return undefined;
-    return {
-      message: {
-        customType: "bobbit:dynamic-context",
-        content,
-        display: false,
-      },
-    };
-  });
+${beforeAgentStartHandler}${requestMutationSection}
 
   // Context filtering: pi may persist hidden custom messages after a turn. Do
   // not mutate message_end (that is too early for the current provider request);
@@ -284,14 +327,18 @@ const bridgeFileCache = new Map<string, string>();
  * dedup, mirroring `writeToolGuardExtension`'s caching and write-if-changed
  * handling.
  */
-export function writeProviderBridgeExtension(sessionId: string): string | undefined {
-	const cachedPath = bridgeFileCache.get(sessionId);
+export function writeProviderBridgeExtension(
+	sessionId: string,
+	requestMutation?: RequestMutationBridgeActivation,
+): string | undefined {
+	const cacheKey = `${sessionId}\0${requestMutation?.prompt ? "prompt" : ""}`;
+	const cachedPath = bridgeFileCache.get(cacheKey);
 	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
 
-	let code = bridgeCodeCache.get(sessionId);
+	let code = bridgeCodeCache.get(cacheKey);
 	if (!code) {
-		code = generateProviderBridgeExtension(sessionId);
-		bridgeCodeCache.set(sessionId, code);
+		code = generateProviderBridgeExtension(sessionId, requestMutation);
+		bridgeCodeCache.set(cacheKey, code);
 	}
 
 	try {
@@ -304,12 +351,12 @@ export function writeProviderBridgeExtension(sessionId: string): string | undefi
 		try {
 			const existing = fs.readFileSync(filePath, "utf-8");
 			if (existing === code) {
-				bridgeFileCache.set(sessionId, filePath);
+				bridgeFileCache.set(cacheKey, filePath);
 				return filePath;
 			}
 		} catch { /* file doesn't exist yet */ }
 		fs.writeFileSync(filePath, code, "utf-8");
-		bridgeFileCache.set(sessionId, filePath);
+		bridgeFileCache.set(cacheKey, filePath);
 		return filePath;
 	} catch {
 		// Non-fatal: if the bridge can't be written the turn proceeds without

@@ -2,7 +2,7 @@
  * E2E tests for scoped sandbox tokens (per-project model).
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken } from "./_e2e/e2e-setup.js";
+import { createSession, defaultProject, deleteSession, readE2EToken } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 let SandboxTokenStore: typeof import("../../src/server/auth/sandbox-token.js").SandboxTokenStore;
@@ -132,6 +132,44 @@ test.describe("Sandbox Token Scoping", () => {
 		expect(isSandboxAllowed("/api/tasks/t1/assign", "POST", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/tasks/t1/transition", "POST", scope)).toBe(true);
 		expect(isSandboxAllowed("/api/tasks/t1", "DELETE", scope)).toBe(false);
+	});
+
+	test("a real scoped token can post only to its own tool-result filter callback", async ({ gateway }) => {
+		const projectId = (await defaultProject()).id;
+		const ownedSessionId = await createSession({ projectId });
+		const otherSessionId = await createSession({ projectId });
+		const tokenStore = gateway.sessionManager.sandboxTokenStore;
+		const sandboxToken = tokenStore.register(projectId);
+		tokenStore.addSession(projectId, ownedSessionId);
+		try {
+			const body = {
+				toolCallId: "sandbox-scoped-filter-call",
+				toolName: "sandbox-fixture-tool",
+				result: { content: [{ type: "text", text: "safe result" }], isError: false },
+			};
+			const allowed = await fetchWithToken(gateway.baseURL, `/api/sessions/${ownedSessionId}/tool-result-filter`, sandboxToken, {
+				method: "POST", body: JSON.stringify(body),
+			});
+			expect(allowed.status, await allowed.clone().text()).toBe(200);
+			// Sandbox scope/Bearer authentication reaches the private callback but
+			// cannot invoke it: only the core Pi gate has an attempt credential.
+			expect(await allowed.json()).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
+
+			const crossSession = await fetchWithToken(gateway.baseURL, `/api/sessions/${otherSessionId}/tool-result-filter`, sandboxToken, {
+				method: "POST", body: JSON.stringify(body),
+			});
+			expect(crossSession.status).toBe(403);
+			const wrongMethod = await fetchWithToken(gateway.baseURL, `/api/sessions/${ownedSessionId}/tool-result-filter`, sandboxToken);
+			expect(wrongMethod.status).toBe(403);
+			const wrongPath = await fetchWithToken(gateway.baseURL, `/api/sessions/${ownedSessionId}/tool-result-filter/extra`, sandboxToken, {
+				method: "POST", body: JSON.stringify(body),
+			});
+			expect(wrongPath.status).toBe(403);
+		} finally {
+			tokenStore.removeSession(projectId, ownedSessionId);
+			await deleteSession(ownedSessionId);
+			await deleteSession(otherSessionId);
+		}
 	});
 
 	test("sandbox guard blocks dangerous endpoints (per-project model)", async () => {

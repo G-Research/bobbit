@@ -2,6 +2,7 @@ import { gatewayFetch, gatewayNativeTransportSupport, gatewayUrl, previewRouteFr
 import { gatewayRoute } from "../shared/base-path.js";
 import { activeSessionId, renderApp, state } from "./state.js";
 import {
+	CONTEXT_PANEL_TAB_ID,
 	INBOX_PANEL_TAB_ID,
 	assistantProposalType,
 	buildPanelWorkspaceTabs,
@@ -20,7 +21,7 @@ import {
 } from "./panel-workspace.js";
 
 export type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
-export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "pack";
+export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "context" | "pack";
 export type SidePanelProposalType = "goal" | "project" | "role" | "tool" | "staff";
 
 export interface SidePanelWorkspaceTab {
@@ -33,6 +34,7 @@ export interface SidePanelWorkspaceTab {
 		| { type: "proposal"; sessionId: string; proposalType: SidePanelProposalType; rev?: number; historical?: boolean }
 		| { type: "review"; sessionId: string; documentId: string; title: string }
 		| { type: "inbox"; sessionId: string; staffId?: string }
+		| { type: "context"; sessionId: string }
 		| { type: "pack"; sessionId: string; packId: string; panelId: string; instanceKey: string; singleton?: boolean; params?: Record<string, unknown> };
 	state?: Record<string, unknown>;
 	updatedAt: number;
@@ -56,6 +58,7 @@ export interface SidePanelWorkspace {
 type PreviewSource = Extract<SidePanelWorkspaceTab["source"], { type: "preview" }>;
 type ProposalSource = Extract<SidePanelWorkspaceTab["source"], { type: "proposal" }>;
 type ReviewSource = Extract<SidePanelWorkspaceTab["source"], { type: "review" }>;
+type ContextSource = Extract<SidePanelWorkspaceTab["source"], { type: "context" }>;
 type PackSource = Extract<SidePanelWorkspaceTab["source"], { type: "pack" }>;
 
 export interface OpenSidePanelTabOptions {
@@ -109,7 +112,7 @@ function isSizeMode(value: unknown): value is SidePanelSizeMode {
 }
 
 function isPanelKind(value: unknown): value is SidePanelKind {
-	return value === "preview" || value === "proposal" || value === "review" || value === "inbox" || value === "pack";
+	return value === "preview" || value === "proposal" || value === "review" || value === "inbox" || value === "context" || value === "pack";
 }
 
 function isProposalType(value: unknown): value is SidePanelProposalType {
@@ -213,6 +216,10 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 	if (kind === "inbox") {
 		return { ...base, id: INBOX_PANEL_TAB_ID, kind, source: { type: "inbox", sessionId, ...(stringValue(source.staffId) ? { staffId: stringValue(source.staffId) } : {}) } };
 	}
+	if (kind === "context") {
+		if (id !== CONTEXT_PANEL_TAB_ID) return null;
+		return { ...base, id: CONTEXT_PANEL_TAB_ID, kind, source: { type: "context", sessionId } };
+	}
 	const packId = stringValue(source.packId);
 	const panelId = stringValue(source.panelId);
 	const instanceKey = stringValue(source.instanceKey) || "default";
@@ -296,6 +303,18 @@ function toLegacyPanelTab(tab: SidePanelWorkspaceTab): PanelWorkspaceTab {
 			label: tab.label,
 			legacyTab: "review",
 			source: { ...source, reviewTitle: source.title } as PanelWorkspaceTab["source"],
+			state: tab.state,
+		};
+	}
+	if (tab.kind === "context") {
+		const source = tab.source as ContextSource;
+		return {
+			id: CONTEXT_PANEL_TAB_ID,
+			kind: "context",
+			title: tab.title,
+			label: tab.label,
+			legacyTab: "context",
+			source,
 			state: tab.state,
 		};
 	}
@@ -548,6 +567,7 @@ function sidePanelTabFromLegacyMirror(tab: PanelWorkspaceTab, sessionId: string)
 		};
 	}
 	if (tab.kind === "inbox") return { id: INBOX_PANEL_TAB_ID, kind: "inbox", title: tab.title || "Inbox", label: tab.label || "Inbox", source: { type: "inbox", sessionId }, state: cloneJsonRecord(tab.state), updatedAt };
+	if (tab.kind === "context") return { id: CONTEXT_PANEL_TAB_ID, kind: "context", title: tab.title || "Context", label: tab.label || "Context", source: { type: "context", sessionId }, state: cloneJsonRecord(tab.state), updatedAt };
 	if (tab.kind === "pack") {
 		const source = asRecord(tab.source) || {};
 		const packId = stringValue(source.packId);
@@ -885,6 +905,9 @@ async function legacyTabToSidePanel(tab: PanelWorkspaceTab, sessionId: string): 
 	}
 	if (tab.kind === "inbox") {
 		return { id: INBOX_PANEL_TAB_ID, kind: "inbox", title: tab.title || "Inbox", label: tab.label || "Inbox", source: { type: "inbox", sessionId }, state: tab.state, updatedAt };
+	}
+	if (tab.kind === "context") {
+		return { id: CONTEXT_PANEL_TAB_ID, kind: "context", title: tab.title || "Context", label: tab.label || "Context", source: { type: "context", sessionId }, state: tab.state, updatedAt };
 	}
 	if (tab.kind === "pack") {
 		const source = asRecord(tab.source) || {};

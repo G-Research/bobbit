@@ -19,7 +19,25 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildAgentArgs } from "../../src/server/agent/rpc-bridge.ts";
+import { assertDockerToolResultGateCompatibility, buildAgentArgs } from "../../src/server/agent/rpc-bridge.ts";
+
+describe("Docker result-gate preflight", () => {
+	it("requires both a read-only gate mount and patched Pi markers before protected launch", () => {
+		const calls: string[][] = [];
+		const exec = (_file: string, args: string[]) => {
+			calls.push(args);
+			return args[0] === "inspect"
+				? "/bobbit-state/tool-result-filter false\n"
+				: "";
+		};
+		assert.doesNotThrow(() => assertDockerToolResultGateCompatibility("sandbox-1", exec));
+		assert.deepEqual(calls.map(args => args[0]), ["inspect", "exec"]);
+		assert.throws(
+			() => assertDockerToolResultGateCompatibility("sandbox-1", () => "/bobbit-state/tool-result-filter true\n"),
+			/patched Docker Pi runtime and read-only gate mount/,
+		);
+	});
+});
 
 describe("buildAgentArgs", () => {
 	it("always includes --no-approve so pi never stalls on the 0.79 project-trust gate", () => {

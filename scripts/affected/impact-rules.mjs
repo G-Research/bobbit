@@ -306,6 +306,13 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		consumers: frozen(["tests2/integration/hindsight-external.test.ts"]),
 	},
 	{
+		// installFixture copies this exact committed pack into an isolated gateway.
+		id: "tool-result-filter-route-fixture",
+		roots: frozen(["tests2/_fixtures/tool-result-filter"]),
+		matches: (path) => path.startsWith("tests2/_fixtures/tool-result-filter/"),
+		consumers: frozen(["tests2/integration/tool-result-filter-routes.test.ts"]),
+	},
+	{
 		id: "pr-walkthrough-proof-removal-guard",
 		roots: frozen(["src", "defaults"]),
 		matches: (path) => (path.startsWith("src/") || path.startsWith("defaults/"))
@@ -421,6 +428,17 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["scripts/testing-v2/test-map-execution.mjs"]),
 	},
 	{
+		// The Pi gate test loads these committed assets through private child-process
+		// paths, so ordinary static-import/read extraction cannot retain their edge.
+		id: "tool-result-filter-pi-gate-assets",
+		consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts",
+		inputs: frozen([
+			"patches/@earendil-works+pi-agent-core+0.82.1.patch",
+			"patches/@earendil-works+pi-coding-agent+0.82.1.patch",
+			"tests2/integration/tool-result-filter-pi-gate-scenario.mjs",
+		]),
+	},
+	{
 		id: "native-ci-workflow-contracts",
 		consumer: "tests2/core/build-unit-gate-ci.test.ts",
 		inputs: frozen([
@@ -459,6 +477,11 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["tests/e2e/hindsight-stub.mjs"]),
 	},
 	{
+		id: "adopted-extension-http-fixture",
+		consumer: "tests2/integration/adopted-extension-runtime.test.ts",
+		inputs: frozen(["tests2/fixtures/adoptions/stock-mcp-streamable-http.mjs"]),
+	},
+	{
 		id: "hung-test-reporter-module",
 		consumer: "tests2/core/hung-test-reporter.test.ts",
 		inputs: frozen(["tests2/core/helpers/hung-test-reporter.mjs"]),
@@ -484,9 +507,28 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["scripts/lib/unit-heartbeat.mjs"]),
 	},
 	{
+		// The fixture test dynamically executes this committed pack implementation.
+		id: "staff-proposal-advisor-fixture-module",
+		consumer: "tests2/integration/staff-proposal-fixture.test.ts",
+		inputs: frozen(["market-packs/_fixtures/staff-proposal-advisor/lib/staff-improvement.mjs"]),
+	},
+	{
 		id: "team-agent-gateway-module",
 		consumer: "tests2/core/team-extension-dismiss-gateway.test.ts",
 		inputs: frozen(["defaults/tools/agent/gateway.js"]),
+	},
+	{
+		id: "thinking-selector-extraction-contract",
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		inputs: frozen([
+			"market-packs/thinking-selector/pack.yaml",
+			"market-packs/thinking-selector/hooks/default-thinking.yaml",
+			"market-packs/thinking-selector/lib/default-thinking-selector.mjs",
+			"scripts/copy-builtin-packs.mjs",
+			"src/server/server.ts",
+			"src/server/agent/session-manager.ts",
+			"src/server/agent/session-setup.ts",
+		]),
 	},
 	{
 		id: "run-isolation-playwright-configs",
@@ -754,9 +796,21 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "`${pathToFileURL(path.join(packDir, \"lib\", \"default-thinking-selector.mjs\")).href}?test=${Date.now()}`", ["indirect:thinking-selector-extraction-contract"]),
+		]),
+	},
+	{
 		consumer: "tests2/core/tool-result-error-bridge-extension.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("dynamic-import", "`data:text/javascript,${encodeURIComponent(source)}`", "in-memory generated data URL module"),
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-result-filter-extension.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`", "test-owned generated Pi result-gate extension module"),
 		]),
 	},
 	{
@@ -766,10 +820,31 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/adopted-extension-runtime.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "HTTP_FIXTURE", ["indirect:adopted-extension-http-fixture"]),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
 			declaredExecutableOperation("repository-directory-copy", "PACK_SRC", ["scan:hindsight-external-pack-fixture"]),
+		]),
+	},
+	{
+		consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("worker-entry", "pathToFileURL(scenarioFile)", ["indirect:tool-result-filter-pi-gate-assets"]),
+			allowedExecutableOperation("repository-directory-copy", "sourcePackage", "private Pi harness copy of installed external coding-agent package"),
+			allowedExecutableOperation("repository-directory-copy", "sourceAgentCore", "private Pi harness copy of installed external agent-core package"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/tool-result-filter-routes.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`", "test-owned temporary generated live result-gate module"),
+			declaredExecutableOperation("repository-directory-copy", "FIXTURE_ROOT", ["scan:tool-result-filter-route-fixture"]),
 		]),
 	},
 	{
@@ -791,6 +866,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/staff-proposal-fixture.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "pathToFileURL(path.join(root, \"lib/staff-improvement.mjs\")).href", ["indirect:staff-proposal-advisor-fixture-module"]),
+		]),
+	},
+	{
 		consumer: "tests2/integration/staff-goal-triggers.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("repository-directory-copy", "join(publisher, \".git\")", "test-owned Git-template clone copied into a temporary bare remote"),
@@ -806,6 +887,20 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  * second read through an existing expression an intentional review event too.
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
+	{
+		consumer: "tests2/core/adopted-extension-ledger.test.ts",
+		allowReason: "test-owned temporary adoption-ledger config file",
+		reads: frozen([
+			{ expression: "configFile()", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-result-filter-extension.test.ts",
+		allowReason: "test-owned generated Pi result-gate extension file",
+		reads: frozen([
+			{ expression: "gatePath!", count: 1 },
+		]),
+	},
 	{
 		consumer: "tests2/integration/extension-host-surface-token.test.ts",
 		declarations: frozen(["scan:server-typescript-source-guards"]),
@@ -913,6 +1008,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "fullPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/prompt-extension-registry-proposal-audit.test.ts",
+		allowReason: "test-owned generated prompt-extension authoring audit output",
+		reads: frozen([
+			{ expression: "path.join(projectRoot, \".bobbit\", \"state\", \"prompt-extension-authoring-audit.jsonl\")", count: 1 },
 		]),
 	},
 	{
@@ -1231,6 +1333,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/tool-guard-artifact-trust.test.ts",
+		allowReason: "test-owned temporary trusted tool-guard artifact",
+		reads: frozen([
+			{ expression: "guard", count: 4 },
+		]),
+	},
+	{
 		consumer: "tests2/core/token-dir.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
@@ -1264,6 +1373,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "promptPath", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-prompt-layout-cache-boundary.test.ts",
+		allowReason: "test-owned generated system-prompt output",
+		reads: frozen([
+			{ expression: "promptPath", count: 1 },
 		]),
 	},
 	{
@@ -1301,6 +1417,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "promptPath!", count: 1 },
 			{ expression: "promptPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-manager-pi-extension-args.test.ts",
+		allowReason: "test-owned temporary trusted tool-guard artifact",
+		reads: frozen([
+			{ expression: "guardPath!", count: 1 },
 		]),
 	},
 	{
@@ -1786,6 +1909,20 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/extension-grant-config-store.test.ts",
+		allowReason: "test-owned temporary project configuration output",
+		reads: frozen([
+			{ expression: "path.join(tmpDir, \"project.yaml\")", count: 3 },
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-settings-store.test.ts",
+		allowReason: "test-owned temporary project configuration output",
+		reads: frozen([
+			{ expression: "path.join(configDir, \"project.yaml\")", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/core/extension-host-terminal.test.ts",
 		declarations: frozen(["impact:market-packs"]),
 		reads: frozen([
@@ -1798,6 +1935,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "`${file}.corrupt`", count: 5 },
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		declarations: frozen(["indirect:thinking-selector-extraction-contract"]),
+		reads: frozen([
+			{ expression: "path.join(root, ...parts)", count: 1 },
 		]),
 	},
 	{
@@ -2101,6 +2245,18 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "invocation-owned temporary fake Vitest report under qualification root",
 		reads: frozen([
 			{ expression: "reportPath", count: 1 },
+		]),
+	},
+	{
+		// patchFile is a selected committed patch; target and sourcePackageJson are
+		// private-harness and installed-package paths reached through the same flow.
+		consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts",
+		declarations: frozen(["indirect:tool-result-filter-pi-gate-assets"]),
+		policyExemption: "The non-repository paths are private-harness or installed-package metadata.",
+		reads: frozen([
+			{ expression: "patchFile", count: 1 },
+			{ expression: "target", count: 1 },
+			{ expression: "sourcePackageJson", count: 1 },
 		]),
 	},
 ]);

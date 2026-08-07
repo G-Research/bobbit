@@ -236,8 +236,8 @@ describe("resolveChildWorkflow — cascade tiers", () => {
 		const prStep = rtm.verify.find(s => s.name === "PR raised");
 		assert.match(prStep?.run ?? "", /^echo 'child goal —/);
 		assert.ok(!prStep!.run!.includes("gh pr"));
-		// Branch-push step is NOT rewritten.
 		const pushStep = rtm.verify.find(s => s.name === "Branch pushed to remote");
-		assert.equal(pushStep?.run, "git push");
+		assert.match(pushStep?.run ?? "", /^echo 'child goal —/);
+		assert.doesNotMatch(pushStep?.run ?? "", /\bgit\s+push\b/);
 	});
 });

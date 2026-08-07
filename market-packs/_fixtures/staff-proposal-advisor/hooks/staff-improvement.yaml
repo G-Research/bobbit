@@ -1,0 +1,7 @@
+id: staff-improvement
+module: ../lib/staff-improvement.mjs
+events: [afterTurn]
+mode: decide
+capabilities: []
+schedule: { everyNTurns: 3, kind: decision }
+budget: { maxTokens: 64, timeoutMs: 1000 }

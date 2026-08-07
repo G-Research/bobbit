@@ -3,6 +3,7 @@ import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.js";
 import {
 	apiFetch,
 	createSession,
+	defaultProject,
 	deleteSession,
 	connectWs,
 	agentEndPredicate,
@@ -139,6 +140,21 @@ async function driveTurn(sessionId: string, prompt: string): Promise<void> {
 	}
 }
 
+async function contextTrace(sessionId: string): Promise<any[]> {
+	const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-trace?limit=100`);
+	expect(response.status).toBe(200);
+	return (await response.json()).entries ?? [];
+}
+
+async function activeHindsightPack(): Promise<any> {
+	const project = await defaultProject();
+	const response = await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(project.id)}`);
+	expect(response.status).toBe(200);
+	const pack = (await response.json()).packs?.find((candidate: any) => candidate.packId === PACK_NAME);
+	expect(pack, "Hindsight test fixture must remain visible as an installed pack").toBeTruthy();
+	return pack;
+}
+
 describe.configure({ mode: "serial" });
 
 describe("hindsight installed-provider worker boundary", () => {
@@ -201,5 +217,33 @@ describe("hindsight installed-provider worker boundary", () => {
 			() => stub.retained("bobbit").length > retainedBefore,
 			{ timeoutMs: 10_000, message: "afterTurn retained through the worker store.read proxy" },
 		);
+		const trace = await contextTrace(sessionId);
+		const afterTurn = trace.find((entry: any) => entry.hook === "afterTurn" && entry.providers?.some((provider: any) => provider.id === PROVIDER_ID));
+		expect(afterTurn, "configured Hindsight afterTurn remains a provider lifecycle invocation").toMatchObject({
+			hook: "afterTurn", providers: [expect.objectContaining({ id: PROVIDER_ID })],
+		});
+		expect(afterTurn?.outcomes ?? [], "a provider-only Hindsight pack cannot create advisory selection outcomes").toHaveLength(0);
+		expect((await activeHindsightPack()).hooks ?? [], "Hindsight declares no decision hook for the dispatcher to import").toEqual([]);
+	});
+
+	test("unconfigured Hindsight remains absent from provider and advisory-decision work", async () => {
+		seedConfig(bobbitDir, null);
+		await setProviderDisabled([]);
+		const callsBefore = stub.calls.length;
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), "hindsight-unconfigured-"));
+		cwds.push(cwd);
+		const sessionId = await createSession({ cwd });
+		sessionIds.push(sessionId);
+
+		const recalled = await callBeforePrompt(sessionId, "this must not contact the external memory provider");
+		expect(recalled).toEqual({ status: 200, content: "" });
+		await driveTurn(sessionId, "This unconfigured turn must not retain externally.");
+		expect(stub.calls).toHaveLength(callsBefore);
+		const pack = await activeHindsightPack();
+		expect(pack.providers ?? [], "requiresConfig removes an unconfigured provider before bridge injection").toEqual([]);
+		expect(pack.hooks ?? [], "an unconfigured provider cannot become an advisory decision hook").toEqual([]);
+		const trace = await contextTrace(sessionId);
+		expect(trace.some((entry: any) => entry.providers?.some((provider: any) => provider.id === PROVIDER_ID))).toBe(false);
+		expect(trace.flatMap((entry: any) => entry.outcomes ?? []).filter((outcome: any) => outcome.selectionKind !== undefined)).toEqual([]);
 	});
 });

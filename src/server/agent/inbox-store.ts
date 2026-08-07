@@ -5,11 +5,53 @@ import path from "node:path";
 export type InboxEntryState = "pending" | "completed" | "failed" | "cancelled";
 
 export interface InboxEntrySource {
-	type: "trigger" | "manual_api" | "manual_ui";
+	type: "trigger" | "manual_api" | "manual_ui" | "extension_advisory" | "consent_pause";
 	/** Set when source.type === "trigger". The trigger id from PersistedStaff.triggers[].id. */
 	triggerId?: string;
 	/** Optional caller identifier for manual_api / manual_ui sources (e.g. user id, integration name). */
 	actorId?: string;
+	/** Set when source.type === "extension_advisory". The owning extension pack. */
+	packId?: string;
+	/** Set when source.type === "extension_advisory". The emitting extension hook. */
+	hookId?: string;
+	/** Set when source.type === "consent_pause". Durable project-scoped idempotency key. */
+	sourceKey?: string;
+	/** Set when source.type === "consent_pause". Opaque decision request reference. */
+	requestId?: string;
+	/** Set when source.type === "consent_pause". Opaque decision question reference. */
+	questionId?: string;
+}
+
+/** A non-waking reference to an actionable, paused consent decision. */
+export interface ConsentPauseInboxSource extends InboxEntrySource {
+	type: "consent_pause";
+	sourceKey: string;
+	requestId: string;
+	questionId: string;
+}
+
+export const MAX_CONSENT_SOURCE_KEY_LENGTH = 256;
+export const MAX_CONSENT_REFERENCE_LENGTH = 128;
+
+export function assertValidConsentPauseSource(source: unknown): asserts source is ConsentPauseInboxSource {
+	if (!source || typeof source !== "object" || (source as { type?: unknown }).type !== "consent_pause") {
+		throw new Error("Invalid consent inbox source");
+	}
+	const consent = source as Record<string, unknown>;
+	for (const [name, value, maxLength] of [
+		["source key", consent.sourceKey, MAX_CONSENT_SOURCE_KEY_LENGTH],
+		["request reference", consent.requestId, MAX_CONSENT_REFERENCE_LENGTH],
+		["question reference", consent.questionId, MAX_CONSENT_REFERENCE_LENGTH],
+	] as const) {
+		if (typeof value !== "string" || value.length === 0 || value.length > maxLength) {
+			throw new Error(`Invalid consent inbox ${name}`);
+		}
+	}
+}
+
+export interface InboxPutOnceResult {
+	entry: InboxEntry;
+	inserted: boolean;
 }
 
 export interface InboxEntry {
@@ -20,6 +62,11 @@ export interface InboxEntry {
 	prompt: string;
 	context?: string;
 	state: InboxEntryState;
+	/**
+	 * Whether this pending entry may wake its staff session. Missing values in
+	 * older persisted records are deliberately treated as `true`.
+	 */
+	wake?: boolean;
 	createdAt: number;
 	completedAt?: number;
 	result?: string;
@@ -93,6 +140,7 @@ export class InboxStore {
 
 	/** Insert or replace an entry. Last-writer-wins on id collision. */
 	put(entry: InboxEntry): void {
+		if (entry.source.type === "consent_pause") assertValidConsentPauseSource(entry.source);
 		const entries = this.ensureLoaded(entry.staffId);
 		const idx = entries.findIndex((e) => e.id === entry.id);
 		if (idx >= 0) {
@@ -106,6 +154,29 @@ export class InboxStore {
 	get(staffId: string, entryId: string): InboxEntry | undefined {
 		const entries = this.ensureLoaded(staffId);
 		return entries.find((e) => e.id === entryId);
+	}
+
+	/** Finds a durable consent-pause entry by its project-scoped source key. */
+	findBySourceKey(staffId: string, sourceKey: string): InboxEntry | undefined {
+		return this.ensureLoaded(staffId).find((entry) =>
+			entry.source.type === "consent_pause" && entry.source.sourceKey === sourceKey,
+		);
+	}
+
+	/**
+	 * Insert a consent-pause reference once. The synchronous check-and-write is
+	 * the durable idempotency boundary for retries and startup replay.
+	 */
+	putConsentPauseOnce(entry: InboxEntry): InboxPutOnceResult {
+		if (entry.source.type !== "consent_pause") {
+			throw new Error("putConsentPauseOnce requires a consent_pause source");
+		}
+		const source = entry.source;
+		assertValidConsentPauseSource(source);
+		const existing = this.findBySourceKey(entry.staffId, source.sourceKey);
+		if (existing) return { entry: existing, inserted: false };
+		this.put(entry);
+		return { entry, inserted: true };
 	}
 
 	/** All entries for a staff, in FIFO (insertion) order. */

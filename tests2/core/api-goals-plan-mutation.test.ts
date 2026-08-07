@@ -264,7 +264,12 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 	): Promise<{ responses: { body: any; status: number }[] }> {
 		const goalManager: any = {
 			updateGoal: async (_id: string, partial: any) => { Object.assign(goal, partial); },
-			getGoalStore: () => ({ update: (_id: string, partial: any) => { Object.assign(goal, partial); } }),
+			// The canonical pause service re-reads persisted state before writing,
+			// just as GoalStore does in production.
+			getGoalStore: () => ({
+				get: () => goal,
+				update: (_id: string, partial: any) => { Object.assign(goal, partial); },
+			}),
 		};
 		const ctx: any = {
 			goalStore: { get: () => goal, getAll: () => [goal] },

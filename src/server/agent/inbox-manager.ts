@@ -2,11 +2,24 @@ import { randomUUID } from "node:crypto";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { StaffManager } from "./staff-manager.js";
 import type { InboxNudger } from "./inbox-nudger.js";
-import type { InboxStore, InboxEntry, InboxEntryState, InboxEntrySource } from "./inbox-store.js";
+import { assertValidConsentPauseSource, MAX_CONSENT_SOURCE_KEY_LENGTH } from "./inbox-store.js";
+import type { ConsentPauseInboxSource, InboxStore, InboxEntry, InboxEntryState, InboxEntrySource } from "./inbox-store.js";
 
 // Re-export for convenience so callers can import everything from
 // `inbox-manager` without reaching into the store module directly.
 export type { InboxEntry, InboxEntryState, InboxEntrySource } from "./inbox-store.js";
+
+export interface ConsentPauseInboxInput {
+	title: string;
+	prompt: string;
+	context?: string;
+	source: ConsentPauseInboxSource;
+}
+
+export interface InboxEnqueueOnceResult {
+	entry: InboxEntry;
+	created: boolean;
+}
 
 /**
  * Facade over per-project `InboxStore`s. Provides a single point for
@@ -18,9 +31,10 @@ export type { InboxEntry, InboxEntryState, InboxEntrySource } from "./inbox-stor
  *  - Persists to the underlying `InboxStore` (synchronous JSON write).
  *  - Broadcasts a WS event via the injected `broadcastToAll`:
  *      "inbox.entry.added" | "inbox.entry.updated" | "inbox.entry.removed".
- *  - `enqueue` additionally calls `nudger.poke(staffId)` so an idle staff
- *    session is woken on the next tick (or earlier — `poke` schedules a
- *    one-shot tickOne on the next microtask).
+ *  - `enqueue` additionally calls `nudger.poke(staffId)` by default so an
+ *    idle staff session is woken on the next tick (or earlier — `poke`
+ *    schedules a one-shot tickOne on the next microtask). Callers can set
+ *    `{ wake: false }` for durable, non-interrupting advisory entries.
  *
  * The nudger is wired in via `setNudger` after both objects are
  * constructed, breaking the construction-time cycle between
@@ -70,7 +84,12 @@ export class InboxManager {
 	enqueue(
 		staffId: string,
 		input: { title: string; prompt: string; context?: string; source: InboxEntrySource },
+		options: { wake?: boolean } = {},
 	): InboxEntry {
+		if (input.source.type === "consent_pause") {
+			assertValidConsentPauseSource(input.source);
+			return this.enqueueOnce(staffId, { ...input, source: input.source }).entry;
+		}
 		const store = this.resolveStore(staffId);
 		if (!store) throw new Error(`Staff agent not found: ${staffId}`);
 
@@ -82,16 +101,54 @@ export class InboxManager {
 			prompt: input.prompt,
 			context: input.context,
 			state: "pending",
+			// Persist eligibility so a restart cannot turn an advisory into a wake.
+			wake: options.wake !== false,
 			createdAt: Date.now(),
 		};
 		store.put(entry);
 		this.broadcastToAll({ type: "inbox.entry.added", staffId, entry });
-		try {
-			this.nudger?.poke(staffId);
-		} catch (err) {
-			console.error(`[inbox-manager] nudger.poke failed for staff ${staffId}:`, err);
+		if (options.wake !== false) {
+			try {
+				this.nudger?.poke(staffId);
+			} catch (err) {
+				console.error(`[inbox-manager] nudger.poke failed for staff ${staffId}:`, err);
+			}
 		}
 		return entry;
+	}
+
+	/** Look up a consent-pause projection by its durable source key. */
+	findBySourceKey(staffId: string, sourceKey: string): InboxEntry | undefined {
+		if (typeof sourceKey !== "string" || sourceKey.length === 0 || sourceKey.length > MAX_CONSENT_SOURCE_KEY_LENGTH) {
+			throw new Error("Invalid consent inbox source key");
+		}
+		const store = this.resolveStore(staffId);
+		return store?.findBySourceKey(staffId, sourceKey);
+	}
+
+	/**
+	 * Durably surface a consent pause once. Consent projections are never
+	 * wakeable, including when a caller retries after a restart.
+	 */
+	enqueueOnce(staffId: string, input: ConsentPauseInboxInput): InboxEnqueueOnceResult {
+		assertValidConsentPauseSource(input.source);
+		const store = this.resolveStore(staffId);
+		if (!store) throw new Error(`Staff agent not found: ${staffId}`);
+		const result = store.putConsentPauseOnce({
+			id: randomUUID(),
+			staffId,
+			source: input.source,
+			title: input.title,
+			prompt: input.prompt,
+			context: input.context,
+			state: "pending",
+			wake: false,
+			createdAt: Date.now(),
+		});
+		if (result.inserted) {
+			this.broadcastToAll({ type: "inbox.entry.added", staffId, entry: result.entry });
+		}
+		return { entry: result.entry, created: result.inserted };
 	}
 
 	listForStaff(staffId: string, state?: InboxEntryState, limit?: number): InboxEntry[] {
@@ -153,6 +210,32 @@ export class InboxManager {
 		const entry = store.get(staffId, entryId)!;
 		this.broadcastToAll({ type: "inbox.entry.updated", staffId, entry });
 		return entry;
+	}
+
+	/**
+	 * Complete an entry at most once. Retrying a successful settlement returns
+	 * the stored completed entry; a different terminal winner is preserved.
+	 */
+	completeOnce(staffId: string, entryId: string, summary?: string): InboxEntry {
+		const store = this.resolveStore(staffId);
+		if (!store) throw new Error(`Staff agent not found: ${staffId}`);
+		const existing = store.get(staffId, entryId);
+		if (!existing) throw new Error(`Inbox entry not found: ${entryId}`);
+		if (existing.state !== "pending") return existing;
+		return this.transitionToCompleted(staffId, entryId, summary);
+	}
+
+	/**
+	 * Cancel an entry at most once. Retrying a cancellation returns the stored
+	 * terminal entry and never overwrites a completed or failed outcome.
+	 */
+	cancelOnce(staffId: string, entryId: string, reason: string): InboxEntry {
+		const store = this.resolveStore(staffId);
+		if (!store) throw new Error(`Staff agent not found: ${staffId}`);
+		const existing = store.get(staffId, entryId);
+		if (!existing) throw new Error(`Inbox entry not found: ${entryId}`);
+		if (existing.state !== "pending") return existing;
+		return this.transitionToTerminal(staffId, entryId, "cancelled", reason);
 	}
 
 	/** Manual prune from the UI / DELETE endpoint. Returns false if no entry matched. */

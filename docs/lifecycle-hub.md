@@ -94,6 +94,37 @@ without mutating project/global config. See
 
 The selector hooks `beforeGoalCreate` / `beforeSessionSpawn` remain a separate, later goal (G8).
 
+## Scheduled advisors
+
+Scheduled advisors are the Hub's separate post-turn observation path for eligible hook metadata;
+they do not use provider `ContextBlock`s. They solve the narrow case where installed pack code
+needs a periodic, bounded lifecycle observation without delaying or changing the agent turn.
+Author declarations and module shape are specified in the [Extension Host authoring guide](extension-host-authoring.md#every-n-turn-schedules).
+
+A hook is advisor-eligible only when it is active, declares `mode: decide`, exactly
+`events: [afterTurn]`, a bounded `schedule.everyNTurns`, omitted `schedule.kind` or
+`kind: advisor`, and has its exact active `decide` grant. `kind: decision` hooks are excluded from
+this path: their due persisted cadence is handled by the normal decision dispatcher, which does
+not call `dispatchScheduledAdvisors`. The Session Manager increments and persists one completed-turn
+index at its final terminal event, then starts ordinary `afterTurn` provider dispatch followed by
+advisor dispatch without awaiting either. Consequently:
+
+- Due turns are exactly N, 2N, and so on; compaction, restore, and respawn preserve the index.
+  A crash or interruption does not replay a former due turn.
+- Invocation is fire-and-forget: advisor latency, timeout, failure, and trace persistence never
+  block idle status, queue draining, or the next turn.
+- One invocation is allowed per `(sessionId, packId, hookId)`. A due overlap is dropped rather
+  than queued or retried.
+- Authorization is checked at launch and completion. Pack disable/removal or exact-grant
+  revocation aborts matching work and discards a result that settles after the change.
+- Advisors receive only narrow server-derived data and can return only a safe trace identifier.
+  They cannot inject context, change prompts, mutate sessions or goals, call a Host API, or
+  supply token/dollar cost data. The trace attributes parent-measured duration to the
+  server-derived pack and hook identifiers.
+
+Wall-clock schedule metadata is deliberately inert: the Hub creates no timers, deadlines,
+catch-up jobs, or retries.
+
 ## The `ContextBlock` contract
 
 A provider hook returns blocks the Hub will consider injecting. The shape
@@ -239,9 +270,27 @@ class LifecycleHub {
      };
    }
 
+   export type HookScopeKind = "project" | "global";
+   export const DEFAULT_HOOK_SCOPE: HookScopeKind = "project";
+
+   export type TurnUsageSnapshot =
+     | {
+         telemetry: "known";
+         inputTokens?: number;
+         outputTokens?: number;
+         cacheReadTokens?: number;
+         cacheWriteTokens?: number;
+         cost?: number;
+         provider?: string;
+         modelId?: string;
+       }
+     | { telemetry: "unknown" };
+
    interface HookCtx {
-     sessionId: string; projectId?: string; scope: "project" | "global"; cwd: string;
+     sessionId: string; projectId?: string; scope: HookScopeKind; cwd: string;
      goalId?: string; roleName?: string; prompt?: string; turn?: { index: number };
+     /** Present for gateway-dispatched afterTurn only. */
+     usage?: TurnUsageSnapshot;
      budget: { maxTokens: number };
      config: Record<string, unknown>;
      runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
@@ -260,9 +309,68 @@ class LifecycleHub {
 8. **Return** the kept blocks plus a list of diagnostics. `dispatch` **never throws** because
    of a provider — provider faults become diagnostics.
 
+### Scope vocabulary and compatibility
+
+`HookScopeKind` is the exported lifecycle-provider vocabulary: `"project" | "global"`.
+`DEFAULT_HOOK_SCOPE` is `"project"`, so project-bearing sessions retain the established default;
+projectless sessions use `"global"`. Use these exports rather than duplicating scope strings in
+provider-facing TypeScript.
+
+`scopeContext` is an optional, additive, read-only `HookCtx` field. Providers that do not need
+rich scope can ignore it safely: the Hub preserves their invocation, ordering, configuration,
+budgets, diagnostics, and block behavior. It is absent when the resolver is unavailable, fails,
+or cannot safely produce a snapshot.
+
+### `afterTurn` usage telemetry
+
+`HookCtx.usage` is an optional additive field supplied only to gateway-dispatched `afterTurn`
+hooks. It exposes direct telemetry for the just-finished assistant turn so a provider can observe
+usage without reading or reconstructing the cost ledger. It is not supplied to `sessionSetup`,
+`beforePrompt`, `beforeCompact`, or `sessionShutdown`.
+
+```ts
+export type TurnUsageSnapshot =
+  | {
+      telemetry: "known";
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      cost?: number;
+      provider?: string;
+      modelId?: string;
+    }
+  | { telemetry: "unknown" };
+```
+
+`telemetry: "known"` means the final assistant `message_end` carried a usage object. It does
+not mean every field is known. Numeric fields are retained only when Pi reported a finite,
+non-negative value; zero remains a reported value. Supported wire aliases are `inputTokens` /
+`input`, `outputTokens` / `output`, `cacheReadTokens` / `cacheRead`, and `cacheWriteTokens` /
+`cacheWrite`; `cost` accepts either a numeric value or `cost.total`. Omitted cache fields remain
+absent (unknown), rather than being converted to zero. Invalid, negative, non-finite, and
+object-shaped token fields are omitted; no token or cost value is estimated.
+
+`provider` and `modelId` appear together only when the runtime supplies a complete observed or
+verified model pair. A partial pair is omitted. `telemetry: "unknown"` has no numeric or
+attribution fields and means the completed turn had no usable terminal assistant usage object.
+
+The gateway normalizes this data once from the same terminal event consumed by
+`SessionManager.trackCostFromEvent()`. The snapshot is an ephemeral live-turn value, not a
+`CostTracker` readback, cost ledger, persisted session field, trace entry, or API response. This
+keeps cache-unknown and missing-cost semantics aligned with the terminal wire data.
+
+At the final non-retry `agent_end`, the gateway copies the snapshot (or `{ telemetry: "unknown" }`)
+and fire-and-forget dispatches `afterTurn`. The existing terminal guard makes that dispatch
+exactly once: duplicate or late terminal events cannot create another hook call. Retryable ends
+do not dispatch; the final attempt supplies the snapshot. Error and abort terminals retain their
+reported usage when available, otherwise they are unknown. The copied value prevents a slow hook
+from observing a later turn. When no Lifecycle Hub is installed, no usage slot is allocated and
+the existing cost and terminal lifecycle paths remain unchanged.
+
 ### `scopeContext`: bounded advisory scope
 
-`scopeContext` is optional, read-only context for lifecycle providers. Its sections are emitted
+When present, `scopeContext` is read-only context for lifecycle providers. Its sections are emitted
 only when independently resolvable; an identifier is required only when its enclosing section is
 present. It helps a provider label or tailor its own advisory output, but grants **no** capability:
 it does not authorize filesystem, session, agent, store, or cross-project access. The Host API
@@ -478,7 +586,7 @@ session id and `404` when the session is unknown (neither live nor persisted).
 |---|---|---|
 | `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ content, blocks, tail }` while `tail` remains as temporary legacy back-compat for old bridges. |
 | `POST /api/sessions/:id/provider-hooks/before-compact` | provider-bridge extension | Dispatches `beforeCompact` and responds `{}` once provider flushes settle (bounded by per-provider timeouts). |
-| `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns `{ entries }` from the [trace store](#the-trace-store), oldest→newest; `limit` keeps the most recent N (clamped to 1000). |
+| `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns lifecycle-dispatch metadata `{ entries }` from the [trace store](#the-trace-store), oldest→newest; a positive `limit` keeps the most recent N (capped at 1000). The [Context Trace Inspector](#context-trace-inspector) starts at 100 and uses bounded expansion. |
 
 **`before-prompt` response shape.** `content` is the accepted blocks joined as fenced
 `<context-block …>` envelopes, or `""` when no block survived budgeting:
@@ -589,33 +697,161 @@ gateway callback. Never reintroduce a global TLS downgrade in the bridge.
 
 ## The trace store
 
-`ContextTraceStore` records each dispatch as one JSON line, so you can reconstruct exactly what
-ambient context a session received and why blocks were dropped.
+`ContextTraceStore` records one bounded metadata row for each lifecycle dispatch. The trace explains
+*that* provider work ran and its budget outcome, plus optional core-owned extension activity, without
+retaining context-block bodies or prompt fields. This supports diagnosis and future decision/advisory/
+audit visibility without becoming a prompt viewer or searchable audit archive.
 
 - **Location:** `<stateDir>/session-context-trace/<sessionId>.jsonl` (the directory is created
-  lazily; the session id is sanitised to a safe basename). This mirrors the `bg-process` state
+  lazily; the session id is reduced to a safe basename). This mirrors the `bg-process` state
   layout under the state dir.
 - **Entry shape** (`appendTrace(sessionId, entry)`):
 
   ```ts
+  type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+  type TraceOutcomeKind = "decision" | "advisory" | "audit";
+  type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
+    | "beforeCompact" | "sessionShutdown" | "decisionResolved";
+  type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
+    | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
+    | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed"
+    | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
+    | "Proposal failed" | "Lower-priority selection";
+  type TraceSelectionKind = "model" | "thinking" | "role" | "workflow";
+  type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
+
+  interface TraceOutcomeRow {
+    kind: TraceOutcomeKind;
+    packId?: string;            // server-derived; required for advisory afterTurn rows
+    hookId: string;             // safe, stable declared identifier
+    event: TraceOutcomeEvent;
+    outcome: TraceOutcome;
+    reason?: TraceOutcomeReason;
+    value?: string;             // legacy EP-5 safe identifier field
+    ms?: number;                // parent-measured duration
+    requestId?: string;
+    questionId?: string;        // SHA-256 hex/base32 fingerprint, not prose
+    answer?: string;            // safe option id or literal "other", not Other text
+    defaultApplied?: boolean;
+    actor?: TraceOutcomeActor;
+    selectionKind?: TraceSelectionKind;
+    selectionValue?: string;
+  }
+
   interface TraceEntry {
-    ts: number;          // epoch ms
-    hook: string;        // the dispatched hook
+    ts: number;                 // epoch ms
+    hook: string;                // dispatched lifecycle hook
     sessionId: string;
-    providers: {
-      id: string;        // provider id
-      ms: number;        // invocation duration
-      blocks: number;    // blocks KEPT after budgeting
-      omitted: number;   // budget-omitted + malformed-dropped count
-      error?: string;    // error / "timeout" / "malformed block(s) dropped"
-    }[];
+    providers: Array<{
+      id: string;
+      ms: number;               // invocation duration
+      blocks: number;           // kept after budgeting
+      omitted: number;          // budget-omitted + malformed-dropped count
+      error?: string;           // normalized diagnostic category
+    }>;
+    outcomes?: TraceOutcomeRow[];
   }
   ```
+
+  `outcomes` is optional, so old rows remain valid. It is nested in its lifecycle entry: pagination
+  can never separate an event from its extension activity. Only the core validation, grant, or
+  application owner may append an outcome; extension code cannot claim that a value was applied.
+  The [REST context-trace endpoint](rest-api.md#context-trace-endpoint) is the canonical public
+  projection of this persisted schema.
+  Scheduled-advisor rows are `kind: "advisory"`, `event: "afterTurn"`, and include the
+  server-derived `packId`. `advised` records a valid observed suggestion, `applied` a
+  core-validated application, `denied` a grant/policy/user-pin refusal, `dropped`
+  malformed/timeout/unavailable/overlap-drop behavior, `error` a core-classified failure, and
+  `superseded` deterministic precedence loss.
+
+  Before JSONL persistence and again on reads, provider rows are limited to **100** and outcomes
+  to **50** per entry. Provider and outcome identifiers must match
+  `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`; invalid provider ids become `Unknown provider`, while
+  malformed outcome rows are omitted. Durations and counts must be finite, non-negative integers
+  and are capped at **1,000,000,000**. Provider errors become only `Timed out`, `Malformed blocks
+  omitted`, or `Provider error`. Outcome `kind`, `event`, `outcome`, and `reason` are exact
+  allow-list values above. `value` is the legacy EP-5 field, retained only for `advised`,
+  `applied`, or `superseded` and only when it is a safe identifier; new decision-resolution rows
+  use `answer` instead. For decision/advisory activity, optional `packId` and `requestId` are safe
+  identifiers, `questionId` is a SHA-256 hexadecimal or base32 fingerprint rather than question
+  prose, and `answer` is a safe selected option id or the literal `other` rather than Other text.
+  `answer` and `defaultApplied` survive only for `applied` or `superseded` resolutions; `actor`,
+  when present, is one of the fixed actor labels above. `selectionKind` is one of the fixed
+  advisory-selection categories. `selectionValue` survives only for an `advised` or `applied`
+  selection: a model uses its verified `provider/modelId` tuple, while the other kinds use a safe
+  identifier. Denied, dropped, errored, and superseded selections retain no selection value.
+  These rules prevent extension prose, arbitrary errors, and unsafe values from becoming durable
+  or REST-visible diagnostics.
+
+  The schema intentionally excludes context-block bodies, prompts, question prose and labels,
+  answer/Other text, rationale, raw availability data, usage telemetry, tokens, credentials,
+  provider config, role prompts, workflow bodies, raw provider errors, stacks, paths, tool
+  arguments, patches, and arbitrary configuration values. `reason` is a small core-owned catalog,
+  not provider prose.
 - **Reads:** `readTrace(sessionId, limit?)` returns entries oldest→newest; `limit` keeps the
   most recent N. Corrupt/partial lines are skipped rather than failing the read.
-- **Size cap:** the file is capped at **2 MB**. On append, if the file exceeds the cap it is
-  rewritten keeping only the newest lines that fit (drop-oldest), via a temp-file rename so a
-  reader never sees a half-written file.
+- **Retention:** each per-session JSONL file is capped at exactly **2 MiB**. After an append that
+  exceeds the cap, the store retains the newest complete rows that fit and rotates out the oldest
+  complete rows, using a temporary-file rename so readers do not observe a partial rewrite. This
+  is bounded diagnostic retention, not an audit archive.
+
+## Context Trace Inspector
+
+The **Context trace** inspector is the user-facing, read-only view of this metadata. It makes
+provider activity debuggable and budget outcomes visible while preserving the boundary between
+observability and the private context supplied to the model.
+
+### Open, persistence, and accessibility
+
+From the active session, choose **Session actions → View context trace**. This opens a **Context**
+tab in the shared right-side workspace rather than replacing the transcript. The tab is persisted
+with that session's workspace, so returning to or cold-reloading a historical persisted session
+rehydrates the open inspector and reloads its trace. Closing the tab remains authoritative; it is
+not recreated merely because trace data exists.
+
+The inspector uses the shared side-panel layout, including narrow-screen behavior. It is keyboard
+accessible: opening the non-modal tab moves focus to its heading, refreshes retain the current
+focus, and closing it restores focus to the action that opened it when possible (with a safe
+session-actions/composer fallback). Its controls have screen-reader names and loading/error states.
+
+### What it shows — and what it never shows
+
+The newest lifecycle event appears first. For each event, the inspector shows:
+
+- lifecycle event and local time;
+- provider id, latency, and kept/omitted block counts;
+- a sanitized provider status, when applicable: **Timed out**, **Malformed blocks omitted**, or
+  **Provider error**; and
+- an **Extension activity** list after provider rows when the entry has valid outcomes. It shows
+  fixed labels for Decision, Advisory, or Audit; the outcome (including distinct visible **Denied**
+  and **Dropped** statuses); and only allow-listed hook, event, reason, safe value, and duration.
+
+Provider order and outcome order within an event are preserved. All endpoint values are treated as
+untrusted and normalized before reaching the component: unrecognized hooks/providers become safe
+fallback labels, invalid numbers are bounded, arbitrary provider error text becomes a fixed status,
+and malformed or unknown outcome rows are ignored. The inspector never renders context-block
+contents, prompts, gateway tokens, secrets, raw provider errors, raw outcome rationale/value,
+stack traces, or filesystem paths. It is deliberately not a prompt, configuration, or error-detail
+inspector.
+
+### Loading and updates
+
+Requests run only while the Context tab belongs to the active session. The initial read asks for
+100 recent rows. **Load 100 earlier** increases the bounded recent-history window by 100 rows at a
+time, up to 1,000; it is not an unbounded poll or cursor walk. The API supplies that window in
+oldest→newest order, while the inspector reverses only the events for newest-first display and
+leaves every event's provider order untouched.
+
+The panel shows loading, empty, and retryable error states. A refresh failure after rows have
+loaded keeps those rows visible with a non-sensitive refresh warning. Requests are aborted on a
+session switch, disconnect, or Context-tab close, and stale responses cannot update another
+session's inspector.
+
+A successful durable trace append sends the session WebSocket a metadata-only
+`context_trace_updated` invalidation (`sessionId` and timestamp only). An open active inspector
+then re-reads its bounded REST window; no trace row, provider diagnostic, outcome, prompt, or
+secret is sent over WebSocket. An inactive session remembers the invalidation and revalidates once
+when its persisted inspector is next opened or synchronized. There is no polling loop.
 
 ## Status / wiring roadmap
 
