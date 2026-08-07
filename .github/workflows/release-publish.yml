@@ -196,7 +196,10 @@ jobs:
           TAG: ${{ needs.verify.outputs.tag }}
         run: |
           set -euo pipefail
-          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
+          existing=""
+          if found="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
+            existing="$found"
+          fi
           if [ -n "$existing" ]; then
             [ "$existing" = "$GITHUB_SHA" ] || {
               echo "::error::$TAG points at $existing, not $GITHUB_SHA"
