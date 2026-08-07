@@ -107,7 +107,7 @@ describe("Hindsight EP-7 runtime settings", () => {
 		const dormantManaged = validateHindsightRuntimeSettings(settings);
 		assert.equal(dormantManaged.ok, true, "EP-7 saves a dormant local managed-volume selection without starting it");
 		const managedStart = validateHindsightRuntimeSettings(settings, {}, true);
-		assert.deepEqual(managedStart, { ok: false, code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" });
+		assert.deepEqual(managedStart, { ok: false, code: "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED" });
 
 		const composeManagedStart = validateHindsightRuntimeSettings({ ...settings, runtimeMode: "compose" }, {}, true);
 		assert.equal(composeManagedStart.ok, true, "Compose owns its declared durable named volume");
@@ -126,9 +126,12 @@ describe("Hindsight EP-7 runtime settings", () => {
 
 		const remoteWithoutKey = validateHindsightRuntimeSettings({ ...settings, localLlmBaseUrl: "http://model.example.test:11434/v1", databaseMode: "external" }, {}, true);
 		assert.deepEqual(remoteWithoutKey, { ok: false, code: "HINDSIGHT_LOCAL_API_KEY_REQUIRED" });
-		const legacyRequestResidency = validateHindsightRuntimeSettings({ ...settings, localLlmResidency: "request" }, {}, true);
-		assert.equal(legacyRequestResidency.ok, true, "legacy request residency normalizes to the only supported resident mode");
-		if (legacyRequestResidency.ok) assert.equal(legacyRequestResidency.settings.localLlmResidency, "resident");
+		const legacyRequestResidency = validateHindsightRuntimeSettings(
+			{ ...settings, localLlmResidency: "request", databaseMode: "external" },
+			{ externalDatabaseUrl: "postgresql://hindsight:database-secret@db.example/hindsight" },
+			true,
+		);
+		assert.deepEqual(legacyRequestResidency, { ok: false, code: "HINDSIGHT_RESIDENCY_REQUIRED" });
 	});
 
 	it("uses the production EP-7 resolver for external continuity and rejects unsupported starts before a runtime is selected", () => {
@@ -168,7 +171,7 @@ describe("Hindsight EP-7 runtime settings", () => {
 			assert.equal(docker.storageIdentity, local.storageIdentity, "external storage survives a local-to-Docker control transition");
 
 			settingsStore.compareAndSwap(ref, 2, { values: { runtimeMode: "local", databaseMode: "managed-volume" }, secrets: { externalDatabaseUrl: undefined } });
-			assert.throws(() => resolver.resolve(request), { code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" });
+			assert.throws(() => resolver.resolve(request), { code: "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED" });
 			assert.ok(!JSON.stringify(settingsStore.getPublicState()).includes("resolver-secret"));
 		} finally {
 			fs.rmSync(directory, { recursive: true, force: true });

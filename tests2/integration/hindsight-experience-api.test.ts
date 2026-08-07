@@ -177,7 +177,7 @@ describe.serial("Hindsight experience API", () => {
 		const start = await route(sessionId, "runtime-control", { action: "start", consent: true });
 		const startBody = await json(start);
 		expect(start.status).toBe(422);
-		expect(startBody).toMatchObject({ code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" });
+		expect(startBody).toMatchObject({ code: "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED" });
 		expect(String(startBody.error)).toMatch(/external PostgreSQL database/i);
 		expect(JSON.stringify(startBody)).not.toContain(SECRET);
 		const context = gateway.projectContextManager.getOrCreate(project.id);

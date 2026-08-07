@@ -17,7 +17,7 @@ export interface HindsightRuntimeSettings {
 	localLlmBaseUrl?: string;
 	localLlmContextTokens: number;
 	localLlmMaxOutputTokens: number;
-	localLlmResidency: "resident";
+	localLlmResidency: "resident" | "request";
 	localLlmKeepAlive: number;
 	ociImage: string;
 	databaseMode: DatabaseMode;
@@ -125,7 +125,7 @@ export function resolveHindsightRuntimeSettings(values: Readonly<Record<string, 
 		...(nonEmptyString(values.localLlmBaseUrl) ? { localLlmBaseUrl: nonEmptyString(values.localLlmBaseUrl) } : {}),
 		localLlmContextTokens: positiveInt(values.localLlmContextTokens, DEFAULTS.localLlmContextTokens),
 		localLlmMaxOutputTokens: positiveInt(values.localLlmMaxOutputTokens, DEFAULTS.localLlmMaxOutputTokens),
-		localLlmResidency: "resident",
+		localLlmResidency: values.localLlmResidency === "request" ? "request" : "resident",
 		localLlmKeepAlive: positiveInt(values.localLlmKeepAlive, DEFAULTS.localLlmKeepAlive),
 		ociImage: nonEmptyString(values.ociImage) ?? DEFAULT_HINDSIGHT_OCI_IMAGE,
 		databaseMode: asDatabaseMode(values.databaseMode),
@@ -136,7 +136,7 @@ export function resolveHindsightRuntimeSettings(values: Readonly<Record<string, 
 export function localModelDiagnostic(settings: HindsightRuntimeSettings, observedLoadId?: string): RedactedModelDiagnostic | undefined {
 	if (settings.runtimeMode === "external") return undefined;
 	const endpointHost = redactEndpointHost(settings.localLlmBaseUrl);
-	if (!endpointHost || !settings.localLlmModelId) return undefined;
+	if (!endpointHost || !settings.localLlmModelId || settings.localLlmResidency !== "resident") return undefined;
 	return {
 		provider: settings.localLlmProvider, modelId: settings.localLlmModelId, endpointHost,
 		contextTokens: settings.localLlmContextTokens, maxOutputTokens: settings.localLlmMaxOutputTokens,
@@ -165,8 +165,9 @@ export function validateHindsightRuntimeSettings(values: Readonly<Record<string,
 	// Saving remains inert and accepts a dormant selection. A local/Docker
 	// Hindsight 0.8.6 start cannot prove a managed-volume backing, however, so
 	// reject it before the generic supervisor records or launches anything.
+	if (settings.localLlmResidency !== "resident") return { ok: false, code: "HINDSIGHT_RESIDENCY_REQUIRED" };
 	if (requireStartConfiguration && settings.databaseMode === "managed-volume" && (settings.runtimeMode === "local" || settings.runtimeMode === "docker")) {
-		return { ok: false, code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" };
+		return { ok: false, code: "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED" };
 	}
 	if (settings.localLlmModelId !== undefined && !textToken(settings.localLlmModelId)) return { ok: false, code: "HINDSIGHT_LOCAL_MODEL_INVALID" };
 	if (settings.localLlmBaseUrl !== undefined && !redactEndpointHost(settings.localLlmBaseUrl)) return { ok: false, code: "HINDSIGHT_LOCAL_ENDPOINT_INVALID" };

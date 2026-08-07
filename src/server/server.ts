@@ -10711,7 +10711,7 @@ async function handleApiRoute(
 		} catch (err) {
 			const runtimeCode = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
 			const continuityRequired = runtimeCode === "SERVICE_CONTINUITY_REQUIRED";
-			const externalDatabaseRequired = runtimeCode === "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED";
+			const externalDatabaseRequired = runtimeCode === "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED";
 			const status = continuityRequired ? 409 : externalDatabaseRequired ? 422 : err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;
 			json({
 				error: continuityRequired

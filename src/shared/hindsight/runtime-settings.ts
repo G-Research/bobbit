@@ -167,7 +167,7 @@ export function validateHindsightRuntimeSettings(values: Readonly<Record<string,
 	// Hindsight 0.8.6 start cannot prove a managed-volume backing, however, so
 	// reject it before the generic supervisor records or launches anything.
 	if (requireStartConfiguration && settings.databaseMode === "managed-volume" && (settings.runtimeMode === "local" || settings.runtimeMode === "docker")) {
-		return { ok: false, code: "HINDSIGHT_EXTERNAL_DATABASE_REQUIRED" };
+		return { ok: false, code: "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED" };
 	}
 	if (settings.localLlmModelId !== undefined && !textToken(settings.localLlmModelId)) return { ok: false, code: "HINDSIGHT_LOCAL_MODEL_INVALID" };
 	if (settings.localLlmBaseUrl !== undefined && !redactEndpointHost(settings.localLlmBaseUrl)) return { ok: false, code: "HINDSIGHT_LOCAL_ENDPOINT_INVALID" };
