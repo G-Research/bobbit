@@ -163,11 +163,12 @@ function clientMethod(client: unknown, name: string): ((...args: unknown[]) => P
 /** A route deadline actively aborts its client, including a body that has already
  * received headers. This is intentionally not a Promise.race: losing work must
  * not retain sockets or continue parsing an attacker-controlled response. */
-async function withActiveClient<T>(
+async function withActiveClient<T, F = { configured: true; code: "SERVICE_UNHEALTHY" }>(
 	ctx: MemoryRouteContext,
 	config: EffectiveConfig,
 	work: (client: unknown, config: EffectiveConfig) => Promise<T>,
-): Promise<T | { configured: true; code: "SERVICE_UNHEALTHY" }> {
+	failure: F = { configured: true, code: "SERVICE_UNHEALTHY" } as F,
+): Promise<T | F> {
 	const controller = new AbortController();
 	const abort = () => controller.abort(ctx.signal?.reason);
 	if (ctx.signal?.aborted) abort(); else ctx.signal?.addEventListener("abort", abort, { once: true });
@@ -175,7 +176,7 @@ async function withActiveClient<T>(
 	try {
 		return await work(await makeClient({ ...clientConfig(config, ctx.runtime), signal: controller.signal }), config);
 	} catch {
-		return { configured: true, code: "SERVICE_UNHEALTHY" };
+		return failure;
 	} finally {
 		clearTimeout(timer); ctx.signal?.removeEventListener("abort", abort); controller.abort();
 	}
@@ -274,7 +275,7 @@ export const memoryRoutes = {
 		const availability = await routeConfig(ctx);
 		if (availability.state === "unavailable") return { ok: false, configured: false, error: availability.error };
 		if (availability.state === "dormant") return { ok: false, configured: false, code: "SERVICE_UNHEALTHY" };
-		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
+		if (availability.state === "unhealthy") return { ok: false, configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		const content = text(bodyOf(req).content, MAX_CONTENT);
 		if (!scope || !content) return { ok: false, configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_CONTENT_REQUIRED" };
@@ -291,7 +292,7 @@ export const memoryRoutes = {
 			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code };
 			await retain(config.bank, content, { tags: { kind: "manual", ...scopedTags(scope) }, sync: bodyOf(req).sync === true });
 			return { ok: true, configured: true };
-		});
+		}, { ok: false as const, configured: true as const, code: "SERVICE_UNHEALTHY" as const });
 	},
 
 	reflect: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
@@ -381,7 +382,7 @@ export const memoryRoutes = {
 		const availability = await routeConfig(ctx);
 		if (availability.state === "unavailable") return { ok: false, configured: false, error: availability.error };
 		if (availability.state === "dormant") return { ok: false, configured: false, code: "SERVICE_UNHEALTHY" };
-		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
+		if (availability.state === "unhealthy") return { ok: false, configured: availability.configured, code: availability.code };
 		const resolvedScope = resolveMemoryScope(ctx, req);
 		// An invalidation is never an all-bank action; body scope cannot broaden a
 		// destructive request beyond the host project/goal context.
@@ -405,14 +406,14 @@ export const memoryRoutes = {
 			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code, id };
 			await invalidate(config.bank, id, { ...(text(body.reason, 1_000) ? { reason: text(body.reason, 1_000) } : {}) });
 			return { ok: true, configured: true, id };
-		});
+		}, { ok: false as const, configured: true as const, code: "SERVICE_UNHEALTHY" as const });
 	},
 
 	"retain-outcome": async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
 		const availability = await routeConfig(ctx);
 		if (availability.state === "unavailable") return { ok: false, configured: false, error: availability.error };
 		if (availability.state === "dormant") return { ok: false, configured: false, code: "SERVICE_UNHEALTHY" };
-		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
+		if (availability.state === "unhealthy") return { ok: false, configured: availability.configured, code: availability.code };
 		const scope = resolveMemoryScope(ctx, req);
 		if (!scope) return { ok: false, configured: true, code: "HINDSIGHT_SCOPE_UNAVAILABLE" };
 		const permission = await authorize(ctx, "memory.write");
@@ -433,6 +434,6 @@ export const memoryRoutes = {
 			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code };
 			await retain(config.bank, outcome.content, { tags: outcome.tags, sync: true, id: outcome.documentId });
 			return { ok: true, configured: true, outcomeId: outcome.documentId };
-		});
+		}, { ok: false as const, configured: true as const, code: "SERVICE_UNHEALTHY" as const });
 	},
 };

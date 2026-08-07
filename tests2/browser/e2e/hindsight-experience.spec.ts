@@ -214,7 +214,58 @@ test.describe("Hindsight experience", () => {
 		await expect(memories.getByLabel("Search memories")).toBeVisible();
 		await memories.getByLabel("Search memories").fill("release marker");
 		await expect(memories.getByRole("button", { name: "Search", exact: true })).toBeVisible();
-		await expect(memories.getByRole("button", { name: "Retain memory", exact: true })).toBeVisible();
+		const retain = memories.getByRole("button", { name: "Retain memory", exact: true });
+		await expect(retain).toBeVisible();
+		// An unhealthy route result and a denied route must preserve the draft; neither
+		// may be rendered as a successful retention.
+		let retainCalls = 0;
+		await page.route("**/api/ext/route/retain", async route => {
+			retainCalls += 1;
+			if (retainCalls === 1) {
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: false, configured: true, code: "SERVICE_UNHEALTHY" }) });
+				return;
+			}
+			await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ code: "EXTENSION_CAPABILITY_DENIED" }) });
+		});
+		const retainInput = memories.getByLabel("Retain a memory");
+		await retainInput.fill("Do not discard this draft");
+		await retain.click();
+		await expect.poll(() => retainCalls).toBeGreaterThan(0);
+		const unhealthyRetainCalls = retainCalls;
+		await expect(retainInput).toHaveValue("Do not discard this draft");
+		await expect(panel.getByRole("status")).toContainText("SERVICE_UNHEALTHY");
+		await expect(panel.getByRole("status")).not.toContainText("Memory retained.");
+		await retainInput.fill("Do not discard denied draft");
+		await retain.click();
+		await expect.poll(() => retainCalls).toBeGreaterThan(unhealthyRetainCalls);
+		await expect(retainInput).toHaveValue("Do not discard denied draft");
+		await expect(panel.getByRole("status")).not.toContainText("Memory retained.");
+
+		// Preserve the selected record, detail, and list row if an invalidation route
+		// rejects the confirmed request.
+		await page.route("**/api/ext/route/browse", async route => {
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ configured: true, memories: [{ id: "memory-preserved", text: "Memory that must remain", tags: ["project:fixture"] }] }) });
+		});
+		await page.route("**/api/ext/route/detail", async route => {
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ configured: true, id: "memory-preserved", text: "Memory that must remain" }) });
+		});
+		await page.route("**/api/ext/route/invalidate", async route => {
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: false, configured: true, code: "SERVICE_UNHEALTHY" }) });
+		});
+		await memories.getByRole("button", { name: "Search", exact: true }).click();
+		const preservedMemory = memories.getByRole("button", { name: /Memory that must remain/ });
+		await expect(preservedMemory).toBeVisible();
+		await preservedMemory.click();
+		await expect(memories.getByText("Memory detail", { exact: true })).toBeVisible();
+		const invalidateReason = memories.getByLabel("Invalidation reason");
+		await invalidateReason.fill("Service is unavailable");
+		await memories.getByRole("button", { name: "Invalidate", exact: true }).click();
+		const invalidateConfirm = panel.getByRole("dialog", { name: "Invalidate this memory?" });
+		await invalidateConfirm.getByRole("button", { name: "Confirm", exact: true }).click();
+		await expect(panel.getByRole("status")).toContainText("SERVICE_UNHEALTHY");
+		await expect(preservedMemory).toBeVisible();
+		await expect(memories.getByText("Memory detail", { exact: true })).toBeVisible();
+		await expect(invalidateReason).toHaveValue("Service is unavailable");
 		// Completed outcomes are host snapshots, not panel-supplied free text.
 		await expect(memories.getByText(/supplied by the host lifecycle/i)).toBeVisible();
 		const retainOutcome = memories.getByRole("button", { name: "Retain completed outcome" });
