@@ -23,25 +23,6 @@ const ROTATED_SECRET_SENTINEL = "settings-browser-private-value-rotation-93ce";
 type Project = { id: string; name: string; rootPath: string };
 type BrowserResponse = { status: number; text: string };
 
-function installHindsightFixture(bobbitDir: string): string {
-	const source = path.resolve(import.meta.dirname, "../../../market-packs/hindsight");
-	const destination = path.join(bobbitDir, "config", "market-packs", PACK_ID);
-	fs.rmSync(destination, { recursive: true, force: true });
-	fs.mkdirSync(path.dirname(destination), { recursive: true });
-	fs.cpSync(source, destination, { recursive: true });
-	fs.writeFileSync(path.join(destination, ".pack-meta.yaml"), [
-		"sourceUrl: e2e",
-		"sourceRef: local",
-		"commit: test",
-		`packName: ${PACK_ID}`,
-		"version: 1.0.0",
-		"installedAt: '2026-01-01T00:00:00.000Z'",
-		"updatedAt: '2026-01-01T00:00:00.000Z'",
-		"scope: server",
-	].join("\n") + "\n");
-	return destination;
-}
-
 /** Real authenticated request from the rendered application's own origin. */
 async function browserApi(page: Page, request: { path: string; method?: string; body?: unknown }): Promise<BrowserResponse> {
 	return page.evaluate(async ({ path, method, body }) => {
@@ -99,13 +80,17 @@ async function publicBrowserSurfaces(page: Page): Promise<unknown> {
 }
 
 test.describe("Market extension settings", () => {
-	let packDir: string | undefined;
 	let projectA: Project | undefined;
 	let projectB: Project | undefined;
 	const projectRoots: string[] = [];
 
-	test.beforeAll(async ({ gateway }) => {
-		packDir = installHindsightFixture(gateway.bobbitDir);
+	test.beforeAll(async () => {
+		// Hindsight ships as an enabled built-in. Resetting its public activation
+		// state avoids a copied server-market fixture shadowing the pack under test.
+		const activation = await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
+		});
+		expect(activation.status, `Hindsight built-in activation reset failed: ${await activation.clone().text()}`).toBe(200);
 		const rootA = fs.mkdtempSync(path.join(os.tmpdir(), "extension-settings-browser-a-"));
 		const rootB = fs.mkdtempSync(path.join(os.tmpdir(), "extension-settings-browser-b-"));
 		projectRoots.push(rootA, rootB);
@@ -118,7 +103,9 @@ test.describe("Market extension settings", () => {
 		for (const project of [projectA, projectB]) {
 			if (project) await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" }).catch(() => {});
 		}
-		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
+		}).catch(() => {});
 		for (const root of projectRoots) fs.rmSync(root, { recursive: true, force: true });
 	});
 
@@ -139,15 +126,15 @@ test.describe("Market extension settings", () => {
 
 		await chooseProject(page, projectA);
 		const rowA = providerRow(page);
-		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Needs configuration");
+		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Active");
 		const formA = await openProviderSettings(page);
 
 		// Native labels expose all five declared kinds. The boolean is toggled with
 		// Space and Save with Enter, so the journey does not rely only on clicks.
 		const url = formA.getByLabel("Hindsight URL");
-		const apiKey = formA.getByLabel("API key");
+		const apiKey = formA.getByLabel("API key", { exact: true });
 		const bank = formA.getByLabel("Bank");
-		const recallScope = formA.getByLabel("Recall scope");
+		const runtimeMode = formA.getByLabel("Runtime mode");
 		const automaticRecall = formA.locator('[data-field-key="autoRecall"] input[type="checkbox"]');
 		const recallBudget = formA.getByLabel("Recall budget");
 		await expect(url).toHaveAttribute("type", "text");
@@ -155,13 +142,15 @@ test.describe("Market extension settings", () => {
 		// The DOM lookup key is metadata only; save reads the password directly
 		// from this element without retaining the secret in application state.
 		await expect(apiKey).toHaveAttribute("data-field-key", "apiKey");
-		expect(await recallScope.evaluate(element => element.tagName)).toBe("SELECT");
+		expect(await runtimeMode.evaluate(element => element.tagName)).toBe("SELECT");
+		await expect(runtimeMode).toHaveValue("external");
 		await expect(automaticRecall).toBeChecked();
 		await expect(recallBudget).toHaveAttribute("type", "number");
 
 		await url.fill("https://settings-a.invalid");
 		await bank.fill("project-a-bank");
-		await recallScope.selectOption("project");
+		await runtimeMode.selectOption("local");
+		await runtimeMode.selectOption("external");
 		await automaticRecall.focus();
 		await page.keyboard.press("Space");
 		await expect(automaticRecall).not.toBeChecked();
@@ -184,9 +173,9 @@ test.describe("Market extension settings", () => {
 		// A password replacement is the only draft change here. It must enable Save
 		// without retaining either value in public application state.
 		const savedForm = await openProviderSettings(page);
-		const rotatedApiKey = savedForm.getByLabel("API key");
+		const rotatedApiKey = savedForm.getByLabel("API key", { exact: true });
 		const rotatedSave = savedForm.getByTestId("market-settings-save");
-		await expect(savedForm.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "set");
+		await expect(savedForm.locator('[data-field-key="apiKey"]').getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "set");
 		await expect(rotatedApiKey).toHaveValue("");
 		await expect(rotatedSave).toBeDisabled();
 		await rotatedApiKey.fill(ROTATED_SECRET_SENTINEL);
@@ -228,7 +217,7 @@ test.describe("Market extension settings", () => {
 		const resetFields = resetBody.target.fields as Array<{ key: string; value?: unknown; source?: string; secretSet?: boolean }>;
 		expect(resetFields.find(field => field.key === "apiKey")).toMatchObject({ secretSet: false });
 		expect(resetFields.find(field => field.key === "bank")).toMatchObject({ value: "bobbit", source: "default" });
-		expect(resetFields.find(field => field.key === "recallScope")).toMatchObject({ value: "all", source: "default" });
+		expect(resetFields.find(field => field.key === "runtimeMode")).toMatchObject({ value: "external", source: "default" });
 		expect(resetFields.find(field => field.key === "autoRecall")).toMatchObject({ value: true, source: "default" });
 		expect(resetFields.find(field => field.key === "recallBudget")).toMatchObject({ value: 1200, source: "default" });
 		await expect(page.getByTestId("market-settings-status")).toContainText(`Settings saved for ${projectA.name}.`, { timeout: 15_000 });
@@ -251,8 +240,8 @@ test.describe("Market extension settings", () => {
 		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/market/${projectA.id}/installed`);
 		await chooseProject(page, projectA);
 		const reloadedForm = await openProviderSettings(page);
-		await expect(reloadedForm.getByLabel("API key")).toHaveValue("");
-		await expect(reloadedForm.getByTestId("market-settings-secret-state")).toHaveText("Not set");
+		await expect(reloadedForm.getByLabel("API key", { exact: true })).toHaveValue("");
+		await expect(reloadedForm.locator('[data-field-key="apiKey"]').getByTestId("market-settings-secret-state")).toHaveText("Not set");
 
 		// Project B is a fresh projection: it must not flash A's URL or expose A's
 		// secret presence. Disable B's provider and then prove A remains active.
@@ -263,7 +252,7 @@ test.describe("Market extension settings", () => {
 		assertNoSecrets(bSettings.text);
 		const formB = await openProviderSettings(page);
 		await expect(formB.getByLabel("Hindsight URL")).toHaveValue("");
-		await expect(formB.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
+		await expect(formB.locator('[data-field-key="apiKey"]').getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
 		await providerRow(page).getByTestId("market-settings-toggle").click();
 		const enabledB = providerRow(page).getByTestId("market-project-provider-enabled");
 		await expect(enabledB).toBeChecked();
@@ -276,7 +265,7 @@ test.describe("Market extension settings", () => {
 		await expect(providerRow(page).getByTestId("market-runtime-status")).toHaveText("Active");
 		const isolatedAForm = await openProviderSettings(page);
 		await expect(isolatedAForm.getByLabel("Hindsight URL")).toHaveValue("https://settings-a.invalid");
-		await expect(isolatedAForm.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
+		await expect(isolatedAForm.locator('[data-field-key="apiKey"]').getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
 
 		// The sentinel must be absent after the write from every public browser
 		// surface: DOM/attributes, storage, API responses, and console output.

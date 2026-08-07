@@ -1,7 +1,7 @@
 /**
- * Hindsight's user-facing contract. The pack is installed into the isolated
- * gateway and is opened through the normal session-actions menu; nothing here
- * imports a panel module or talks to a private Hindsight client.
+ * Hindsight's user-facing contract. The shipped first-party built-in is opened
+ * through the normal session-actions menu; nothing here copy-installs a shadow
+ * pack, imports a panel module, or talks to a private Hindsight client.
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
@@ -15,7 +15,7 @@ import {
 	createHindsightExperienceBrowserProject,
 	expectHindsightExperienceSecretRedacted,
 	hindsightExperienceBrowserApi,
-	installHindsightExperienceBrowserFixture,
+	resetHindsightExperienceBuiltinActivation,
 	type HindsightExperienceProject,
 } from "../fixtures/hindsight-experience-fixture.js";
 
@@ -73,18 +73,17 @@ async function grant(page: Page, capability: typeof CAPABILITIES[number]): Promi
 }
 
 test.describe("Hindsight experience", () => {
-	let packDir: string | undefined;
 	let project: HindsightExperienceProject | undefined;
 	let sessionId = "";
 
-	test.beforeAll(async ({ gateway }) => {
-		packDir = installHindsightExperienceBrowserFixture(gateway.bobbitDir);
+	test.beforeAll(async () => {
+		await resetHindsightExperienceBuiltinActivation();
 		project = await createHindsightExperienceBrowserProject();
 		sessionId = await createSession({ projectId: project.id, cwd: project.rootPath });
 	});
 
 	test.afterAll(async () => {
-		await cleanupHindsightExperienceBrowserFixture(project, packDir);
+		await cleanupHindsightExperienceBrowserFixture(project);
 	});
 
 	test("configuration is inert, write-only secrets never echo, and denied/granted/revoked access stays live", async ({ page }) => {
@@ -180,15 +179,22 @@ test.describe("Hindsight experience", () => {
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 		await expect(page.locator(PANEL)).toHaveCount(0);
 
-		// Removing the fixture must reconcile launchers and open panel state; a
-		// stale late response may not resurrect the disposed panel.
-		const removed = await hindsightExperienceBrowserApi(page, {
-			path: "/api/marketplace/installed",
-			method: "DELETE",
-			body: { scope: "server", packName: HINDSIGHT_EXPERIENCE_PACK_ID },
+		// Hindsight is a built-in and cannot be uninstalled. Disable its session-menu
+		// entrypoint through the public activation route instead; reconciliation
+		// must not resurrect a closed panel or leave a stale launcher behind.
+		const disabled = await hindsightExperienceBrowserApi(page, {
+			path: "/api/marketplace/pack-activation",
+			method: "PUT",
+			body: {
+				scope: "server",
+				packName: HINDSIGHT_EXPERIENCE_PACK_ID,
+				disabled: { entrypoints: ["hindsight-session-menu"] },
+			},
 		});
-		expect(removed.status, removed.text).toBe(204);
+		expect(disabled.status, disabled.text).toBe(200);
 		await page.evaluate(async () => (window as any).__bobbitReconcilePackRenderers());
 		await expect(page.locator(PANEL)).toHaveCount(0);
+		await page.locator('[data-testid="session-actions-trigger"]').first().click();
+		await expect(page.locator('sidebar-actions-popover [role="menuitem"]').filter({ hasText: "Hindsight" })).toHaveCount(0);
 	});
 });

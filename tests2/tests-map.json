@@ -1202,7 +1202,7 @@
     },
     {
       "path": "tests2/browser/e2e/pr-walkthrough-default-off.spec.ts",
-      "reason": "Part 1+2 of 'Hide/Disable PR & Hindsight': fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; plus hindsight is absent from the built-in group and from /api/marketplace/installed. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts.",
+      "reason": "Fresh-state browser journey proving pr-walkthrough ships default-OFF (no contributions/tools, deep-link unavailable, master toggle rendered+unchecked), enabling via the marketplace master toggle lights up all contributions and persists across reload, disabling turns it off again; Hindsight remains a visible first-party built-in. Complements the enabled-baseline live-feature spec at tests2/browser/e2e/pr-walkthrough-pack.spec.ts.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -17778,7 +17778,7 @@
       "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
     },
     {
-      "file": "tests/e2e/hindsight-runtime-matrix.test.ts",
+      "file": "tests/e2e/hindsight-runtime-matrix.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
