@@ -2080,9 +2080,9 @@ export class SessionManager {
 		condition?: ModelSelectionRequiredCondition;
 		activationInProgress: boolean;
 	} {
-		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		const coordinator = this._sessionReplacementCoordinators?.get(sessionId);
 		const ownerCondition = coordinator?.promptOwner?.condition;
-		const canonicalCondition = this.sessions.get(sessionId)?.condition;
+		const canonicalCondition = this.sessions?.get(sessionId)?.condition;
 		return {
 			condition: ownerCondition?.code === "MODEL_SELECTION_REQUIRED"
 				? ownerCondition
