@@ -568,14 +568,15 @@ describe("ServiceRuntimeSupervisor", () => {
 		});
 		store.records.set(store.key(identity), old);
 		const local = runner("local");
-		const { instance } = supervisor({
+		const { instance, resolve } = supervisor({
 			store,
 			runners: [local],
 			settings: { mode: "docker", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-external:new-bank" },
 		});
 		const before = JSON.stringify(store.records.get(store.key(identity)));
 
-		await expect(instance.restart({ ...identity, mode: "docker" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		await expect(instance.restartWithResult({ ...identity, mode: "docker" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		assert.equal(resolve.mock.calls.length, 1, "restart resolves one snapshot before continuity preflight");
 		assert.equal(JSON.stringify(store.records.get(store.key(identity))), before, "mismatch leaves the persisted record byte-for-byte unchanged");
 		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
 		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
@@ -631,6 +632,81 @@ describe("ServiceRuntimeSupervisor", () => {
 		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1, "restart keeps normal stale ownership removal");
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 		assert.equal(store.records.get(store.key(identity))?.storageIdentity, "hindsight-managed:stable-bank");
+	});
+
+	it("restarts from one immutable settings snapshot despite a concurrent save", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:stable-bank",
+		}));
+		let resolvedSnapshot!: () => void;
+		const snapshotRead = new Promise<void>((resolve) => { resolvedSnapshot = resolve; });
+		let releaseResolution!: () => void;
+		const release = new Promise<void>((resolve) => { releaseResolution = resolve; });
+		let current = {
+			mode: "local" as const, revision: "revision-2", values: { configValue: "old-public" },
+			resolvedSecrets: { apiKey: "old-secret" }, storageIdentity: "hindsight-managed:stable-bank",
+		};
+		const resolve = vi.fn(async () => {
+			const captured = structuredClone(current);
+			resolvedSnapshot();
+			await release;
+			return captured;
+		});
+		const local = runner("local", {
+			start: async (input) => {
+				assert.equal(input.environment.CONFIG, "old-public");
+				assert.equal(input.environment.USER_SECRET, "old-secret");
+				return { endpoint: `${endpoint}/restarted`, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] };
+			},
+		});
+		const { instance, resolveSecret } = supervisor({ store, runners: [local], resolve, probe: vi.fn(async () => true) });
+
+		const restarting = instance.restartWithResult({ ...identity, mode: "local" });
+		await snapshotRead;
+		current = {
+			mode: "local", revision: "revision-3", values: { configValue: "new-public" },
+			resolvedSecrets: { apiKey: "new-secret" }, storageIdentity: "hindsight-managed:stable-bank",
+		};
+		releaseResolution();
+
+		await expect(restarting).resolves.toMatchObject({ settingsRevision: "revision-2", status: { state: "ready", endpoint: `${endpoint}/restarted` } });
+		assert.equal(resolve.mock.calls.length, 1, "restart never resolves a second generation after stop");
+		assert.equal(resolveSecret.mock.calls.length, 0, "the captured EP-7 secret pair is never mixed with a later generation");
+		assert.deepEqual(store.environmentCalls.at(-1), {
+			FIXED: "fixed", CONFIG: "old-public", USER_SECRET: "old-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080",
+		});
+		assert.equal(store.records.get(store.key(identity))?.settingsRevision, "revision-2");
+	});
+
+	it("rechecks a live grant after stop before launching a restart", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "old-resource" },
+			storageIdentity: "hindsight-managed:stable-bank",
+		}));
+		let stopped = false;
+		const authorize = vi.fn(async ({ action }: { action: string }) => action !== "start" || !stopped);
+		const local = runner("local", { stop: async () => { stopped = true; } });
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			authorize,
+			settings: { mode: "local", revision: "revision-2", values: { configValue: "configured" }, storageIdentity: "hindsight-managed:stable-bank" },
+		});
+
+		await expect(instance.restartWithResult({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0, "revocation prevents stale-resource removal and launch");
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(store.environmentCalls.length, 0);
+		const persisted = store.records.get(store.key(identity));
+		assert.equal(persisted?.desired, "stopped", "stopped ownership stays durable for an authorized retry");
+		assert.equal(persisted?.endpoint, undefined);
+		assert.deepEqual(persisted?.runnerIdentity, { kind: "local", id: "old-resource" });
 	});
 
 	it("blocks a legacy runtime without an identity when a settings owner now resolves one", async () => {

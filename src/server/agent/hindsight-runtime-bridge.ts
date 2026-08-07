@@ -58,6 +58,12 @@ export type HindsightMigrationRouteResult =
 	| { ok: true; planId: string; fingerprint: string }
 	| { ok: false; code: string; rolledBack?: boolean };
 
+export interface HindsightRuntimeControlResult {
+	runtime: ServiceRuntimeStatus;
+	/** The EP-7 revision from the exact snapshot the supervisor applied. */
+	settingsRevision: number;
+}
+
 export interface HindsightRuntimeBridgeOptions {
 	contributions: Pick<PackContributionResolver, "getPack">;
 	contextForProject(projectId: string): {
@@ -252,17 +258,28 @@ export class HindsightRuntimeBridge {
 		return safeStatusDiagnostic(await this.supervisor(projectId).status(identity, projectId), settings.modelDiagnostic(), settings.ociWarning());
 	}
 
-	async control(projectId: string, action: "start" | "stop" | "restart"): Promise<ServiceRuntimeStatus> {
+	async control(projectId: string, action: "start" | "stop" | "restart"): Promise<HindsightRuntimeControlResult> {
 		this.require(projectId, "service.manage");
-		const mode = resolveHindsightRuntimeSettings(publicRuntimeValues(this.settings(projectId).getRuntimeValues(this.provider(projectId)).values)).runtimeMode;
-		if (mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 		const request = { packId: HINDSIGHT_PACK_ID, runtimeId: HINDSIGHT_RUNTIME_ID, projectId };
-		if (action === "stop") return this.supervisor(projectId).stop(request);
-		const settings = this.settings(projectId);
-		const status = action === "restart"
-			? await this.supervisor(projectId).restart(request)
-			: await this.supervisor(projectId).start(request);
-		return safeStatusDiagnostic(status, settings.modelDiagnostic(), settings.ociWarning());
+		if (action === "stop") {
+			const mode = resolveHindsightRuntimeSettings(publicRuntimeValues(this.settings(projectId).getRuntimeValues(this.provider(projectId)).values)).runtimeMode;
+			if (mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
+			return {
+				runtime: await this.supervisor(projectId).stop(request),
+				settingsRevision: this.settingsRevision(projectId),
+			};
+		}
+		// The supervisor resolves one immutable EP-7 snapshot before continuity
+		// preflight. Never read this mutable settings owner again for the response.
+		const applied = action === "restart"
+			? await this.supervisor(projectId).restartWithResult(request)
+			: await this.supervisor(projectId).startWithResult(request);
+		return {
+			// Do not re-resolve EP-7 merely to decorate an explicit control response:
+			// that could observe a concurrent save after the applied snapshot.
+			runtime: safeStatusDiagnostic(applied.status),
+			settingsRevision: Number(applied.settingsRevision),
+		};
 	}
 
 	async logs(projectId: string): Promise<string | undefined> {

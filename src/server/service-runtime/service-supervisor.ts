@@ -37,6 +37,14 @@ export interface ServiceRuntimeStatus extends ServiceRuntimeContext {
 	mode?: ServiceRuntimeStatusMode;
 }
 
+/** The control result retains the exact settings snapshot revision that the
+ * supervisor applied. It is separate from the public status wire so callers
+ * cannot accidentally replace it with a later EP-7 read. */
+export interface ServiceRuntimeControlResult {
+	status: ServiceRuntimeStatus;
+	settingsRevision: string;
+}
+
 export interface ServiceRuntimeControlRequest extends ServiceRuntimeIdentity {
 	projectId?: string;
 	/** A caller may request a mode, but settings remains the source of truth. */
@@ -212,7 +220,7 @@ function asControl(identity: ServiceRuntimeIdentity, request: Partial<ServiceRun
  * call the authorizer, settings, secret owner, runner start, or storage writer.
  */
 export class ServiceRuntimeSupervisor {
-	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeStatus> }>();
+	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeControlResult> }>();
 	private readonly lifecycle = new Map<string, Promise<void>>();
 	private readonly restartTokens = new Map<string, number>();
 	/** Cancels detached periodic health work without letting reads schedule it. */
@@ -271,6 +279,11 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	start(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		return this.startWithResult(request).then(result => result.status);
+	}
+
+	/** Resolves and applies one settings-owner snapshot for explicit control. */
+	startWithResult(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
 		// Authorization is intentionally outside the shared in-flight operation:
 		// every public caller is checked before it can observe another caller's
 		// endpoint or status. doStart rechecks the live grant when queued work applies.
@@ -279,22 +292,26 @@ export class ServiceRuntimeSupervisor {
 			.then(() => this.startAuthorized(request));
 	}
 
-	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
 		return this.enqueueStart(request, () => this.doStart(request, false));
 	}
 
 	/**
-	 * Restart retains the established stop-then-start lifecycle, but makes the
-	 * settings-owner continuity comparison while the old record is authoritative.
-	 * It intentionally does not attempt an atomic/candidate replacement.
+	 * Restart retains the established stop-then-start lifecycle. It resolves one
+	 * immutable settings-owner snapshot, preflights continuity before stopping,
+	 * then applies that same snapshot without a second settings read.
 	 */
 	restart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		return this.restartWithResult(request).then(result => result.status);
+	}
+
+	restartWithResult(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
 		return Promise.resolve()
 			.then(() => this.authorize(request, "start"))
 			.then(() => this.enqueueStart(request, () => this.doRestart(request)));
 	}
 
-	private enqueueStart(request: ServiceRuntimeControlRequest, operation: () => Promise<ServiceRuntimeStatus>): Promise<ServiceRuntimeStatus> {
+	private enqueueStart(request: ServiceRuntimeControlRequest, operation: () => Promise<ServiceRuntimeControlResult>): Promise<ServiceRuntimeControlResult> {
 		const key = identityKey(request);
 		const prior = this.inFlight.get(key);
 		if (prior) {
@@ -310,17 +327,17 @@ export class ServiceRuntimeSupervisor {
 		return promise;
 	}
 
-	private async doRestart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+	private async doRestart(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
 		// The queued restart rechecks the live start grant before resolving settings
 		// or touching the old resource. doStop and doStart retain their own live
 		// action fences as they apply their respective lifecycle changes.
 		await this.authorize(request, "start");
 		const contribution = this.requireContribution(request);
-		const settings = await this.resolveControlSettings(request, contribution);
+		const settings = this.immutableSettingsSnapshot(await this.resolveControlSettings(request, contribution));
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		this.assertStorageContinuity(await this.options.store.load(identity), settings);
 		await this.doStop(request);
-		return this.doStart(request, false);
+		return this.doStart(request, false, false, settings);
 	}
 
 	stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
@@ -460,7 +477,7 @@ export class ServiceRuntimeSupervisor {
 				// happens to report a matching in-memory resource.
 				try {
 					const request = asControl(identity, { projectId, mode: "local" });
-					results.push(await this.enqueueLifecycle(identity, () => this.doStart(request, false, true)));
+					results.push((await this.enqueueLifecycle(identity, () => this.doStart(request, false, true))).status);
 				} catch { results.push(await this.status(identity, projectId)); }
 				continue;
 			}
@@ -470,12 +487,17 @@ export class ServiceRuntimeSupervisor {
 		return results;
 	}
 
-	private async doStart(request: ServiceRuntimeControlRequest, alreadyAuthorized: boolean, forceFresh = false): Promise<ServiceRuntimeStatus> {
+	private async doStart(
+		request: ServiceRuntimeControlRequest,
+		alreadyAuthorized: boolean,
+		forceFresh = false,
+		settingsSnapshot?: ServiceRuntimeSettings,
+	): Promise<ServiceRuntimeControlResult> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		try {
 			if (!alreadyAuthorized) await this.authorize(request, "start");
 			const contribution = this.requireContribution(request);
-			const settings = await this.resolveControlSettings(request, contribution);
+			const settings = settingsSnapshot ?? this.immutableSettingsSnapshot(await this.resolveControlSettings(request, contribution));
 			const prior = await this.options.store.load(identity);
 			// An unsupported backing may keep serving its exact already-ready
 			// resource, but it must fail closed before any start path could remove
@@ -483,7 +505,7 @@ export class ServiceRuntimeSupervisor {
 			if (prior && settings.storageContinuity === "unsupported") {
 				if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
 					this.startHealthMonitor(identity, this.restartRequest(request), contribution);
-					return recordContext(identity, prior);
+					return { status: recordContext(identity, prior), settingsRevision: settings.revision };
 				}
 				throw new ServiceRuntimeError("SERVICE_CONTINUITY_REQUIRED");
 			}
@@ -492,7 +514,7 @@ export class ServiceRuntimeSupervisor {
 			// revision and the adapter proves that exact resource is still present.
 			if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
 				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
-				return recordContext(identity, prior!);
+				return { status: recordContext(identity, prior!), settingsRevision: settings.revision };
 			}
 			this.cancelHealthMonitor(identity);
 			// Settings resolution and ready-resource inspection are asynchronous. The
@@ -544,11 +566,14 @@ export class ServiceRuntimeSupervisor {
 				const ready = this.nextRecord(desired, { endpoint: started.endpoint, lastDiagnostic: undefined });
 				await this.options.store.replace(identity, ready);
 				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
-				return recordContext(identity, ready);
+				return { status: recordContext(identity, ready), settingsRevision: settings.revision };
 			} catch (error) {
-				return this.failStart(identity, desired, contribution, request, error, started && runner
-					? async () => runner!.remove(await this.controlInput(identity, contribution, started!.runnerIdentity, materialized?.secrets))
-					: undefined);
+				return {
+					status: await this.failStart(identity, desired, contribution, request, error, started && runner
+						? async () => runner!.remove(await this.controlInput(identity, contribution, started!.runnerIdentity, materialized?.secrets))
+						: undefined),
+					settingsRevision: settings.revision,
+				};
 			}
 		} catch (error) {
 			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET|CONTINUITY/.test(error.code)) throw error;
@@ -610,6 +635,15 @@ export class ServiceRuntimeSupervisor {
 		if (settings.imageOverride !== undefined && !isSafeServiceImageReference(settings.imageOverride)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
 		if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 		return settings;
+	}
+
+	private immutableSettingsSnapshot(settings: ServiceRuntimeSettings): ServiceRuntimeSettings {
+		return Object.freeze({
+			...settings,
+			values: Object.freeze({ ...settings.values }),
+			...(settings.resolvedSecrets ? { resolvedSecrets: Object.freeze({ ...settings.resolvedSecrets }) } : {}),
+			...(settings.storage ? { storage: Object.freeze({ ...settings.storage }) } : {}),
+		});
 	}
 
 	private assertStorageContinuity(prior: PersistedServiceRuntime | undefined, settings: ServiceRuntimeSettings): void {

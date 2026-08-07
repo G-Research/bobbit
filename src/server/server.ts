@@ -10712,7 +10712,8 @@ async function handleApiRoute(
 						json({ error: "Explicit runtime control consent is required", code: "HINDSIGHT_CONTROL_CONSENT_REQUIRED" }, 422);
 						return;
 					}
-					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), runtime: await hindsightRuntimeBridge?.control(projectId, action) });
+					const controlled = await hindsightRuntimeBridge?.control(projectId, action);
+					json(controlled ?? { error: "Hindsight runtime is unavailable", code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }, controlled ? 200 : 503);
 					return;
 				}
 				if (projectId && routeName === "migration-plan") {
