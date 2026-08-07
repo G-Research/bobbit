@@ -20,7 +20,7 @@ import "../../src/ui/lazy/safe-markdown-block.js";
 setRenderApp(() => {});
 
 const SESSION_ID = "retired-model-dom-session";
-const RETIRED = { provider: "retired-provider", id: "retired-model", name: "Retired model" };
+const RETIRED = { provider: "retired-provider", id: "retired-model", name: "Retired model", reasoning: true };
 const CONDITION = {
 	code: "MODEL_SELECTION_REQUIRED" as const,
 	provider: RETIRED.provider,
@@ -209,6 +209,7 @@ describe("retired-model recovery surface", () => {
 		expect(choose).toBeTruthy();
 		expect(choose.disabled).toBe(false);
 		expect(ui.querySelector("message-editor")).toBeTruthy();
+		expect(ui.querySelector(".thinking-select-compact")).toBeNull();
 
 		await agent.handleServerMessage({ type: "state", data: { status: "terminated", serverCost: null } });
 		await settle(ui);
@@ -228,6 +229,12 @@ describe("retired-model recovery surface", () => {
 			modelId: replacement.id,
 			thinkingLevel: "medium",
 		});
+		await settle(ui);
+		expect((ui.querySelector('[data-testid="choose-replacement-model"]') as HTMLButtonElement).disabled).toBe(true);
+		const footerModelButton = ui.querySelector('[data-testid="footer-model-id"]')?.closest("button") as HTMLButtonElement;
+		expect(footerModelButton.disabled).toBe(true);
+		agent.setModel({ provider: "second-provider", id: "second-model" }, "low");
+		expect(sent.filter((frame) => frame.type === "set_model")).toHaveLength(1);
 
 		await agent.handleServerMessage({
 			type: "state",
@@ -294,6 +301,45 @@ describe("MessageEditor retired-model send fence", () => {
 		expect(textarea.value).toBe("/prw-preview keep this draft");
 		const alert = editor.querySelector('[data-testid="composer-model-selection-error"][role="alert"]');
 		expect(alert?.textContent).toBe("Choose a replacement model before sending.");
+	});
+
+	it("blocks Ctrl/Cmd+Enter steer before send, history, or draft cleanup", async () => {
+		const editor = document.createElement("message-editor") as MessageEditor & any;
+		editor.showModelSelector = false;
+		editor.showThinkingSelector = false;
+		editor.showAttachmentButton = false;
+		editor.blockedSendReason = "Choose a replacement model before sending.";
+		const onSteerSend = vi.fn(async () => true);
+		const onInput = vi.fn();
+		editor.onSteerSend = onSteerSend;
+		editor.onInput = onInput;
+		document.body.appendChild(editor);
+		await editor.updateComplete;
+		const textarea = editor.querySelector("textarea") as HTMLTextAreaElement;
+		textarea.value = "keep conditioned steer draft";
+		textarea.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+		await editor.updateComplete;
+		onInput.mockClear();
+		const history = vi.spyOn(editor as any, "addToHistory");
+		const messageSend = vi.fn();
+		editor.addEventListener("message-send", messageSend);
+
+		textarea.dispatchEvent(new KeyboardEvent("keydown", {
+			key: "Enter",
+			ctrlKey: true,
+			bubbles: true,
+			cancelable: true,
+		}));
+		await editor.updateComplete;
+
+		expect(onSteerSend).not.toHaveBeenCalled();
+		expect(messageSend).not.toHaveBeenCalled();
+		expect(history).not.toHaveBeenCalled();
+		expect(onInput).not.toHaveBeenCalled();
+		expect(editor.value).toBe("keep conditioned steer draft");
+		expect(textarea.value).toBe("keep conditioned steer draft");
+		expect(editor.querySelector('[data-testid="composer-model-selection-error"]')?.textContent)
+			.toBe("Choose a replacement model before sending.");
 	});
 
 	it("keeps the ordinary send path unchanged when no fence is present", async () => {

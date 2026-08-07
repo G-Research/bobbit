@@ -196,7 +196,7 @@ describe("retired persisted model cold recovery", () => {
 			agentSessionFile: transcriptFile,
 			createdAt: Date.parse("2026-01-01T00:00:00.000Z"),
 			lastActivity: Date.parse("2026-01-01T00:01:00.000Z"),
-			messageQueue: [],
+			messageQueue: [{ id: "persisted-queued", text: "leave me parked", isSteered: false, createdAt: 1 }],
 			wasStreaming: false,
 			modelProvider: RETIRED_PROVIDER,
 			modelId: RETIRED_MODEL_ID,
@@ -214,11 +214,13 @@ describe("retired persisted model cold recovery", () => {
 		const placeholderGetMessages = vi.fn(async () => {
 			throw new Error("conditioned history must not query an unstarted placeholder RPC");
 		});
+		const placeholderPrompt = vi.fn(async () => ({ success: true }));
 		registerRpcBridgeFactory(() => ({
 			running: false,
 			start: vi.fn(async () => { piStartCount += 1; }),
 			stop: vi.fn(async () => {}),
 			getMessages: placeholderGetMessages,
+			prompt: placeholderPrompt,
 		} as any));
 
 		const manager: any = new SessionManager({ preferencesStore: preferences, stateDir });
@@ -290,6 +292,30 @@ describe("retired persisted model cold recovery", () => {
 		assert.deepEqual(recovered.promptQueue.toArray(), queueBeforeRejectedPrompt, "rejection must precede queue acceptance");
 		assert.equal(store.updates.length, writesBeforeRejectedPrompt, "rejection must precede persistence");
 
+		recovered.manualRetryRequired = true;
+		const conditionedStateBefore = JSON.stringify({
+			queue: recovered.promptQueue.toArray(),
+			manualRetryRequired: recovered.manualRetryRequired,
+			restoreError: recovered.restoreError,
+		});
+		for (const operation of [
+			() => manager.retryLastPrompt(SESSION_ID),
+			() => manager.restartAgent(SESSION_ID),
+			() => manager.ensureSessionAlive(SESSION_ID),
+			() => manager.deliverLiveSteer(SESSION_ID, "must not steer"),
+		]) {
+			await assert.rejects(operation, (error: any) => error?.code === "MODEL_SELECTION_REQUIRED");
+		}
+		manager.drainQueue(recovered);
+		assert.equal(JSON.stringify({
+			queue: recovered.promptQueue.toArray(),
+			manualRetryRequired: recovered.manualRetryRequired,
+			restoreError: recovered.restoreError,
+		}), conditionedStateBefore, "retry/restart/ensure/steer/drain must leave conditioned state unchanged");
+		assert.equal(store.updates.length, writesBeforeRejectedPrompt, "condition bypasses must not persist");
+		assert.equal(placeholderPrompt.mock.calls.length, 0, "condition bypasses must not dispatch RPC");
+		assert.equal(restoreSession.mock.calls.length, 0, "condition bypasses must not attempt restore");
+
 		const replacement = catalog.find((model: any) =>
 			model.provider === "anthropic" && model.sessionSelectable !== false,
 		);
@@ -319,6 +345,43 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(store.get(SESSION_ID)?.modelId, RETIRED_MODEL_ID, "failed activation must retain durable model");
 		assert.equal(recovered.clients.has(firstClient), true, "failed activation must retain attached clients");
 		assert.equal(explicitConditionClearFrames(firstClient).length, 0, "failed activation must not publish a recovery-condition clear");
+
+		const poisonedTranscriptBytes = transcriptBytes + JSON.stringify({
+			type: "message",
+			id: "poisoned-user",
+			parentId: "assistant-1",
+			message: {
+				role: "user",
+				content: [
+					{ type: "text", text: "" },
+					{ type: "image", data: "fixture-image", mimeType: "image/png" },
+				],
+			},
+		}) + "\n";
+		fs.writeFileSync(transcriptFile, poisonedTranscriptBytes, "utf-8");
+		let readbackFailureBridge: any;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			readbackFailureBridge = replacementBridge(options, {
+				getState: vi.fn(async () => ({
+					success: true,
+					data: { model: { provider: "wrong-provider", id: "wrong-model" }, thinkingLevel: "high" },
+				})),
+			});
+			return readbackFailureBridge;
+		});
+		await assert.rejects(
+			manager.recoverModelSelectionRequired(SESSION_ID, replacement.provider, replacement.id, "high"),
+			(error: any) => error?.code === "MODEL_RECOVERY_FAILED",
+			"post-switch tuple verification failure must roll back",
+		);
+		assert.equal(readFixtureUtf8(transcriptFile), poisonedTranscriptBytes, "failed recovery must restore sanitizer-mutated transcript bytes");
+		assert.equal(readbackFailureBridge.sendCommand.mock.calls.length, 1, "fixture must fail after switch_session");
+		assert.equal(readbackFailureBridge.stop.mock.calls.length, 1, "failed staged bridge must be stopped");
+		assert.equal(manager.getSession(SESSION_ID), recovered);
+		assert.deepEqual(recovered.condition, EXPECTED_CONDITION);
+		assert.equal(store.get(SESSION_ID)?.modelProvider, RETIRED_PROVIDER);
+		assert.equal(store.get(SESSION_ID)?.modelId, RETIRED_MODEL_ID);
+		assert.equal(explicitConditionClearFrames(firstClient).length, 0);
 
 		let successfulOptions: Record<string, any> | undefined;
 		let successfulBridge: any;

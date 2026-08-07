@@ -39,7 +39,10 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 	assert.fail(`timed out waiting for ${label}`);
 }
 
-function websocketHarness(recoverModelSelectionRequired = vi.fn(async () => {})) {
+function websocketHarness(
+	recoverModelSelectionRequired = vi.fn(async () => {}),
+	activationInProgress = false,
+) {
 	const ws = new FakeWebSocket();
 	const clients = new Set<any>();
 	const queueRows = [{ id: "persisted-queued", text: "leave me parked" }];
@@ -69,6 +72,9 @@ function websocketHarness(recoverModelSelectionRequired = vi.fn(async () => {}))
 		effectiveThinkingLevel: "high",
 	};
 	const persistMutation = vi.fn();
+	const retryLastPrompt = vi.fn(async () => {});
+	const restartAgent = vi.fn(async () => {});
+	const deliverLiveSteer = vi.fn(async () => {});
 	const manager: any = {
 		getSession: (id: string) => id === session.id ? session : undefined,
 		getArchivedSession: () => undefined,
@@ -81,8 +87,12 @@ function websocketHarness(recoverModelSelectionRequired = vi.fn(async () => {}))
 		getPendingToolPermission: () => undefined,
 		getProjectContextManager: () => undefined,
 		enqueuePrompt,
+		deliverLiveSteer,
+		retryLastPrompt,
+		restartAgent,
 		persistSessionModel: persistMutation,
 		recoverModelSelectionRequired,
+		getModelSelectionRecoveryAdmission: () => ({ condition: CONDITION, activationInProgress }),
 	};
 
 	handleWebSocketConnection(
@@ -106,6 +116,9 @@ function websocketHarness(recoverModelSelectionRequired = vi.fn(async () => {}))
 		projectConfigGet,
 		persistMutation,
 		recoverModelSelectionRequired,
+		retryLastPrompt,
+		restartAgent,
+		deliverLiveSteer,
 		cwdReads: () => cwdReads,
 	};
 }
@@ -190,6 +203,57 @@ describe("MODEL_SELECTION_REQUIRED prompt boundaries", () => {
 			assert.equal(
 				h.ws.sent.some((frame) => frame.type === "error" && frame.code === "COMMAND_ERROR"),
 				false,
+			);
+		} finally {
+			h.ws.close();
+		}
+	});
+
+	it("rejects conditioned steer, retry, restart, and thinking before their runtime routes", async () => {
+		const h = websocketHarness();
+		try {
+			for (const frame of [
+				{ type: "steer", text: "do not steer" },
+				{ type: "retry" },
+				{ type: "restart_agent" },
+				{ type: "set_thinking_level", level: "high" },
+			]) {
+				const before = h.ws.sent.filter((sent) => sent.type === "error" && sent.code === MODEL_SELECTION_REQUIRED).length;
+				h.ws.emit("message", JSON.stringify(frame));
+				await waitFor(
+					() => h.ws.sent.filter((sent) => sent.type === "error" && sent.code === MODEL_SELECTION_REQUIRED).length > before,
+					`${frame.type} condition rejection`,
+				);
+			}
+			assert.equal(h.enqueuePrompt.mock.calls.length, 0);
+			assert.equal(h.deliverLiveSteer.mock.calls.length, 0);
+			assert.equal(h.retryLastPrompt.mock.calls.length, 0);
+			assert.equal(h.restartAgent.mock.calls.length, 0);
+			assert.equal(h.persistMutation.mock.calls.length, 0);
+			assert.equal(h.rpcPrompt.mock.calls.length, 0);
+		} finally {
+			h.ws.close();
+		}
+	});
+
+	it("rejects a second model selection while replacement activation is in progress", async () => {
+		const recover = vi.fn(async () => {});
+		const h = websocketHarness(recover, true);
+		try {
+			h.ws.emit("message", JSON.stringify({
+				type: "set_model",
+				provider: "second-provider",
+				modelId: "second-model",
+			}));
+			await waitFor(
+				() => h.ws.sent.some((frame) => frame.type === "error" && frame.code === MODEL_SELECTION_RECOVERY_FAILED),
+				"activation-in-progress rejection",
+			);
+			assert.equal(recover.mock.calls.length, 0);
+			assert.equal(h.persistMutation.mock.calls.length, 0);
+			assert.match(
+				h.ws.sent.find((frame) => frame.type === "error" && frame.code === MODEL_SELECTION_RECOVERY_FAILED).message,
+				/already in progress/i,
 			);
 		} finally {
 			h.ws.close();

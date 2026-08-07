@@ -48,7 +48,7 @@ import {
 	type AgentAuthorDependencies,
 	type AgentSessionIdentity,
 } from "./message-author.js";
-import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, restoreAgentTranscriptSnapshot, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
@@ -2073,6 +2073,29 @@ export class SessionManager {
 		const canonical = this.sessions.get(session.id);
 		if (canonical && canonical !== session) return false;
 		return (session.lifecycleGeneration ?? 0) === this._currentRespawnGeneration(session.id);
+	}
+
+	/** Read-only admission view over the existing replacement coordinator. */
+	getModelSelectionRecoveryAdmission(sessionId: string): {
+		condition?: ModelSelectionRequiredCondition;
+		activationInProgress: boolean;
+	} {
+		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		const ownerCondition = coordinator?.promptOwner?.condition;
+		const canonicalCondition = this.sessions.get(sessionId)?.condition;
+		return {
+			condition: ownerCondition?.code === "MODEL_SELECTION_REQUIRED"
+				? ownerCondition
+				: canonicalCondition?.code === "MODEL_SELECTION_REQUIRED"
+					? canonicalCondition
+					: undefined,
+			activationInProgress: coordinator?.active?.kind === "model-recovery",
+		};
+	}
+
+	private _assertModelSelectionReady(sessionId: string): void {
+		const condition = this.getModelSelectionRecoveryAdmission(sessionId).condition;
+		if (condition) throw new ModelSelectionRequiredError(condition);
 	}
 
 	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
@@ -4377,11 +4400,7 @@ export class SessionManager {
 		// session must not create queue/transcript/sidecar/persistence/RPC state. During
 		// recovery the coordinator's promptOwner remains the conditioned capsule until
 		// the verified replacement commits and ownership is released.
-		const promptOwner = this._sessionReplacementCoordinators.get(sessionId)?.promptOwner;
-		const condition = promptOwner?.condition ?? this.sessions.get(sessionId)?.condition;
-		if (condition?.code === "MODEL_SELECTION_REQUIRED") {
-			throw new ModelSelectionRequiredError(condition);
-		}
+		this._assertModelSelectionReady(sessionId);
 
 		// Replacement ownership is the first ordinary dispatch fence — before
 		// poison/error classification, revive logic, or any RPC. Every prompt accepted
@@ -4788,6 +4807,11 @@ export class SessionManager {
 	 * or attach their own error handler.
 	 */
 	deliverLiveSteer(sessionId: string, message: string, opts?: { source?: PromptSource; author?: MessageAuthor }): Promise<unknown> {
+		try {
+			this._assertModelSelectionReady(sessionId);
+		} catch (error) {
+			return Promise.reject(error);
+		}
 		const session = this.sessions.get(sessionId);
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
 		const source = opts?.source ?? "user";
@@ -5290,6 +5314,7 @@ export class SessionManager {
 	 * enqueuePrompt call sees idle+empty and dispatches a second concurrent prompt.
 	 */
 	private drainQueue(session: SessionInfo): void {
+		if (this.getModelSelectionRecoveryAdmission(session.id).condition) return;
 		if (!this._sessionWriterIsCurrent(session)) return;
 		if (session.promptQueue.isEmpty) return;
 
@@ -6275,6 +6300,7 @@ export class SessionManager {
 	 * - Mid-work error (tool calls already executed): sends a system continuation
 	 */
 	async retryLastPrompt(sessionId: string, opts?: { auto?: boolean; preserveQueueIds?: string[] }): Promise<void> {
+		this._assertModelSelectionReady(sessionId);
 		// Join before looking up SessionInfo: a real in-place respawn removes the
 		// old entry briefly, and duplicate Retry clicks must not fail or redrive.
 		const poisonRecovery = this._poisonedHistoryRecoveries.get(sessionId);
@@ -6987,6 +7013,7 @@ export class SessionManager {
 	 * Re-attaches existing WS clients so the user can keep working.
 	 */
 	async restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void> {
+		this._assertModelSelectionReady(sessionId);
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
@@ -8209,9 +8236,22 @@ export class SessionManager {
 				_deferVerifiedTupleCommit: true,
 				_disableControlledModelFallback: true,
 			} as PersistedSession;
+			const transcriptFileCtx = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
+			let transcriptSnapshot: string;
+			try {
+				trustPersistedAgentSessionFile(persisted.agentSessionFile);
+				const content = await sessionFileRead(transcriptFileCtx, persisted.agentSessionFile, this.sandboxManager);
+				if (content === null) throw new Error("persisted conversation history is unavailable");
+				transcriptSnapshot = content;
+			} catch (err) {
+				throw new ModelSelectionRecoveryError(provider, modelId, err);
+			}
+
 			let candidate: SessionInfo | undefined;
 			let durableCommitAttempted = false;
+			let candidateRestoreStarted = false;
 			try {
+				candidateRestoreStarted = true;
 				await this.restoreSession(replacementPs);
 				candidate = this.sessions.get(sessionId);
 				const verifiedModel = `${selectedProvider}/${selectedModelId}`;
@@ -8265,6 +8305,16 @@ export class SessionManager {
 					candidate.status = "terminated";
 					try { candidate.unsubscribe(); } catch { /* best-effort cleanup */ }
 					try { await candidate.rpcClient.stop(); } catch { /* best-effort cleanup */ }
+				}
+				// Ordinary restore sanitizes the durable JSONL before model/thinking
+				// verification. A provisional candidate must not retain that mutation when
+				// activation rolls back.
+				if (candidateRestoreStarted) {
+					restoreAgentTranscriptSnapshot(
+						transcriptFileCtx,
+						persisted.agentSessionFile,
+						transcriptSnapshot,
+					);
 				}
 				this.sessions.set(sessionId, capsule);
 				capsule.lifecycleFenced = false;
@@ -10833,6 +10883,7 @@ export class SessionManager {
 	 * Throws if the session cannot be restored.
 	 */
 	async ensureSessionAlive(sessionId: string): Promise<void> {
+		this._assertModelSelectionReady(sessionId);
 		const existing = this.sessions.get(sessionId);
 		if (existing && existing.status !== "terminated") return; // already alive
 

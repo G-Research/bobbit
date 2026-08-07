@@ -1448,6 +1448,7 @@ export class RemoteAgent {
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any, thinkingLevel?: string): void {
+		if (this._state.modelSelectionPending) return;
 		const effectiveThinking = thinkingLevel ?? this._state.thinkingLevel;
 		const recoveryCondition = modelSelectionRequiredCondition(this._state.condition);
 		if (recoveryCondition) {
@@ -1471,6 +1472,7 @@ export class RemoteAgent {
 	}
 
 	setThinkingLevel(level: any): void {
+		if (modelSelectionRequiredCondition(this._state.condition)) return;
 		this._state.thinkingLevel = level;
 		this.send({ type: "set_thinking_level", level });
 		state.chatPanel?.agentInterface?.requestUpdate();
