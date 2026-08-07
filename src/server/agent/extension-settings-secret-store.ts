@@ -12,6 +12,28 @@ export interface ExtensionSettingsSecretTargetRef {
 
 export type ExtensionSettingsSecretChanges = Readonly<Record<string, string | undefined>>;
 
+/** A secret update owned by the one project-scoped secret-store publication. */
+export interface ExtensionSettingsSecretMutation {
+  ref: ExtensionSettingsSecretTargetRef;
+  changes: ExtensionSettingsSecretChanges;
+}
+
+/** An opaque, platform-owned identity shared with the public settings record. */
+export type ExtensionSettingsCommitId = string;
+
+/**
+ * The secret side and public project.yaml were not published as one commit.
+ * A mismatch is therefore unsafe: callers must not combine their values.
+ */
+export class ExtensionSettingsSecretCommitMismatchError extends Error {
+  readonly code = "EXTENSION_SETTINGS_SECRET_COMMIT_MISMATCH";
+
+  constructor() {
+    super("Extension settings secret and public state do not match. Repair the project state and retry.");
+    this.name = "ExtensionSettingsSecretCommitMismatchError";
+  }
+}
+
 /** Deliberately redacted: callers must not learn the file path or parser error. */
 export class ExtensionSettingsSecretReadError extends Error {
   readonly code = "EXTENSION_SETTINGS_SECRET_READ_FAILED";
@@ -45,6 +67,11 @@ export class ExtensionSettingsSecretValidationError extends Error {
 const MAX_SECRET_BYTES = 16 * 1024;
 const MAX_FIELD_NAME_LENGTH = 64;
 const FIELD_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const COMMIT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+export function isExtensionSettingsCommitId(value: unknown): value is ExtensionSettingsCommitId {
+  return typeof value === "string" && COMMIT_ID_RE.test(value);
+}
 
 function isWellFormedText(value: string): boolean {
   for (let index = 0; index < value.length; index++) {
@@ -92,6 +119,9 @@ export function validateExtensionSettingsSecretChanges(ref: ExtensionSettingsSec
  */
 export class ExtensionSettingsSecretStore {
   private data: Record<string, string> = {};
+  /** Legacy flat files deliberately have no commit identity. */
+  private commitId: ExtensionSettingsCommitId | undefined;
+  private versioned = false;
   private unreadable = false;
   private readonly filePath: string;
   private readonly fs: FsLike;
@@ -103,6 +133,10 @@ export class ExtensionSettingsSecretStore {
   }
 
   private load(): void {
+    this.data = {};
+    this.commitId = undefined;
+    this.versioned = false;
+    this.unreadable = false;
     try {
       this.fs.lstatSync(this.filePath);
     } catch (error) {
@@ -114,23 +148,45 @@ export class ExtensionSettingsSecretStore {
     try {
       const raw = JSON.parse(this.fs.readFileSync(this.filePath, "utf-8"));
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid shape");
+      const record = raw as Record<string, unknown>;
+      // A marker makes this a versioned envelope even when its identity is
+      // corrupt. It must never be reinterpreted as a legacy complete record.
+      const valuesRaw = record.schema === 1 ? record.values : raw;
+      if (!valuesRaw || typeof valuesRaw !== "object" || Array.isArray(valuesRaw)) throw new Error("invalid shape");
       const next: Record<string, string> = {};
-      for (const [key, value] of Object.entries(raw)) {
+      for (const [key, value] of Object.entries(valuesRaw)) {
         if (typeof value !== "string" || !isWellFormedText(value) || Buffer.byteLength(value, "utf8") > MAX_SECRET_BYTES) {
           throw new Error("invalid value");
         }
         next[key] = value;
       }
+      if (record.schema === 1) {
+        this.versioned = true;
+        if (isExtensionSettingsCommitId(record.commitId)) this.commitId = record.commitId;
+      }
       this.data = next;
     } catch {
       // A failed read must not be mistaken for a project with no secrets.
       this.data = {};
+      this.commitId = undefined;
+      this.versioned = false;
       this.unreadable = true;
     }
   }
 
   private assertReadable(): void {
     if (this.unreadable) throw new ExtensionSettingsSecretReadError();
+  }
+
+  /**
+   * Pair public and owner-only records before runtime reads. Legacy data remains
+   * readable only while both sides are legacy; a partial upgrade is unsafe.
+   */
+  assertCommitId(publicCommitId: ExtensionSettingsCommitId | undefined): void {
+    this.assertReadable();
+    if (publicCommitId === undefined && !this.versioned) return;
+    if (publicCommitId !== undefined && this.versioned && this.commitId === publicCommitId) return;
+    throw new ExtensionSettingsSecretCommitMismatchError();
   }
 
   has(ref: ExtensionSettingsSecretTargetRef, field: string): boolean {
@@ -147,33 +203,62 @@ export class ExtensionSettingsSecretStore {
   }
 
   /**
-   * Atomically replace or clear several fields on one server-derived target.
-   * Inputs are validated before the candidate is persisted or made observable.
+   * Atomically replace or clear fields on one server-derived target. The public
+   * settings owner supplies the shared identity; this store never mints one.
    */
-  update(ref: ExtensionSettingsSecretTargetRef, changes: ExtensionSettingsSecretChanges): void {
-    this.assertReadable();
-    validateExtensionSettingsSecretChanges(ref, changes);
-    const candidate = { ...this.data };
-    for (const [field, value] of Object.entries(changes)) {
-      const key = extensionSettingsSecretKey(ref, field);
-      if (value === undefined) delete candidate[key];
-      else candidate[key] = value;
-    }
-    this.save(candidate);
-    this.data = candidate;
+  update(ref: ExtensionSettingsSecretTargetRef, changes: ExtensionSettingsSecretChanges, commitId: ExtensionSettingsCommitId): void {
+    this.updateMany([{ ref, changes }], commitId);
   }
 
-  private save(candidate: Record<string, string>): void {
+  /**
+   * Atomically publish every supplied target's secret changes in one owner-only
+   * envelope. Calling this with no field changes still advances the envelope,
+   * binding public-only mutations to the same durable commit identity.
+   */
+  updateMany(mutations: readonly ExtensionSettingsSecretMutation[], commitId: ExtensionSettingsCommitId): void {
+    this.assertReadable();
+    if (!Array.isArray(mutations) || !isExtensionSettingsCommitId(commitId)) throw new ExtensionSettingsSecretValidationError();
+
+    const seen = new Set<string>();
+    for (const mutation of mutations) {
+      if (!mutation || typeof mutation !== "object") throw new ExtensionSettingsSecretValidationError();
+      validateExtensionSettingsSecretChanges(mutation.ref, mutation.changes);
+      for (const field of Object.keys(mutation.changes)) {
+        const key = extensionSettingsSecretKey(mutation.ref, field);
+        if (seen.has(key)) throw new ExtensionSettingsSecretValidationError();
+        seen.add(key);
+      }
+    }
+
+    const candidate = { ...this.data };
+    for (const mutation of mutations) {
+      const changes = mutation.changes as ExtensionSettingsSecretChanges;
+      for (const [field, value] of Object.entries(changes) as Array<[string, string | undefined]>) {
+        const key = extensionSettingsSecretKey(mutation.ref, field);
+        if (value === undefined) delete candidate[key];
+        else candidate[key] = value;
+      }
+    }
+    this.save(candidate, commitId);
+    this.data = candidate;
+    this.commitId = commitId;
+    this.versioned = true;
+  }
+
+  private save(candidate: Record<string, string>, commitId: ExtensionSettingsCommitId): void {
     const dir = path.dirname(this.filePath);
     const temp = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     try {
       if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
       // The mode is assigned to the temp inode before its secret bytes are
       // written; rename atomically publishes that owner-only inode.
-      this.fs.writeFileSync(temp, JSON.stringify(candidate) + "\n", { encoding: "utf-8", mode: 0o600 });
+      this.fs.writeFileSync(temp, JSON.stringify({ schema: 1, commitId, values: candidate }) + "\n", { encoding: "utf-8", mode: 0o600 });
       this.fs.renameSync(temp, this.filePath);
     } catch {
       try { this.fs.unlinkSync(temp); } catch { /* clean only this invocation's temp */ }
+      // POSIX rename may have committed despite an error. Re-read durable state
+      // so a compensating public rollback cannot keep a stale in-memory pair.
+      this.load();
       throw new ExtensionSettingsSecretPersistenceError();
     }
   }
