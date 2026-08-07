@@ -5755,7 +5755,27 @@ async function handleApiRoute(
 			if (!pack || !contribution) continue;
 			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
 		}
-		return { schema: 2 as const, revision: publicState.revision, targets };
+		// The Market's existing Pack target is an administrative owner rather than
+		// a durable settings record. Publish it from the same active resolver used
+		// by grant application, so a revoked, inactive, or shadowed pack grant is
+		// never displayed as actionable authority.
+		const packTargets = extensionPackGrantStatus(projectId).map(pack => {
+			const ownedTargets = targets.filter(target => target.ref.packId === pack.packId);
+			const allOwnedTargetsDisabled = ownedTargets.length > 0 && ownedTargets.every(target => target.enabled.effective === false);
+			return {
+				ref: { packId: pack.packId, kind: "pack" as const, id: pack.packId },
+				packName: pack.packName,
+				listName: pack.packName,
+				enabled: { effective: !allOwnedTargetsDisabled },
+				configuration: { state: allOwnedTargetsDisabled ? "disabled" as const : "ready" as const, missing: [] },
+				fields: [],
+				packGrant: {
+					requestedCapabilities: pack.requestedCapabilities,
+					grants: pack.grants,
+				},
+			};
+		});
+		return { schema: 2 as const, revision: publicState.revision, targets: [...targets, ...packTargets] };
 	};
 	const extensionSettingsMutationFailure = (error: unknown): { status: number; body: Record<string, unknown> } => {
 		const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
