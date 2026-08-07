@@ -11,7 +11,17 @@ import { redactSensitive } from "../auth/redact.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
-import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from "./protocol.js";
+import {
+	MODEL_SELECTION_RECOVERY_FAILED,
+	MODEL_SELECTION_REQUIRED,
+	isModelSelectionRequiredCondition,
+	modelSelectionRequiredMessage,
+	type ChannelInfo,
+	type ClientMessage,
+	type HostChannelFrame,
+	type ModelSelectionRequiredCondition,
+	type ServerMessage,
+} from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
@@ -127,6 +137,22 @@ export function buildResolvedModelStateModel(provider: string, id: string, base?
 	return model;
 }
 
+type ModelSelectionRecoveryManager = SessionManager & {
+	recoverModelSelectionRequired(
+		sessionId: string,
+		provider: string,
+		modelId: string,
+		thinkingLevel?: string,
+	): Promise<unknown>;
+};
+
+function sessionModelSelectionRequired(
+	session: unknown,
+): ModelSelectionRequiredCondition | undefined {
+	const condition = (session as { condition?: unknown } | null | undefined)?.condition;
+	return isModelSelectionRequiredCondition(condition) ? condition : undefined;
+}
+
 function normalizeStateModelSnapshot(
 	data: Record<string, unknown>,
 	sessionManager: SessionManager,
@@ -149,6 +175,8 @@ function normalizeStateModelSnapshot(
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
 	const data: Record<string, unknown> = {};
+	const condition = sessionModelSelectionRequired(sessionManager.getSession(sessionId));
+	if (condition) data.condition = condition;
 	if (persisted?.modelProvider && persisted?.modelId) {
 		data.model = buildResolvedModelStateModel(persisted.modelProvider, persisted.modelId);
 		if (persisted.effectiveThinkingLevel !== undefined) {
@@ -1057,6 +1085,18 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "prompt": {
+					// Fence unavailable-model capsules before mention/skill/attachment
+					// preprocessing or SessionManager's authoritative acceptance boundary.
+					const modelSelectionCondition = sessionModelSelectionRequired(session);
+					if (modelSelectionCondition) {
+						send(ws, {
+							type: "error",
+							message: modelSelectionRequiredMessage(modelSelectionCondition),
+							code: MODEL_SELECTION_REQUIRED,
+						});
+						return;
+					}
+
 					// The prompt text is rendered in the UI transcript — debug-only here.
 					if (process.env.BOBBIT_DEBUG) console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
 
@@ -1280,9 +1320,30 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Retry failed: ${err}`, code: "RETRY_ERROR" });
 					}
 					break;
-				case "set_model":
+				case "set_model": {
+					const combined = msg as typeof msg & { thinkingLevel?: string };
+					const modelSelectionCondition = sessionModelSelectionRequired(session);
+					if (modelSelectionCondition) {
+						try {
+							await (sessionManager as ModelSelectionRecoveryManager).recoverModelSelectionRequired(
+								sessionId,
+								msg.provider,
+								msg.modelId,
+								combined.thinkingLevel,
+							);
+						} catch (err: any) {
+							const safeError = redactSensitive(String(err?.message || err));
+							console.error(`[ws-handler] replacement model activation failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, safeError);
+							send(ws, {
+								type: "error",
+								message: `Failed to activate the replacement model. Choose another available model or retry: ${safeError}`,
+								code: MODEL_SELECTION_RECOVERY_FAILED,
+							});
+						}
+						break;
+					}
+
 					try {
-						const combined = msg as typeof msg & { thinkingLevel?: string };
 						await applyRuntimeSessionModelSelection(
 							sessionManager,
 							session,
@@ -1300,6 +1361,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Failed to switch model: ${safeError}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
+				}
 				case "set_image_model": {
 					const provider = typeof msg.provider === "string" ? msg.provider : "";
 					const modelId = typeof msg.modelId === "string" ? msg.modelId : "";
