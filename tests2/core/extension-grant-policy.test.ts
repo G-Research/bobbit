@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { resolveExtensionGrant, type ResolvedHook } from "../../src/server/agent/extension-grant-policy.js";
-import type { ExtensionGrant } from "../../src/server/agent/project-config-store.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	createExtensionCapabilityGrantResolver,
+	resolveExtensionGrant,
+	type ResolvedHook,
+} from "../../src/server/agent/extension-grant-policy.js";
+import {
+	EXTENSION_CAPABILITIES,
+	type ExtensionCapability,
+	type ExtensionGrant,
+} from "../../src/server/agent/project-config-store.js";
 
 const grantedAt = "2025-02-03T04:05:06.000Z";
 const decideHook: ResolvedHook = {
@@ -15,6 +23,14 @@ const observeHook: ResolvedHook = {
 	mode: "observe",
 	capabilities: ["store"],
 };
+const packOnlyCapabilities = [
+	"service.manage",
+	"memory.read",
+	"memory.write",
+	"memory.reflect",
+	"memory.invalidate",
+	"memory.read.all",
+] as const;
 
 function grant(overrides: Partial<ExtensionGrant> = {}): ExtensionGrant {
 	return {
@@ -25,6 +41,16 @@ function grant(overrides: Partial<ExtensionGrant> = {}): ExtensionGrant {
 		grantedBy: "admin",
 		...overrides,
 	};
+}
+
+function packGrant(capability: typeof packOnlyCapabilities[number], packId = "pack-a"): ExtensionGrant {
+	return {
+		packId,
+		principal: "pack",
+		capability,
+		grantedAt,
+		grantedBy: "admin",
+	} as unknown as ExtensionGrant;
 }
 
 describe("extension capability grant policy", () => {
@@ -80,5 +106,92 @@ describe("extension capability grant policy", () => {
 			decision.grant.grantedBy = "changed-by-caller";
 		}
 		expect(stored.grantedBy).toBe("admin");
+	});
+});
+
+describe("live project capability grant resolver", () => {
+	// The config-store task owns production capability admission. Keep this policy
+	// test runnable before that additive commit is merged, while exercising the
+	// public resolver against each of its future closed values.
+	const capabilitySet = EXTENSION_CAPABILITIES as Set<ExtensionCapability>;
+	const injectedCapabilities: string[] = [];
+	beforeEach(() => {
+		for (const capability of packOnlyCapabilities) {
+			if (!capabilitySet.has(capability as ExtensionCapability)) {
+				capabilitySet.add(capability as ExtensionCapability);
+				injectedCapabilities.push(capability);
+			}
+		}
+	});
+	afterEach(() => {
+		for (const capability of injectedCapabilities.splice(0)) capabilitySet.delete(capability as ExtensionCapability);
+	});
+
+	function liveResolver(initialGrants: ExtensionGrant[] = []) {
+		let grants = initialGrants;
+		const store = { getExtensionGrants: () => grants };
+		const resolver = createExtensionCapabilityGrantResolver({
+			contextForProject: projectId => projectId === "project-a" ? { projectConfigStore: store } : undefined,
+			contributions: {
+				getPack: (projectId, packId) => projectId === "project-a" && packId === "pack-a"
+					? {
+						packId: "pack-a",
+						hooks: [{ id: "decider", mode: "decide", capabilities: ["store"], events: ["afterTurn"] }],
+					} as never
+					: undefined,
+			},
+		});
+		return { resolver, replaceGrants: (next: ExtensionGrant[]) => { grants = next; } };
+	}
+
+	it("allows only active exact pack rows for every platform-owned pack capability", () => {
+		for (const capability of packOnlyCapabilities) {
+			const stored = packGrant(capability);
+			const { resolver } = liveResolver([stored]);
+			const decision = resolver("project-a", { kind: "pack", packId: "pack-a" }, capability as ExtensionCapability);
+			expect(decision).toMatchObject({ allowed: true, grant: { packId: "pack-a", principal: "pack", capability } });
+			if (decision.allowed) {
+				expect(decision.grant).not.toBe(stored);
+				decision.grant.grantedBy = "caller-mutated";
+			}
+			expect(stored.grantedBy).toBe("admin");
+			expect(resolver("project-a", { kind: "pack", packId: "pack-b" }, capability as ExtensionCapability))
+				.toEqual({ allowed: false, reason: "inactive_principal" });
+		}
+	});
+
+	it("shares one live resolver across lifecycle, panel-route, and tool callers so revocation wins stale work", () => {
+		const { resolver, replaceGrants } = liveResolver([
+			packGrant("service.manage"), packGrant("memory.read"), packGrant("memory.write"),
+		]);
+		const lifecycle = () => resolver("project-a", { kind: "pack", packId: "pack-a" }, "service.manage" as ExtensionCapability);
+		const panelRoute = () => resolver("project-a", { kind: "pack", packId: "pack-a" }, "memory.read" as ExtensionCapability);
+		const agentTool = () => resolver("project-a", { kind: "pack", packId: "pack-a" }, "memory.write" as ExtensionCapability);
+
+		expect(lifecycle().allowed).toBe(true);
+		expect(panelRoute().allowed).toBe(true);
+		expect(agentTool().allowed).toBe(true);
+		replaceGrants([]);
+		expect(lifecycle()).toEqual({ allowed: false, reason: "grant_required" });
+		expect(panelRoute()).toEqual({ allowed: false, reason: "grant_required" });
+		expect(agentTool()).toEqual({ allowed: false, reason: "grant_required" });
+	});
+
+	it("fails closed before stored grants for unavailable, inactive, malformed, unknown, and unsupported requests", () => {
+		const { resolver } = liveResolver([packGrant("memory.read")]);
+		expect(resolver("missing-project", { kind: "pack", packId: "pack-a" }, "memory.read" as ExtensionCapability))
+			.toEqual({ allowed: false, reason: "project_unavailable" });
+		expect(resolver("project-a", { kind: "pack", packId: "not-installed" }, "memory.read" as ExtensionCapability))
+			.toEqual({ allowed: false, reason: "inactive_principal" });
+		expect(resolver("project-a", { kind: "pack", packId: "../pack" } as never, "memory.read" as ExtensionCapability))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+		expect(resolver("project-a", { kind: "service" as never, packId: "pack-a" } as never, "memory.read" as ExtensionCapability))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+		expect(resolver("project-a", { kind: "pack", packId: "pack-a" }, "unknown" as never))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+		expect(resolver("project-a", { kind: "pack", packId: "pack-a" }, "decide"))
+			.toEqual({ allowed: false, reason: "unsupported_capability" });
+		expect(resolver("project-a", { kind: "hook", packId: "pack-a", hookId: "decider" }, "memory.read" as ExtensionCapability))
+			.toEqual({ allowed: false, reason: "unsupported_capability" });
 	});
 });
