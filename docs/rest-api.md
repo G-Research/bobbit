@@ -43,6 +43,44 @@ obtain the weak operator cookie. Cookies have
 localhost HTTP mode. Individual cookies are not independently revocable;
 rotating the signing key invalidates all of them.
 
+### Cross-origin API preflight
+
+Every `/api/` response advertises the API's complete request-method contract:
+`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`. An `OPTIONS` preflight
+returns `204` and additionally caches that approval for 600 seconds via
+`Access-Control-Max-Age`. This lets a UI on a different origin perform every
+supported API mutation, including `PATCH`, rather than having the browser
+reject a valid request before it reaches the gateway.
+
+The preflight allows these non-simple request headers:
+
+- `Authorization`
+- `Content-Type`
+- `If-Match`
+- `X-Bobbit-Session-Id`
+- `X-Bobbit-Spawning-Session`
+- `X-Bobbit-Session-Secret`
+
+These headers are permitted so authenticated, concurrency-aware, and
+session-scoped API calls can cross origins; permission is not authentication.
+In particular, a remote UI normally authenticates with its explicit Bearer
+token. CORS is intentionally non-credentialed: the gateway does not send
+`Access-Control-Allow-Credentials`, so browsers must not rely on cross-origin
+cookie authentication. Same-origin cookie flows remain governed by their
+normal authentication rules.
+
+This does not broaden the origin policy. A gateway serving its UI reflects the
+request origin (and varies by `Origin`); a gateway not serving the UI continues
+to advertise `*`. The method and header contract is separate from that origin
+decision.
+
+For example, the side-panel workspace persists a tab edit through
+`PATCH /api/sessions/:id/side-panel-workspace/tabs/:tabId`. When the UI and
+gateway use different origins, the browser preflights that `PATCH` before the
+request. Advertising `PATCH`, `Authorization`, and any applicable session or
+concurrency header lets the persistence request reach its existing route, so a
+side-panel edit is retained instead of appearing to be forgotten after reload.
+
 ### Driving the gateway from an agent
 
 Agents should prefer the **`bobbit` tool group** over hand-rolled `curl` for
@@ -212,7 +250,7 @@ explicit changes remain subject to the normal policy cascade.
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
-| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
+| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. A processless target awaiting model recovery returns `409 { code: "MODEL_SELECTION_REQUIRED" }` before prompt or steer acceptance, so no queue or transcript work is created; select a replacement through the session picker/`set_model` path. The existing `409 { code: "GOAL_PAUSED" }` response still applies when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |

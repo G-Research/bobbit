@@ -393,6 +393,10 @@ test.describe("Sidebar font scale (full-stack UI)", () => {
 		await openApp(page);
 		await resetSidebarVisualState(page, goalTitle);
 
+		const goalPlusStroke = await page.locator('button[title^="New goal in"] [data-testid="sidebar-add-goal-plus"] path').first().getAttribute("stroke");
+		const sessionPlusStroke = await page.locator('button[title^="New session in"] [data-testid="sidebar-add-session-plus"] path').first().getAttribute("stroke");
+		expect(sessionPlusStroke, "New Session plus should match the New Goal plus color").toBe(goalPlusStroke);
+
 		await setSidebarFontSizeDirect(page, 14);
 		const expandedSmall = await measureSidebarVisualAffordances(page);
 		await setSidebarFontSizeDirect(page, 24);

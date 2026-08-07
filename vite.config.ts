@@ -266,6 +266,25 @@ function blockDangerousGlobs(): Plugin {
 }
 
 /**
+ * Tailwind 4.3.3 assumes Vite always supplies `server` to hotUpdate, while
+ * bundled dev intentionally supplies only type/file/modules. Mirror Tailwind's
+ * merged (but unreleased) fix until the next package release lands.
+ * https://github.com/tailwindlabs/tailwindcss/pull/20379
+ */
+function tailwindcssWithBundledDevGuard(): Plugin[] {
+	const plugins = tailwindcss();
+	const generator = plugins.find((plugin) => plugin.name === "@tailwindcss/vite:generate:serve");
+	const hotUpdate = generator?.hotUpdate;
+	if (generator && typeof hotUpdate === "function") {
+		generator.hotUpdate = function guardedTailwindHotUpdate(options) {
+			if (!options.server) return;
+			return hotUpdate.call(this, options);
+		};
+	}
+	return plugins;
+}
+
+/**
  * Defense-in-depth: Reject requests from non-localhost IPs when Vite is
  * bound to localhost, and block Docker bridge subnet IPs in all modes.
  * Prevents sandbox containers from reaching the Vite dev server even if
@@ -566,7 +585,13 @@ function dynamicGatewayProxy(): Plugin {
 }
 
 export default defineConfig(({ command, mode }) => ({
-	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
+	plugins: [
+		tailwindcssWithBundledDevGuard(),
+		blockDangerousGlobs(),
+		localhostGuard(),
+		bobbitSwVersion(),
+		dynamicGatewayProxy(),
+	],
 	// Expose a dev-mode boolean via globalThis so code that needs to gate
 	// dev-only behaviour can read `(globalThis as any).__BOBBIT_DEV__` without
 	// touching `import.meta.env` — important for test fixtures that bundle
@@ -574,8 +599,12 @@ export default defineConfig(({ command, mode }) => ({
 	define: {
 		"globalThis.__BOBBIT_DEV__": JSON.stringify(mode !== "production"),
 	},
-	// Runtime URL expressions are a production-build concern only. The Vite
-	// development UI, HMR client, and source modules remain rooted at `/`.
+	// Bundle the browser graph during development. Bobbit's large eager graph
+	// takes tens of seconds to traverse as one request per source module; Vite's
+	// bundled mode keeps HMR while serving a small set of in-memory chunks.
+	// Production retains its mount-aware runtime URL rewriting instead. The
+	// source-runtime E2E owns an explicit opt-out because it verifies the actual
+	// source module graph rather than the normal bundled development runtime.
 	experimental: command === "build"
 		? {
 			renderBuiltUrl(filename, { hostType }) {
@@ -591,7 +620,9 @@ export default defineConfig(({ command, mode }) => ({
 				return { relative: hostType === "css" };
 			},
 		}
-		: undefined,
+		: process.env.BOBBIT_VITE_SOURCE_GRAPH === "1"
+			? undefined
+			: { bundledDev: true },
 	build: {
 		outDir: "dist/ui",
 		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)

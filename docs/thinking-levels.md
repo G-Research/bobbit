@@ -357,19 +357,29 @@ when selecting a Pi `0.82.1` Opus 5 row because that exact row advertises both
 request prevents an intervening command from observing a model-only picker
 state.
 
-The server validates the model, re-clamps the requested level, applies and
-reads back the complete tuple, and broadcasts a `state` frame containing both
-`model` and `thinkingLevel`. That frame is authoritative and replaces both
-optimistic fields. On `SET_MODEL_FAILED`, the server first broadcasts the
-observed or previous durable tuple, attempts a verified rollback, and uses the
-existing restart path if a partial mutation cannot be verified. The client
-also requests `get_state`, so a rejected model or thinking write cannot leave
-either optimistic field displayed.
+For an ordinary live switch, the server validates the model, re-clamps the
+requested level, applies and reads back the complete tuple, and broadcasts a
+`state` frame containing both `model` and `thinkingLevel`. That frame is
+authoritative and replaces both optimistic fields. On `SET_MODEL_FAILED`, the
+server first broadcasts the observed or previous durable tuple, attempts a
+verified rollback, and uses the existing restart path if a partial mutation
+cannot be verified. The client also requests `get_state`, so a rejected model
+or thinking write cannot leave either optimistic field displayed.
+
+A session with `MODEL_SELECTION_REQUIRED` uses the same picker for a different
+purpose. The footer hides standalone thinking selection and keeps the
+unavailable tuple visible while the gateway starts, rehydrates, clamps, and
+verifies the selected replacement. Only successful activation publishes the
+new model/thinking tuple with `condition: null`; failure returns
+`MODEL_SELECTION_RECOVERY_FAILED` and leaves the old tuple and condition in
+place. See [Model and thinking selection](websocket-protocol.md#model-and-thinking-selection)
+and [Restored session requires a model](debugging.md#restored-session-requires-a-model).
 
 ### Standalone thinking changes
 
-Changing only the footer or message-editor thinking control remains a separate
-operation. It calls `session.setThinkingLevel(level)` and sends
+For an ordinary live session, changing only the footer or message-editor
+thinking control remains a separate operation. It calls
+`session.setThinkingLevel(level)` and sends
 `{ "type": "set_thinking_level", "level": "..." }`; it does not resend the
 model picker request. The server clamps that level against the currently bound
 exact model, verifies the resulting complete model/thinking tuple, persists it,

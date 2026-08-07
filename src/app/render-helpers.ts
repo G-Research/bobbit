@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Goal as GoalIcon, LayoutDashboard, Link, Menu, RotateCcw, Trash2 } from "lucide";
+import { Archive, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
 import type { GoalContext, SessionChildrenContext, SessionContext, SidebarTreeNode, TeamLeadContext } from "./sidebar-tree-builder.js";
@@ -412,7 +412,7 @@ export function renderSandboxIndicator(status: string) {
 }
 
 /** Render terse relative time with optional unseen indicator dot. */
-function renderSessionTime(session: GatewaySession, selected = false) {
+export function renderSessionTime(session: GatewaySession, selected = false) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 	if (isActive) return renderActiveShimmer();
 	const time = terseRelativeTime(session.lastActivity);
@@ -421,6 +421,7 @@ function renderSessionTime(session: GatewaySession, selected = false) {
 	return html`<span
 		class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${selected ? (unseen ? "text-foreground font-medium" : "text-foreground/50") : (unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50")}"
 		style="vertical-align:middle;font-size: 0.9167em;"
+		data-testid="sidebar-session-last-activity"
 		title="${formatSessionAge(session.lastActivity)}"
 	>${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
 }
@@ -640,13 +641,39 @@ function notifySidebarSessionActionsChanged(): void {
 	renderApp();
 }
 
-function buildSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
+function buildSessionSidebarActions(session: GatewaySession, displayTitle: string, staffId = session.staffId): SidebarActionItem[] {
 	return buildSessionActions({
 		session,
 		displayTitle,
-		staffId: session.staffId,
+		staffId,
 		onRefreshStateChanged: notifySidebarSessionActionsChanged,
 	}).map(toSidebarActionItem);
+}
+
+function buildStaffEditSidebarAction(staffId: string): SidebarActionItem {
+	return {
+		id: "modify",
+		label: "Edit staff",
+		title: "Open this staff agent's settings",
+		icon: icon(Pencil, "xs"),
+		quick: true,
+		run: (event: Event) => {
+			event.stopPropagation();
+			setHashRoute("staff-edit", staffId);
+		},
+	};
+}
+
+/** Render the canonical session quick actions and hamburger for a staff row. */
+export function renderStaffSidebarActions(staffId: string, displayTitle: string, session?: GatewaySession): TemplateResult {
+	const mobile = !isDesktop();
+	const btnPad = mobile ? "p-1" : "p-0.5";
+	const entityId = session?.id ?? `staff:${staffId}`;
+	const buildActions = () => session
+		? buildSessionSidebarActions(session, displayTitle, staffId)
+		: [buildStaffEditSidebarAction(staffId)];
+	const actions = buildActions();
+	return html`${renderSidebarQuickActions(actions, { kind: "session", entityId, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId, actions, mobile, btnPad, refresh: buildActions, onBeforeOpen: session ? resetSessionForkNewWorktree : undefined })}`;
 }
 
 function buildArchivedSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
