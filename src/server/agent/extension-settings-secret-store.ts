@@ -202,9 +202,12 @@ export class ExtensionSettingsSecretStore {
     return this.data[extensionSettingsSecretKey(ref, field)];
   }
 
-  /** Atomically replace or clear fields on one server-derived target. */
-  update(ref: ExtensionSettingsSecretTargetRef, changes: ExtensionSettingsSecretChanges): void {
-    this.updateMany([{ ref, changes }], randomUUID());
+  /**
+   * Atomically replace or clear fields on one server-derived target. The public
+   * settings owner supplies the shared identity; this store never mints one.
+   */
+  update(ref: ExtensionSettingsSecretTargetRef, changes: ExtensionSettingsSecretChanges, commitId: ExtensionSettingsCommitId): void {
+    this.updateMany([{ ref, changes }], commitId);
   }
 
   /**
@@ -212,7 +215,7 @@ export class ExtensionSettingsSecretStore {
    * envelope. Calling this with no field changes still advances the envelope,
    * binding public-only mutations to the same durable commit identity.
    */
-  updateMany(mutations: readonly ExtensionSettingsSecretMutation[], commitId: ExtensionSettingsCommitId = randomUUID()): void {
+  updateMany(mutations: readonly ExtensionSettingsSecretMutation[], commitId: ExtensionSettingsCommitId): void {
     this.assertReadable();
     if (!Array.isArray(mutations) || !isExtensionSettingsCommitId(commitId)) throw new ExtensionSettingsSecretValidationError();
 
