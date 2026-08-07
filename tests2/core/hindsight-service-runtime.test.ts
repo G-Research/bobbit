@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import YAML from "yaml";
 import { parseServiceManifest } from "../../src/server/service-runtime/service-manifest.js";
+import { loadPackContributions } from "../../src/server/agent/pack-contributions.js";
+import { HindsightRuntimeBridge, type HindsightRuntimeSettingsResolver } from "../../src/server/agent/hindsight-runtime-bridge.js";
+import { ExtensionSettingsSecretStore } from "../../src/server/agent/extension-settings-secret-store.js";
+import { ExtensionSettingsStore } from "../../src/server/agent/extension-settings-store.js";
+import { ProjectConfigStore } from "../../src/server/agent/project-config-store.js";
+import { SecretsStore } from "../../src/server/agent/secrets-store.js";
+import { ServiceRuntimeStore, ServiceRuntimeSupervisor, type ServiceRunner } from "../../src/server/service-runtime/index.js";
 
 import provider, {
   __setClientFactory,
@@ -184,6 +192,125 @@ describe("Hindsight generic runtime linkage", () => {
       assert.equal(clientCalls, 0);
     } finally {
       __setClientFactory(null);
+    }
+  });
+
+  it("starts the shipping descriptor with the project SecretsStore in every managed mode and reconciles only desired runtimes", async () => {
+    const packRoot = path.join(root, "market-packs/hindsight");
+    const contributions = loadPackContributions(
+      packRoot,
+      YAML.parse(fs.readFileSync(path.join(packRoot, "pack.yaml"), "utf8")),
+    );
+    const runtime = contributions.runtimes.find((candidate) => candidate.id === "hindsight");
+    const memoryProvider = contributions.providers.find((candidate) => candidate.id === "memory");
+    assert.ok(runtime, "the shipping runtime descriptor must load through the production contribution loader");
+    assert.ok(memoryProvider, "the shipping provider must link to the runtime descriptor");
+    const shippingRuntime = runtime;
+
+    for (const mode of ["local", "docker", "compose"] as const) {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), `hindsight-runtime-${mode}-`));
+      try {
+        const projectId = `shipping-${mode}`;
+        const settingsStore = new ExtensionSettingsStore(
+          new ProjectConfigStore(path.join(directory, "config")),
+          new ExtensionSettingsSecretStore(path.join(directory, "settings-secrets")),
+        );
+        settingsStore.compareAndSwap(
+          { packId: "hindsight", kind: "provider", id: "memory" },
+          0,
+          {
+            values: {
+              runtimeMode: mode,
+              databaseMode: mode === "compose" ? "managed-volume" : "external",
+              localLlmProvider: "openai-compatible",
+              localLlmModelId: "qwen3-coder",
+              localLlmBaseUrl: "http://127.0.0.1:11434/v1",
+              localLlmContextTokens: 32768,
+              localLlmMaxOutputTokens: 4096,
+              localLlmResidency: "resident",
+              localLlmKeepAlive: 3600,
+            },
+            ...(mode === "compose" ? {} : { secrets: { externalDatabaseUrl: `postgresql://hindsight:external-${mode}@db.example/hindsight` } }),
+          },
+        );
+
+        // This is the same structural composition used by createGateway: the
+        // generic store owns its collision-safe key while ProjectContext owns
+        // durable secret bytes. No secret ever reaches a settings projection.
+        const secretsStore = new SecretsStore(path.join(directory, "state"));
+        const store = new ServiceRuntimeStore({
+          stateDir: path.join(directory, "state"),
+          serverIdentity: "shipping-server",
+          generatedSecrets: secretsStore,
+          generateSecret: () => `generated-${mode}-database-password`,
+        });
+        let starts = 0;
+        let inspections = 0;
+        const passwords: string[] = [];
+        const fakeRunner: ServiceRunner = {
+          mode,
+          async start(input) {
+            starts++;
+            const password = input.environment.HINDSIGHT_DB_PASSWORD;
+            assert.equal(typeof password, "string");
+            assert.ok(password.length > 0, "generated password reaches the selected runner");
+            passwords.push(password);
+            input.onOutput?.(`HINDSIGHT_DB_PASSWORD=${password}`);
+            return {
+              endpoint: `http://127.0.0.1:${49000 + starts}`,
+              runnerIdentity: { kind: mode, id: `${mode}-${starts}` },
+              services: [],
+            };
+          },
+          async inspect() {
+            inspections++;
+            return {
+              endpoint: "http://127.0.0.1:49001",
+              runnerIdentity: { kind: mode, id: `${mode}-survived` },
+              services: [],
+            };
+          },
+          async stop() {},
+          async remove() {},
+        };
+        const bridge: HindsightRuntimeBridge = new HindsightRuntimeBridge({
+          contributions: {
+            getPack: () => contributions,
+          },
+          contextForProject: () => ({ stateDir: path.join(directory, "state"), extensionSettingsStore: settingsStore }),
+          grants: () => ({ allowed: true }) as never,
+          supervisorForProject: (_id: string, settings: HindsightRuntimeSettingsResolver): ServiceRuntimeSupervisor => new ServiceRuntimeSupervisor({
+            registry: { getRuntime: () => shippingRuntime },
+            store,
+            runners: [fakeRunner],
+            authorizer: { authorize: () => true },
+            settings,
+            serverIdentity: "shipping-server",
+            probe: async () => true,
+          }),
+        });
+
+        const started = await bridge.control(projectId, "start");
+        const generatedPassword = `generated-${mode}-database-password`;
+        assert.equal(secretsStore.get("service-runtime:hindsight:hindsight:databasePassword"), generatedPassword);
+        assert.equal(passwords[0], generatedPassword);
+        assert.ok(!JSON.stringify(started).includes(generatedPassword), "control/status responses remain redacted");
+
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const logs = await store.readLog({ packId: "hindsight", runtimeId: "hindsight" });
+        assert.ok(logs?.includes("[REDACTED]"));
+        assert.ok(!logs?.includes(generatedPassword));
+
+        await bridge.reconcile(projectId);
+        assert.deepEqual(passwords, mode === "local" ? [generatedPassword, generatedPassword] : [generatedPassword]);
+        assert.equal(inspections, mode === "local" ? 0 : 1, "Docker and Compose preserve by inspection; local restarts");
+
+        await bridge.control(projectId, "stop");
+        await bridge.reconcile(projectId);
+        assert.equal(starts, mode === "local" ? 2 : 1, "desired:stopped stays inert during startup reconciliation");
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
     }
   });
 
