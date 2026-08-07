@@ -26,7 +26,18 @@ class FakeSdkQuery implements AsyncIterable<unknown> {
 	private reader?: (value: IteratorResult<unknown>) => void;
 	private queued: unknown[] = [];
 
-	constructor(readonly args: SdkQueryArgs) {}
+	constructor(readonly args: SdkQueryArgs) {
+		void this.recordPrompts();
+	}
+
+	private async recordPrompts(): Promise<void> {
+		for await (const message of this.args.prompt) {
+			const content = (message as any)?.message?.content;
+			deliveredPrompts.push(typeof content === "string" ? content : JSON.stringify(content));
+			// Let the production bridge return to ready before the next UI action.
+			this.emit({ type: "result", subtype: "success", result: "OK" });
+		}
+	}
 
 	async initializationResult(): Promise<{ session_id: string }> {
 		return { session_id: SDK_SESSION_ID };
@@ -57,15 +68,7 @@ class FakeSdkQuery implements AsyncIterable<unknown> {
 				const next = this.queued.shift();
 				if (next !== undefined) return Promise.resolve({ done: false, value: next });
 				return new Promise<IteratorResult<unknown>>((resolve) => {
-					this.reader = (result) => {
-						if (!result.done) {
-							const content = (result.value as any)?.message?.content;
-							deliveredPrompts.push(typeof content === "string" ? content : JSON.stringify(content));
-							// Let the production bridge return to ready before the next UI action.
-							this.emit({ type: "result", subtype: "success", result: "OK" });
-						}
-						resolve(result);
-					};
+					this.reader = resolve;
 				});
 			},
 		};
