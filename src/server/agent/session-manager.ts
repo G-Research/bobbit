@@ -81,7 +81,7 @@ import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, 
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
-import { CostTracker, type SessionCost } from "./cost-tracker.js";
+import { CostTracker, type AuthoritativeUsageRecord, type SessionUsageSnapshot } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -3214,12 +3214,12 @@ export class SessionManager {
 		throw new Error("No cost tracker available");
 	}
 
-	/** Return persisted cumulative cost for a session, without creating a zero-cost record. */
-	getSessionCost(sessionId: string): SessionCost | undefined {
+	/** Return the authoritative persisted usage projection without creating a zero record. */
+	getSessionCost(sessionId: string): SessionUsageSnapshot | undefined {
 		const live = this.sessions.get(sessionId);
 		if (live) {
 			try {
-				const cost = this.resolveCostTracker(live).getSessionCost(sessionId);
+				const cost = this.resolveCostTracker(live).getSessionUsage(sessionId);
 				if (cost) return cost;
 			} catch {
 				// Fall through to persisted/store scans below.
@@ -3229,7 +3229,7 @@ export class SessionManager {
 		const persisted = this.getPersistedSession(sessionId);
 		if (persisted?.projectId || !this.projectContextManager) {
 			try {
-				const cost = this.getCostTracker(persisted?.projectId).getSessionCost(sessionId);
+				const cost = this.getCostTracker(persisted?.projectId).getSessionUsage(sessionId);
 				if (cost) return cost;
 			} catch {
 				// Fall through to cross-project scan.
@@ -3238,7 +3238,7 @@ export class SessionManager {
 
 		if (this.projectContextManager) {
 			for (const ctx of this.projectContextManager.all()) {
-				const cost = ctx.costTracker.getSessionCost(sessionId);
+				const cost = ctx.costTracker.getSessionUsage(sessionId);
 				if (cost) return cost;
 			}
 		}
@@ -3266,7 +3266,8 @@ export class SessionManager {
 			sessionId,
 			goalId: live?.goalId ?? persisted?.goalId,
 			taskId: this.resolveTaskIdForSession(sessionId),
-			cost,
+			// The usage transport slice widens this legacy protocol field additively.
+			cost: cost as any,
 		};
 	}
 
@@ -7084,39 +7085,52 @@ export class SessionManager {
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
-		// Message updates repeat the same usage on every streaming chunk, so only
-		// completed assistant messages are accounted. Pi 0.81 additionally reports
-		// summarizer usage once on each completed compaction event.
+		// SDK accounting has exactly one authority: the root result annotation
+		// emitted by its translator. Never fall through to assistant message_end;
+		// those frames can be streamed, replayed, or belong to an SDK child.
+		if (session.runtime === "claude-agent-sdk") {
+			if (!this._sessionWriterIsCurrent(session)) return;
+			const record = event?.claudeSdkUsage as AuthoritativeUsageRecord | undefined;
+			if (!record || typeof record.sourceResultId !== "string" || !record.total || !record.modelUsage
+				|| (record.costBasis !== "subscription-notional" && record.costBasis !== "api-notional" && record.costBasis !== "unknown")) return;
+			const outcome = this.resolveCostTracker(session).recordAuthoritativeUsage(
+				session.id,
+				record,
+				session.goalId ?? session.teamGoalId,
+			);
+			// A detached/replaced bridge may finish while the synchronous ledger write
+			// is in flight. It is permitted to leave its durable duplicate marker, but
+			// it must not publish a stale snapshot.
+			if (!outcome.applied || !this._sessionWriterIsCurrent(session)) return;
+			broadcast(session.clients, {
+				type: "cost_update",
+				sessionId: session.id,
+				goalId: session.goalId,
+				taskId: this.resolveTaskIdForSession(session.id),
+				cost: outcome.snapshot as any,
+			});
+			return;
+		}
+
+		// Pi's established completed-assistant + completed-compaction accounting is
+		// intentionally byte-for-byte unchanged.
 		const assistantMessageEnd = event.type === "message_end" && event.message?.role === "assistant";
 		const compactionEnd = event.type === "compaction_end" || event.type === "auto_compaction_end";
 		if (!assistantMessageEnd && !compactionEnd) return;
-		const usage = assistantMessageEnd
-			? (event.message?.usage ?? event.usage)
-			: (event.result?.usage ?? event.usage);
+		const usage = assistantMessageEnd ? (event.message?.usage ?? event.usage) : (event.result?.usage ?? event.usage);
 		if (!usage) return;
-
-		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)
-		const costValue = typeof usage.cost === "number" ? usage.cost
-			: typeof usage.cost?.total === "number" ? usage.cost.total
-			: undefined;
+		const costValue = typeof usage.cost === "number" ? usage.cost : typeof usage.cost?.total === "number" ? usage.cost.total : undefined;
 		if (costValue === undefined) return;
-
-		const sessionCostTracker = this.resolveCostTracker(session);
-		const stampGoalId = session.goalId ?? session.teamGoalId;
-		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
+		const cumulativeCost = this.resolveCostTracker(session).recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
 			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
 			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
 			cost: costValue,
-		}, stampGoalId);
-
+		}, session.goalId ?? session.teamGoalId);
 		broadcast(session.clients, {
-			type: "cost_update",
-			sessionId: session.id,
-			goalId: session.goalId,
-			taskId: this.resolveTaskIdForSession(session.id),
-			cost: cumulativeCost,
+			type: "cost_update", sessionId: session.id, goalId: session.goalId,
+			taskId: this.resolveTaskIdForSession(session.id), cost: cumulativeCost,
 		});
 	}
 
@@ -7406,9 +7420,14 @@ export class SessionManager {
 				await this._restoreSessionCoalesced(ps);
 				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Restored SDK session: "${ps.title}" (${ps.id})`);
 			} catch (err) {
-				const msg = err instanceof Error ? (err.stack || err.message) : String(err);
+				// Provider/SDK failures may contain local paths or SDK diagnostics. The
+				// dormant capsule is user-visible and therefore receives only a stable
+				// recovery category; queues and steers remain durable on the session row.
+				const message = err instanceof ClaudeAgentSdkUnavailableError && err.message.includes("SDK_SESSION_UNAVAILABLE")
+					? err.message
+					: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK session could not be restored";
 				console.error(`[session-manager] Failed to restore SDK session "${ps.title}":`, err);
-				this.addDormantSession(ps, msg);
+				this.addDormantSession(ps, message);
 			}
 			return;
 		}
