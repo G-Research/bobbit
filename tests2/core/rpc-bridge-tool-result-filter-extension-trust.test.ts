@@ -151,4 +151,69 @@ describe("protected RpcBridge extension trust boundary", () => {
 		await bridge.start();
 		expect(spawns).toBe(1);
 	});
+
+	it("absorbs a non-protected next-tick spawn ENOENT before an uncaught error can escape", async () => {
+		const child = new EventEmitter() as any;
+		child.stdin = Object.assign(new EventEmitter(), { write: () => true });
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => true;
+		const enoent = Object.assign(new Error("missing executable"), { code: "ENOENT" });
+		let uncaught: Error | undefined;
+		const onUncaught = (error: Error) => { uncaught = error; };
+		process.on("uncaughtException", onUncaught);
+		try {
+			const bridge = new RpcBridge({ cliPath: "/fixture/pi.js" }, {
+				spawnDirect: (() => {
+					process.nextTick(() => child.emit("error", enoent));
+					return child;
+				}) as any,
+			});
+
+			await expect(bridge.start()).rejects.toThrow("Process failed to start");
+			expect(uncaught).toBeUndefined();
+		} finally {
+			process.removeListener("uncaughtException", onUncaught);
+		}
+	});
+
+	it("attaches error handlers before the protected bootstrap write and fails EPIPE closed", async () => {
+		const secret = "c".repeat(64);
+		const child = new EventEmitter() as any;
+		const stdin = new EventEmitter() as any;
+		const writes: string[] = [];
+		let firstWriteHandlers: { process: number; stdin: number } | undefined;
+		const epipe = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+		stdin.write = (line: string, callback: (error?: Error) => void) => {
+			writes.push(line);
+			firstWriteHandlers = {
+				process: child.listenerCount("error"),
+				stdin: stdin.listenerCount("error"),
+			};
+			process.nextTick(() => stdin.emit("error", epipe));
+			process.nextTick(() => callback(epipe));
+			return false;
+		};
+		child.stdin = stdin;
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => true;
+		let uncaught: Error | undefined;
+		const onUncaught = (error: Error) => { uncaught = error; };
+		process.on("uncaughtException", onUncaught);
+		try {
+			const bridge = new RpcBridge({
+				cliPath: "/fixture/pi.js",
+				env: { BOBBIT_TOOL_RESULT_FILTER_GATE: "/fixture/gate.ts" },
+				toolResultFilterBootstrap: { runtimeGeneration: 4, runtimeKey: secret },
+			}, { spawnDirect: (() => child) as any });
+
+			await expect(bridge.start()).rejects.toMatchObject({ code: "EPIPE" });
+			expect(firstWriteHandlers).toEqual({ process: 1, stdin: 1 });
+			expect(writes).toEqual([JSON.stringify({ runtimeGeneration: 4, runtimeKey: secret }) + "\n"]);
+			expect(uncaught).toBeUndefined();
+		} finally {
+			process.removeListener("uncaughtException", onUncaught);
+		}
+	});
 });
