@@ -62,10 +62,10 @@ describe("Hindsight EP-7 runtime settings", () => {
 		assert.deepEqual(local, { identity: "hindsight-unverified-managed:local", continuity: "unsupported" });
 		assert.deepEqual(docker, { identity: "hindsight-unverified-managed:docker", continuity: "unsupported" });
 
-		const secretUrl = "postgresql://alice:super-secret@DB.example:5432/hindsight?application_name=bobbit&sslmode=require&password=query-secret";
+		const secretUrl = "postgresql://alice:super-secret@DB.example:5432/hindsight?application_name=bobbit&sslmode=require&password=query-secret&sslpassword=ssl-secret&access_token=access-secret&credential=credential-secret&auth_secret=auth-secret";
 		const external = hindsightStorageIdentity("compose", "external", secretUrl);
 		assert.match(external, /^hindsight-external:[a-f0-9]{64}$/);
-		assert.equal(external, hindsightStorageIdentity("docker", "external", "postgresql://alice:rotated-secret@db.example/hindsight?sslmode=require&application_name=bobbit&password=rotated-query-secret"), "password-only rotation preserves continuity");
+		assert.equal(external, hindsightStorageIdentity("docker", "external", "postgresql://alice:rotated-secret@db.example/hindsight?sslmode=require&application_name=bobbit&password=rotated-query-secret&sslpassword=rotated-ssl-secret&access_token=rotated-access-secret&credential=rotated-credential-secret&auth_secret=rotated-auth-secret"), "password and credential-query rotation preserves continuity");
 		assert.notEqual(external, hindsightStorageIdentity("docker", "external", "postgresql://other-user:rotated-secret@db.example/hindsight?application_name=bobbit&sslmode=require"), "a database username selects a different backing");
 		assert.notEqual(external, hindsightStorageIdentity("docker", "external", "postgresql://alice:rotated-secret@db.example/other?application_name=bobbit&sslmode=require"), "a database name selects a different backing");
 		assert.notEqual(external, hindsightStorageIdentity("docker", "external", "postgresql://alice:rotated-secret@db.example/hindsight?application_name=bobbit&sslmode=disable"), "behaviorally meaningful options select a different backing");

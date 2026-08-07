@@ -387,6 +387,17 @@ export function hindsightStorageContinuity(
 	return { identity: hindsightStorageIdentity(runtimeMode, databaseMode), continuity: "unsupported" };
 }
 
+/**
+ * Query values from credential-bearing connection components must not affect
+ * continuity: rotating an auth value does not select another database. This is
+ * intentionally broader than `password`; provider-specific aliases commonly
+ * use `token`, `credential`, or `auth_*` names.
+ */
+function isCredentialQueryComponent(name: string): boolean {
+	const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+	return /(?:pass(?:word|phrase)?|pwd|token|credential|secret|auth(?:entication|orization)?|apikey|sslkey|sslcert|privatekey)/.test(normalized);
+}
+
 /** Opaque durable key only: no target path or credential can surface from it. */
 export function hindsightStorageIdentity(
 	runtimeMode: "local" | "docker" | "compose",
@@ -408,9 +419,9 @@ export function hindsightStorageIdentity(
 		if (protocol !== "postgresql:" || !url.hostname || !url.pathname || url.pathname === "/") throw new Error("invalid external database target");
 		const username = url.username;
 		const options = [...url.searchParams.entries()]
-			// User-info and `password` query parameters are credentials, not backing
-			// identity. Other libpq options can alter database behavior and remain.
-			.filter(([name]) => name.toLowerCase() !== "password")
+			// User-info and credential-bearing query parameters are not backing
+			// identity. Safe libpq/provider behavior options remain canonicalized.
+			.filter(([name]) => !isCredentialQueryComponent(name))
 			.sort(([leftName, leftValue], [rightName, rightValue]) => leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue))
 			.map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
 			.join("&");
