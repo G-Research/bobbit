@@ -677,13 +677,19 @@ export class ModelSelectionRequiredError extends Error {
 
 export class ModelSelectionRecoveryError extends Error {
 	readonly code = "MODEL_RECOVERY_FAILED";
+	readonly retryable: boolean;
 
-	constructor(provider: string, modelId: string, reason: unknown) {
-		super(
-			`Could not activate replacement model ${sanitizeModelErrorText(`${provider}/${modelId}`)}. ` +
-			`Choose another available model or retry. ${sanitizeModelErrorText(reason)}`,
+	constructor(provider: string, modelId: string, reason: unknown, options?: { retryable?: boolean }) {
+		const retryable = options?.retryable !== false;
+		super(retryable
+			? `Could not activate replacement model ${sanitizeModelErrorText(`${provider}/${modelId}`)}. ` +
+				`Choose another available model or retry. ${sanitizeModelErrorText(reason)}`
+			: `Could not safely activate replacement model ${sanitizeModelErrorText(`${provider}/${modelId}`)}. ` +
+				"The original conversation transcript could not be restored. Do not retry model selection; " +
+				"ask an administrator to inspect the server logs and restore the transcript before continuing.",
 		);
 		this.name = "ModelSelectionRecoveryError";
+		this.retryable = retryable;
 	}
 }
 
@@ -8315,13 +8321,20 @@ export class SessionManager {
 				}
 				// Ordinary restore sanitizes the durable JSONL before model/thinking
 				// verification. A provisional candidate must not retain that mutation when
-				// activation rolls back.
+				// activation rolls back. Treat any rejected or thrown restore as a distinct,
+				// non-retryable failure rather than claiming that the capsule was preserved.
+				let transcriptRollbackVerified = !candidateRestoreStarted;
 				if (candidateRestoreStarted) {
-					restoreAgentTranscriptSnapshot(
-						transcriptFileCtx,
-						persisted.agentSessionFile,
-						transcriptSnapshot,
-					);
+					try {
+						transcriptRollbackVerified = restoreAgentTranscriptSnapshot(
+							transcriptFileCtx,
+							persisted.agentSessionFile,
+							transcriptSnapshot,
+						) === true;
+					} catch (rollbackError) {
+						transcriptRollbackVerified = false;
+						console.error(`[session-manager] Failed to restore transcript after model recovery for ${sessionId}:`, rollbackError);
+					}
 				}
 				this.sessions.set(sessionId, capsule);
 				capsule.lifecycleFenced = false;
@@ -8335,6 +8348,15 @@ export class SessionManager {
 							effectiveThinkingLevel: persisted.effectiveThinkingLevel,
 						});
 					} catch { /* retain the recovery capsule even if storage itself is unavailable */ }
+				}
+				if (!transcriptRollbackVerified) {
+					console.error(`[session-manager] Transcript rollback could not be verified after model recovery for ${sessionId}; provisional candidate remains fenced`);
+					throw new ModelSelectionRecoveryError(
+						selectedProvider,
+						selectedModelId,
+						"conversation transcript rollback could not be verified",
+						{ retryable: false },
+					);
 				}
 				throw err instanceof ModelSelectionRecoveryError
 					? err
