@@ -72,6 +72,15 @@ function escapeRegExp(value: string): string {
 
 describe("executable CLI root and nested base-path smoke", () => {
 	it("prints only the package version and exits before all gateway side effects", async () => {
+		const packageMetadata = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+			version: string;
+			bin: { bobbit: string };
+		};
+		expect(packageMetadata.bin.bobbit).toBe("dist/server/cli.js");
+		const packageBinEntry = resolve(REPO_ROOT, packageMetadata.bin.bobbit);
+		expect(packageBinEntry).toBe(BUILT_CLI_ENTRY);
+		expect(existsSync(packageBinEntry), "the package bin target must be built before executable coverage").toBe(true);
+
 		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-version-"));
 		const projectRoot = join(root, "project");
 		const headquartersDir = join(root, "headquarters");
@@ -87,7 +96,6 @@ describe("executable CLI root and nested base-path smoke", () => {
 
 		const portGuard = createServer((socket) => socket.destroy());
 		const guardedPort = await listen(portGuard);
-		const packageVersion = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).version;
 		const childEnv: NodeJS.ProcessEnv = {
 			...process.env,
 			BOBBIT_DIR: headquartersDir,
@@ -95,6 +103,9 @@ describe("executable CLI root and nested base-path smoke", () => {
 			BOBBIT_AGENT_DIR: agentDir,
 			BOBBIT_PI_DIR: join(root, "legacy-headquarters"),
 			PI_CODING_AGENT_DIR: join(root, "pi-agent"),
+			BOBBIT_TEST_NO_EXTERNAL: "1",
+			BOBBIT_TEST_NO_REMOTE: "1",
+			PI_OFFLINE: "1",
 			NODE_ENV: "production",
 		};
 		delete childEnv.BOBBIT_BASE_PATH;
@@ -102,8 +113,7 @@ describe("executable CLI root and nested base-path smoke", () => {
 
 		const startedAt = performance.now();
 		const child = spawn(process.execPath, [
-			"--import", "tsx",
-			CLI_ENTRY,
+			packageBinEntry,
 			"--version",
 			"--cwd", projectRoot,
 			"--host", "127.0.0.1",
@@ -111,7 +121,7 @@ describe("executable CLI root and nested base-path smoke", () => {
 			"--no-tls",
 			"--no-ui",
 		], {
-			cwd: REPO_ROOT,
+			cwd: projectRoot,
 			env: childEnv,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
@@ -126,7 +136,7 @@ describe("executable CLI root and nested base-path smoke", () => {
 			const elapsedMs = performance.now() - startedAt;
 			expect(exit).toEqual({ code: 0, signal: null });
 			expect(elapsedMs, "--version must terminate promptly without starting a long-lived gateway").toBeLessThan(5_000);
-			expect(stdout).toBe(`v${packageVersion}\n`);
+			expect(stdout).toBe(`v${packageMetadata.version}\n`);
 			expect(stderr).toBe("");
 			expect(portGuard.listening, "the CLI must not replace or disturb the occupied gateway port").toBe(true);
 			for (const forbiddenPath of [
