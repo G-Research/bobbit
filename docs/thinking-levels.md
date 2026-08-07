@@ -295,10 +295,13 @@ the aigw discovery path to carry per-model thinking maps.
 The UI also clamps reactively (see below), but trusting the client would be
 wrong — extensions, MCP clients, stale prefs, and direct REST callers all
 bypass the UI. For Pi sessions, the server clamps at every entry point. For
-**interactive** Claude Agent SDK `set_model` and `set_thinking_level` requests,
-the server instead validates the initialized Query's live map and rejects an
-unavailable level without a mutation or durable write; it does not use Pi's
-registry fallback.
+**interactive** Claude Agent SDK requests, the initialized Query's live map is
+authoritative and Pi's registry fallback is not used. An unsupported model and
+a standalone unavailable level reject before their respective mutations. In a
+combined `set_model` request, an unavailable level can reject after model
+application and read-back, but before its requested thinking mutation; neither
+failure makes the requested tuple durable, and recovery handles any applied
+model.
 
 SDK startup is intentionally not an interactive rejection path. Once the Query
 has initialized, `SessionManager` normalizes the role/default candidate against

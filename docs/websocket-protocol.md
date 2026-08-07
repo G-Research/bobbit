@@ -186,9 +186,12 @@ The picker always includes `thinkingLevel`, optimistically updates both fields,
 and emits no follow-up `set_thinking_level`. For a Pi catalog row, it clamps the
 current level against that row before sending. For an interactive Claude Agent
 SDK session, the active Query's live capability map is authoritative instead:
-unsupported model or thinking requests are unavailable and are rejected before
-mutation or durability, not clamped. For example, if the current level is `max`
-and a Pi user selects Opus 4.8, whose metadata advertises `xhigh` but not `max`,
+an unsupported model is rejected before mutation. An unavailable level in a
+combined request is rejected after model read-back but before its requested
+thinking mutation; neither failure makes the requested tuple durable, and
+recovery handles any already-applied model. Neither case is clamped. For
+example, if the current level is `max` and a Pi user selects Opus 4.8, whose
+metadata advertises `xhigh` but not `max`,
 the only picker frame is:
 
 ```json
@@ -206,9 +209,11 @@ otherwise the current authoritative level, and clamps it against the exact new
 catalog model. `max` is selectable only when that model's `thinkingLevelMap`
 explicitly contains a non-null `max` entry. Interactive Claude Agent SDK
 requests instead require a model and level advertised by the initialized active
-Query; unavailable values reject without SDK mutation or a durable write. See
-[Per-model thinking-level capabilities](thinking-levels.md) for Pi map semantics
-and [Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls)
+Query. An unavailable model rejects before SDK mutation. An unavailable level
+in a combined request makes no requested thinking mutation or durable requested
+tuple, although model application and read-back can already have occurred before
+recovery. See [Per-model thinking-level capabilities](thinking-levels.md) for Pi
+map semantics and [Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls)
 for the SDK capability contract.
 
 On success, the gateway:
@@ -282,9 +287,9 @@ A thinking-only UI change remains supported with:
 
 This standalone path leaves provider/model unchanged. Pi clamps `level` against
 the currently bound exact catalog model; an interactive Claude Agent SDK request
-uses the active Query map and rejects an unsupported value before mutation or
-durability. A successful request verifies and persists the complete tuple and
-broadcasts both fields as authoritative state. Failure returns
+uses the active Query map and rejects an unsupported value before a thinking
+mutation or durable write. A successful request verifies and persists the
+complete tuple and broadcasts both fields as authoritative state. Failure returns
 `SET_THINKING_LEVEL_FAILED` and uses the same correction, bounded rollback,
 restart, fail-closed quarantine, stale-target fencing, and client refresh rules.
 
