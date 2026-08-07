@@ -365,10 +365,6 @@ function hindsightStorageIdentity(projectId: string, mode: "local" | "docker" | 
 	return `hindsight-external-${createHash("sha256").update(externalDatabaseUrl).digest("hex").slice(0, 48)}`;
 }
 
-function sameStorage(a: MigrationStorage, b: MigrationStorage): boolean {
-	return a.kind === b.kind && (a.kind === "managed-volume" && b.kind === "managed-volume" ? a.volume === b.volume : a.kind === "external" && b.kind === "external" && a.target === b.target);
-}
-
 function safeExternalEndpoint(value: ExtensionSettingValue | undefined): string | undefined {
 	if (typeof value !== "string" || value.length === 0 || value.length > 2_048) return undefined;
 	try {
