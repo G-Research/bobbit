@@ -45,6 +45,9 @@ import {
 	getExtensionSettings,
 	patchExtensionSettingsPack,
 	patchExtensionSettingsTarget,
+	grantExtensionCapability,
+	revokeExtensionCapability,
+	getExtensionGrantAudit,
 	fetchTools,
 	fetchMcpServers,
 	type BrowsePackWire,
@@ -63,6 +66,9 @@ import {
 	type PackEntityDescriptions,
 	type PackMcpContributionWire,
 	type PiExtensionDiagnostic,
+	type ExtensionCapabilityGrantTuple,
+	type ExtensionCapabilityWire,
+	type ExtensionGrantAuditEntryWire,
 	type ExtensionSettingsResponse,
 } from "./api.js";
 
@@ -169,6 +175,28 @@ let settingsErrors = new Map<string, Map<string, string>>();
 let settingsFormErrors = new Map<string, string>();
 let settingsBusy = new Set<string>();
 let settingsStatus = "";
+let grantAuditEntries: ExtensionGrantAuditEntryWire[] = [];
+let grantAuditLoading = false;
+let grantAuditError = "";
+let grantAuditProjectId: string | undefined;
+// Grant actions are independent from settings saves and keyed by their exact,
+// project-owned tuple so a repeated click cannot submit duplicate authority.
+const capabilityGrantBusy = new Set<string>();
+const capabilityGrantErrors = new Map<string, string>();
+const marketGrantCapabilities = new Set<ExtensionCapabilityWire>([
+	"decide", "mutate", "store", "session", "agents",
+	"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
+]);
+const packCapabilityCopy: Partial<Record<ExtensionCapabilityWire, { label: string; description: string }>> = {
+	"service.manage": { label: "Manage service", description: "Start, stop, and manage this pack's project service." },
+	"memory.read": { label: "Read memory", description: "Read memory available to this pack in the current project scope." },
+	"memory.write": { label: "Write memory", description: "Create and update memory in the current project scope." },
+	"memory.reflect": { label: "Reflect on memory", description: "Produce derived reflections from memory this pack is allowed to read." },
+	"memory.invalidate": { label: "Invalidate memory", description: "Mark existing memory as invalid so it is no longer used as current knowledge." },
+	"memory.read.all": { label: "Read all memory", description: "Read all project memory, including memory outside the pack's ordinary scoped context." },
+};
+const packCapabilityOrder = ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"] as const;
+const packCapabilityRank = new Map<ExtensionCapabilityWire, number>(packCapabilityOrder.map((capability, index) => [capability, index]));
 
 // Drag-reorder state (market packs within one scope).
 let dragScope: MarketScope | null = null;
@@ -214,6 +242,10 @@ export function clearMarketplaceState(): void {
 	settingsFormErrors.clear();
 	settingsBusy.clear();
 	settingsStatus = "";
+	grantAuditEntries = [];
+	grantAuditLoading = false;
+	grantAuditError = "";
+	grantAuditProjectId = undefined;
 }
 
 // ============================================================================
@@ -243,6 +275,10 @@ function clearProjectScopedMarketplaceState(projectId?: string): void {
 	extensionSettingsLoading = false;
 	extensionSettingsError = "";
 	extensionSettingsProjectId = projectId;
+	grantAuditEntries = [];
+	grantAuditLoading = false;
+	grantAuditError = "";
+	grantAuditProjectId = projectId;
 	clearSecretInputs();
 	clearExtensionSettingsUi();
 }
@@ -278,7 +314,13 @@ function settingsOwnerKey(target: Pick<ExtensionSettingsTarget, "packId" | "kind
 	return `${target.packId}:${target.kind}:${target.id}`;
 }
 
-function clearExtensionSettingsUi(): void {
+function capabilityGrantKey(projectId: string, tuple: ExtensionCapabilityGrantTuple): string {
+	return "principal" in tuple
+		? `${projectId}:${tuple.packId}:pack:${tuple.capability}`
+		: `${projectId}:${tuple.packId}:hook:${tuple.hookId}:${tuple.capability}`;
+}
+
+function clearExtensionSettingsUi(clearCapabilityGrantState = true): void {
 	expandedSettingsOwner = "";
 	settingsDrafts.clear();
 	secretDrafts.clear();
@@ -286,6 +328,10 @@ function clearExtensionSettingsUi(): void {
 	settingsFormErrors.clear();
 	settingsBusy.clear();
 	settingsStatus = "";
+	if (clearCapabilityGrantState) {
+		capabilityGrantBusy.clear();
+		capabilityGrantErrors.clear();
+	}
 }
 
 function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: string): ExtensionSettingsProjection {
@@ -298,6 +344,8 @@ function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: 
 			: configuration === "unavailable" ? "unavailable"
 			: grantRequired ? "grant-required"
 			: "active";
+		const grantProjection = target.ref.kind === "pack" ? target.packGrant : target.hookGrant;
+		const inactive = !target.enabled.effective;
 		return {
 			packId: target.ref.packId,
 			kind: target.ref.kind,
@@ -324,18 +372,64 @@ function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: 
 					source: field.source, options: field.values?.map((value) => ({ value })), min: field.min, max: field.max,
 				};
 			}),
-			grants: target.hookGrant?.requestedCapabilities.map((capability) => ({
+			grants: grantProjection?.requestedCapabilities.map((capability) => ({
 				capability,
-				state: target.hookGrant?.grants.includes(capability) ? (target.enabled.effective ? "Granted" : "Granted · inactive") : "Not granted",
-			})),
+				// A newer server may advertise a reserved capability unknown to this
+				// client. Keep it visible, but never offer authority we cannot name.
+				state: marketGrantCapabilities.has(capability)
+					? grantProjection.grants.includes(capability) ? (inactive ? "Granted · inactive" : "Granted") : "Not granted"
+					: "Unavailable",
+			}))
 		};
 	});
 	for (const packId of new Set(targets.map((target) => target.packId))) {
+		if (targets.some((target) => target.packId === packId && target.kind === "pack")) continue;
 		const owned = targets.filter((target) => target.packId === packId);
-		const label = data.targets.find((target) => target.ref.packId === packId)?.packName || packId;
-		targets.unshift({ packId, kind: "pack", id: packId, label, enabled: owned.some((target) => target.enabled !== false), status: owned.some((target) => target.enabled === false) ? "partially-enabled" : "active", fields: [] });
+		const source = data.targets.find((target) => target.ref.packId === packId);
+		const label = source?.packName || packId;
+		const packGrant = source?.packGrant;
+		const enabled = owned.some((target) => target.enabled !== false);
+		targets.unshift({
+			packId, kind: "pack", id: packId, label, enabled,
+			status: owned.some((target) => target.enabled === false) ? "partially-enabled" : "active",
+			fields: [],
+			grants: packGrant?.requestedCapabilities.map((capability) => ({
+				capability,
+				state: marketGrantCapabilities.has(capability)
+					? packGrant.grants.includes(capability) ? (enabled ? "Granted" : "Granted · inactive") : "Not granted"
+					: "Unavailable",
+			})),
+		});
 	}
 	return { projectId, revision: data.revision, targets };
+}
+
+async function loadGrantAudit(projectId = currentProjectId()): Promise<void> {
+	if (!projectId) {
+		grantAuditEntries = [];
+		grantAuditProjectId = undefined;
+		return;
+	}
+	const requestedProjectId = projectId;
+	grantAuditLoading = true;
+	grantAuditError = "";
+	grantAuditProjectId = requestedProjectId;
+	renderApp();
+	try {
+		const response = await getExtensionGrantAudit(requestedProjectId);
+		if (!response.ok) throw new Error("Extension grant history is unavailable.");
+		if (currentProjectId() !== requestedProjectId) return;
+		grantAuditEntries = [...response.data.entries].reverse();
+	} catch {
+		if (currentProjectId() !== requestedProjectId) return;
+		grantAuditEntries = [];
+		grantAuditError = "Could not load grant history.";
+	} finally {
+		if (currentProjectId() === requestedProjectId) {
+			grantAuditLoading = false;
+			renderApp();
+		}
+	}
 }
 
 async function loadExtensionSettings(projectId = currentProjectId()): Promise<void> {
@@ -497,6 +591,7 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	void loadActivationForInstalled(projectId);
 	void loadMcpRuntimeForInstalled(projectId);
 	void loadExtensionSettings(projectId);
+	void loadGrantAudit(projectId);
 
 	await loadBrowse();
 }
@@ -1952,6 +2047,131 @@ async function toggleSettingsTarget(target: ExtensionSettingsTarget, enabled: bo
 	} finally { settingsBusy.delete(owner); renderApp(); }
 }
 
+function isGrantedCapability(state?: string): boolean {
+	return state === "Granted" || state === "Granted · inactive";
+}
+
+function isActionableCapability(capability: string, state?: string): capability is ExtensionCapabilityWire {
+	return state !== "Unavailable" && marketGrantCapabilities.has(capability as ExtensionCapabilityWire);
+}
+
+function capabilityTuple(target: ExtensionSettingsTarget, capability: ExtensionCapabilityWire): ExtensionCapabilityGrantTuple {
+	return target.kind === "pack"
+		? { packId: target.packId, principal: "pack", capability }
+		: { packId: target.packId, hookId: target.id, capability };
+}
+
+function canChangeCapability(target: ExtensionSettingsTarget, capability: string, state?: string): boolean {
+	if (!isActionableCapability(capability, state)) return false;
+	// A stale durable grant remains revocable. New authority is available only
+	// when the server's current project projection says the principal is active.
+	if (isGrantedCapability(state)) return true;
+	return target.enabled !== false
+		&& target.status !== "disabled"
+		&& target.status !== "requires-config"
+		&& target.status !== "review"
+		&& target.status !== "unavailable";
+}
+
+function capabilityError(responseStatus: number, granted: boolean): string {
+	if (responseStatus === 401 || responseStatus === 403) return "Sign in as a browser operator to change extension grants.";
+	if (responseStatus === 400) return "This capability request is no longer valid.";
+	if (responseStatus === 404) return "This pack is no longer active for this project.";
+	if (responseStatus === 422) return "This pack does not support this capability.";
+	return `Could not ${granted ? "revoke" : "grant"} this extension capability. Retry.`;
+}
+
+async function changeCapabilityGrant(target: ExtensionSettingsTarget, capability: string, grantState?: string): Promise<void> {
+	const projectId = currentProjectId();
+	if (!projectId || !isActionableCapability(capability, grantState)) return;
+	const tuple = capabilityTuple(target, capability);
+	const key = capabilityGrantKey(projectId, tuple);
+	if (capabilityGrantBusy.has(key)) return;
+	const granted = isGrantedCapability(grantState);
+	if (!granted && !canChangeCapability(target, capability, grantState)) return;
+	if (!granted) {
+		const { confirmAction } = await import("./dialogs.js");
+		const projectName = state.projects.find((project) => project.id === projectId)?.name || "this project";
+		const isPack = "principal" in tuple;
+		const broadMemoryCopy = capability === "memory.read.all"
+			? " This lets it read all project memory, including memory outside its ordinary scoped context."
+			: "";
+		const confirmed = await confirmAction(
+			"Grant extension capability",
+			isPack
+				? `Grant ${capability} to pack ${target.label || target.packId} (${target.packId}) for ${projectName}?${broadMemoryCopy}`
+				: `Grant ${capability} to hook ${target.label || target.id} (${target.id}) in pack ${target.packId} for ${projectName}?`,
+			"Grant capability",
+		);
+		if (!confirmed || currentProjectId() !== projectId || capabilityGrantBusy.has(key)) return;
+	}
+	capabilityGrantBusy.add(key);
+	capabilityGrantErrors.delete(key);
+	renderApp();
+	try {
+		const response = granted
+			? await revokeExtensionCapability(projectId, tuple)
+			: await grantExtensionCapability(projectId, tuple);
+		if (!response.ok) {
+			if (currentProjectId() === projectId) {
+				capabilityGrantErrors.set(key, capabilityError(response.status, granted));
+				// Invalid/inactive responses may have raced a projection update; never
+				// leave a locally actionable stale row behind.
+				if (response.status === 400 || response.status === 404 || response.status === 422) void loadExtensionSettings(projectId);
+			}
+			return;
+		}
+		if (currentProjectId() !== projectId) return;
+		settingsStatus = `${granted ? "Revoked" : "Granted"} ${capability} for ${target.label || target.id} in ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
+		// Grants affect only authority. Reload server-owned state rather than
+		// inferring authority locally; the separate audit read remains read-only.
+		await Promise.all([loadExtensionSettings(projectId), loadGrantAudit(projectId)]);
+	} finally {
+		if (currentProjectId() === projectId) {
+			capabilityGrantBusy.delete(key);
+			renderApp();
+		}
+	}
+}
+
+function renderExtensionGrants(target: ExtensionSettingsTarget): TemplateResult {
+	if (!target.grants?.length) return html``;
+	const projectId = currentProjectId() || "";
+	const grants = target.kind === "pack"
+		? [...target.grants].sort((left, right) => (packCapabilityRank.get(left.capability as ExtensionCapabilityWire) ?? Number.MAX_SAFE_INTEGER) - (packCapabilityRank.get(right.capability as ExtensionCapabilityWire) ?? Number.MAX_SAFE_INTEGER))
+		: target.grants;
+	const grantedCount = grants.filter((grant) => isGrantedCapability(grant.state)).length;
+	const principal = target.kind === "pack" ? "pack" : "hook";
+	return html`<details class="market-extension-grants ${target.kind === "hook" ? "market-hook-grants" : ""}" data-testid=${target.kind === "hook" ? "market-hook-grants" : "market-extension-grants"} data-principal=${principal}>
+		<summary>Review grants · ${grantedCount} of ${grants.length} granted</summary>
+		${grants.map((grant) => {
+			const capability = grant.capability as ExtensionCapabilityWire;
+			const tuple = capabilityTuple(target, capability);
+			const grantKey = capabilityGrantKey(projectId, tuple);
+			const granted = isGrantedCapability(grant.state);
+			const actionable = canChangeCapability(target, grant.capability, grant.state);
+			const grantBusy = capabilityGrantBusy.has(grantKey);
+			const grantError = capabilityGrantErrors.get(grantKey);
+			const copy = target.kind === "pack" ? packCapabilityCopy[capability] : undefined;
+			const rowId = `market-capability-${grantKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+			const inactiveReason = !granted && !actionable && grant.state !== "Unavailable"
+				? "Enable this pack before granting this capability."
+				: undefined;
+			return html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-busy=${grantBusy ? "true" : "false"}>
+				<div class="market-capability-copy">
+					${copy ? html`<strong>${copy.label}</strong>` : ""}
+					<code>${grant.capability}</code>
+					<span>${grant.state || "Unavailable"}</span>
+					${copy ? html`<span id=${rowId} class="market-capability-description">${copy.description}</span>` : ""}
+					${inactiveReason ? html`<span id=${rowId} class="market-capability-description">${inactiveReason}</span>` : ""}
+				</div>
+				<button type="button" class="market-btn" data-testid="market-capability-action" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-describedby=${copy || inactiveReason ? rowId : undefined} ?disabled=${!actionable || grantBusy} @click=${() => changeCapabilityGrant(target, grant.capability, grant.state)}>${grantBusy ? (granted ? "Revoking…" : "Granting…") : grant.state === "Unavailable" ? "Unavailable" : `${granted ? "Revoke" : "Grant"} ${grant.capability}`}</button>
+				${grantError ? html`<div class="market-error" data-testid="market-capability-error" role="alert">${grantError}</div>` : ""}
+			</div>`;
+		})}
+	</details>`;
+}
+
 function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 	const owner = settingsOwnerKey(target);
 	const open = expandedSettingsOwner === owner;
@@ -1966,7 +2186,7 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
 		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
 		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
-		${target.kind === "hook" && target.grants?.length ? html`<details class="market-hook-grants" data-testid="market-hook-grants"><summary>Review grants</summary>${target.grants.map((grant) => html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "unknown"}>${grant.capability}: ${grant.state || "Unavailable"}</div>`)}</details>` : ""}
+		${renderExtensionGrants(target)}
 		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId())}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
 	</div>`;
 }
@@ -1990,6 +2210,36 @@ function renderNoProjectRuntimeEmptyState(): TemplateResult {
 	</section>`;
 }
 
+function renderGrantHistory(): TemplateResult {
+	const projectId = currentProjectId();
+	if (!projectId) return html``;
+	const project = state.projects.find((item) => item.id === projectId);
+	return html`<details class="market-grant-history" data-testid="market-grant-history">
+		<summary>Grant history</summary>
+		${grantAuditLoading && grantAuditProjectId === projectId
+			? html`<p class="market-grant-history-empty">Loading grant history…</p>`
+			: grantAuditError
+				? html`<div class="market-error" data-testid="market-grant-history-error" role="alert">${grantAuditError} <button type="button" class="market-btn" @click=${() => loadGrantAudit(projectId)}>Retry</button></div>`
+				: grantAuditEntries.length === 0
+					? html`<p class="market-grant-history-empty">No extension grant changes have been recorded for this project.</p>`
+					: html`<ul class="market-grant-history-list" aria-label=${`Grant history for ${project?.name || "this project"}`}>
+						${grantAuditEntries.map((entry) => {
+							const timestamp = new Date(entry.at);
+							const principal = "principal" in entry
+								? `Pack · ${entry.packId}`
+								: `Hook · ${entry.packId} / ${entry.hookId}`;
+							return html`<li class="market-grant-history-row" data-testid="market-grant-history-entry" data-principal=${"principal" in entry ? "pack" : "hook"}>
+								<time datetime=${entry.at}>${Number.isNaN(timestamp.getTime()) ? entry.at : timestamp.toLocaleString()}</time>
+								<span>${entry.action === "granted" ? "Granted" : "Revoked"}</span>
+								<code>${entry.capability}</code>
+								<span>${principal}</span>
+								<span>${entry.actor}</span>
+							</li>`;
+						})}
+					</ul>`}
+	</details>`;
+}
+
 function renderInstalledPanel(): TemplateResult {
 	const builtinPacks = installed.filter((p) => p.builtin);
 	const scopesWithPacks = SCOPE_ORDER.filter((s) => packsForScope(s).length > 0);
@@ -2005,6 +2255,7 @@ function renderInstalledPanel(): TemplateResult {
 					${builtinPacks.length > 0 ? renderBuiltinGroup(builtinPacks) : ""}
 					${scopesWithPacks.map(renderScopeGroup)}
 				`}
+			${renderGrantHistory()}
 		</section>
 	`;
 }
