@@ -74,6 +74,8 @@ export interface ClaudeSdkSubagentDefinition {
 export interface ClaudeSdkSubagentRegistryEntry {
 	readonly agentId: string;
 	readonly agentType: string;
+	/** The bounded root Agent tool-use that admitted this child. */
+	readonly toolUseId: string;
 	readonly startedAt: number;
 }
 
@@ -95,8 +97,9 @@ export interface ClaudeSdkSubagentPolicy {
 	readonly audit: (event: ClaudeSdkSubagentAuditEvent) => void;
 	readonly admit: (rawName: unknown, input: unknown, context: { agentId?: unknown; toolUseId?: string; permissionMode?: unknown }) => boolean;
 	readonly authorizeChild: (rawName: unknown, agentId: unknown, agentType?: unknown) => boolean;
-	readonly onStart: (input: { agent_id?: unknown; agent_type?: unknown; tool_use_id?: unknown }) => boolean;
-	readonly onStop: (input: { agent_id?: unknown; agent_type?: unknown; parent_tool_use_id?: unknown }) => void;
+	/** Uses only the fields provided by the pinned SubagentStart hook. */
+	readonly onStart: (input: { agent_id?: unknown; agent_type?: unknown }) => boolean;
+	readonly onStop: (input: { agent_id?: unknown; agent_type?: unknown }) => void;
 	readonly clear: () => void;
 	readonly dispose: () => void;
 }
@@ -187,6 +190,7 @@ const APPROVED_SUBAGENTS = [
 ] as const;
 const CHILD_CANONICAL_TOOLS = ["read", "find", "grep"] as const;
 const MAX_SUBAGENT_PROMPT_BYTES = 8 * 1024;
+const MAX_SUBAGENT_ID_BYTES = 512;
 const SUBAGENT_DENIAL = "Subagent request is not available in this Bobbit session.";
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -197,6 +201,10 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function boundedString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_SUBAGENT_PROMPT_BYTES;
+}
+
+function boundedSubagentId(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_SUBAGENT_ID_BYTES;
 }
 
 /**
@@ -251,51 +259,88 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 	}
 
 	const active = new Map<string, ClaudeSdkSubagentRegistryEntry>();
+	const admissions = new Map<string, Readonly<{ agentType?: string; admitted: boolean }>>();
+	let pending: Readonly<{ toolUseId: string; agentType: string }> | undefined;
 	let disposed = false;
 	const record = (outcome: ClaudeSdkSubagentAuditEvent["outcome"], values: Omit<ClaudeSdkSubagentAuditEvent, "sessionId" | "outcome"> = {}) =>
 		audit({ sessionId: options.sessionId.slice(0, 128), outcome, ...values });
+	const rememberAdmission = (toolUseId: string, agentType: string | undefined, admitted: boolean): void => {
+		admissions.set(toolUseId, Object.freeze({ agentType, admitted }));
+		while (admissions.size > MAX_APPROVALS) admissions.delete(admissions.keys().next().value!);
+	};
 	const admit = (rawName: unknown, input: unknown, context: { agentId?: unknown; toolUseId?: string; permissionMode?: unknown }): boolean => {
-		if (disposed || typeof rawName !== "string" || rawName.toLowerCase() !== "agent" || context.agentId || (context.permissionMode !== undefined && context.permissionMode !== "default") || !isPlainRecord(input)) {
-			record("denied", { toolUseId: context.toolUseId }); return false;
+		const toolUseId = context.toolUseId;
+		if (!boundedSubagentId(toolUseId)) {
+			record("denied");
+			return false;
 		}
-		const keys = Object.keys(input);
-		if ((keys.length !== 3 && keys.length !== 4) || keys.some(key => !["description", "subagent_type", "prompt", "run_in_background"].includes(key))
-			|| ("description" in input && !boundedString(input.description))
-			|| typeof input.subagent_type !== "string" || !byType.has(input.subagent_type)
-			|| !boundedString(input.prompt) || input.run_in_background !== false || active.size !== 0) {
-			record("denied", { toolUseId: context.toolUseId }); return false;
+		const inputType = isPlainRecord(input) && typeof input.subagent_type === "string" && byType.has(input.subagent_type)
+			? input.subagent_type : undefined;
+		const prior = admissions.get(toolUseId);
+		if (prior) return prior.admitted && prior.agentType === inputType;
+
+		let allowed = false;
+		if (!disposed && typeof rawName === "string" && rawName.toLowerCase() === "agent" && !context.agentId
+			&& context.permissionMode === "default" && isPlainRecord(input)) {
+			const keys = Object.keys(input);
+			allowed = (keys.length === 3 || keys.length === 4)
+				&& !keys.some(key => !["description", "subagent_type", "prompt", "run_in_background"].includes(key))
+				&& (!("description" in input) || boundedString(input.description))
+				&& typeof input.subagent_type === "string" && byType.has(input.subagent_type)
+				&& boundedString(input.prompt) && input.run_in_background === false
+				&& !pending && active.size === 0;
 		}
-		record("admitted", { toolUseId: context.toolUseId, agentType: input.subagent_type });
+		rememberAdmission(toolUseId, inputType, allowed);
+		if (!allowed) {
+			record("denied", { toolUseId, ...(inputType ? { agentType: inputType } : {}) });
+			return false;
+		}
+		pending = Object.freeze({ toolUseId, agentType: inputType! });
+		record("admitted", { toolUseId, agentType: inputType! });
 		return true;
 	};
 	const authorizeChild = (rawName: unknown, agentId: unknown, agentType?: unknown): boolean => {
-		if (disposed || typeof agentId !== "string" || !agentId) return false;
+		if (disposed || !boundedSubagentId(agentId)) return false;
 		const entry = active.get(agentId);
 		if (!entry || (agentType !== undefined && agentType !== entry.agentType)) return false;
 		if (typeof rawName !== "string") return false;
 		if (rawName.toLowerCase() === "skill") return true;
 		return byType.get(entry.agentType)?.childRawTools.some(name => name.toLowerCase() === rawName.toLowerCase()) ?? false;
 	};
-	const onStart = (input: { agent_id?: unknown; agent_type?: unknown; tool_use_id?: unknown }): boolean => {
-		if (disposed || typeof input.agent_id !== "string" || !input.agent_id || typeof input.agent_type !== "string" || !byType.has(input.agent_type) || active.size !== 0 || active.has(input.agent_id)) {
-			record("diagnostic", { toolUseId: typeof input.tool_use_id === "string" ? input.tool_use_id : undefined }); return false;
+	const onStart = (input: { agent_id?: unknown; agent_type?: unknown }): boolean => {
+		if (disposed || !boundedSubagentId(input.agent_id) || typeof input.agent_type !== "string" || !byType.has(input.agent_type)
+			|| !pending || pending.agentType !== input.agent_type || active.size !== 0 || active.has(input.agent_id)) {
+			record("diagnostic", { ...(typeof input.agent_type === "string" && byType.has(input.agent_type) ? { agentType: input.agent_type } : {}) });
+			return false;
 		}
-		active.set(input.agent_id, Object.freeze({ agentId: input.agent_id, agentType: input.agent_type, startedAt: Date.now() }));
-		record("started", { toolUseId: typeof input.tool_use_id === "string" ? input.tool_use_id : undefined, agentId: input.agent_id, agentType: input.agent_type });
+		const entry = Object.freeze({ agentId: input.agent_id, agentType: input.agent_type, toolUseId: pending.toolUseId, startedAt: Date.now() });
+		pending = undefined;
+		active.set(entry.agentId, entry);
+		record("started", { toolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType });
 		return true;
 	};
-	const onStop = (input: { agent_id?: unknown; agent_type?: unknown; parent_tool_use_id?: unknown }): void => {
-		if (typeof input.agent_id !== "string" || typeof input.agent_type !== "string") { record("diagnostic"); return; }
+	const onStop = (input: { agent_id?: unknown; agent_type?: unknown }): void => {
+		if (!boundedSubagentId(input.agent_id) || typeof input.agent_type !== "string") { record("diagnostic"); return; }
 		const entry = active.get(input.agent_id);
-		if (!entry || entry.agentType !== input.agent_type) { record("diagnostic", { agentId: input.agent_id, agentType: input.agent_type }); return; }
+		if (!entry || entry.agentType !== input.agent_type) {
+			record("diagnostic", { agentId: input.agent_id, ...(byType.has(input.agent_type) ? { agentType: input.agent_type } : {}) });
+			return;
+		}
 		active.delete(input.agent_id);
-		record("stopped", { agentId: entry.agentId, agentType: entry.agentType, parentToolUseId: typeof input.parent_tool_use_id === "string" ? input.parent_tool_use_id : undefined, durationMs: Math.max(0, Date.now() - entry.startedAt) });
+		// Do not trust a hook-supplied parent id in audit output: retain only the
+		// bounded id that originally admitted this exact child.
+		record("stopped", { toolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType, parentToolUseId: entry.toolUseId, durationMs: Math.max(0, Date.now() - entry.startedAt) });
+	};
+	const clear = (): void => {
+		pending = undefined;
+		active.clear();
+		admissions.clear();
 	};
 	return Object.freeze({
-		definitions: Object.freeze(definitions), byType, maxConcurrent: 1 as const, active, audit,
-		admit, authorizeChild, onStart, onStop,
-		clear: () => { active.clear(); },
-		dispose: () => { disposed = true; active.clear(); },
+		definitions: Object.freeze(definitions), byType, maxConcurrent: 1 as const,
+		get active() { return new Map(active); }, audit,
+		admit, authorizeChild, onStart, onStop, clear,
+		dispose: () => { disposed = true; clear(); },
 	});
 }
 
@@ -438,7 +483,9 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 			return options.subagentPolicy?.authorizeChild(rawName, agentId) ? allow() : deny(SUBAGENT_DENIAL);
 		}
 		if (typeof rawName === "string" && rawName.toLowerCase() === "agent") {
-			return options.subagentPolicy?.admit(rawName, input, { toolUseId: context.toolUseID }) ? allow() : deny(SUBAGENT_DENIAL);
+			// Query options fix the root permission mode to default; the pinned
+			// CanUseTool context does not expose it, so never infer caller input.
+			return options.subagentPolicy?.admit(rawName, input, { toolUseId: context.toolUseID, permissionMode: "default" }) ? allow() : deny(SUBAGENT_DENIAL);
 		}
 		if (typeof rawName === "string" && rawName.toLowerCase() === "skill") return allow();
 		const normalizedTool = normalized(rawName);
@@ -460,11 +507,14 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 	};
 
 	const preToolUse = async (input: PreToolUseHookInput) => {
-		const hookInput = input as PreToolUseHookInput & { agent_id?: unknown; agent_type?: unknown; permission_mode?: unknown };
+		// agent_id and agent_type are the only subagent fields supplied by the
+		// pinned PreToolUse hook. Root mode is fixed by query options below.
+		const hookInput = input as PreToolUseHookInput & { agent_id?: unknown; agent_type?: unknown };
+		if (disposed) return preDecision("deny", "Tool is not available in this Bobbit session.");
 		if (hookInput.agent_id) return options.subagentPolicy?.authorizeChild(input.tool_name, hookInput.agent_id, hookInput.agent_type)
 			? preDecision("allow") : preDecision("deny", SUBAGENT_DENIAL);
 		if (typeof input.tool_name === "string" && input.tool_name.toLowerCase() === "agent") {
-			return options.subagentPolicy?.admit(input.tool_name, input.tool_input, { toolUseId: input.tool_use_id, permissionMode: hookInput.permission_mode })
+			return options.subagentPolicy?.admit(input.tool_name, input.tool_input, { toolUseId: input.tool_use_id, permissionMode: "default" })
 				? preDecision("allow") : preDecision("deny", SUBAGENT_DENIAL);
 		}
 		if (typeof input.tool_name === "string" && input.tool_name.toLowerCase() === "skill") return preDecision("allow");
@@ -479,12 +529,14 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		return preDecision("allow");
 	};
 	const subagentStart = async (input: unknown) => {
-		const value = input as { agent_id?: unknown; agent_type?: unknown; tool_use_id?: unknown };
-		if (!options.subagentPolicy?.onStart(value)) return { continue: false };
+		const value = input as { agent_id?: unknown; agent_type?: unknown };
+		// An unregistered child is already fail-closed at both child tool gates.
+		// Do not stop the root query merely because its child lifecycle is invalid.
+		options.subagentPolicy?.onStart(value);
 		return { continue: true };
 	};
 	const subagentStop = async (input: unknown) => {
-		options.subagentPolicy?.onStop(input as { agent_id?: unknown; agent_type?: unknown; parent_tool_use_id?: unknown });
+		options.subagentPolicy?.onStop(input as { agent_id?: unknown; agent_type?: unknown });
 		return { continue: true };
 	};
 
