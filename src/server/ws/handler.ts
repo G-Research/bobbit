@@ -1379,9 +1379,12 @@ export function handleWebSocketConnection(
 						} catch (err: any) {
 							const safeError = redactSensitive(String(err?.message || err));
 							console.error(`[ws-handler] replacement model activation failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, safeError);
+							const retryable = err?.retryable !== false;
 							send(ws, {
 								type: "error",
-								message: `Failed to activate the replacement model. Choose another available model or retry: ${safeError}`,
+								message: retryable
+									? `Failed to activate the replacement model. Choose another available model or retry: ${safeError}`
+									: safeError,
 								code: MODEL_SELECTION_RECOVERY_FAILED,
 							});
 						}

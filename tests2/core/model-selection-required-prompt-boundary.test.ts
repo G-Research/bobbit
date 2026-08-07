@@ -396,4 +396,39 @@ describe("MODEL_SELECTION_REQUIRED prompt boundaries", () => {
 			h.ws.close();
 		}
 	});
+
+	it("does not wrap an unverified transcript rollback as an ordinary retryable activation failure", async () => {
+		const secret = `sk-or-${"b".repeat(28)}`;
+		const recover = vi.fn(async () => {
+			const error: any = new Error(
+				`The original conversation transcript could not be restored (${secret}). ` +
+				"Do not retry model selection; ask an administrator to inspect the server logs.",
+			);
+			error.retryable = false;
+			throw error;
+		});
+		const h = websocketHarness(recover);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			h.ws.emit("message", JSON.stringify({
+				type: "set_model",
+				provider: "anthropic",
+				modelId: "claude-sonnet-5",
+			}));
+			await waitFor(
+				() => h.ws.sent.some((frame) => frame.type === "error" && frame.code === MODEL_SELECTION_RECOVERY_FAILED),
+				"fail-closed transcript rollback failure",
+			);
+			const error = h.ws.sent.find((frame) => frame.type === "error" && frame.code === MODEL_SELECTION_RECOVERY_FAILED);
+			assert.match(error.message, /original conversation transcript could not be restored/i);
+			assert.match(error.message, /do not retry model selection/i);
+			assert.doesNotMatch(error.message, /choose another available model or retry/i);
+			assert.equal(error.message.includes(secret), false);
+			assert.match(error.message, /<redacted-(?:api-key|token)>/);
+			assert.deepEqual(h.session.condition, CONDITION);
+			assert.equal(h.persistMutation.mock.calls.length, 0);
+		} finally {
+			h.ws.close();
+		}
+	});
 });

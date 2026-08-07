@@ -383,6 +383,55 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(store.get(SESSION_ID)?.modelId, RETIRED_MODEL_ID);
 		assert.equal(explicitConditionClearFrames(firstClient).length, 0);
 
+		// Force the trusted no-follow rollback boundary to reject the transcript after
+		// provisional sanitization. This simulates a path replacement/I/O failure
+		// without weakening the production path checks or adding a lifecycle seam.
+		const rollbackFailureFile = `${transcriptFile}.rollback-failure`;
+		let rollbackFailureBridge: any;
+		let rollbackFailureCandidate: any;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			rollbackFailureBridge = replacementBridge(options);
+			return rollbackFailureBridge;
+		});
+		manager.bgProcessManager = {
+			restoreSession: vi.fn(async () => {
+				fs.renameSync(transcriptFile, rollbackFailureFile);
+				fs.mkdirSync(transcriptFile);
+				rollbackFailureCandidate = manager.getSession(SESSION_ID);
+				rollbackFailureCandidate.spawnPinnedModel = "wrong-provider/wrong-model";
+			}),
+		};
+		let rollbackFailure: any;
+		try {
+			await manager.recoverModelSelectionRequired(
+				SESSION_ID,
+				replacement.provider,
+				replacement.id,
+				"high",
+			);
+		} catch (error) {
+			rollbackFailure = error;
+		}
+		assert.equal(rollbackFailure?.code, "MODEL_RECOVERY_FAILED");
+		assert.equal(rollbackFailure?.retryable, false, "unverified transcript rollback must not invite another activation attempt");
+		assert.match(rollbackFailure?.message, /original conversation transcript could not be restored/i);
+		assert.match(rollbackFailure?.message, /do not retry model selection/i);
+		assert.doesNotMatch(rollbackFailure?.message, /choose another available model or retry/i);
+		assert.notEqual(readFixtureUtf8(rollbackFailureFile), poisonedTranscriptBytes, "fixture must fail after provisional transcript sanitization");
+		assert.equal(rollbackFailureBridge.stop.mock.calls.length, 1, "rollback failure must stop the provisional bridge");
+		assert.equal(rollbackFailureCandidate?.lifecycleFenced, true, "rollback failure must fence the provisional candidate");
+		assert.equal(rollbackFailureCandidate?.dormant, true);
+		assert.equal(rollbackFailureCandidate?.status, "terminated");
+		assert.equal(manager.getSession(SESSION_ID), recovered, "rollback failure must return ownership to the processless capsule");
+		assert.equal(recovered.lifecycleFenced, false, "the processless capsule remains the canonical admission owner");
+		assert.deepEqual(recovered.condition, EXPECTED_CONDITION);
+		assert.equal(store.get(SESSION_ID)?.modelProvider, RETIRED_PROVIDER, "rollback failure must retain the unavailable durable provider");
+		assert.equal(store.get(SESSION_ID)?.modelId, RETIRED_MODEL_ID, "rollback failure must retain the unavailable durable model");
+		assert.equal(explicitConditionClearFrames(firstClient).length, 0, "rollback failure must not publish recovery success");
+		fs.rmSync(transcriptFile, { recursive: true, force: true });
+		fs.rmSync(rollbackFailureFile, { force: true });
+		fs.writeFileSync(transcriptFile, poisonedTranscriptBytes, "utf-8");
+
 		let successfulOptions: Record<string, any> | undefined;
 		let successfulBridge: any;
 		let durableTupleAtConditionClear: Record<string, unknown> | undefined;
