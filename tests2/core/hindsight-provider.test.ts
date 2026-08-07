@@ -58,7 +58,7 @@ function scope(projectId = "proj-1", goalId = "goal-1", role = "coder") {
 /** Routes receive live EP-6 decisions from the server; direct route fixtures
  * must model that boundary instead of relying on the retired ambient access. */
 function liveMemoryGrant() {
-	return { requireCapability: () => ({ allowed: true as const }) };
+	return { requireCapability: () => undefined };
 }
 
 function queueEntry(content: string, ts: number, projectId = "proj-1", goalId = "goal-1") {
