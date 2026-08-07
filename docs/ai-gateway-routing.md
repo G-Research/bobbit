@@ -58,10 +58,11 @@ A persisted provider/model tuple is a binding, not a hint. If cold restore compl
 
 While the condition is active:
 
-- The session remains listed, attachable, and navigable. Its transcript and exact saved tuple remain unchanged, and history is read without starting Pi.
+- On cold restore and before replacement activation, the session remains listed, attachable, and navigable. Its transcript and exact saved tuple remain unchanged, and history is read without starting Pi.
 - Prompt admission is rejected before queue, transcript, attachment, persistence, or RPC work. The browser keeps the composer text and attachment draft so the user can send them after recovery.
 - The **Choose replacement model** action opens the existing session picker. Recovery accepts only an exact, currently session-selectable tuple, starts the session pinned to it, restores the existing transcript, clamps thinking to that model's capabilities, and verifies runtime read-back.
-- Bobbit persists the replacement and clears the condition only after successful verification. A failed activation keeps the unavailable tuple and recoverable session intact and returns a sanitized error so the user can retry or choose another model.
+- Bobbit persists the replacement and clears the condition only after successful verification. An ordinary retryable activation failure keeps the unavailable tuple, transcript, and condition intact; its sanitized `MODEL_SELECTION_RECOVERY_FAILED` message tells the user to retry or choose another model.
+- An unverified transcript rollback uses the same error code but fails closed. Its sanitized message says that the original conversation transcript could not be restored and not to retry model selection. The unavailable tuple and `MODEL_SELECTION_REQUIRED` condition remain authoritative, but transcript integrity is not guaranteed; an administrator must inspect the server logs and restore the transcript before the session continues.
 
 For AIGW, a successful discovery that omits the old row can trigger this condition. A thrown discovery request alone is not evidence of retirement: when the matching last-published row is eligible for retention, it remains the session-selection authority during that outage. This distinction is why operators should compare `/api/models`, not only the live `/api/aigw/status` response, before concluding that a saved model was retired.
 
