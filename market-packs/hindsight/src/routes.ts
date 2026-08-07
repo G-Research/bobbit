@@ -2,6 +2,7 @@
 // contract so an unreadable queue/config is never presented as an empty/default
 // snapshot or overwritten by a route mutation.
 
+import { memoryRoutes, type MemoryRouteHostAdapter } from "./memory-routes.js";
 import {
 	clientConfig,
 	isActive,
@@ -26,12 +27,14 @@ import {
 export { __setClientFactory } from "./shared.js";
 
 interface RouteCtx {
-	host: { store: StoreLike };
+	host: { store: StoreLike; memory?: MemoryRouteHostAdapter };
 	sessionId?: string;
 	/** Authoritative host snapshot; flat projectId is compatibility-only. */
 	scopeContext?: { project?: { id?: string }; goal?: { id?: string } };
 	projectId?: string;
 	runtime?: RuntimeContext;
+	/** Bounded completion snapshot injected only by the host lifecycle boundary. */
+	outcome?: unknown;
 }
 interface RouteReq {
 	method?: string;
@@ -85,6 +88,7 @@ function manualTags(extra: Tags | undefined): Tags {
 }
 
 export const routes = {
+	...memoryRoutes,
 	config: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const method = (req?.method ?? "GET").toUpperCase();
