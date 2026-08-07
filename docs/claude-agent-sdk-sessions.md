@@ -214,6 +214,45 @@ compaction still dispatches the existing Extension Platform `beforeCompact`
 lifecycle hook through the SDK `PreCompact` hook. This keeps extension lifecycle
 behavior additive without introducing a provider-specific hook.
 
+### Composer slash commands
+
+The composer, not the SDK, owns current Bobbit slash controls, discovered skills,
+and active Extension Platform launchers. It builds its inventory from the scoped
+skill catalogue, server collision claims, active `composer-slash` pack entries,
+and the explicit session runtime. This prevents a Bobbit command from colliding
+with a bundled Claude command while preserving the existing server skill
+expansion pipeline.
+
+In an SDK session, `/compact` is deliberately absent from autocomplete but exact
+trimmed, case-insensitive input is consumed locally. The editor shows an inline
+unsupported-command alert and retains the text, attachments, and focus; it never
+calls the SDK. This avoids accidentally invoking Claude's bundled `/compact`.
+Pi sessions instead show `/compact` and run Bobbit's existing local compaction;
+attachments block that action without being discarded. While runtime identity is
+still loading, `/compact` is also consumed with an unavailable-until-ready alert
+rather than assuming Pi.
+
+A current Bobbit skill named `/goal` or `/review` wins over a Claude command with
+the same name. The editor only completes the token; normal send still reaches the
+server, where the skill is expanded before `ClaudeAgentSdkBridge` receives the
+final text. Without that exact Bobbit skill, `/goal`, `/review`, unknown slashes,
+and near-prefixes pass through as raw runtime prompts. Hidden recognized skills
+also mask same-named pack launchers, and ambiguous launcher ids never dispatch.
+
+Pack launchers run only for an exact full-line command with no attachments and
+use the existing compound entrypoint key. On reload or a project/session change,
+Bobbit refetches scoped skills and reconciles active pack entries; launcher and
+menu state are not persisted in drafts. Ctrl/Cmd+Enter normally steers text, but
+refuses an exact Bobbit-owned command so an unexpanded skill or launcher cannot
+reach the SDK raw. An open autocomplete menu owns Enter, Ctrl+Enter, and
+Cmd+Enter to complete its selection before send or steer behavior applies.
+
+These composer rules do not configure Claude commands or loosen SDK isolation:
+query options still use `settingSources: []`, `strictMcpConfig: true`, and only
+the live Bobbit MCP server. See the
+[composer slash interception design](design/claude-sdk-composer-slash-intercept.md)
+for the full ownership, collision, reload, and failure behavior.
+
 ## Tool ownership and permissions
 
 SDK sessions expose the Bobbit tool catalogue through one live, in-process SDK
