@@ -255,9 +255,9 @@ export interface SandboxTokenEntry {
 }
 
 /** Closed vocabulary for explicit extension capability grants. */
-export type ExtensionCapability = "decide" | "mutate" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
+export type ExtensionCapability = "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
 export const EXTENSION_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
-	"decide", "mutate", "store", "session", "agents", "prompt:system-static", "prompt:system-author",
+	"decide", "mutate", "filter:tool-result", "store", "session", "agents", "prompt:system-static", "prompt:system-author",
 ]);
 
 /** Server-derived hook identity. Wildcards are deliberately unsupported. */

@@ -305,6 +305,13 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		consumers: frozen(["tests2/integration/hindsight-external.test.ts"]),
 	},
 	{
+		// installFixture copies this exact committed pack into an isolated gateway.
+		id: "tool-result-filter-route-fixture",
+		roots: frozen(["tests2/_fixtures/tool-result-filter"]),
+		matches: (path) => path.startsWith("tests2/_fixtures/tool-result-filter/"),
+		consumers: frozen(["tests2/integration/tool-result-filter-routes.test.ts"]),
+	},
+	{
 		id: "pr-walkthrough-proof-removal-guard",
 		roots: frozen(["src", "defaults"]),
 		matches: (path) => (path.startsWith("src/") || path.startsWith("defaults/"))
@@ -418,6 +425,17 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		id: "affected-classification-source",
 		consumer: "tests2/core/affected-test-classification.test.ts",
 		inputs: frozen(["scripts/testing-v2/test-map-execution.mjs"]),
+	},
+	{
+		// The Pi gate test loads these committed assets through private child-process
+		// paths, so ordinary static-import/read extraction cannot retain their edge.
+		id: "tool-result-filter-pi-gate-assets",
+		consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts",
+		inputs: frozen([
+			"patches/@earendil-works+pi-agent-core+0.82.1.patch",
+			"patches/@earendil-works+pi-coding-agent+0.82.1.patch",
+			"tests2/integration/tool-result-filter-pi-gate-scenario.mjs",
+		]),
 	},
 	{
 		id: "native-ci-workflow-contracts",
@@ -789,6 +807,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/tool-result-filter-extension.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`", "test-owned generated Pi result-gate extension module"),
+		]),
+	},
+	{
 		consumer: "tests2/core/worktree-setup-fallback.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("recursive-directory-scan", "walk", ["scan:worktree-setup-source-guard"]),
@@ -805,6 +829,21 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
 			declaredExecutableOperation("repository-directory-copy", "PACK_SRC", ["scan:hindsight-external-pack-fixture"]),
+		]),
+	},
+	{
+		consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("worker-entry", "pathToFileURL(scenarioFile)", ["indirect:tool-result-filter-pi-gate-assets"]),
+			allowedExecutableOperation("repository-directory-copy", "sourcePackage", "private Pi harness copy of installed external coding-agent package"),
+			allowedExecutableOperation("repository-directory-copy", "sourceAgentCore", "private Pi harness copy of installed external agent-core package"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/tool-result-filter-routes.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`", "test-owned temporary generated live result-gate module"),
+			declaredExecutableOperation("repository-directory-copy", "FIXTURE_ROOT", ["scan:tool-result-filter-route-fixture"]),
 		]),
 	},
 	{
@@ -1279,6 +1318,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/tool-guard-artifact-trust.test.ts",
+		allowReason: "test-owned temporary trusted tool-guard artifact",
+		reads: frozen([
+			{ expression: "guard", count: 4 },
+		]),
+	},
+	{
 		consumer: "tests2/core/token-dir.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
@@ -1356,6 +1402,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "promptPath!", count: 1 },
 			{ expression: "promptPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-manager-pi-extension-args.test.ts",
+		allowReason: "test-owned temporary trusted tool-guard artifact",
+		reads: frozen([
+			{ expression: "guardPath!", count: 1 },
 		]),
 	},
 	{
@@ -2170,6 +2223,18 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "invocation-owned temporary fake Vitest report under qualification root",
 		reads: frozen([
 			{ expression: "reportPath", count: 1 },
+		]),
+	},
+	{
+		// patchFile is a selected committed patch; target and sourcePackageJson are
+		// private-harness and installed-package paths reached through the same flow.
+		consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts",
+		declarations: frozen(["indirect:tool-result-filter-pi-gate-assets"]),
+		policyExemption: "The non-repository paths are private-harness or installed-package metadata.",
+		reads: frozen([
+			{ expression: "patchFile", count: 1 },
+			{ expression: "target", count: 1 },
+			{ expression: "sourcePackageJson", count: 1 },
 		]),
 	},
 ]);

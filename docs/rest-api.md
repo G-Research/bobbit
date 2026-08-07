@@ -1463,9 +1463,11 @@ agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The 
 caller, assigns the actor and timestamp. These are exact, fail-closed grants for active schema-2
 hooks and do not replace pack activation, Host API guards, or session policy. Static prompt
 sections require `prompt:system-static`; `prompt:system-author` permits only an authenticated
-owning agent session to create or edit an approval proposal, never a direct write. See [Extension
-capability grants](extension-capability-grants.md) for the configuration, audit-outbox,
-live-revocation, and extension-author contract.
+owning agent session to create or edit an approval proposal, never a direct write.
+`filter:tool-result` is eligible only for a `mode: decide` hook with exactly
+`events: [afterToolResult]` and that declared capability; it enables only core's pre-fan-out
+filter seam. See [Extension capability grants](extension-capability-grants.md) for the
+configuration, audit-outbox, live-revocation, and extension-author contract.
 
 | Method | Path | Description |
 |---|---|---|
@@ -1492,6 +1494,30 @@ fence, and redaction boundary.
 
 These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI is deferred to
 EP-7.
+
+#### Tool-result filter bridge and audit
+
+`POST /api/sessions/:id/tool-result-filter` is an **internal generated Pi-gate callback**, not a
+public extension API. A protected Pi session posts exactly `{ toolCallId, toolName, result }`
+after privately holding the complete result and before it emits any result update, transcript,
+model-context, RPC, or UI event. The route derives the session's project; callers cannot supply a
+project, grant, source identity, rule, or policy.
+
+The body is capped and strictly canonicalized. A recognized gate request with a malformed or
+oversized body, route/worker failure, disconnect/abort, or invalid outcome receives the fixed
+core-owned synthetic error result; it never receives an echoed error or raw-result prefix. A
+valid response is only the core-selected canonical result: `pass`, a complete validated
+`replace`/`redact` replacement, or the synthetic rejection. Reject wins over every less
+protective candidate. See [EP-14 — Tool-result filter seam](design/ep-14-tool-result-filter.md)
+for the wire contract and limits.
+
+| Method | Path | Request / response contract |
+|---|---|---|
+| `POST` | `/api/sessions/:id/tool-result-filter` | **Internal generated Pi-gate endpoint.** Requires the session's normal authenticated bridge request. Accepts exactly `{ toolCallId, toolName, result }`; the bounded canonical result is never logged or persisted by this route. An unknown/non-project session is `404`. A recognized malformed request or dispatch failure returns `200` with the fixed synthetic rejection, not a raw error; malformed route identity is a safe `400`. |
+| `GET` | `/api/sessions/:id/tool-result-filter-audit?limit=N` | Operator-only metadata audit. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer, sandbox, and agent-session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The target must be a project session. Returns newest valid rows in chronological order, bounded 1–200 (default 100); `503 TOOL_RESULT_FILTER_AUDIT_UNAVAILABLE` reports an unavailable audit. Rows contain only IDs, action/outcome, fixed reason/rule identities, byte counts, and timing — never result bytes, details, usage, hashes, URLs, or extension error text. |
+
+This seam does not expose credential-containment policy through REST. The shipped deterministic
+fixture exists only to prove the boundary; real credential policy is deferred.
 
 Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 

@@ -51,7 +51,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Managed service extension** *(schema 2; declarative and currently dormant)* | `runtimes/<name>.yaml` (listed in `contents.runtimes`) | Core-owned lifecycle manager when a future consumer wires it | Closed service declaration only; packs never receive a process handle — see [Managed service-extension contract](service-extension-runtime.md) |
 | **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
 | **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
-| **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; bounded consumers are eligible scheduled advisors, the exact-granted decision dispatcher, and [gated request mutation](request-mutation.md) for a `mode: decide` hook that declares and is separately granted `mutate` | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
+| **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; bounded consumers are eligible scheduled advisors, the exact-granted decision dispatcher, [gated request mutation](request-mutation.md), and the core-owned [post-tool-result filter](design/ep-14-tool-result-filter.md) | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
@@ -1801,6 +1801,55 @@ filesystem, and network access; this is not an OS sandbox. Its worker receives a
 environment rather than the gateway's inherited environment, and has no Host API or gateway
 secret. Authors must still treat advisor code as privileged pack code.
 
+#### Post-tool-result filter
+
+A result-filter hook declares exactly one event and one special capability:
+
+```yaml
+# hooks/result-filter.yaml
+id: result-filter
+module: ../lib/result-filter.mjs
+events: [afterToolResult]
+mode: decide
+capabilities: [filter:tool-result]
+budget: { timeoutMs: 1000, maxTokens: 64 }
+```
+
+An operator must separately grant the exact `(packId, hookId, "filter:tool-result")` tuple.
+`decide`, `mutate`, activation, and pack provenance do not imply it. The dispatcher gives the
+module a frozen inspection containing only the completed canonical result, session/project IDs,
+and tool-call/name IDs. It never supplies tool arguments, credentials, a session object, policy
+map, Host API, apply callback, or raw persistence/transport handle.
+
+The default export is an object whose `decide(ctx)` returns one complete closed proposal:
+
+```js
+export default {
+  decide(ctx) {
+    if (!ctx.result.content.some(block => block.type === "text" && block.text.includes("fixture-canary"))) {
+      return { kind: "tool-result-filter", version: 1, action: "pass", ruleId: "result-filter", reasonCode: "not-matched" };
+    }
+    return {
+      kind: "tool-result-filter", version: 1, action: "redact", ruleId: "result-filter", reasonCode: "fixture-match",
+      replacement: { content: [{ type: "text", text: "Result withheld." }], isError: true },
+    };
+  },
+};
+```
+
+`action` is `pass`, `replace`, `redact`, or `reject`. `pass`/`reject` carry no replacement;
+`replace`/`redact` carry a complete bounded text/image replacement, not a patch, redaction range,
+URL, callback, free-form explanation, `details`, or `usage`. `ruleId` must equal the declaring
+hook ID; core owns outcome reason codes and attribution. Unknown fields and malformed values are
+rejected. Across eligible hooks, core reduces deterministically: `reject` wins, then `redact`,
+then `replace`, then `pass`; pack precedence and stable identity only choose attribution within a
+severity. A reject or any active-filter failure returns the core-owned synthetic error, not the
+original result. See [EP-14](design/ep-14-tool-result-filter.md) for exact limits and lifecycle.
+
+This is a fixture-only platform seam. It is not a credential detector, secret-scanning API, or
+user-configurable policy language. Do not use example patterns as production containment policy;
+that product is explicitly deferred.
+
 The declaration fields are strict:
 
 - **`id`** is a stable pack-local identifier matching
@@ -1810,12 +1859,15 @@ The declaration fields are strict:
   pack root after realpath-aware containment checks; absolute, syntactically unsafe, and
   pack-escaping paths reject the pack.
 - **`events`** is required, non-empty, and duplicate-free. Supported values are
-  `sessionSetup`, `beforePrompt`, `beforeToolCall`, `afterTurn`, `beforeCompact`,
-  `sessionShutdown`, and `goalProvisioned`.
+  `sessionSetup`, `beforePrompt`, `beforeToolCall`, `afterToolResult`, `afterTurn`,
+  `beforeCompact`, `sessionShutdown`, and `goalProvisioned`. `afterToolResult` is reserved for
+  the result-filter consumer. A declaration is eligible for its `filter:tool-result` grant only
+  when it is the sole event; other metadata remains inert.
 - **`mode`** is required and is exactly `observe` or `decide`.
 - **`capabilities`** is required and duplicate-free. Its only values are `store`, `session`,
-  `agents`, `mutate`, `prompt:system-static`, and `prompt:system-author`; `[]` is valid.
-  These are declarations only and do not confer access.
+  `agents`, `mutate`, `filter:tool-result`, `prompt:system-static`, and
+  `prompt:system-author`; `[]` is valid. `filter:tool-result` requires `mode: decide` and
+  exactly `events: [afterToolResult]`. These are declarations only and do not confer access.
 - **`budget`** is optional. An omitted or non-mapping `budget`, and each missing, non-numeric,
   or non-finite field, falls back independently to `maxTokens: 1600` and `timeoutMs: 1500`.
   Finite numeric values are then clamped: `maxTokens` to `64..8192` and `timeoutMs` to
@@ -1858,8 +1910,10 @@ the authenticated project API. `mode: decide` makes `decide` an eligible request
 the manifest's `store`, `session`, and `agents` values are eligible only by the same exact name.
 `mutate` is eligible only when that active hook is also `mode: decide` and declares `mutate`.
 Its current use is the typed, core-applied [gated request-mutation](request-mutation.md) path;
-the grant does not directly let pack code apply a mutation. Missing, revoked, malformed, or
-inactive grants deny.
+the grant does not directly let pack code apply a mutation. `filter:tool-result` is eligible only
+for `mode: decide`, exactly `events: [afterToolResult]`, and that declared capability; it permits
+only the core [pre-fan-out result-filter dispatcher](design/ep-14-tool-result-filter.md). Missing,
+revoked, malformed, or inactive grants deny.
 
 This is deliberately distinct from `host.capabilities`, `ctx.host`, and the existing scoped Host
 API. A grant does not add methods, bypass action/session policy, supply a token, or change what a
@@ -1873,10 +1927,12 @@ timers, mutate state, or register a UI surface. The bounded runtime consumers ar
 advisor with omitted/`advisor` kind meeting the exact contract above; an active exact-granted
 `mode: decide` hook invoked by the decision-request dispatcher (including only-due `kind: decision`
 every-N hooks); an active exact-granted `mode: decide`/`mutate` hook invoked by [gated request
-mutation](request-mutation.md); and an active exact-granted declared selector during session setup.
-The decision dispatcher rechecks the grant before `decide()` and optional `onDecision()`; request
-mutation rechecks every extension candidate after all workers settle and immediately before core
-applies a result; selectors recheck at their application fence. A scheduled `kind: decision`
+mutation](request-mutation.md); an active exact-granted declared selector during session setup;
+and an active exact-granted `afterToolResult` filter. The decision dispatcher rechecks the grant
+before `decide()` and optional `onDecision()`; request mutation rechecks every extension candidate
+after all workers settle and immediately before core applies a result; result filtering checks
+before invocation and after all workers settle; selectors recheck at their application fence. A
+scheduled `kind: decision`
 proposal is additionally forced through the constrained consent/draft route described in the
 [staff-improvement proposal fixture](staff-improvement-proposals.md). Inactive and ungranted hooks
 remain metadata-only. See [Extension decision requests](extension-decision-requests.md), [gated request

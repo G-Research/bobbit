@@ -17,7 +17,7 @@ export type TraceOutcome = typeof TRACE_OUTCOMES[number];
 export const TRACE_OUTCOME_KINDS = ["decision", "advisory", "audit"] as const;
 export type TraceOutcomeKind = typeof TRACE_OUTCOME_KINDS[number];
 
-export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
+export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
 /** Fixed startup capability-selection stages. Candidate names never enter the trace. */
@@ -48,6 +48,18 @@ export const TRACE_OUTCOME_REASONS = [
 	"Tool warning",
 	"Tool denied",
 	"Prompt shaped",
+	"Tool result passed",
+	"Tool result replaced",
+	"Tool result redacted",
+	"Tool result withheld",
+	"Filter unavailable",
+	"Filter disabled or revoked",
+	"Filter grant required",
+	"Filter malformed",
+	"Filter timed out",
+	"Filter aborted",
+	"Filter admission rejected",
+	"Lower-priority filter",
 	"Unavailable",
 ] as const;
 export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
@@ -73,7 +85,7 @@ export type TraceConsentResumeStatus = typeof TRACE_CONSENT_RESUME_STATUSES[numb
 
 export interface TraceOutcomeRow {
 	kind: TraceOutcomeKind;
-	/** Server-derived winning pack identity for scheduled advisor activity. */
+	/** Server-derived extension pack identity; audit rows may retain it too. */
 	packId?: string;
 	hookId: string;
 	event: TraceOutcomeEvent;
@@ -287,7 +299,9 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 			? row.value
 			: undefined;
 		const isDecisionActivity = kind === "decision" || kind === "advisory";
-		const packId = isDecisionActivity && typeof row.packId === "string" && SAFE_IDENTIFIER.test(row.packId) ? row.packId : undefined;
+		// Filter audit rows need the same server-derived pack attribution as
+		// decision/advisory rows, while retaining the existing closed identifier gate.
+		const packId = (isDecisionActivity || kind === "audit") && typeof row.packId === "string" && SAFE_IDENTIFIER.test(row.packId) ? row.packId : undefined;
 		if (kind === "advisory" && event === "afterTurn" && !packId) continue;
 		const requestId = isDecisionActivity && typeof row.requestId === "string" && SAFE_IDENTIFIER.test(row.requestId) ? row.requestId : undefined;
 		const questionId = isDecisionActivity && typeof row.questionId === "string" && QUESTION_FINGERPRINT.test(row.questionId) ? row.questionId : undefined;

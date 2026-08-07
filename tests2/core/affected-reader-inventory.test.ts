@@ -53,6 +53,9 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/app/side-panel-workspace.ts" },
 	{ consumer: "tests2/core/enforce-headless-qa.test.ts", input: ".claude/.mcp.json" },
 	{ consumer: "tests2/core/affected-test-classification.test.ts", input: "scripts/testing-v2/test-map-execution.mjs" },
+	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "patches/@earendil-works+pi-agent-core+0.82.1.patch" },
+	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "patches/@earendil-works+pi-coding-agent+0.82.1.patch" },
+	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "tests2/integration/tool-result-filter-pi-gate-scenario.mjs" },
 	{ consumer: "tests2/core/build-unit-gate-ci.test.ts", input: ".github/workflows/build-unit-gate.yml" },
 	{ consumer: "tests2/core/build-unit-gate-ci.test.ts", input: ".github/workflows/codeql.yml" },
 	{ consumer: "tests2/core/bobbit-dir-agent-dir.test.ts", input: "src/server/agent-dir-config.ts" },
@@ -114,6 +117,7 @@ const REPOSITORY_SCAN_RULE_IDS = [
 	"pi-browser-fixture-guard",
 	"pr-walkthrough-pack-boundary",
 	"hindsight-external-pack-fixture",
+	"tool-result-filter-route-fixture",
 	"pr-walkthrough-proof-removal-guard",
 	"extension-capability-residual-guard",
 ] as const;
@@ -223,7 +227,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(69);
+		expect(declared).toHaveLength(72);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
@@ -310,17 +314,17 @@ describe("affected repository reader inventory", () => {
 	it("pins the exact dynamic-operation and computed-scan inventories", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
 		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
-		expect(audit).toHaveLength(44);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(57);
+		expect(audit).toHaveLength(47);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(63);
 		expect([...observedOperations.values()].reduce(
 			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
 			0,
-		)).toBe(62);
-		expect(REPOSITORY_SCAN_RULES).toHaveLength(16);
+		)).toBe(68);
+		expect(REPOSITORY_SCAN_RULES).toHaveLength(17);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(observedOperations.size).toBe(44);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(44);
+		expect(observedOperations.size).toBe(47);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(47);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {

@@ -24,6 +24,8 @@
     "data/",
     "docker/",
     "docs/",
+    "patches/",
+    "scripts/postinstall-patches.mjs",
     "src/",
     "README.md"
   ],
@@ -77,7 +79,8 @@
     "test": "npm run test:unit && npm run test:browser && npm run test:e2e",
     "clean": "shx rm -rf dist",
     "prepublishOnly": "npm run build",
-    "build:binaries": "node scripts/build-binaries.mjs"
+    "build:binaries": "node scripts/build-binaries.mjs",
+    "postinstall": "node scripts/postinstall-patches.mjs"
   },
   "optionalDependencies": {
     "@bobbit/binaries-darwin-arm64": "0.9.0",
@@ -106,6 +109,7 @@
     "marked": "^18.0.4",
     "mkcert": "^3.2.0",
     "ollama": "^0.6.0",
+    "patch-package": "^8.0.1",
     "pdfjs-dist": "5.4.394",
     "qrcode": "^1.5.4",
     "sortablejs": "^1.15.7",

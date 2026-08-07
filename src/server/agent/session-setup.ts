@@ -52,9 +52,18 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool, type ToolActivationResult } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
+import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
+import {
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
+} from "./tool-result-filter-extension-trust.js";
+export {
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
+} from "./tool-result-filter-extension-trust.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
@@ -107,6 +116,41 @@ export interface MarketplacePiExtensionActivation {
 	tools: PiExtensionToolInfo[];
 	diagnostics: PiExtensionDiagnostic[];
 	runtimeExtensions: RuntimePiExtensionInfo[];
+}
+
+/**
+ * Marketplace Pi extensions execute arbitrary code in Pi's realm. They cannot
+ * share a protected result-gate session, even though core snapshots intrinsics,
+ * because they could replace private AgentSession internals before execution.
+ */
+/**
+ * Result-gate sessions share Pi's private realm with every `--extension`.
+ * This early activation check gives setup diagnostics; RpcBridge owns the
+ * authoritative final path boundary immediately before spawn.
+ */
+export function assertToolResultFilterExtensionCompatibility(
+	filter: { toolResult?: boolean } | null | undefined,
+	toolActivation: Pick<ToolActivationResult, "activeBobbitExtensionProviders">,
+	piActivation: Pick<MarketplacePiExtensionActivation, "runtimeExtensions">,
+): void {
+	if (!filter?.toolResult) return;
+	const hasUntrustedToolProvider = toolActivation.activeBobbitExtensionProviders.some(provider => provider.provenance !== "builtin");
+	if (!hasUntrustedToolProvider && piActivation.runtimeExtensions.length === 0) return;
+	const error = new Error(TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE) as Error & { code: string };
+	error.code = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE;
+	throw error;
+}
+
+/** @deprecated Use assertToolResultFilterExtensionCompatibility. */
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE;
+/** @deprecated Use TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE. */
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE;
+/** @deprecated Compatibility wrapper for Marketplace Pi extensions. */
+export function assertToolResultFilterMarketplacePiExtensionCompatibility(
+	filter: { toolResult?: boolean } | null | undefined,
+	activation: Pick<MarketplacePiExtensionActivation, "runtimeExtensions">,
+): void {
+	assertToolResultFilterExtensionCompatibility(filter, { activeBobbitExtensionProviders: [] }, activation);
 }
 
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
@@ -354,6 +398,8 @@ export interface PipelineContext {
 	lifecycleHub?: LifecycleHub;
 /** Recomputed from the live request-mutation dispatcher at every spawn. */
 	requestMutationActivation?: (projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean };
+	/** Recomputed from the live result-filter dispatcher at every spawn. */
+	toolResultFilterActivation?: (projectId: string | undefined) => { toolResult?: boolean };
 	/** Returns active, user/model-invocable skill names after normal discovery and policy composition. */
 	resolveDynamicSkillCandidates?: (scope: { cwd: string; projectId?: string }) => readonly string[];
 	/** Builds a post-discovery, session-local skills catalogue for the prompt. */
@@ -1131,16 +1177,27 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
 	const requestMutation = ctx.requestMutationActivation?.(plan.projectId);
+	const toolResultFilter = ctx.toolResultFilterActivation?.(plan.projectId);
 	const mcpExtPaths = ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope, plan.dynamicCapabilities?.selectionFingerprint)
 		: undefined;
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
+	assertToolResultFilterExtensionCompatibility(toolResultFilter, activation, piExtensionActivation);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
+	let toolResultGateEnv: Record<string, string> | undefined;
+	if (toolResultFilter?.toolResult) {
+		// This is intentionally a setup-time hard failure. The private Pi loader
+		// must install the gate before every ordinary extension or no session starts.
+		assertToolResultGatePiCompatibility();
+		const gatePath = writeToolResultFilterExtension(plan.id);
+		if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
+		toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
+	}
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
-	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
+	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env, ...toolResultGateEnv };
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
 	const guardPath = ctx.toolManager ? writeToolGuardExtension(

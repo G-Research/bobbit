@@ -100,6 +100,9 @@ import { ContextTraceStore, type TraceOutcomeReason } from "./agent/context-trac
 import { RequestMutationDispatcher, type RequestMutationOutcome } from "./agent/request-mutation-dispatcher.js";
 import { RequestMutationAuditStore, type RequestMutationAuditOutcome, type RequestMutationAuditReason } from "./agent/request-mutation-audit-store.js";
 import type { RequestMutationReason, RequestMutationSource } from "./agent/request-mutation-contract.js";
+import { ToolResultFilterDispatcher, type ToolResultFilterDispatchOutcome, type ToolResultFilterResolution } from "./agent/tool-result-filter-dispatcher.js";
+import { ToolResultFilterAuditStore } from "./agent/tool-result-filter-audit-store.js";
+import { createSyntheticRejectedToolResult, validateToolResultInspection, type ToolResultInspection } from "./agent/tool-result-filter-contract.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
@@ -2592,6 +2595,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
 	let requestMutationDispatcher!: RequestMutationDispatcher;
+	let toolResultFilterDispatcher!: ToolResultFilterDispatcher;
 	let decisionRequestManager!: DecisionRequestManager;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
@@ -3087,9 +3091,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			?? sessionManager.getPersistedSession(sessionId)?.cwd
 			?? process.cwd(),
 	});
+	toolResultFilterDispatcher = new ToolResultFilterDispatcher({
+		registry: packContributionRegistry,
+		moduleHost,
+		grantsForProject: (projectId) => projectId
+			? projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? []
+			: projectConfigStore.getExtensionGrants(),
+		cwdForSession: (sessionId) => sessionManager.getSession(sessionId)?.cwd
+			?? sessionManager.getPersistedSession(sessionId)?.cwd
+			?? process.cwd(),
+	});
 	sessionManager.setRequestMutationActivationResolver((projectId) => projectId ? {
 		prompt: requestMutationDispatcher.hasPromptHooks(projectId),
 		toolSafety: requestMutationDispatcher.hasToolSafetyHooks(projectId),
+	} : {});
+	sessionManager.setToolResultFilterActivationResolver((projectId) => projectId ? {
+		toolResult: toolResultFilterDispatcher.hasEligibleFilters(projectId),
 	} : {});
 	sessionManager.setStaticPromptSectionResolver(resolveStaticPromptSections);
 	sessionManager.lifecycleHub = new LifecycleHub({
@@ -4121,7 +4138,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, requestMutationDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5448,6 +5465,7 @@ async function handleApiRoute(
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
 	requestMutationDispatcher?: RequestMutationDispatcher,
+	toolResultFilterDispatcher?: ToolResultFilterDispatcher,
 	requestMutationTrace?: ContextTraceStore,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
@@ -5507,6 +5525,7 @@ async function handleApiRoute(
 		...pack.runtimes.filter(runtime => runtime.settingsSchemaDiagnostic !== undefined).map(runtime => ({ packId: pack.packId, kind: "runtime" as const, id: runtime.id })),
 	]);
 	const mutationDispatcher = requestMutationDispatcher!;
+	const resultFilterDispatcher = toolResultFilterDispatcher!;
 	const mutationTrace = requestMutationTrace!;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
@@ -5606,6 +5625,7 @@ async function handleApiRoute(
 			hookId: hook.id,
 			mode: hook.mode,
 			capabilities: hook.capabilities,
+			events: hook.events,
 		})));
 		return packs.map((pack) => ({
 			packId: pack.packId,
@@ -5661,7 +5681,8 @@ async function handleApiRoute(
 				const hook = target.contribution as { mode: "observe" | "decide"; capabilities: ExtensionCapability[]; events: string[] };
 				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide" ? ["decide", ...hook.capabilities] : [...hook.capabilities];
 				const grants = context.projectConfigStore.getExtensionGrants();
-				const granted = requestedCapabilities.filter(capability => grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
+				const granted = requestedCapabilities.filter(capability => supportsExtensionGrantCapability(hook, capability)
+					&& grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
 				const runnable = hook.mode === "decide" && granted.includes("decide");
 				// Request mutation dispatch is intentionally authorized by its exact
 				// `mutate` grant; it does not also require the generic `decide` tuple.
@@ -5716,10 +5737,12 @@ async function handleApiRoute(
 		const pack = packContributionRegistry.list(projectId).find(candidate => candidate.packId === packId);
 		return pack?.hooks.find(hook => hook.id === hookId);
 	};
-	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[] }, capability: ExtensionCapability): boolean =>
-		(capability === "mutate"
-			? hook.mode === "decide" && hook.capabilities.includes("mutate")
-			: (capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
+	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[]; events: readonly string[] }, capability: ExtensionCapability): boolean =>
+		(capability === "filter:tool-result"
+			? hook.mode === "decide" && hook.capabilities.includes(capability) && hook.events.length === 1 && hook.events[0] === "afterToolResult"
+			: capability === "mutate"
+				? hook.mode === "decide" && hook.capabilities.includes("mutate")
+				: (capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
 	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
 	const broadcastExtensionGrantInvalidation = (projectId: string): void => {
 		invalidateResolverCaches();
@@ -7923,6 +7946,86 @@ async function handleApiRoute(
 		} catch { /* Context tracing is also non-fatal. */ }
 	};
 
+	const serializedResultBytes = (value: unknown): number => {
+		try { return Math.min(256 * 1024, Buffer.byteLength(JSON.stringify(value), "utf8")); } catch { return 0; }
+	};
+	const traceReasonForToolResultFilter = (
+		action: "pass" | "replace" | "redact" | "reject",
+		outcome: ToolResultFilterDispatchOutcome["outcome"],
+		reasonCode: string,
+	): TraceOutcomeReason => {
+		if (outcome === "applied") {
+			return action === "pass" ? "Tool result passed"
+				: action === "replace" ? "Tool result replaced"
+					: action === "redact" ? "Tool result redacted" : "Tool result withheld";
+		}
+		if (outcome === "superseded") return "Lower-priority filter";
+		switch (reasonCode) {
+			case "filter-grant-required": return "Filter grant required";
+			case "filter-disabled-or-revoked":
+			case "no-filter": return "Filter disabled or revoked";
+			case "filter-malformed": return "Filter malformed";
+			case "filter-timed-out": return "Filter timed out";
+			case "filter-aborted": return "Filter aborted";
+			case "filter-admission-rejected": return "Filter admission rejected";
+			case "filter-lower-priority": return "Lower-priority filter";
+			default: return "Filter unavailable";
+		}
+	};
+	/**
+	 * Filter results are data firewalled here: only dispatcher-owned identifiers,
+	 * fixed states, counts, and timing reach the project audit or EP-5 trace.
+	 */
+	const appendToolResultFilterDiagnostics = (
+		context: { stateDir: string },
+		inspection: ToolResultInspection,
+		resolution: ToolResultFilterResolution,
+		latencyMs: number,
+	): void => {
+		// A gate invocation with no selected worker is feature-off pass-through and
+		// intentionally has no filter observability record.
+		if (resolution.outcomes.length === 0 && !resolution.source && resolution.action === "pass") return;
+		const inputBytes = serializedResultBytes(inspection.result);
+		const outputBytes = serializedResultBytes(resolution.result);
+		const finalOutcome = resolution.action === "pass" && !resolution.source ? "denied" as const : "applied" as const;
+		try {
+			const audit = new ToolResultFilterAuditStore(context.stateDir, fsImpl);
+			for (const outcome of resolution.outcomes) {
+				audit.append({
+					sessionId: inspection.sessionId, toolCallId: inspection.toolCallId, toolName: inspection.toolName,
+					packId: outcome.source.packId, hookId: outcome.source.hookId,
+					action: outcome.action, outcome: outcome.outcome, reasonCode: outcome.reasonCode,
+					...(outcome.ruleId ? { ruleId: outcome.ruleId } : {}), inputBytes, outputBytes, latencyMs: outcome.latencyMs,
+				});
+			}
+			audit.append({
+				sessionId: inspection.sessionId, toolCallId: inspection.toolCallId, toolName: inspection.toolName,
+				...(resolution.source ? { packId: resolution.source.packId, hookId: resolution.source.hookId } : {}),
+				action: resolution.action, outcome: finalOutcome, reasonCode: resolution.reasonCode,
+				...(resolution.ruleId ? { ruleId: resolution.ruleId } : {}), inputBytes, outputBytes, latencyMs,
+			});
+		} catch { /* Storage is diagnostic only and never changes the gated result. */ }
+		try {
+			mutationTrace.appendTrace(inspection.sessionId, {
+				ts: Date.now(), hook: "afterToolResult", sessionId: inspection.sessionId, providers: [],
+				outcomes: [
+					...resolution.outcomes.map((outcome) => ({
+						kind: "audit" as const, packId: outcome.source.packId, hookId: outcome.source.hookId,
+						event: "afterToolResult" as const, outcome: outcome.outcome,
+						reason: traceReasonForToolResultFilter(outcome.action, outcome.outcome, outcome.reasonCode),
+						...(outcome.ruleId ? { value: outcome.ruleId } : {}), ms: outcome.latencyMs,
+					})),
+					{
+						kind: "audit" as const, ...(resolution.source ? { packId: resolution.source.packId } : {}),
+						hookId: resolution.source?.hookId ?? "tool-result-filter", event: "afterToolResult" as const,
+						outcome: finalOutcome, reason: traceReasonForToolResultFilter(resolution.action, finalOutcome, resolution.reasonCode),
+						...(resolution.ruleId ? { value: resolution.ruleId } : {}), ms: latencyMs,
+					},
+				],
+			});
+		} catch { /* Context trace storage is isolated from the result gate. */ }
+	};
+
 	// Decision requests are a REST projection of durable project-owned records.
 	// They deliberately bypass ask envelopes and SessionManager.enqueuePrompt.
 	const decisionRequestsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests$/);
@@ -8173,6 +8276,89 @@ async function handleApiRoute(
 			json({ action: result.action === "deny" ? "deny" : "pass" });
 		} catch {
 			json({ action: "pass" });
+		}
+		return;
+	}
+
+	// The generated Pi result gate calls this route after it has privately buffered
+	// a complete tool result and before Pi emits an update/end/message event. Never
+	// log, echo, or retain the request: dispatcher outcomes are metadata-only and
+	// the response is the sole value Pi may fan out.
+	const toolResultFilterMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-result-filter$/);
+	if (toolResultFilterMatch && req.method === "POST") {
+		const sessionId = toolResultFilterMatch[1];
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext?.base.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const reject = () => json(createSyntheticRejectedToolResult());
+		// The gate transport is the last owner of this protected payload. A peer
+		// disconnect must terminate every worker before any late pass can return.
+		const disconnect = new AbortController();
+		const abortOnDisconnect = () => { if (!disconnect.signal.aborted) disconnect.abort(); };
+		req.once("aborted", abortOnDisconnect);
+		req.once("error", abortOnDisconnect);
+		res.once("close", abortOnDisconnect);
+		const body = await readBody(req, 288 * 1024).catch(() => undefined);
+		try {
+			if (!body || typeof body !== "object" || Array.isArray(body)
+				|| Object.keys(body as Record<string, unknown>).length !== 3
+				|| !Object.hasOwn(body as Record<string, unknown>, "toolCallId")
+				|| !Object.hasOwn(body as Record<string, unknown>, "toolName")
+				|| !Object.hasOwn(body as Record<string, unknown>, "result")) {
+				reject();
+				return;
+			}
+			const inspection = validateToolResultInspection({
+				event: "afterToolResult",
+				sessionId,
+				projectId: hookContext.base.projectId,
+				toolCallId: (body as Record<string, unknown>).toolCallId,
+				toolName: (body as Record<string, unknown>).toolName,
+				result: (body as Record<string, unknown>).result,
+			});
+			const started = Date.now();
+			const resolution = await resultFilterDispatcher.filter(inspection, disconnect.signal);
+			try {
+				const context = projectContextManager.getOrCreate(hookContext.base.projectId)
+					?? { stateDir: sessionManager.stateDir };
+				appendToolResultFilterDiagnostics(context, inspection, resolution, Math.max(0, Date.now() - started));
+			} catch { /* Observability setup must not change the selected safe result. */ }
+			json(resolution.result);
+		} catch {
+			// A recognized gate request fails closed. Do not interpolate a malformed
+			// body, worker exception, or original result into an error response.
+			if (!res.writableEnded && !res.destroyed) reject();
+		} finally {
+			req.removeListener("aborted", abortOnDisconnect);
+			req.removeListener("error", abortOnDisconnect);
+			res.removeListener("close", abortOnDisconnect);
+		}
+		return;
+	}
+
+	const toolResultFilterAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-result-filter-audit$/);
+	if (toolResultFilterAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		const sessionId = toolResultFilterAuditMatch[1];
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const context = projectContextManager.getOrCreate(session.projectId);
+		if (!context) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
+		try {
+			const entries = new ToolResultFilterAuditStore(context.stateDir, fsImpl).listForSession(sessionId, limit);
+			json({ entries });
+		} catch {
+			json({ error: "Tool result filter audit is unavailable", code: "TOOL_RESULT_FILTER_AUDIT_UNAVAILABLE" }, 503);
 		}
 		return;
 	}

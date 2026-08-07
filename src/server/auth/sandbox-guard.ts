@@ -16,6 +16,9 @@ function isOwnSessionToolEndpoint(subpath: string, method: string): boolean {
 	if (subpath.startsWith("/bg-processes")) return true;
 	if (method === "GET" && subpath === "/google-code-assist/token") return true;
 	if (method === "POST" && subpath === "/tool-grant-request") return true;
+	// The core-generated Pi result gate may submit its buffered result only to
+	// the session named by this already scope-checked route.
+	if (method === "POST" && subpath === "/tool-result-filter") return true;
 	if (method === "POST" && subpath === "/activate-skill") return true;
 	if (method === "GET" && subpath === "/transcript") return true;
 	if (method === "POST" && subpath === "/prompt") return true;

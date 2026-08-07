@@ -10,7 +10,9 @@ import {
 /** Active hook metadata assembled exclusively from PackContributionRegistry rows. */
 export interface ResolvedHook extends ExtensionHookRef {
 	mode: "observe" | "decide";
-	/** Schema-2 declared capabilities. `mutate` requires a decide hook. */
+	/** Server-derived declaration events. Required for event-scoped capabilities. */
+	events?: readonly string[];
+	/** Schema-2 declared capabilities. `mutate` and result filtering require a decide hook. */
 	capabilities: readonly ExtensionCapability[];
 	/** Optional server-derived pack precedence for deterministic core reducers. */
 	priority?: number;
@@ -40,6 +42,7 @@ function isValidGrant(grant: unknown): grant is ExtensionGrant {
 function isValidActiveHook(hook: unknown): hook is ResolvedHook {
 	if (!isRecord(hook) || !isValidRef(hook)) return false;
 	return (hook.mode === "observe" || hook.mode === "decide")
+		&& (hook.events === undefined || (Array.isArray(hook.events) && hook.events.every(event => typeof event === "string")))
 		&& Array.isArray(hook.capabilities)
 		&& hook.capabilities.every(isExtensionCapability)
 		&& (hook.priority === undefined || (typeof hook.priority === "number" && Number.isFinite(hook.priority)));
@@ -47,6 +50,14 @@ function isValidActiveHook(hook: unknown): hook is ResolvedHook {
 
 function supportsCapability(hook: ResolvedHook, capability: ExtensionCapability): boolean {
 	if (capability === "mutate") return hook.mode === "decide" && hook.capabilities.includes("mutate");
+	// This grant is deliberately narrower than `decide`: it names the one
+	// pre-fan-out event and cannot be implied by another capability.
+	if (capability === "filter:tool-result") {
+		return hook.mode === "decide"
+			&& hook.events?.length === 1
+			&& hook.events[0] === "afterToolResult"
+			&& hook.capabilities.includes("filter:tool-result");
+	}
 	if (capability === "decide") return hook.mode === "decide";
 	return hook.capabilities.includes(capability);
 }

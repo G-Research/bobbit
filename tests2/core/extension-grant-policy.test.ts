@@ -55,6 +55,22 @@ describe("extension capability grant policy", () => {
 			.toMatchObject({ allowed: true, grant: { hookId: "mutator", capability: "mutate" } });
 	});
 
+	it("requires the exact result-filter declaration and its exact grant", () => {
+		const ref = { packId: "pack-a", hookId: "filter" };
+		const filterGrant = grant({ hookId: "filter", capability: "filter:tool-result" });
+		const filterHook: ResolvedHook = {
+			...ref, mode: "decide", events: ["afterToolResult"], capabilities: ["filter:tool-result"],
+		};
+		expect(resolveExtensionGrant([filterHook], [filterGrant], ref, "filter:tool-result"))
+			.toMatchObject({ allowed: true, grant: { capability: "filter:tool-result" } });
+		expect(resolveExtensionGrant([{ ...filterHook, events: ["afterTurn"] }], [filterGrant], ref, "filter:tool-result"))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+		expect(resolveExtensionGrant([{ ...filterHook, events: ["afterToolResult", "afterTurn"] }], [filterGrant], ref, "filter:tool-result"))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+		expect(resolveExtensionGrant([{ ...filterHook, capabilities: [] }], [filterGrant], ref, "filter:tool-result"))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+	});
+
 	it("requires an exact active tuple and capability", () => {
 		const grants = [
 			grant({ capability: "decide" }),

@@ -2,13 +2,13 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1145,
+  "censusTotal": 1139,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 516,
+    "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 205
+    "v2-integration": 203
   },
   "methods": {
     "adapter": 276,
@@ -20,6 +20,24 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/tool-guard-artifact-trust.test.ts",
+      "reason": "Pins trusted tool-guard publication, cross-platform exact-content cache validation, POSIX-only mode enforcement, Windows no-chmod publication, symlink rejection, and fail-closed integrity errors.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/rpc-bridge-tool-result-filter-extension-trust.test.ts",
+      "reason": "Pins RpcBridge's final protected-session extension trust boundary, including generated core state roots, config and arbitrary path rejection, symlink escape rejection, and inactive-gate compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
     {
       "path": "tests2/core/pack-list-scan-cache.test.ts",
       "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
@@ -2914,7 +2932,6 @@
     {
       "path": "tests2/browser/e2e/extension-settings.spec.ts",
       "reason": "Production Market browser journey for project-scoped Hindsight settings: accessible save and clear controls, redacted secrets, disablement isolation, reload, navigation, and mobile layout.",
-
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2974,7 +2991,6 @@
         "tier": "unit",
         "project": "core"
       }
-
     },
     {
       "path": "tests2/core/service-extension-contract.test.ts",
@@ -3028,6 +3044,69 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-contract.test.ts",
+      "reason": "Closed EP-14 result-filter contract coverage for strict canonical inputs, closed pass/replace/redact/reject proposals, deny-wins reduction, and safe synthetic rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-dispatcher.test.ts",
+      "reason": "EP-14 dispatcher coverage for exact filter grants, revoke fencing, deterministic reject-wins reduction, fail-closed worker isolation, and concurrent call isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-audit-store.test.ts",
+      "reason": "EP-14 metadata-only audit-store coverage for bounded normalized rows, rotation, corrupt-row rejection, and no canary persistence or diagnostic leakage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/tool-result-filter-routes.test.ts",
+      "reason": "Authenticated gateway route coverage for the deterministic EP-14 fixture: exact-grant activation, pass/redact/replace/reject output, deny-wins ordering, live revoke, and malformed or oversized fail-closed outputs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/tool-result-filter.spec.ts",
+      "reason": "Production browser-origin EP-14 fixture journey for inert/grant/reject-wins/redact/revoke/reload lifecycle and safe result visibility in DOM and accessibility snapshots.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-extension.test.ts",
+      "reason": "EP-14 generated Pi gate coverage for one bounded route handoff, strict safe gateway output acceptance, and fixed local failure fallback without raw malformed or oversized result forwarding.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/tool-result-filter-pi-gate.test.ts",
+      "reason": "Patched Pi pre-fan-out gate integration coverage for private streamed updates, authoritative safe result fan-out to model/session/transcript owners, and abort buffer disposal.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],
