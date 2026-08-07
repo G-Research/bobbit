@@ -151,6 +151,15 @@ test.describe("extension capability grants API", () => {
 		});
 		expect(unsupported.status, `${REPRO}: mutation is never implied by an active decision hook`).toBe(422);
 		expect((await json(unsupported)).code).toBe("EXTENSION_CAPABILITY_UNSUPPORTED");
+
+		for (const capability of ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"]) {
+			const packOnly = await apiFetch(grantsPath(), {
+				method: "PUT", headers: operatorHeaders(),
+				body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability }),
+			});
+			expect(packOnly.status, `${REPRO}: hook routes explicitly reject pack-only ${capability} authority`).toBe(422);
+			expect((await json(packOnly)).code).toBe("EXTENSION_CAPABILITY_UNSUPPORTED");
+		}
 	});
 
 	test("requires signed operator consent for exact active pack grants and revokes the pack tuple", async () => {

@@ -5793,7 +5793,11 @@ async function handleApiRoute(
 		return pack?.hooks.find(hook => hook.id === hookId);
 	};
 	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[]; events: readonly string[] }, capability: ExtensionCapability): boolean =>
-		(capability === "filter:tool-result"
+		// Generic capabilities are pack-principal-only. Keep this REST eligibility
+		// fence explicit even though hook manifest validation also keeps the two
+		// declaration vocabularies disjoint.
+		!extensionPackGrantCapabilities.includes(capability)
+		&& (capability === "filter:tool-result"
 			? hook.mode === "decide" && hook.capabilities.includes(capability) && hook.events.length === 1 && hook.events[0] === "afterToolResult"
 			: capability === "mutate"
 				? hook.mode === "decide" && hook.capabilities.includes("mutate")
