@@ -2,6 +2,15 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Dev UI stays grey after a source edit or pull
+
+- **Symptom**: after a TypeScript edit, `git pull`, or checkout, Vite reloads but the inline grey shell remains for tens of seconds. A proxy `ECONNABORTED` / `ECONNRESET` may appear during navigation.
+- **Cause**: Bobbit's large eager browser graph took one request per source module under Vite's unbundled dev server. Client timing showed `modules-evaluated` at 46.95 s while WebSocket auth plus a 1.1 MB transcript snapshot completed in the following 0.56 s; the gateway was not the bottleneck.
+- **Fix**: development enables Vite's bundled dev mode (`experimental.bundledDev`) so Rolldown serves a small set of in-memory chunks and performs incremental HMR. A separate-port proof reduced a warm full reload to 597 ms. Production keeps the normal mount-aware build configuration. Tailwind 4.3.3 needs the narrow `tailwindcssWithBundledDevGuard` compatibility shim from its merged upstream fix; remove that shim after upgrading to a release containing tailwindlabs/tailwindcss#20379.
+- **Service worker**: a production worker must never control Vite. In dev, `main.ts` unregisters the exact mounted worker and clears only that mount's Bobbit caches.
+- **Diagnostic**: enable Settings → Debug and inspect the latest `boot-timing.jsonl`. A long delay before `modules-evaluated` is Vite/browser loading; a delay after `ws-open` belongs to auth or snapshot recovery. Bundled dev requests `/assets/*.js`, not hundreds of `/src/**/*.ts` modules. Confirm `[boot]` / `[harness]` lifecycle logs before treating a proxy disconnect as a gateway restart.
+- **Pinning test**: `tests2/core/vite-bundled-dev.test.ts`.
+
 ## Project Settings save returns `PROJECT_CONFIG_LOAD_FAILED` or `PROJECT_CONFIG_PERSIST_FAILED`
 
 - **Symptom**: `PUT /api/projects/:id/config` or `PUT /api/project-config` returns 409 `PROJECT_CONFIG_LOAD_FAILED`, or 500 `PROJECT_CONFIG_PERSIST_FAILED`, instead of `{ ok: true }`.

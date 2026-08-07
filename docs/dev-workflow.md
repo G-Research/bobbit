@@ -107,6 +107,8 @@ before changing `node_modules`.
 
 **Rule of thumb**: UI is hot. Server is compiled. If you touched anything under `src/server/`, you need a rebuild + restart.
 
+Development uses Vite's bundled dev mode: Rolldown serves the large eager browser graph as a small set of in-memory chunks instead of one request per source module, while preserving incremental HMR for edits and multi-file operations. Dev mode also unregisters Bobbit's production service worker and removes only the current mount's worker caches. A proxy `ECONNABORTED` during navigation means the page cancelled its API request; confirm separate `[harness]` or gateway `[boot]` logs before treating it as a server restart.
+
 ---
 
 ## `node_modules` gets wiped while the dev server is running
