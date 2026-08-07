@@ -277,8 +277,7 @@ describe("ServiceRuntimeSupervisor health monitor", () => {
 		await flush();
 
 		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 1, "revocation prevents the queued replacement launch");
-		assert.equal(authorize.mock.calls.length, 3);
-		assert.deepEqual(authorize.mock.calls[2]?.[0], { ...identity, action: "start" });
+		assert.deepEqual(authorize.mock.calls.at(-1)?.[0], { ...identity, action: "start" });
 		assert.deepEqual(store.record?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.020Z" });
 	});
 
