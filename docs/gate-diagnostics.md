@@ -31,6 +31,23 @@ The gate store persists references to the retained diagnostics on the verificati
 
 The compact step output is still the source for default status views. The retained files are the source for explicit diagnostic inspection.
 
+## Pinned-verification operational evidence
+
+Pinned verification keeps server-only operational evidence for its signal-owned frozen checkout. The durable checkout lease records its lifecycle state, project/signal ownership, materialized inventory, and any cleanup attempt/error classification. A D-3 v1 lease records one validated commit/digest; a D-4 v2 lease records the aggregate witness plus ordered per-repository commit/digest identities and layout ownership. The active verification record separately retains the pinned attestation, sandbox-sidecar identity when applicable, and terminal-cleanup-pending status.
+
+This evidence exists so restart recovery can resume or clean up the *same* bytes and so operators can distinguish a real test failure from an unavailable, changed, substituted, or still-releasing checkout. Gate history and detail expose the signal `contentDigest`, its versioned `pinnedCheckout` attestation, and, when source attestation fails, only a fixed `PINNED_CHECKOUT_*` code/message. Checkout paths, private Git worktree locations, Docker IDs, and raw Git/OS errors remain server-private; normal `gate_status` and `gate_inspect` output remain compact.
+
+| Code | Operator-facing message | Meaning and next action |
+|---|---|---|
+| `PINNED_CHECKOUT_ACQUIRE_FAILED` | Frozen verification checkout could not be prepared. | Inspect server verification logs and correct the source/layout condition before re-signalling. |
+| `PINNED_CHECKOUT_MUTATED` | Frozen verification source changed during execution. | Treat the result as invalid; identify the writer and re-signal after it stops. |
+| `PINNED_CHECKOUT_UNREADABLE` | Frozen verification requires Docker and a prepared Bobbit sandbox image. | Start Docker and build the configured Bobbit sandbox image, then re-signal. Signalling never builds it automatically. |
+| `PINNED_CHECKOUT_UNSUPPORTED_LAYOUT` | Frozen verification does not support this project layout. | Correct the persisted component/repository layout; do not expect a live-worktree fallback. |
+
+These are the complete durable messages, including when an internal Docker, Git, path, or OS operation has a more detailed cause. See [Pinned multi-repo verification (D-4)](design/pinned-multi-repo-verification.md) for component-layout boundaries and the [D-5 end-to-end verification plan](design/pinned-gate-verification-e2e.md) for the real-process diagnostic lifecycle coverage.
+
+If a terminal result remains associated with active cleanup, do not delete its checkout directory manually. The manager owns retries and validates that a path is the exact lease root before removal. A failed cleanup remains durable with bounded backoff, including across gateway restart. For a source-attestation failure, inspect the named gate step and server verification logs, then re-signal only after the previous generation has drained. See [Pinned source verification](goals-workflows-tasks.md#pinned-source-verification) for cache and lifecycle semantics.
+
 ## Inspecting retained logs
 
 Use `gate_status` first to identify the failing gate and step. Then inspect that step with an explicit `gate_inspect` mode before rerunning tests:

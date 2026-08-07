@@ -75,4 +75,66 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 			process.off("unhandledRejection", listener);
 		}
 	});
+
+	it("creates a verification-only backend without initializing a mutable project container", async () => {
+		const manager = new SandboxManager({
+			bootstrap: async () => ({
+				projectId: "verification-only-project",
+				projectDir: process.cwd(),
+				repoUrl: "",
+				image: "prepared-verifier-image",
+			}),
+		});
+
+		await manager.ensureVerificationBackend("verification-only-project");
+		assert.equal(manager.has("verification-only-project"), true);
+		assert.equal(manager.get("verification-only-project")?.getStatus().status, "starting",
+			"verification preparation must not create the long-lived mutable project container");
+	});
+
+	it("requests a verification backend independently of direct-agent sandbox policy", async () => {
+		const purposes: string[] = [];
+		const manager = new SandboxManager({
+			bootstrap: async (_projectId, purpose) => {
+				purposes.push(purpose ?? "session");
+				return null;
+			},
+		});
+
+		await manager.ensureForProject("direct-project");
+		await manager.ensureVerificationBackend("direct-project");
+		assert.deepEqual(purposes, ["session", "verification"]);
+		assert.equal(manager.has("direct-project"), false);
+	});
+
+	it("does not replace an in-flight session sandbox with a verification-only instance", async () => {
+		const projectId = "concurrent-project";
+		const purposes: string[] = [];
+		let releaseInit!: () => void;
+		let sessionPublished!: () => void;
+		const initReleased = new Promise<void>((resolve) => { releaseInit = resolve; });
+		const sessionPublishedPromise = new Promise<void>((resolve) => { sessionPublished = resolve; });
+		const manager = new SandboxManager({
+			bootstrap: async (_id, purpose) => {
+				purposes.push(purpose ?? "session");
+				return { projectId, projectDir: process.cwd(), repoUrl: "", image: "prepared-verifier-image" };
+			},
+		});
+		const sessionSandbox = { getStatus: () => ({ projectId, status: "starting", containerId: "" }) };
+		(manager as any).initForProject = async () => {
+			(manager as any).sandboxes.set(projectId, sessionSandbox);
+			sessionPublished();
+			await initReleased;
+		};
+
+		const sessionInit = manager.ensureForProject(projectId);
+		await sessionPublishedPromise;
+		const verificationInit = manager.ensureVerificationBackend(projectId);
+		releaseInit();
+		await Promise.all([sessionInit, verificationInit]);
+
+		assert.equal(manager.get(projectId), sessionSandbox, "the session-owned sandbox remains registered after the race");
+		assert.equal((manager as any)._verificationOnlyProjects.has(projectId), false);
+		assert.deepEqual(purposes, ["session"], "verification must await the in-flight session bootstrap instead of replacing it");
+	});
 });

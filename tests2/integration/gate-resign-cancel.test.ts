@@ -4,11 +4,13 @@ import path from "node:path";
 import { expect, test } from "vitest";
 
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import type { VerificationCommandRunner } from "../../src/server/agent/verification-command-runner.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.js";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import { createManualClock, type ManualClock } from "../harness/clock.js";
+import { FakePinnedCheckoutManager } from "../harness/fake-pinned-checkout-manager.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 const GOAL_ID = "gate-resignal-suite-goal";
@@ -48,6 +50,7 @@ let clock: ManualClock;
 let goalStore: GoalStore;
 let gateStore: GateStore;
 let harness: VerificationHarness;
+let pinnedCheckoutManager: FakePinnedCheckoutManager;
 let events: any[];
 let notifications: Array<{ goalId: string; message: string }>;
 let signalSequence: number;
@@ -106,6 +109,27 @@ async function completeSignal(signal: GateSignal): Promise<void> {
 	await harness.verifyGateSignal(signal, GATE, stateDir);
 }
 
+/** Hold post-sync frozen materialization so cancellation is ordered before spawn. */
+function holdPinnedCheckoutAcquire(manager: FakePinnedCheckoutManager): {
+	waitForAcquire: () => Promise<void>;
+	releaseAcquire: () => void;
+} {
+	let observeAcquire!: () => void;
+	const acquireObserved = new Promise<void>(resolve => { observeAcquire = resolve; });
+	let release!: () => void;
+	const heldAcquire = new Promise<void>(resolve => { release = resolve; });
+	const acquire = manager.acquire.bind(manager);
+	manager.acquire = async (input) => {
+		observeAcquire();
+		await heldAcquire;
+		return acquire(input);
+	};
+	return {
+		waitForAcquire: () => acquireObserved,
+		releaseAcquire: () => release(),
+	};
+}
+
 function activeVerifications() {
 	return harness.getActiveVerifications(GOAL_ID);
 }
@@ -136,6 +160,7 @@ test.beforeEach(() => {
 		getContextForGoal: (goalId: string) => goalId === GOAL_ID ? context : undefined,
 	};
 
+	pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
 	harness = new VerificationHarness(
 		stateDir,
 		gateStore,
@@ -151,6 +176,7 @@ test.beforeEach(() => {
 			clock,
 			commandRunner: fakeGitRunner,
 			commandStepRunner: createFakeVerificationCommandRunner(),
+			pinnedCheckoutManager: pinnedCheckoutManager as any,
 		},
 	);
 	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
@@ -161,6 +187,40 @@ test.afterEach(() => {
 });
 
 test.describe("Gate Re-signal Cancellation", () => {
+	test("reset cancellation finalizes a queued command while frozen materialization is pending without spawning", async () => {
+		const checkout = holdPinnedCheckoutAcquire(pinnedCheckoutManager);
+		const baseRunner = createFakeVerificationCommandRunner();
+		let spawnCalls = 0;
+		const trackingRunner: VerificationCommandRunner = {
+			nonDurable: true,
+			spawn: spec => {
+				spawnCalls++;
+				return baseRunner.spawn(spec);
+			},
+		};
+		(harness as any).commandStepRunner = trackingRunner;
+		const signal = declareSignal("Reset before command spawn.");
+		const verification = harness.verifyGateSignal(signal, GATE, stateDir, undefined, "master");
+		await checkout.waitForAcquire();
+
+		const queued = activeVerifications().find(active => active.signalId === signal.id)?.steps.find(step => step.type === "command");
+		expect(queued?.commandSpawnState, "RESET_PRE_SPAWN_COMMAND_MUST_REMAIN_EXPLICITLY_QUEUED").toBe("queued");
+		expect(await harness.cancelStaleVerificationsForGates(GOAL_ID, [GATE_ID]), "RESET_PRE_SPAWN_CANCEL_MUST_NOT_WAIT_FOR_NONEXISTENT_PROCESS").toBe(true);
+		expect(spawnCalls, "RESET_PRE_SPAWN_CANCEL_MUST_NOT_START_A_COMMAND_AFTER_FINALIZATION").toBe(0);
+
+		checkout.releaseAcquire();
+		await verification;
+		expect(spawnCalls, "RESET_PRE_SPAWN_MATERIALIZATION_RESUME_MUST_NOT_SPAWN_CANCELLED_COMMAND").toBe(0);
+		expect(activeVerifications()).toEqual([]);
+		expect(signals().find(candidate => candidate.id === signal.id)?.verification).toMatchObject({
+			status: "failed",
+			steps: [{ name: "Cancelled", status: "failed" }],
+		});
+		expect(events).toContainEqual(expect.objectContaining({
+			type: "gate_verification_complete", signalId: signal.id, status: "cancelled",
+		}));
+	});
+
 	test("re-signaling a gate cancels the previous verification", async () => {
 		const signal1 = declareSignal("Signal v1");
 

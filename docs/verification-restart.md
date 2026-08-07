@@ -17,6 +17,22 @@ This ordering matters because process IDs and process-group IDs are reusable. A 
 
 `TrackedChild.ownershipReady` is the single public readiness boundary. Callers do not combine separate platform and container readiness promises: it resolves only when all ownership prerequisites for that spawn have succeeded, and rejects after fail-closed cleanup begins. Timeout clocks and shutdown-survival acknowledgement wait for this boundary, so a cold spawn cannot be timed out or preserved before Bobbit owns it.
 
+## Frozen source checkout boundary
+
+Process ownership answers *which process* Bobbit may clean up. Pinned verification answers *which source bytes* that process, a reviewer, or a sign-off decision may attest to. Every fresh verification signal first receives a server-owned checkout made from its complete non-ignored Git inventory. The checkout's raw-byte digest and full base commit are persisted on the signal and checked for post-acquisition step reuse, before each phase, after each phase, and before the terminal verdict.
+
+A route-level whole-gate cache materialization creates no checkout lease because it executes no process. It may reuse v1 evidence only for the same v1 layout. It may reuse v2 evidence only when the route independently observes the exact ordered, path-free current component witness; absent, mismatched, or v1/v2-transition evidence is a cache miss. This prevents an aggregate digest from treating a changed component identity as a prior pass.
+
+The public execution tree is source-only and has no usable Git metadata. A separate private detached worktree exists only for server-owned Git queries, such as creating a review baseline/diff context. Git uses fixed argument arrays, a validated full commit SHA, disabled repository hooks, and a trusted private cwd; no reviewer, sandbox, workflow command, or signal can select that Git cwd. This prevents Git discovery from an untrusted execution directory and prevents a sandbox from accessing repository metadata.
+
+Sandboxed fresh phases use an exact signal-labelled sidecar rather than the normal mutable project container worktree. Its only writable additions are manager-approved ignored output overlays derived from the frozen `.gitignore`; their reports or dependency links are deliberately outside the source inventory. The sidecar is removed before the next host audit. Therefore a check can generate ignored output without making a source mutation invisible, and a source mutation cannot become a pass just because the command exited successfully.
+
+The checkout and sidecar are resources with a durable terminal owner. After a pass, failure, cancellation, or restart, command cleanup completes first, then any sidecar is removed, then the checkout lease is released. A visible terminal gate result is not permission to forget these resources: an active verification record persists until that exact order converges. Retried cleanup is fail-closed and never targets an arbitrary historical path or process.
+
+Restart recovery reopens only the same ready lease after validating its project owner, signal id, pinned root identity, and source identity. A v1 lease validates its single repository commit/digest; a D-4 v2 lease also validates its ordered per-repository commit/digest manifest and aggregate digest. It never recreates a source snapshot from a now-mutable worktree. Missing, changed, unreadable, or substituted pinned state is a restart interruption/pending or fixed infrastructure failure according to the step lifecycle; it is not evidence for a pass.
+
+D-4 maps nested and multi-repository component locations through the persisted pinned layout, not through a live cwd. Recovery does not reconstruct that layout from the current parent, child, or sibling goal: it resumes only the executing goal's recorded layout, and fails closed if it cannot prove it. For cache behavior, diagnostics, and signal lifecycle, see [Goals, workflows, and tasks — Pinned source verification](goals-workflows-tasks.md#pinned-source-verification), [Pinned multi-repo verification (D-4)](design/pinned-multi-repo-verification.md), and the [D-5 end-to-end verification plan](design/pinned-gate-verification-e2e.md). The D-5 real-process integration E2E, rather than the browser fixture that injects a fake checkout manager, proves the full pinned-checkout diagnostic lifecycle.
+
 ## Spawn-time ownership
 
 ### POSIX
