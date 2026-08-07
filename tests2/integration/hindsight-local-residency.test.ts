@@ -12,12 +12,14 @@ class MemoryStore implements StoreLike {
 	async put<T>(key: string, value: T): Promise<void> { this.values.set(key, value); }
 }
 
+const EXTERNAL_DATABASE_URL = "postgresql://hindsight:integration-password@127.0.0.1:5432/hindsight";
+
 function localSettings() {
 	return {
 		runtimeMode: "local" as const, localLlmProvider: "openai-compatible", localLlmModelId: "qwen3-coder",
 		localLlmBaseUrl: "http://127.0.0.1:11434/v1", localLlmContextTokens: 32768,
 		localLlmMaxOutputTokens: 4096, localLlmResidency: "resident", localLlmKeepAlive: 3600,
-		ociImage: DEFAULT_HINDSIGHT_OCI_IMAGE, databaseMode: "managed-volume",
+		ociImage: DEFAULT_HINDSIGHT_OCI_IMAGE, databaseMode: "external" as const,
 	};
 }
 
@@ -30,7 +32,7 @@ afterEach(() => __setClientFactory(null));
 
 describe("Hindsight local resident model integration", () => {
 	it("preserves resident local settings and reuses one ready runtime endpoint across retain and reflect", async () => {
-		const validated = validateHindsightRuntimeSettings(localSettings(), {}, true);
+		const validated = validateHindsightRuntimeSettings(localSettings(), { externalDatabaseUrl: EXTERNAL_DATABASE_URL }, true);
 		assert.equal(validated.ok, true);
 		if (validated.ok) assert.equal(validated.model?.residency, "resident");
 
