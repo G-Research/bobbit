@@ -37,19 +37,21 @@ generic over hook and pack principals.
 |---|---|---|
 | Data/control flow | One owner and one current grant read at the application fence; the discriminator selects the exact tuple key. | Two durable readers and audit streams; generic callers must choose or merge owners and define precedence. |
 | Expected files | Extends the five existing ownership/control areas above, their already-registered tests, and the existing documentation. | Adds a config/audit store, routes, client API/types, a separate Market UI, resolver, test suite, and documentation set. |
-| Failure modes | A union-validation regression could mishandle a hook row; independent invalid-row dropping and legacy-shape round-trip tests bound that risk. | State/audit/outbox divergence, inconsistent deny-wins and recovery semantics, duplicated operator-auth checks, and UI state drift between permission surfaces. |
+| Failure modes | A union-validation regression could mishandle a hook row; discriminator-free legacy canonicalization, independent invalid-row dropping, and full-key tests bound that risk. | State/audit/outbox divergence, inconsistent deny-wins and recovery semantics, duplicated operator-auth checks, and UI state drift between permission surfaces. |
 | Test seams | Reuses the listed config, policy, audit, route, and Market seams, with targeted pack-principal cases alongside hook cases. | Requires parallel storage/recovery/auth/browser seams and cross-owner merge tests in addition to existing hook coverage. |
 
 Option B loses because it directly violates the hard single-state-owner constraint, roughly doubles
 the audit/outbox/auth defect surface, and gives up the existing pinning tests. Option A's meaningful
-risk is its legacy normalizer branch; the required legacy byte-compatible round-trip and
-independent-row-drop coverage specifically protects it.
+risk is its legacy normalizer branch; coverage for discriminator-free legacy canonicalization,
+unknown-key stripping, and independent-row dropping specifically protects it.
 
 ## Decision
 
 Keep `ProjectConfigStore.extension_grants` and `ExtensionGrantAuditStore` as the only durable
-state owners, but make their rows a compatible discriminated union. Existing hook records stay
-exactly as they are. A new **pack** principal grants the same exact project/pack capability to
+state owners, but make their rows a compatible discriminated union. Valid legacy hook records
+retain their discriminator-free durable shape; the existing normalizer continues to canonicalize
+that shape when it strips tolerated unknown fields. A new **pack** principal grants the same exact
+project/pack capability to
 that pack's service lifecycle, panels/routes, and agent tools:
 
 ```ts
@@ -231,10 +233,13 @@ extension_grants:
     grantedBy: admin
 ```
 
-Validation requires safe identifiers, a canonical timestamp, the closed capability, and exactly
-the fields of the matching row shape. A legacy hook row with an added principal field, a pack row
-with `hookId`, an unknown principal, unsafe identifier, or malformed row is dropped independently.
-That preserves valid sibling rows and default-denies bad data.
+Validation requires safe identifiers, a canonical timestamp, and a closed capability. Pack rows
+must contain exactly their matching fields. For backward compatibility, a legacy hook row must
+omit `principal` and contain a safe `hookId`, but may include unknown legacy fields; the normalizer
+retains its recognized hook tuple and strips those extra fields when it serializes. A legacy hook
+row with any added `principal` field, a pack row with `hookId`, an unknown principal, unsafe
+identifier, or malformed required field is dropped independently. That preserves valid sibling
+rows and default-denies bad data.
 
 Deduplicate only on the full key:
 
@@ -242,8 +247,9 @@ Deduplicate only on the full key:
 - pack: `(packId, "pack", capability)`.
 
 A replacement keeps the last valid occurrence as today. Empty state removes `extension_grants`.
-A failed atomic write leaves the old snapshot usable. Existing hook YAML loads and serializes with
-identical semantics; there is no migration, loss, or reinterpretation of `hookId`.
+A failed atomic write leaves the old snapshot usable. Existing valid hook YAML loads and
+serializes with the same discriminator-free grant semantics; tolerated unknown legacy fields are
+canonicalized away, and there is no migration or reinterpretation of `hookId`.
 
 ## Generic administrative API and audit
 
@@ -255,7 +261,7 @@ Keep the current routes and normal-auth reads, generalizing them without a Hinds
 | `PUT` | `/api/projects/:id/extension-grants` | Accepts exactly one legacy hook body `{ packId, hookId, capability }` or one pack body `{ packId, principal: "pack", capability }`. Server stamps actor/time. |
 | `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Unchanged legacy-hook revoke route. |
 | `DELETE` | `/api/projects/:id/extension-grants/:packId/principals/pack/:capability` | New exact pack revoke route. The `principals` segment avoids treating a valid legacy hook id named `pack` as a pack principal. |
-| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Existing bounded 1–200 chronological list, now with a backward-readable audit union. |
+| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Existing bounded 1–200 list: select the newest stored rows, then return them in stored append order (earliest to latest within that window). The audit union remains backward-readable. |
 
 `PUT` resolves the project before consulting the registry, validates body shape/closed strings,
 then verifies the matching active pack and platform capability matrix. It returns `400` for
@@ -282,8 +288,10 @@ export type ExtensionGrantAuditEntry =
       principal: "pack"; capability: ExtensionCapability };
 ```
 
-Legacy JSONL rows remain valid and listable unchanged. The outbox reference is the same
-principal-aware union key plus action. Append-after-config, queueing, restart recovery, exact
+Legacy JSONL rows remain valid and listable unchanged. Audit reads select the newest bounded
+window but preserve JSONL append order; callers receive its earliest row first and must not assume
+the API sorts by `at`. The outbox reference is the same principal-aware union key plus action.
+Append-after-config, queueing, restart recovery, exact
 failed-revoke retry, duplicate suppression, corrupt-line skipping, safe errors, and
 `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` partial-success behavior remain unchanged. A no-op revoke
 creates neither authority nor audit event; an exact retry drains only that matching hook or pack
@@ -344,7 +352,7 @@ packs remain visible; legacy rows display as Hook and new rows display as Pack.
 | `docs/design/non-hook-extension-grants.md` | Record the selected compatible union, comparative rationale, public resolver handoff, exact file/test plan, and non-goals; no Hindsight behavior belongs here. |
 | `src/server/agent/project-config-store.ts` | Add exactly the six closed values; extend `ExtensionGrant`, cloning, normalization, validation, and full-key dedupe to the discriminator-free hook / `principal: "pack"` union while retaining YAML serialization semantics. |
 | `src/server/agent/extension-grant-policy.ts` | Export `ExtensionGrantPrincipal`, `ExtensionGrantDecision`, `ExtensionCapabilityGrantResolver`, and `createExtensionCapabilityGrantResolver()`; retain `resolveExtensionGrant()` as the hook-compatible pure path. The factory receives the existing `PackContributionResolver` and a closure backed by `ProjectContextManager.getOrCreate(projectId)`. |
-| `src/server/agent/extension-grant-audit-store.ts` | Generalize `ExtensionGrantAuditEntry` and `ExtensionGrantAuditRef` to the same principal union, including normalizer, equality, outbox, duplicate, and recovery keys; legacy hook JSONL remains readable. |
+| `src/server/agent/extension-grant-audit-store.ts` | Generalize `ExtensionGrantAuditEntry` and `ExtensionGrantAuditRef` to the same principal union, including normalizer, equality, outbox, duplicate, and recovery keys; legacy hook JSONL remains readable and the newest bounded window retains append order. |
 | `src/server/server.ts` | Wire the live resolver from `projectContextManager.getOrCreate()` and `packContributionRegistry`; generalize grant GET/PUT/audit projections, add the pack DELETE route, preserve hook route/auth behavior, require the existing signed operator proof for all six pack mutations, and invalidate/reconcile after authority changes. |
 | `src/server/extension-host/service-extension-runtime.ts` | Inject the shared resolver at desired-service selection and before publish after awaited launch/readiness boundaries; `service.manage` denial prevents start or publication and drives ordinary reconcile/stop. |
 | `src/app/api.ts` | Extend `ExtensionCapabilityWire`, make `ExtensionCapabilityGrantTuple` a hook/pack union, add `PackGrantStatusWire` and optional `ExtensionSettingsTargetWire.packGrant`, and choose the established hook or pack revoke URL from that union. |
@@ -372,8 +380,9 @@ Implementation updates affected tests and registers every new file in `tests2/te
    hook use of a pack capability deny. Prove exact pack scoping and that a grant on pack A cannot
    authorize pack B.
 2. **Core audit/outbox** (`extension-grant-audit-store`): legacy audit rows remain readable; pack
-   rows record `principal: "pack"`; malformed mixed rows are ignored; grant/revoke restart
-   recovery and duplicate suppression are principal-aware and secret-free.
+   rows record `principal: "pack"`; malformed mixed rows are ignored; the newest bounded audit
+   window remains in stored append order; grant/revoke restart recovery and duplicate suppression
+   are principal-aware and secret-free.
 3. **Integration routes** (`extension-capability-grants`): normal-auth reads; verified operator
    requirement for every new capability; active-pack-only PUT; stale-pack DELETE; canonical
    actor/time; exact audit rows; invalid input/capability responses; cache/WS invalidation; audit
