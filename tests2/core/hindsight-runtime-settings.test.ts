@@ -13,7 +13,7 @@ import {
 	redactEndpointHost,
 	validateHindsightRuntimeSettings,
 } from "../../market-packs/hindsight/src/runtime-settings.ts";
-import { hindsightStorageIdentity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
+import { hindsightStorageContinuity, hindsightStorageIdentity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const descriptorPath = path.join(root, "market-packs/hindsight/providers/memory.yaml");
@@ -51,19 +51,28 @@ describe("Hindsight EP-7 runtime settings", () => {
 		if (saved.ok) assert.deepEqual(saved.warnings, ["OCI_REFERENCE_MUTABLE_TAG"]);
 	});
 
-	it("derives opaque durable continuity identities without retaining database credentials", () => {
-		const managed = hindsightStorageIdentity("/state/service-data/../service-data/hindsight", "managed-volume");
-		assert.match(managed, /^hindsight-managed:[a-f0-9]{64}$/);
-		assert.equal(managed, hindsightStorageIdentity("/state/service-data/hindsight", "managed-volume"));
+	it("binds continuity to the actual mode backing and redacts external credentials", () => {
+		const compose = hindsightStorageContinuity("compose", "managed-volume");
+		assert.equal(compose.continuity, "verified");
+		assert.match(compose.identity, /^hindsight-compose-volume:[a-f0-9]{64}$/);
+		assert.equal(compose.identity, hindsightStorageIdentity("compose", "managed-volume"));
 
-		const secretUrl = "postgresql://alice:super-secret@DB.example:5432/hindsight?sslmode=require&token=also-secret";
-		const external = hindsightStorageIdentity("/ignored", "external", secretUrl);
+		const local = hindsightStorageContinuity("local", "managed-volume");
+		const docker = hindsightStorageContinuity("docker", "managed-volume");
+		assert.deepEqual(local, { identity: "hindsight-unverified-managed:local", continuity: "unsupported" });
+		assert.deepEqual(docker, { identity: "hindsight-unverified-managed:docker", continuity: "unsupported" });
+
+		const secretUrl = "postgresql://alice:super-secret@DB.example:5432/hindsight?application_name=bobbit&sslmode=require&password=query-secret";
+		const external = hindsightStorageIdentity("compose", "external", secretUrl);
 		assert.match(external, /^hindsight-external:[a-f0-9]{64}$/);
-		assert.equal(external, hindsightStorageIdentity("/ignored", "external", "postgresql://other-user:other-secret@db.example/hindsight"), "credential rotation preserves the same database continuity identity");
+		assert.equal(external, hindsightStorageIdentity("docker", "external", "postgresql://alice:rotated-secret@db.example/hindsight?sslmode=require&application_name=bobbit&password=rotated-query-secret"), "password-only rotation preserves continuity");
+		assert.notEqual(external, hindsightStorageIdentity("docker", "external", "postgresql://other-user:rotated-secret@db.example/hindsight?application_name=bobbit&sslmode=require"), "a database username selects a different backing");
+		assert.notEqual(external, hindsightStorageIdentity("docker", "external", "postgresql://alice:rotated-secret@db.example/other?application_name=bobbit&sslmode=require"), "a database name selects a different backing");
+		assert.notEqual(external, hindsightStorageIdentity("docker", "external", "postgresql://alice:rotated-secret@db.example/hindsight?application_name=bobbit&sslmode=disable"), "behaviorally meaningful options select a different backing");
 		assert.ok(!external.includes("alice") && !external.includes("secret") && !external.includes("db.example"));
-		assert.throws(() => hindsightStorageIdentity("/ignored", "external", "not a database URL"), { code: "SERVICE_SETTING_UNAVAILABLE" });
+		assert.throws(() => hindsightStorageIdentity("compose", "external", "not a database URL"), { code: "SERVICE_SETTING_UNAVAILABLE" });
 		try {
-			hindsightStorageIdentity("/ignored", "external", "mysql://alice:super-secret@db.example/hindsight");
+			hindsightStorageIdentity("compose", "external", "mysql://alice:super-secret@db.example/hindsight");
 			assert.fail("an unsupported external database URL must fail closed");
 		} catch (error) {
 			assert.equal((error as { code?: unknown }).code, "SERVICE_SETTING_UNAVAILABLE");

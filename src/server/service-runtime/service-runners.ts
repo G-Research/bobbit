@@ -634,20 +634,21 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Only the declared Compose service may publish ports");
 		}
 		if (rawService.volumes !== undefined) {
-			if (!declaredStorage || !Array.isArray(rawService.volumes)) {
-				throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose storage is undeclared");
-			}
+			if (!Array.isArray(rawService.volumes)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume is invalid");
 			for (const volume of rawService.volumes) {
 				if (typeof volume !== "string") throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume is invalid");
 				const bind = volume.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}:([^:]+)$/);
 				const named = volume.match(/^([A-Za-z0-9][A-Za-z0-9_.-]*):([^:]+)$/);
 				const environmentSource = bind ? input.manifest.environment[bind[1]!] : undefined;
-				const validBind = !!bind && !!input.storage && !!environmentSource && "setting" in environmentSource
+				const validBind = !!bind && !!declaredStorage && !!input.storage && !!environmentSource && "setting" in environmentSource
 					&& environmentSource.setting === declaredStorage.setting && input.environment[bind[1]!] === input.storage.hostPath
 					&& bind[2] === declaredStorage.target && bind[2] === input.storage.target;
-				const validNamed = !!named && namedVolumes.has(named[1]!) && named[2] === declaredStorage.target;
+				// A descriptor-owned Compose named volume is a valid durable backing
+				// even when no generic host bind is declared. It stays constrained to
+				// the YAML's own key; custom/external volume declarations are rejected.
+				const validNamed = !!named && namedVolumes.has(named[1]!);
 				if (!validBind && !validNamed) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume escapes declared storage");
-				storageMounts++;
+				if (validBind) storageMounts++;
 			}
 		}
 	}

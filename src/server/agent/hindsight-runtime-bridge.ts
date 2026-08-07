@@ -119,14 +119,21 @@ export class HindsightRuntimeSettingsResolver {
 		const materialized = materializeHindsightRuntimeSettings(publicRuntimeValues(runtime.values), runtime.revision, secretValues(runtime.values));
 		if (!materialized.ok) throw new ServiceRuntimeError(materialized.code);
 		if (materialized.mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
-		const dataDir = this.ownedDataDir(resolved.dataDir);
+		const continuity = hindsightStorageContinuity(materialized.mode, resolved.databaseMode, materialized.secrets.externalDatabaseUrl);
+		const values = Object.freeze({ ...materialized.values });
+		const resolvedSecrets = Object.freeze({ ...materialized.secrets });
 		return {
 			mode: materialized.mode,
 			revision: materialized.revision,
-			values: materialized.values,
-			storage: { dataPath: dataDir, ownedRoot: path.join(this.context.stateDir, "service-data") },
-			imageOverride: materialized.values.HINDSIGHT_OCI_IMAGE,
-			storageIdentity: hindsightStorageIdentity(dataDir, resolved.databaseMode, materialized.secrets.externalDatabaseUrl),
+			values,
+			// The descriptor declares no host bind. In particular, `dataDir` is a
+			// legacy setting and is not evidence that Hindsight 0.8.6 consumes it.
+			// Keep public values, secret bytes, revision, and continuity from this
+			// one EP-7 resolution together through materialization.
+			resolvedSecrets,
+			imageOverride: values.HINDSIGHT_OCI_IMAGE,
+			storageIdentity: continuity.identity,
+			storageContinuity: continuity.continuity,
 		};
 	}
 
@@ -184,14 +191,6 @@ export class HindsightRuntimeSettingsResolver {
 		return provider;
 	}
 
-	private ownedDataDir(raw: string | undefined): string {
-		const root = path.resolve(this.context.stateDir, "service-data");
-		const text = raw && raw.length > 0 ? raw : path.join(root, HINDSIGHT_RUNTIME_ID);
-		const expanded = text.replaceAll("${stateDir}", this.context.stateDir);
-		const resolved = path.resolve(expanded);
-		if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
-		return resolved;
-	}
 }
 
 /**
@@ -368,20 +367,54 @@ function safeProjectToken(projectId: string): string {
 }
 
 /**
- * This is deliberately an opaque durable continuity key, not a connection
- * string or host path. Credential changes for the same external database do
- * not change continuity; database target changes do.
+ * Continuity identities name the storage Hindsight actually uses, never an
+ * unused host `dataDir`. Compose's `hindsight-postgres` is an owned named
+ * volume; external PostgreSQL is identified by a canonical target. The local
+ * and Docker managed modes have no verified Hindsight 0.8.6 durable-storage
+ * contract, so any replacement is fenced before it can discard a bank.
  */
-export function hindsightStorageIdentity(dataDir: string, databaseMode: "managed-volume" | "external", externalDatabaseUrl?: string): string {
+export function hindsightStorageContinuity(
+	runtimeMode: "local" | "docker" | "compose",
+	databaseMode: "managed-volume" | "external",
+	externalDatabaseUrl?: string,
+): { identity: string; continuity: "verified" | "unsupported" } {
+	if (databaseMode === "external") {
+		return { identity: hindsightStorageIdentity(runtimeMode, databaseMode, externalDatabaseUrl), continuity: "verified" };
+	}
+	if (runtimeMode === "compose") {
+		return { identity: hindsightStorageIdentity(runtimeMode, databaseMode), continuity: "verified" };
+	}
+	return { identity: hindsightStorageIdentity(runtimeMode, databaseMode), continuity: "unsupported" };
+}
+
+/** Opaque durable key only: no target path or credential can surface from it. */
+export function hindsightStorageIdentity(
+	runtimeMode: "local" | "docker" | "compose",
+	databaseMode: "managed-volume" | "external",
+	externalDatabaseUrl?: string,
+): string {
 	if (databaseMode === "managed-volume") {
-		return `hindsight-managed:${createHash("sha256").update(path.normalize(dataDir)).digest("hex")}`;
+		if (runtimeMode === "compose") {
+			// This is the exact descriptor-declared named volume key. Compose owns
+			// its server-scoped physical name and preserves it on ordinary `down`.
+			return `hindsight-compose-volume:${createHash("sha256").update("hindsight-postgres").digest("hex")}`;
+		}
+		return `hindsight-unverified-managed:${runtimeMode}`;
 	}
 	if (!externalDatabaseUrl) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
 	try {
 		const url = new URL(externalDatabaseUrl);
 		const protocol = url.protocol.toLowerCase() === "postgres:" ? "postgresql:" : url.protocol.toLowerCase();
 		if (protocol !== "postgresql:" || !url.hostname || !url.pathname || url.pathname === "/") throw new Error("invalid external database target");
-		const target = `${protocol}//${url.hostname.toLowerCase()}:${url.port || "5432"}${url.pathname}`;
+		const username = url.username;
+		const options = [...url.searchParams.entries()]
+			// User-info and `password` query parameters are credentials, not backing
+			// identity. Other libpq options can alter database behavior and remain.
+			.filter(([name]) => name.toLowerCase() !== "password")
+			.sort(([leftName, leftValue], [rightName, rightValue]) => leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue))
+			.map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+			.join("&");
+		const target = `${protocol}//${username}@${url.hostname.toLowerCase()}:${url.port || "5432"}${url.pathname}${options ? `?${options}` : ""}`;
 		return `hindsight-external:${createHash("sha256").update(target).digest("hex")}`;
 	} catch {
 		throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");

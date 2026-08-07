@@ -54,6 +54,14 @@ export interface ServiceRuntimeSettings {
 	imageOverride?: string;
 	/** Opaque settings-owner continuity key. The supervisor compares but never interprets it. */
 	storageIdentity?: string;
+	/**
+	 * Secrets resolved alongside `values` and `revision` for this exact explicit
+	 * control request. When present, materialization must not re-read the secret
+	 * owner: doing so could combine a new credential with old public settings.
+	 */
+	resolvedSecrets?: Readonly<Record<string, string | undefined>>;
+	/** A settings owner may fail closed where a selected backing is not durable. */
+	storageContinuity?: "verified" | "unsupported";
 }
 
 /** Settings are resolved only for explicit control or durable reconciliation. */
@@ -405,6 +413,16 @@ export class ServiceRuntimeSupervisor {
 			const contribution = this.requireContribution(request);
 			const settings = await this.resolveControlSettings(request, contribution);
 			const prior = await this.options.store.load(identity);
+			// An unsupported backing may keep serving its exact already-ready
+			// resource, but it must fail closed before any start path could remove
+			// and recreate it. Inspection is read-only and does not resolve secrets.
+			if (prior && settings.storageContinuity === "unsupported") {
+				if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
+					this.startHealthMonitor(identity, this.restartRequest(request), contribution);
+					return recordContext(identity, prior);
+				}
+				throw new ServiceRuntimeError("SERVICE_CONTINUITY_REQUIRED");
+			}
 			this.assertStorageContinuity(prior, settings);
 			// A durable endpoint is only reusable when it names the current settings
 			// revision and the adapter proves that exact resource is still present.
@@ -521,8 +539,9 @@ export class ServiceRuntimeSupervisor {
 		// Both sides are optional to preserve generic runtimes that do not own a
 		// continuity key. A legacy record without one is safely blocked if its
 		// settings owner now resolves one, rather than guessing that an unknown
-		// existing bank can be replaced.
-		if (prior && prior.storageIdentity !== settings.storageIdentity) {
+		// existing bank can be replaced. An explicitly unsupported backing must
+		// never be torn down/replaced as though it preserved durable state.
+		if (prior && (settings.storageContinuity === "unsupported" || prior.storageIdentity !== settings.storageIdentity)) {
 			throw new ServiceRuntimeError("SERVICE_CONTINUITY_REQUIRED");
 		}
 	}
@@ -605,9 +624,14 @@ export class ServiceRuntimeSupervisor {
 				const value = await this.options.store.getOrCreateGeneratedSecret(identity, source.generatedSecret);
 				environment[name] = value; secrets.push(value);
 			} else {
-				const value = this.options.settings.resolveSecret
-					? await this.options.settings.resolveSecret(source.secret, { ...request, contribution })
-					: await this.options.store.resolveUserSecret(source.secret);
+				// A resolver-provided map is an immutable EP-7 snapshot. Never fall
+				// through to resolveSecret when it is present: a concurrent settings
+				// save must not splice new secret bytes into old public settings.
+				const value = settings.resolvedSecrets
+					? settings.resolvedSecrets[source.secret]
+					: this.options.settings.resolveSecret
+						? await this.options.settings.resolveSecret(source.secret, { ...request, contribution })
+						: await this.options.store.resolveUserSecret(source.secret);
 				if (!value) {
 					if (source.optional === true) continue;
 					throw new ServiceRuntimeError("SERVICE_SECRET_UNAVAILABLE");

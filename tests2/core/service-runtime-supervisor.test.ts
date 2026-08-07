@@ -120,7 +120,7 @@ function supervisor(input: {
 	runners?: ServiceRunner[];
 	clock?: ServiceRuntimeClock;
 	probe?: ReturnType<typeof vi.fn>;
-	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined>; storageIdentity?: string };
+	settings?: { mode: "local" | "docker" | "compose"; revision: string; values: Record<string, string | undefined>; storageIdentity?: string; storageContinuity?: "verified" | "unsupported"; resolvedSecrets?: Readonly<Record<string, string | undefined>> };
 	authorize?: ReturnType<typeof vi.fn>;
 	resolveSecret?: ReturnType<typeof vi.fn>;
 } = {}) {
@@ -192,6 +192,28 @@ describe("ServiceRuntimeSupervisor", () => {
 		assert.ok(!JSON.stringify(store.replaceCalls).includes("user-secret"));
 		assert.ok(!JSON.stringify(store.replaceCalls).includes("generated-TOKEN"));
 		assert.deepEqual(store.logCalls, [{ output: "USER_SECRET=user-secret generated-TOKEN", redactions: ["user-secret", "generated-TOKEN"] }]);
+	});
+
+	it("materializes only the resolved secret snapshot and redacts it without a second secret lookup", async () => {
+		const local = runner("local", { start: async (input) => {
+			assert.equal(input.environment.USER_SECRET, "snapshot-secret");
+			assert.deepEqual(input.redactions, ["snapshot-secret", "generated-TOKEN"]);
+			return { endpoint, runnerIdentity: { kind: "local", id: "local-snapshot" }, services: [] };
+		} });
+		const resolveSecret = vi.fn(async () => "newly-rotated-secret");
+		const { instance, store } = supervisor({
+			runners: [local],
+			resolveSecret,
+			settings: {
+				mode: "local", revision: "revision-snapshot", values: { configValue: "configured" },
+				resolvedSecrets: { apiKey: "snapshot-secret" },
+			},
+		});
+
+		await expect(instance.start({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready" });
+		assert.equal(resolveSecret.mock.calls.length, 0, "a control uses its immutable settings/secret snapshot");
+		assert.deepEqual(store.environmentCalls[0], { FIXED: "fixed", CONFIG: "configured", USER_SECRET: "snapshot-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080" });
+		assert.ok(!JSON.stringify(store.replaceCalls).includes("snapshot-secret"));
 	});
 
 	it("keeps context, status, and diagnostics read-only while reporting a missing inspected service as degraded", async () => {
@@ -427,6 +449,30 @@ describe("ServiceRuntimeSupervisor", () => {
 		const status = await instance.status(identity);
 		assert.deepEqual(status, { identity, desired: "running", mode: "local", state: "degraded", diagnostic: { code: "SERVICE_DOWN" } });
 		assert.ok(!JSON.stringify(status).includes("new-bank"), "continuity identities never surface in status");
+	});
+
+	it("blocks an unverified managed backing before a restart removes it", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({
+			endpoint,
+			runnerIdentity: { kind: "local", id: "ephemeral-hindsight" },
+			storageIdentity: "hindsight-unverified-managed:local",
+		}));
+		const local = runner("local");
+		const { instance } = supervisor({
+			store,
+			runners: [local],
+			settings: {
+				mode: "local", revision: "revision-2", values: { configValue: "configured" },
+				storageIdentity: "hindsight-unverified-managed:local", storageContinuity: "unsupported",
+			},
+		});
+
+		await expect(instance.restart({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_CONTINUITY_REQUIRED" });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(store.records.get(store.key(identity))?.storageIdentity, "hindsight-unverified-managed:local");
 	});
 
 	it("uses the established stop-then-start path when restart continuity matches", async () => {
