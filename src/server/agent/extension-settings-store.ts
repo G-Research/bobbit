@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import {
   ExtensionSettingsSecretPersistenceError,
   ExtensionSettingsSecretStore,
+  isExtensionSettingsCommitId,
   validateExtensionSettingsSecretChanges,
   type ExtensionSettingsSecretChanges,
   type ExtensionSettingsSecretTargetRef,
@@ -23,6 +25,8 @@ export interface ExtensionSettingsRecord {
 export interface ExtensionSettingsState {
   schema: 1;
   revision: number;
+  /** Opaque identity paired with the owner-only secret envelope. */
+  commitId?: string;
   targets: Record<string, ExtensionSettingsRecord>;
 }
 
@@ -143,7 +147,9 @@ function assertState(state: unknown): asserts state is ExtensionSettingsState {
   // the scalar before checking it so the assertion is sound rather than
   // relying on a property access that remains `unknown` to TypeScript.
   const revision = isPlainObject(state) ? state.revision : undefined;
-  if (!isPlainObject(state) || state.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || !isPlainObject(state.targets)) {
+  const commitId = isPlainObject(state) ? state.commitId : undefined;
+  if (!isPlainObject(state) || state.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+    || (commitId !== undefined && !isExtensionSettingsCommitId(commitId)) || !isPlainObject(state.targets)) {
     throw new ExtensionSettingsUnavailableError();
   }
   for (const record of Object.values(state.targets)) {
@@ -253,6 +259,9 @@ export class ExtensionSettingsStore {
     defaults: Readonly<Record<string, ExtensionSettingValue>>,
     options: ExtensionSettingsEffectiveOptions = {},
   ): Record<string, ExtensionSettingValue> {
+    // Pair before combining any public value with an owner-only read. A public
+    // candidate and an older secret file can both be durable after a crash.
+    this.secretStore.assertCommitId(this.getPublicState().commitId);
     const effective = this.getEffective(ref, defaults, options);
     const values = { ...effective.values };
     for (const field of options.secretFields ?? []) {
@@ -293,6 +302,9 @@ export class ExtensionSettingsStore {
     if (current.revision !== expectedRevision) throw new ExtensionSettingsRevisionConflictError();
     const candidate = cloneState(current);
     candidate.revision++;
+    // Every mutation, including a public-only one, gets a fresh identity. The
+    // secret store publishes an envelope even if none of its field bytes change.
+    candidate.commitId = randomUUID();
 
     for (const mutation of mutations) {
       const key = extensionSettingsTargetKey(mutation.ref);
@@ -316,7 +328,9 @@ export class ExtensionSettingsStore {
         : [],
     );
     try {
-      if (secretMutations.length > 0) this.secretStore.updateMany(secretMutations);
+      // Always publish the envelope. Otherwise a public-only endpoint change
+      // would leave a stale secret identity that runtime could not safely pair.
+      this.secretStore.updateMany(secretMutations, candidate.commitId);
     } catch (error) {
       // Restore the precise snapshot that was current at the successful CAS.
       // A successful rollback preserves the original revision for a retry.

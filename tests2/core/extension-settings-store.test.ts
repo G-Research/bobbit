@@ -9,6 +9,7 @@ import {
 	extensionSettingsTargetKey,
 } from "../../src/server/agent/extension-settings-store.js";
 import {
+	ExtensionSettingsSecretCommitMismatchError,
 	ExtensionSettingsSecretPersistenceError,
 	ExtensionSettingsSecretStore,
 } from "../../src/server/agent/extension-settings-secret-store.js";
@@ -50,9 +51,10 @@ describe("extension settings store", () => {
 		publicState.targets[targetKey].values.endpoint = "changed-only-in-test";
 		expect(store.getPublicState().targets[targetKey].values.endpoint).toBe("https://one.example");
 		const onDisk = yaml.parse(fs.readFileSync(path.join(configDir, "project.yaml"), "utf-8")) as Record<string, unknown>;
-		expect(onDisk.extension_settings).toEqual({
+		expect(onDisk.extension_settings).toMatchObject({
 			schema: 1,
 			revision: 5,
+			commitId: expect.any(String),
 			targets: { [targetKey]: { enabled: true, values: { endpoint: "https://one.example", enabled: true, limit: 7 } } },
 		});
 
@@ -127,6 +129,7 @@ describe("extension settings store", () => {
 			values: { endpoint: "https://previous.example" },
 			secrets: { credential: oldSecret },
 		});
+		const priorCommitId = store.getPublicState().commitId;
 		const originalWrite = memFs.writeFileSync.bind(memFs);
 		memFs.writeFileSync = (file, ...args) => {
 			if (String(file).includes("extension-settings-secrets.json")) throw new Error("injected failure");
@@ -144,7 +147,7 @@ describe("extension settings store", () => {
 		}
 		expect(thrown).toBeInstanceOf(ExtensionSettingsSecretPersistenceError);
 		expect(thrown).not.toHaveProperty("committedRevision");
-		expect(store.getPublicState()).toEqual({ schema: 1, revision: 1, targets: { [targetKey]: { values: { endpoint: "https://previous.example" } } } });
+		expect(store.getPublicState()).toMatchObject({ schema: 1, revision: 1, commitId: priorCommitId, targets: { [targetKey]: { values: { endpoint: "https://previous.example" } } } });
 		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toEqual({ endpoint: "https://previous.example", credential: oldSecret });
 
 		memFs.writeFileSync = originalWrite;
@@ -181,10 +184,11 @@ describe("extension settings store", () => {
 		}
 		expect(thrown).toBeInstanceOf(ExtensionSettingsUnavailableError);
 		expect(thrown).toMatchObject({ code: "EXTENSION_SETTINGS_UNAVAILABLE", committedRevision: 1 });
-		expect(store.getPublicState()).toEqual({ schema: 1, revision: 1, targets: { [targetKey]: { values: {} } } });
+		expect(store.getPublicState()).toMatchObject({ schema: 1, revision: 1, targets: { [targetKey]: { values: {} } } });
 		expect(String(thrown)).not.toContain("must-not-escape");
 		expect(JSON.stringify(thrown)).not.toContain("must-not-escape");
 		expect(thrown).not.toHaveProperty("cause");
+		expect(() => store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
 	});
 
 	it("publishes multiple target secrets all-or-nothing in one owner-only replacement", () => {
@@ -224,6 +228,94 @@ describe("extension settings store", () => {
 		expect(store.getPublicState()).toEqual(before);
 		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] }).credential).toBe("previous-provider-secret");
 		expect(store.getForRuntime(secondRef, {}, { secretFields: ["credential"] }).credential).toBe("previous-hook-secret");
+	});
+
+	it("rejects mismatched, partial commit identities before returning secret bytes", () => {
+		const memFs = createMemFs();
+		const configDir = "/memfs/settings-config";
+		const stateDir = "/memfs/settings-state";
+		const config = new ProjectConfigStore(configDir, memFs);
+		const secrets = new ExtensionSettingsSecretStore(stateDir, memFs);
+		const store = new ExtensionSettingsStore(config, secrets);
+		store.compareAndSwap(ref, 0, { values: { endpoint: "https://old.example" }, secrets: { credential: "old-secret" } });
+		const committed = store.getPublicState();
+		// The opposite partial state is unsafe as well: a versioned owner-only
+		// envelope cannot be paired with an unversioned public record.
+		config.setExtensionSettings({ schema: 1, revision: 0, targets: committed.targets });
+		expect(() => new ExtensionSettingsStore(new ProjectConfigStore(configDir, memFs), new ExtensionSettingsSecretStore(stateDir, memFs))
+			.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+		config.setExtensionSettings({ ...committed, revision: 2, commitId: "new-public-commit", targets: {
+			[targetKey]: { values: { endpoint: "https://new.example" } },
+		} });
+
+		expect(() => store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+		expect(() => store.getForRuntime(ref, {}, { secretFields: ["credential"] })).not.toThrow(/old-secret|new\.example/);
+
+		// A versioned public record cannot be paired with a legacy secret file.
+		memFs.files.set(path.resolve(stateDir, "extension-settings-secrets.json"), JSON.stringify({ ["legacy\0provider\0one\0credential"]: "legacy-secret" }));
+		const restarted = new ExtensionSettingsStore(new ProjectConfigStore(configDir, memFs), new ExtensionSettingsSecretStore(stateDir, memFs));
+		expect(() => restarted.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+	});
+
+	it("accepts only complete legacy pairs, then upgrades both records together", () => {
+		const memFs = createMemFs();
+		const configDir = "/memfs/settings-config";
+		const stateDir = "/memfs/settings-state";
+		const legacySecret = "legacy-secret";
+		const legacyPublic = { schema: 1 as const, revision: 0, targets: { [targetKey]: { values: { endpoint: "https://legacy.example" } } } };
+		const config = new ProjectConfigStore(configDir, memFs);
+		config.setExtensionSettings(legacyPublic);
+		memFs.files.set(path.resolve(stateDir, "extension-settings-secrets.json"), JSON.stringify({ [`${targetKey}\0credential`]: legacySecret }));
+		const store = new ExtensionSettingsStore(config, new ExtensionSettingsSecretStore(stateDir, memFs));
+		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toEqual({ endpoint: "https://legacy.example", credential: legacySecret });
+
+		store.compareAndSwap(ref, 0, { values: { endpoint: "https://upgraded.example" } });
+		const publicState = store.getPublicState();
+		expect(publicState.commitId).toEqual(expect.any(String));
+		const envelope = JSON.parse(memFs.readFileSync(path.resolve(stateDir, "extension-settings-secrets.json"), "utf-8")) as Record<string, unknown>;
+		expect(envelope).toMatchObject({ schema: 1, commitId: publicState.commitId, values: { [`${targetKey}\0credential`]: legacySecret } });
+		expect(new ExtensionSettingsStore(new ProjectConfigStore(configDir, memFs), new ExtensionSettingsSecretStore(stateDir, memFs))
+			.getForRuntime(ref, {}, { secretFields: ["credential"] }))
+			.toEqual({ endpoint: "https://upgraded.example", credential: legacySecret });
+	});
+
+	it("advances the owner-only commit for public-only mutations", () => {
+		const memFs = createMemFs();
+		const configDir = "/memfs/settings-config";
+		const stateDir = "/memfs/settings-state";
+		const store = new ExtensionSettingsStore(new ProjectConfigStore(configDir, memFs), new ExtensionSettingsSecretStore(stateDir, memFs));
+		store.compareAndSwap(ref, 0, { values: { endpoint: "https://one.example" }, secrets: { credential: "retained-secret" } });
+		const firstCommit = store.getPublicState().commitId;
+		store.compareAndSwap(ref, 1, { values: { endpoint: "https://two.example" } });
+		const secondCommit = store.getPublicState().commitId;
+		expect(secondCommit).not.toBe(firstCommit);
+		expect(JSON.parse(memFs.readFileSync(path.resolve(stateDir, "extension-settings-secrets.json"), "utf-8"))).toMatchObject({ commitId: secondCommit });
+		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toEqual({ endpoint: "https://two.example", credential: "retained-secret" });
+	});
+
+	it("fails closed after an ambiguous secret rename and stays closed after restart", () => {
+		const memFs = createMemFs();
+		const configDir = "/memfs/settings-config";
+		const stateDir = "/memfs/settings-state";
+		const config = new ProjectConfigStore(configDir, memFs);
+		const secrets = new ExtensionSettingsSecretStore(stateDir, memFs);
+		const store = new ExtensionSettingsStore(config, secrets);
+		store.compareAndSwap(ref, 0, { values: { endpoint: "https://old.example" }, secrets: { credential: "old-secret" } });
+		const originalRename = memFs.renameSync.bind(memFs);
+		let throwAfterRename = true;
+		memFs.renameSync = (from, to) => {
+			originalRename(from, to);
+			if (throwAfterRename && String(to).includes("extension-settings-secrets.json")) {
+				throwAfterRename = false;
+				throw new Error("rename outcome unknown");
+			}
+		};
+
+		expect(() => store.compareAndSwap(ref, 1, { values: { endpoint: "https://new.example" }, secrets: { credential: "new-secret" } }))
+			.toThrow(ExtensionSettingsSecretPersistenceError);
+		expect(() => store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+		expect(() => new ExtensionSettingsStore(new ProjectConfigStore(configDir, memFs), new ExtensionSettingsSecretStore(stateDir, memFs))
+			.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
 	});
 
 	it("resolves public and owner-only values independently for each project", () => withTmpDir(root => {

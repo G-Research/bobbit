@@ -316,6 +316,8 @@ export type ExtensionSettingsMap = Record<string, ExtensionSettingsRecord>;
 export interface ExtensionSettingsState {
 	schema: 1;
 	revision: number;
+	/** Opaque identity paired with the owner-only extension-secret envelope. */
+	commitId?: string;
 	targets: ExtensionSettingsMap;
 }
 
@@ -328,6 +330,7 @@ export const EMPTY_EXTENSION_SETTINGS_STATE: Readonly<ExtensionSettingsState> = 
 const MAX_EXTENSION_SETTINGS_TARGETS = 256;
 const MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET = 64;
 const MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH = 512;
+const EXTENSION_SETTINGS_COMMIT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 function cloneExtensionSettings(state: ExtensionSettingsState): ExtensionSettingsState {
 	const targets: ExtensionSettingsMap = {};
@@ -337,7 +340,7 @@ function cloneExtensionSettings(state: ExtensionSettingsState): ExtensionSetting
 			values: { ...record.values },
 		};
 	}
-	return { schema: 1, revision: state.revision, targets };
+	return { schema: 1, revision: state.revision, ...(state.commitId === undefined ? {} : { commitId: state.commitId }), targets };
 }
 
 /**
@@ -353,8 +356,11 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 	// correct boundary type for parsed YAML, so property reads must be narrowed
 	// before they can enter the persisted settings state.
 	const revision = raw.revision;
+	const commitId = raw.commitId;
 	const rawTargets = raw.targets;
-	if (raw.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || !isPlainObject(rawTargets)) {
+	if (raw.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+		|| (commitId !== undefined && (typeof commitId !== "string" || !EXTENSION_SETTINGS_COMMIT_ID_RE.test(commitId)))
+		|| !isPlainObject(rawTargets)) {
 		return { value: empty(), ok: false };
 	}
 	const targets: ExtensionSettingsMap = {};
@@ -385,7 +391,7 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 		if (!valid) continue;
 		targets[targetKey] = { ...(enabled === undefined ? {} : { enabled }), values };
 	}
-	return { value: { schema: 1, revision, targets }, ok: true };
+	return { value: { schema: 1, revision, ...(commitId === undefined ? {} : { commitId }), targets }, ok: true };
 }
 
 /** Shared strict bound for stored hook refs and server-derived principal labels. */
