@@ -1,7 +1,9 @@
 # Non-hook extension grants — Market UX
 
-**Status:** design guidance for the generic EP-6 capability slice.  
-**Surface:** Market → Installed → selected project → existing **Project runtime** rows.  
+**Status:** design guidance for the generic EP-6 capability slice.
+
+**Surface:** Market → Installed → selected project → existing **Project runtime** rows.
+
 **Scope:** presentation and interaction only; the server remains the authority for principal identity, capability support, active state, authentication, and audit state.
 
 ## Decision
