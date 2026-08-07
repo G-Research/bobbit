@@ -404,21 +404,54 @@ describe("retired persisted model cold recovery", () => {
 			successfulBridge = replacementBridge(options);
 			return successfulBridge;
 		});
-		const activated = await manager.recoverModelSelectionRequired(
+		let releaseBgRestore!: () => void;
+		const bgRestoreBlocked = new Promise<void>((resolve) => { releaseBgRestore = resolve; });
+		const restoreBackgroundProcesses = vi.fn(() => bgRestoreBlocked);
+		manager.bgProcessManager = { restoreSession: restoreBackgroundProcesses };
+		const activation = manager.recoverModelSelectionRequired(
 			SESSION_ID,
 			replacement.provider,
 			replacement.id,
 			"high",
 		);
+
+		await vi.waitFor(() => {
+			assert.notEqual(manager.getSession(SESSION_ID), recovered, "fixture must reach the installed staged candidate");
+			assert.equal(restoreBackgroundProcesses.mock.calls.length, 1, "fixture must hold activation after candidate install");
+		});
+		const stagedCandidate = manager.getSession(SESSION_ID);
+		assert.deepEqual(stagedCandidate?.condition, EXPECTED_CONDITION, "canonical staging must retain the retired tuple condition");
+		assert.deepEqual(
+			manager.listSessions().find((session: any) => session.id === SESSION_ID)?.condition,
+			EXPECTED_CONDITION,
+			"session listings must not publish successful recovery before durable commit",
+		);
+		assert.deepEqual(
+			manager.getModelSelectionRecoveryAdmission(SESSION_ID).condition,
+			EXPECTED_CONDITION,
+			"admission and public projections must agree throughout staged activation",
+		);
+		const duringActivationClient = makeClient("during-activation");
+		assert.equal(manager.addClient(SESSION_ID, duringActivationClient), true);
+		assert.equal(stagedCandidate?.clients.has(duringActivationClient), true, "a second attachment must join the conditioned candidate");
+		assert.deepEqual(stagedCandidate?.condition, EXPECTED_CONDITION, "second attachment must not clear staged recovery state");
+		assert.equal(explicitConditionClearFrames(firstClient).length, 0, "staging must not clear the original client's condition");
+		assert.equal(explicitConditionClearFrames(duringActivationClient).length, 0, "staging must not clear the new client's condition");
+
+		releaseBgRestore();
+		const activated = await activation;
 		assert.equal(successfulOptions?.initialModel, `${replacement.provider}/${replacement.id}`, "recovery must spawn pinned to the selected exact tuple");
 		assert.equal(activated.provider, replacement.provider);
 		assert.equal(activated.modelId, replacement.id);
 		assert.equal(manager.getSession(SESSION_ID)?.condition, undefined, "verified activation clears the condition");
+		assert.equal(manager.listSessions().find((session: any) => session.id === SESSION_ID)?.condition, undefined, "verified activation clears the listing condition");
 		assert.equal(manager.getSession(SESSION_ID)?.clients.has(firstClient), true, "verified activation transfers clients");
+		assert.equal(manager.getSession(SESSION_ID)?.clients.has(duringActivationClient), true, "verified activation retains clients attached during staging");
 		assert.equal(store.get(SESSION_ID)?.modelProvider, replacement.provider, "only verified activation publishes provider");
 		assert.equal(store.get(SESSION_ID)?.modelId, replacement.id, "only verified activation publishes model");
 		assert.equal(store.get(SESSION_ID)?.effectiveThinkingLevel, activated.thinkingLevel, "published thinking is the verified clamp");
 		assert.equal(explicitConditionClearFrames(firstClient).length, 1, "verified activation must publish one explicit condition clear");
+		assert.equal(explicitConditionClearFrames(duringActivationClient).length, 1, "verified activation must clear the condition for clients attached during staging");
 		assert.deepEqual(durableTupleAtConditionClear, {
 			modelProvider: replacement.provider,
 			modelId: replacement.id,

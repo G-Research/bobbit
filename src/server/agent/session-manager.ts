@@ -7993,6 +7993,9 @@ export class SessionManager {
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			_deferVerifiedTupleCommit: (ps as any)._deferVerifiedTupleCommit === true,
 			_disableControlledModelFallback: (ps as any)._disableControlledModelFallback === true,
+			// Recovery candidates remain publicly conditioned while restoreSession owns
+			// staged startup work. This is ephemeral coordinator input, never persisted.
+			condition: (ps as any)._modelSelectionRequiredCondition,
 			repoPath: ps.repoPath,
 			branch: ps.branch,
 			worktreePushPolicy: ps.worktreePushPolicy,
@@ -8235,6 +8238,7 @@ export class SessionManager {
 				_preserveRecoveryCapsule: true,
 				_deferVerifiedTupleCommit: true,
 				_disableControlledModelFallback: true,
+				_modelSelectionRequiredCondition: { ...condition },
 			} as PersistedSession;
 			const transcriptFileCtx = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
 			let transcriptSnapshot: string;
@@ -8270,6 +8274,9 @@ export class SessionManager {
 				// the replacement to the capsule's clients or releasing prompt ownership.
 				durableCommitAttempted = true;
 				this.persistSessionModel(sessionId, selectedProvider, selectedModelId, selectedThinking);
+				// The durable tuple is now authoritative. Clear the ephemeral staged condition
+				// before publishing the explicit client clear below.
+				candidate.condition = undefined;
 				this._writeModelNameFile(sessionId, verifiedModel);
 				candidate._deferVerifiedTupleCommit = undefined;
 				candidate._disableControlledModelFallback = undefined;

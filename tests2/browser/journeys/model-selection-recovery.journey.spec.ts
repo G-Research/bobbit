@@ -198,6 +198,11 @@ test.describe("Journey: unavailable session model recovery", () => {
 			expect(coldRecord).toMatchObject({
 				modelProvider: RETIRED_MODEL.provider,
 				modelId: RETIRED_MODEL.id,
+				condition: {
+					code: "MODEL_SELECTION_REQUIRED",
+					provider: RETIRED_MODEL.provider,
+					modelId: RETIRED_MODEL.id,
+				},
 			});
 			expect(coldRecord.restoreError, "expected recovery must not be a generic retry-on-restart failure").toBeFalsy();
 			expect(readFileSync(durable.transcriptFile, "utf8")).toBe(durable.transcript);
@@ -268,6 +273,10 @@ test.describe("Journey: unavailable session model recovery", () => {
 				},
 				{ timeout: 30_000, message: "verified replacement tuple should become durable" },
 			).toMatchObject({ modelProvider: replacement!.provider, modelId: replacement!.id });
+			const recoveredRecordResponse = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(recoveredRecordResponse.status).toBe(200);
+			const recoveredRecord = await recoveredRecordResponse.json() as any;
+			expect(recoveredRecord.condition, "direct session projection must clear only after verified replacement").toBeUndefined();
 			await expect.poll(
 				async () => (await listedSession(sessionId!))?.condition ?? null,
 				{ timeout: 30_000, message: "server listing should publish the cleared recovery condition" },
