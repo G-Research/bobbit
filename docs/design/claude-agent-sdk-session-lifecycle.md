@@ -264,27 +264,15 @@ steers. `stop()` must be idempotent and terminal. `forceAbort` keeps its current
 the SDK bridge's interrupt promise is simply the graceful participant in that
 race.
 
-## Model, thinking, and compaction
+## Model/thinking history and compaction
 
-For `claude-agent-sdk/<model-id>` sessions, `setModel(provider, modelId)`
-requires `provider === "claude-agent-sdk"`, calls `Query.setModel(modelId)`,
-and updates bridge-local model only after success. `getState()` returns that
-runtime/provider pair and the last initialized SDK session id. A cross-runtime
-provider request returns `{ success: false, error: "Switching runtimes requires a new session" }`.
-
-The runtime-specific branch in model resolution must preserve the existing
-read-back/persist contract, but must not invoke Pi spawn flags or Pi-only model
-normalization for this runtime. The selected model is passed to SDK `Options`
-as `model`, and `tryAutoSelectModel` persists only after `getState()` verifies
-the provider/id pair. No model catalog change is part of this work.
-
-`setThinkingLevel(level)` maps Bobbit's canonical level to a documented,
-versioned SDK token budget table in the bridge and calls
-`Query.setMaxThinkingTokens(budgetOrNull)`. `off` maps to `null`; all other
-levels map to fixed increasing budgets. The bridge updates `thinkingLevel` only
-after success, and `getState()` exposes it for the existing read-back checks.
-The table must be a pure exported helper with exhaustive tests; SDK/model
-unsupported errors are normal rejected controls, not silent downgrade.
+> **Superseded live-controls plan.** The current model and thinking contract is
+> [Live model and thinking controls](../claude-agent-sdk-sessions.md#live-model-and-thinking-controls).
+> It uses the existing WebSocket tuple transaction, bridge-local SDK capabilities,
+> exact read-back, and verified-only persistence; supported controls use the
+> SDK's native model, effort, or token-budget operation rather than Pi flags or
+> respawn emulation. This lifecycle design retains only the compaction boundary
+> below.
 
 There is no public SDK compact command. Consequently `compact()` returns a
 structured unsupported failure and does not fabricate Pi compaction events or
@@ -387,8 +375,10 @@ Required cases:
    restart of the same instance.
 6. `forceAbort` still reaches its grace timeout when fake `interrupt()` never
    settles, then installs only a ready, fenced replacement.
-7. Model, thinking token mapping, read-back, wrong-provider rejection, and
-   unsupported SDK controls are deterministic and persist only verified state.
+7. **Superseded live-controls validation:** model/thinking capability,
+   mutation, exact read-back, and verified-persistence coverage follows
+   [Live model and thinking controls](../claude-agent-sdk-sessions.md#live-model-and-thinking-controls).
+   This lifecycle suite retains compaction and runtime-boundary coverage.
 8. Automatic `PreCompact` calls existing `beforeCompact`; manual `compact()`
    returns unsupported without fabricated compaction events.
 9. Fresh initialization persists the SDK session id; restore/role restart/

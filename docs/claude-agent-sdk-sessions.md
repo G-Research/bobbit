@@ -33,6 +33,51 @@ Bobbit derives and persists runtime from the selected provider; the runtime is
 not a separate preference. Replacement cannot change an existing session between
 Pi and SDK; create a new session for a cross-runtime model choice.
 
+## Review workflow selection
+
+Workflow choice is separate from runtime selection. The registered
+`claude-runtime` workflow is for changes whose correctness depends on the Claude
+Agent SDK contract or its subscription-only boundary; it does not make a session
+use the SDK. The selected `claude-agent-sdk/<model-id>` provider still decides
+that.
+
+| Scope | Select | Required evidence |
+| --- | --- | --- |
+| A narrow empirical SDK or fixture question | A protocol-only, goal-specific snapshot using the `protocol-spike` gate | Version-tagged, sanitized observed setup and SDK evidence; record unresolved questions rather than inferring behavior. |
+| Setup or provider-selection work with no end-to-end SDK session claim | A reduced, goal-specific `claude-runtime` snapshot | Retain the applicable protocol/design, parity, and billing checks; state which gates are omitted and why. It cannot claim real-session coverage. |
+| Session lifecycle, tools, persistence, transcript/usage, rendering, auth, billing, or any user-visible SDK behavior | The full registered `claude-runtime` workflow | All workflow gates, including real-subscription dogfood evidence. |
+| Work with no Claude-runtime safety contract, such as unrelated documentation | `general` | The ordinary workflow evidence. |
+
+The named `claude-runtime` definition is the full workflow. A protocol-only or
+reduced scope must be proposed as a valid inline workflow snapshot before goal
+creation, not obtained by silently skipping gates on an active goal. Bobbit uses
+the same validation and verification engine for these snapshots. Every goal
+stores its own frozen workflow copy, so later edits to the project template do
+not change work already in progress; use the explicit goal-workflow replacement
+flow when a live goal genuinely needs a different contract. See
+[Goals, Workflows, Tasks & Gates](goals-workflows-tasks.md#workflows).
+
+The full workflow assigns three narrow specialists in addition to ordinary
+reviewers:
+
+- **Claude Protocol Scout** gathers version-tagged, sanitized empirical evidence
+  for a protocol spike. It is an evidence producer, not a gate verifier.
+- **Backend Parity Reviewer** checks SDK fixture drift, Pi-default routing,
+  canonical tool-policy names, and transcript/usage fidelity at shared seams.
+- **Billing Safety Auditor** checks that subscription-only operation cannot
+  inherit API, cloud, or alternate-auth fallback and that billed and notional
+  usage remain distinct.
+
+The dogfood gate is a content review by `spec-auditor`. Deterministic tests do
+not replace it: the submitted matrix must record the opt-in real-subscription
+command, installed SDK/Claude version, unprefixed model ID, sanitized
+`apiKeySource`/subscription proof, lifecycle results, transcript and usage
+observations, and any exercised browser-rendering screenshots. The specialist
+roles do not pin a provider or model; they inherit the goal's resolved model, so
+review coverage does not introduce an API-provider selection. See the
+[Claude runtime review workflow design](design/claude-runtime-review-workflow.md)
+for the gate layout and evidence rules.
+
 ## Runtime architecture
 
 `SessionManager` continues to own durable prompt queues, steer recovery, status,
@@ -153,21 +198,163 @@ any destination allocation, Pi transcript handling, worktree setup, or sidecar
 work. See [Session runtime identity](design/session-runtime-identity.md) and the
 [REST endpoint contract](rest-api.md#fork-session-endpoint).
 
-## Model, thinking, and compaction
+## Live model and thinking controls
 
 An SDK session can change model only within `claude-agent-sdk`; switching providers
-requires a new session. The bridge updates its persisted model state only after the
-SDK accepts the change.
+requires a new session. Live controls use the existing session WebSocket model-tuple
+transaction, not a second SDK-specific persistence or broadcast path. In particular,
+Bobbit does not replace a healthy SDK session merely to simulate a model or thinking
+control. A replacement is recovery for an unverified partial mutation, not the way a
+supported SDK control is implemented.
 
-Bobbit thinking levels map to fixed SDK maximum-thinking-token budgets (`off` maps
-to no budget). As with models, a failed SDK call does not update the bridge's
-reported setting.
+### Capability authority and model identity
+
+Configured custom-provider rows remain the picker's source of available session
+models. After the query initializes, however, the live `Query` is the authority for
+whether an SDK model and its reasoning controls can actually run. The bridge reads
+its initialization `models` and prefers `supportedModels()` when that method is
+available. It converts those SDK rows into capability records owned by that one
+bridge; it does not seed a process-wide catalog or mutate `model-registry` caches.
+This matters because an SDK query replacement can expose different capabilities, and
+stale process-global metadata would outlive the query that proved it.
+
+A capability record uses the SDK's `value`, optional `resolvedModel`,
+`supportsEffort`, `supportedEffortLevels`, and `supportsAdaptiveThinking` fields.
+It matches a requested id against both `value` and `resolvedModel`, but preserves the
+SDK `value` as the private wire value passed to `Query.setModel()`. The requested
+configured identity remains the public identity in live state and the durable tuple.
+For example, a picker can retain `sonnet` while the SDK receives that alias as its
+wire value, or it can retain `claude-sonnet-5` while resolving it to the SDK wire
+alias. Bobbit never silently rewrites either form to the other during verified
+read-back.
+
+The bridge publishes `reasoning` and `thinkingLevelMap` with its live model state.
+Reasoning is true only when SDK metadata proves effort or adaptive-thinking support.
+The map marks `off` and each canonical control as advertised or unavailable; it
+never borrows Pi family heuristics or invents `minimal`. This live metadata overrides the
+conservative manual provider row for an active SDK session, so clients see the
+capabilities that the query, rather than the registry, has verified.
+
+### Applying controls
+
+The bridge resolves a thinking request against the active model's live capability.
+It uses the appropriate SDK control instead of translating one control family into
+another:
+
+| Proven capability / request | SDK operation |
+| --- | --- |
+| Advertised effort level | Clear any fixed budget with `setMaxThinkingTokens(null)`, then call `applyFlagSettings({ effortLevel })`. |
+| Adaptive-thinking fixed-token level | If available, clear prior effort with `applyFlagSettings({ effortLevel: null })`, then call `setMaxThinkingTokens()` with Bobbit's fixed budget for that level. |
+| `off` | If available, clear prior effort, then explicitly call `setMaxThinkingTokens(null)`. |
+
+Clearing the other control family prevents a prior effort setting or fixed budget
+from surviving a model or level transition. The bridge changes its locally reported
+model or thinking value only after the corresponding SDK call succeeds; SDK errors
+propagate to the session transaction.
+
+For **interactive live requests**, unsupported input is explicit, never a clamp. A
+configured model that the live SDK advertised-model list does not contain is rejected
+without calling `Query.setModel()`. Likewise, a non-`off` level absent from the
+active live map is rejected without a thinking mutation. If an older SDK provides no
+model data, Bobbit keeps a conservative compatibility path: a configured SDK model
+may still be selected, but only `off` is available. If the SDK advertises effort but
+lacks `applyFlagSettings()`, advertised effort is rejected rather than emulated;
+`off` continues to clear the token budget. These cases let the UI make unavailable
+controls visible while keeping a direct or stale client request safe.
+
+Initial SDK thinking is not an interactive rejection path. Before Query
+initialization, Bobbit retains the role/default candidate because the configured
+manual provider row is deliberately conservative. After initialization, it
+normalizes that candidate only from the bridge's live `reasoning` and
+`thinkingLevelMap` metadata. A missing map, missing reasoning proof, or otherwise
+insufficient SDK metadata yields the conservative effective value `off`; Bobbit never
+falls back to Pi model-family heuristics or invents an SDK effort level.
+
+`SessionManager` then applies the effective initial level through the bridge and
+reads back the exact `(provider, modelId, thinkingLevel)` tuple. It persists only
+that verified effective tuple, not the raw preference, attempted request, or SDK
+capability record. The bridge capability itself is not persisted: it is re-derived
+whenever a query starts.
+
+### Verified tuple transaction and recovery
+
+`SessionManager` and the runtime model selector own the transaction. The bridge
+only mutates its `Query` and reports live state; it never persists a request,
+capability record, SDK `ModelInfo`, or broadcast. For a model-plus-thinking request,
+the selector follows this order:
+
+1. Read the durable and live tuple, validate the configured model and live SDK
+   capability, and fence the current bridge owner.
+2. Mutate the model, then require an exact model read-back.
+3. Validate and mutate thinking, then require an exact final
+   `(provider, modelId, thinkingLevel)` read-back and recheck ownership.
+4. Only then persist the normal tuple, update the model-name mirror, and broadcast
+   the verified model metadata and thinking level.
+
+A standalone interactive thinking request uses the same validation, exact read-back,
+commit, and broadcast rule. Therefore neither an interactive request nor an initial
+preference becomes durable merely because an SDK call was attempted or returned: the
+final effective state must match exactly. This also preserves alias identity—an
+accepted alias is persisted and broadcast as that alias, not as an unrequested
+resolved id.
+
+On a rejection, SDK error, mismatch, or ownership change, the selector broadcasts a
+correction from live or durable truth and performs the established bounded rollback.
+If rollback cannot be verified, it uses normal bridge-replacement recovery from the
+unchanged durable tuple; if that recovery is unsafe, it quarantines the affected
+canonical session. Owner fencing prevents a delayed detached bridge from rolling
+back, stopping, archiving, persisting over, or broadcasting over a newer canonical
+replacement. A verified replacement instead remains authoritative and is the only
+state that may be broadcast.
+
+This contract is provider-scoped. Pi continues to use its registry-derived metadata
+and existing thinking-level clamping behavior; SDK live capability checks neither
+populate Pi metadata nor change Pi controls.
 
 The SDK does not expose a manual compact operation, so Bobbit reports manual
 compaction as unsupported rather than inventing Pi compaction events. SDK-managed
 compaction still dispatches the existing Extension Platform `beforeCompact`
 lifecycle hook through the SDK `PreCompact` hook. This keeps extension lifecycle
 behavior additive without introducing a provider-specific hook.
+
+### Composer slash commands
+
+The composer, not the SDK, owns current Bobbit slash controls, discovered skills,
+and active Extension Platform launchers. It builds its inventory from the scoped
+skill catalogue, server collision claims, active `composer-slash` pack entries,
+and the explicit session runtime. This prevents a Bobbit command from colliding
+with a bundled Claude command while preserving the existing server skill
+expansion pipeline.
+
+In an SDK session, `/compact` is deliberately absent from autocomplete but exact
+trimmed, case-insensitive input is consumed locally. The editor shows an inline
+unsupported-command alert and retains the text, attachments, and focus; it never
+calls the SDK. This avoids accidentally invoking Claude's bundled `/compact`.
+Pi sessions instead show `/compact` and run Bobbit's existing local compaction;
+attachments block that action without being discarded. While runtime identity is
+still loading, `/compact` is also consumed with an unavailable-until-ready alert
+rather than assuming Pi.
+
+A current Bobbit skill named `/goal` or `/review` wins over a Claude command with
+the same name. The editor only completes the token; normal send still reaches the
+server, where the skill is expanded before `ClaudeAgentSdkBridge` receives the
+final text. Without that exact Bobbit skill, `/goal`, `/review`, unknown slashes,
+and near-prefixes pass through as raw runtime prompts. Hidden recognized skills
+also mask same-named pack launchers, and ambiguous launcher ids never dispatch.
+
+Pack launchers run only for an exact full-line command with no attachments and
+use the existing compound entrypoint key. On reload or a project/session change,
+Bobbit refetches scoped skills and reconciles active pack entries; launcher and
+menu state are not persisted in drafts. Ctrl/Cmd+Enter normally steers text, but
+refuses an exact Bobbit-owned command so an unexpanded skill or launcher cannot
+reach the SDK raw. An open autocomplete menu owns Enter, Ctrl+Enter, and
+Cmd+Enter to complete its selection before send or steer behavior applies.
+
+These composer rules do not configure Claude commands or loosen SDK isolation:
+query options still use `settingSources: []`, `strictMcpConfig: true`, and only
+the live Bobbit MCP server. See the
+[composer slash interception design](design/claude-sdk-composer-slash-intercept.md)
+for the full ownership, collision, reload, and failure behavior.
 
 ## Tool ownership and permissions
 
@@ -251,24 +438,29 @@ allowlists alone are not an execution boundary:
    tools are absent. The SDK gets only native `Skill`, the complete native
    disallow list, and no tool aliases.
 2. **`canUseTool`.** Each raw SDK call is normalized and rechecked. An `allow`
-   tool is approved. An `ask` tool uses the existing
-   `SessionManager.requestToolGrant()` path, which emits the normal
-   `tool_permission_needed` and `tool_permission_settled` UI events. The grant
-   must cover the current canonical tool and group. Cancellation, stale or
-   mismatched decisions, and denied/expired requests deny that invocation.
+   tool is approved. An `ask` tool calls the existing
+   `SessionManager.requestToolGrant()` path with its canonical Bobbit name,
+   resolved group, SDK tool-use id, and abort signal. That path emits the normal
+   `tool_permission_needed` and `tool_permission_settled` UI events; it is not a
+   second SDK permission service. A successful resolution is accepted only when
+   it covers the current canonical tool and, when supplied, the resolved group.
+   Cancellation, timeout, supersession, stale or mismatched decisions, denial,
+   expiry, and grant errors deny that invocation and settle the existing card.
 3. **`PreToolUse`.** The hook normalizes and checks again immediately before
    execution. It rejects native, foreign, malformed, unselected, `never`, and
    subagent-origin calls even if another SDK permission path says allow. An
    `ask` approval is bound to the exact SDK tool-use id and canonical name, then
-   consumed by the hook.
+   consumed by the hook; a direct callback bypass without that approval remains
+   `ask`.
 
 An SDK one-time approval is never added to the query's `allowedTools` or a
-surface callback cache; it is bound to one call and consumed by `PreToolUse`.
-SessionManager retains its normal one-time grant bookkeeping and revokes that
-grant at the end of the agent turn. Session-only and persistent grants retain
-their existing SessionManager semantics; any bridge rebuild derives a fresh
-canonical surface from that current state. Permission mode remains `default`;
-permission bypass options are never set.
+surface callback cache; it permits one exact `PreToolUse` consumption. The
+surface clears unconsumed approvals when disposed, so a late grant cannot pass a
+replacement boundary. SessionManager retains its normal one-time grant
+bookkeeping and revokes that grant at the end of the agent turn. Session-only
+and persistent grants retain their existing SessionManager semantics; any bridge
+rebuild derives a fresh canonical surface from that current state. Permission
+mode remains `default`; permission bypass options are never set.
 
 ## Isolation and credential boundary
 
@@ -328,7 +520,9 @@ account or credentials:
   history access, cwd scoping, sanitized unavailable errors, valid empty history,
   and snapshot adaptation without Pi transcript access.
 - `tests2/core/claude-agent-sdk-bridge.test.ts` covers initialization UUID
-  validation, unavailable startup settlement, and live official-history reads.
+  validation, unavailable startup settlement, live official-history reads, and
+  session-local SDK capability discovery, alias wire selection, effort/fixed/off
+  transitions, unsupported controls, and failure-safe read-back state.
 - `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` covers the
   minimal SessionStore tuple, strict metadata persistence, and dormant recovery
   that retains queued prompts and in-flight steers.
@@ -338,6 +532,13 @@ account or credentials:
 - `tests/e2e/claude-agent-sdk-session-restart.spec.ts` runs a fake official SDK
   through prompt/history, `PreCompact`, gateway crash/restart, snapshot equality,
   resumed append, and co-resident Pi recovery.
+- `tests2/core/controlled-model-fallback.test.ts` pins exact tuple read-back,
+  verified-only persistence, live SDK capability metadata, explicit unsupported
+  levels, and rollback behavior; `tests2/core/runtime-model-recovery-ownership.test.ts`
+  pins replacement fencing.
+- `tests2/browser/journeys/claude-live-controls.journey.spec.ts` verifies a
+  production SDK bridge with mixed advertised controls, wire-model selection,
+  verified persistence across reload, and rollback of a failed model request.
 
 Run the focused deterministic coverage with:
 
@@ -345,6 +546,8 @@ Run the focused deterministic coverage with:
 npx vitest run --config vitest.config.ts --silent=passed-only \
   tests2/core/claude-agent-sdk-session-access.test.ts \
   tests2/core/claude-agent-sdk-bridge.test.ts \
+  tests2/core/controlled-model-fallback.test.ts \
+  tests2/core/runtime-model-recovery-ownership.test.ts \
   tests2/integration/claude-agent-sdk-runtime-persistence.test.ts \
   tests2/integration/session-runtime-route-boundary.test.ts
 npm run check
@@ -359,6 +562,12 @@ The following regressions document the tool-surface contracts:
   canonical dispatch/rendering, existing permission events, cancellation,
   one-time grants, trusted-worker schema preflight, managed MCP operation
   snapshots, credential separation, and cleanup behavior.
+- `tests2/integration/claude-agent-sdk-permission-card-journey.test.ts` drives
+  the real `SessionManager` grant seam through the SDK surface. It covers the
+  canonical tool/group card request and settlement, one-time/session/persistent
+  ownership, exact one-use `PreToolUse` consumption, deny, abort, timeout,
+  stale and mismatched responses, disposal, and callback-bypass/native/foreign/
+  `never`/subagent defenses.
 - `tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts` starts the official
   SDK/bundled Claude in a process-isolated hostile-settings fixture and compares
   a literal initialization inventory: version, tools, reported built-ins,
@@ -369,7 +578,8 @@ Run the focused deterministic coverage with:
 ```bash
 npx vitest run --config vitest.config.ts --silent=passed-only \
   tests2/core/claude-agent-sdk-tool-surface.test.ts \
-  tests2/integration/claude-agent-sdk-tool-permissions.test.ts
+  tests2/integration/claude-agent-sdk-tool-permissions.test.ts \
+  tests2/integration/claude-agent-sdk-permission-card-journey.test.ts
 npm run check
 ```
 
