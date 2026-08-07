@@ -303,14 +303,13 @@ an idempotent “already resumed” result. If a later/manual pause replaces the
 route leaves that pause intact and tells the user it requires normal resume. No automatic session turn is resurrected;
 the resumed goal/session proceeds through its ordinary queue/next-turn path.
 
-EP-6 adds two distinct per-project grants through `ProjectConfigStore`: `ask:decision` permits creating a decision
-record, and `ask:interrupt` permits a deferrable/consent card to interrupt. The latter has server-owned,
-configuration-validated `maxPerSession` and `maxPerGoal` hard caps. The manager checks grant and cap before creating
-interrupting UI, and
-counts only a newly persisted, deduplicated request. Revoke is rechecked at the answer/terminal transition: it cannot
-turn a pending unsafe operation into an allow; a revoked consent request resolves through its fail-closed deny/pause
-policy. Exceeding a cap returns `BUDGET_EXCEEDED`, writes a loud audit result, and creates no card—never a silent
-drop. Advisory inbox publication is not an interrupt and needs no interruption grant/cap.
+EP-11 requires its own reviewed, typed decision-authorization contract if it needs to gate record creation or
+interruption. It must not add `ask:*` strings, quota fields, or another principal shape to EP-6's implemented closed
+grant vocabulary. Its manager checks its approved authorization and cap before creating interrupting UI, counts only a
+newly persisted, deduplicated request, and rechecks at the answer/terminal transition so revocation cannot turn a
+pending unsafe operation into an allow. Exceeding a cap returns `BUDGET_EXCEEDED`, writes a loud audit result, and
+creates no card—never a silent drop. Advisory inbox publication is not an interrupt and needs no interruption
+authorization or cap.
 
 `ContextTraceStore` remains the sole activity audit stream. Extend its exact allow-lists with core-owned decision
 status/reason identifiers and a bounded request id; do not put question prose, answers, options, tool arguments, or
@@ -575,25 +574,44 @@ The migration removes the superseded core heuristic/call path rather than adding
 
 ### Grants, precedence, and hard denial
 
-EP-6 adds a native, per-project configuration record through `ProjectConfigStore`:
+EP-6 uses one native, per-project `ProjectConfigStore.extension_grants` union and one compatible
+audit/outbox owner:
 
 ```ts
-interface ExtensionGrant {
-  hookId: string;
-  capability: string;
-  grantedAt: string;
-  grantedBy: string;
-  // Present only for ask:interrupt; server validates, persists, and enforces it.
-  maxPerSession?: number;
-  maxPerGoal?: number;
-}
+type ExtensionGrant =
+  | {
+      packId: string; hookId: string; capability: ExtensionCapability;
+      grantedAt: string; grantedBy: string;
+    }
+  | {
+      packId: string; principal: "pack"; capability: ExtensionCapability;
+      grantedAt: string; grantedBy: string;
+    };
 ```
 
-The server owns write validation, audit rows, revoke, and cache invalidation; the Market UI only requests them. A missing grant is deny-by-default. Revocation takes effect for the next resolution without process restart. The grant surface gates core application only and must be visibly distinct from pack activation.
+The closed vocabulary is `decide`, `mutate`, `filter:tool-result`, `store`, `session`, `agents`,
+`prompt:system-static`, `prompt:system-author`, `service.manage`, `memory.read`, `memory.write`,
+`memory.reflect`, `memory.invalidate`, and `memory.read.all`. The last six are pack-only; hook
+eligibility remains declaration-owned and is not broadened. The exact keys are `(packId, "hook",
+hookId, capability)` and `(packId, "pack", capability)`. There are no wildcards, inherited
+permissions, extension-defined capabilities, or quota fields in a grant row.
 
-Resolution is deterministic:
+Legacy hook rows stay discriminator-free. For backward compatibility their loader tolerates
+unrelated extra fields, canonicalizing a valid row to the durable hook shape on a later write.
+Those fields never add authority. `principal` is intentionally not tolerated on a hook row:
+`principal: "hook"` and unknown principal values are invalid, while a pack row must have exactly
+`principal: "pack"` and no `hookId`.
 
-1. Inactive pack/entity, malformed result, unavailable value, ungranted capability, or user/operator pin: no application; record why.
+The server owns write validation, audit rows, revoke, and cache invalidation; Market uses the
+existing grant controls. A missing grant is deny-by-default. Revocation is visible to the shared
+live resolver on its next application-fence call without a process restart. The grant surface
+gates core application only and remains visibly distinct from pack activation.
+
+Resolution and core application remain deterministic:
+
+1. A malformed request, inactive server-resolved pack/hook, unsupported principal/capability
+   pairing, unavailable value, ungranted capability, or user/operator pin permits no application;
+   record the applicable reason.
 2. Within a pack, highest valid confidence wins; ties use stable hook id order.
 3. Across packs, configured project `pack_order` priority breaks the tie; the highest-priority pack wins deterministically.
 4. For tool safety, validate all granted verdicts and apply the most restrictive result: `deny > warn > allow`. A granted hard deny wins over every allow, cannot alter unrelated tools, and records its reason.
@@ -640,10 +658,12 @@ The runtime adapter owns start → readiness/health → status → graceful stop
 ### Generic non-hook grant handoff
 
 EP-6 extends its single project-owned `extension_grants` and audit/outbox owner with a compatible
-principal union. Legacy hook rows remain discriminator-free; a new pack row is exactly
-`{ packId, principal: "pack", capability, grantedAt, grantedBy }`. The six pack-only closed values
-are `service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`, and
-`memory.read.all`. No hook receives those values, and no pack declaration can mint another one.
+principal union. Legacy hook rows remain discriminator-free; their loader tolerates unrelated
+extra fields but canonicalizes them on write, while treating any `principal` field as invalid. A
+new pack row is exactly `{ packId, principal: "pack", capability, grantedAt, grantedBy }`. The six
+pack-only closed values are `service.manage`, `memory.read`, `memory.write`, `memory.reflect`,
+`memory.invalidate`, and `memory.read.all`. No hook receives those values, and no pack declaration
+can mint another one.
 
 The public Hindsight seam is `ExtensionGrantPrincipal`, `ExtensionGrantDecision`,
 `ExtensionCapabilityGrantResolver`, and `createExtensionCapabilityGrantResolver()` from the

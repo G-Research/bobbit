@@ -1,6 +1,6 @@
 # EP-6 — Extension Capability Grants
 
-**Status:** implemented architecture record. **Depends on:** the schema-2 inert hook catalogue, `PackContributionRegistry`, `ProjectConfigStore`, and EP-5 Context trace. **Scope:** backend-only explicit per-project grants, revocation, audit, and hook grant-state visibility. Marketplace grant controls are **EP-7**; EP-6 supplies their authenticated API and response shapes but does not add a settings page. For the current operator and extension-author contract, including audit recovery, see [Extension capability grants](../extension-capability-grants.md).
+**Status:** implemented architecture record. **Depends on:** the schema-2 inert hook catalogue, `PackContributionRegistry`, `ProjectConfigStore`, and EP-5 Context trace. **Scope:** explicit per-project grants, revocation, audit, hook grant-state visibility, and the generic non-hook pack-principal handoff. Market reuses the existing grant controls; it does not create a second permission surface. For the current operator and extension-author contract, including audit recovery, see [Extension capability grants](../extension-capability-grants.md).
 
 ## Decision
 
@@ -41,59 +41,73 @@ type ExtensionHookRef = {
 
 The request body may name a candidate tuple, but never establishes its identity: the server resolves the active winning declaration for the project and accepts only its server-derived `packId`/`hookId` ref. A same-named hook in another pack is distinct. A hook whose pack is disabled, removed, or shadowed cannot be granted or used.
 
-EP-6 introduces this closed capability vocabulary:
+EP-6 owns this closed capability vocabulary:
 
 ```ts
 type ExtensionCapability =
-  | "decide"       // core may invoke a mode:decide hook for a future decision event
-  | "mutate"       // core may apply an explicitly-supported mutation proposal
-  | "store"
-  | "session"
-  | "agents";
+  | "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents"
+  | "prompt:system-static" | "prompt:system-author"
+  | "service.manage" | "memory.read" | "memory.write" | "memory.reflect"
+  | "memory.invalidate" | "memory.read.all";
 ```
 
-`decide` is an implicit requested capability of every `mode: "decide"` hook. `mutate` is reserved for a future declaration/consumer; it is intentionally not inferred from `session` or `agents`. The existing manifest `capabilities: ["store" | "session" | "agents"]` stays schema-2-compatible and descriptive. EP-6 does not change what those existing declarations can do. A future consumer may request one of those capabilities only when it has a concrete, existing core choke point.
-
-All capabilities are deny-by-default. In particular, `decide` and `mutate` are never synthesized from hook mode, pack activation, existing stored config, built-in provenance, or `enabled: true`. No generic “all capabilities” grant exists.
+The first eight values retain their existing hook declaration and eligibility rules. The final six values are pack-only: they are not hook-declarable and do not broaden any hook capability. A pack declaration, activation state, built-in provenance, or `enabled: true` never grants authority or adds a capability string. The platform admits only this vocabulary; extensions cannot mint another value. All capabilities are deny-by-default and there is no generic “all capabilities” grant.
 
 ## Persistent grant and audit stores
 
 ### Active grants: `ProjectConfigStore`
 
-Add a native-YAML field alongside `pack_order` and `pack_activation`:
+`extension_grants` is a native YAML discriminated union. Existing hook rows remain
+**discriminator-free**; a non-hook grant explicitly names the pack principal:
 
 ```ts
-interface ExtensionGrant {
-  packId: string;
-  hookId: string;
-  capability: ExtensionCapability;
-  grantedAt: string; // canonical ISO-8601 instant, server clock
-  grantedBy: string; // server-derived safe principal label
-}
+type ExtensionGrant =
+  | {
+      packId: string; hookId: string; capability: ExtensionCapability;
+      grantedAt: string; grantedBy: string;
+    }
+  | {
+      packId: string; principal: "pack"; capability: ExtensionCapability;
+      grantedAt: string; grantedBy: string;
+    };
 
 type ExtensionGrantMap = ExtensionGrant[];
 ```
 
-Example project config:
-
 ```yaml
 extension_grants:
+  # Legacy hook row
   - packId: extension-platform-demo
     hookId: choose-thinking
     capability: decide
     grantedAt: "2026-04-02T12:34:56.000Z"
     grantedBy: local-user
+
+  # Non-hook pack-principal row
+  - packId: hindsight
+    principal: pack
+    capability: memory.read
+    grantedAt: "2026-04-02T12:35:00.000Z"
+    grantedBy: local-user
 ```
 
-`ProjectConfigStore` adds `getExtensionGrants()` and `setExtensionGrants()` plus draft support. Treat `extension_grants` like the other native fields: strict normalization on load and write, defensive copies, one atomic `mutate()` publication, and no legacy string representation. Invalid rows are dropped; an unreadable project config continues to fail closed through the existing `ProjectConfigLoadError` path.
+`ProjectConfigStore` provides `getExtensionGrants()` and `setExtensionGrants()` with defensive
+copies and one atomic `mutate()` publication. The exact keys are `(packId, "hook", hookId,
+capability)` and `(packId, "pack", capability)`; a later valid row for the same key replaces its
+metadata. A pack row must name `principal: "pack"`, must not carry `hookId`, and may use only a
+pack-only capability.
 
-Validation rules:
+For compatibility, legacy hook rows tolerate unrelated extra fields on load. The normalizer
+retains their valid authority tuple but canonicalizes it to the durable hook shape when it is
+subsequently written; ignored data never becomes authority. `principal` is deliberately not an
+unrelated extra field: a hook row requires it to be absent, so `principal: "hook"` or any unknown
+principal is invalid and is dropped. Malformed rows are dropped independently, preserving valid
+siblings and default denial.
 
-- `packId` and `hookId` match the existing safe identifier rule (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`).
-- `capability` is an exact `ExtensionCapability` member.
-- `grantedAt` is a parseable ISO timestamp emitted by the server, and `grantedBy` is a bounded server-generated identifier/label.
-- Uniqueness is `(packId, hookId, capability)`. A new grant for an existing tuple replaces its metadata rather than creating a duplicate.
-- The persisted record contains no token, credential reference, config value, module path, request body, free-form rationale, session secret, or user-supplied actor string.
+All rows require safe identifiers, a canonical server timestamp, and an exact closed capability.
+They contain no token, credential reference, config value, module path, request body, free-form
+rationale, session secret, or user-supplied actor string. An unreadable project config continues to
+fail closed through the existing `ProjectConfigLoadError` path.
 
 ### Append-only audit: `ExtensionGrantAuditStore`
 
@@ -101,17 +115,18 @@ Active configuration cannot prove a revoke happened after its target has been re
 
 ```ts
 type ExtensionGrantAuditAction = "granted" | "revoked";
-interface ExtensionGrantAuditEntry {
-  at: string;                         // server clock, ISO-8601
-  actor: string;                      // server-derived, bounded
-  action: ExtensionGrantAuditAction;
-  packId: string;
-  hookId: string;
-  capability: ExtensionCapability;
-}
+type ExtensionGrantAuditEntry =
+  | {
+      at: string; actor: string; action: ExtensionGrantAuditAction;
+      packId: string; hookId: string; capability: ExtensionCapability;
+    }
+  | {
+      at: string; actor: string; action: ExtensionGrantAuditAction;
+      packId: string; principal: "pack"; capability: ExtensionCapability;
+    };
 ```
 
-The store validates/bounds every field before append, writes one JSON object per line, and its reader skips corrupt partial lines. It never accepts an arbitrary details/reason field. Audit append happens only after the `ProjectConfigStore` mutation has persisted successfully. If audit append fails, return a retriable `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE`; the successful active-config change remains in effect and must not be rolled back by a second unrelated write. Log only the safe tuple and error code. This explicit partial-success response lets the operator retry/audit the failure without lying that a revoke did not take effect.
+The store validates/bounds every field before append, writes one JSON object per line, and its reader skips corrupt partial lines. Legacy hook JSONL remains readable without a discriminator; pack rows carry `principal: "pack"` and no `hookId`. It never accepts an arbitrary details/reason field. Audit append happens only after the `ProjectConfigStore` mutation has persisted successfully. If audit append fails, return a retriable `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE`; the successful active-config change remains in effect and must not be rolled back by a second unrelated write. Log only the safe tuple and error code. This explicit partial-success response lets the operator retry/audit the failure without lying that a revoke did not take effect.
 
 The implementation also keeps a project-owned durable outbox for an event that could not be
 appended. Later append attempts flush the outbox first and de-duplicate a row that was appended
@@ -124,29 +139,43 @@ Audit is durable administrative history, separate from the 2 MiB/session diagnos
 
 ## Policy resolution
 
-Add `src/server/agent/extension-grant-policy.ts` as a pure owner, with no filesystem or HTTP dependency:
+`src/server/agent/extension-grant-policy.ts` exports one live resolver for both principals:
 
 ```ts
-type GrantDecision =
-  | { allowed: true; grant: ExtensionGrant }
-  | { allowed: false; reason: "grant_required" | "inactive_hook" | "invalid_request" };
+type ExtensionGrantPrincipal =
+  | { kind: "hook"; packId: string; hookId: string }
+  | { kind: "pack"; packId: string };
 
-function resolveExtensionGrant(
-  activeHooks: readonly ResolvedHook[],
-  grants: readonly ExtensionGrant[],
-  ref: ExtensionHookRef,
+type ExtensionGrantDecision =
+  | { allowed: true; grant: ExtensionGrant }
+  | { allowed: false; reason:
+      "invalid_request" | "project_unavailable" | "inactive_principal" |
+      "unsupported_capability" | "grant_required" };
+
+type ExtensionCapabilityGrantResolver = (
+  projectId: string,
+  principal: ExtensionGrantPrincipal,
   capability: ExtensionCapability,
-): GrantDecision;
+) => ExtensionGrantDecision;
+
+function createExtensionCapabilityGrantResolver(deps: {
+  contextForProject(projectId: string):
+    | { projectConfigStore: Pick<ProjectConfigStore, "getExtensionGrants"> }
+    | undefined;
+  contributions: Pick<PackContributionResolver, "getPack">;
+}): ExtensionCapabilityGrantResolver;
 ```
 
-`ResolvedHook` is constructed only from the active `PackContributionRegistry.list(projectId)` rows and their server-derived `packId`; it is never browser input. The same per-pack rows produce the contribution projection, so policy and wire status use one active declaration source without a registry extension. Resolution is exact and synchronous:
+The resolver accepts only server-derived principals. It validates the project, principal, and
+closed capability; resolves the current winning active pack (and active hook when applicable);
+checks the hook/pack capability matrix; then reads current durable grants and matches the exact
+union key. It returns a defensive grant copy or a typed denial. The legacy
+`resolveExtensionGrant()` remains the compatible hook-only wrapper for existing callers.
 
-1. The hook must be an active registry declaration for the project. Pack activation filtering and winning-pack collapse have already happened. Otherwise return `inactive_hook`.
-2. The requested capability must be supported for that declaration: `decide` requires `mode === "decide"`; declared manifest capabilities permit only their same named capability; reserved `mutate` has no eligible current declaration and therefore denies.
-3. Match an exact active-grant tuple. No match returns `grant_required`.
-4. A caller still applies the existing capability-specific ceilings (role/tool policy, user pin, session state, action guard, validation). `allowed` means only “the extension grant layer did not deny.”
-
-There is no cached positive authorization. A resolver may cache parsed contribution metadata, but it reads grants from the project store on every resolution or invalidates an immutable snapshot synchronously after a successful grant mutation. The implementation must choose the former unless profiling proves it inadequate. This makes revocation effective before the next hook resolution without restarting the gateway, agent, worker, or browser.
+There is no cached positive authorization. Consumers retain the resolver rather than an allow
+result and call it again at each application fence, including after awaited work. This makes
+revocation effective before a stale lifecycle result, panel/route response, or tool result is
+applied without restarting the gateway, agent, worker, or browser.
 
 ## Existing hook visibility and execution
 
@@ -173,53 +202,58 @@ When EP-2 or a later decision consumer invokes a hook, it must call `resolveExte
 
 ## REST API
 
-All routes are handled in `src/server/server.ts` after standard API authentication and require the same local-user principal class used for global UI (`admin` or `localhost`). A sandbox/session bearer may not grant, revoke, or read another project's audit history. The actor is derived from this authenticated principal, not accepted from the request; current deployments record `admin` or `localhost`, with a future authenticated account mapped server-side only.
+All routes are handled in `src/server/server.ts` after standard API authentication. The actor and
+server timestamp are derived by the server; a request cannot supply them. Reads use normal gateway
+authentication. Hook mutations retain their existing authentication rules, while every
+pack-principal mutation requires the verified signed `bobbit_session` operator cookie. A bearer,
+sandbox, or agent-session caller cannot use that operator proof.
 
-### Read effective grants and active hook status
+### Read grants and active principal status
 
 ```
 GET /api/projects/:projectId/extension-grants
 ```
 
-Returns `404` for an unknown project and `200`:
+A successful response contains the durable union in `grants`, active hook status in `hooks`, and
+server-resolved active pack-principal status in `packs`. Durable stale rows remain visible and
+revocable but cannot authorize work; reads never automatically prune operator state.
 
-```ts
-{
-  grants: ExtensionGrant[];
-  hooks: Array<{ packId: string; packName: string; hooks: HookGrantStatusWire[] }>;
-}
-```
-
-Only currently active registry hooks appear in `hooks`; `grants` may include an orphaned tuple only during a crash/interruption window. On normal read, prune neither config nor audit records automatically. A later explicit maintenance operation may surface orphaned grants, but EP-6 must not delete operator state merely because a pack is temporarily absent.
-
-### Grant
+### Grant and revoke exact principals
 
 ```
 PUT /api/projects/:projectId/extension-grants
-Content-Type: application/json
 
 { "packId": "extension-platform-demo", "hookId": "choose-thinking", "capability": "decide" }
-```
 
-The server rejects malformed bodies with `400`, an unknown/inactive hook with `404`, an unsupported capability for that hook with `422`, and an unreadable/persistence-failed config with the existing safe store error. It does not accept `grantedAt`, `grantedBy`, `actor`, `reason`, or a wildcard. On success it atomically persists/replaces the active grant, appends a `granted` audit record, invalidates resolver/contribution projections, broadcasts a metadata-only project invalidation for clients, and returns `200 { grant, hooks }`.
+{ "packId": "hindsight", "principal": "pack", "capability": "memory.read" }
 
-### Revoke
-
-```
 DELETE /api/projects/:projectId/extension-grants/:packId/:hookId/:capability
+DELETE /api/projects/:projectId/extension-grants/:packId/principals/pack/:capability
 ```
 
-Segments are URI-decoded once and validated as safe identifiers/enums before lookup. The route removes the exact tuple if present, appends a `revoked` audit record only when a grant changed, invalidates immediately, and returns `200 { revoked: boolean, hooks }`. It never requires a currently installed hook, so a revoked removed/shadowed pack is still auditable and cannot regain authority if reinstalled. A completed repeat is an idempotent `revoked: false` no-op. The exception is an exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke: it drains that tuple's durable pending audit row and returns `revoked: true` without restoring or removing authority again.
+`PUT` accepts exactly one hook or pack body. It rejects malformed/unknown input with `400`, an
+inactive or uninstalled target with `404`, and a known capability unsupported for that principal
+with `422 EXTENSION_CAPABILITY_UNSUPPORTED`. It accepts no wildcard, actor, timestamp, reason,
+settings value, secret, or arbitrary metadata. The legacy hook DELETE path is unchanged; the
+pack DELETE path has a `principals/pack` segment so a hook called `pack` is never ambiguous.
 
-### Audit read
+Revocation is available for stale rows. A completed ordinary retry is an idempotent
+`revoked: false` no-op; an exact retry after `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` drains only
+its matching pending audit event without restoring or changing authority.
+
+### Audit read and invalidation
 
 ```
 GET /api/projects/:projectId/extension-grant-audit?limit=N
 ```
 
-Returns newest `N` valid entries in chronological order after bounding `limit` to 1..200 (default 100). The response is `{ entries }`; it contains only the five audit fields. EP-7 may render it, but EP-6 has no Marketplace UI.
+The response contains newest valid union entries in chronological order; `limit` defaults to 100
+and is bounded to 1–200. Legacy hook entries remain readable and pack entries attribute
+`principal: "pack"`. Market renders this existing audit stream in its Installed surface.
 
-Use `broadcastToProject(projectId, { type: "extension_grants_updated", projectId, ts })` as an invalidation only. It carries no grant, actor, audit row, reason, or secret. Existing clients may ignore the additive frame; a caller re-fetches the REST projection.
+A successful authority mutation, including one followed by audit `503`, invalidates derived
+state and broadcasts `extension_grants_updated` as metadata only. It carries no grant, actor,
+audit row, reason, or secret; callers re-fetch the server projection.
 
 ## Live revocation and cache ownership
 
