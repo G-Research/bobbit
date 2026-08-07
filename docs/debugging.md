@@ -266,6 +266,28 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 - If context bar still shows wrong info after restart, check that `modelProvider` and `modelId` are persisted in `<project-root>/.bobbit/state/sessions.json` for the affected session.
 - `SessionManager.getPersistedSession(id)` exposes persisted session data used by the fallback mechanism.
 
+## Restored session requires a model
+
+**Symptom:** after a restart, an existing session shows **Choose a model to continue** and the unavailable `provider/model` tuple. History remains readable, but sending is blocked with `MODEL_SELECTION_REQUIRED`.
+
+This is an expected recovery condition, not a generic terminated-session or retry-on-restart failure. Cold restore found the complete persisted tuple authoritatively absent from the current session-selectable catalog, so Bobbit kept the session processless rather than letting Pi choose a fallback. Reloading or attaching another client does not repeat the doomed start.
+
+### Diagnose catalog authority
+
+1. Inspect the session detail or list response for `condition: { code: "MODEL_SELECTION_REQUIRED", provider, modelId }`. The same tuple should remain in the persisted session record, and `restoreError` should not classify it as a generic restore failure.
+2. Check `GET /api/models` for that exact provider and model ID. A missing row, or one marked non-session-selectable, cannot activate a text session. If the row has returned since cold restore, it can be selected again through the picker; Bobbit does not clear the condition merely because a later catalog read changed.
+3. For AIGW, distinguish omission from outage. A successful discovery that omits the row is authoritative. If live discovery throws, a last-published `models.json` row remains selectable only when its provider URL matches the saved gateway URL after normalization. `GET /api/aigw/status` may show no live models during this outage while `/api/models` still exposes the retained session catalog. See [AI Gateway routing — Transient discovery outages](ai-gateway-routing.md#transient-discovery-outages).
+
+### Recover safely
+
+Use **Choose replacement model** and select any currently session-selectable model. The old model may be selected if it has returned to the catalog. Bobbit starts a replacement pinned to the exact choice, restores the transcript, clamps thinking for that model, verifies runtime model state, then persists the new tuple and clears the condition.
+
+Do not use Retry, restart, or manual edits to `sessions.json` as a substitute for the picker. Prompt, steer, retry, thinking-level, and restart actions remain fenced while selection is required. Browser sends retain their text and attachment drafts; REST and tool-driven prompt delivery returns HTTP `409` with `MODEL_SELECTION_REQUIRED` before accepting work. Any already persisted prompts stay parked until verified recovery releases the existing session lifecycle.
+
+If activation reports `MODEL_SELECTION_RECOVERY_FAILED`, the old tuple, transcript, clients, and condition should remain intact. Confirm that the selected row is still present and session-selectable, its provider credentials and endpoint work, the persisted transcript is readable, and the state directory is writable. Then retry or choose another model. Server diagnostics sanitize credential-shaped values; do not copy secrets into logs while investigating.
+
+Unexpected Pi startup, a substituted tuple, changed transcript bytes, repeated restore attempts on attachment, or a cleared condition before the replacement becomes durable indicates a recovery-boundary regression. Inspect the model-selection recovery path in the session manager and the explicit condition projections in session list/detail and WebSocket state; do not repair it by broadening fallback behavior.
+
 ## Duplicate `model_change` event at session startup
 
 A normal Bobbit-owned spawn binds one exact provider/model/effective-thinking tuple before the first prompt. A duplicate startup `model_change`, or a first state frame with a different tuple, means that spawn-time pin did not apply.
