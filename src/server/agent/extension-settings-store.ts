@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import {
   ExtensionSettingsSecretPersistenceError,
   ExtensionSettingsSecretStore,
+  isExtensionSettingsCommitId,
   validateExtensionSettingsSecretChanges,
   type ExtensionSettingsSecretChanges,
   type ExtensionSettingsSecretTargetRef,
@@ -23,6 +25,8 @@ export interface ExtensionSettingsRecord {
 export interface ExtensionSettingsState {
   schema: 1;
   revision: number;
+  /** Opaque identity paired with the owner-only secret envelope. */
+  commitId?: string;
   targets: Record<string, ExtensionSettingsRecord>;
 }
 
@@ -62,7 +66,7 @@ export interface ExtensionSettingsMutation {
 }
 
 export type ExtensionSettingsUpdateResult = {
-  outcome: "updated" | "secret-persist-failed";
+  outcome: "updated";
   revision: number;
   /** Redacted public overlay only. */
   targets: Record<string, ExtensionSettingsRecord>;
@@ -140,7 +144,9 @@ function assertState(state: unknown): asserts state is ExtensionSettingsState {
   // the scalar before checking it so the assertion is sound rather than
   // relying on a property access that remains `unknown` to TypeScript.
   const revision = isPlainObject(state) ? state.revision : undefined;
-  if (!isPlainObject(state) || state.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || !isPlainObject(state.targets)) {
+  const commitId = isPlainObject(state) ? state.commitId : undefined;
+  if (!isPlainObject(state) || state.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+    || (commitId !== undefined && !isExtensionSettingsCommitId(commitId)) || !isPlainObject(state.targets)) {
     throw new ExtensionSettingsUnavailableError();
   }
   for (const record of Object.values(state.targets)) {
@@ -173,8 +179,8 @@ function assertMutation(mutation: ExtensionSettingsMutation): void {
 
 /**
  * Project-scoped settings owner. It publishes safe YAML state first, then
- * owner-only secrets. A failed second phase deliberately reports partial
- * publication rather than claiming a secret was stored.
+ * owner-only secrets. If the latter fails, it restores the exact prior public
+ * snapshot before reporting a sanitized failure.
  */
 export class ExtensionSettingsStore {
   constructor(
@@ -250,6 +256,9 @@ export class ExtensionSettingsStore {
     defaults: Readonly<Record<string, ExtensionSettingValue>>,
     options: ExtensionSettingsEffectiveOptions = {},
   ): Record<string, ExtensionSettingValue> {
+    // Pair before combining any public value with an owner-only read. A public
+    // candidate and an older secret file can both be durable after a crash.
+    this.secretStore.assertCommitId(this.getPublicState().commitId);
     const effective = this.getEffective(ref, defaults, options);
     const values = { ...effective.values };
     for (const field of options.secretFields ?? []) {
@@ -265,8 +274,8 @@ export class ExtensionSettingsStore {
 
   /**
    * Publish all safe target mutations in one ProjectConfigStore transaction.
-   * The public revision changes exactly once. Secret writes follow afterwards;
-   * callers receive a redacted partial result when that second phase fails.
+   * The public revision changes exactly once. Secret changes follow in one
+   * owner-only publication; a failed secret save restores the prior snapshot.
    */
   compareAndSwapMany(mutations: readonly ExtensionSettingsMutation[], expectedRevision: number): ExtensionSettingsUpdateResult {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || mutations.length === 0) throw new ExtensionSettingsMutationError();
@@ -290,6 +299,9 @@ export class ExtensionSettingsStore {
     if (current.revision !== expectedRevision) throw new ExtensionSettingsRevisionConflictError();
     const candidate = cloneState(current);
     candidate.revision++;
+    // Every mutation, including a public-only one, gets a fresh identity. The
+    // secret store publishes an envelope even if none of its field bytes change.
+    candidate.commitId = randomUUID();
 
     for (const mutation of mutations) {
       const key = extensionSettingsTargetKey(mutation.ref);
@@ -302,21 +314,33 @@ export class ExtensionSettingsStore {
       candidate.targets[key] = next;
     }
 
-    // All shape validation happens before public publication. The config store
-    // owns atomic YAML persistence and preserves its unrelated fields.
+    // The config store owns atomic YAML persistence and preserves unrelated
+    // fields. Public state is deliberately published before secrets: reversing
+    // this order could leave durable secret changes with no public rollback.
     this.projectConfigStore.mutate(draft => draft.setExtensionSettings(candidate));
 
+    const secretMutations = mutations.flatMap(mutation =>
+      mutation.secrets && Object.keys(mutation.secrets).length > 0
+        ? [{ ref: mutation.ref, changes: mutation.secrets }]
+        : [],
+    );
     try {
-      for (const mutation of mutations) {
-        if (mutation.secrets && Object.keys(mutation.secrets).length > 0) {
-          this.secretStore.update(mutation.ref, mutation.secrets);
-        }
-      }
+      // Always publish the envelope. Otherwise a public-only endpoint change
+      // would leave a stale secret identity that runtime could not safely pair.
+      this.secretStore.updateMany(secretMutations, candidate.commitId);
     } catch (error) {
-      if (error instanceof ExtensionSettingsSecretPersistenceError) {
-        return { outcome: "secret-persist-failed", revision: candidate.revision, targets: this.redactedTargets(candidate, mutations) };
+      // Restore the precise snapshot that was current at the successful CAS.
+      // A successful rollback preserves the original revision for a retry.
+      try {
+        this.projectConfigStore.mutate(draft => draft.setExtensionSettings(current));
+      } catch {
+        // We cannot claim atomic success if the compensation itself was not
+        // durable. Keep the response loud, unavailable, and value-free.
+        throw new ExtensionSettingsUnavailableError();
       }
-      throw error;
+      if (error instanceof ExtensionSettingsSecretPersistenceError) throw error;
+      // Secret owner errors must never expose a cause or any secret bytes.
+      throw new ExtensionSettingsUnavailableError();
     }
 
     return { outcome: "updated", revision: candidate.revision, targets: this.redactedTargets(candidate, mutations) };
