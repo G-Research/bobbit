@@ -252,19 +252,29 @@ from surviving a model or level transition. The bridge changes its locally repor
 model or thinking value only after the corresponding SDK call succeeds; SDK errors
 propagate to the session transaction.
 
-Unsupported input is explicit, never a clamp. A configured model that the live SDK
-advertised-model list does not contain is rejected without calling `Query.setModel()`.
-Likewise, a non-`off` level absent from the active live map is rejected without a
-thinking mutation. If an older SDK provides no model data, Bobbit keeps a
-conservative compatibility path: a configured SDK model may still be selected, but
-only `off` is available. If the SDK advertises effort but lacks
-`applyFlagSettings()`, advertised effort is rejected rather than emulated; `off`
-continues to clear the token budget. These cases let the UI make unavailable controls
-visible while keeping a direct or stale client request safe.
+For **interactive live requests**, unsupported input is explicit, never a clamp. A
+configured model that the live SDK advertised-model list does not contain is rejected
+without calling `Query.setModel()`. Likewise, a non-`off` level absent from the
+active live map is rejected without a thinking mutation. If an older SDK provides no
+model data, Bobbit keeps a conservative compatibility path: a configured SDK model
+may still be selected, but only `off` is available. If the SDK advertises effort but
+lacks `applyFlagSettings()`, advertised effort is rejected rather than emulated;
+`off` continues to clear the token budget. These cases let the UI make unavailable
+controls visible while keeping a direct or stale client request safe.
 
-Initial SDK thinking application uses the same live bridge capability, rather than
-the manual provider row. The bridge capability itself is not persisted: it is
-re-derived whenever a query starts.
+Initial SDK thinking is not an interactive rejection path. Before Query
+initialization, Bobbit retains the role/default candidate because the configured
+manual provider row is deliberately conservative. After initialization, it
+normalizes that candidate only from the bridge's live `reasoning` and
+`thinkingLevelMap` metadata. A missing map, missing reasoning proof, or otherwise
+insufficient SDK metadata yields the conservative effective value `off`; Bobbit never
+falls back to Pi model-family heuristics or invents an SDK effort level.
+
+`SessionManager` then applies the effective initial level through the bridge and
+reads back the exact `(provider, modelId, thinkingLevel)` tuple. It persists only
+that verified effective tuple, not the raw preference, attempted request, or SDK
+capability record. The bridge capability itself is not persisted: it is re-derived
+whenever a query starts.
 
 ### Verified tuple transaction and recovery
 
@@ -281,11 +291,12 @@ the selector follows this order:
 4. Only then persist the normal tuple, update the model-name mirror, and broadcast
    the verified model metadata and thinking level.
 
-A standalone thinking request uses the same validation, exact read-back, commit, and
-broadcast rule. Therefore a request is not durable merely because an SDK call was
-attempted or returned: the final state must match exactly. This also preserves alias
-identity—an accepted alias is persisted and broadcast as that alias, not as an
-unrequested resolved id.
+A standalone interactive thinking request uses the same validation, exact read-back,
+commit, and broadcast rule. Therefore neither an interactive request nor an initial
+preference becomes durable merely because an SDK call was attempted or returned: the
+final effective state must match exactly. This also preserves alias identity—an
+accepted alias is persisted and broadcast as that alias, not as an unrequested
+resolved id.
 
 On a rejection, SDK error, mismatch, or ownership change, the selector broadcasts a
 correction from live or durable truth and performs the established bounded rollback.

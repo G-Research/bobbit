@@ -14,9 +14,12 @@ arrays around the codebase, Pi capability questions go through one shared module
 
 This page documents the Pi/catalog rules that module enforces, where it is
 consulted, and why that runtime clamps rather than rejects. Claude Agent SDK
-sessions are the deliberate exception: their live Query advertises a
-session-local capability map, and unsupported SDK levels are rejected rather than
-clamped. See [Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls).
+sessions are the deliberate exception for **interactive live requests**: their
+live Query advertises a session-local capability map, and an unavailable SDK
+level is rejected rather than clamped. SDK startup is different: Bobbit waits for
+that live metadata, normalizes the initial preference to an effective level, and
+falls back conservatively to `off` when the Query cannot prove a capability. See
+[Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls).
 
 ## Why a single source of truth
 
@@ -291,18 +294,26 @@ the aigw discovery path to carry per-model thinking maps.
 
 The UI also clamps reactively (see below), but trusting the client would be
 wrong — extensions, MCP clients, stale prefs, and direct REST callers all
-bypass the UI. For Pi sessions, the server clamps at every entry point. Claude
-Agent SDK sessions instead validate the initialized Query's live map and reject
-unavailable levels without a mutation or durable write; they do not use Pi's
+bypass the UI. For Pi sessions, the server clamps at every entry point. For
+**interactive** Claude Agent SDK `set_model` and `set_thinking_level` requests,
+the server instead validates the initialized Query's live map and rejects an
+unavailable level without a mutation or durable write; it does not use Pi's
 registry fallback.
+
+SDK startup is intentionally not an interactive rejection path. Once the Query
+has initialized, `SessionManager` normalizes the role/default candidate against
+its live `reasoning` and `thinkingLevelMap` metadata. Missing or insufficient
+metadata proves only `off`, never a Pi family heuristic. Bobbit applies that
+effective value, requires exact model/thinking read-back, and persists only the
+verified effective tuple.
 
 | Boundary | Site | What it clamps or validates |
 |---|---|---|
-| WS `set_model` | `src/server/ws/runtime-model-selection.ts` | Pi: the optional requested thinking level, or the previous effective level for an older frame, against the exact selected catalog model before either value becomes durable. SDK: the live bridge capability must explicitly allow the level. |
-| WS `set_thinking_level` | `src/server/ws/handler.ts` | Pi: the level the client sent against the session's currently-bound model. SDK: the live capability map; unavailable levels are rejected, not clamped. |
+| WS `set_model` | `src/server/ws/runtime-model-selection.ts` | Pi: the optional requested thinking level, or the previous effective level for an older frame, against the exact selected catalog model before either value becomes durable. SDK interactive request: the live bridge capability must explicitly allow the level. |
+| WS `set_thinking_level` | `src/server/ws/handler.ts` | Pi: the level the client sent against the session's currently-bound model. SDK interactive request: the live capability map; unavailable levels are rejected, not clamped. |
 | REST role create/update | `clampRoleThinking` in `src/server/server.ts` | The role's `thinkingLevel` field, against the role's `model` if set (or returned as-is if the role inherits, since the per-session clamp will run at spawn). |
 | REST project/system prefs PUT | `/api/preferences` | Stored as-is (no write-time clamp): the defaults apply to many models and the resolved model may not be known yet. Clamping happens at use-time — see `resolveInitialThinkingLevel` / `tryApplyDefaultThinkingLevel` for sessions and `clampReviewThinking` for verification reviewers. |
-| Session start | `resolveInitialThinkingLevel` + `tryApplyDefaultThinkingLevel` in `src/server/agent/session-manager.ts` | The role-or-default level, against the model resolved for that session (role override → global default → aigw fallback). |
+| Session start | `resolveInitialThinkingLevel` + `tryApplyDefaultThinkingLevel` in `src/server/agent/session-manager.ts` | Pi: the role-or-default level is resolved against the selected model (role override → global default → aigw fallback). SDK: after Query initialization, the same candidate is normalized from live bridge metadata; unknown capability falls back to `off`, and only the exact verified effective tuple is persisted. |
 | Verification harness | `clampReviewThinking` in `src/server/agent/verification-harness.ts` | Reviewer/QA/sub-session levels at six call sites, against the resolved reviewer or role model. |
 
 Both server helpers (`clampRoleThinking`, `clampReviewThinking`) parse the
@@ -364,15 +375,15 @@ request prevents an intervening command from observing a model-only picker
 state.
 
 The server validates the model and applies the runtime's effective level:
-Pi re-clamps against catalog metadata, while Claude Agent SDK requires a level
-advertised by the live Query. It then reads back the complete tuple and broadcasts
-a `state` frame containing both `model` and `thinkingLevel`. That frame is
-authoritative and replaces both optimistic fields. On `SET_MODEL_FAILED`, the
-server first broadcasts the observed or previous durable tuple, attempts a verified
-rollback, and uses the
-existing restart path if a partial mutation cannot be verified. The client
-also requests `get_state`, so a rejected model or thinking write cannot leave
-either optimistic field displayed.
+Pi re-clamps against catalog metadata, while an interactive Claude Agent SDK
+request requires a level advertised by the live Query. It then reads back the
+complete tuple and broadcasts a `state` frame containing both `model` and
+`thinkingLevel`. That frame is authoritative and replaces both optimistic fields.
+On `SET_MODEL_FAILED`, the server first broadcasts the observed or previous durable
+tuple, attempts a verified rollback, and uses the existing restart path if a
+partial mutation cannot be verified. The client also requests `get_state`, so a
+rejected interactive model or thinking write cannot leave either optimistic field
+displayed.
 
 ### Standalone thinking changes
 
@@ -380,11 +391,11 @@ Changing only the footer or message-editor thinking control remains a separate
 operation. It calls `session.setThinkingLevel(level)` and sends
 `{ "type": "set_thinking_level", "level": "..." }`; it does not resend the
 model picker request. For Pi, the server clamps that level against the currently
-bound exact model. For Claude Agent SDK, it requires the level in the live Query
-capability map. It verifies the resulting complete model/thinking tuple, persists it,
-and broadcasts
-authoritative state. `SET_THINKING_LEVEL_FAILED` follows the
-same correction, bounded rollback/restart, and `get_state` refresh behavior.
+bound exact model. For an interactive Claude Agent SDK request, it requires the
+level in the live Query capability map. It verifies the resulting complete
+model/thinking tuple, persists it, and broadcasts authoritative state.
+`SET_THINKING_LEVEL_FAILED` follows the same correction, bounded rollback/restart,
+and `get_state` refresh behavior.
 
 The full-name label map in `AgentInterface.ts` is the single place to extend if
 a new level is added; `xhigh` is labelled "Extra high" and `max` is labelled
