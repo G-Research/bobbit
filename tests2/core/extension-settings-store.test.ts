@@ -5,9 +5,13 @@ import yaml from "yaml";
 import {
 	ExtensionSettingsRevisionConflictError,
 	ExtensionSettingsStore,
+	ExtensionSettingsUnavailableError,
 	extensionSettingsTargetKey,
 } from "../../src/server/agent/extension-settings-store.js";
-import { ExtensionSettingsSecretStore } from "../../src/server/agent/extension-settings-secret-store.js";
+import {
+	ExtensionSettingsSecretPersistenceError,
+	ExtensionSettingsSecretStore,
+} from "../../src/server/agent/extension-settings-secret-store.js";
 import {
 	normalizeExtensionSettings,
 	ProjectConfigStore,
@@ -110,29 +114,105 @@ describe("extension settings store", () => {
 		expect(secrets.getForRuntime(ref, "credential")).toBe("runtime-credential-value");
 	});
 
-	it("reports a redacted partial result when the owner-only write fails", () => {
+	it("rolls back public state after an owner-only write failure so the original revision can retry", () => {
 		const memFs = createMemFs();
 		const configDir = "/memfs/settings-config";
 		const stateDir = "/memfs/settings-state";
 		const config = new ProjectConfigStore(configDir, memFs);
 		const secrets = new ExtensionSettingsSecretStore(stateDir, memFs);
 		const store = new ExtensionSettingsStore(config, secrets);
-		const privateValue = "unpublished-runtime-value";
+		const oldSecret = "previous-runtime-value";
+		const unpublishedSecret = "unpublished-runtime-value";
+		store.compareAndSwap(ref, 0, {
+			values: { endpoint: "https://previous.example" },
+			secrets: { credential: oldSecret },
+		});
 		const originalWrite = memFs.writeFileSync.bind(memFs);
 		memFs.writeFileSync = (file, ...args) => {
 			if (String(file).includes("extension-settings-secrets.json")) throw new Error("injected failure");
 			return originalWrite(file, ...args);
 		};
 
-		const result = store.compareAndSwap(ref, 0, {
-			values: { endpoint: "https://published.example" },
-			secrets: { credential: privateValue },
-		});
+		expect(() => store.compareAndSwap(ref, 1, {
+			values: { endpoint: "https://unpublished.example" },
+			secrets: { credential: unpublishedSecret },
+		})).toThrow(ExtensionSettingsSecretPersistenceError);
+		expect(store.getPublicState()).toEqual({ schema: 1, revision: 1, targets: { [targetKey]: { values: { endpoint: "https://previous.example" } } } });
+		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toEqual({ endpoint: "https://previous.example", credential: oldSecret });
 
-		expect(result).toEqual({ outcome: "secret-persist-failed", revision: 1, targets: { [targetKey]: { values: { endpoint: "https://published.example" } } } });
-		expect(JSON.stringify(result)).not.toContain(privateValue);
-		expect(store.getPublicState()).toEqual({ schema: 1, revision: 1, targets: { [targetKey]: { values: { endpoint: "https://published.example" } } } });
-		expect(store.getEffective(ref, {}, { secretFields: ["credential"] }).secretSet.credential).toBe(false);
+		memFs.writeFileSync = originalWrite;
+		expect(store.compareAndSwap(ref, 1, {
+			values: { endpoint: "https://retried.example" },
+			secrets: { credential: unpublishedSecret },
+		})).toMatchObject({ outcome: "updated", revision: 2 });
+		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toEqual({ endpoint: "https://retried.example", credential: unpublishedSecret });
+	});
+
+	it("reports an unavailable failure if public rollback cannot be persisted", () => {
+		const memFs = createMemFs();
+		const configDir = "/memfs/settings-config";
+		const stateDir = "/memfs/settings-state";
+		const config = new ProjectConfigStore(configDir, memFs);
+		const secrets = new ExtensionSettingsSecretStore(stateDir, memFs);
+		const store = new ExtensionSettingsStore(config, secrets);
+		const originalWrite = memFs.writeFileSync.bind(memFs);
+		let secretSaveFailed = false;
+		memFs.writeFileSync = (file, ...args) => {
+			if (String(file).includes("extension-settings-secrets.json")) {
+				secretSaveFailed = true;
+				throw new Error("injected secret failure");
+			}
+			if (secretSaveFailed && String(file).includes("project.yaml")) throw new Error("injected rollback failure");
+			return originalWrite(file, ...args);
+		};
+
+		let thrown: unknown;
+		try {
+			store.compareAndSwap(ref, 0, { secrets: { credential: "must-not-escape" } });
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ExtensionSettingsUnavailableError);
+		expect(String(thrown)).not.toContain("must-not-escape");
+	});
+
+	it("publishes multiple target secrets all-or-nothing in one owner-only replacement", () => {
+		const memFs = createMemFs();
+		const configDir = "/memfs/settings-config";
+		const stateDir = "/memfs/settings-state";
+		const config = new ProjectConfigStore(configDir, memFs);
+		const secrets = new ExtensionSettingsSecretStore(stateDir, memFs);
+		const store = new ExtensionSettingsStore(config, secrets);
+		const secondRef = { packId: "observability", kind: "hook" as const, id: "audit" };
+		const originalWrite = memFs.writeFileSync.bind(memFs);
+		const initialSecretWrites: string[] = [];
+		memFs.writeFileSync = (file, ...args) => {
+			if (String(file).includes("extension-settings-secrets.json")) initialSecretWrites.push(String(file));
+			return originalWrite(file, ...args);
+		};
+		store.compareAndSwapMany([
+			{ ref, secrets: { credential: "previous-provider-secret" } },
+			{ ref: secondRef, secrets: { credential: "previous-hook-secret" } },
+		], 0);
+		expect(initialSecretWrites).toHaveLength(1);
+		const before = store.getPublicState();
+		const secretWrites: string[] = [];
+		memFs.writeFileSync = (file, ...args) => {
+			if (String(file).includes("extension-settings-secrets.json")) {
+				secretWrites.push(String(file));
+				throw new Error("injected failure");
+			}
+			return originalWrite(file, ...args);
+		};
+
+		expect(() => store.compareAndSwapMany([
+			{ ref, values: { endpoint: "https://new-provider.example" }, secrets: { credential: "new-provider-secret" } },
+			{ ref: secondRef, values: { endpoint: "https://new-hook.example" }, secrets: { credential: "new-hook-secret" } },
+		], 1)).toThrow(ExtensionSettingsSecretPersistenceError);
+		expect(secretWrites).toHaveLength(1);
+		expect(store.getPublicState()).toEqual(before);
+		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] }).credential).toBe("previous-provider-secret");
+		expect(store.getForRuntime(secondRef, {}, { secretFields: ["credential"] }).credential).toBe("previous-hook-secret");
 	});
 
 	it("resolves public and owner-only values independently for each project", () => withTmpDir(root => {

@@ -62,7 +62,7 @@ export interface ExtensionSettingsMutation {
 }
 
 export type ExtensionSettingsUpdateResult = {
-  outcome: "updated" | "secret-persist-failed";
+  outcome: "updated";
   revision: number;
   /** Redacted public overlay only. */
   targets: Record<string, ExtensionSettingsRecord>;
@@ -173,8 +173,8 @@ function assertMutation(mutation: ExtensionSettingsMutation): void {
 
 /**
  * Project-scoped settings owner. It publishes safe YAML state first, then
- * owner-only secrets. A failed second phase deliberately reports partial
- * publication rather than claiming a secret was stored.
+ * owner-only secrets. If the latter fails, it restores the exact prior public
+ * snapshot before reporting a sanitized failure.
  */
 export class ExtensionSettingsStore {
   constructor(
@@ -265,8 +265,8 @@ export class ExtensionSettingsStore {
 
   /**
    * Publish all safe target mutations in one ProjectConfigStore transaction.
-   * The public revision changes exactly once. Secret writes follow afterwards;
-   * callers receive a redacted partial result when that second phase fails.
+   * The public revision changes exactly once. Secret changes follow in one
+   * owner-only publication; a failed secret save restores the prior snapshot.
    */
   compareAndSwapMany(mutations: readonly ExtensionSettingsMutation[], expectedRevision: number): ExtensionSettingsUpdateResult {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || mutations.length === 0) throw new ExtensionSettingsMutationError();
@@ -302,21 +302,31 @@ export class ExtensionSettingsStore {
       candidate.targets[key] = next;
     }
 
-    // All shape validation happens before public publication. The config store
-    // owns atomic YAML persistence and preserves its unrelated fields.
+    // The config store owns atomic YAML persistence and preserves unrelated
+    // fields. Public state is deliberately published before secrets: reversing
+    // this order could leave durable secret changes with no public rollback.
     this.projectConfigStore.mutate(draft => draft.setExtensionSettings(candidate));
 
+    const secretMutations = mutations.flatMap(mutation =>
+      mutation.secrets && Object.keys(mutation.secrets).length > 0
+        ? [{ ref: mutation.ref, changes: mutation.secrets }]
+        : [],
+    );
     try {
-      for (const mutation of mutations) {
-        if (mutation.secrets && Object.keys(mutation.secrets).length > 0) {
-          this.secretStore.update(mutation.ref, mutation.secrets);
-        }
-      }
+      if (secretMutations.length > 0) this.secretStore.updateMany(secretMutations);
     } catch (error) {
-      if (error instanceof ExtensionSettingsSecretPersistenceError) {
-        return { outcome: "secret-persist-failed", revision: candidate.revision, targets: this.redactedTargets(candidate, mutations) };
+      // Restore the precise snapshot that was current at the successful CAS.
+      // A successful rollback preserves the original revision for a retry.
+      try {
+        this.projectConfigStore.mutate(draft => draft.setExtensionSettings(current));
+      } catch {
+        // We cannot claim atomic success if the compensation itself was not
+        // durable. Keep the response loud, unavailable, and value-free.
+        throw new ExtensionSettingsUnavailableError();
       }
-      throw error;
+      if (error instanceof ExtensionSettingsSecretPersistenceError) throw error;
+      // Secret owner errors must never expose a cause or any secret bytes.
+      throw new ExtensionSettingsUnavailableError();
     }
 
     return { outcome: "updated", revision: candidate.revision, targets: this.redactedTargets(candidate, mutations) };

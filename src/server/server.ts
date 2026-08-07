@@ -10305,16 +10305,12 @@ async function handleApiRoute(
 		}
 		const allTargets = settingsTargets(resolved.projectId);
 		const invalidRefs = invalidSettingsTargetRefs(resolved.projectId);
-		const emitMutation = (result: { outcome: "updated" | "secret-persist-failed"; revision: number }, responseTargets: ExtensionSettingsTargetRef[]) => {
+		const emitMutation = (result: { outcome: "updated"; revision: number }, responseTargets: ExtensionSettingsTargetRef[]) => {
 			broadcastExtensionSettingsInvalidation(resolved.projectId, result.revision);
 			let projection: ReturnType<typeof extensionSettingsProjection>;
 			try { projection = extensionSettingsProjection(resolved.projectId); }
 			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); return; }
 			const targets = projection.targets.filter(target => responseTargets.some(ref => ref.packId === target.ref.packId && ref.kind === target.ref.kind && ref.id === target.ref.id));
-			if (result.outcome === "secret-persist-failed") {
-				json({ error: "Extension settings saved but the secret was not persisted; re-enter it and retry.", code: "EXTENSION_SETTINGS_SECRET_PERSIST_FAILED", revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) }, 503);
-				return;
-			}
 			json({ revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
 		};
 		if (kind) {

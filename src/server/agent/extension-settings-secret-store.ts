@@ -12,6 +12,12 @@ export interface ExtensionSettingsSecretTargetRef {
 
 export type ExtensionSettingsSecretChanges = Readonly<Record<string, string | undefined>>;
 
+/** A secret update owned by the one project-scoped secret-store publication. */
+export interface ExtensionSettingsSecretMutation {
+  ref: ExtensionSettingsSecretTargetRef;
+  changes: ExtensionSettingsSecretChanges;
+}
+
 /** Deliberately redacted: callers must not learn the file path or parser error. */
 export class ExtensionSettingsSecretReadError extends Error {
   readonly code = "EXTENSION_SETTINGS_SECRET_READ_FAILED";
@@ -146,18 +152,39 @@ export class ExtensionSettingsSecretStore {
     return this.data[extensionSettingsSecretKey(ref, field)];
   }
 
-  /**
-   * Atomically replace or clear several fields on one server-derived target.
-   * Inputs are validated before the candidate is persisted or made observable.
-   */
+  /** Atomically replace or clear fields on one server-derived target. */
   update(ref: ExtensionSettingsSecretTargetRef, changes: ExtensionSettingsSecretChanges): void {
+    this.updateMany([{ ref, changes }]);
+  }
+
+  /**
+   * Atomically publish every supplied target's secret changes in one owner-only
+   * file replacement. Validation and duplicate detection complete before any
+   * candidate is written or made observable.
+   */
+  updateMany(mutations: readonly ExtensionSettingsSecretMutation[]): void {
     this.assertReadable();
-    validateExtensionSettingsSecretChanges(ref, changes);
+    if (!Array.isArray(mutations) || mutations.length === 0) throw new ExtensionSettingsSecretValidationError();
+
+    const seen = new Set<string>();
+    for (const mutation of mutations) {
+      if (!mutation || typeof mutation !== "object") throw new ExtensionSettingsSecretValidationError();
+      validateExtensionSettingsSecretChanges(mutation.ref, mutation.changes);
+      for (const field of Object.keys(mutation.changes)) {
+        const key = extensionSettingsSecretKey(mutation.ref, field);
+        if (seen.has(key)) throw new ExtensionSettingsSecretValidationError();
+        seen.add(key);
+      }
+    }
+
     const candidate = { ...this.data };
-    for (const [field, value] of Object.entries(changes)) {
-      const key = extensionSettingsSecretKey(ref, field);
-      if (value === undefined) delete candidate[key];
-      else candidate[key] = value;
+    for (const mutation of mutations) {
+      const changes = mutation.changes as ExtensionSettingsSecretChanges;
+      for (const [field, value] of Object.entries(changes) as Array<[string, string | undefined]>) {
+        const key = extensionSettingsSecretKey(mutation.ref, field);
+        if (value === undefined) delete candidate[key];
+        else candidate[key] = value;
+      }
     }
     this.save(candidate);
     this.data = candidate;
