@@ -15,9 +15,9 @@ services:
       HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS: ${HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS}
       HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS: ${HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS}
       HINDSIGHT_LOCAL_LLM_KEEP_ALIVE: ${HINDSIGHT_LOCAL_LLM_KEEP_ALIVE}
-      # The bridge selects a managed-volume database URL or the write-only
-      # external database URL only while processing explicit control.
-      HINDSIGHT_API_DATABASE_URL: ${HINDSIGHT_API_DATABASE_URL}
+      # An optional external URL is supplied only for explicit external-DB
+      # starts. Otherwise Compose uses its own durable named-volume database.
+      HINDSIGHT_API_DATABASE_URL: ${HINDSIGHT_API_DATABASE_URL:-postgresql://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight}
     ports:
       - "127.0.0.1::8888"
     depends_on:

@@ -144,7 +144,25 @@ test.describe("Hindsight experience", () => {
 		expect((await control).status()).toBe(200);
 		await expect(confirm).toHaveCount(0);
 
-		await expect(service.getByRole("button", { name: /plan migration/i })).toBeVisible();
+		const planMigration = service.getByRole("button", { name: /plan migration/i });
+		await expect(planMigration).toBeVisible();
+		const planResponse = page.waitForResponse(response => response.url().includes("/api/ext/route/migration-plan") && response.request().method() === "POST");
+		await planMigration.click();
+		const planned = await planResponse;
+		expect(planned.status()).toBe(200);
+		const planBody = await planned.json();
+		expect(planBody.ok).toBe(true);
+		await expect(service.getByText("Confirmation:")).toBeVisible();
+		await service.getByRole("button", { name: "Apply plan", exact: true }).click();
+		const migrationConfirm = panel.getByRole("dialog", { name: "Apply the reviewed migration plan?" });
+		const executeResponse = page.waitForResponse(response => response.url().includes("/api/ext/route/migration-execute") && response.request().method() === "POST");
+		await migrationConfirm.getByRole("button", { name: "Confirm", exact: true }).click();
+		const executed = await executeResponse;
+		expect(executed.status()).toBe(200);
+		const executeRequest = JSON.parse(executed.request().postData() ?? "{}");
+		expect(executeRequest.init?.body).toEqual({ plan: planBody.plan, confirmation: planBody.plan.confirmation });
+		await expect(panel.getByText(/Migration is unavailable because this runtime has no logical migration connector/i)).toBeVisible();
+
 		await expect(service.getByRole("button", { name: "View runtime logs" })).toBeVisible();
 		await service.getByRole("button", { name: "View runtime logs" }).click();
 

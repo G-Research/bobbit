@@ -30,7 +30,7 @@ config:
   localLlmApiKey: { type: secret, label: Local model API key, description: Optional write-only model credential. Loopback HTTP endpoints require no placeholder key., optional: true }
   localLlmContextTokens: { type: number, label: Local context tokens, description: Positive model context limit forwarded only during explicit runtime start., min: 1, default: 32768 }
   localLlmMaxOutputTokens: { type: number, label: Local output tokens, description: Positive model output limit forwarded only during explicit runtime start., min: 1, default: 4096 }
-  localLlmResidency: { type: enum, label: Local model residency, description: Resident keeps the selected local model loaded across Hindsight requests; request-scoped loading is unsupported., values: [resident, request], default: resident }
+  localLlmResidency: { type: enum, label: Local model residency, description: Resident keeps the selected local model loaded across Hindsight requests., values: [resident], default: resident }
   localLlmKeepAlive: { type: number, label: Local keep-alive seconds, description: Positive residency keep-alive value for providers that support it., min: 1, default: 3600 }
   ociImage: { type: string, label: Hindsight OCI image, description: Offline/private registry OCI reference. Saving validates syntax only; mutable tags warn and pull only on explicit start., default: "ghcr.io/vectorize-io/hindsight:0.8.6@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1" }
   registryCredentials: { type: secret, label: Registry credentials, description: Optional write-only credential used only for an explicit Docker or Compose start., optional: true }

@@ -32,6 +32,7 @@ type Entry = {
 	reflection?: string;
 	retain: string;
 	invalidateReason: string;
+	migrationTarget: "managed-volume" | "external";
 	confirm?: { action: ConfirmAction; label: string; restore?: Element | null };
 	migration?: RouteRecord;
 };
@@ -49,9 +50,20 @@ function text(value: unknown, fallback = ""): string {
 function list(value: unknown): RouteRecord[] {
 	return Array.isArray(value) ? value.map(record).filter((x): x is RouteRecord => !!x) : [];
 }
+function routeErrorText(value: RouteRecord): string {
+	const code = text(value.code);
+	if (code === "HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE" || code === "HINDSIGHT_MIGRATION_FAILED") {
+		return "Migration is unavailable because this runtime has no logical migration connector. No storage was changed.";
+	}
+	if (code === "HINDSIGHT_STORAGE_CONTINUITY_REQUIRED" || code === "HINDSIGHT_STORAGE_CONTINUITY_UNAVAILABLE" || code === "HINDSIGHT_MIGRATION_REQUIRED") {
+		return "Storage continuity could not be proven. Run a supported logical migration or configure the existing external database before starting; the current runtime was not stopped.";
+	}
+	if (code === "HINDSIGHT_MIGRATION_CONFIRMATION_REQUIRED") return "The reviewed migration plan must be confirmed exactly before it can run.";
+	return text(value.error || value.message || code, "Request failed.").slice(0, 280);
+}
 function errorText(error: unknown): string {
 	const body = record(error);
-	return text(body?.error || body?.message, "Request unavailable.").slice(0, 280);
+	return body ? routeErrorText(body) : "Request unavailable.";
 }
 function statusOf(runtime?: RouteRecord): RuntimeState {
 	const state = text(runtime?.state || runtime?.status);
@@ -74,7 +86,7 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 		if (activeKey && activeKey !== key) disposeEntry(entries.get(activeKey));
 		activeKey = key;
 		const entry = entries.get(key) ?? {
-			key, host, activeTab: "service", generation: 0, memories: [], search: "", reflectPrompt: "", retain: "", invalidateReason: "",
+			key, host, activeTab: "service", generation: 0, memories: [], search: "", reflectPrompt: "", retain: "", invalidateReason: "", migrationTarget: "managed-volume",
 		};
 		entry.host = host;
 		entries.set(key, entry);
@@ -83,15 +95,26 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 	function repaint(entry: Entry): void { entry.host?.requestRender?.(); }
 	function disposeEntry(entry?: Entry): void {
 		if (!entry) return;
+		// Abort by generation and evict the entry: panel close/session changes must
+		// never retain a prior session's memories, logs, or route result caches.
 		entry.generation += 1;
 		entry.busy = undefined;
-		entry.confirm = undefined;
-		entry.search = "";
+		entry.message = undefined;
+		entry.error = undefined;
+		entry.runtime = undefined;
+		entry.logs = undefined;
+		entry.memories = [];
 		entry.selected = undefined;
 		entry.detail = undefined;
+		entry.search = "";
 		entry.reflectPrompt = "";
+		entry.reflection = undefined;
 		entry.retain = "";
 		entry.invalidateReason = "";
+		entry.migration = undefined;
+		entry.confirm = undefined;
+		entry.host = undefined;
+		entries.delete(entry.key);
 	}
 	async function call(entry: Entry, route: string, init?: { method?: "GET" | "POST"; body?: unknown; query?: Record<string, string> }): Promise<RouteRecord | undefined> {
 		if (!entry.host?.capabilities?.callRoute || !entry.host.callRoute) {
@@ -107,7 +130,7 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 			const result = await entry.host.callRoute<unknown>(route, init);
 			if (generation !== entry.generation) return undefined;
 			const value = record(result) ?? {};
-			if (value.ok === false || value.error) entry.error = text(value.error || value.message, "Request failed.");
+			if (value.ok === false || value.error || value.code) entry.error = routeErrorText(value);
 			return value;
 		} catch (error) {
 			if (generation === entry.generation) entry.error = errorText(error);
@@ -121,7 +144,7 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 	}
 	async function refreshStatus(entry: Entry): Promise<void> {
 		const result = await call(entry, "runtime-status");
-		if (result) entry.runtime = record(result.status) ?? record(result.runtime) ?? result;
+		if (result) entry.runtime = record(result.runtime) ?? record(result.status) ?? result;
 		repaint(entry);
 	}
 	async function showLogs(entry: Entry): Promise<void> {
@@ -190,11 +213,13 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 			const result = await call(entry, "invalidate", { method: "POST", body: { id, confirmation: id, reason: entry.invalidateReason.trim() } });
 			if (result && result.ok !== false) { entry.message = "Memory invalidated."; entry.selected = undefined; entry.detail = undefined; entry.memories = entry.memories.filter((m) => memoryId(m) !== id); }
 		} else if (intent.action === "migrate") {
-			const result = await call(entry, "migration-execute", { method: "POST", body: { planFingerprint: text(entry.migration?.fingerprint), confirmed: true } });
+			const plan = entry.migration;
+			if (!plan) { entry.error = "Plan a migration before applying it."; repaint(entry); return; }
+			const result = await call(entry, "migration-execute", { method: "POST", body: { plan, confirmation: text(plan.confirmation) } });
 			if (result && result.ok !== false) entry.message = "Migration request completed.";
 		} else {
 			const result = await call(entry, "runtime-control", { method: "POST", body: { action: intent.action, consent: true } });
-			if (result) entry.runtime = result.status && record(result.status) ? record(result.status) : result;
+			if (result) entry.runtime = record(result.runtime) ?? record(result.status) ?? result;
 		}
 		closeConfirm(entry);
 		repaint(entry);
@@ -231,7 +256,7 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 			<div class="hindsight-meta"><span>Mode: ${mode || "not configured"}</span>${desired ? html`<span>Desired: ${desired}</span>` : nothing}${endpoint ? html`<code>Endpoint: ${endpoint}</code>` : nothing}</div>
 			<div class="hindsight-actions"><button type="button" @click=${() => void refreshStatus(entry)} ?disabled=${!!entry.busy}>${entry.busy === "runtime-status" ? "Refreshing…" : "Refresh status"}</button><button type="button" aria-label="Start Hindsight service" @click=${() => openConfirm(entry, "start", "Start service")}>Start</button><button type="button" aria-label="Stop Hindsight service" @click=${() => openConfirm(entry, "stop", "Stop service")}>Stop</button><button type="button" aria-label="Restart Hindsight service" @click=${() => openConfirm(entry, "restart", "Restart service")}>Restart</button><button type="button" aria-label="View runtime logs" @click=${() => void showLogs(entry)}>View logs</button></div>
 			${entry.logs?.length ? html`<pre class="hindsight-logs" aria-label="Runtime logs">${entry.logs.join("\n")}</pre>` : nothing}
-			<div class="hindsight-migration"><strong>Storage migration</strong><p>Migration uses a logical backup and restore; it never mounts the live PostgreSQL data directory.</p><button type="button" @click=${async () => { const plan = await call(entry, "migration-plan", { method: "POST", body: {} }); if (plan) { entry.migration = plan; entry.message = text(plan.summary, "Migration plan ready for review."); repaint(entry); } }}>Plan migration</button>${entry.migration ? html`<button type="button" @click=${() => openConfirm(entry, "migrate", "Apply the reviewed migration plan")}>Apply plan</button>` : nothing}</div>
+			<div class="hindsight-migration"><strong>Storage migration</strong><p>Migration uses a logical backup and restore; it never mounts the live PostgreSQL data directory.</p><label>Target storage<select .value=${entry.migrationTarget} @change=${(event: Event) => { entry.migrationTarget = (event.target as HTMLSelectElement).value === "external" ? "external" : "managed-volume"; entry.migration = undefined; }}><option value="managed-volume">New managed volume</option><option value="external">External database</option></select></label><button type="button" @click=${async () => { const result = await call(entry, "migration-plan", { method: "POST", body: { target: entry.migrationTarget } }); const plan = record(result?.plan); if (result?.ok !== false && plan) { entry.migration = plan; entry.message = text(plan.confirmation, "Migration plan ready for review."); repaint(entry); } }}>Plan migration</button>${entry.migration ? html`<p>Confirmation: <code>${text(entry.migration.confirmation)}</code></p><button type="button" @click=${() => openConfirm(entry, "migrate", "Apply the reviewed migration plan")}>Apply plan</button>` : nothing}</div>
 		</section>`;
 	}
 	function renderMemories(entry: Entry): unknown {
@@ -257,7 +282,7 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 		render(params?: Record<string, unknown>, host?: Host) {
 			const entry = entryFor(params, host);
 			return html`<section class="hindsight-panel" data-hindsight-panel=${entry.key} data-testid="hindsight-panel" @keydown=${(event: KeyboardEvent) => trapDialog(event, entry)}>
-				<style>.hindsight-panel{position:relative;display:grid;gap:1rem;padding:1rem;color:var(--foreground);background:var(--background);min-width:0}.hindsight-tabs{display:flex;gap:.25rem;border-bottom:1px solid var(--border)}.hindsight-tabs button{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted-foreground);padding:.5rem .7rem;font:inherit;cursor:pointer}.hindsight-tabs button[aria-selected=true]{color:var(--foreground);border-color:var(--primary);font-weight:600}.hindsight-tabs button:focus-visible,.hindsight-actions button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.hindsight-section{display:grid;gap:.75rem}.hindsight-card{display:flex;justify-content:space-between;gap:1rem;padding:.85rem;border:1px solid var(--border);border-radius:.5rem;background:var(--card)}.hindsight-card h3,.hindsight-detail h3{margin:0}.hindsight-card p,.hindsight-empty,.hindsight-migration p,.hindsight-outcome-note{margin:.3rem 0;color:var(--muted-foreground);font-size:.875rem}.hindsight-state{align-self:start;border-radius:999px;padding:.2rem .55rem;font-size:.75rem;white-space:nowrap;background:color-mix(in oklch,var(--muted-foreground) 14%,transparent)}.hindsight-state--ready{background:color-mix(in oklch,var(--positive) 20%,transparent)}.hindsight-state--degraded,.hindsight-state--blocked{background:color-mix(in oklch,var(--warning) 20%,transparent)}.hindsight-state--unavailable{background:color-mix(in oklch,var(--negative) 18%,transparent)}.hindsight-meta,.hindsight-actions{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}.hindsight-meta{font-size:.8rem;color:var(--muted-foreground)}.hindsight-actions button,.hindsight-search button{border:1px solid var(--border);border-radius:.35rem;padding:.35rem .55rem;background:var(--card);color:var(--foreground);font:inherit;cursor:pointer}.hindsight-actions button:hover:not(:disabled),.hindsight-search button:hover:not(:disabled){border-color:var(--primary)}button:disabled{opacity:.55;cursor:not-allowed}.hindsight-primary{background:var(--primary)!important;color:var(--primary-foreground,var(--background))!important}.hindsight-danger{border-color:var(--negative)!important;color:var(--negative)!important}.hindsight-logs{max-height:12rem;overflow:auto;margin:0;padding:.65rem;border:1px solid var(--border);border-radius:.4rem;background:var(--card);font-size:.75rem;white-space:pre-wrap}.hindsight-migration{padding:.75rem;border-left:3px solid var(--chart-4);background:color-mix(in oklch,var(--chart-4) 8%,transparent)}.hindsight-search,.hindsight-quick-retain{display:flex;gap:.5rem;align-items:end}.hindsight-search label,.hindsight-quick-retain label,.hindsight-detail label{display:grid;gap:.25rem;font-size:.8rem;color:var(--muted-foreground);flex:1}.hindsight-quick-retain button{border:1px solid var(--border);border-radius:.35rem;padding:.35rem .55rem;background:var(--card);color:var(--foreground);font:inherit;cursor:pointer}.hindsight-search input,.hindsight-detail input,.hindsight-detail textarea,.hindsight-quick-retain textarea{box-sizing:border-box;width:100%;border:1px solid var(--border);border-radius:.35rem;padding:.45rem;background:var(--background);color:var(--foreground);font:inherit}.hindsight-detail textarea,.hindsight-quick-retain textarea{min-height:4rem;resize:vertical}.hindsight-memory-grid{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(16rem,1.2fr);gap:1rem}.hindsight-memory-list,.hindsight-capabilities{padding:0;margin:0;list-style:none}.hindsight-memory-list{display:grid;gap:.35rem}.hindsight-memory-list button{width:100%;text-align:left;border:1px solid var(--border);border-radius:.35rem;padding:.55rem;background:var(--card);color:var(--foreground);cursor:pointer}.hindsight-memory-list button.selected{border-color:var(--primary);background:color-mix(in oklch,var(--primary) 10%,var(--card))}.hindsight-memory-list strong,.hindsight-memory-list small{display:block}.hindsight-memory-list small{margin-top:.2rem;color:var(--muted-foreground)}.hindsight-detail{display:grid;align-content:start;gap:.6rem;padding:.8rem;border:1px solid var(--border);border-radius:.5rem}.hindsight-reflection{white-space:pre-wrap;padding:.6rem;border-left:3px solid var(--chart-2);background:color-mix(in oklch,var(--chart-2) 8%,transparent)}.hindsight-link{align-self:start;color:var(--primary)}.hindsight-capabilities{display:grid;gap:.45rem}.hindsight-capabilities li{display:flex;justify-content:space-between;gap:1rem;padding:.6rem;border-bottom:1px solid var(--border);font-size:.8rem}.hindsight-capabilities span{color:var(--muted-foreground);text-align:right}.hindsight-modal-backdrop{position:absolute;inset:0;z-index:2;display:grid;place-items:center;padding:1rem;background:color-mix(in oklch,var(--background) 74%,transparent)}.hindsight-modal{width:min(26rem,100%);display:grid;gap:.7rem;padding:1rem;border:1px solid var(--border);border-radius:.55rem;background:var(--card);box-shadow:0 .5rem 2rem color-mix(in oklch,var(--foreground) 18%,transparent)}.hindsight-modal h3,.hindsight-modal p{margin:0}.hindsight-modal p{color:var(--muted-foreground)}.hindsight-live{min-height:1.2em;color:var(--muted-foreground);font-size:.85rem}.hindsight-error{color:var(--negative)}@media(max-width:36rem){.hindsight-card,.hindsight-memory-grid{grid-template-columns:1fr;display:grid}.hindsight-card{gap:.6rem}.hindsight-search,.hindsight-quick-retain{align-items:stretch;flex-direction:column}.hindsight-capabilities li{display:grid;gap:.25rem}.hindsight-capabilities span{text-align:left}}</style>
+				<style>.hindsight-panel{position:relative;display:grid;gap:1rem;padding:1rem;color:var(--foreground);background:var(--background);min-width:0}.hindsight-tabs{display:flex;gap:.25rem;border-bottom:1px solid var(--border)}.hindsight-tabs button{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted-foreground);padding:.5rem .7rem;font:inherit;cursor:pointer}.hindsight-tabs button[aria-selected=true]{color:var(--foreground);border-color:var(--primary);font-weight:600}.hindsight-tabs button:focus-visible,.hindsight-actions button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.hindsight-section{display:grid;gap:.75rem}.hindsight-card{display:flex;justify-content:space-between;gap:1rem;padding:.85rem;border:1px solid var(--border);border-radius:.5rem;background:var(--card)}.hindsight-card h3,.hindsight-detail h3{margin:0}.hindsight-card p,.hindsight-empty,.hindsight-migration p,.hindsight-outcome-note{margin:.3rem 0;color:var(--muted-foreground);font-size:.875rem}.hindsight-state{align-self:start;border-radius:999px;padding:.2rem .55rem;font-size:.75rem;white-space:nowrap;background:color-mix(in oklch,var(--muted-foreground) 14%,transparent)}.hindsight-state--ready{background:color-mix(in oklch,var(--positive) 20%,transparent)}.hindsight-state--degraded,.hindsight-state--blocked{background:color-mix(in oklch,var(--warning) 20%,transparent)}.hindsight-state--unavailable{background:color-mix(in oklch,var(--negative) 18%,transparent)}.hindsight-meta,.hindsight-actions{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}.hindsight-meta{font-size:.8rem;color:var(--muted-foreground)}.hindsight-actions button,.hindsight-search button{border:1px solid var(--border);border-radius:.35rem;padding:.35rem .55rem;background:var(--card);color:var(--foreground);font:inherit;cursor:pointer}.hindsight-actions button:hover:not(:disabled),.hindsight-search button:hover:not(:disabled){border-color:var(--primary)}button:disabled{opacity:.55;cursor:not-allowed}.hindsight-primary{background:var(--primary)!important;color:var(--primary-foreground,var(--background))!important}.hindsight-danger{border-color:var(--negative)!important;color:var(--negative)!important}.hindsight-logs{max-height:12rem;overflow:auto;margin:0;padding:.65rem;border:1px solid var(--border);border-radius:.4rem;background:var(--card);font-size:.75rem;white-space:pre-wrap}.hindsight-migration{display:grid;gap:.5rem;padding:.75rem;border-left:3px solid var(--chart-4);background:color-mix(in oklch,var(--chart-4) 8%,transparent)}.hindsight-migration label{display:grid;gap:.25rem;font-size:.8rem;color:var(--muted-foreground)}.hindsight-migration select{border:1px solid var(--border);border-radius:.35rem;padding:.45rem;background:var(--background);color:var(--foreground);font:inherit}.hindsight-search,.hindsight-quick-retain{display:flex;gap:.5rem;align-items:end}.hindsight-search label,.hindsight-quick-retain label,.hindsight-detail label{display:grid;gap:.25rem;font-size:.8rem;color:var(--muted-foreground);flex:1}.hindsight-quick-retain button{border:1px solid var(--border);border-radius:.35rem;padding:.35rem .55rem;background:var(--card);color:var(--foreground);font:inherit;cursor:pointer}.hindsight-search input,.hindsight-detail input,.hindsight-detail textarea,.hindsight-quick-retain textarea{box-sizing:border-box;width:100%;border:1px solid var(--border);border-radius:.35rem;padding:.45rem;background:var(--background);color:var(--foreground);font:inherit}.hindsight-detail textarea,.hindsight-quick-retain textarea{min-height:4rem;resize:vertical}.hindsight-memory-grid{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(16rem,1.2fr);gap:1rem}.hindsight-memory-list,.hindsight-capabilities{padding:0;margin:0;list-style:none}.hindsight-memory-list{display:grid;gap:.35rem}.hindsight-memory-list button{width:100%;text-align:left;border:1px solid var(--border);border-radius:.35rem;padding:.55rem;background:var(--card);color:var(--foreground);cursor:pointer}.hindsight-memory-list button.selected{border-color:var(--primary);background:color-mix(in oklch,var(--primary) 10%,var(--card))}.hindsight-memory-list strong,.hindsight-memory-list small{display:block}.hindsight-memory-list small{margin-top:.2rem;color:var(--muted-foreground)}.hindsight-detail{display:grid;align-content:start;gap:.6rem;padding:.8rem;border:1px solid var(--border);border-radius:.5rem}.hindsight-reflection{white-space:pre-wrap;padding:.6rem;border-left:3px solid var(--chart-2);background:color-mix(in oklch,var(--chart-2) 8%,transparent)}.hindsight-link{align-self:start;color:var(--primary)}.hindsight-capabilities{display:grid;gap:.45rem}.hindsight-capabilities li{display:flex;justify-content:space-between;gap:1rem;padding:.6rem;border-bottom:1px solid var(--border);font-size:.8rem}.hindsight-capabilities span{color:var(--muted-foreground);text-align:right}.hindsight-modal-backdrop{position:absolute;inset:0;z-index:2;display:grid;place-items:center;padding:1rem;background:color-mix(in oklch,var(--background) 74%,transparent)}.hindsight-modal{width:min(26rem,100%);display:grid;gap:.7rem;padding:1rem;border:1px solid var(--border);border-radius:.55rem;background:var(--card);box-shadow:0 .5rem 2rem color-mix(in oklch,var(--foreground) 18%,transparent)}.hindsight-modal h3,.hindsight-modal p{margin:0}.hindsight-modal p{color:var(--muted-foreground)}.hindsight-live{min-height:1.2em;color:var(--muted-foreground);font-size:.85rem}.hindsight-error{color:var(--negative)}@media(max-width:36rem){.hindsight-card,.hindsight-memory-grid{grid-template-columns:1fr;display:grid}.hindsight-card{gap:.6rem}.hindsight-search,.hindsight-quick-retain{align-items:stretch;flex-direction:column}.hindsight-capabilities li{display:grid;gap:.25rem}.hindsight-capabilities span{text-align:left}}</style>
 				<div class="hindsight-tabs" role="tablist" aria-label="Hindsight memory panel">${TABS.map((tab) => html`<button type="button" id="hindsight-tab-${tab}-${entry.key}" data-hindsight-tab=${tab} role="tab" tabindex=${entry.activeTab === tab ? "0" : "-1"} aria-selected=${entry.activeTab === tab ? "true" : "false"} aria-controls="hindsight-${tab}-${entry.key}" @keydown=${(event: KeyboardEvent) => tabKey(event, entry)} @click=${() => selectTab(entry, tab)}>${tab[0].toUpperCase() + tab.slice(1)}</button>`)}</div>
 				<div class="hindsight-live" role="status" aria-live="polite">${entry.error ? html`<span class="hindsight-error">${entry.error}</span>` : entry.message || ""}</div>
 				${entry.activeTab === "service" ? renderService(entry) : entry.activeTab === "memories" ? renderMemories(entry) : renderAccess(entry)}

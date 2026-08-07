@@ -30,6 +30,7 @@ describe("Hindsight EP-7 runtime settings", () => {
 		assert.equal(fields.localLlmApiKey?.type, "secret");
 		assert.equal(fields.registryCredentials?.type, "secret");
 		assert.equal(fields.externalDatabaseUrl?.type, "secret");
+		assert.deepEqual(fields.localLlmResidency?.values, ["resident"], "request-scoped residency is not a supported setting");
 		assert.ok((fields.localLlmContextTokens?.min ?? 0) > 0);
 		assert.ok((fields.localLlmMaxOutputTokens?.min ?? 0) > 0);
 	});
@@ -73,5 +74,8 @@ describe("Hindsight EP-7 runtime settings", () => {
 		assert.equal(loopbackStart.ok, true);
 		const remoteWithoutKey = validateHindsightRuntimeSettings({ ...settings, localLlmBaseUrl: "http://model.example.test:11434/v1" }, {}, true);
 		assert.deepEqual(remoteWithoutKey, { ok: false, code: "HINDSIGHT_LOCAL_API_KEY_REQUIRED" });
+		const legacyRequestResidency = validateHindsightRuntimeSettings({ ...settings, localLlmResidency: "request" }, {}, true);
+		assert.equal(legacyRequestResidency.ok, true, "legacy request residency normalizes to the only supported resident mode");
+		if (legacyRequestResidency.ok) assert.equal(legacyRequestResidency.settings.localLlmResidency, "resident");
 	});
 });

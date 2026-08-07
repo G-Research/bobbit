@@ -43,8 +43,10 @@ environment:
   # The generic runtime secret owner receives these only for explicit starts.
   HINDSIGHT_API_LLM_API_KEY:
     secret: localLlmApiKey
+    optional: true
   HINDSIGHT_API_DATABASE_URL:
     secret: externalDatabaseUrl
+    optional: true
   HINDSIGHT_DB_PASSWORD:
     generatedSecret: databasePassword
   HINDSIGHT_API_PORT:
