@@ -1,0 +1,218 @@
+// v2-native — D3/D4 literal skills, constrained SDK subagents, and fail-closed admission contract.
+import { describe, expect, it } from "vitest";
+
+import * as sdkSurface from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
+
+const BUNDLED_SKILLS_0_3_222 = [
+	"batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design-sync", "doctor",
+	"fewer-permission-prompts", "loop", "run", "run-skill-generator", "simplify", "update-config", "verify",
+] as const;
+
+const ROOT_NATIVE_DISALLOWED = [
+	"Task", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookEdit",
+	"AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree", "Monitor",
+	"ScheduleWakeup", "PushNotification", "RemoteTrigger", "CronCreate", "CronDelete", "CronList", "TaskCreate",
+	"TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch",
+] as const;
+
+const CHILD_MCP_TOOLS = ["mcp__bobbit__read", "mcp__bobbit__find", "mcp__bobbit__grep"] as const;
+const PROJECTIONS = {
+	"bobbit-protocol-scout": { sourceRole: "claude-protocol-scout", effort: "high", maxTurns: 6 },
+	"bobbit-backend-parity-reviewer": { sourceRole: "backend-parity-reviewer", effort: "medium", maxTurns: 4 },
+	"bobbit-billing-safety-auditor": { sourceRole: "billing-safety-auditor", effort: "medium", maxTurns: 4 },
+} as const;
+
+type BuildPolicy = (input: {
+	sessionId: string;
+	goalBranch: string;
+	roleSnapshot: ReadonlyMap<string, { name: string; promptTemplate: string }>;
+	selectedRootEntries: readonly { name: string; policy: "allow" | "ask" | "never" }[];
+	resolvedModel: string;
+	audit: (event: Record<string, unknown>) => void;
+}) => any;
+
+function policyFixture() {
+	const audit: Array<Record<string, unknown>> = [];
+	const buildPolicy = (sdkSurface as Record<string, unknown>).buildClaudeSdkSubagentPolicy;
+	expect(buildPolicy, "D4 must expose the pure policy factory used by the session-setup preflight").toBeTypeOf("function");
+	const roleSnapshot = new Map(Object.values(PROJECTIONS).map(({ sourceRole }) => [sourceRole, {
+		name: sourceRole,
+		promptTemplate: `Resolved ${sourceRole}: {{AGENT_ID}} @ {{GOAL_BRANCH}}`,
+	}]));
+	const policy = (buildPolicy as BuildPolicy)({
+		sessionId: "root-sdk-session",
+		goalBranch: "goal/immutable-projection",
+		roleSnapshot,
+		selectedRootEntries: [
+			{ name: "read", policy: "allow" },
+			{ name: "find", policy: "allow" },
+			{ name: "grep", policy: "allow" },
+			{ name: "bash", policy: "never" },
+		],
+		resolvedModel: "claude-sonnet-4-6",
+		audit: event => audit.push(event),
+	});
+	return { policy, audit };
+}
+
+function hookInput(overrides: Record<string, unknown> = {}) {
+	return {
+		hook_event_name: "PreToolUse",
+		session_id: "root-sdk-session",
+		transcript_path: "/never/expose/child.jsonl",
+		cwd: "/workspace",
+		tool_name: "Agent",
+		tool_use_id: "agent-use-1",
+		tool_input: { subagent_type: "bobbit-backend-parity-reviewer", prompt: "Inspect this change", run_in_background: false },
+		...overrides,
+	};
+}
+
+function permissionContext(overrides: Record<string, unknown> = {}) {
+	return { signal: new AbortController().signal, toolUseID: "agent-use-1", ...overrides };
+}
+
+function permissionDecision(value: any): string | undefined {
+	return value?.hookSpecificOutput?.permissionDecision;
+}
+
+describe("Claude Agent SDK D3/D4 skills and subagents", () => {
+	it("pins only the reviewed bundled skills and the root native inventory", () => {
+		expect((sdkSurface as Record<string, unknown>).CLAUDE_BUNDLED_SKILLS_0_3_222).toEqual(BUNDLED_SKILLS_0_3_222);
+		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.retained).toEqual(["Skill", "Agent"]);
+		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).toEqual(ROOT_NATIVE_DISALLOWED);
+		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).toContain("Task");
+		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Skill");
+		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Agent");
+	});
+
+	it("projects exactly the three resolved Bobbit roles with immutable child bounds", () => {
+		const { policy } = policyFixture();
+		expect(Object.keys(policy.definitions).sort()).toEqual(Object.keys(PROJECTIONS).sort());
+		for (const [agentType, expected] of Object.entries(PROJECTIONS)) {
+			const definition = policy.definitions[agentType];
+			expect(definition).toMatchObject({
+				model: "inherit",
+				effort: expected.effort,
+				maxTurns: expected.maxTurns,
+				background: false,
+				permissionMode: "default",
+				tools: ["Skill", ...CHILD_MCP_TOOLS],
+				skills: BUNDLED_SKILLS_0_3_222,
+			});
+			expect(definition.prompt).toBe(`Resolved ${expected.sourceRole}: root-sdk-session @ goal/immutable-projection`);
+			for (const forbidden of ["Agent", "Task", "Bash", "mcp__bobbit__bash"]) {
+				expect(definition.disallowedTools, `${agentType} must explicitly disallow ${forbidden}`).toContain(forbidden);
+			}
+			for (const absent of ["memory", "mcpServers", "initialPrompt", "observer", "observerMessage"]) {
+				expect(definition[absent], `${agentType} must not inherit ${absent}`).toBeUndefined();
+			}
+		}
+		expect(policy.maxConcurrent).toBe(1);
+		for (const forbiddenOwner of ["sessionStore", "taskManager", "worktree", "costLedger", "transcriptStore"]) {
+			expect(policy, `SDK helper policy cannot own a Bobbit ${forbiddenOwner}`).not.toHaveProperty(forbiddenOwner);
+		}
+	});
+
+	it("installs no Bobbit command or filesystem skill and retains only root Agent plus Skill", () => {
+		const { policy } = policyFixture();
+		const surface = sdkSurface.buildClaudeSdkToolSurface({
+			sessionId: "root-sdk-session",
+			restriction: "restricted",
+			entries: [
+				{ name: "read", description: "read", group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "ok" },
+				{ name: "find", description: "find", group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "" },
+				{ name: "grep", description: "grep", group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "" },
+				{ name: "bash", description: "bash", group: "Shell", inputSchema: { type: "object", properties: {} }, policy: "never", invoke: async () => "" },
+			],
+			requestToolGrant: async () => ({ granted: false }),
+			subagentPolicy: policy,
+		} as any);
+		const options = sdkSurface.buildClaudeAgentSdkQueryOptions(surface, {
+			cwd: "/workspace",
+			env: { PATH: "/bin" },
+			abortController: new AbortController(),
+		} as any) as any;
+
+		expect(options.tools).toEqual(["Skill", "Agent"]);
+		expect(options.skills).toEqual(BUNDLED_SKILLS_0_3_222);
+		expect(options.agents).toEqual(policy.definitions);
+		expect(options.allowedTools).toEqual(["Agent", ...CHILD_MCP_TOOLS]);
+		expect(options.disallowedTools).toEqual(ROOT_NATIVE_DISALLOWED);
+		expect(options.settingSources).toEqual([]);
+		expect(options.strictMcpConfig).toBe(true);
+		expect(options.managedSettings).toEqual({ autoMemoryEnabled: false });
+		expect(options.toolAliases).toBeUndefined();
+		expect(options.commands).toBeUndefined();
+		expect(options.skills).not.toContain("bobbit");
+	});
+
+	it("admits only one foreground allowlisted Agent and fails closed for every native escape", async () => {
+		const { policy } = policyFixture();
+		const surface = sdkSurface.buildClaudeSdkToolSurface({
+			sessionId: "root-sdk-session",
+			restriction: "restricted",
+			entries: CHILD_MCP_TOOLS.map(name => ({
+				name: name.slice("mcp__bobbit__".length), description: name, group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow" as const, invoke: async () => "ok",
+			})),
+			requestToolGrant: async () => ({ granted: false }),
+			subagentPolicy: policy,
+		} as any);
+		const preToolUse = (surface.preToolUseMatcher as any)[0].hooks[0];
+
+		await expect((surface.canUseTool as any)("Agent", hookInput().tool_input, permissionContext())).resolves.toMatchObject({ behavior: "allow" });
+		expect(permissionDecision(await preToolUse(hookInput()))).toBe("allow");
+		for (const denied of [
+			hookInput({ tool_name: "Task", tool_input: {} }),
+			hookInput({ tool_input: { subagent_type: "general-purpose", prompt: "escape", run_in_background: false } }),
+			hookInput({ tool_input: { subagent_type: "Bobbit-Backend-Parity-Reviewer", prompt: "case collision", run_in_background: false } }),
+			hookInput({ tool_input: { subagent_type: "bobbit-backend-parity-reviewer", prompt: "background", run_in_background: true } }),
+			hookInput({ tool_input: { subagent_type: "bobbit-backend-parity-reviewer", prompt: "missing foreground flag" } }),
+			hookInput({ tool_input: { subagent_type: "bobbit-backend-parity-reviewer", prompt: "extra", run_in_background: false, model: "opus" } }),
+			hookInput({ tool_input: { subagent_type: "bobbit-backend-parity-reviewer", prompt: "x".repeat(8 * 1024 + 1), run_in_background: false } }),
+		]) {
+			expect(permissionDecision(await preToolUse(denied))).toBe("deny");
+			await expect((surface.canUseTool as any)(denied.tool_name, denied.tool_input, permissionContext())).resolves.toMatchObject({ behavior: "deny" });
+		}
+		for (const native of ["Task", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"]) {
+			await expect((surface.canUseTool as any)(native, {}, permissionContext())).resolves.toMatchObject({ behavior: "deny" });
+		}
+	});
+
+	it("requires a registered matching child, keeps its tool subset read-only, audits bounded fields, and clears on stop", async () => {
+		const { policy, audit } = policyFixture();
+		const surface = sdkSurface.buildClaudeSdkToolSurface({
+			sessionId: "root-sdk-session",
+			restriction: "restricted",
+			entries: [
+				...CHILD_MCP_TOOLS.map(name => ({ name: name.slice("mcp__bobbit__".length), description: name, group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow" as const, invoke: async () => "ok" })),
+				{ name: "bash", description: "bash", group: "Shell", inputSchema: { type: "object", properties: {} }, policy: "allow" as const, invoke: async () => "bad" },
+			],
+			requestToolGrant: async () => ({ granted: false }),
+			subagentPolicy: policy,
+		} as any);
+		const options = sdkSurface.buildClaudeAgentSdkQueryOptions(surface, { cwd: "/workspace", env: {}, abortController: new AbortController() } as any) as any;
+		const hooks = options.hooks;
+		const preToolUse = hooks.PreToolUse[0].hooks[0];
+		const start = hooks.SubagentStart[0].hooks[0];
+		const stop = hooks.SubagentStop[0].hooks[0];
+		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
+
+		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "mcp__bobbit__read", ...child })))).toBe("deny");
+		await start({ hook_event_name: "SubagentStart", session_id: "root-sdk-session", transcript_path: "/private/child.jsonl", cwd: "/workspace", ...child });
+		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "mcp__bobbit__read", ...child })))).toBe("allow");
+		for (const tool_name of ["Agent", "Task", "mcp__bobbit__bash", "mcp__foreign__read"]) {
+			expect(permissionDecision(await preToolUse(hookInput({ tool_name, ...child })))).toBe("deny");
+		}
+		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "Agent", agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" })))).toBe("deny");
+		await stop({ hook_event_name: "SubagentStop", session_id: "root-sdk-session", transcript_path: "/private/root.jsonl", cwd: "/workspace", agent_transcript_path: "/private/child.jsonl", stop_hook_active: false, ...child });
+		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "mcp__bobbit__read", ...child })))).toBe("deny");
+		expect(audit).not.toEqual([]);
+		for (const event of audit) {
+			expect(JSON.stringify(event)).not.toMatch(/Inspect this change|private|transcript|credential|secret/i);
+			expect(event).toEqual(expect.objectContaining({ sessionId: "root-sdk-session", agentId: expect.any(String), agentType: expect.any(String), outcome: expect.any(String) }));
+		}
+		surface.dispose?.();
+		expect(permissionDecision(await preToolUse(hookInput({ tool_name: "mcp__bobbit__read", ...child })))).toBe("deny");
+	});
+});
