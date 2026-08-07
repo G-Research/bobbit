@@ -12,6 +12,13 @@ import { getAppStorage } from "../storage/app-storage.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
 import { listLauncherEntrypoints, runLauncherEntrypoint } from "../../app/pack-entrypoints.js";
+import {
+	createComposerSlashRegistry,
+	resolveComposerSlashDispatch,
+	type ComposerRuntime,
+	type ComposerSlashMenuItem,
+	type ComposerSlashSkill,
+} from "../../app/composer-slash-dispatch.js";
 import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { MessageAuthor } from "../../shared/message-author.js";
@@ -23,24 +30,13 @@ async function loadAttachmentLazy(source: string | File | Blob | ArrayBuffer, fi
 	return mod.loadAttachment(source, fileName);
 }
 
-interface SlashSkillInfo {
-	name: string;
-	description: string;
-	argumentHint?: string;
-	source: "project" | "personal" | "legacy" | "built-in" | "pack";
-	/** Slice C1 — set when this slash entry is a pack `composer-slash` ENTRYPOINT.
-	 *  Selecting it only inserts the completed command; send-time dispatch runs the
-	 *  launcher once the user has supplied any required arguments. */
-	entrypointId?: string;
-}
+type SlashSkillInfo = ComposerSlashMenuItem;
 
-// The PR-walkthrough launcher is now provided by the first-party pack's
-// composer-slash entrypoint (not a built-in slash command).
-const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [];
+const BUILT_IN_SLASH_COMMANDS: ComposerSlashSkill[] = [];
 
-function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
-	const names = new Set(skills.map((skill) => skill.name.toLowerCase()));
-	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name.toLowerCase())), ...skills];
+function mergeBuiltInSlashCommands(skills: ComposerSlashSkill[]): ComposerSlashSkill[] {
+	const names = new Set(skills.map((skill) => skill.name));
+	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name)), ...skills];
 }
 
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
@@ -136,6 +132,9 @@ export class MessageEditor extends LitElement {
 	@property() cwd?: string;
 	/** Project ID — used to scope slash skill discovery */
 	@property() projectId?: string;
+	/** Explicit server-provided session runtime; never inferred from model/provider. */
+	@property() runtime: ComposerRuntime = "pi";
+	@property({ attribute: false }) onCompact?: () => void | Promise<void>;
 
 	@state() processingFiles = false;
 	@state() isDragging = false;
@@ -163,7 +162,7 @@ export class MessageEditor extends LitElement {
 	private _savedDraft = ""; // draft saved when entering history mode
 
 	// Slash skill autocomplete state
-	@state() private _slashSkills: SlashSkillInfo[] = mergeBuiltInSlashCommands([]);
+	@state() private _slashSkills: ComposerSlashSkill[] = mergeBuiltInSlashCommands([]);
 	@state() private _slashFilteredSkills: SlashSkillInfo[] = [];
 	@state() private _slashMenuOpen = false;
 	@state() private _slashSelectedIndex = 0;
@@ -171,6 +170,7 @@ export class MessageEditor extends LitElement {
 	private _slashSkillsLoaded = false;
 	private _slashSkillsCwd?: string;
 	private _slashSkillsProjectId?: string;
+	private _slashLoadGeneration = 0;
 
 	// @-mention file autocomplete state (parallel to the _slash* fields above).
 	@state() private _atFiles: string[] = [];
@@ -230,26 +230,42 @@ export class MessageEditor extends LitElement {
 		this._historyIndex = -1;
 	}
 
+	private _composerSlashRegistry() {
+		return createComposerSlashRegistry({
+			skills: this._slashSkills,
+			launchers: listLauncherEntrypoints("composer-slash"),
+			runtime: this.runtime,
+		});
+	}
+
 	private async _loadSlashSkills() {
 		if (!this.cwd) {
 			this._slashSkills = mergeBuiltInSlashCommands([]);
+			this._slashSkillsLoaded = true;
 			return;
 		}
 		if (this._slashSkillsLoaded && this._slashSkillsCwd === this.cwd && this._slashSkillsProjectId === this.projectId) return;
+		const cwd = this.cwd;
+		const projectId = this.projectId;
+		const generation = ++this._slashLoadGeneration;
 		try {
-			let url = `/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`;
-			if (this.projectId) url += `&projectId=${encodeURIComponent(this.projectId)}`;
+			let url = `/api/slash-skills?cwd=${encodeURIComponent(cwd)}`;
+			if (projectId) url += `&projectId=${encodeURIComponent(projectId)}`;
 			const res = await gatewayFetch(gatewayRoute(url));
 			if (res.ok) {
 				const data = await res.json();
-				this._slashSkills = this._withPackEntrypoints(mergeBuiltInSlashCommands(data.skills || []));
+				if (generation === this._slashLoadGeneration && this.cwd === cwd && this.projectId === projectId) {
+					this._slashSkills = mergeBuiltInSlashCommands(Array.isArray(data.skills) ? data.skills : []);
+				}
 			}
 		} catch {
-			// Best effort
-			this._slashSkills = this._withPackEntrypoints(mergeBuiltInSlashCommands([]));
+			if (generation === this._slashLoadGeneration && this.cwd === cwd && this.projectId === projectId) {
+				this._slashSkills = mergeBuiltInSlashCommands([]);
+			}
 		}
-		this._slashSkillsCwd = this.cwd;
-		this._slashSkillsProjectId = this.projectId;
+		if (generation !== this._slashLoadGeneration || this.cwd !== cwd || this.projectId !== projectId) return;
+		this._slashSkillsCwd = cwd;
+		this._slashSkillsProjectId = projectId;
 		this._slashSkillsLoaded = true;
 	}
 
@@ -259,48 +275,22 @@ export class MessageEditor extends LitElement {
 		const cursorPos = textarea.selectionStart;
 		const textBeforeCursor = this.value.substring(0, cursorPos);
 		// Find the last "/" before cursor that's at a word boundary (after whitespace, newline, or at position 0)
-		const match = textBeforeCursor.match(/(^|[\s])\/([\w-]*)$/);
+		const match = textBeforeCursor.match(/(^|[\s])\/([\w.-]*)$/);
 		if (match) {
-			// Eagerly load skills if not yet loaded (handles race with cwd arrival)
+			// Eagerly load skills if not yet loaded (handles race with cwd arrival).
 			if (!this._slashSkillsLoaded && this.cwd) {
 				this._loadSlashSkills().then(() => this._updateSlashAutocomplete());
 			}
 			this._slashTokenStart = cursorPos - match[2].length - 1; // position of "/"
 			const query = match[2].toLowerCase();
-			// Pack entrypoints reconcile asynchronously after session/project changes.
-			// Re-merge them at filter time so the slash menu never shows stale launcher ids
-			// (or misses newly-registered launchers) because the base skill list loaded early.
-			const slashSkills = this._withPackEntrypoints(this._slashSkills.filter((s) => s.source !== "pack"));
+			const menuItems = this._composerSlashRegistry().menuItems;
 			this._slashFilteredSkills = query
-				? slashSkills.filter((s) => s.name.toLowerCase().includes(query))
-				: slashSkills;
+				? menuItems.filter((skill) => skill.name.toLowerCase().includes(query))
+				: [...menuItems];
 			this._slashMenuOpen = this._slashFilteredSkills.length > 0;
 			this._slashSelectedIndex = 0;
 		} else {
 			this._slashMenuOpen = false;
-		}
-	}
-
-	/** Slice C1 — append the registered pack `composer-slash` ENTRYPOINTS (from the
-	 *  reconciled client pack-entrypoints registry) to the slash list as synthetic
-	 *  entries. The trigger name is the entrypoint id; selecting one completes the
-	 *  token and send-time dispatch runs the launcher. Best-effort + synchronous —
-	 *  the registry is already populated by the project reconcile; a load failure is
-	 *  non-fatal. */
-	private _withPackEntrypoints(skills: SlashSkillInfo[]): SlashSkillInfo[] {
-		try {
-			const eps = listLauncherEntrypoints("composer-slash");
-			if (eps.length === 0) return skills;
-			const names = new Set(skills.map((s) => s.name.toLowerCase()));
-			// `name` is the user-facing slash trigger (the pack-local entrypoint id);
-			// `entrypointId` carries the COMPOUND launcher key (packId+entrypointId) so
-			// dispatch addresses the exact launcher even when two packs share an id.
-			const packEntries: SlashSkillInfo[] = eps
-				.filter((e) => !names.has(e.id.toLowerCase()))
-				.map((e) => ({ name: e.id, description: e.label, source: "pack" as const, entrypointId: e.key }));
-			return [...skills, ...packEntries];
-		} catch {
-			return skills;
 		}
 	}
 
@@ -338,27 +328,6 @@ export class MessageEditor extends LitElement {
 		const newPos = before.length + skill.name.length + 2; // "/" + name + " "
 		textarea.focus();
 		textarea.setSelectionRange(newPos, newPos);
-	}
-
-	private _packSlashLaunchFromText(text: string): { entrypointId: string; label: string; body: Record<string, unknown> } | undefined {
-		const trimmed = text.trim();
-		const match = trimmed.match(/^\/([A-Za-z0-9_.-]+)(?:\s+([\s\S]+))?$/);
-		if (!match) return undefined;
-
-		const name = match[1];
-		const launcher = listLauncherEntrypoints("composer-slash").find((l) => l.id === name);
-		if (!launcher) return undefined;
-
-		const arg = (match[2] ?? "").trim();
-		if (!arg) return { entrypointId: launcher.key, label: launcher.label, body: {} };
-
-		// PR walkthrough's run route already accepts these argument fields.
-		if (launcher.packId === "pr-walkthrough" || launcher.id === "pr-walkthrough") {
-			if (/^\d+$/.test(arg)) return { entrypointId: launcher.key, label: launcher.label, body: { prNumber: Number(arg) } };
-			return { entrypointId: launcher.key, label: launcher.label, body: { prUrl: arg } };
-		}
-
-		return { entrypointId: launcher.key, label: launcher.label, body: { input: arg } };
 	}
 
 	/** Fetch the file list for the current `@` query from the server (debounced).
@@ -1057,8 +1026,32 @@ export class MessageEditor extends LitElement {
 		}
 		this._sendSizeError = "";
 		this._steerError = ""; // a normal send dismisses any stale steer-attachment alert (D2)
-		const packSlashLaunch = this.attachments.length === 0 ? this._packSlashLaunchFromText(text) : undefined;
-		if (packSlashLaunch) {
+		const dispatch = resolveComposerSlashDispatch(text, { runtime: this.runtime, registry: this._composerSlashRegistry() });
+		if (dispatch?.kind === "unsupported-compact") {
+			// This hidden reservation prevents Claude Agent SDK's bundled command from
+			// receiving the raw token. Do not mutate the draft, attachments, history, or focus.
+			this._steerError = "Manual compaction isn’t available for Claude Agent SDK sessions.";
+			return;
+		}
+		if (dispatch?.kind === "compact") {
+			if (this.attachments.length > 0) {
+				this._steerError = "Remove attachments before compacting.";
+				return;
+			}
+			this._slashMenuOpen = false;
+			this._inFlightSubmits.add(text);
+			try {
+				this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+				this._historyIndex = -1;
+				this._savedDraft = "";
+				void this.addToHistory(text);
+				await this.onCompact?.();
+			} finally {
+				this._inFlightSubmits.delete(text);
+			}
+			return;
+		}
+		if (dispatch?.kind === "launcher" && this.attachments.length === 0) {
 			this._slashMenuOpen = false;
 			this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
 			this.value = "";
@@ -1072,11 +1065,11 @@ export class MessageEditor extends LitElement {
 			this._savedDraft = "";
 			void this.addToHistory(text);
 
-			this._showLauncherPending(`Starting ${packSlashLaunch.label}…`);
-			runLauncherEntrypoint(packSlashLaunch.entrypointId, (r) => {
+			this._showLauncherPending(`Starting ${dispatch.label}…`);
+			runLauncherEntrypoint(dispatch.entrypointKey, (r) => {
 				if (r.ok) this._showLauncherResolved();
-				else this._showLauncherError(r.error || `Could not start ${packSlashLaunch.label}.`);
-			}, { body: packSlashLaunch.body });
+				else this._showLauncherError(r.error || `Could not start ${dispatch.label}.`);
+			}, { body: dispatch.body });
 			return;
 		}
 	// Dispatch a composed event that escapes shadow DOM — used by
@@ -1436,9 +1429,15 @@ export class MessageEditor extends LitElement {
 			}
 		}
 
-		if ((changed.has("cwd") || changed.has("projectId")) && this.cwd) {
+		if (changed.has("sessionId") || changed.has("cwd") || changed.has("projectId") || changed.has("runtime")) {
+			// Session/project/runtime changes must not momentarily offer a stale scoped
+			// skill or runtime-specific control while their fresh catalog reconciles.
+			this._slashLoadGeneration++;
 			this._slashSkillsLoaded = false;
-			this._loadSlashSkills();
+			this._slashSkills = mergeBuiltInSlashCommands([]);
+			this._slashFilteredSkills = [];
+			this._slashMenuOpen = false;
+			if (this.cwd) void this._loadSlashSkills();
 		}
 
 		if (changed.has("cwd") || changed.has("projectId")) {
