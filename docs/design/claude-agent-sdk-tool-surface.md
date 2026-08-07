@@ -35,6 +35,13 @@ starts an SDK query with `settingSources: []`. This slice replaces its empty
 callback protocol, an HTTP proxy endpoint, a private extension hook, another
 catalogue, or a new permission store.
 
+> **Superseded D3/D4 posture.** The original D1 proposal's Skill-only,
+> `Agent`-denied, `agents: {}` posture is superseded for this runtime by
+> [Claude Agent SDK skills and subagents](claude-agent-sdk-skills-subagents.md).
+> D1 remains the canonical MCP, grant, canonical-name, `PreToolUse`, isolation,
+> and G7 design. D3/D4 adds only the bounded native `Skill`/`Agent` surface and
+> immutable subagent projections described below.
+
 ## Evidence and chosen official composition
 
 The pinned package is `@anthropic-ai/claude-agent-sdk@0.3.222`
@@ -160,19 +167,25 @@ The required table is:
 | `WebSearch`                                                                                              | suppress                       | `web_search`.                                                                                                                                                                                                                                                                                                                                             |
 | `AskUserQuestion`                                                                                        | suppress                       | `ask_user_choices`; preserves Bobbit UI/question ownership.                                                                                                                                                                                                                                                                                               |
 | `EnterPlanMode`, `ExitPlanMode`                                                                          | suppress                       | No Claude plan-mode state. Bobbit goals/gates and normal prompts remain authoritative.                                                                                                                                                                                                                                                                    |
-| `Task`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, `TaskUpdate`                      | suppress                       | D4 owns Bobbit task/team lifecycle; no Claude task/subagent store may be created.                                                                                                                                                                                                                                                                         |
+| `Task`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, `TaskUpdate`                      | suppress                       | Bobbit owns durable task/team lifecycle; no Claude task/subagent store may be created.                                                                                                                                                                                                                                                                     |
 | `EnterWorktree`, `ExitWorktree`                                                                          | suppress                       | Bobbit worktree/session manager owns worktrees.                                                                                                                                                                                                                                                                                                           |
 | `Monitor`, `ScheduleWakeup`, `PushNotification`, `RemoteTrigger`, `CronCreate`, `CronDelete`, `CronList` | suppress                       | No Bobbit analogue is exposed in this runtime; unavailable is safer than a second scheduler/notification owner.                                                                                                                                                                                                                                           |
-| `Skill`                                                                                                  | retain (D3)                    | The only retained native tool. It is explicitly listed in `Options.tools` and covered by the same ceiling; no Bobbit alias is invented. SDK skills must still be explicitly constrained by D3.                                                                                                                                                            |
+| `Skill`                                                                                                  | retain (D3)                    | Listed in `Options.tools` with the reviewed literal bundled-skill inventory. No Bobbit alias is invented.                                                                                                                                                                                                                                                 |
+| `Agent`                                                                                                  | retain (D4), admission-only    | Permits only exact foreground root admission for one of three immutable Bobbit role projections. One live child maximum means it is not a general native subagent surface.                                                                                                                                                                                 |
 | `ToolSearch`                                                                                             | suppress for the `0.3.222` pin | The Bobbit server and every adapter tool set `alwaysLoad: true`; all SDK MCP definitions are already role-filtered, so deferred tool search is not required. If a future SDK pin demonstrably requires it, the policy table—not an ad-hoc option—may change to retain it only for this filtered server, with a new real-SDK snapshot and security review. |
 
-`Agent` is not in the measured floor but is separately reserved and disallowed;
-`agents: {}` is passed. This prevents an SDK-native subagent surface from
-appearing due to a binary/config drift. `tools` is exactly `["Skill"]`; no
-native preset is used. `toolAliases` is absent. `disallowedTools` is the full
-suppressed inventory plus `Agent`; it is not treated as redundant with
-`tools`, because the SDK declaration explicitly says it also blocks
-harness-internal direct calls holding a tool object.
+`Agent` is not in the measured floor but is explicitly retained by D4, rather
+than reserved and disallowed. `tools` is exactly `["Skill", "Agent"]`; no
+native preset or `toolAliases` is used. `allowedTools` contains `Agent` plus
+eligible Bobbit MCP raw names. `agents` contains only the immutable policy
+definitions for `bobbit-protocol-scout`, `bobbit-backend-parity-reviewer`, and
+`bobbit-billing-safety-auditor`; it never discovers filesystem, built-in, or
+user-defined agents. `disallowedTools` remains the full suppressed inventory,
+including `Task` and every `Task*` operation. It is not treated as redundant
+with `tools`, because the SDK declaration explicitly says it also blocks
+harness-internal direct calls holding a tool object. See the [D3/D4
+design](claude-agent-sdk-skills-subagents.md) for the literal definitions and
+admission grammar.
 
 A suppressed tool must not be replaced by an SDK alias. A replacement means the
 model receives the distinct Bobbit MCP raw name and one Bobbit owner, not two
@@ -234,10 +247,12 @@ identity.
 
 1. **Registration and `allowedTools` (visibility / convenience).** Only
    non-`never`, allowlist-eligible Bobbit tools are registered. `Options.allowedTools`
-   contains exactly the SDK raw names for policy `allow`, plus retained `Skill`.
+   contains exactly the SDK raw names for policy `allow`, plus `Agent`; `Skill`
+   is enabled by the literal bundled `skills` inventory rather than this list.
    It never contains a `never`, malformed, foreign, or `ask` raw tool name.
-   `tools: ["Skill"]`, the full `disallowedTools` inventory, and `agents: {}`
-   provide the native ceiling.
+   `tools: ["Skill", "Agent"]`, the full `disallowedTools` inventory, the
+   bundled-skill list, and immutable policy-built `agents` definitions provide
+   the native ceiling.
 2. **`canUseTool` (interactive permission).** The callback normalizes the SDK
    name and rechecks the surface snapshot. Unknown/foreign/suppressed/native
    names return `{ behavior: "deny", message }`. `allow` returns allow.
@@ -255,10 +270,14 @@ canonicalName, group)` seam. It listens to `options.signal`: abort settles
    matcher receives every candidate execution, normalizes again, checks the
    same allowlist and current policy/grant state, and returns
    `permissionDecision: "deny"` with a bounded reason unless the call is still
-   eligible. It also denies native, `Agent`, and subagent-originated calls that
-   did not come from the adapter. It permits an already-authorized `allow` or
-   callback-approved current `ask` call only. This hook is required even when
-   `allowedTools` or the SDK permission resolver says allow.
+   eligible. Root `Agent` calls must satisfy the exact foreground admission for
+   one immutable projection; a child may use only its registered `read`/`find`/
+   `grep` MCP subset. It denies `Task`/`Task*`, malformed or built-in Agent
+   input, nested or child-origin `Agent` calls, and every other native or
+   subagent-originated call outside that subset. It permits an already-authorized
+   `allow`, callback-approved current `ask`, or admitted Agent call only. This
+   hook is required even when `allowedTools` or the SDK permission resolver says
+   allow.
 
 Use `permissionMode: "default"`; never set `bypassPermissions` or
 `allowDangerouslySkipPermissions`. SDK permission updates/suggestions are not
@@ -278,18 +297,24 @@ security posture is:
 
 ```ts
 {
-  tools: ["Skill"],
+  tools: ["Skill", "Agent"],
+  skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
   disallowedTools: CLAUDE_NATIVE_TOOL_POLICY.disallowed,
-  allowedTools: surface.sdkAllowNames,
-  agents: {},
+  allowedTools: ["Agent", ...surface.sdkAllowNames],
+  agents: surface.subagentPolicy.definitions,
   mcpServers: { bobbit: surface.server },
   settingSources: [],
   strictMcpConfig: true,
   managedSettings: { autoMemoryEnabled: false },
   permissionMode: "default",
   canUseTool: surface.canUseTool,
-  hooks: { PreToolUse: [surface.preToolUseMatcher], PreCompact: existingHook },
-  env: buildClaudeAgentSdkEnv(...),
+  hooks: {
+    PreToolUse: [surface.preToolUseMatcher],
+    SubagentStart: [surface.subagentStartMatcher],
+    SubagentStop: [surface.subagentStopMatcher],
+    PreCompact: existingHook,
+  },
+  env: buildClaudeAgentSdkEnv({ CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1" }),
 }
 ```
 
@@ -297,7 +322,9 @@ The actual `mcpServers` container must use the type/shape required by the
 installed declaration (`Record<string, McpServerConfig>` with the live SDK
 server config); it must contain only `bobbit`. `settingSources: []` is
 mandatory, not optional: the SDK must not load user/project/local Claude
-settings, `.mcp.json`, plugin config, `CLAUDE.md`, skills, agents, or commands.
+settings, `.mcp.json`, plugin config, `CLAUDE.md`, filesystem skills, agents,
+or commands. The only enabled skills and agents are the literal bundled-skill
+inventory and policy-built definitions passed directly in query options.
 `strictMcpConfig: true` additionally rejects any unmanaged MCP discovery.
 
 `managedSettings.autoMemoryEnabled = false` suppresses SDK auto-memory reads,
@@ -310,9 +337,10 @@ no `process.env` spread, generic credentials, `BOBBIT_TOKEN`, or project env is
 introduced. The isolated config directory and auto-memory setting are tested
 as a pair; one without the other is insufficient.
 
-MCP config, setting source, native tool, agent, skills, slash-command, plugin,
-and auto-memory drift are startup failures in the exact real-SDK snapshot test.
-Do not downgrade these to warnings or permit a broad fallback.
+Unmanaged MCP config, setting source, native tool, undisclosed bundled skill,
+agent definition, slash-command, plugin, and auto-memory drift are startup
+failures in the exact real-SDK snapshot test. Do not downgrade these to
+warnings or permit a broad fallback.
 
 ## Files, APIs, and branches
 
@@ -358,8 +386,11 @@ raw SDK names are ephemeral only.
 
 New branches are limited to: runtime is SDK vs Pi; unrestricted vs explicitly
 restricted allowlist; policy allow/ask/never; valid vs invalid normalized raw
-identity; grant/deny/cancel; and collision/init failure. There is no fallback
-branch that loads SDK defaults or unmanaged configuration.
+identity; grant/deny/cancel; exact root Agent admission versus denial; registered
+child lifecycle/subset versus denial; and collision/init failure. A bridge has
+one foreground child maximum and the closed SDK environment fixes subagent spawn
+depth at one. There is no fallback branch that loads SDK defaults or unmanaged
+configuration.
 
 ## Failure behavior
 
@@ -367,12 +398,14 @@ branch that loads SDK defaults or unmanaged configuration.
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
 | Invalid/colliding ToolManager name or raw SDK identity             | Fail SDK session start before query readiness; sanitized collision diagnostic; no winner selected.                                |
 | SDK server construction/schema conversion error                    | Fail start and close partial bridge/server; do not omit the bad tool and widen the rest silently.                                 |
-| Native, foreign, malformed, or unknown tool invocation             | `canUseTool` and `PreToolUse` deny; no dispatcher invocation.                                                                     |
+| Suppressed native, foreign, malformed, or unknown tool invocation  | `canUseTool` and `PreToolUse` deny; no dispatcher invocation.                                                                     |
+| `Task`/`Task*`, built-in/unknown Agent, malformed or background Agent input, nested/child Agent, or a second live child | Deny before dispatch; create no task, child, or lifecycle entry.                                                                  |
+| Child native call or MCP call outside `read`/`find`/`grep`          | Deny through the child registry and `PreToolUse`; never widen the root or child surface.                                           |
 | `never` / explicitly empty role surface                            | Tool absent and denied defensively if invoked.                                                                                    |
 | Grant denied, stale, wrong group/tool, expired, or aborted         | Deny only that call; leave one-time grant uncached; cancel/settle existing request.                                               |
 | Existing handler throws/times out                                  | Return sanitized MCP error result; preserve Bobbit error/render semantics and session liveness.                                   |
-| SDK may attempt unmanaged MCP/settings/agent/plugin/memory surface | Exact inventory assertion fails initialization/tests; production init fails closed rather than enabling it.                       |
-| Bridge replacement/stop                                            | Abort pending callback work, close the in-process SDK server, discard surface; new bridge rebuilds from current canonical policy. |
+| SDK may attempt unmanaged MCP/settings/filesystem-agent/plugin/memory surface | Exact inventory assertion fails initialization/tests; production init fails closed rather than enabling it.                       |
+| Bridge replacement/stop                                            | Abort pending callback work, clear active-child state, close the in-process SDK server, discard surface; new bridge rebuilds from current canonical policy. |
 
 ## Verification plan and exact inventory regression
 
@@ -382,9 +415,14 @@ Inject a fake `tool`, `createSdkMcpServer`, and handler dispatcher into the
 surface factory. Pin:
 
 1. all 30 measured native names exactly once, their policy/replacement column,
-   `Agent` reservation, `Skill` retention, and `ToolSearch` suppression;
-2. `tools === ["Skill"]`, no aliases, empty agents, complete disallow list,
-   only `bobbit` MCP config, `alwaysLoad` on server/tools, and no native preset;
+   retained `Skill`/admission-only `Agent`, continued `Task`/`Task*` denial, and
+   `ToolSearch` suppression;
+2. `tools === ["Skill", "Agent"]`, the literal bundled-skill inventory,
+   `allowedTools` containing `Agent`, no aliases, the complete disallow list,
+   and exactly the three immutable `bobbit-*` policy definitions with their
+   model, effort, foreground/default-permission, max-turn, and `read`/`find`/
+   `grep` child-tool bounds; only `bobbit` MCP config, `alwaysLoad` on
+   server/tools, and no native preset;
 3. raw/canonical round trips, case normalization, renderer canonicalization,
    malformed/foreign rejection, and no raw name comparison against Bobbit
    `allowedTools`;
@@ -392,18 +430,23 @@ surface factory. Pin:
    startup failure; and
 5. unrestricted, restricted non-empty, and explicit-empty allowlist behavior;
    policy `allow`/`ask`/`never`; goal-disabled filtering; scoped pack overrides;
-   and only selected schemas/handlers being registered.
+   only selected schemas/handlers being registered; exact Agent admission;
+   one-live-child/depth-one lifecycle; and rejection of built-in, malformed,
+   background, nested, child-origin, and Task ownership paths.
 
 ### Permission integration seams
 
 Use the current `SessionManager.requestToolGrant` fake/real seam and abort
 signal. Pin that `allowedTools`, `canUseTool`, and `PreToolUse` all reject a
-`never`, foreign, raw/native, or explicitly-empty call; `allow` works; `ask`
-opens exactly the existing request; a returned grant covers the normalized
-current name and group; denial/timeout/abort settles; and one-time approval
-does not authorize a second invocation. Test an SDK-preallowed / default-mode
-path to prove `PreToolUse` remains the final ceiling. Test subagent/`Agent`
-origin denial. No test may use bypass permissions.
+`never`, foreign, suppressed-native, or explicitly-empty call; `allow` works;
+`ask` opens exactly the existing request; a returned grant covers the normalized
+current name and group; denial/timeout/abort settles; and one-time approval does
+not authorize a second invocation. Test an SDK-preallowed / default-mode path to
+prove `PreToolUse` remains the final ceiling. Exercise valid foreground root
+admission for each projection and reject `Task`/`Task*`, built-in or malformed
+Agent input, background and nested/child Agent calls, duplicate live children,
+and child bash or other MCP calls outside `read`/`find`/`grep`. No test may use
+bypass permissions.
 
 ### Real SDK initialization snapshot (G5/G12)
 
@@ -419,8 +462,8 @@ The committed snapshot is sorted and asserts **exactly**:
   claudeCodeVersion: "2.1.222",
   tools: [/* exact raw native + mcp__bobbit__ names */],
   skills: [/* D3-approved only */],
-  agents: [],
-  slash_commands: [],
+  agents: [/* exact built-in diagnostics and three bobbit-* projections */],
+  slash_commands: [/* exact bundled diagnostic inventory */],
   mcp_servers: ["bobbit"],
   plugins: [],
   settingSources: [],
@@ -429,14 +472,19 @@ The committed snapshot is sorted and asserts **exactly**:
 }
 ```
 
-The expected tool list contains retained `Skill` and the exact selected
-`mcp__bobbit__<canonical>` entries; it contains none of every suppressed native
-name, no `Agent`, no `ToolSearch`, no external SDK-owned MCP tool, and no
-unmanaged configuration-derived tool. Snapshot setup seeds hostile user,
-project, local, `.mcp.json`, plugin, memory, agent, slash-command, and
-`CLAUDE_CONFIG_DIR` inputs, proving each is absent. It also asserts the
-closed environment excludes gateway/project credentials and that no auto-memory
-path is read or written.
+The expected options inventory contains retained `Skill`, admission-only
+`Agent`, and the exact selected `mcp__bobbit__<canonical>` entries. It contains
+none of every other suppressed native name, no `ToolSearch`, no external
+SDK-owned MCP tool, and no unmanaged configuration-derived tool. The expected
+agent inventory contains only the reviewed diagnostic built-ins plus the three
+policy projections; the expected skills inventory is the literal D3 bundled
+list. A legacy `Task` initialization label is diagnostic only: `Task` and every
+`Task*` operation remain absent from `allowedTools`, present in
+`disallowedTools`, and denied at execution. Snapshot setup seeds hostile user,
+project, local, `.mcp.json`, plugin, memory, filesystem-agent, slash-command,
+and `CLAUDE_CONFIG_DIR` inputs, proving every unowned source is absent. It also
+asserts the closed environment excludes gateway/project credentials and that no
+auto-memory path is read or written.
 
 The snapshot deliberately fails on SDK or bundled Claude binary drift. Updating
 it requires reviewing the changed native inventory against the declarative table
