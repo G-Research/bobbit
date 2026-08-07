@@ -3,6 +3,18 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.16.3
+
+Upgrading from v0.16.2. This release adds a command-line version flag and completes the automated release workflow fixes.
+
+### ✨ New Features
+
+* 🏷️ **Command-line version flag**: Run `bobbit --version` or `npx @gresearch/bobbit@latest --version` to print the installed Bobbit version and exit without starting the gateway or creating configuration state.
+
+### 🐛 Bug Fixes
+
+* 📦 **Reliable GitHub release creation**: The checkout-free release job now targets the repository explicitly, allowing it to create the GitHub release after npm publication and immutable tag creation.
+
 ## v0.16.2
 
 Upgrading from v0.16.1. This release fixes automated release completion.
