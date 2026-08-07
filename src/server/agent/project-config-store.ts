@@ -257,19 +257,6 @@ export interface ExtensionHookRef {
 	hookId: string;
 }
 
-/** Discriminated server-derived principal identity for capability resolution. */
-export interface ExtensionHookPrincipal extends ExtensionHookRef {
-	kind: "hook";
-}
-
-/** A pack principal covers its service, panels/routes, and tools—not arbitrary child identities. */
-export interface ExtensionPackPrincipal {
-	kind: "pack";
-	packId: string;
-}
-
-export type ExtensionGrantPrincipal = ExtensionHookPrincipal | ExtensionPackPrincipal;
-
 /** Legacy persisted shape. An absent discriminator permanently means hook. */
 export interface ExtensionHookGrant extends ExtensionHookRef {
 	/** Deliberately absent from persisted hook rows; `principal: "hook"` is invalid. */
