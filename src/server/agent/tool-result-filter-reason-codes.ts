@@ -12,6 +12,7 @@ export const TOOL_RESULT_FILTER_REASON_CODES = [
 	"filter-timed-out",
 	"filter-unavailable",
 	"filter-authority-unavailable",
+	"filter-authority-changed",
 	"filter-aborted",
 	"filter-admission-rejected",
 ] as const;

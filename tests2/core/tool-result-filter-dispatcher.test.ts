@@ -110,6 +110,71 @@ describe("ToolResultFilterDispatcher", () => {
 		expect(result.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "denied", reasonCode: "filter-disabled-or-revoked" })]));
 	});
 
+	it("fails closed when A is replaced by B before A settles", async () => {
+		let activeHooks = [hook("a")];
+		let activeGrants = [grant("a")];
+		let release!: () => void;
+		const wait = new Promise<void>(resolve => { release = resolve; });
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: { list: () => activeHooks.map(item => ({ packId: item.id, hooks: [item] })) } as any,
+			grantsForProject: () => activeGrants as any,
+			moduleHost: { invoke: async () => { await wait; return proposal("reject", "a"); } } as any,
+		});
+		const pending = dispatcher.filter(input);
+		activeHooks = [hook("b")];
+		activeGrants = [grant("b")];
+		release();
+		const result = await pending;
+		expect(result).toMatchObject({ action: "reject", reasonCode: "filter-authority-changed" });
+		expect(JSON.stringify(result)).not.toContain(canary);
+	});
+
+	it("fails closed when B is added while A settles because B never executed", async () => {
+		let activeHooks = [hook("a")];
+		let activeGrants = [grant("a")];
+		let release!: () => void;
+		const wait = new Promise<void>(resolve => { release = resolve; });
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: { list: () => activeHooks.map(item => ({ packId: item.id, hooks: [item] })) } as any,
+			grantsForProject: () => activeGrants as any,
+			moduleHost: { invoke: async () => { await wait; return proposal("pass", "a"); } } as any,
+		});
+		const pending = dispatcher.filter(input);
+		activeHooks = [hook("a"), hook("b")];
+		activeGrants = [grant("a"), grant("b")];
+		release();
+		const result = await pending;
+		expect(result).toMatchObject({ action: "reject", reasonCode: "filter-authority-changed" });
+		expect(JSON.stringify(result)).not.toContain(canary);
+	});
+
+	it("fails closed when the eligible priority order changes before workers settle", async () => {
+		let activeHooks = [hook("a"), hook("b")];
+		let release!: () => void;
+		const wait = new Promise<void>(resolve => { release = resolve; });
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: { list: () => activeHooks.map(item => ({ packId: item.id, hooks: [item] })) } as any,
+			grantsForProject: () => [grant("a"), grant("b")] as any,
+			moduleHost: { invoke: async (request: any) => { await wait; return proposal("pass", request.packRoot.endsWith("a") ? "a" : "b"); } } as any,
+		});
+		const pending = dispatcher.filter(input);
+		activeHooks = [hook("b"), hook("a")];
+		release();
+		const result = await pending;
+		expect(result).toMatchObject({ action: "reject", reasonCode: "filter-authority-changed" });
+		expect(JSON.stringify(result)).not.toContain(canary);
+	});
+
+	it("keeps a stable eligible set and deterministically reduces its complete worker set", async () => {
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: registry(hook("a"), hook("b")), grantsForProject: () => [grant("a"), grant("b")] as any,
+			moduleHost: { invoke: async (request: any) => proposal(request.packRoot.endsWith("a") ? "pass" : "redact", request.packRoot.endsWith("a") ? "a" : "b") } as any,
+		});
+		const result = await dispatcher.filter(input);
+		expect(result).toMatchObject({ action: "redact", ruleId: "b", result: { content: [{ text: "safe-b" }] } });
+		expect(JSON.stringify(result)).not.toContain(canary);
+	});
+
 	it("rejects worker-controlled metadata and publishes only source identity and core codes", async () => {
 		const forgedRuleId = "EP14_FORGED_RULE_CANARY_must_not_escape";
 		const forgedReasonCode = "EP14_FORGED_REASON_CANARY_must_not_escape";

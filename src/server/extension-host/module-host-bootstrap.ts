@@ -4,14 +4,16 @@
 //
 // This module is the `Worker` entry spawned by `ModuleHost.invoke`
 // (module-host-worker.ts). It runs in a worker thread whose memory is capped by
-// `resourceLimits`. Actions/routes/providers inherit the gateway environment;
-// scheduled advisors receive only a portable runtime environment.
+// `resourceLimits`. Actions/routes/providers and ordinary hooks inherit the gateway
+// environment; scheduled advisors and protected result filters receive only a
+// portable runtime environment.
 //
 // **Trust model (Model A).** Pack SERVER code is TRUSTED — same tier as a tool or
 // MCP server the user chose to install — so it has ambient Node built-ins
 // (`fs`/`child_process`/`net`/`http`…) and network globals (`fetch`/`WebSocket`).
-// Actions/routes/providers also retain the normal full environment. Advisors receive
-// only portable runtime variables, avoiding inherited gateway environment secrets;
+// Actions/routes/providers also retain the normal full environment. Advisors and
+// protected result filters receive only portable runtime variables, avoiding
+// inherited gateway environment secrets;
 // this is not a capability sandbox because trusted advisor code still has ambient
 // filesystem/network access and can defeat in-process restrictions. The worker is
 // otherwise purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
@@ -103,7 +105,7 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes" | "providers" | "advisors" | "hooks";
+	exportKind: "actions" | "routes" | "providers" | "advisors" | "hooks" | "result-filters";
 	member: string;
 	/** Serializable handler context (identity + capability flags; NO live host).
 	 * Advisor contexts are server-derived data only and intentionally have no
@@ -223,7 +225,8 @@ const confinementReady: Promise<void> = (async () => {
  * `process.chdir()`). Nothing else about `process` is touched — the worker keeps the
  * real `process` global with its configured env, real `argv`/`execPath`/`exit`/
  * `kill`/`binding`/… all present. Actions/routes/providers retain their full
- * inherited env; advisors receive only portable runtime variables. A no-op when
+ * inherited env; advisors and protected result filters receive only portable runtime
+ * variables. A no-op when
  * `workingDir` is absent/empty (the worker keeps its real cwd).
  */
 function setSessionCwd(workingDir?: string): void {
@@ -673,7 +676,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 	try {
 		// ── (4) Dynamic-import the pack module through the module-import containment hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
-		const group = msg.exportKind === "providers" || msg.exportKind === "hooks"
+		const group = msg.exportKind === "providers" || msg.exportKind === "hooks" || msg.exportKind === "result-filters"
 			? ((mod.default as Record<string, unknown> | undefined) ?? mod)
 			: (mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind]);
 		// Export-map validation now lives HERE (moved off the parent so the parent never
@@ -686,17 +689,19 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		// Own-property + function check (mirrors the former dispatcher parent-side guard):
 		// never invoke an INHERITED member (`constructor`, `toString`, …) — defense-in-depth
 		// against a prototype-walk. An unknown/own-non-function member is a 404.
-		const allowedHookMember = msg.exportKind !== "hooks"
-			|| msg.member === "decide"
-			|| msg.member === "onDecision"
-			|| msg.member === "selectSkills"
-			|| msg.member === "selectMcp";
+		const allowedHookMember = msg.exportKind === "result-filters"
+			? msg.member === "decide"
+			: msg.exportKind !== "hooks"
+				|| msg.member === "decide"
+				|| msg.member === "onDecision"
+				|| msg.member === "selectSkills"
+				|| msg.member === "selectMcp";
 		const fn = allowedHookMember && Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
 		if (typeof fn !== "function") {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
-		const ctx = msg.exportKind === "hooks"
+		const ctx = msg.exportKind === "hooks" || msg.exportKind === "result-filters"
 			? { ...msg.ctx, capabilities: { callRoute: false, session: false, store: false, agents: false } }
 			: msg.exportKind === "providers"
 				? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
