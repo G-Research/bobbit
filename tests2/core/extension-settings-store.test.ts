@@ -106,7 +106,7 @@ describe("extension settings store", () => {
 			return originalWrite(file, ...args);
 		};
 
-		secrets.update(ref, { credential: "runtime-credential-value" });
+		secrets.update(ref, { credential: "runtime-credential-value" }, "test-owner-commit");
 
 		expect(writes).toHaveLength(1);
 		expect(writes[0]).toMatchObject({
@@ -129,7 +129,7 @@ describe("extension settings store", () => {
 			values: { endpoint: "https://previous.example" },
 			secrets: { credential: oldSecret },
 		});
-		const priorCommitId = store.getPublicState().commitId;
+		const priorPublicState = store.getPublicState();
 		const originalWrite = memFs.writeFileSync.bind(memFs);
 		memFs.writeFileSync = (file, ...args) => {
 			if (String(file).includes("extension-settings-secrets.json")) throw new Error("injected failure");
@@ -147,7 +147,7 @@ describe("extension settings store", () => {
 		}
 		expect(thrown).toBeInstanceOf(ExtensionSettingsSecretPersistenceError);
 		expect(thrown).not.toHaveProperty("committedRevision");
-		expect(store.getPublicState()).toMatchObject({ schema: 1, revision: 1, commitId: priorCommitId, targets: { [targetKey]: { values: { endpoint: "https://previous.example" } } } });
+		expect(store.getPublicState()).toEqual(priorPublicState);
 		expect(store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toEqual({ endpoint: "https://previous.example", credential: oldSecret });
 
 		memFs.writeFileSync = originalWrite;
@@ -249,6 +249,10 @@ describe("extension settings store", () => {
 		} });
 
 		expect(() => store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+		// A redacted secretSet projection is also unavailable; the project-wide
+		// fence applies even to targets with no secret fields.
+		expect(() => store.getEffective(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+		expect(() => store.getEffective(ref, {})).toThrow(ExtensionSettingsSecretCommitMismatchError);
 		expect(() => store.getForRuntime(ref, {}, { secretFields: ["credential"] })).not.toThrow(/old-secret|new\.example/);
 
 		// A versioned public record cannot be paired with a legacy secret file.
@@ -314,8 +318,23 @@ describe("extension settings store", () => {
 		expect(() => store.compareAndSwap(ref, 1, { values: { endpoint: "https://new.example" }, secrets: { credential: "new-secret" } }))
 			.toThrow(ExtensionSettingsSecretPersistenceError);
 		expect(() => store.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
-		expect(() => new ExtensionSettingsStore(new ProjectConfigStore(configDir, memFs), new ExtensionSettingsSecretStore(stateDir, memFs))
-			.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+		const publicBytes = memFs.readFileSync(path.resolve(configDir, "project.yaml"), "utf-8");
+		const secretBytes = memFs.readFileSync(path.resolve(stateDir, "extension-settings-secrets.json"), "utf-8");
+		const rolledBackPublicState = store.getPublicState();
+		const restarted = new ExtensionSettingsStore(new ProjectConfigStore(configDir, memFs), new ExtensionSettingsSecretStore(stateDir, memFs));
+		expect(restarted.getPublicState()).toEqual(rolledBackPublicState);
+		expect(() => restarted.getForRuntime(ref, {}, { secretFields: ["credential"] })).toThrow(ExtensionSettingsSecretCommitMismatchError);
+		// Preflight rejects both public-only and partial-secret attempts without
+		// changing either durable byte stream or the rolled-back public revision.
+		for (const mutation of [
+			{ values: { endpoint: "https://laundered.example" } },
+			{ secrets: { credential: "laundered-secret" } },
+		]) {
+			expect(() => restarted.compareAndSwap(ref, 1, mutation)).toThrow(ExtensionSettingsSecretCommitMismatchError);
+			expect(restarted.getPublicState()).toEqual(rolledBackPublicState);
+			expect(memFs.readFileSync(path.resolve(configDir, "project.yaml"), "utf-8")).toBe(publicBytes);
+			expect(memFs.readFileSync(path.resolve(stateDir, "extension-settings-secrets.json"), "utf-8")).toBe(secretBytes);
+		}
 	});
 
 	it("resolves public and owner-only values independently for each project", () => withTmpDir(root => {

@@ -217,7 +217,13 @@ export class ExtensionSettingsStore {
     options: ExtensionSettingsEffectiveOptions = {},
   ): EffectiveExtensionSettings {
     assertRef(ref);
-    const record = this.getTarget(ref);
+    const publicState = this.getPublicState();
+    // A secret-presence projection is still a pairing observation. Do not show
+    // it next to public settings from a different durable commit, even when the
+    // requested target has no declared secret fields.
+    this.secretStore.assertCommitId(publicState.commitId);
+    const storedRecord = publicState.targets[extensionSettingsTargetKey(ref)];
+    const record = storedRecord ? cloneRecord(storedRecord) : undefined;
     const hasProjectRecord = record !== undefined;
     const secretFields = new Set(options.secretFields ?? []);
     const values: Record<string, ExtensionSettingValue> = Object.create(null) as Record<string, ExtensionSettingValue>;
@@ -256,9 +262,8 @@ export class ExtensionSettingsStore {
     defaults: Readonly<Record<string, ExtensionSettingValue>>,
     options: ExtensionSettingsEffectiveOptions = {},
   ): Record<string, ExtensionSettingValue> {
-    // Pair before combining any public value with an owner-only read. A public
-    // candidate and an older secret file can both be durable after a crash.
-    this.secretStore.assertCommitId(this.getPublicState().commitId);
+    // getEffective performs the project-wide pairing check before exposing any
+    // public overlay or secret-presence metadata.
     const effective = this.getEffective(ref, defaults, options);
     const values = { ...effective.values };
     for (const field of options.secretFields ?? []) {
@@ -296,6 +301,10 @@ export class ExtensionSettingsStore {
     }
 
     const current = this.getPublicState();
+    // Never use a follow-up mutation to launder bytes from an ambiguous or
+    // mismatched secret publication into a fresh commit identity. This probe is
+    // unconditional so public-only changes cannot enter compensation either.
+    this.secretStore.assertCommitId(current.commitId);
     if (current.revision !== expectedRevision) throw new ExtensionSettingsRevisionConflictError();
     const candidate = cloneState(current);
     candidate.revision++;
