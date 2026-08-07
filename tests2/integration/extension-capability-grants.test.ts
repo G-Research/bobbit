@@ -20,6 +20,10 @@ function auditPath(): string {
 	return `/api/projects/${encodeURIComponent(projectId)}/extension-grant-audit`;
 }
 
+function settingsPath(): string {
+	return `/api/projects/${encodeURIComponent(projectId)}/extension-settings`;
+}
+
 function writeFixturePack(headquartersDir: string): void {
 	packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
@@ -155,16 +159,39 @@ test.describe("extension capability grants API", () => {
 		expect(absentPack.status).toBe(404);
 		expect((await json(absentPack)).code).toBe("EXTENSION_GRANT_PRINCIPAL_NOT_FOUND");
 
+		const settingsBefore = await apiFetch(settingsPath());
+		expect(settingsBefore.status).toBe(200);
+		const packTargetBefore = (await json(settingsBefore)).targets.find((candidate: any) =>
+			candidate.ref?.packId === PACK_NAME && candidate.ref?.kind === "pack",
+		);
+		expect(packTargetBefore, `${REPRO}: the existing Market Pack target must expose the server-owned pack grant projection`).toMatchObject({
+			ref: { packId: PACK_NAME, kind: "pack", id: PACK_NAME },
+			packGrant: {
+				requestedCapabilities: ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"],
+				grants: [],
+			},
+		});
+
 		const granted = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(packGrant) });
 		expect(granted.status).toBe(200);
 		expect((await json(granted)).grant).toMatchObject({ ...packGrant, grantedBy: "admin" });
 		const projection = await apiFetch(grantsPath());
 		const activePack = (await json(projection)).packs.find((candidate: any) => candidate.packId === PACK_NAME);
 		expect(activePack).toMatchObject({ requestedCapabilities: expect.arrayContaining(["memory.read", "memory.read.all", "service.manage"]), grants: ["memory.read"] });
+		const settingsAfterGrant = await apiFetch(settingsPath());
+		const packTargetAfterGrant = (await json(settingsAfterGrant)).targets.find((candidate: any) =>
+			candidate.ref?.packId === PACK_NAME && candidate.ref?.kind === "pack",
+		);
+		expect(packTargetAfterGrant?.packGrant?.grants).toEqual(["memory.read"]);
 
 		const revoke = await apiFetch(`${grantsPath()}/${encodeURIComponent(PACK_NAME)}/principals/pack/memory.read`, { method: "DELETE", headers: operatorHeaders() });
 		expect(revoke.status, `${REPRO}: pack principal revoke must target only its exact tuple`).toBe(200);
 		expect((await json(revoke)).revoked).toBe(true);
+		const settingsAfterRevoke = await apiFetch(settingsPath());
+		const packTargetAfterRevoke = (await json(settingsAfterRevoke)).targets.find((candidate: any) =>
+			candidate.ref?.packId === PACK_NAME && candidate.ref?.kind === "pack",
+		);
+		expect(packTargetAfterRevoke?.packGrant?.grants, `${REPRO}: the Pack target must re-read the live resolver after revocation`).toEqual([]);
 	});
 
 	test("projects inert hook state, grants one exact hook, invalidates contribution state, and revokes without restart", async () => {
