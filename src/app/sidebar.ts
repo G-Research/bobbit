@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, ChevronDown, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -29,7 +29,7 @@ import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
 import { refreshSessions, retryLoadSessions, fetchRoles, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder, refreshStaffStateFromApi } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderTreeSessionNode, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
+import { renderGoalGroup, renderTreeSessionNode, renderStaffSidebarActions, renderSessionTime, SESSION_ROW_PY, hasUnseenActivity, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
@@ -1054,40 +1054,27 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				const isAborting = session?.isAborting || false;
 				const accessory = session?.accessory;
 				const rowPy = SESSION_ROW_PY;
-				const btnPad = mobile ? "p-1" : "p-0.5";
-				const editBtn = html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
-					title="Edit">${icon(Pencil, "xs")}</button>`;
+				const buttons = renderStaffSidebarActions(agent.id, agent.name, session);
 				const staffSessionNavId = agent.currentSessionId ? `session:${agent.currentSessionId}` : "";
 				return html`
 				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 					${active ? "bg-secondary text-foreground sidebar-session-active" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+					data-sidebar-actions-row-root
 					data-nav-id=${staffSessionNavId}
 					data-nav-active=${active ? "true" : "false"}
 					style="padding-left:var(--sidebar-chevron-w);"
 					@click=${() => handleStaffClick(agent)}>
 					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session), true)}</span>
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="block min-w-0 max-w-full truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
-							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
-							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
-							const time = terseRelativeTime(session.lastActivity);
-							if (!time) return "";
-							const unseen = hasUnseenActivity(session);
-							return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;font-size: 0.9167em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
-						})() : ""}</div>
+					<div class="flex-1 min-w-0 flex flex-col justify-center">
+						<div class="flex items-center gap-1 min-w-0 font-normal"><span class="flex-1 min-w-0 truncate" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+					</div>
 					${mobile
-						? editBtn
-						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-							<span class="group-hover:hidden flex items-center">${session ? (() => {
-								const time = terseRelativeTime(session.lastActivity);
-								if (!time) return "";
-								const unseen = hasUnseenActivity(session);
-								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
-							})() : ""}</span>
-							<div class="sidebar-actions sidebar-action-cluster hidden group-hover:flex items-center">
-								${editBtn}
-							</div>
-						</div>`}
+						? buttons
+						: html`
+							<span class="group-hover:hidden group-focus-within:hidden absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">${session ? renderSessionTime(session, active) : ""}</span>
+							<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+								${buttons}
+							</div>`}
 				</div>
 			`; })}</div>` : ""}
 	`;
