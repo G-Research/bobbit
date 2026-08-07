@@ -114,6 +114,9 @@ export class MessageEditor extends LitElement {
 	@property() showThinkingSelector = true;
 	@property() onInput?: (value: string) => void;
 	@property() onSend?: (input: string, attachments: Attachment[]) => void | Promise<void>;
+	/** Synchronous prompt fence. When set, normal send retains the complete draft
+	 *  and returns before message-send, slash dispatch, history, or onSend. */
+	@property() blockedSendReason?: string;
 	@property() onAbort?: () => void;
 	@property() onModelSelect?: () => void;
 	@property() onThinkingChange?: (level: ThinkingLevel) => void;
@@ -146,6 +149,7 @@ export class MessageEditor extends LitElement {
 	 *  present. Shown as an inline error; cleared on the next edit or when the
 	 *  attachments change. */
 	@state() private _steerError = "";
+	@state() private _blockedSendError = "";
 	/** Content-aware submit-lock guarding BOTH the steer ({@link handleSteerShortcut})
 	 *  and normal-send ({@link handleSend}) lifecycles against concurrent DUPLICATE
 	 *  submission. Holds the exact text of every submit currently mid-flight (via any
@@ -875,6 +879,7 @@ export class MessageEditor extends LitElement {
 		this.value = textarea.value;
 		if (this._sendSizeError) this._sendSizeError = ""; // clear the S31 error once the user edits
 		if (this._steerError) this._steerError = ""; // clear the steer-attachment error once the user edits
+		if (this._blockedSendError) this._blockedSendError = "";
 		this.onInput?.(this.value);
 		this._updateSlashAutocomplete();
 		this._updateAtAutocomplete();
@@ -1037,8 +1042,16 @@ export class MessageEditor extends LitElement {
 		}
 	};
 
+	public showBlockedSendError(reason: string): void {
+		this._blockedSendError = reason;
+	}
+
 	private handleSend = async () => {
 		const text = this.value;
+		if (this.blockedSendReason) {
+			this.showBlockedSendError(this.blockedSendReason);
+			return;
+		}
 		// Content-aware lock: block only an identical concurrent submission (same text
 		// mid-flight via any path); a distinct edited submission is still allowed.
 		if (this._inFlightSubmits.has(text)) return;
@@ -1435,6 +1448,9 @@ export class MessageEditor extends LitElement {
 				this._loadHistory();
 			}
 		}
+		if (changed.has("blockedSendReason") && !this.blockedSendReason) {
+			this._blockedSendError = "";
+		}
 
 		if ((changed.has("cwd") || changed.has("projectId")) && this.cwd) {
 			this._slashSkillsLoaded = false;
@@ -1622,12 +1638,14 @@ export class MessageEditor extends LitElement {
 				     NOTE: transform: translateZ(0) is load-bearing on iOS Safari. Without its
 				     own GPU compositing layer the textarea caret is invisible in this position
 				     (bottom of viewport, nested flex). Do not remove without re-testing on iOS. -->
-				${(this._sendSizeError || this._steerError)
+				${(this._blockedSendError || this._sendSizeError || this._steerError)
 					? html`<div
-							data-testid=${this._steerError ? "composer-steer-error" : "composer-size-error"}
+							data-testid=${this._blockedSendError
+								? "composer-model-selection-error"
+								: this._steerError ? "composer-steer-error" : "composer-size-error"}
 							class="mx-2 mb-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive"
 							role="alert"
-						>${this._steerError || this._sendSizeError}</div>`
+						>${this._blockedSendError || this._steerError || this._sendSizeError}</div>`
 					: nothing}
 				<div class="flex items-center gap-1 px-2 py-2" style="transform: translateZ(0);">
 					${attachButton}

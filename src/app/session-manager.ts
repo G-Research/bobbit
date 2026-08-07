@@ -184,6 +184,13 @@ type InteractionModeTarget = {
 	nonInteractive?: boolean;
 };
 
+function isModelSelectionRequiredRecord(record: Partial<GatewaySession> | undefined): boolean {
+	const condition = (record as any)?.condition;
+	return condition?.code === "MODEL_SELECTION_REQUIRED"
+		&& typeof condition.provider === "string"
+		&& typeof condition.modelId === "string";
+}
+
 /** Apply every interaction restriction already known without ever clearing one. */
 function applyKnownSessionInteractionMode(
 	target: InteractionModeTarget,
@@ -199,7 +206,7 @@ function applyKnownSessionInteractionMode(
 		|| records.some((record) => record?.readOnly === true
 			|| record?.archived === true
 			|| record?.status === "archived"
-			|| record?.status === "terminated")
+			|| (record?.status === "terminated" && !isModelSelectionRequiredRecord(record)))
 	) {
 		target.readOnly = true;
 	}
@@ -1713,8 +1720,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Keep selection UX optimistic, but only persist server-confirmed model state.
 		const originalSetModel = remote.setModel.bind(remote);
-		remote.setModel = (model: any) => {
-			originalSetModel(model);
+		remote.setModel = (model: any, thinkingLevel?: string) => {
+			originalSetModel(model, thinkingLevel);
 			renderApp();
 		};
 
@@ -2428,6 +2435,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// a direct-record fetch remains a best-effort fallback after hydration.
 		let sessionDataAny: any = sessionData
 			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
+		// Seed the cold-restore condition from the authoritative listing before the
+		// first editor render. The WS state snapshot will subsequently own updates
+		// and must explicitly publish null after verified recovery.
+		if (isModelSelectionRequiredRecord(sessionDataAny) && !remote.conditionSnapshotReceived) {
+			remote.state.condition = { ...sessionDataAny.condition };
+		}
 
 		// Bind draft autosave before setAgent can render an interactive editor.
 		_bindPromptDraftSession(sessionId);
