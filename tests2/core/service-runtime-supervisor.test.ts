@@ -33,9 +33,10 @@ function manifest(overrides: Partial<ServiceRuntimeManifest> = {}): ServiceRunti
 			USER_SECRET: { secret: "apiKey" },
 			GENERATED_SECRET: { generatedSecret: "TOKEN" },
 			PORT: { endpointPort: true },
+			HOST: { value: "127.0.0.1" },
 		},
 		modes: {
-			local: { command: "fixture", args: [], portEnv: "PORT" },
+			local: { command: "fixture", args: [], portEnv: "PORT", hostEnv: "HOST" },
 			docker: { image: "fixture:latest" },
 			compose: { file: "compose.yaml", service: "fixture", projectName: "fixture-${serverIdentity}" },
 		},

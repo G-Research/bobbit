@@ -35,6 +35,7 @@ function validDescriptor(): Record<string, unknown> {
 		lifecycle: { startPolicy: "manual", restart: { policy: "on-failure", maxAttempts: 3, windowMs: 30_000, initialBackoffMs: 500, maxBackoffMs: 5_000 } },
 		environment: {
 			SERVICE_PORT: { endpointPort: true },
+			SERVICE_HOST: { value: "127.0.0.1" },
 			PUBLIC_SETTING: { setting: "publicSetting" },
 			API_TOKEN: { secret: "apiToken" },
 			INTERNAL_PASSWORD: { generatedSecret: "internalPassword" },
@@ -42,7 +43,7 @@ function validDescriptor(): Record<string, unknown> {
 		},
 		storage: { setting: "dataDir", target: "/var/lib/example", survival: "preserve" },
 		modes: {
-			local: { command: "node", args: ["./runtime/service.mjs"], cwd: ".", portEnv: "SERVICE_PORT" },
+			local: { command: "node", args: ["./runtime/service.mjs"], cwd: ".", portEnv: "SERVICE_PORT", hostEnv: "SERVICE_HOST" },
 			docker: { image: "ghcr.io/example/service:1.2.3", command: ["node", "service.mjs"] },
 			compose: { file: "../runtime/compose.yaml", service: "api", projectName: "bobbit-${packId}-${runtimeId}-${serverIdentity}" },
 		},
@@ -61,6 +62,7 @@ describe("parseServiceManifest", () => {
 		assert.equal(parsed.id, "example-service");
 		assert.equal(parsed.modes.local.cwd, ".");
 		assert.equal(parsed.modes.local.portEnv, "SERVICE_PORT");
+		assert.equal(parsed.modes.local.hostEnv, "SERVICE_HOST");
 		assert.equal(parsed.modes.compose.service, "api");
 		assert.deepEqual(parsed.environment.SERVICE_PORT, { endpointPort: true });
 	});
@@ -69,6 +71,9 @@ describe("parseServiceManifest", () => {
 		const { root, sourceFile } = fixtureRoot();
 		for (const mutate of [
 			(raw: any) => { raw.unknown = true; },
+			(raw: any) => { delete raw.modes.local.hostEnv; },
+			(raw: any) => { raw.modes.local.hostEnv = "MISSING_HOST"; },
+			(raw: any) => { raw.environment.SERVICE_HOST.value = "0.0.0.0"; },
 			(raw: any) => { raw.endpoint.health.expectedStatus = 99; },
 			(raw: any) => { raw.lifecycle.restart.maxBackoffMs = 1; },
 			(raw: any) => { raw.modes.local.args = "--unsafe"; },
@@ -133,8 +138,8 @@ describe("schema-2 runtime contributions", () => {
 			"apiVersion: 1", "id: Example-Service", "title: Example service",
 			"endpoint:", "  protocol: http", "  servicePort: 8080", "  health: { path: /health, expectedStatus: 200, requestTimeoutMs: 1000, intervalMs: 500, startupTimeoutMs: 10000 }",
 			"lifecycle:", "  startPolicy: manual", "  restart: { policy: never, maxAttempts: 0, windowMs: 1000, initialBackoffMs: 100, maxBackoffMs: 100 }",
-			"environment: { SERVICE_PORT: { endpointPort: true } }",
-			"modes:", "  local: { command: node, args: [service.mjs], cwd: '.', portEnv: SERVICE_PORT }",
+			"environment: { SERVICE_PORT: { endpointPort: true }, SERVICE_HOST: { value: 127.0.0.1 } }",
+			"modes:", "  local: { command: node, args: [service.mjs], cwd: '.', portEnv: SERVICE_PORT, hostEnv: SERVICE_HOST }",
 			"  docker: { image: ghcr.io/example/service:1.2.3 }",
 			"  compose: { file: ../runtime/compose.yaml, service: api, projectName: 'bobbit-${packId}-${serverIdentity}' }",
 		].join("\n"));

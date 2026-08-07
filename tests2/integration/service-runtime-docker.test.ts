@@ -73,6 +73,9 @@ function input(
 		packId: "service-runtime-e2e",
 		environment: {
 			SERVICE_RUNTIME_PORT: "8888",
+			// The local runner must discard this authored wildcard and force the
+			// descriptor-declared host variable to loopback for the child process.
+			SERVICE_RUNTIME_HOST: "0.0.0.0",
 			// The local process receives the host path; containers receive their
 			// declared target and the runner owns the host bind separately.
 			SERVICE_RUNTIME_DATA_DIR: mode === "docker" ? "/data" : dataDir,
@@ -192,6 +195,21 @@ describe.sequential("service-runtime real adapter matrix", () => {
 		});
 	});
 
+	it("forces a real local child that requests wildcard binding onto loopback", { timeout: 15_000 }, async () => {
+		const root = makeRoot("runtime-local-loopback");
+		const manifest = fixtureManifest(root);
+		const dataDir = join(root, "data");
+		const runner = new LocalServiceRunner();
+		const runnerInput = { ...input(manifest, "local", root, dataDir), descriptorDir: root };
+		const started = await runner.start(runnerInput);
+		try {
+			await waitForHealth(started.endpoint, manifest);
+			expect(await json(started.endpoint, "/health")).toEqual({ status: "ok", listener: "127.0.0.1" });
+		} finally {
+			await runner.remove({ ...runnerInput, runnerIdentity: started.runnerIdentity });
+		}
+	});
+
 	it("runs the unchanged fixture via local, Docker, and Compose with one endpoint contract", { timeout: 180_000 }, async () => {
 		if (!(await dockerAvailable())) return;
 
@@ -214,7 +232,7 @@ describe.sequential("service-runtime real adapter matrix", () => {
 				await waitForHealth(started.endpoint, manifest).catch((error: unknown) => {
 					throw new Error(`${mode} fixture failed readiness`, { cause: error });
 				});
-				expect(await json(started.endpoint, "/health")).toEqual({ status: "ok" });
+				expect(await json(started.endpoint, "/health")).toMatchObject({ status: "ok" });
 				const marker = `${mode}-${TEST_ID}`;
 				await retainAndRecall(started.endpoint, marker);
 				if (mode === "compose") {

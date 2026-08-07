@@ -126,6 +126,8 @@ lifecycle:
 environment:
   EXAMPLE_PORT:
     endpointPort: true
+  EXAMPLE_HOST:
+    value: 127.0.0.1
   EXAMPLE_DATA_DIR:
     setting: dataDir
   EXAMPLE_API_TOKEN:
@@ -144,6 +146,7 @@ modes:
     args: [./runtime/service.mjs]
     cwd: .
     portEnv: EXAMPLE_PORT
+    hostEnv: EXAMPLE_HOST
   docker:
     image: ghcr.io/example/service:1.2.3
     command: [node, service.mjs]
@@ -196,7 +199,7 @@ export interface ServiceRuntimeManifest {
   environment: Record<string, ServiceEnvSource>;
   storage?: { setting: string; target: string; survival: "preserve" };
   modes: {
-    local: { command: string; args: string[]; cwd?: string; portEnv: string };
+    local: { command: string; args: string[]; cwd?: string; portEnv: string; hostEnv: string };
     docker: { image: string; command?: string[] };
     compose: { file: string; service: string; projectName: string };
   };
@@ -223,7 +226,9 @@ export interface ServiceRuntimeManifest {
 Every environment entry declares exactly one source. There is no process-env
 inheritance, interpolation, or arbitrary settings lookup in a descriptor.
 Exactly one entry in the whole map must be `{ endpointPort: true }`; local
-`portEnv` must name that entry.
+`portEnv` must name that entry. Local `hostEnv` is required, must name a
+distinct literal `{ value: "127.0.0.1" }` entry, and is reassigned after all
+resolved settings when the child starts.
 
 | Source | Host behavior |
 |---|---|
@@ -260,9 +265,11 @@ All three mode blocks are required so an adapter switch cannot change provider
 semantics.
 
 - `local.command` is a constrained executable token, `args` is a non-empty
-  string array, and `cwd` is optional and pack-relative. Shell interpreter
-  command forms such as `sh -c`, `cmd /c`, and PowerShell command flags are
-  rejected.
+  string array, and `cwd` is optional and pack-relative. `hostEnv` declares
+  the upstream listener-host variable; the runner always supplies
+  `127.0.0.1` after settings, so a local child cannot become a wildcard
+  listener. Shell interpreter command forms such as `sh -c`, `cmd /c`, and
+  PowerShell command flags are rejected.
 - `docker.image` is a constrained image reference. Optional `command` is argv,
   not a command string, and has the same shell-interpreter rejection.
 - `compose.file` is pack-relative; `service` is a constrained service token;
@@ -323,7 +330,12 @@ file, a validated project name, and an owner-only environment-file path. It
 uses `docker compose port` and accepts only `127.0.0.1:<dynamic-port>`.
 
 Before `up`, the runner validates the static Compose file as a deliberately
-small contract. It permits only a `services` mapping with the supported image,
+small contract. Every interpolation name must be declared in the runtime
+manifest. An omitted `optional: true` secret is permitted only with one of
+Compose's explicit default/alternate forms (`-`, `:-`, `+`, `:+`); nested
+references in that fallback are validated too. This uses a bounded scanner:
+Docker Engine has no Compose interpolation API, and the maintained YAML parser
+intentionally parses YAML rather than Compose CLI substitution semantics. It permits only a `services` mapping with the supported image,
 restart, environment, ports, volumes, and dependencies fields. The endpoint
 service must publish exactly one dynamic loopback port; only that service may
 publish a port. Compose-side restart is disabled (`restart: "no"` or `false`),

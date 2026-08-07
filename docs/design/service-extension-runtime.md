@@ -156,6 +156,8 @@ export interface LocalLaunch {
   cwd?: string;
   /** Upstream listener's ordinary port environment-variable name. */
   portEnv: string;
+  /** Required upstream listener-host variable; local runner forces loopback. */
+  hostEnv: string;
 }
 export interface DockerLaunch { image: string; command?: string[]; }
 export interface ComposeLaunch {
@@ -176,7 +178,7 @@ export interface ServiceRuntimeManifest {
 }
 ```
 
-Validation rejects unknown keys, duplicate env names, unsafe ids/images/service names, non-array argv, invalid `local.portEnv`, shell metacharacter-bearing Compose project template values, `..`/absolute/symlink-escaping `file` and `local.cwd` paths, secret strings in `value`, an `endpointPort` environment source not mapped to the declared endpoint, malformed probe paths, and storage targets that are not absolute container paths. `environment` is a map, not string interpolation: an authored descriptor can only source a literal, EP-7 non-secret setting, EP-7 write-only secret, generated secret, or the runtime endpoint port. No descriptor can copy arbitrary process environment values.
+Validation rejects unknown keys, duplicate env names, unsafe ids/images/service names, non-array argv, invalid `local.portEnv`, a missing/non-literal-loopback `local.hostEnv`, shell metacharacter-bearing Compose project template values, `..`/absolute/symlink-escaping `file` and `local.cwd` paths, secret strings in `value`, an `endpointPort` environment source not mapped to the declared endpoint, malformed probe paths, and storage targets that are not absolute container paths. `environment` is a map, not string interpolation: an authored descriptor can only source a literal, EP-7 non-secret setting, EP-7 write-only secret, generated secret, or the runtime endpoint port. No descriptor can copy arbitrary process environment values.
 
 The selected mode is an EP-7 enum setting named `runtimeMode`, values exactly `local`, `docker`, `compose`; the default is `local` for development-oriented packs and is authored per pack. It selects only the runner. It does not change the provider, route, tool, REST client, service protocol, or semantic configuration.
 
@@ -245,7 +247,7 @@ All listeners bind loopback from Bobbit's perspective. Fixed host-port settings 
 
 | Mode | Start and endpoint discovery | Conflict behavior |
 |---|---|---|
-| Local | `get-port({ host: "127.0.0.1" })` selects a candidate; `execa(command, args, { cwd, env: { [local.portEnv]: candidate }, reject:false })` starts the unmodified upstream service. The adapter forms `http://127.0.0.1:<candidate>` and uses `p-retry`-bounded health polling. | Probe-close is inherently TOCTOU. An early `EADDRINUSE`/non-zero bind exit or unavailable health endpoint discards the candidate and retries allocation/start at most three times inside `startupTimeoutMs`; exhausted attempts return `SERVICE_PORT_CONFLICT`/`SERVICE_UNHEALTHY`, never hang. |
+| Local | `get-port({ host: "127.0.0.1" })` selects a candidate; `execa(command, args, { cwd, env: { [local.portEnv]: candidate, [local.hostEnv]: "127.0.0.1" }, reject:false })` starts the unmodified upstream service. `hostEnv` is required, declared as a literal loopback variable, and assigned after resolved settings so it cannot be overridden. The adapter forms `http://127.0.0.1:<candidate>` and uses `p-retry`-bounded health polling. | Probe-close is inherently TOCTOU. An early `EADDRINUSE`/non-zero bind exit or unavailable health endpoint discards the candidate and retries allocation/start at most three times inside `startupTimeoutMs`; exhausted attempts return `SERVICE_PORT_CONFLICT`/`SERVICE_UNHEALTHY`, never hang. |
 | Docker | `dockerode.createContainer` with label `io.bobbit.service=<identity>`, `HostConfig.PortBindings` mapping `<servicePort>/tcp` to host port `0` on `127.0.0.1`; start then inspect `NetworkSettings.Ports`. | Docker atomically allocates/binds. No host port is persisted; restart rediscovery inspects the live container. |
 | Compose | `execa("docker", ["compose", "-p", project, "-f", containedFile, "up", "-d", service])`; authored Compose maps `127.0.0.1::${SERVICE_PORT}`. Discover with `docker compose ... port service servicePort`, validate `127.0.0.1:<port>`, then probe. | Docker/Compose allocates atomically. A publication conflict or unavailable plugin is classified, bounded, and shown in diagnostics. |
 
@@ -310,7 +312,7 @@ config:
 `market-packs/hindsight/runtimes/hindsight.yaml` supplies:
 
 - `endpoint: { protocol: http, servicePort: 8888, health: { path: /health, expectedStatus: 200, requestTimeoutMs: 1500, intervalMs: 1000, startupTimeoutMs: 120000 } }`;
-- `local` command/package entry with `portEnv` set to the audited upstream Hindsight listener variable, so the unmodified service receives a normal selected port with no Bobbit-specific ready protocol;
+- `local` command/package entry with `portEnv` and required `hostEnv` set to Hindsight's audited listener variables, so the unmodified service receives a normal selected port and forced loopback host with no Bobbit-specific ready protocol;
 - digest-pinned `ghcr.io/vectorize-io/hindsight` Docker image and a Compose stack with only the verified API plus `pgvector/pgvector`; `SERVICE_PORT` is dynamically published on loopback;
 - a generated Postgres password, write-only Hindsight LLM key, and the declared bind storage path;
 - `lifecycle.restart: { policy: on-failure, maxAttempts: 3, windowMs: 300000, initialBackoffMs: 1000, maxBackoffMs: 30000 }`.
@@ -394,13 +396,13 @@ Current regression coverage is registered in `tests2/core/hindsight-memory-compl
 A LangFlow author does exactly this:
 
 1. Add `runtimes/langflow.yaml` and list `langflow` in `contents.runtimes`.
-2. Declare LangFlow's HTTP service port and a real readiness endpoint, bounded probe timings, `local` argv plus its normal `portEnv`, digest-pinned Docker image, and a contained Compose file/service. The local runner supplies that normal port variable; Docker/Compose use loopback dynamic publication. No LangFlow code emits or understands Bobbit-specific readiness messages.
+2. Declare LangFlow's HTTP service port and a real readiness endpoint, bounded probe timings, `local` argv plus its normal `portEnv` and listener `hostEnv`, digest-pinned Docker image, and a contained Compose file/service. The local runner supplies that normal port variable and forces the declared host variable to loopback; Docker/Compose use loopback dynamic publication. No LangFlow code emits or understands Bobbit-specific readiness messages.
 3. Declare every setting/secret through the provider or pack EP-7 schema, and map each process environment variable via `environment`. Add `storage` only if LangFlow must persist data. Never read raw environment/config or construct a Docker command in the pack module.
 4. Set a provider's `runtime: langflow`; provider/routes/tools read only `ctx.runtime.endpoint`. If absent/not ready, return their documented graceful no-service behavior.
 5. Request `service.manage` in the manifest capability metadata. EP-6 displays/audits the grant; the generic supervisor only checks the resolved grant before control actions.
 6. Add the same runner-contract fixtures and mode matrix described below. No new server integration, settings screen, permission system, endpoint injection, port logic, or lifecycle code is authored.
 
-If a service cannot bind its ordinary declared `local.portEnv` or expose the declared HTTP readiness endpoint, it is not compatible with local mode and must declare no local mode; it does not receive a bespoke exception. Docker and Compose support alone is insufficient for this goal's mode-independence promise.
+If a service cannot bind its ordinary declared `local.portEnv` and `local.hostEnv`, or expose the declared HTTP readiness endpoint, it is not compatible with local mode and must declare no local mode; it does not receive a bespoke exception. Docker and Compose support alone is insufficient for this goal's mode-independence promise.
 
 ## 9. File-level implementation plan and control flow
 

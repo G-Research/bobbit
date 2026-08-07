@@ -21,6 +21,8 @@ lifecycle:
 environment:
   SERVICE_RUNTIME_PORT:
     endpointPort: true
+  SERVICE_RUNTIME_HOST:
+    value: 127.0.0.1
   SERVICE_RUNTIME_DATA_DIR:
     setting: fixtureDataDir
 storage:
@@ -34,6 +36,7 @@ modes:
       - server.mjs
     cwd: .
     portEnv: SERVICE_RUNTIME_PORT
+    hostEnv: SERVICE_RUNTIME_HOST
   docker:
     image: bobbit-service-runtime-e2e:latest
   compose:
