@@ -10,7 +10,7 @@ The implementation composes existing owners rather than creating a second pack r
 
 - `loadPackContributions()` remains the declaration parser. Providers use their existing `ProviderContribution.configSchema`; hook `config` maps become editable only when they validate as a settings schema. Existing opaque hook config stays opaque and inert.
 - `PackContributionRegistry` remains the sole active/winning contribution resolver. After ordinary `pack_activation` filtering, it removes project-disabled schema-2 providers and hooks, resolves their effective project settings, and evaluates each contribution's `activation.requiresConfig` before exposing it to runtime consumers.
-- `ProjectConfigStore` atomically publishes the non-secret native YAML field. `ExtensionSettingsSecretStore` writes owner-only bytes below the owning `ProjectContext.stateDir`; values never enter `project.yaml`, an audit, a trace, a WebSocket frame, or a diff.
+- `ProjectConfigStore` atomically publishes the non-secret native YAML field. `ExtensionSettingsSecretStore` coalesces every secret change in one settings mutation into one owner-only file replacement below the owning `ProjectContext.stateDir`. An opaque commit identity binds the two durable records before either is consumed; values never enter `project.yaml`, an audit, a trace, a WebSocket frame, or a diff.
 - `server.ts` owns authenticated REST, validation, cache invalidation, redaction, and broadcasts. `marketplace-page.ts` is a typed client of that projection only.
 - EP-6 remains the sole authority owner. A setting never grants a hook capability, and a grant never enables, configures, or resurrects a disabled contribution.
 
@@ -91,6 +91,7 @@ type ExtensionSettingsMap = Record<string, ExtensionSettingsRecord>;
 type ExtensionSettingsState = {
   schema: 1;                          // storage schema, not pack schema
   revision: number;                   // monotonically increasing optimistic revision
+  commitId?: string;                  // opaque paired-record identity; absent only for legacy state
   targets: ExtensionSettingsMap;
 };
 
@@ -128,7 +129,7 @@ extension_settings:
         recallBudget: 1200
 ```
 
-`normalizeExtensionSettings()` validates the root, bounds target count and field counts, rejects non-primitive values, drops malformed target rows independently, returns defensive copies, and never logs either a bad row or a request body. `MIGRATED_KEYS`, `PresentFields`, snapshots, serialization, and `ProjectConfigDraft` must be updated together so `mutate()` retains its one-publication guarantee. A malformed public state is a safe unavailable state for runtime use, not a reason to activate a provider with defaults.
+`normalizeExtensionSettings()` validates the root, including the optional bounded opaque commit identity, bounds target count and field counts, rejects non-primitive values, drops malformed target rows independently, returns defensive copies, and never logs either a bad row or a request body. `MIGRATED_KEYS`, `PresentFields`, snapshots, serialization, and `ProjectConfigDraft` must be updated together so `mutate()` retains its one-publication guarantee. A malformed public state is a safe unavailable state for runtime use, not a reason to activate a provider with defaults.
 
 The settings record is intentionally an overlay, not a copy of pack defaults. Effective values are resolved as:
 
@@ -154,9 +155,36 @@ Add `src/server/agent/extension-settings-secret-store.ts`, constructed with each
 <project stateDir>/extension-settings-secrets.json
 ```
 
-It uses the same temp-file, `0o600`, rename-before-memory-publication pattern as `SecretsStore`, but exposes only `has(ref, field)`, `getForRuntime(ref, field)`, and `update(...)`; there is no `getAll()` public path. Secret record keys are derived from the server-created target key plus field name, not a browser-provided filename. Read/persistence errors map to controlled codes (`EXTENSION_SETTINGS_SECRET_READ_FAILED` and `EXTENSION_SETTINGS_SECRET_PERSIST_FAILED`) without a filesystem path, raw parser error, field value, or request body.
+It uses the same temp-file, `0o600`, rename-before-memory-publication pattern as `SecretsStore`, but exposes only `has(ref, field)`, `getForRuntime(ref, field)`, and owner-only `updateMany(...)`; there is no `getAll()` public path. Secret record keys are derived from the server-created target key plus field name, not a browser-provided filename. Read failures map to `EXTENSION_SETTINGS_SECRET_READ_FAILED`; persistence failures are redacted before the HTTP boundary, with no filesystem path, raw parser error, field value, or request body.
 
-A mutation validates the complete request before publishing. It first publishes the value-free `extension_settings` candidate and then writes/removes secret bytes. This matches the established sandbox-secret contract: if the second publication fails, the public revision has changed but old secret bytes remain; return `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with the new redacted projection so the client can retry using that revision. Invalidate runtime caches after the public publish even on this partial success. A secret is therefore never silently reported as written. Runtime validation of an existing secret remains internal: it can fail the resolver closed but never changes the public `secretSet` representation into a validation diagnostic.
+### Commit binding, legacy data, and repair
+
+The two files are individually atomically replaced, but they are not one cross-file transaction. The
+security invariant is that public values, secret presence, and runtime secret reads may be combined
+only after the public `commitId` equals the owner-only record's identity. This blocks a mixed state
+where a crash or ambiguous rename leaves a newly persisted public candidate alongside an older secret
+record.
+
+The public record stores a fresh opaque `commitId` for every successful mutation. The owner-only file
+uses a versioned envelope with a schema marker, that same identifier, and its private value map. The
+secret owner rewrites that envelope even for a public-only mutation, so a retained private value is
+always paired with the new public generation. The secret-store API accepts the identity from the public
+settings owner; it does not mint a later identity that could make an uncertain pair appear valid.
+
+A public state with no `commitId` and a flat, unversioned secret record form a compatible complete
+legacy pair. The first successful mutation upgrades both sides to the bound format. A versioned
+secret envelope with a missing or invalid identity is still versioned, never a legacy flat record.
+Likewise, a versioned/legacy combination or unequal identities is a mismatch. The resolver rejects a
+mismatch before it returns public overlays, `secretSet` metadata, or private runtime bytes. A mutation
+also checks this invariant before its CAS work, including for public-only patches; a stale or ambiguous
+secret generation therefore cannot be laundered into a fresh identifier by a follow-up save.
+
+A mismatch is an unavailable project settings state, not a conflict the service resolves by choosing a
+side. Recovery must restore a matching pair from the same known-good project state before settings can
+be read or changed. No automatic repair copies, derives, or exposes a private value. This is deliberate:
+commit binding detects inconsistent durable state, but does not claim to make two files crash-atomic.
+
+A mutation validates the complete request before publishing. It first persists the value-free `extension_settings` candidate, then coalesces all changed secrets into one owner-only file save under the candidate's identity. If the secret save fails, the store synchronously compensates before responding: it persists the exact prior public snapshot, including its original revision and identity. The HTTP route then returns the generic sanitized `503 EXTENSION_SETTINGS_PERSIST_FAILED`, not a partial-success response or retry projection. The caller can retry using the original revision, while prior public and runtime values remain authoritative and the attempted secret is never reported as written. If the compensating public save fails, or a secret replacement has an ambiguous durable outcome, commit binding leaves the settings unavailable until repaired; the service must not claim success or a determinate setting state. Runtime validation of an existing secret remains internal: it can fail the resolver closed but never changes the public `secretSet` representation into a validation diagnostic.
 
 Secret values are prohibited from:
 
@@ -267,7 +295,7 @@ Content-Type: application/json
 
 `kind` is `provider` or `hook`; all path segments are decoded once and validated against server-derived safe identifiers. `enabled` is optional. `values` is a partial map of declared fields; `null` clears an optional or secret field. Empty requests, unknown keys, invalid types/ranges/enums, clear of required fields, stale `expectedRevision`, inactive/missing target, and invalid declaration receive controlled `400`, `422`, `409 EXTENSION_SETTINGS_REVISION_CONFLICT`, or `404` responses. The server validates against the winning declaration before touching either store; it never lets a body establish pack or contribution identity.
 
-Success is `200` with `{ revision, target }`, where `target` is exactly the redacted `ExtensionSettingsTargetWire`. The response is also redacted for a secret-only write. A public-config persistence failure follows `PROJECT_CONFIG_PERSIST_FAILED`; a secret second-phase failure uses the explicit partial-success `503` described above.
+Success is `200` with `{ revision, target }`, where `target` is exactly the redacted `ExtensionSettingsTargetWire`. The response is also redacted for a secret-only write. A public-config persistence failure follows `PROJECT_CONFIG_PERSIST_FAILED`; a secret second-phase failure is compensated before the generic `503 EXTENSION_SETTINGS_PERSIST_FAILED` described above. A failed compensation instead returns `503 EXTENSION_SETTINGS_UNAVAILABLE`.
 
 ```
 PATCH /api/projects/:projectId/extension-settings/:packId
@@ -309,7 +337,7 @@ New tests belong in `tests2/` and are registered in `tests2/tests-map.json`.
 | Layer | File | Assertions |
 |---|---|---|
 | Core | `tests2/core/extension-settings-schema.test.ts` | All five field kinds, descriptor/default/range/enum validation, required/optional clearing, invalid hook opaque config, no secret defaults, requires-config field validation. |
-| Core | `tests2/core/extension-settings-store.test.ts` | YAML round-trip and defensive copies, revision CAS, unknown future public keys preserved, malformed-row isolation, public publication failure, owner-only secret mode, secret failure partial-success behavior, no secret in YAML/error/log snapshots. |
+| Core | `tests2/core/extension-settings-store.test.ts` | YAML round-trip and defensive copies, revision CAS, unknown future public keys preserved, malformed-row isolation, public publication failure, one owner-only coalesced secret save, secret-save compensation restoring the exact prior public state/revision and runtime values, legacy-pair upgrade, mismatch rejection before redacted or runtime reads, no stale-generation laundering after an ambiguous replacement, unavailable result when compensation fails, and no secret in YAML/error/log snapshots. |
 | Core | `tests2/core/pack-contributions.test.ts` (extend) | Project disabled provider/hook filtering, project config overlay before `requiresConfig`, unreadable settings fail closed, install-scope activation still wins. |
 | Integration | `tests2/integration/extension-settings-api.test.ts` | Authenticated read versus operator-only mutation, exact target identity, schema/type/enum/range/CAS failures, value redaction in GET/PATCH/WebSocket/console capture, invalidation of a previously built registry, and ordinary EP-6 grants remain unchanged. |
 | Integration | same | Two project contexts: configure Hindsight URL in both, disable `hindsight/memory` only in A, assert A has no active provider while B does; reload contexts and assert isolation persists. Test legacy PackStore fallback is read-only and first project write shadows it. |

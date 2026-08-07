@@ -288,21 +288,30 @@ export type ExtensionGrantMap = ExtensionGrant[];
 /** Public, project-owned settings overlay. Secret fields are never represented here. */
 export interface ExtensionSettingsRecord { enabled?: boolean; values: Record<string, ExtensionSettingValue>; }
 export type ExtensionSettingsMap = Record<string, ExtensionSettingsRecord>;
-export interface ExtensionSettingsState { schema: 1; revision: number; targets: ExtensionSettingsMap; }
+/** Storage schema (not contribution schema); revision supports CAS at the API boundary. */
+export interface ExtensionSettingsState {
+	schema: 1;
+	revision: number;
+	/** Opaque identity paired with the owner-only extension-secret envelope. */
+	commitId?: string;
+	targets: ExtensionSettingsMap;
+}
 export const EMPTY_EXTENSION_SETTINGS_STATE: Readonly<ExtensionSettingsState> = Object.freeze({ schema: 1, revision: 0, targets: Object.freeze({}) as ExtensionSettingsMap });
 const MAX_EXTENSION_SETTINGS_TARGETS = 256;
 const MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET = 64;
 const MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH = 512;
+const EXTENSION_SETTINGS_COMMIT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 function cloneExtensionSettings(state: ExtensionSettingsState): ExtensionSettingsState {
 	const targets: ExtensionSettingsMap = {};
 	for (const [target, record] of Object.entries(state.targets)) targets[target] = { ...(record.enabled === undefined ? {} : { enabled: record.enabled }), values: { ...record.values } };
-	return { schema: 1, revision: state.revision, targets };
+	return { schema: 1, revision: state.revision, ...(state.commitId === undefined ? {} : { commitId: state.commitId }), targets };
 }
 export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSettingsState; ok: boolean } {
 	const empty = (): ExtensionSettingsState => ({ schema: 1, revision: 0, targets: {} });
 	if (!isPlainObject(raw)) return { value: empty(), ok: false };
-	const revision = raw.revision; const rawTargets = raw.targets;
-	if (raw.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || !isPlainObject(rawTargets)) return { value: empty(), ok: false };
+	const revision = raw.revision; const commitId = raw.commitId; const rawTargets = raw.targets;
+	if (raw.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+		|| (commitId !== undefined && (typeof commitId !== "string" || !EXTENSION_SETTINGS_COMMIT_ID_RE.test(commitId))) || !isPlainObject(rawTargets)) return { value: empty(), ok: false };
 	const targets: ExtensionSettingsMap = {}; const entries = Object.entries(rawTargets);
 	if (entries.length > MAX_EXTENSION_SETTINGS_TARGETS) return { value: empty(), ok: false };
 	for (const [targetKey, candidate] of entries) {
@@ -314,7 +323,7 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 		for (const [key, value] of Object.entries(rawValues)) { if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key) || !isExtensionSettingValue(value) || (typeof value === "string" && (!isWellFormedExtensionSettingsText(value) || Buffer.byteLength(value, "utf8") > 4 * 1024))) { valid = false; break; } values[key] = value; }
 		if (valid) targets[targetKey] = { ...(enabled === undefined ? {} : { enabled }), values };
 	}
-	return { value: { schema: 1, revision, targets }, ok: true };
+	return { value: { schema: 1, revision, ...(commitId === undefined ? {} : { commitId }), targets }, ok: true };
 }
 
 /** Shared strict bound for stored hook refs and server-derived principal labels. */
