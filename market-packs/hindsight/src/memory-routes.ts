@@ -49,6 +49,9 @@ const MAX_CONTENT = 16_000;
 const MAX_CURSOR = 512;
 const MAX_ID = 512;
 const MAX_LIMIT = 100;
+/** Route work is independently bounded even when a client adapter ignores its
+ * request AbortSignal. The host dispatcher supplies a second outer deadline. */
+const DATA_PLANE_DEADLINE_MS = 5_000;
 
 function record(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -127,6 +130,18 @@ function clientMethod(client: unknown, name: string): ((...args: unknown[]) => P
 	return typeof method === "function" ? method.bind(client) as (...args: unknown[]) => Promise<unknown> : undefined;
 }
 
+async function withinDataPlaneDeadline<T>(work: Promise<T>): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work,
+			new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error("SERVICE_UNHEALTHY")), DATA_PLANE_DEADLINE_MS); }),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 /** New read endpoints use the expanded client protocol when present. The legacy
  * client never had browse/detail/history, so fail closed instead of fabricating
  * an empty bank or falling back to a different endpoint. */
@@ -138,7 +153,7 @@ async function withActiveClient<T>(
 	if (!loaded.available) return { configured: false, code: "HINDSIGHT_CONFIG_UNAVAILABLE" };
 	if (!isActive(loaded.config, ctx.runtime)) return inactive(isConfigured(loaded.config));
 	try {
-		return await work(await makeClient(clientConfig(loaded.config, ctx.runtime)), loaded.config);
+		return await withinDataPlaneDeadline(work(await makeClient(clientConfig(loaded.config, ctx.runtime)), loaded.config));
 	} catch {
 		return { configured: true, code: "SERVICE_UNHEALTHY" };
 	}
@@ -169,6 +184,60 @@ async function readRows(ctx: MemoryRouteContext, req: MemoryRouteRequest) {
 export const memoryRoutes = {
 	browse: readRows,
 	search: readRows,
+
+	/** Recall shares the ordinary scoped-read adapter rather than the legacy
+	 * provider route, so an all-scope request cannot be silently narrowed or
+	 * authorized with the wrong EP-6 capability. */
+	recall: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const scope = resolveMemoryScope(ctx, req);
+		const query = text(bodyOf(req).query ?? req.query?.query, MAX_QUERY);
+		if (!scope || !query) return { configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_QUERY_REQUIRED", memories: [] };
+		const permission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
+		if (!permission.ok) return { configured: true, code: permission.code, memories: [] };
+		return await withActiveClient(ctx, async (client, config) => {
+			const recall = clientMethod(client, "recall");
+			if (!recall) return { configured: true, code: "MEMORY_API_UNSUPPORTED", memories: [] };
+			const result = await recall(config.bank, query, { maxTokens: config.recallBudget, tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
+			const data = record(result) ? result : {};
+			return { configured: true, memories: Array.isArray(data.memories) ? data.memories : [] };
+		});
+	},
+
+	retain: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const scope = resolveMemoryScope(ctx, req);
+		const content = text(bodyOf(req).content, MAX_CONTENT);
+		if (!scope || !content) return { ok: false, configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_CONTENT_REQUIRED" };
+		const permission = await authorize(ctx, "memory.write");
+		if (!permission.ok) return { ok: false, configured: true, code: permission.code };
+		return await withActiveClient(ctx, async (client, config) => {
+			const retain = clientMethod(client, "retain");
+			const ensureBank = clientMethod(client, "ensureBank");
+			if (!retain || !ensureBank) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED" };
+			await ensureBank(config.bank);
+			await retain(config.bank, content, { tags: scopedTags(scope), sync: bodyOf(req).sync === true });
+			return { ok: true, configured: true };
+		});
+	},
+
+	reflect: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
+		const scope = resolveMemoryScope(ctx, req);
+		const prompt = text(bodyOf(req).prompt, MAX_QUERY);
+		if (!scope || !prompt) return { configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_PROMPT_REQUIRED", text: "" };
+		const permission = await authorize(ctx, "memory.reflect");
+		if (!permission.ok) return { configured: true, code: permission.code, text: "" };
+		const readPermission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
+		if (!readPermission.ok) return { configured: true, code: readPermission.code, text: "" };
+		return await withActiveClient(ctx, async (client, config) => {
+			// Reflect must preserve the authoritative read scope. Older clients expose
+			// only an unscoped reflect endpoint, which is deliberately rejected rather
+			// than reflecting arbitrary project memories.
+			const reflect = clientMethod(client, "reflectScoped");
+			if (!reflect) return { configured: true, code: "MEMORY_API_UNSUPPORTED", text: "" };
+			const result = await reflect(config.bank, prompt, { tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
+			const data = record(result) ? result : {};
+			return { configured: true, text: text(data.text, MAX_CONTENT) ?? "" };
+		});
+	},
 
 	detail: async (ctx: MemoryRouteContext, req: MemoryRouteRequest) => {
 		const scope = resolveMemoryScope(ctx, req);

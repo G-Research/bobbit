@@ -5491,7 +5491,7 @@ async function handleApiRoute(
 		contributions: packContributionRegistry,
 	});
 	const hindsightRouteCapability = (routeName: string, body: unknown): "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all" | undefined => {
-		if (["runtime-control", "migration-execute", "migration-rollback", "migration-purge"].includes(routeName)) return "service.manage";
+		if (["runtime-control", "migration-plan", "migration-execute", "migration-rollback", "migration-purge"].includes(routeName)) return "service.manage";
 		if (["retain", "retain-outcome"].includes(routeName)) return "memory.write";
 		if (routeName === "reflect") return "memory.reflect";
 		if (routeName === "invalidate") return "memory.invalidate";
@@ -9748,17 +9748,17 @@ async function handleApiRoute(
 		}
 		const allTargets = settingsTargets(resolved.projectId);
 		const invalidRefs = invalidSettingsTargetRefs(resolved.projectId);
-		const emitMutation = (result: { outcome: "updated" | "secret-persist-failed"; revision: number }, responseTargets: ExtensionSettingsTargetRef[]) => {
+		const emitMutation = (result: { outcome: "updated" | "secret-persist-failed"; revision: number }, responseTargets: ExtensionSettingsTargetRef[], warnings: readonly string[] = []) => {
 			broadcastExtensionSettingsInvalidation(resolved.projectId, result.revision);
 			let projection: ReturnType<typeof extensionSettingsProjection>;
 			try { projection = extensionSettingsProjection(resolved.projectId); }
 			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); return; }
 			const targets = projection.targets.filter(target => responseTargets.some(ref => ref.packId === target.ref.packId && ref.kind === target.ref.kind && ref.id === target.ref.id));
 			if (result.outcome === "secret-persist-failed") {
-				json({ error: "Extension settings saved but the secret was not persisted; re-enter it and retry.", code: "EXTENSION_SETTINGS_SECRET_PERSIST_FAILED", revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) }, 503);
+				json({ error: "Extension settings saved but the secret was not persisted; re-enter it and retry.", code: "EXTENSION_SETTINGS_SECRET_PERSIST_FAILED", revision: result.revision, ...(warnings.length ? { warnings } : {}), ...(targets.length === 1 ? { target: targets[0] } : { targets }) }, 503);
 				return;
 			}
-			json({ revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
+			json({ revision: result.revision, ...(warnings.length ? { warnings } : {}), ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
 		};
 		if (kind) {
 			if (!id) { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
@@ -9786,9 +9786,16 @@ async function handleApiRoute(
 				if (!isValidExtensionSettingValue(field, value)) { json({ error: "Invalid extension settings field value", code: "EXTENSION_SETTINGS_INVALID_FIELD_VALUE" }, 422); return; }
 				if (field.type === "secret") secrets[key] = value as string; else publicValues[key] = value as ExtensionSettingValue;
 			}
+			const hindsightValidation = ref.packId === "hindsight" && ref.kind === "provider" && ref.id === "memory" && hindsightRuntimeBridge
+				? hindsightRuntimeBridge.validateSettingsSave(resolved.projectId, publicValues)
+				: undefined;
+			if (hindsightValidation && !hindsightValidation.ok) {
+				json({ error: "Invalid Hindsight runtime settings", code: hindsightValidation.code }, 422);
+				return;
+			}
 			try {
 				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, { ...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}), ...(Object.keys(publicValues).length ? { values: publicValues } : {}), ...(Object.keys(secrets).length ? { secrets } : {}) });
-				emitMutation(result, [ref]);
+				emitMutation(result, [ref], hindsightValidation?.ok ? hindsightValidation.warnings : []);
 			} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
 			return;
 		}
@@ -10664,6 +10671,14 @@ async function handleApiRoute(
 						return;
 					}
 					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), runtime: await hindsightRuntimeBridge?.control(projectId, action) });
+					return;
+				}
+				if (projectId && routeName === "migration-plan") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), ...(hindsightRuntimeBridge?.migrationPlan(projectId, init.body) ?? { ok: false, code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }) });
+					return;
+				}
+				if (projectId && routeName === "migration-execute") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), ...(await hindsightRuntimeBridge?.migrationExecute(projectId, init.body) ?? { ok: false, code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }) });
 					return;
 				}
 				routeRuntime = await hindsightRuntimeBridge?.context({
