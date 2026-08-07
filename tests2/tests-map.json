@@ -2514,6 +2514,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/vite-bundled-dev.test.ts",
+      "reason": "Vite config regression coverage proving development uses bundled browser chunks to avoid the large native-ESM request waterfall, guards Tailwind's unreleased bundled-dev hot-update fix, and keeps production asset URL rewriting separate.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
