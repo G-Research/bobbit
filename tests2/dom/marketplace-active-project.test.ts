@@ -9,17 +9,21 @@ __syncBeforeAll(() => __syncCE());
 // SESSION's project (extension-host §4c), not the marketplace-focused project.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileRenderersForActiveSession, activeSessionProjectId } from "../../src/app/marketplace-page.js";
+import { grantExtensionCapability, revokeExtensionCapability } from "../../src/app/api.js";
 import { state } from "../../src/app/state.js";
 
 let fetchCalls: string[];
+let fetchRequests: Array<{ url: string; init: RequestInit }>;
 const toolsResponse = [{ name: "demo_pack_tool", rendererKind: "pack" }];
 const RENDERER_MODULE = "export default function(){ return { render(){ return { content: '', isCustom: false }; } }; }";
 
 beforeEach(() => {
 	fetchCalls = [];
-	vi.stubGlobal("fetch", async (input: any): Promise<Response> => {
+	fetchRequests = [];
+	vi.stubGlobal("fetch", async (input: any, init: RequestInit = {}): Promise<Response> => {
 		const url = typeof input === "string" ? input : (input && input.url) || String(input);
 		fetchCalls.push(url);
+		fetchRequests.push({ url, init });
 		if (url.includes("/renderer")) {
 			return new Response(RENDERER_MODULE, { status: 200, headers: { "Content-Type": "text/javascript" } });
 		}
@@ -75,5 +79,34 @@ describe("marketplace refresh scopes renderers to the active session (extension-
 
 		expect(activeSessionProjectId()).toBe("fallbackproj");
 		expect(fetchCalls.some((u) => /\/api\/tools\?projectId=fallbackproj$/.test(u))).toBe(true);
+	});
+});
+
+describe("Market extension capability grant API", () => {
+	it("uses only the exact project, pack, hook, and capability tuple for grants and revokes", async () => {
+		const tuple = { packId: "fixture-pack", hookId: "decision.hook", capability: "filter:tool-result" as const };
+
+		await expect(grantExtensionCapability("project A", tuple)).resolves.toMatchObject({ ok: true });
+		expect(fetchRequests).toHaveLength(1);
+		expect(fetchRequests[0]).toMatchObject({
+			url: "/api/projects/project%20A/extension-grants",
+			init: { method: "PUT", body: JSON.stringify(tuple) },
+		});
+
+		await expect(revokeExtensionCapability("project A", tuple)).resolves.toMatchObject({ ok: true });
+		expect(fetchRequests).toHaveLength(2);
+		expect(fetchRequests[1]).toMatchObject({
+			url: "/api/projects/project%20A/extension-grants/fixture-pack/decision.hook/filter%3Atool-result",
+			init: { method: "DELETE" },
+		});
+	});
+
+	it("preserves an operator-route 403 for the Market UI's browser-operator guidance", async () => {
+		vi.stubGlobal("fetch", async (): Promise<Response> => new Response(JSON.stringify({ error: "operator required" }), {
+			status: 403, headers: { "Content-Type": "application/json" },
+		}));
+
+		await expect(grantExtensionCapability("project", { packId: "pack", hookId: "hook", capability: "mutate" }))
+			.resolves.toEqual({ ok: false, error: "operator required", status: 403 });
 	});
 });
