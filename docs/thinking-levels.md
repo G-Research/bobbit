@@ -448,11 +448,11 @@ in the wiring between the shared module and the UI / server boundary.
 - **Adding levels beyond `off|minimal|low|medium|high|xhigh|max`** is upstream's
   call (pi-mono / pi-coding-agent). Bobbit will accept new levels once they
   appear in the upstream enum.
-- **How thinking levels are passed to the agent process** — `--thinking
-  <level>` remains the spawn-time CLI flag. A live model pick carries the
-  effective level in Bobbit's combined `set_model` frame and then uses Pi's
-  existing model/thinking setters with exact read-back; an independent level
-  change still uses the standalone `set_thinking_level` frame.
+- **Pi agent-process thinking transport** — Pi uses the spawn-time
+  `--thinking <level>` flag, its existing model/thinking setters, and the
+  combined or standalone WebSocket frames described above. Claude Agent SDK
+  live controls are a separate in-scope capability; see [Live model and
+  thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls).
 - **Per-provider thinking-budget tuning** (`thinkingBudgets` in
   pi-agent-core) — a separate concern.
 
