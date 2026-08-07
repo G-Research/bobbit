@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, defaultProject, deleteSession } from "../e2e-setup.js";
+import { createToolResultFilterAttemptToken } from "../../../src/server/agent/tool-result-filter-attempt-credentials.js";
 import { createSessionViaUI, openApp } from "./ui-helpers.js";
 
 // This journey uses the real authenticated browser origin and the real gateway
@@ -17,6 +19,9 @@ const REDACTED = "EP14_FIXTURE_REDACT__browser_canary_never_render";
 const ORDERED = "EP14_FIXTURE_ORDER_EP14_FIXTURE_REJECT__browser_canary_never_render";
 
 type BrowserResponse = { status: number; text: string };
+type AttemptCredential = { runtimeGeneration: number; runtimeKey: string };
+type AttemptCredentialOwner = { beginRuntime(sessionId: string, runtimeGeneration: number): AttemptCredential };
+type FilterGateway = { sessionManager?: { toolResultFilterAttemptCredentials?: AttemptCredentialOwner } };
 
 function fixturePackDir(bobbitDir: string): string {
 	return path.join(bobbitDir, "config", "market-packs", PACK_ID);
@@ -33,16 +38,43 @@ function installFixture(bobbitDir: string): string {
 	return target;
 }
 
-async function browserApi(page: Page, request: { path: string; method?: string; body?: unknown }): Promise<BrowserResponse> {
-	return page.evaluate(async ({ path, method, body }) => {
+async function browserApi(page: Page, request: { path: string; method?: string; body?: unknown; headers?: Record<string, string> }): Promise<BrowserResponse> {
+	return page.evaluate(async ({ path, method, body, headers }) => {
 		const token = localStorage.getItem("gateway.token");
 		const response = await fetch(path, {
 			method: method ?? "GET", credentials: "include",
-			headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+			headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
 			body: body === undefined ? undefined : JSON.stringify(body),
 		});
 		return { status: response.status, text: await response.text() };
 	}, request);
+}
+
+/**
+ * The browser is intentionally not allowed to mint these. The real Pi gate is
+ * their production owner; this in-process harness begins an equivalent test
+ * runtime and mints one private, exact-attempt token per exercised callback.
+ */
+function beginFilterRuntime(gateway: FilterGateway, sessionId: string): AttemptCredential {
+	const owner = gateway.sessionManager?.toolResultFilterAttemptCredentials;
+	expect(owner, "browser harness must expose the private filter credential owner").toBeTruthy();
+	return owner!.beginRuntime(sessionId, 0);
+}
+
+async function invokeFilter(
+	page: Page,
+	route: string,
+	credential: AttemptCredential,
+	sessionId: string,
+	toolCallId: string,
+	result: Record<string, unknown>,
+): Promise<BrowserResponse> {
+	const attempt = createToolResultFilterAttemptToken(credential, sessionId, toolCallId, randomUUID());
+	return browserApi(page, {
+		path: route, method: "POST",
+		headers: { "x-bobbit-tool-result-attempt": attempt },
+		body: { toolCallId, toolName: "fixture-tool", result },
+	});
 }
 
 function parse(response: BrowserResponse): any {
@@ -106,7 +138,7 @@ test.describe("tool result filter", () => {
 	});
 	test.afterAll(async () => { if (packDir) fs.rmSync(packDir, { recursive: true, force: true }); });
 
-	test("browser-origin grant, reject-wins, redact, revoke, and reload expose only safe result bytes", async ({ page }) => {
+	test("browser-origin grant, reject-wins, redact, revoke, and reload expose only safe result bytes", async ({ page, gateway }) => {
 		const consoleMessages: string[] = [];
 		const collectConsole = (message: { type(): string; text(): string }) => {
 			consoleMessages.push(`[${message.type()}] ${message.text()}`);
@@ -121,15 +153,18 @@ test.describe("tool result filter", () => {
 			const inert = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "inert", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
 			expect(inert).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
 
+			// Begin a private runtime only after the bearer-only probe above. Every
+			// subsequent route invocation gets a newly signed exact-attempt token.
+			const credential = beginFilterRuntime(gateway, sessionId);
 			await grant(page, projectId, "result-filter");
 			await grant(page, projectId, "competing-result-filter");
-			const rejected = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "reject", toolName: "fixture-tool", result: rawResult(ORDERED) } }));
+			const rejected = parse(await invokeFilter(page, route, credential, sessionId, "reject", rawResult(ORDERED)));
 			expect(rejected).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
 			expect(JSON.stringify(rejected)).not.toContain(ORDERED);
 			expect(JSON.stringify(rejected)).not.toContain("EP14_SAFE_COMPETING_REPLACEMENT");
 
-			const redacted = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "redact", toolName: "fixture-tool", result: rawResult(REDACTED) } }));
-			expect(redacted).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
+			const redacted = parse(await invokeFilter(page, route, credential, sessionId, "redact", rawResult(REDACTED)));
+			expect(redacted).toMatchObject({ isError: false, content: [{ type: "text", text: "EP14_SAFE_REDACTED_RESULT" }] });
 			expect(JSON.stringify(redacted)).not.toContain(REDACTED);
 
 			// Render the real route's safe outputs through the actual product chat,
@@ -142,10 +177,12 @@ test.describe("tool result filter", () => {
 			for (const host of [redactedRenderHost, rejectedRenderHost]) {
 				await host.locator("button").filter({ hasText: "Expand to inspect" }).last().click();
 			}
-			await expect(redactedRenderHost.getByText(/^Tool result withheld by project result policy \[ref: /).first()).toBeVisible();
+			await expect(redactedRenderHost.getByText("EP14_SAFE_REDACTED_RESULT").first()).toBeVisible();
 			await expect(rejectedRenderHost.getByText(/^Tool result withheld by project result policy \[ref: /).first()).toBeVisible();
 			const rendered = await page.locator("body").innerText();
 			const snapshot = await page.locator("body").ariaSnapshot();
+			expect(rendered).toContain("EP14_SAFE_REDACTED_RESULT");
+			expect(snapshot).toContain("EP14_SAFE_REDACTED_RESULT");
 			for (const canary of [REJECTED, REDACTED, ORDERED]) {
 				expect(rendered).not.toContain(canary);
 				expect(snapshot).not.toContain(canary);
@@ -167,13 +204,22 @@ test.describe("tool result filter", () => {
 			// merely because production code never writes that probe.
 			for (const canary of [REJECTED, REDACTED, ORDERED]) {
 				expect(consoleMessages.join("\n")).not.toContain(canary);
+				expect(gateway.logs.ring.join("\n")).not.toContain(canary);
 			}
 
 			await revoke(page, projectId, "result-filter");
 			await revoke(page, projectId, "competing-result-filter");
 			await page.reload({ waitUntil: "domcontentloaded" });
-			const revoked = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "revoked", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
-			expect(revoked).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
+			const revoked = parse(await invokeFilter(page, route, credential, sessionId, "revoked", rawResult(REJECTED)));
+			expect(revoked).toMatchObject({ isError: false, content: [{ type: "text", text: REJECTED }] });
+
+			// Re-granting restores the active snapshot: deny still beats the
+			// competing replacement, with a fresh one-use credential for this call.
+			await grant(page, projectId, "result-filter");
+			await grant(page, projectId, "competing-result-filter");
+			const regranted = parse(await invokeFilter(page, route, credential, sessionId, "regranted", rawResult(ORDERED)));
+			expect(regranted).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
+			expect(JSON.stringify(regranted)).not.toContain(ORDERED);
 		} finally {
 			page.off("console", collectConsole);
 			if (sessionId) await deleteSession(sessionId);
