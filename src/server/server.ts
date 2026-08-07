@@ -5690,7 +5690,7 @@ async function handleApiRoute(
 	const extensionSettingsMutationFailure = (error: unknown): { status: number; body: Record<string, unknown> } => {
 		const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
 		if (code === "EXTENSION_SETTINGS_REVISION_CONFLICT") return { status: 409, body: { error: "Extension settings changed elsewhere. Reload and review before saving.", code } };
-		if (code === "EXTENSION_SETTINGS_UNAVAILABLE" || code === "EXTENSION_SETTINGS_SECRET_READ_FAILED") return { status: 503, body: { error: "Extension settings are unavailable. Retry after repairing project state.", code } };
+		if (code === "EXTENSION_SETTINGS_UNAVAILABLE" || code === "EXTENSION_SETTINGS_SECRET_READ_FAILED" || code === "EXTENSION_SETTINGS_SECRET_COMMIT_MISMATCH") return { status: 503, body: { error: "Extension settings are unavailable. Retry after repairing project state.", code } };
 		if (code === "EXTENSION_SETTINGS_INVALID" || code === "EXTENSION_SETTINGS_SECRET_INVALID") return { status: 422, body: { error: "Invalid extension settings mutation", code } };
 		return { status: 503, body: { error: "Extension settings could not be saved", code: "EXTENSION_SETTINGS_PERSIST_FAILED" } };
 	};
@@ -9842,14 +9842,21 @@ async function handleApiRoute(
 				if (!isValidExtensionSettingValue(field, value)) { json({ error: "Invalid extension settings field value", code: "EXTENSION_SETTINGS_INVALID_FIELD_VALUE" }, 422); return; }
 				if (field.type === "secret") secrets[key] = value as string; else publicValues[key] = value as ExtensionSettingValue;
 			}
-			const hindsightValidation = ref.packId === "hindsight" && ref.kind === "provider" && ref.id === "memory" && hindsightRuntimeBridge
-				? hindsightRuntimeBridge.validateSettingsSave(resolved.projectId, publicValues)
-				: undefined;
-			if (hindsightValidation && !hindsightValidation.ok) {
-				json({ error: "Invalid Hindsight runtime settings", code: hindsightValidation.code }, 422);
-				return;
-			}
 			try {
+				// Settings targets are resolved from the installed-pack catalogue above,
+				// not the active runtime registry. This keeps a disabled Hindsight
+				// target repairable without starting or otherwise consulting its provider.
+				const hindsightValidation = ref.packId === "hindsight" && ref.kind === "provider" && ref.id === "memory" && hindsightRuntimeBridge
+					? hindsightRuntimeBridge.validateSettingsSave(
+						resolved.projectId,
+						Object.fromEntries(target.fields.filter(field => field.default !== undefined).map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>,
+						publicValues,
+					)
+					: undefined;
+				if (hindsightValidation && !hindsightValidation.ok) {
+					json({ error: "Invalid Hindsight runtime settings", code: hindsightValidation.code }, 422);
+					return;
+				}
 				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, { ...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}), ...(Object.keys(publicValues).length ? { values: publicValues } : {}), ...(Object.keys(secrets).length ? { secrets } : {}) });
 				emitMutation(result, [ref], hindsightValidation?.ok ? hindsightValidation.warnings : []);
 			} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
