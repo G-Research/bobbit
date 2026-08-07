@@ -3,6 +3,48 @@
 **Status:** implementation design for the additive EP-6 handoff. This extends the existing
 hook-only grant owner; it does not implement Hindsight memory behavior.
 
+## Considered approaches
+
+### Option A — extend the existing single grant owner (selected)
+
+Compose the current grant path rather than creating an authority subsystem. The exact existing
+pieces and their protecting tests are:
+
+| Existing composition point | Responsibility retained | Existing protecting coverage |
+|---|---|---|
+| `src/server/agent/project-config-store.ts` — `EXTENSION_CAPABILITIES`, `isExtensionCapability()`, and `normalizeExtensionGrants()` | Closed vocabulary, native `extension_grants` normalization, defensive reads, and atomic candidate publication. | `tests2/core/extension-grant-config-store.test.ts` |
+| `src/server/agent/extension-grant-policy.ts` — `resolveExtensionGrant()` | Existing pure exact hook decision and defensive grant snapshot behavior. | `tests2/core/extension-grant-policy.test.ts` |
+| `src/server/agent/extension-grant-audit-store.ts` — `ExtensionGrantAuditStore` | Secret-free JSONL audit, outbox, exact recovery, and duplicate suppression. | `tests2/core/extension-grant-audit-store.test.ts` |
+| `src/server/server.ts` — `extensionGrantStatus`, `supportsExtensionGrantCapability`, grant routes, and `broadcastExtensionGrantInvalidation` | Server-owned active-pack resolution, authenticated mutation, projection, audit wiring, cache invalidation, and WebSocket metadata event. | `tests2/integration/extension-capability-grants.test.ts` |
+| `src/app/api.ts`, `src/app/marketplace-page.ts`, and `src/app/marketplace.css` — `ExtensionCapabilityGrantTuple`, `ExtensionSettingsTargetWire`, `market-hook-grants`, and `market-capability-grant` | Existing Market tuple, Review grants control, confirmation/busy/error state, and accessible capability row rendering. | `tests2/browser/e2e/extension-capability-grants.spec.ts`, plus hook compatibility assertions in `tests2/browser/e2e/extension-settings.spec.ts` and `tests2/browser/e2e/extension-platform-lifecycle.spec.ts` |
+
+The control flow stays one application-fence read: server-derived active principal → closed
+principal/capability matrix → `ProjectConfigStore.getExtensionGrants()` → exact union-key match.
+A principal-aware union changes only the durable tuple shape; the active
+`PackContributionResolver.getPack(projectId, packId)` remains the sole installed/active/precedence
+ceiling. The selected implementation touches those existing owners and wire/control seams rather
+than adding an authorization pipeline.
+
+### Option B — parallel pack-grant owner (rejected)
+
+Add a separate `pack_grants` config section or `PackGrantStore`, its own audit/outbox, dedicated
+`/api/projects/:id/pack-grants` routes, a pack-only resolver, and a second Market permissions
+surface while leaving hook grants unchanged. This can represent the same exact project/pack tuples,
+but its control flow needs two grant lookups plus a merge/precedence rule whenever a caller is
+generic over hook and pack principals.
+
+| Comparison | Option A — selected union | Option B — separate owner |
+|---|---|---|
+| Data/control flow | One owner and one current grant read at the application fence; the discriminator selects the exact tuple key. | Two durable readers and audit streams; generic callers must choose or merge owners and define precedence. |
+| Expected files | Extends the five existing ownership/control areas above, their already-registered tests, and the existing documentation. | Adds a config/audit store, routes, client API/types, a separate Market UI, resolver, test suite, and documentation set. |
+| Failure modes | A union-validation regression could mishandle a hook row; independent invalid-row dropping and legacy-shape round-trip tests bound that risk. | State/audit/outbox divergence, inconsistent deny-wins and recovery semantics, duplicated operator-auth checks, and UI state drift between permission surfaces. |
+| Test seams | Reuses the listed config, policy, audit, route, and Market seams, with targeted pack-principal cases alongside hook cases. | Requires parallel storage/recovery/auth/browser seams and cross-owner merge tests in addition to existing hook coverage. |
+
+Option B loses because it directly violates the hard single-state-owner constraint, roughly doubles
+the audit/outbox/auth defect surface, and gives up the existing pinning tests. Option A's meaningful
+risk is its legacy normalizer branch; the required legacy byte-compatible round-trip and
+independent-row-drop coverage specifically protects it.
+
 ## Decision
 
 Keep `ProjectConfigStore.extension_grants` and `ExtensionGrantAuditStore` as the only durable
@@ -87,6 +129,22 @@ Grant creation requires the active resolved pack. Revocation does not: a stale r
 uninstalled or inactive pack remains inspectable and revocable but never authorizes work. There
 are no wildcard pack ids, arbitrary capability strings, inherited permissions, or client-defined
 principal types.
+
+## Defect-surface inventory
+
+Every additive branch is deliberate and paired with a test seam; no addition creates authority
+outside the existing project grant owner.
+
+| Addition | Why it is necessary and bounded | Coverage seam |
+|---|---|---|
+| Pack-row `principal: "pack"` discriminator in `normalizeExtensionGrants()` | Distinguishes a new pack tuple without rewriting discriminator-free hook YAML; mixed/malformed rows can fail independently. | `tests2/core/extension-grant-config-store.test.ts` legacy round-trip, mixed-row rejection, full-key dedupe, and atomic-write cases. |
+| Six `EXTENSION_CAPABILITIES` values and `isExtensionCapability()` admission | Keeps capability authority platform-owned and closed; no manifest or caller can mint a string. | `tests2/core/extension-grant-config-store.test.ts` and `tests2/core/extension-grant-policy.test.ts` validate every new value and reject unknown values. |
+| `ExtensionGrantPrincipal` and `ExtensionGrantDecision` | Makes the compatible storage discriminator explicit at every resolver caller and makes denial reasons inspectable without an allow-by-default fallback. | `tests2/core/extension-grant-policy.test.ts` invalid principal, unsupported matrix, exact-pack, and defensive-result cases. |
+| `createExtensionCapabilityGrantResolver()` public factory | Provides the one live, current-store application fence for runtime, route/panel, and tool callers; prevents private grant readers and stale positive caches. | `tests2/core/extension-grant-policy.test.ts` plus lifecycle/route/tool boundary cases in `tests2/integration/extension-capability-grants.test.ts`. |
+| Pack-principal DELETE path with `/principals/pack/` | Makes pack revocation exact without colliding with a valid legacy hook id named `pack`. | `tests2/integration/extension-capability-grants.test.ts` legacy-path compatibility, pack revoke, audit `503`, and exact recovery cases. |
+| `PackGrantStatusWire` and `ExtensionSettingsTargetWire.packGrant` | Lets the existing server projection expose only active, recognized pack capabilities; it does not expose a browser-selected principal. | `tests2/integration/extension-capability-grants.test.ts` projection cases and `tests2/browser/e2e/extension-capability-grants.spec.ts` reload assertions. |
+| Discriminated `ExtensionCapabilityGrantTuple` and shared Market renderer | Reuses one exact confirmation/action path for Hook and Pack rows, avoiding a second permissions UI or grant-all affordance. | `tests2/browser/e2e/extension-capability-grants.spec.ts`, with existing hook regressions in `extension-settings.spec.ts` and `extension-platform-lifecycle.spec.ts`. |
+| `service.manage` lifecycle fence | Makes service startup/reconcile re-check the same current resolver decision before publishing a service usable; revocation cannot be bypassed by an awaited launch. | `tests2/core/service-extension-runtime.test.ts` and `tests2/integration/extension-capability-grants.test.ts` stale-work/revocation cases. |
 
 ## Durable resolver handoff seam
 
@@ -278,6 +336,30 @@ Granting requires an active pack; revoke remains available for a retained inacti
 After every mutation, reload the durable projection rather than inferring authority locally. Keep
 project-level read-only grant history in the same Installed surface so audit rows for uninstalled
 packs remain visible; legacy rows display as Hook and new rows display as Pack.
+
+## File changes
+
+| File | Change |
+|---|---|
+| `docs/design/non-hook-extension-grants.md` | Record the selected compatible union, comparative rationale, public resolver handoff, exact file/test plan, and non-goals; no Hindsight behavior belongs here. |
+| `src/server/agent/project-config-store.ts` | Add exactly the six closed values; extend `ExtensionGrant`, cloning, normalization, validation, and full-key dedupe to the discriminator-free hook / `principal: "pack"` union while retaining YAML serialization semantics. |
+| `src/server/agent/extension-grant-policy.ts` | Export `ExtensionGrantPrincipal`, `ExtensionGrantDecision`, `ExtensionCapabilityGrantResolver`, and `createExtensionCapabilityGrantResolver()`; retain `resolveExtensionGrant()` as the hook-compatible pure path. The factory receives the existing `PackContributionResolver` and a closure backed by `ProjectContextManager.getOrCreate(projectId)`. |
+| `src/server/agent/extension-grant-audit-store.ts` | Generalize `ExtensionGrantAuditEntry` and `ExtensionGrantAuditRef` to the same principal union, including normalizer, equality, outbox, duplicate, and recovery keys; legacy hook JSONL remains readable. |
+| `src/server/server.ts` | Wire the live resolver from `projectContextManager.getOrCreate()` and `packContributionRegistry`; generalize grant GET/PUT/audit projections, add the pack DELETE route, preserve hook route/auth behavior, require the existing signed operator proof for all six pack mutations, and invalidate/reconcile after authority changes. |
+| `src/server/extension-host/service-extension-runtime.ts` | Inject the shared resolver at desired-service selection and before publish after awaited launch/readiness boundaries; `service.manage` denial prevents start or publication and drives ordinary reconcile/stop. |
+| `src/app/api.ts` | Extend `ExtensionCapabilityWire`, make `ExtensionCapabilityGrantTuple` a hook/pack union, add `PackGrantStatusWire` and optional `ExtensionSettingsTargetWire.packGrant`, and choose the established hook or pack revoke URL from that union. |
+| `src/app/marketplace-page.ts` | Generalize `capabilityGrantKey`, mutation construction, confirmation copy, and Review grants rendering from hook-only targets to the existing Pack target, using only server-projected exact capabilities. |
+| `src/app/marketplace.css` | Apply the existing grant disclosure/capability-row layout to Pack targets and the retained in-surface grant-history disclosure without a separate permissions page. |
+| `tests2/core/extension-grant-config-store.test.ts` | Add legacy-shape round-trip, each new capability, malformed union, exact union-key, and atomic persistence cases. |
+| `tests2/core/extension-grant-policy.test.ts` | Cover the exported resolver factory, typed malformed/unknown/default-deny results, active winning-pack matrix, exact pack scope, and fresh-store revocation. |
+| `tests2/core/extension-grant-audit-store.test.ts` | Cover legacy JSONL compatibility and principal-aware pack grant/revoke normalization, outbox/restart recovery, and duplicate suppression. |
+| `tests2/core/service-extension-runtime.test.ts` | Cover `service.manage` checks before launch/publish and revocation during an awaited lifecycle boundary. |
+| `tests2/integration/extension-capability-grants.test.ts` | Cover active-pack-only generic routes, signed-operator mutation requirements, stale revoke, audit/outbox recovery, server projections, invalidation, and shared lifecycle/panel-route/tool resolver seams. |
+| `tests2/browser/e2e/extension-capability-grants.spec.ts` | Extend the existing Market journey to grant, reload, revoke, and audit a pack capability through the Pack row, while retaining the legacy Hook assertion. |
+| `tests2/tests-map.json` | Refresh registered-test inventory entries/reasons via the repository inventory generator for every changed or newly added focused test; do not hand-edit generated counts. |
+| `docs/extension-capability-grants.md`, `docs/rest-api.md` | Document the compatibility union, closed pack vocabulary, generic routes/audit, exact stale revoke, operator requirement, and resolver contract. |
+| `docs/extension-host-authoring.md`, `docs/marketplace.md`, `docs/extension-settings.md` | Document that a pack declares no authority, where the existing Market Pack row exposes grants, and that settings/activation remain separate ceilings. |
+| `docs/service-extension-runtime.md`, `docs/extension-platform.md`, `docs/design/extension-platform-parent.md` | Document the `service.manage` fence, Hindsight's public resolver handoff, revocation behavior, and the parent-platform dependency without adding Hindsight-local state. |
 
 ## Required registered coverage
 
