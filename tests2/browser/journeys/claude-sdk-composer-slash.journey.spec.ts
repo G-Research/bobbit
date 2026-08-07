@@ -210,21 +210,24 @@ test.describe("Journey: Claude SDK composer slash interception", () => {
 			await expect(editor(page)).toBeFocused();
 			expect(deliveredPrompts).toHaveLength(2);
 
-			// A Bobbit-owned skill cannot be raw-steered to the SDK either: it takes
-			// the normal server expansion path instead of delivering its slash token.
+			// A Bobbit-owned skill cannot be raw-steered to the SDK. Ctrl+Enter
+			// preserves the draft and tells the user to submit it through the normal
+			// server expansion path instead.
 			await editor(page).fill("/goal steer safely");
 			await editor(page).press("Control+Enter");
-			await expectSdkPrompt(2, /GOAL SKILL BODY[\s\S]*steer safely/);
-			expect(deliveredPrompts[2]).not.toBe("/goal steer safely");
+			await expect(page.getByRole("alert")).toContainText("Slash commands can’t be sent as steers. Press Enter to send a normal prompt.");
+			await expect(editor(page)).toHaveValue("/goal steer safely");
+			await expect(editor(page)).toBeFocused();
+			expect(deliveredPrompts).toHaveLength(2);
 
 			// A reconciled pack launcher consumes the composer command via its pack
-			// route rather than adding a third SDK prompt.
+			// route rather than adding an SDK prompt.
 			await editor(page).fill("/pr-walkthrough");
 			await editor(page).press("Escape");
 			const packRoute = page.waitForRequest((request) => request.url().includes("/api/ext/route/run") && request.method() === "POST");
 			await editor(page).press("Enter");
 			await packRoute;
-			expect(deliveredPrompts).toHaveLength(3);
+			expect(deliveredPrompts).toHaveLength(2);
 
 			// Reload repeats current-session discovery; menu inventory is never draft
 			// state and remains scoped to the active project.
