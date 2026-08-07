@@ -16,6 +16,7 @@ import {
 	translateClaudeSdkEvent,
 	type ClaudeSdkTranslatorState,
 } from "./claude-sdk-event-translator.js";
+import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import type { ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
 import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
@@ -48,6 +49,71 @@ export class ClaudeAgentSdkUnavailableError extends Error {
 		super(message);
 		this.name = "ClaudeAgentSdkUnavailableError";
 	}
+}
+
+const CLAUDE_SDK_FIXED_TOKEN_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const CLAUDE_SDK_EFFORT_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+const CLAUDE_SDK_ALL_LEVELS: readonly ThinkingLevel[] = ["off", ...CLAUDE_SDK_FIXED_TOKEN_LEVELS];
+
+export interface ClaudeAgentSdkModelInfo {
+	value: string;
+	resolvedModel?: string;
+	supportsEffort?: boolean;
+	supportedEffortLevels?: readonly string[];
+	supportsAdaptiveThinking?: boolean;
+}
+
+/** A session-local SDK capability record. `wireValue` is the value Query.setModel accepts. */
+export interface ClaudeAgentSdkModelCapability {
+	id: string;
+	wireValue: string;
+	reasoning: boolean;
+	thinkingLevelMap: Partial<Record<ThinkingLevel, string | null>>;
+	effortLevels: readonly ThinkingLevel[];
+	fixedTokenLevels: readonly ThinkingLevel[];
+}
+
+function isClaudeAgentSdkModelInfo(value: unknown): value is ClaudeAgentSdkModelInfo {
+	return !!value && typeof value === "object" && typeof (value as ClaudeAgentSdkModelInfo).value === "string";
+}
+
+
+/**
+ * Convert SDK model rows without relying on process-global model catalog state.
+ * The explicit map prevents the generic Pi-family fallback from inventing levels
+ * (notably `minimal`) that the SDK did not advertise.
+ */
+export function normalizeClaudeAgentSdkModelCapabilities(models: unknown): ClaudeAgentSdkModelCapability[] | undefined {
+	if (!Array.isArray(models)) return undefined;
+	return models.filter(isClaudeAgentSdkModelInfo).map((model) => {
+		const effortLevels = model.supportsEffort === true
+			? (model.supportedEffortLevels ?? []).filter((level): level is ThinkingLevel => (CLAUDE_SDK_EFFORT_LEVELS as readonly string[]).includes(level))
+			: [];
+		const fixedTokenLevels = model.supportsAdaptiveThinking === true
+			? CLAUDE_SDK_FIXED_TOKEN_LEVELS.filter(level => !effortLevels.includes(level))
+			: [];
+		const reasoning = model.supportsEffort === true || model.supportsAdaptiveThinking === true;
+		const supported = new Set<ThinkingLevel>(["off", ...effortLevels, ...fixedTokenLevels]);
+		const thinkingLevelMap = Object.fromEntries(CLAUDE_SDK_ALL_LEVELS.map(level => [level, supported.has(level) ? level : null])) as Partial<Record<ThinkingLevel, string | null>>;
+		return {
+			id: model.resolvedModel || model.value,
+			wireValue: model.value,
+			reasoning,
+			thinkingLevelMap,
+			effortLevels,
+			fixedTokenLevels,
+		};
+	});
+}
+
+/** Resolve SDK aliases and canonical resolved ids while preserving their SDK wire value. */
+export function resolveClaudeAgentSdkModelCapability(
+	capabilities: readonly ClaudeAgentSdkModelCapability[] | undefined,
+	modelId: string | undefined,
+): ClaudeAgentSdkModelCapability | undefined {
+	if (!capabilities || !modelId) return undefined;
+	return capabilities.find(capability => capability.id === modelId)
+		?? capabilities.find(capability => capability.wireValue === modelId);
 }
 
 /** Fixed, explicit budgets keep the bridge's public thinking vocabulary stable. */
@@ -179,6 +245,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private initializedSessionId?: string;
 	private modelId?: string;
 	private thinkingLevel?: string;
+	/** Undefined means an older SDK did not provide model data; [] means it did and no model is selectable. */
+	private modelCapabilities?: ClaudeAgentSdkModelCapability[];
+	private activeModelCapability?: ClaudeAgentSdkModelCapability;
 	private translatorState: ClaudeSdkTranslatorState = createClaudeSdkTranslatorState();
 	/** A locally-running turn becomes observable only after SDK input acceptance. */
 	private pendingTurnStart?: symbol;
@@ -281,6 +350,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id");
 			}
 			this.initializedSessionId = sessionId;
+			await this.captureModelCapabilities(initialized);
 			if (this.terminalError || this.closed) throw this.terminalError ?? new Error("Claude Agent SDK stopped during initialization");
 			this.state = "ready";
 			this.resolveReady();
@@ -289,6 +359,33 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			await this.cleanupTerminal();
 			throw this.terminalError!;
 		}
+	}
+
+	private async captureModelCapabilities(initialized: unknown): Promise<void> {
+		const initializationModels = (initialized as { models?: unknown }).models;
+		let models = initializationModels;
+		const supportedModels = (this.queryHandle as unknown as { supportedModels?: () => Promise<unknown> } | undefined)?.supportedModels;
+		if (supportedModels) {
+			try {
+				const discovered = await this.withinStartupWindow(supportedModels.call(this.queryHandle));
+				if (Array.isArray(discovered)) models = discovered;
+			} catch { /* SDKs that cannot refresh models still expose initialization models. */ }
+		}
+		this.modelCapabilities = normalizeClaudeAgentSdkModelCapabilities(models);
+		// Keep the configured/requested identity for exact runtime read-back. The
+		// capability resolver accepts canonical ids and SDK aliases, while wireValue
+		// remains the only value sent to Query.setModel().
+		this.activeModelCapability = resolveClaudeAgentSdkModelCapability(this.modelCapabilities, this.modelId);
+	}
+
+	private modelState(): Record<string, unknown> {
+		const capability = this.activeModelCapability;
+		return {
+			provider: "claude-agent-sdk",
+			id: this.modelId,
+			reasoning: capability?.reasoning ?? false,
+			thinkingLevelMap: capability?.thinkingLevelMap ?? { off: "off", minimal: null, low: null, medium: null, high: null, xhigh: null, max: null },
+		};
 	}
 
 	private canonicalizeToolNames(events: readonly any[]): readonly any[] {
@@ -452,7 +549,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	async getState(): Promise<any> {
 		return { success: true, data: {
 			provider: "claude-agent-sdk",
-			model: { provider: "claude-agent-sdk", id: this.modelId },
+			model: this.modelState(),
 			thinkingLevel: this.thinkingLevel,
 			sessionId: this.initializedSessionId,
 		} };
@@ -481,15 +578,44 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	async setModel(provider: string, modelId: string): Promise<any> {
 		if (provider !== "claude-agent-sdk") return unsupported("Switching runtimes requires a new session");
 		if (!this.queryHandle) return unsupported("Claude Agent SDK query is not running");
-		await this.queryHandle.setModel(modelId);
+		const capability = resolveClaudeAgentSdkModelCapability(this.modelCapabilities, modelId);
+		if (this.modelCapabilities && !capability) return unsupported(`Unsupported Claude Agent SDK model: ${modelId}`);
+		await this.queryHandle.setModel(capability?.wireValue ?? modelId);
+		// Do not let an SDK failure mutate the tuple the runtime selector reads back.
+		// `modelId` remains public so aliases round-trip exactly; capability.id is
+		// only for resolving SDK metadata and capability.wireValue is SDK-private.
+		this.activeModelCapability = capability;
 		this.modelId = modelId;
 		return { success: true };
 	}
 	async setThinkingLevel(level: string): Promise<any> {
+		if (!this.queryHandle) return unsupported("Claude Agent SDK query is not running");
+		const capability = this.activeModelCapability;
 		const budget = thinkingBudgetForLevel(level);
 		if (budget === undefined) return unsupported(`Unsupported thinking level: ${level}`);
-		if (!this.queryHandle) return unsupported("Claude Agent SDK query is not running");
-		await this.queryHandle.setMaxThinkingTokens(budget);
+		if (level !== "off" && (!capability || (!capability.effortLevels.includes(level as ThinkingLevel) && !capability.fixedTokenLevels.includes(level as ThinkingLevel)))) {
+			return unsupported(`Unsupported thinking level for ${this.modelId ?? "current model"}: ${level}`);
+		}
+		const usesEffort = capability?.effortLevels.includes(level as ThinkingLevel) === true;
+		// Old SDKs expose token controls but not flag settings. They can still clear
+		// thinking; advertised effort must remain unavailable rather than emulated.
+		const applyFlagSettings = typeof this.queryHandle.applyFlagSettings === "function"
+			? this.queryHandle.applyFlagSettings.bind(this.queryHandle)
+			: undefined;
+		if (usesEffort && !applyFlagSettings) {
+			return unsupported("Claude Agent SDK does not support advertised effort controls");
+		}
+		// The SDK merges flag settings, so clear a prior effort before selecting a
+		// fixed budget or off when the API is available. Likewise clear a prior fixed
+		// budget before effort. A model switch may have left the other family active.
+		if (!usesEffort) {
+			if (applyFlagSettings) await applyFlagSettings({ effortLevel: null });
+			await this.queryHandle.setMaxThinkingTokens(level === "off" ? null : budget!);
+		} else {
+			await this.queryHandle.setMaxThinkingTokens(null);
+			await applyFlagSettings!({ effortLevel: level as "low" | "medium" | "high" | "xhigh" | "max" });
+		}
+		// Do not let an SDK failure mutate the tuple the runtime selector reads back.
 		this.thinkingLevel = level;
 		return { success: true };
 	}

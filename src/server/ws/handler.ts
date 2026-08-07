@@ -101,7 +101,10 @@ export function buildResolvedModelStateModel(provider: string, id: string, base?
 		provider,
 		id,
 	};
-	const inferredFallback = meta.source === "inferred";
+	// Claude Agent SDK capability metadata is owned by its live Query instance.
+	// Its configured manual picker row is deliberately conservative, so it can
+	// be cache-backed yet must never overwrite a verified live capability map.
+	const inferredFallback = meta.source === "inferred" || provider === "claude-agent-sdk";
 
 	// contextWindow / maxTokens: authoritative overwrites; inferred only fills gaps.
 	model.contextWindow = inferredFallback && isPositiveNumber(base?.contextWindow)
@@ -870,10 +873,14 @@ export function handleWebSocketConnection(
 
 			// Send current agent state (don't block auth on this — fire async
 			// so the client gets auth_ok immediately and can start rendering).
-			// Skip for "preparing" sessions (agent not launched yet) and fresh
-			// sessions with no history (avoids sending getState ahead of the
-			// user's first prompt on the agent's sequential RPC pipeline).
-			if (session.status !== "preparing" && session.eventBuffer.size > 0) {
+			// Skip fresh Pi sessions with no history (avoids a getState ahead of the
+			// user's first prompt on its sequential RPC pipeline). An initialized SDK
+			// Query has bridge-local capability metadata that persistence cannot carry,
+			// so its first attach must read the live canonical state even without events.
+			const persistedSession = sessionManager.getPersistedSession(sessionId);
+			const isClaudeAgentSdkSession = persistedSession?.runtime === "claude-agent-sdk"
+				|| persistedSession?.modelProvider === "claude-agent-sdk";
+			if (session.status !== "preparing" && (session.eventBuffer.size > 0 || isClaudeAgentSdkSession)) {
 				void sendCanonicalSessionState(ws, sessionManager, sessionId, "attachGetState");
 			} else {
 				// Session preparing or dormant — send persisted model info immediately

@@ -357,12 +357,32 @@ function makeReviewRpc(failModels: string[] = []): ReviewModelRpc & {
 const DURABLE_MODEL = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
 const REQUESTED_MODEL = { provider: "anthropic", id: "claude-opus-5" };
 const FALLBACK_MODEL = { provider: "anthropic", id: "claude-haiku-4-5" };
+const SDK_MODEL = { provider: "claude-agent-sdk", id: "sdk-live-model" };
+
+function sdkRuntimePrefs(modelId = SDK_MODEL.id): PreferencesStore {
+	const preferences = new PreferencesStore(
+		path.resolve(`/memfs/controlled-fallback-sdk-${Math.random().toString(36).slice(2)}`),
+		createMemFs(),
+	);
+	preferences.set("customProviders", [{
+		id: SDK_MODEL.provider,
+		name: SDK_MODEL.provider,
+		type: "manual",
+		baseUrl: "http://127.0.0.1:9",
+		apiKey: "test-key",
+		models: [{ id: modelId, name: "SDK live model" }],
+	}]);
+	invalidateModelCache();
+	return preferences;
+}
 
 type RuntimeTuple = { provider: string; id: string; thinkingLevel: string };
 
 function makeRuntimeHarness(options: {
 	initial?: RuntimeTuple;
 	modelResults?: Record<string, RuntimeTuple>;
+	modelCapabilities?: Record<string, { reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> }>;
+	runtime?: "pi" | "claude-agent-sdk";
 	failThinkingLevels?: string[];
 	incompleteStateReads?: number[];
 } = {}) {
@@ -381,6 +401,7 @@ function makeRuntimeHarness(options: {
 	const client = { readyState: 1, send: (raw: string) => messages.push(JSON.parse(raw)) };
 	const session = {
 		id: "runtime-session",
+		runtime: options.runtime ?? "pi",
 		clients: new Set([client]),
 		rpcClient: {
 			async setModel(provider: string, modelId: string) {
@@ -397,7 +418,18 @@ function makeRuntimeHarness(options: {
 			async getState() {
 				stateReadCalls++;
 				if (incompleteStateReads.has(stateReadCalls)) return { data: {} };
-				return { data: { model: { provider: bound.provider, id: bound.id }, thinkingLevel: bound.thinkingLevel } };
+				const capability = options.modelCapabilities?.[`${bound.provider}/${bound.id}`];
+				return {
+					data: {
+						model: {
+							provider: bound.provider,
+							id: bound.id,
+							...(capability?.reasoning !== undefined ? { reasoning: capability.reasoning } : {}),
+							...(capability?.thinkingLevelMap ? { thinkingLevelMap: capability.thinkingLevelMap } : {}),
+						},
+						thinkingLevel: bound.thinkingLevel,
+					},
+				};
 			},
 		},
 	};
@@ -1231,6 +1263,123 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 		assert.equal(harness.messages.at(-1)?.data?.model?.provider, REQUESTED_MODEL.provider);
 		assert.equal(harness.messages.at(-1)?.data?.model?.id, REQUESTED_MODEL.id);
 		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "xhigh");
+	});
+
+	it("commits an SDK alias picker id after exact read-back without rollback", async () => {
+		const alias = "sonnet";
+		const preferences = sdkRuntimePrefs(alias);
+		const harness = makeRuntimeHarness({
+			initial: { ...SDK_MODEL, thinkingLevel: "off" },
+			runtime: "claude-agent-sdk",
+			modelCapabilities: {
+				[`${SDK_MODEL.provider}/${alias}`]: {
+					reasoning: true,
+					thinkingLevelMap: { off: "off", minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+				},
+			},
+		});
+
+		const actual = await applyRuntimeSessionModelSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			SDK_MODEL.provider,
+			alias,
+			"off",
+			preferences,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { provider: SDK_MODEL.provider, id: alias, thinkingLevel: "off" });
+		assert.deepEqual(harness.setModelCalls, [[SDK_MODEL.provider, alias]], "the accepted alias must not trigger a rollback");
+		assert.deepEqual(harness.persisted, [{
+			sessionId: "runtime-session", provider: SDK_MODEL.provider, modelId: alias, effectiveThinkingLevel: "off",
+		}]);
+	});
+
+	it("uses verified live SDK capabilities instead of the manual picker row", async () => {
+		const preferences = sdkRuntimePrefs();
+		const capability = {
+			reasoning: true,
+			thinkingLevelMap: { off: "off", minimal: null, low: null, medium: "medium", high: "high", xhigh: null, max: null },
+		};
+		const harness = makeRuntimeHarness({
+			initial: { ...SDK_MODEL, thinkingLevel: "off" },
+			runtime: "claude-agent-sdk",
+			modelCapabilities: { [`${SDK_MODEL.provider}/${SDK_MODEL.id}`]: capability },
+		});
+
+		const actual = await applyRuntimeSessionModelSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			SDK_MODEL.provider,
+			SDK_MODEL.id,
+			"medium",
+			preferences,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { ...SDK_MODEL, thinkingLevel: "medium" });
+		assert.deepEqual(harness.setThinkingCalls, ["medium"]);
+		assert.deepEqual(harness.persisted, [{
+			sessionId: "runtime-session",
+			provider: SDK_MODEL.provider,
+			modelId: SDK_MODEL.id,
+			effectiveThinkingLevel: "medium",
+		}]);
+		assert.equal(harness.messages.at(-1)?.data?.model?.reasoning, true);
+		assert.deepEqual(harness.messages.at(-1)?.data?.model?.thinkingLevelMap, capability.thinkingLevelMap);
+	});
+
+	it("rejects unavailable SDK effort without clamping or mutating it", async () => {
+		const capability = {
+			reasoning: true,
+			thinkingLevelMap: { off: "off", minimal: null, low: null, medium: "medium", high: "high", xhigh: null, max: null },
+		};
+		const harness = makeRuntimeHarness({
+			initial: { ...SDK_MODEL, thinkingLevel: "high" },
+			modelCapabilities: { [`${SDK_MODEL.provider}/${SDK_MODEL.id}`]: capability },
+		});
+
+		await assert.rejects(
+			applyRuntimeSessionThinkingSelection(harness.sessionManager as any, harness.session as any, "xhigh", harness.broadcast),
+			/unavailable/i,
+		);
+
+		assert.deepEqual(harness.setThinkingCalls, [], "unsupported SDK effort must not be clamped into a bridge mutation");
+		assert.deepEqual(harness.persisted, []);
+		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "high");
+		assert.deepEqual(harness.messages.at(-1)?.data?.model?.thinkingLevelMap, capability.thinkingLevelMap);
+	});
+
+	it("rolls an SDK model mutation back when its live capability rejects the requested effort", async () => {
+		const preferences = sdkRuntimePrefs();
+		const harness = makeRuntimeHarness({
+			initial: { ...SDK_MODEL, thinkingLevel: "high" },
+			runtime: "claude-agent-sdk",
+			modelCapabilities: {
+				[`${SDK_MODEL.provider}/${SDK_MODEL.id}`]: {
+					reasoning: true,
+					thinkingLevelMap: { off: "off", minimal: null, low: null, medium: "medium", high: "high", xhigh: null, max: null },
+				},
+			},
+		});
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				SDK_MODEL.provider,
+				SDK_MODEL.id,
+				"xhigh",
+				preferences,
+				harness.broadcast,
+			),
+			/unavailable/i,
+		);
+
+		assert.deepEqual(harness.persisted, [], "a rejected SDK capability must never become durable");
+		assert.deepEqual(harness.setThinkingCalls, ["high"], "only durable rollback thinking may reach the bridge");
+		assert.deepEqual(harness.bound, { ...SDK_MODEL, thinkingLevel: "high" });
 	});
 
 	it("rejects cross-runtime selection before reading or mutating the live bridge", async () => {

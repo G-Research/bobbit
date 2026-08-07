@@ -2,10 +2,10 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1142,
+  "censusTotal": 1143,
   "buckets": {
     "daily": 67,
-    "v2-browser": 216,
+    "v2-browser": 217,
     "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
@@ -1399,6 +1399,15 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/claude-live-controls.journey.spec.ts",
+      "reason": "Browser journey through the production Claude Agent SDK bridge with a deterministic Query: verifies SDK-advertised mixed effort controls are visible without clamping, wire-model selection and verified tuple persistence survive reload, and a failing SDK model request rolls back without becoming durable.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/session-runtime-identity.spec.ts",
       "reason": "Production browser journey for provider-derived runtime identity: selecting a deterministic Claude Agent SDK model keeps its accessible runtime badge and model tuple visible in picker, live and archived audit rows, through reload and reconnect, and preserves the SDK identity with Model unavailable after provider removal.",
       "execution": {
@@ -2631,6 +2640,10 @@
     },
     {
       "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/claude-live-controls.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

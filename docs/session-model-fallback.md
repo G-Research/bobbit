@@ -66,9 +66,9 @@ Runtime model switching from the picker is deliberately excluded. Once a session
 
 ## Exact live model-picker selection
 
-The picker sends one combined `set_model` request containing `provider`, `modelId`, and the effective `thinkingLevel`. Bobbit clamps thinking against the exact selected model, asks the agent to bind that model, reads back the exact provider/model identity, applies thinking, and then reads back the complete tuple.
+The picker sends one combined `set_model` request containing `provider`, `modelId`, and `thinkingLevel`. Pi clamps thinking against the exact selected catalog model. An interactive Claude Agent SDK request instead uses the active Query's live capability map: an unsupported model is rejected before mutation, while an unavailable combined level is rejected after model read-back and before its requested thinking mutation. Neither failure makes the requested tuple durable; recovery handles an already-applied model. Neither case is clamped. See [Per-model thinking-level capabilities](thinking-levels.md) and [Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls) for the runtime-specific rules.
 
-The live request succeeds only when the final state exactly matches the requested provider/model and normalized effective thinking level. Only then does the server atomically persist the tuple, update the session's spawn pins and model-name mirror, and broadcast a complete `state` frame. A Pi or provider fallback to an unrequested model is a read-back mismatch, not success—even when `allowSessionModelFallback` is enabled or the bound model equals `default.sessionModel`.
+The live request succeeds only when the final state exactly matches the requested provider/model and its runtime-validated effective thinking level. Only then does the server atomically persist the tuple, update the session's spawn pins and model-name mirror, and broadcast a complete `state` frame. A Pi or provider fallback to an unrequested model is a read-back mismatch, not success—even when `allowSessionModelFallback` is enabled or the bound model equals `default.sessionModel`.
 
 ### Failure correction and bounded recovery
 
