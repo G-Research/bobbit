@@ -3,6 +3,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const port = Number(process.env.SERVICE_RUNTIME_PORT || process.env.PORT || 8888);
+// Local runner contract: this receives 127.0.0.1 after all authored values.
+// Docker/Compose omit it and retain the container-appropriate wildcard default.
+const host = process.env.SERVICE_RUNTIME_HOST || "0.0.0.0";
 const dataDir = process.env.SERVICE_RUNTIME_DATA_DIR || "/data";
 const unhealthy = process.env.SERVICE_RUNTIME_UNHEALTHY === "1";
 const dataFile = join(dataDir, "records.json");
@@ -31,7 +34,8 @@ const server = createServer(async (request, response) => {
 	try {
 		const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
 		if (url.pathname === "/health") {
-			reply(response, unhealthy ? 503 : 200, { status: unhealthy ? "unhealthy" : "ok" });
+			const address = server.address();
+			reply(response, unhealthy ? 503 : 200, { status: unhealthy ? "unhealthy" : "ok", listener: typeof address === "object" && address ? address.address : undefined });
 			return;
 		}
 		if (url.pathname === "/retain" && request.method === "POST") {
@@ -59,7 +63,7 @@ const server = createServer(async (request, response) => {
 	}
 });
 
-server.listen(port, "0.0.0.0");
+server.listen(port, host);
 
 function shutdown() {
 	server.close(() => process.exit(0));

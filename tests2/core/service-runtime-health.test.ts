@@ -26,9 +26,9 @@ const manifest: ServiceRuntimeManifest = {
 		health: { path: "/health", expectedStatus: 200, requestTimeoutMs: 100, intervalMs: 10, startupTimeoutMs: 30 },
 	},
 	lifecycle: { startPolicy: "manual", restart: { policy: "never", maxAttempts: 0, windowMs: 100, initialBackoffMs: 10, maxBackoffMs: 10 } },
-	environment: { PORT: { endpointPort: true } },
+	environment: { PORT: { endpointPort: true }, HOST: { value: "127.0.0.1" } },
 	modes: {
-		local: { command: "fixture", args: [], portEnv: "PORT" },
+		local: { command: "fixture", args: [], portEnv: "PORT", hostEnv: "HOST" },
 		docker: { image: "fixture:latest" },
 		compose: { file: "compose.yaml", service: "fixture", projectName: "fixture-${serverIdentity}" },
 	},

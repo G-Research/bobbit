@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseServiceManifest } from "../../src/server/service-runtime/service-manifest.js";
 import { ComposeServiceRunner, LocalServiceRunner, type ServiceRunner, type ServiceRunnerStartInput } from "../../src/server/service-runtime/service-runners.js";
 import { ServiceRuntimeSupervisor } from "../../src/server/service-runtime/service-supervisor.js";
@@ -14,9 +14,9 @@ const manifest: any = {
 	apiVersion: 1, id: "fixture", title: "Fixture",
 	endpoint: { protocol: "http", servicePort: 8080, health: { path: "/health", expectedStatus: 200, requestTimeoutMs: 100, intervalMs: 100, startupTimeoutMs: 1_000 } },
 	lifecycle: { startPolicy: "manual", restart: { policy: "never", maxAttempts: 0, windowMs: 1_000, initialBackoffMs: 100, maxBackoffMs: 100 } },
-	environment: { PORT: { endpointPort: true } },
+	environment: { PORT: { endpointPort: true }, HOST: { value: "127.0.0.1" } },
 	modes: {
-		local: { command: "fixture", args: ["serve"], cwd: ".", portEnv: "PORT" },
+		local: { command: "fixture", args: ["serve"], cwd: ".", portEnv: "PORT", hostEnv: "HOST" },
 		docker: { image: "fixture:latest" },
 		compose: { file: "compose.yaml", service: "api", projectName: "bobbit-${packId}-${runtimeId}-${serverIdentity}" },
 	},
@@ -100,6 +100,39 @@ describe("service runtime security boundaries", () => {
 			};
 			await assert.rejects(new ComposeServiceRunner({ execute }).start(runnerInput), { code: "SERVICE_LAUNCH_FAILED" });
 			assert.equal(execute.mock.calls.length, 0, "unsafe Compose must be rejected before up");
+		}
+	});
+
+	it("allows only declared optional Compose fallbacks, including nested declared names", async () => {
+		const interpolationManifest = {
+			...manifest,
+			environment: {
+				...manifest.environment,
+				OPTIONAL_DATABASE_URL: { secret: "databaseUrl", optional: true as const },
+				DATABASE_PASSWORD: { generatedSecret: "databasePassword" },
+			},
+		};
+		const valid = "services:\n  api:\n    image: fixture\n    restart: 'no'\n    environment:\n      DATABASE_URL: \"\${OPTIONAL_DATABASE_URL:-postgresql://fixture:\${DATABASE_PASSWORD}@db/fixture}\"\n    ports: ['127.0.0.1::8080']\n";
+		const execute = vi.fn()
+			.mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 })
+			.mockResolvedValueOnce({ stdout: "127.0.0.1:43123", stderr: "", exitCode: 0 });
+		const root = rootWithCompose(valid);
+		const runnerInput = {
+			...input(root, "compose"), manifest: interpolationManifest,
+			environment: { PORT: "8080", HOST: "127.0.0.1", DATABASE_PASSWORD: "generated" },
+		};
+		await expect(new ComposeServiceRunner({ execute }).start(runnerInput)).resolves.toMatchObject({ endpoint: "http://127.0.0.1:43123" });
+
+		for (const source of [
+			"services:\n  api:\n    image: fixture\n    restart: 'no'\n    environment: { DATABASE_URL: '${OPTIONAL_DATABASE_URL}' }\n    ports: ['127.0.0.1::8080']\n",
+			"services:\n  api:\n    image: fixture\n    restart: 'no'\n    environment: { DATABASE_URL: '${OPTIONAL_DATABASE_URL:-postgresql://${UNDECLARED}@db}' }\n    ports: ['127.0.0.1::8080']\n",
+			"services:\n  api:\n    image: fixture\n    restart: 'no'\n    environment: { DATABASE_URL: '${UNDECLARED:-fallback}' }\n    ports: ['127.0.0.1::8080']\n",
+		]) {
+			const unsafeRoot = rootWithCompose(source);
+			const unsafeInput = { ...runnerInput, packRoot: unsafeRoot, descriptorDir: unsafeRoot, envFile: path.join(unsafeRoot, "runtime.env") };
+			const unsafeExecute = vi.fn();
+			await assert.rejects(new ComposeServiceRunner({ execute: unsafeExecute }).start(unsafeInput), { code: "SERVICE_LAUNCH_FAILED" });
+			assert.equal(unsafeExecute.mock.calls.length, 0, "invalid interpolation must fail before Compose up");
 		}
 	});
 

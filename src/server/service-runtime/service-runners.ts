@@ -318,6 +318,11 @@ export class LocalServiceRunner implements ServiceRunner {
 		assertArgv(launch.args, "local args");
 		assertNoShellInterpreterInvocation(launch.command, launch.args, "local command");
 		assertComposeToken(launch.portEnv, "local portEnv");
+		assertComposeToken(launch.hostEnv, "local hostEnv");
+		const hostSource = input.manifest.environment[launch.hostEnv];
+		if (launch.hostEnv === launch.portEnv || !hostSource || !("value" in hostSource) || hostSource.value !== LOOPBACK_HOST) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Local host binding declaration is invalid");
+		}
 		const cwd = launch.cwd === undefined ? (input.descriptorDir ?? input.packRoot) : containedPath(input.packRoot, input.descriptorDir, launch.cwd, "local cwd");
 		let lastFailure: unknown;
 		for (let attempt = 0; attempt < MAX_LOCAL_START_ATTEMPTS; attempt++) {
@@ -328,7 +333,10 @@ export class LocalServiceRunner implements ServiceRunner {
 			try {
 				child = this.execute(launch.command, launch.args, {
 					cwd,
-					env: runtimeEnvironment({ ...input.environment, [launch.portEnv]: String(port) }),
+					// Both values are assigned after the resolved environment: neither
+					// a setting nor a direct runner caller can turn a local child into
+					// a wildcard listener.
+					env: runtimeEnvironment({ ...input.environment, [launch.portEnv]: String(port), [launch.hostEnv]: LOOPBACK_HOST }),
 					extendEnv: false,
 					shell: false,
 					reject: false,
@@ -428,10 +436,15 @@ export class DockerServiceRunner implements ServiceRunner {
 		const portKey = `${input.manifest.endpoint.servicePort}/tcp`;
 		let container: DockerContainer | undefined;
 		try {
+			// `local.hostEnv` is meaningful only to a host-process listener. Never
+			// pass it into a container, where loopback would be the container's own
+			// network namespace and make the published port unreachable.
+			const environment = { ...input.environment };
+			delete environment[input.manifest.modes.local.hostEnv];
 			container = await this.docker.createContainer({
 				Image: image,
 				Cmd: launch.command,
-				Env: Object.entries(input.environment).map(([key, value]) => `${key}=${value}`),
+				Env: Object.entries(environment).map(([key, value]) => `${key}=${value}`),
 				Labels: labelsFor(input),
 				ExposedPorts: { [portKey]: {} },
 				HostConfig: {
@@ -549,12 +562,69 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function assertComposeNoUnownedInterpolation(text: string, environment: Record<string, string>): void {
-	for (const match of text.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/g)) {
-		if (!Object.hasOwn(environment, match[1]!)) {
+const MAX_COMPOSE_INTERPOLATION_BYTES = 1024 * 1024;
+const MAX_COMPOSE_INTERPOLATION_DEPTH = 16;
+const MAX_COMPOSE_INTERPOLATIONS = 256;
+const COMPOSE_FALLBACK_OPERATORS = new Set(["-", ":-", "+", ":+"]);
+
+/**
+ * Docker Compose interpolation is implemented by the Compose CLI, not Docker
+ * Engine, and neither `yaml` nor Dockerode parses it. This bounded scanner is
+ * deliberately limited to the four default/alternate forms we allow; it
+ * validates nested substitutions without rendering the untrusted document.
+ */
+function composeInterpolations(text: string, depth = 0, seen = { count: 0 }): Array<{ name: string; operator?: string }> {
+	if (Buffer.byteLength(text) > MAX_COMPOSE_INTERPOLATION_BYTES || depth > MAX_COMPOSE_INTERPOLATION_DEPTH) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose interpolation is too large or deeply nested");
+	}
+	const references: Array<{ name: string; operator?: string }> = [];
+	for (let cursor = 0; cursor < text.length;) {
+		const start = text.indexOf("${", cursor);
+		if (start < 0) break;
+		let index = start + 2;
+		let nesting = 1;
+		for (; index < text.length && nesting > 0; index++) {
+			if (text.startsWith("${", index)) { nesting++; index++; }
+			else if (text[index] === "}") nesting--;
+		}
+		if (nesting !== 0) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose interpolation is malformed");
+		if (++seen.count > MAX_COMPOSE_INTERPOLATIONS) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose has too many interpolations");
+		const expression = text.slice(start + 2, index - 1);
+		const name = expression.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+		if (!name) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose interpolation is malformed");
+		const remainder = expression.slice(name.length);
+		const operator = [":-", ":+", "-", "+"].find((candidate) => remainder.startsWith(candidate));
+		if (remainder && (!operator || !COMPOSE_FALLBACK_OPERATORS.has(operator))) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose interpolation uses an unsupported operator");
+		}
+		references.push({ name, ...(operator ? { operator } : {}) });
+		if (operator) references.push(...composeInterpolations(remainder.slice(operator.length), depth + 1, seen));
+		cursor = index;
+	}
+	return references;
+}
+
+function assertComposeNoUnownedInterpolation(text: string, input: Pick<ServiceRunnerStartInput, "manifest" | "environment">): void {
+	for (const reference of composeInterpolations(text)) {
+		const source = input.manifest.environment[reference.name];
+		// SERVICE_RUNTIME_IMAGE is the one generic runner-owned interpolation,
+		// injected only after validating an explicit image override.
+		const isRunnerImage = reference.name === "SERVICE_RUNTIME_IMAGE" && Object.hasOwn(input.environment, reference.name);
+		if (!source && !isRunnerImage) {
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose references an undeclared environment variable");
 		}
+		if (!Object.hasOwn(input.environment, reference.name)) {
+			if (!(source && "secret" in source && source.optional === true && reference.operator && COMPOSE_FALLBACK_OPERATORS.has(reference.operator))) {
+				throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose omits an environment variable without an optional fallback");
+			}
+		}
 	}
+}
+
+function resolveComposeImage(value: unknown, environment: Record<string, string>): unknown {
+	if (typeof value !== "string") return value;
+	const interpolation = value.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/);
+	return interpolation ? environment[interpolation[1]!] : value;
 }
 
 function assertComposePort(value: unknown, port: number): void {
@@ -584,7 +654,10 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 	} catch (cause) {
 		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose file is invalid", { cause });
 	}
-	assertComposeNoUnownedInterpolation(source, input.environment);
+	assertComposeNoUnownedInterpolation(source, input);
+	if (composeInterpolations(source).some((reference) => reference.name === input.manifest.modes.local.hostEnv)) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose must not use the local listener-host variable");
+	}
 	// Compose named volumes are permitted only when they are project-owned (no
 	// `external`, custom `name`, drivers, or driver options). Compose prefixes the
 	// declared key with the server-derived project name, so `down` preserves an
@@ -611,7 +684,7 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 		if (!isRecord(rawService) || !hasOnlyComposeKeys(rawService, ["image", "restart", "environment", "ports", "volumes", "depends_on"])) {
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service uses an unsupported feature");
 		}
-		const image = rawService.image === "${SERVICE_RUNTIME_IMAGE}" ? input.environment.SERVICE_RUNTIME_IMAGE : rawService.image;
+		const image = resolveComposeImage(rawService.image, input.environment);
 		if (!isSafeServiceImageReference(image)) {
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service image is invalid");
 		}

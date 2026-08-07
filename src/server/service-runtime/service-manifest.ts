@@ -52,6 +52,8 @@ export interface LocalLaunch {
 	args: string[];
 	cwd?: string;
 	portEnv: string;
+	/** Declared listener-host variable, forced to loopback by the local runner. */
+	hostEnv: string;
 }
 
 export interface DockerLaunch {
@@ -200,16 +202,25 @@ function parseEnvironment(value: unknown, problems: string[]): Record<string, Se
 			result[name] = { endpointPort: true };
 			continue;
 		}
-		if (!stringToken(source, SETTING_NAME_RE, `environment.${name}.${key}`, problems)) return null;
 		if (key === "value") {
+			// Descriptor literals are values, not setting identifiers. Keep them
+			// bounded and text-only while allowing ordinary values such as an IP
+			// address; secrets still require the dedicated provenance types.
+			if (typeof source !== "string" || source.length === 0 || source.length > 4_096 || /[\0\r\n]/.test(source)) {
+				problems.push(`environment.${name}.value must be a bounded non-empty string`);
+				return null;
+			}
 			if (isLikelySecretLiteral(name, source)) {
 				problems.push(`environment.${name}.value looks like a secret; use secret or generatedSecret`);
 				return null;
 			}
 			result[name] = { value: source };
-		} else if (key === "setting") result[name] = { setting: source };
-		else if (key === "secret") result[name] = raw.optional === true ? { secret: source, optional: true } : { secret: source };
-		else result[name] = { generatedSecret: source };
+		} else {
+			if (!stringToken(source, SETTING_NAME_RE, `environment.${name}.${key}`, problems)) return null;
+			if (key === "setting") result[name] = { setting: source };
+			else if (key === "secret") result[name] = raw.optional === true ? { secret: source, optional: true } : { secret: source };
+			else result[name] = { generatedSecret: source };
+		}
 	}
 	if (endpointPortCount !== 1) {
 		problems.push("environment must declare exactly one endpointPort source");
@@ -287,15 +298,21 @@ function parseContainedPath(value: unknown, label: string, context: ServiceManif
 
 function parseModes(value: unknown, environment: Record<string, ServiceEnvSource>, context: ServiceManifestSourceContext, problems: string[]): ServiceRuntimeManifest["modes"] | null {
 	if (!isRecord(value) || !hasOnlyKeys(value, ["local", "docker", "compose"], "modes", problems)) return null;
-	if (!isRecord(value.local) || !hasOnlyKeys(value.local, ["command", "args", "cwd", "portEnv"], "modes.local", problems)) return null;
+	if (!isRecord(value.local) || !hasOnlyKeys(value.local, ["command", "args", "cwd", "portEnv", "hostEnv"], "modes.local", problems)) return null;
 	const local = value.local;
 	if (!stringToken(local.command, COMMAND_RE, "modes.local.command", problems) || local.command.includes("..")) return null;
 	const localArgs = parseArgv(local.args, "modes.local.args", problems);
 	if (!localArgs || rejectShellInterpreterInvocation(local.command, localArgs, "modes.local", problems)
-		|| !stringToken(local.portEnv, ENV_NAME_RE, "modes.local.portEnv", problems)) return null;
+		|| !stringToken(local.portEnv, ENV_NAME_RE, "modes.local.portEnv", problems)
+		|| !stringToken(local.hostEnv, ENV_NAME_RE, "modes.local.hostEnv", problems)) return null;
 	const portSource = environment[local.portEnv];
 	if (!portSource || !("endpointPort" in portSource) || portSource.endpointPort !== true) {
 		problems.push("modes.local.portEnv must name the endpointPort environment variable");
+		return null;
+	}
+	const hostSource = environment[local.hostEnv];
+	if (local.hostEnv === local.portEnv || !hostSource || !("value" in hostSource) || hostSource.value !== "127.0.0.1") {
+		problems.push("modes.local.hostEnv must name a distinct literal 127.0.0.1 environment variable");
 		return null;
 	}
 	let cwd: string | undefined;
@@ -325,7 +342,7 @@ function parseModes(value: unknown, environment: Record<string, ServiceEnvSource
 		return null;
 	}
 	return {
-		local: { command: local.command, args: localArgs, ...(cwd ? { cwd } : {}), portEnv: local.portEnv },
+		local: { command: local.command, args: localArgs, ...(cwd ? { cwd } : {}), portEnv: local.portEnv, hostEnv: local.hostEnv },
 		docker: { image: docker.image, ...(dockerCommand ? { command: dockerCommand } : {}) },
 		compose: { file, service: compose.service, projectName: compose.projectName },
 	};

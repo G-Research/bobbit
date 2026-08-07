@@ -51,11 +51,15 @@ environment:
     generatedSecret: databasePassword
   HINDSIGHT_API_PORT:
     endpointPort: true
+  # Local children are forcibly bound to loopback by the generic runner.
+  HINDSIGHT_API_HOST:
+    value: 127.0.0.1
 modes:
   local:
     command: hindsight
     args: [serve]
     portEnv: HINDSIGHT_API_PORT
+    hostEnv: HINDSIGHT_API_HOST
   docker:
     image: ghcr.io/vectorize-io/hindsight:0.8.6@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
   compose:

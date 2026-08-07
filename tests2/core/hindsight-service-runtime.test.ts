@@ -13,6 +13,7 @@ import { ExtensionSettingsStore } from "../../src/server/agent/extension-setting
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.js";
 import { SecretsStore } from "../../src/server/agent/secrets-store.js";
 import { ServiceRuntimeStore, ServiceRuntimeSupervisor, type ServiceRunner } from "../../src/server/service-runtime/index.js";
+import { ComposeServiceRunner } from "../../src/server/service-runtime/service-runners.js";
 
 import provider, {
   __setClientFactory,
@@ -377,6 +378,7 @@ describe("Hindsight generic runtime linkage", () => {
     assert.match(compose, /127\.0\.0\.1::8888/);
     assert.match(compose, /restart: "no"/);
     assert.match(compose, /hindsight-postgres:\/var\/lib\/postgresql\/data/, "Compose owns PostgreSQL through a durable named volume");
+    assert.match(compose, /HINDSIGHT_API_LLM_API_KEY:-/, "Compose gives the optional LLM secret an explicit empty fallback");
     assert.match(compose, /HINDSIGHT_API_DATABASE_URL:-postgresql:\/\/hindsight:\$\{HINDSIGHT_DB_PASSWORD\}@db:5432\/hindsight/, "Compose falls back to its durable named-volume database when the external secret is absent");
     assert.doesNotMatch(compose, /^\s*-\s*[^#\n]*pg0[^#\n]*:/m, "Compose must never bind-mount the live legacy pg0 directory");
     const source = fs.readFileSync(
@@ -402,5 +404,47 @@ describe("Hindsight generic runtime linkage", () => {
         timeoutMs: 1500,
       },
     );
+  });
+
+  it("validates Hindsight's optional database fallback and its nested generated password", async () => {
+    const descriptorPath = path.join(root, "market-packs/hindsight/runtimes/hindsight.yaml");
+    const manifest = parseServiceManifest(YAML.parse(fs.readFileSync(descriptorPath, "utf8")), {
+      packRoot: path.join(root, "market-packs/hindsight"),
+      sourceFile: descriptorPath,
+    });
+    assert.ok(manifest);
+    const environment = Object.fromEntries(Object.entries(manifest.environment).flatMap(([name, source]) => {
+      if ("secret" in source && source.optional) return [];
+      if ("value" in source) return [[name, source.value]];
+      if ("endpointPort" in source) return [[name, String(manifest.endpoint.servicePort)]];
+      if ("generatedSecret" in source) return [[name, "generated-password"]];
+      return [[name, name === "HINDSIGHT_OCI_IMAGE" ? manifest.modes.docker.image : "configured"]];
+    }));
+    const envDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-hindsight-compose-"));
+    const envFile = path.join(envDirectory, "runtime.env");
+    fs.writeFileSync(envFile, "# owner-only test environment\n", { mode: 0o600 });
+    fs.chmodSync(envFile, 0o600);
+    let call = 0;
+    const runner = new ComposeServiceRunner({
+      execute: () => Promise.resolve(call++ === 0
+        ? { stdout: "", stderr: "", exitCode: 0 }
+        : { stdout: "127.0.0.1:43123", stderr: "", exitCode: 0 }) as never,
+    });
+    try {
+      const started = await runner.start({
+        manifest,
+        mode: "compose",
+        packRoot: path.join(root, "market-packs/hindsight"),
+        descriptorDir: path.dirname(descriptorPath),
+        serverIdentity: "test-server",
+        serviceIdentity: "hindsight:test",
+        packId: "hindsight",
+        environment,
+        envFile,
+      });
+      assert.equal(started.endpoint, "http://127.0.0.1:43123");
+    } finally {
+      fs.rmSync(envDirectory, { recursive: true, force: true });
+    }
   });
 });

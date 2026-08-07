@@ -19,9 +19,9 @@ const manifest = {
 		health: { path: "/health", expectedStatus: 200, requestTimeoutMs: 100, intervalMs: 100, startupTimeoutMs: 1_000 },
 	},
 	lifecycle: { startPolicy: "manual", restart: { policy: "never", maxAttempts: 0, windowMs: 1_000, initialBackoffMs: 100, maxBackoffMs: 100 } },
-	environment: {},
+	environment: { HOST: { value: "127.0.0.1" } },
 	modes: {
-		local: { command: "fixture-server", args: ["--serve"], portEnv: "PORT" },
+		local: { command: "fixture-server", args: ["--serve"], portEnv: "PORT", hostEnv: "HOST" },
 		docker: { image: "fixture:latest", command: ["--serve"] },
 		compose: { file: "runtime/compose.yaml", service: "fixture", projectName: "bobbit-fixture-${serverIdentity}" },
 	},
@@ -39,7 +39,7 @@ function startInput(mode: ServiceRunnerStartInput["mode"], packRoot = "/pack"): 
 		serverIdentity: "server-1",
 		serviceIdentity: "pack:fixture",
 		packId: "pack",
-		environment: { FIXTURE_SETTING: "value" },
+		environment: { FIXTURE_SETTING: "value", HOST: "0.0.0.0" },
 	};
 }
 
@@ -88,7 +88,7 @@ describe("service runtime runners", () => {
 			shell: false,
 			reject: false,
 			cwd: "/pack",
-			env: expect.objectContaining({ FIXTURE_SETTING: "value", PORT: "43123", PATH: expect.any(String) }),
+			env: expect.objectContaining({ FIXTURE_SETTING: "value", PORT: "43123", HOST: "127.0.0.1", PATH: expect.any(String) }),
 		}));
 		await expect(runner.inspect({ ...startInput("local"), runnerIdentity: started.runnerIdentity })).resolves.toEqual(started);
 		expect(getPort).toHaveBeenCalledTimes(1);
@@ -107,7 +107,7 @@ describe("service runtime runners", () => {
 			const firstEnvironment = (execute.mock.calls[0] as any)?.[2]?.env;
 			expect(firstEnvironment?.PATH).not.toBe("/gateway-only");
 			expect(firstEnvironment?.PATH).toEqual(expect.any(String));
-			await runner.start({ ...startInput("local"), environment: { FIXTURE_SETTING: "value", PATH: "/runtime-loader" } });
+			await runner.start({ ...startInput("local"), environment: { FIXTURE_SETTING: "value", HOST: "0.0.0.0", PATH: "/runtime-loader" } });
 			const secondEnvironment = (execute.mock.calls[1] as any)?.[2]?.env;
 			expect(secondEnvironment).toMatchObject({ PATH: "/runtime-loader" });
 		} finally {
@@ -162,6 +162,8 @@ describe("service runtime runners", () => {
 			Cmd: ["--serve"],
 			HostConfig: expect.objectContaining({ PortBindings: { "8080/tcp": [{ HostIp: "127.0.0.1", HostPort: "0" }] } }),
 		}));
+		const [[dockerOptions]] = docker.createContainer.mock.calls as unknown as Array<[{ Env: string[] }]>;
+		expect(dockerOptions!.Env).not.toContain("HOST=0.0.0.0");
 		await runner.stop({ ...startInput("docker"), runnerIdentity: started.runnerIdentity });
 		expect(container.stop).toHaveBeenCalledWith({ t: 10 });
 
@@ -221,7 +223,7 @@ describe("service runtime runners", () => {
 		const execute = vi.fn(() => child());
 		const runner = new LocalServiceRunner({ execute, getPort: async () => 43123 });
 		const localManifest = structuredClone(manifest) as any;
-		localManifest.modes.local = { command: "bash", args: ["-c", "echo nope"], portEnv: "PORT" };
+		localManifest.modes.local = { command: "bash", args: ["-c", "echo nope"], portEnv: "PORT", hostEnv: "HOST" };
 		await expect(runner.start({ ...startInput("local"), manifest: localManifest })).rejects.toMatchObject({ code: "SERVICE_LAUNCH_FAILED" });
 		expect(execute).not.toHaveBeenCalled();
 
