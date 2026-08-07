@@ -1195,6 +1195,14 @@ export class AgentInterface extends LitElement {
 				return;
 			}
 			if ((ev as any).type === "state_update") {
+				// Update the send fence synchronously with authoritative state. Waiting
+				// for Lit's next render would leave a small window where Enter could emit
+				// message-send and tombstone the draft before the defensive onSend check.
+				if (this._messageEditor) {
+					this._messageEditor.blockedSendReason = (this.session?.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED"
+						? "Choose a replacement model before sending."
+						: undefined;
+				}
 				// Server state refresh (e.g. after compaction or reconnect) —
 				// re-render stats and re-pin once layout commits. Content may
 				// have been bulk-replaced without triggering a ResizeObserver
@@ -1581,6 +1589,13 @@ export class AgentInterface extends LitElement {
 		if (!input.trim() && (!attachments || attachments.length === 0)) return;
 		const session = this.session;
 		if (!session) throw new Error("No session set on AgentInterface");
+		// Defensive backstop for programmatic callers. The editor performs the
+		// user-visible synchronous fence before message-send; this check must still
+		// precede /compact and every composer/attachment clear path.
+		if ((session.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED") {
+			this._messageEditor?.showBlockedSendError("Choose a replacement model before sending.");
+			return;
+		}
 
 		// Handle /compact slash command
 		if (input.trim().toLowerCase() === "/compact") {
@@ -1693,6 +1708,7 @@ export class AgentInterface extends LitElement {
 		if (!text.trim()) return false;
 		const session = this.session;
 		if (!session) throw new Error("No session set on AgentInterface");
+		if ((session.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED") return false;
 		if (!session.state.model) throw new Error("No model set on AgentInterface");
 
 		const isStreaming = session.state.isStreaming;
@@ -1769,14 +1785,15 @@ export class AgentInterface extends LitElement {
 
 	/** Apply one picker choice as an exact model/effective-thinking tuple. */
 	private _applyModelSelection(session: any, model: any): void {
+		if (session.state?.modelSelectionPending) return;
 		const effectiveThinking = clampThinkingLevel(session.state?.thinkingLevel, model as any) ?? "off";
-		// Stage the clamped value before calling through application wrappers that
-		// still forward only the model argument. RemoteAgent uses this optimistic
-		// effective state to keep the request combined.
-		session.state.thinkingLevel = effectiveThinking;
+		const requiresRecovery = session.state?.condition?.code === "MODEL_SELECTION_REQUIRED";
+		// Normal selection stays optimistic. Recovery keeps the retired tuple visible
+		// until the server verifies and explicitly publishes the replacement.
+		if (!requiresRecovery) session.state.thinkingLevel = effectiveThinking;
 		if (typeof session.setModel === "function") {
 			session.setModel(model, effectiveThinking);
-		} else {
+		} else if (!requiresRecovery) {
 			session.state.model = model;
 		}
 	}
@@ -1807,6 +1824,54 @@ export class AgentInterface extends LitElement {
 			else session?.abort?.();
 			this.requestUpdate();
 		}
+	}
+
+	private renderModelSelectionRequired(condition: any) {
+		if (condition?.code !== "MODEL_SELECTION_REQUIRED"
+			|| typeof condition.provider !== "string"
+			|| typeof condition.modelId !== "string") return nothing;
+		const session = this.session as any;
+		const sessionState = session?.state as any;
+		const pending = !!sessionState?.modelSelectionPending;
+		const error = typeof sessionState?.modelSelectionError === "string"
+			? sessionState.modelSelectionError
+			: "";
+		return html`
+			<div
+				class="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm"
+				role="alert"
+				data-testid="model-selection-required-banner"
+				data-provider=${condition.provider}
+				data-model-id=${condition.modelId}
+			>
+				<div class="flex items-start gap-3">
+					<div class="shrink-0 text-warning mt-0.5">${icon(AlertTriangle, "sm")}</div>
+					<div class="min-w-0 flex-1">
+						<div class="font-medium text-foreground">Choose a model to continue</div>
+						<div class="mt-1 text-muted-foreground">
+							The saved model <code class="font-mono text-foreground">${condition.provider}/${condition.modelId}</code>
+							is no longer available. Your conversation is safe. Choose another model to continue.
+						</div>
+						${error ? html`<div class="mt-2 text-destructive" data-testid="model-selection-recovery-error">${error}</div>` : nothing}
+						<div class="mt-3">
+							<button
+								type="button"
+								class="px-2.5 py-1 rounded border border-border bg-card hover:bg-secondary text-foreground text-xs disabled:opacity-50"
+								data-testid="choose-replacement-model"
+								aria-label="Choose replacement model"
+								?disabled=${pending || !this.enableModelSelector || !sessionState?.model}
+								@click=${() => {
+									void openModelSelector(sessionState.model, (model) => {
+										this._applyModelSelection(session, model);
+										this.requestUpdate();
+									});
+								}}
+							>${pending ? "Switching…" : "Choose replacement model"}</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		`;
 	}
 
 	private renderProviderAuthRequired(auth: any) {
@@ -2053,6 +2118,8 @@ export class AgentInterface extends LitElement {
 					.turnStartTime=${(state as any).turnStartTime ?? null}
 				></streaming-message-container>
 
+				${this.renderModelSelectionRequired((state as any).condition)}
+
 				${this.renderProviderAuthRequired((state as any).providerAuthRequired)}
 
 				${(() => {
@@ -2203,6 +2270,8 @@ export class AgentInterface extends LitElement {
 		}
 
 		const session = this.session!;
+		const modelSelectionRequired = (state as any).condition?.code === "MODEL_SELECTION_REQUIRED";
+		const modelSelectionPending = !!(state as any).modelSelectionPending;
 		const supportsThinking = (state.model as any)?.reasoning === true;
 
 		// The dropdown popover always shows full labels; on mobile (<640px) the trigger
@@ -2222,7 +2291,7 @@ export class AgentInterface extends LitElement {
 			: ["off", "minimal", "low", "medium", "high"];
 		const thinkingTitle = fullLabels[(state.thinkingLevel as ThinkingLevel) ?? "off"] ?? fullLabels.off;
 
-		const thinkingSelect = supportsThinking && this.enableThinkingSelector
+		const thinkingSelect = supportsThinking && this.enableThinkingSelector && !modelSelectionRequired
 			// Outer button gap (label → chevron) tightened to 2px; inner span gap
 			// (brain icon → label) stays at 4px so the icon doesn't crowd the text.
 			? html`<span class="thinking-select-compact [&_button]:!gap-0.5 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
@@ -2244,7 +2313,9 @@ export class AgentInterface extends LitElement {
 			? Button({
 				variant: "ghost",
 				size: "sm",
+				disabled: modelSelectionPending,
 				onClick: () => {
+					if (modelSelectionPending) return;
 					void openModelSelector(state.model, (model) => {
 						this._applyModelSelection(session, model);
 					});
@@ -2569,10 +2640,13 @@ export class AgentInterface extends LitElement {
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}
 							.showAttachmentButton=${this.enableAttachments}
-							.showModelSelector=${this.enableModelSelector}
-							.showThinkingSelector=${this.enableThinkingSelector}
+							.showModelSelector=${this.enableModelSelector && !(state as any).modelSelectionPending}
+							.showThinkingSelector=${this.enableThinkingSelector && (state as any).condition?.code !== "MODEL_SELECTION_REQUIRED"}
 							.queuedMessages=${this._serverQueue}
 							.attachments=${this._attachments}
+							.blockedSendReason=${(state as any).condition?.code === "MODEL_SELECTION_REQUIRED"
+								? "Choose a replacement model before sending."
+								: undefined}
 							.onFilesChange=${(files: Attachment[]) => {
 								this._setAttachmentDraft(files);
 							}}
@@ -2604,13 +2678,13 @@ export class AgentInterface extends LitElement {
 									(session as any).reorderQueue(messageIds);
 								}
 							}}
-							.onModelSelect=${() => {
+							.onModelSelect=${(state as any).modelSelectionPending ? undefined : () => {
 								void openModelSelector(state.model, (model) => {
 									this._applyModelSelection(session, model);
 								});
 							}}
 							.onThinkingChange=${
-								this.enableThinkingSelector
+								this.enableThinkingSelector && (state as any).condition?.code !== "MODEL_SELECTION_REQUIRED"
 									? (level: ThinkingLevel) => {
 											if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(level);
 											else session.state.thinkingLevel = level;
