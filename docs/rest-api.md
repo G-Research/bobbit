@@ -1482,11 +1482,15 @@ receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`.
 | `PATCH` | `/api/projects/:id/extension-settings/:packId` | Revisioned pack runtime switch with exact body `{ expectedRevision, enabled }`; updates all declared targets in that pack and returns their redacted projections. |
 
 A stale revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT`; callers must reload and
-review rather than overwrite. If public YAML publishes but the subsequent secret persistence
-fails, the server returns `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with a redacted retry
-projection and does not claim that the secret was saved. Each mutation invalidates resolver
-caches and emits only the metadata-only project WebSocket refresh frame documented in
-[Project extension settings](extension-settings.md).
+review rather than overwrite. A mutation persists public YAML before one coalesced owner-only
+secret-file save, so the two files are not a crash-atomic transaction. If that secret save fails,
+the server restores the exact prior public settings and revision before returning the generic,
+sanitized `503 EXTENSION_SETTINGS_PERSIST_FAILED`. The original revision is retryable, and the
+prior public projection and runtime values remain authoritative; no retry projection claims that
+the secret was saved. If the compensating public save fails, the route returns
+`503 EXTENSION_SETTINGS_UNAVAILABLE` rather than claiming success or a determinate state. Each
+successful mutation invalidates resolver caches and emits only the metadata-only project WebSocket
+refresh frame documented in [Project extension settings](extension-settings.md).
 
 See [Project extension settings](extension-settings.md) for declaration syntax, value validation,
 error codes, storage isolation, Market behavior, and Hindsight migration.

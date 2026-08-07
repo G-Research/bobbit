@@ -103,13 +103,13 @@ The public project YAML holds an `extension_settings` record with storage `schem
 override and primitive non-secret `values`. Its internal key is derived from the pack id,
 `provider`, `hook`, or `runtime` kind, and contribution id; clients never create or choose that storage key.
 
-Secret bytes are kept separately in the project's state directory. The secret owner publishes its
-own file atomically with owner-only permissions and exposes only a per-target presence check and
-a runtime-only single-field read. It has no bulk or public getter. Thus a project YAML file,
-project-config endpoint, settings projection, WebSocket invalidation, log, trace, audit record,
-diff, or Market-rendered state/attributes do not contain a secret value. A password input temporarily
-holds the value only while an operator enters it for a save, then is cleared. Public responses
-represent a secret only as `secretSet: true` or `false`.
+Secret bytes are kept separately in the project's state directory. The secret owner coalesces every
+secret-field change in one settings mutation into one owner-only, atomic file replacement. It exposes
+only a per-target presence check and a runtime-only single-field read; it has no bulk or public getter.
+Thus a project YAML file, project-config endpoint, settings projection, WebSocket invalidation, log,
+trace, audit record, diff, or Market-rendered state/attributes do not contain a secret value. A password
+input temporarily holds the value only while an operator enters it for a save, then is cleared. Public
+responses represent a secret only as `secretSet: true` or `false`.
 
 The effective non-secret value order is:
 
@@ -200,10 +200,14 @@ reports whether the hook's applicable capability is authorized: ordinary decisio
 
 Mutations are compare-and-swap operations. The caller must send the revision it read; a stale
 revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT` and must be reloaded and reviewed,
-not overwritten. A public update increments the revision once. Public YAML is published before
-secret persistence, because the two files cannot be one filesystem transaction. If the later
-secret write fails, the response is `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with the new
-revision and a redacted retry projection; it never claims that the secret was stored.
+not overwritten. A successful public update increments the revision once. Public YAML is persisted
+before the one coalesced secret-file save, because the two files cannot be one filesystem transaction.
+If that secret save fails, the server first compensates by restoring the exact prior public settings
+snapshot and revision, then returns the generic sanitized `503 EXTENSION_SETTINGS_PERSIST_FAILED`. The original revision is therefore retryable,
+and the prior public projection and runtime values remain authoritative; the failed secret value is
+never reported as stored. If that compensating public save also fails, the server reports settings as
+unavailable rather than claiming a determinate result or success. This request-time compensation does
+not provide crash-level atomicity across the two files.
 
 Other useful mutation outcomes include:
 
