@@ -49,8 +49,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
 | **Managed service extension** *(schema 2; declarative and currently dormant)* | `runtimes/<name>.yaml` (listed in `contents.runtimes`) | Core-owned lifecycle manager when a future consumer wires it | Closed service declaration only; packs never receive a process handle — see [Managed service-extension contract](service-extension-runtime.md) |
-| **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
-| **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
+| **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region. See [Static system-prompt sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2). |
 | **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; bounded consumers are eligible scheduled advisors, the exact-granted decision dispatcher, [gated request mutation](request-mutation.md), and the core-owned [post-tool-result filter](design/ep-14-tool-result-filter.md) | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
@@ -157,10 +156,6 @@ Rules:
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
   read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-metadata-first) for the strict
   declaration contract, scheduled-advisor exception, and metadata-first boundary.
-- **`contents.system-prompts: string[]`** — schema-2 static-section basenames under
-  `system-prompts/<name>.yaml`. An unlisted file is never read. It is an activation catalogue;
-  authoring text still requires explicit project grants and approval. See [Static system-prompt
-  sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2).
 - **`contents.system-prompts: string[]`** — schema-2 static-section basenames under
   `system-prompts/<name>.yaml`. An unlisted file is never read. It is an activation catalogue;
   authoring text still requires explicit project grants and approval. See [Static system-prompt

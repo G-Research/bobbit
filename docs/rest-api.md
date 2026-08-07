@@ -1457,13 +1457,16 @@ error codes, storage isolation, Market behavior, and Hindsight migration.
 
 Extension grants are a separate, project-owned native YAML field (`extension_grants`), not a
 value accepted by the generic config writer. The `GET` grant and grant-audit routes use normal
-gateway authentication. The prompt-sensitive `PUT` grant and `DELETE` revoke mutations require a
-verified signed `bobbit_session` prompt-operator cookie: bearer tokens, sandbox credentials, and
-agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The server, not the
-caller, assigns the actor and timestamp. These are exact, fail-closed grants for active schema-2
-hooks and do not replace pack activation, Host API guards, or session policy. Static prompt
-sections require `prompt:system-static`; `prompt:system-author` permits only an authenticated
-owning agent session to create or edit an approval proposal, never a direct write.
+gateway authentication. Normal gateway authentication permits exact grants and revokes for
+`decide`, `filter:tool-result`, `store`, `session`, and `agents`. `mutate`,
+`prompt:system-static`, and `prompt:system-author` additionally require a verified signed
+`bobbit_session` cookie; bearer-only, sandbox, and agent-session credentials receive
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED` only for those protected capabilities. The server, not
+the caller, assigns the actor and timestamp. These are exact, fail-closed grants for active
+schema-2 hooks and do not replace pack activation, Host API guards, session policy, or add Host API
+authority. Static prompt sections require `prompt:system-static`; `prompt:system-author` permits
+only an authenticated owning agent session to create or edit an approval proposal, never a direct
+write.
 `filter:tool-result` is eligible only for a `mode: decide` hook with exactly
 `events: [afterToolResult]` and that declared capability; it enables only core's pre-fan-out
 filter seam. See [Extension capability grants](extension-capability-grants.md) for the
@@ -1472,8 +1475,8 @@ configuration, audit-outbox, live-revocation, and extension-author contract.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/projects/:id/extension-grants` | Normal-auth read of durable exact grants and active hook grant-status projection; no signed operator cookie is required. |
-| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
-| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
+| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Normal gateway authentication is sufficient for `decide`, `filter:tool-result`, `store`, `session`, and `agents`; protected `mutate`, `prompt:system-static`, and `prompt:system-author` grants require the verified signed `bobbit_session` cookie. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Normal gateway authentication is sufficient for `decide`, `filter:tool-result`, `store`, `session`, and `agents`; protected `mutate`, `prompt:system-static`, and `prompt:system-author` revokes require the verified signed `bobbit_session` cookie. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
 | `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe audit rows; no signed operator cookie is required. |
 
 #### Gated request-mutation bridge and audit

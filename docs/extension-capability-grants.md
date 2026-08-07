@@ -67,13 +67,15 @@ remains in effect.
 
 ## Administrative REST API
 
-The `GET` grant and grant-audit routes use normal gateway authentication. The prompt-sensitive
-`PUT` grant and `DELETE` revoke mutations instead require a verified signed `bobbit_session`
-operator cookie. A bearer token, sandbox credential, or agent session credential is not an
-operator credential: each mutation returns `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. This keeps
-broad automation credentials able to inspect project state while reserving authority changes for
-the browser operator path. The server derives the audit actor as `localhost` for an unauthenticated
-loopback gateway, otherwise `admin`; no request field can choose the actor.
+The `GET` grant and grant-audit routes use normal gateway authentication. Normal gateway
+authentication permits exact grants and revokes for `decide`, `filter:tool-result`, `store`,
+`session`, and `agents`. `mutate`, `prompt:system-static`, and `prompt:system-author` additionally
+require a verified signed `bobbit_session` cookie; bearer-only, sandbox, and agent-session
+credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED` only for those protected capabilities.
+This keeps broad automation credentials able to manage ordinary declared capability tuples while
+reserving prompt-sensitive and mutation authority changes for the browser operator path. The server
+derives the audit actor as `localhost` for an unauthenticated loopback gateway, otherwise `admin`;
+no request field can choose the actor.
 
 ### Read grants and active hook status
 
@@ -116,9 +118,10 @@ Content-Type: application/json
 ```
 
 The body must contain exactly those three fields. Wildcards, client timestamps, actors, reasons,
-and arbitrary metadata are rejected. This mutation requires the verified signed `bobbit_session`
-operator cookie; bearer, sandbox, and agent session credentials receive
-`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The route returns:
+and arbitrary metadata are rejected. Normal gateway authentication is sufficient for `decide`,
+`filter:tool-result`, `store`, `session`, and `agents`; the protected `mutate`,
+`prompt:system-static`, and `prompt:system-author` capabilities require the verified signed
+`bobbit_session` operator cookie. The route returns:
 
 - `400` for an invalid body or tuple;
 - `404 EXTENSION_HOOK_NOT_FOUND` when the hook is not currently active;
@@ -131,9 +134,10 @@ operator cookie; bearer, sandbox, and agent session credentials receive
 DELETE /api/projects/:projectId/extension-grants/:packId/:hookId/:capability
 ```
 
-A revoke does not require the hook to remain installed or active. It requires the verified signed
-`bobbit_session` operator cookie; bearer, sandbox, and agent session credentials receive
-`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. It removes the exact persisted tuple if present, returns
+A revoke does not require the hook to remain installed or active. Normal gateway authentication is
+sufficient for `decide`, `filter:tool-result`, `store`, `session`, and `agents`; the protected
+`mutate`, `prompt:system-static`, and `prompt:system-author` capabilities require the verified
+signed `bobbit_session` operator cookie. It removes the exact persisted tuple if present, returns
 `200 { revoked: true, hooks }`, and writes one `revoked` audit event. An ordinary repeat after a
 completed revoke is a no-op: `200 { revoked: false, hooks }` and no second audit event.
 
