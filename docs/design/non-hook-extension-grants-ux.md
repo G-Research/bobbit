@@ -96,7 +96,7 @@ Do not optimistically change state. During mutation, preserve the last server st
 
 Add a single read-only **Grant history** disclosure to the existing selected-project Installed surface, near the Project runtime content. It is not a new navigation destination or a second permissions UI and contains no mutation controls. This project-level placement is necessary so events for an uninstalled pack remain inspectable after its pack card disappears.
 
-Show newest events first for scanning, while respecting the API's bounded result. Each compact row contains only:
+Show the API's newest bounded window in its returned append order: earliest to latest within that window. Do not re-sort by timestamp in the client; append/recovery order is authoritative. Each compact row contains only:
 
 - localized date/time via a semantic `<time datetime="full ISO value">`;
 - `Granted` or `Revoked` text (not color alone);
@@ -108,8 +108,8 @@ Example:
 
 ```text
 Grant history
-Apr 8, 10:42     Granted    memory.read.all    Pack · hindsight             admin
 Apr 8, 10:39     Revoked    decide             Hook · advisor / choose-mode  admin
+Apr 8, 10:42     Granted    memory.read.all    Pack · hindsight             admin
 ```
 
 Legacy hook audit rows remain readable and appear in the same list; missing additive principal metadata is interpreted only for display using the legacy row's existing `hookId`. Never hide orphaned/uninstalled pack events. Empty copy: `No extension grant changes have been recorded for this project.` Loading copy: `Loading grant history…`. Failure copy: `Could not load grant history.` with the existing **Retry** button.
@@ -185,7 +185,7 @@ Add a registered `tests2/browser` journey using a fixture pack with the non-hook
 5. Assert the confirmation names project `Hermes`, exact pack ID, principal `pack`, capability `memory.read.all`, and the broad “all project memory” consequence. Cancel with Escape; assert state remains `Not granted` and audit has no new event.
 6. Open again and confirm **Grant capability**. While pending, assert only that exact action is disabled and reads `Granting…`. Await the server-refetched `Granted` state and polite success announcement.
 7. Reload the page and reopen the same project/pack disclosure. Assert `memory.read.all` remains `Granted`, while `memory.read` and `service.manage` remain `Not granted` (exact scoping/no implied authority).
-8. Open project **Grant history**. Assert a `Granted` row attributes the exact project, pack principal, pack ID, capability, actor, and parseable timestamp. Include a legacy hook audit fixture and assert it remains readable as a Hook principal in the same history.
+8. Open project **Grant history**. Assert a `Granted` row attributes the exact project, pack principal, pack ID, capability, actor, and parseable timestamp. Assert the newest bounded rows retain the API's append order (earliest to latest). Include a legacy hook audit fixture and assert it remains readable as a Hook principal in the same history.
 9. Revoke through the same capability row. Assert `Revoking…`, then server-refetched `Not granted`; verify a Revoked audit row appears and a second reload preserves the state.
 10. Simulate stale/inactive state by disabling the pack through its existing activation toggle. Assert ungranted actions are disabled with an accessible explanation. If an existing grant fixture is retained, assert `Granted · inactive` remains visible and Revoke remains enabled.
 11. Simulate missing signed operator authentication for a mutation. Assert `403` leaves state unchanged and shows the adjacent operator-auth alert; no actor/token/cookie value appears in page text.
