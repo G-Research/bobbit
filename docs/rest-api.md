@@ -1459,25 +1459,83 @@ error codes, storage isolation, Market behavior, and Hindsight migration.
 
 Extension grants are a separate, project-owned native YAML field (`extension_grants`), not a
 value accepted by the generic config writer. The `GET` grant and grant-audit routes use normal
-gateway authentication. The prompt-sensitive `PUT` grant and `DELETE` revoke mutations require a
-verified signed `bobbit_session` prompt-operator cookie: bearer tokens, sandbox credentials, and
-agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The server, not the
-caller, assigns the actor and timestamp. These are exact, fail-closed grants for active schema-2
-hooks and do not replace pack activation, Host API guards, or session policy. Static prompt
-sections require `prompt:system-static`; `prompt:system-author` permits only an authenticated
-owning agent session to create or edit an approval proposal, never a direct write. See [Extension
-capability grants](extension-capability-grants.md) for the configuration, audit-outbox,
-live-revocation, and extension-author contract.
+gateway authentication. The server, not the caller, assigns the actor and timestamp. Grants are
+exact and fail closed for active schema-2 hooks or active pack principals; they do not replace pack
+activation, Host API guards, or session policy. A pack-principal grant and a hook `mutate` grant
+require a verified signed `bobbit_session` prompt-operator cookie; bearer-only, sandbox, and agent
+session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Other hook grants use normal
+gateway authentication. Static prompt sections require `prompt:system-static`; `prompt:system-author`
+permits only an authenticated owning agent session to create or edit an approval proposal, never a
+direct write. See the [non-hook extension-grants design](design/non-hook-extension-grants.md) for
+the configuration, audit-outbox, live-revocation, and extension-author contract.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects/:id/extension-grants` | Normal-auth read of durable exact grants and active hook grant-status projection; no signed operator cookie is required. |
-| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
-| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
-| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe audit rows; no signed operator cookie is required. |
+| `GET` | `/api/projects/:id/extension-grants` | Normal-auth read of durable exact grants plus active hook and pack grant-status projections. |
+| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. A hook body is exactly `{ packId, hookId, capability }`; a pack-principal body is exactly `{ packId, principal: "pack", capability }`. Pack grants require the verified operator cookie, name an active pack, and accept only pack capabilities; malformed input is `400`, an inactive principal/hook is `404`, and an unsupported capability is `422 EXTENSION_CAPABILITY_UNSUPPORTED`. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke a hook tuple, including one for a removed hook. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/principals/pack/:capability` | Revoke a pack-principal tuple; requires the verified operator cookie. |
+| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe audit rows. |
 
-These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI is deferred to
-EP-7.
+A completed repeat revoke is an audit-free no-op. An exact retry after a
+`503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without
+restoring authority. These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI
+is deferred to EP-7.
+
+#### Hindsight typed pack routes
+
+The built-in Hindsight panel and its five agent tools use the pack-scoped route endpoint rather
+than a Hindsight-specific public server API. A client calls `host.callRoute(name, init)`; the host
+sends `POST /api/ext/route/:name` with a server-minted surface token and the header-bound session.
+The server derives the pack and authoritative project/goal scope from those bindings, so callers do
+not supply a pack id, project id, goal id, or endpoint. See [Extension Host routes](extension-host-authoring.md#routes--the-packs-own-server-endpoints-hostcallroute) for the transport contract,
+[Hindsight memory pack](hindsight-memory.md), and [Project extension settings](extension-settings.md).
+
+All Hindsight routes are scoped to the session's project; normal memory reads also include its goal
+when present. `scope: "all"` is an explicit all-project read only; it is never inferred from tags,
+an id, or a missing scope. Settings revisions and secrets remain owned by the EP-7 settings route:
+settings saves validate and persist but do not probe, pull, or start a runtime.
+
+| Route name | Request body inside `init.body` | Capability | Response summary |
+|---|---|---|---|
+| `runtime-status` | None | — | `{ settingsRevision, runtime }`, where `runtime` is the generic `ServiceRuntimeStatus`: identity, desired state, optional mode/endpoint, observed state, and safe diagnostic. External mode is reported as ready only with a valid configured endpoint. |
+| `runtime-logs` | `{ tail? }` | — | `{ settingsRevision, lines }`; `tail` is an integer clamped to 1–200 and defaults to 100. |
+| `runtime-control` | `{ action: "start" \| "stop" \| "restart", consent: true }` | `service.manage` | `{ settingsRevision, runtime }` from the exact settings snapshot used for control. |
+| `migration-plan` | `{ target: "managed-volume" \| "external" }` | `service.manage` | `{ settingsRevision, ok: true, plan }` or `{ settingsRevision, ok: false, code }`. Planning is redacted and does not run a command, start a service, pull an image, or mutate storage. |
+| `migration-execute` | `{ plan, confirmation }` | `service.manage` | `{ settingsRevision, ok: true, planId, fingerprint }` or `{ settingsRevision, ok: false, code, rolledBack? }`. The confirmation must equal the plan confirmation. |
+| `browse`, `search` | `{ query?, cursor?, limit?, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memories, cursor? }`. `limit` defaults to 25 and is capped at 100. |
+| `detail` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memory }` or a typed result without `memory`. The returned record is checked against the authoritative scope. |
+| `history` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, history }`; the route verifies the scoped record before reading its history. |
+| `recall` | `{ query, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memories }`. |
+| `retain` | `{ content, sync? }` | `memory.write` | `{ ok, configured }`. Tags are derived by the route; request tags do not select scope. |
+| `reflect` | `{ prompt }` | `memory.reflect` and `memory.read` | `{ configured, text }`. Reflection is always limited to the current project/goal; `scope: "all"` cannot broaden it. |
+| `invalidate` | `{ id, confirmation, reason? }` | `memory.invalidate` | `{ ok, configured, id }`. `confirmation` must exactly equal `id`; the route checks the selected record's scope before invalidating it. |
+| `retain-outcome` | Ignored | `memory.write` | `{ ok, configured, outcomeId? }`. The route accepts only a server-derived, completed-goal outcome; body content and goal identifiers are ignored. |
+
+The `hindsight_recall`, `hindsight_retain`, `hindsight_reflect`, `hindsight_invalidate`, and
+`hindsight_retain_outcome` tools are thin adapters for `recall`, `retain`, `reflect`, `invalidate`,
+and `retain-outcome`, respectively. Grant the listed capabilities with the pack-principal grant
+form above; the Hindsight capability set is `service.manage`, `memory.read`, `memory.write`,
+`memory.reflect`, `memory.invalidate`, and `memory.read.all`.
+
+Hindsight rechecks a live grant immediately before the provider request, so revocation wins over a
+request already in progress. A pre-dispatch missing grant is HTTP
+`403 EXTENSION_CAPABILITY_DENIED` with the required `capability`; a revocation observed by the
+worker is a typed `EXTENSION_CAPABILITY_DENIED` route result. Invalid runtime control consent/action is
+`422 HINDSIGHT_CONTROL_CONSENT_REQUIRED`; a required migration/continuity transition is
+`409 HINDSIGHT_STORAGE_CONTINUITY_REQUIRED`; and local/Docker starts without the required external
+database setting return `422 HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED`. Unavailable runtime
+infrastructure returns `503 HINDSIGHT_RUNTIME_UNAVAILABLE`.
+
+Data-plane availability and validation failures are typed **200** responses, so a panel can keep
+its form state rather than treat an expected down service as a transport failure. Common codes are
+`SERVICE_UNHEALTHY`, `HINDSIGHT_CONFIG_UNAVAILABLE`, `HINDSIGHT_SCOPE_UNAVAILABLE`,
+`MEMORY_QUERY_REQUIRED`, `MEMORY_CONTENT_REQUIRED`, `MEMORY_PROMPT_REQUIRED`,
+`MEMORY_ID_REQUIRED`, `INVALIDATION_CONFIRMATION_REQUIRED`, `OUTCOME_UNAVAILABLE`,
+`MEMORY_NOT_FOUND`, `MEMORY_API_UNSUPPORTED`, and `MEMORY_RESPONSE_INVALID`. A service-down,
+degraded, or timed-out data-plane request returns its typed unhealthy result without constructing a
+fallback client or falling back to another provider. Migration failures are returned in their typed
+result (`HINDSIGHT_MIGRATION_*`) rather than as a new empty bank.
 
 Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 
