@@ -276,6 +276,10 @@ export class ModuleHost {
 				// structured-cloned to the worker for routes that require rich identity.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
 				scopeContext: (req.ctx as { scopeContext?: unknown } | undefined)?.scopeContext,
+				// Route data-plane adapters receive the server-resolved generic runtime
+				// projection. It is configuration-free and contains no authority or
+				// secrets; omitting it would make every managed-mode route appear down.
+				runtime: (req.ctx as { runtime?: unknown } | undefined)?.runtime,
 				outcome: (req.ctx as { outcome?: unknown } | undefined)?.outcome,
 				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
 				workingDir: req.ctx?.workingDir,

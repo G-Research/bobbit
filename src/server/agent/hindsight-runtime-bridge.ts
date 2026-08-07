@@ -277,7 +277,7 @@ export class HindsightRuntimeBridge {
 		const plan = createHindsightMigrationPlan({
 			source,
 			target,
-			backupDirectory: path.join(this.context(projectId).stateDir, "hindsight-migrations"),
+			backupDirectory: path.join(this.projectContext(projectId).stateDir, "hindsight-migrations"),
 			// A source whose location has not been positively verified is never
 			// migrated; the caller must configure an external database or use the
 			// documented logical migration route rather than receive an empty bank.
@@ -328,7 +328,7 @@ export class HindsightRuntimeBridge {
 		return undefined;
 	}
 
-	private context(projectId: string): { stateDir: string; extensionSettingsStore: ExtensionSettingsStore } {
+	private projectContext(projectId: string): { stateDir: string; extensionSettingsStore: ExtensionSettingsStore } {
 		const context = this.options.contextForProject(projectId);
 		if (!context) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
 		return context;
@@ -346,7 +346,7 @@ export class HindsightRuntimeBridge {
 	private settings(projectId: string): HindsightRuntimeSettingsResolver {
 		let resolver = this.resolvers.get(projectId);
 		if (!resolver) {
-			resolver = new HindsightRuntimeSettingsResolver(projectId, this.context(projectId), this.options.contributions);
+			resolver = new HindsightRuntimeSettingsResolver(projectId, this.projectContext(projectId), this.options.contributions);
 			this.resolvers.set(projectId, resolver);
 		}
 		return resolver;

@@ -191,10 +191,12 @@ describe.serial("Hindsight experience API", () => {
 		denied(readDenied, await json(readDenied), "memory.read");
 		await grant(project.id, "memory.read");
 		const readAllowed = await route(sessionId, "recall", { query: "configured but unavailable is bounded" });
-		expect(readAllowed.status).toBe(200);
+		expect(readAllowed.status, `granted recall: ${await readAllowed.clone().text()}`).toBe(200);
 		const readBody = await json(readAllowed);
-		expect(readBody).toMatchObject({ configured: expect.any(Boolean), memories: expect.any(Array) });
-		expect(readBody.memories).toEqual([]);
+		// Saving a managed EP-7 mode is inert. Until an explicitly granted start
+		// succeeds, the route returns its bounded typed no-service result rather
+		// than probing, starting, or falling back to another provider.
+		expect(readBody).toEqual({ configured: false, code: "SERVICE_UNHEALTHY" });
 		expect(JSON.stringify(readBody)).not.toContain(SECRET);
 		await revoke(project.id, "memory.read");
 		const readRevoked = await route(sessionId, "recall", { query: "revoked before dispatch" });

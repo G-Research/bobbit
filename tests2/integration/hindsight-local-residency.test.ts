@@ -21,6 +21,11 @@ function localSettings() {
 	};
 }
 
+/** Direct pack-route contexts must model the live EP-6 boundary explicitly.
+ * Production injects this adapter from the gateway; tests must never depend on
+ * an absent adapter being treated as a grant. */
+const allowMemoryCapabilities = { requireCapability: () => ({ allowed: true as const }) };
+
 afterEach(() => __setClientFactory(null));
 
 describe("Hindsight local resident model integration", () => {
@@ -36,10 +41,11 @@ describe("Hindsight local resident model integration", () => {
 		const client = {
 			health: async () => ({ ok: true }), ensureBank: async () => { calls.push("ensure-bank"); },
 			recall: async () => ({ memories: [] }), retain: async () => { calls.push("retain"); },
-			reflect: async () => { calls.push("reflect"); return { text: "reflection" }; }, listBanks: async () => ({ banks: [] }),
+			reflect: async () => ({ text: "legacy unscoped reflection" }),
+			reflectScoped: async () => { calls.push("reflect"); return { text: "reflection" }; }, listBanks: async () => ({ banks: [] }),
 		};
 		__setClientFactory(config => { endpoints.push(config.baseUrl); return client; });
-		const context = { host: { store }, scopeContext: { project: { id: "project-a" } }, runtime: { state: "ready" as const, endpoint: "http://127.0.0.1:45123" } };
+		const context = { host: { store, memory: allowMemoryCapabilities }, scopeContext: { project: { id: "project-a" } }, runtime: { state: "ready" as const, endpoint: "http://127.0.0.1:45123" } };
 		assert.deepEqual(await routes.retain(context, { body: { content: "keep resident" } }), { ok: true, configured: true });
 		assert.deepEqual(await routes.reflect(context, { body: { prompt: "summarize" } }), { configured: true, text: "reflection" });
 		assert.deepEqual(calls, ["ensure-bank", "retain", "reflect"]);
@@ -51,10 +57,10 @@ describe("Hindsight local resident model integration", () => {
 		await store.put(CONFIG_KEY, { runtimeMode: "local" });
 		let clientConstructed = false;
 		__setClientFactory(() => { clientConstructed = true; throw new Error("unexpected fallback"); });
-		const context = { host: { store }, scopeContext: { project: { id: "project-a" } }, runtime: { state: "degraded" as const, diagnostic: { code: "SERVICE_UNHEALTHY" } } };
-		assert.deepEqual(await routes.recall(context, { body: { query: "do not hang" } }), { configured: true, memories: [] });
-		assert.deepEqual(await routes.retain(context, { body: { content: "do not write" } }), { ok: false, configured: true });
-		assert.deepEqual(await routes.reflect(context, { body: { prompt: "do not reflect" } }), { configured: true, text: "" });
+		const context = { host: { store, memory: allowMemoryCapabilities }, scopeContext: { project: { id: "project-a" } }, runtime: { state: "degraded" as const, diagnostic: { code: "SERVICE_UNHEALTHY" } } };
+		assert.deepEqual(await routes.recall(context, { body: { query: "do not hang" } }), { configured: true, code: "SERVICE_UNHEALTHY" });
+		assert.deepEqual(await routes.retain(context, { body: { content: "do not write" } }), { configured: true, code: "SERVICE_UNHEALTHY" });
+		assert.deepEqual(await routes.reflect(context, { body: { prompt: "do not reflect" } }), { configured: true, code: "SERVICE_UNHEALTHY" });
 		assert.equal(clientConstructed, false);
 	});
 });

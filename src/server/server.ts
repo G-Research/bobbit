@@ -89,7 +89,7 @@ import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER
 import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
 import { HindsightCapabilityError, HindsightRuntimeBridge, HindsightRuntimeSettingsResolver, isHindsightCapability } from "./agent/hindsight-runtime-bridge.js";
 import { isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
-import { ComposeServiceRunner, DockerServiceRunner, LocalServiceRunner, ServiceRuntimeStore, ServiceRuntimeSupervisor } from "./service-runtime/index.js";
+import { ComposeServiceRunner, DockerServiceRunner, LocalServiceRunner, ServiceRuntimeStore, ServiceRuntimeSupervisor, type ServiceRuntimeContext } from "./service-runtime/index.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
@@ -10640,7 +10640,7 @@ async function handleApiRoute(
 				completionRevision: goal.updatedAt,
 			};
 		})();
-		let routeRuntime: Awaited<ReturnType<HindsightRuntimeBridge["context"]>> | undefined;
+		let routeRuntime: ServiceRuntimeContext | undefined;
 		try {
 			if (ident.packId === "hindsight") {
 				const capability = hindsightRouteCapability(routeName, init.body);
@@ -10681,12 +10681,20 @@ async function handleApiRoute(
 					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), ...(await hindsightRuntimeBridge?.migrationExecute(projectId, init.body) ?? { ok: false, code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }) });
 					return;
 				}
-				routeRuntime = await hindsightRuntimeBridge?.context({
-					packId: ident.packId,
-					runtimeId: "hindsight",
-					providerId: "memory",
-					projectId,
-				});
+				// Runtime status is advisory for data-plane routes. A transient generic
+				// store/runner read must degrade to the typed no-service response below,
+				// not turn an otherwise granted recall into an HTTP 503 or trigger a
+				// provider fallback. Capability checks above remain strict and fail closed.
+				try {
+					routeRuntime = await hindsightRuntimeBridge?.context({
+						packId: ident.packId,
+						runtimeId: "hindsight",
+						providerId: "memory",
+						projectId,
+					});
+				} catch {
+					routeRuntime = { state: "unavailable", diagnostic: { code: "SERVICE_UNAVAILABLE" } };
+				}
 			}
 		} catch (err) {
 			const status = err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;

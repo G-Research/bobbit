@@ -158,6 +158,8 @@ interface SerializableCtx {
 	tool: string;
 	/** Host-resolved, structured-cloned advisory scope for route handlers. */
 	scopeContext?: HookScopeContext;
+	/** Generic service runtime projection supplied by the server route boundary. */
+	runtime?: { endpoint?: string; state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable"; diagnostic?: { code: string; retryAt?: string } };
 	workingDir?: string;
 	sessionArchived?: boolean;
 	/** Bounded, server-derived completed-goal snapshot for retain-outcome only. */
@@ -738,6 +740,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				toolUseId: msg.ctx.toolUseId,
 				tool: msg.ctx.tool,
 				...(msg.ctx.scopeContext === undefined ? {} : { scopeContext: msg.ctx.scopeContext }),
+				...(msg.ctx.runtime === undefined ? {} : { runtime: msg.ctx.runtime }),
 				workingDir: msg.ctx.workingDir,
 				sessionArchived: msg.ctx.sessionArchived,
 			};
