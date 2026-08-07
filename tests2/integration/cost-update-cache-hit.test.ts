@@ -112,6 +112,88 @@ test("/api/sessions/:id/cost REST snapshot includes cacheHitRate", async () => {
 	}
 });
 
+test("cost_update hydration preserves the complete manager-owned usage projection", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	const manager = gateway.sessionManager as any;
+	const snapshot = {
+		inputTokens: 500,
+		outputTokens: 125,
+		cacheReadTokens: 250,
+		cacheWriteTokens: 75,
+		totalCost: null,
+		notionalCostUsd: 0.0125,
+		costBasis: "subscription-notional",
+		byModel: {
+			"claude-agent-sdk/claude-sonnet-4-6": {
+				inputTokens: 500,
+				outputTokens: 125,
+				cacheReadTokens: 250,
+				cacheWriteTokens: 75,
+				notionalCostUsd: 0.0125,
+			},
+		},
+		context: {
+			currentTokens: 875,
+			currentModel: "claude-agent-sdk/claude-sonnet-4-6",
+			highWaterTokens: 1_024,
+			highWaterModel: "claude-agent-sdk/claude-sonnet-4-6",
+			byModel: {
+				"claude-agent-sdk/claude-sonnet-4-6": {
+					contextWindow: 200_000,
+					currentTokens: 875,
+					highWaterTokens: 1_024,
+				},
+			},
+		},
+		cacheHitRate: 1 / 3,
+	};
+	const getCostUpdate = manager.getSessionCostUpdate.bind(manager);
+	const withCostInState = manager.withSessionCostInState.bind(manager);
+	manager.getSessionCostUpdate = (sessionId: string) => sessionId === targetSessionId
+		? { type: "cost_update", sessionId, cost: snapshot }
+		: getCostUpdate(sessionId);
+	// The handler must use the same projection as cost_update, not a parallel
+	// state-only reconstruction that can lose nullable/basis/context fields.
+	manager.withSessionCostInState = (sessionId: string, data: unknown) => sessionId === targetSessionId
+		? data
+		: withCostInState(sessionId, data);
+
+	let ws: WsConnection | undefined;
+	try {
+		ws = await connectWs(targetSessionId);
+		const costFrame = await ws.waitFor(
+			(m) => m.type === "cost_update" && m.sessionId === targetSessionId,
+			5_000,
+		);
+		const stateFrame = await ws.waitFor(
+			(m) => m.type === "state" && m.data?.serverCost?.costBasis === "subscription-notional",
+			5_000,
+		);
+		expect(costFrame.cost).toEqual(snapshot);
+		expect(stateFrame.data.serverCost).toEqual(costFrame.cost);
+		expect(stateFrame.data.serverCost.totalCost).toBeNull();
+
+		const cursor = ws.messageCount();
+		ws.send({ type: "get_state" });
+		const refreshedCost = await ws.waitForFrom(
+			cursor,
+			(m) => m.type === "cost_update" && m.sessionId === targetSessionId,
+			5_000,
+		);
+		const refreshedState = await ws.waitForFrom(
+			cursor,
+			(m) => m.type === "state" && m.data?.serverCost?.costBasis === "subscription-notional",
+			5_000,
+		);
+		expect(refreshedState.data.serverCost).toEqual(refreshedCost.cost);
+	} finally {
+		ws?.close();
+		manager.getSessionCostUpdate = getCostUpdate;
+		manager.withSessionCostInState = withCostInState;
+		await deleteSession(targetSessionId).catch(() => {});
+	}
+});
+
 test("cost_update and REST map non-zero cacheRead usage into cacheHitRate", async ({ gateway }) => {
 	const targetSessionId = await createSession();
 	const ws = await connectWs(targetSessionId);
