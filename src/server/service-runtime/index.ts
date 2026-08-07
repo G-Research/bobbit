@@ -4,11 +4,12 @@ export type {
 	ServiceRuntimeManifest,
 	ServiceManifestSourceContext,
 } from "./service-manifest.js";
-export { parseServiceManifest } from "./service-manifest.js";
+export { parseServiceManifest, isSafeServiceImageReference } from "./service-manifest.js";
 
 export type {
 	ServiceRuntimeContext,
 	ServiceRuntimeStatus,
+	ServiceRuntimeStatusMode,
 	ServiceRuntimeControlRequest,
 	ServiceRuntimeSettings,
 	ServiceRuntimeSettingsResolver,

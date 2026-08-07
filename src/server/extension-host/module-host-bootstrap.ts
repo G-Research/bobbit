@@ -160,9 +160,11 @@ interface SerializableCtx {
 	scopeContext?: HookScopeContext;
 	workingDir?: string;
 	sessionArchived?: boolean;
+	/** Bounded, server-derived completed-goal snapshot for retain-outcome only. */
+	outcome?: unknown;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean; memory: boolean };
 }
 
 /** Recreate the parent-owned absolute deadline as a worker-local AbortSignal.
@@ -506,6 +508,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			session: flags.session,
 			store: flags.store,
 			agents: flags.agents,
+			memory: flags.memory,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
 		store: {
@@ -528,6 +531,9 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		// SUB-GOAL C: the ambient `host.agents` namespace. Each verb marshals to the
 		// PARENT's live ServerHostApi (where owner/source scoping + recursion denial are
 		// enforced). Poll-based only — NO blocking `wait`.
+		memory: {
+			requireCapability: (capability: string) => callHost(["memory", "requireCapability"], [capability]),
+		},
 		agents: {
 			spawn: (spawnOpts: unknown) => callHost(["agents", "spawn"], [spawnOpts]),
 			prompt: (childSessionId: string, message: string) => callHost(["agents", "prompt"], [childSessionId, message]),

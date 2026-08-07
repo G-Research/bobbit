@@ -3940,6 +3940,31 @@ export function patchExtensionSettingsPack(
 	);
 }
 
+// Generic runtime projection shared by pack panels. It deliberately has no
+// settings or secret fields; those stay on the redacted EP-7 settings wire.
+export type ServiceRuntimeObservedState = "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable";
+export type ServiceRuntimeMode = "external" | "local" | "docker" | "compose";
+export interface ServiceRuntimeStatusWire {
+	identity: { packId: string; runtimeId: string };
+	desired: "stopped" | "running";
+	mode?: ServiceRuntimeMode;
+	state: ServiceRuntimeObservedState;
+	endpoint?: string;
+	diagnostic?: { code: string; retryAt?: string };
+}
+
+/** Runtime route payloads carry the settings revision that produced the status,
+ * never secret bytes. Pack panels call these through their scoped host route. */
+export interface HindsightRuntimeStatusWire {
+	settingsRevision: number;
+	status: ServiceRuntimeStatusWire;
+}
+export interface HindsightRuntimeControlRequest {
+	action: "start" | "stop" | "restart";
+	/** Explicit consent is required by the pack route before control is invoked. */
+	consent: true;
+}
+
 /** Grant one exact capability tuple through the authenticated project policy route. */
 export function grantExtensionCapability(
 	projectId: string,

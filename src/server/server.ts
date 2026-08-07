@@ -87,7 +87,9 @@ import type { StoreMutationOptions, StorePutOptions } from "../shared/extension-
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
 import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
+import { HindsightCapabilityError, HindsightRuntimeBridge, HindsightRuntimeSettingsResolver, isHindsightCapability } from "./agent/hindsight-runtime-bridge.js";
 import { isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
+import { ComposeServiceRunner, DockerServiceRunner, LocalServiceRunner, ServiceRuntimeStore, ServiceRuntimeSupervisor } from "./service-runtime/index.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
@@ -3081,6 +3083,43 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		undefined,
 		extensionSettingsRuntimeLookup,
 	);
+	// Hindsight uses the existing project-scoped settings and live EP-6 resolver.
+	// Construction is inert: it neither resolves settings nor touches a service.
+	const hindsightServiceRunners = [new LocalServiceRunner(), new DockerServiceRunner(), new ComposeServiceRunner()];
+	const hindsightServerIdentity = `hindsight-${createHash("sha256").update(stateDir).digest("hex").slice(0, 24)}`;
+	const hindsightRuntimeBridge = new HindsightRuntimeBridge({
+		contributions: packContributionRegistry,
+		contextForProject: (projectId) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			return context ? { stateDir: context.stateDir, extensionSettingsStore: context.extensionSettingsStore } : undefined;
+		},
+		grants: (projectId, principal, capability) => createExtensionCapabilityGrantResolver({
+			contextForProject: (id) => {
+				const context = projectContextManager.getOrCreate(id);
+				return context ? { projectConfigStore: context.projectConfigStore } : undefined;
+			},
+			contributions: packContributionRegistry,
+		})(projectId, principal, capability),
+		supervisorForProject: (projectId, settings: HindsightRuntimeSettingsResolver) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			if (!context) throw new Error("PROJECT_NOT_FOUND");
+			return new ServiceRuntimeSupervisor({
+				registry: packContributionRegistry,
+				store: new ServiceRuntimeStore({ stateDir: context.stateDir, serverIdentity: hindsightServerIdentity }),
+				runners: hindsightServiceRunners,
+				authorizer: { authorize: request => createExtensionCapabilityGrantResolver({
+					contextForProject: (id) => {
+						const current = projectContextManager.getOrCreate(id);
+						return current ? { projectConfigStore: current.projectConfigStore } : undefined;
+					},
+					contributions: packContributionRegistry,
+				})(projectId, { kind: "pack", packId: request.packId }, "service.manage").allowed },
+				settings,
+				serverIdentity: hindsightServerIdentity,
+				logger: { warn: (message, details) => console.warn(`[hindsight-runtime] ${message}`, details?.code ?? "") },
+			});
+		},
+	});
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -3113,6 +3152,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			packStore: getPackStore(),
 			capabilityMask: { store: true, session: false, agents: false },
 		}),
+		runtimeContextResolver: (input) => hindsightRuntimeBridge
+			? hindsightRuntimeBridge.context(input)
+			: { state: "unavailable", diagnostic: { code: "SERVICE_UNAVAILABLE" } },
 		gatewayInfo: () => {
 			try {
 				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -3993,7 +4035,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes, hindsightRuntimeBridge);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5320,6 +5362,7 @@ async function handleApiRoute(
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
+	hindsightRuntimeBridge?: HindsightRuntimeBridge,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5447,6 +5490,18 @@ async function handleApiRoute(
 		},
 		contributions: packContributionRegistry,
 	});
+	const hindsightRouteCapability = (routeName: string, body: unknown): "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all" | undefined => {
+		if (["runtime-control", "migration-execute", "migration-rollback", "migration-purge"].includes(routeName)) return "service.manage";
+		if (["retain", "retain-outcome"].includes(routeName)) return "memory.write";
+		if (routeName === "reflect") return "memory.reflect";
+		if (routeName === "invalidate") return "memory.invalidate";
+		if (["browse", "detail", "recall"].includes(routeName)) {
+			const allScope = !!body && typeof body === "object" && !Array.isArray(body)
+				&& ((body as Record<string, unknown>).scope === "all" || (body as Record<string, unknown>).allScope === true);
+			return allScope ? "memory.read.all" : "memory.read";
+		}
+		return undefined;
+	};
 	const extensionPackGrantCapabilities: readonly ExtensionPackCapability[] = [
 		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
 	];
@@ -10097,6 +10152,14 @@ async function handleApiRoute(
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
 			// Drop activation caches when an action persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
+			...(ident.packId === "hindsight" && actionSessionProjectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(actionSessionProjectId, capability);
+					},
+				},
+			} : {}),
 		});
 		// The session working dir the confined worker uses as its process.cwd() (tool
 		// parity — prefer the worktree path; fall back to the recorded cwd).
@@ -10523,6 +10586,14 @@ async function handleApiRoute(
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
+			...(ident.packId === "hindsight" && routeSessionProjectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(routeSessionProjectId, capability);
+					},
+				},
+			} : {}),
 		});
 		// Resolve rich route scope only from the authenticated session's own live or
 		// persisted coordinates. This is the same host resolver used by lifecycle
@@ -10545,6 +10616,63 @@ async function handleApiRoute(
 				repoWorktrees: routeRepoWorktrees,
 			})
 			: undefined;
+		// Retain-outcome receives the same bounded durable snapshot used by the
+		// goal-completion lifecycle hook. The request body can never choose a goal
+		// or supply replacement outcome content.
+		const routeOutcome = (() => {
+			if (ident.packId !== "hindsight" || routeName !== "retain-outcome") return undefined;
+			const goalId = authenticatedRouteSession?.goalId ?? authenticatedRouteSession?.teamGoalId;
+			const projectId = authenticatedRouteSession?.projectId;
+			if (!goalId || !projectId) return undefined;
+			const context = projectContextManager.getContextForGoal(goalId);
+			const goal = context?.goalManager.getGoal(goalId);
+			if (!context || !goal || context.project.id !== projectId || goal.state !== "complete") return undefined;
+			return {
+				outcome: boundedGoalCompletionOutcome(goal, context.taskStore.getByGoalId(goalId), context.gateStore.getGatesForGoal(goalId)),
+				completedAt: goal.updatedAt,
+				completionRevision: goal.updatedAt,
+			};
+		})();
+		let routeRuntime: Awaited<ReturnType<HindsightRuntimeBridge["context"]>> | undefined;
+		try {
+			if (ident.packId === "hindsight") {
+				const capability = hindsightRouteCapability(routeName, init.body);
+				if (capability) {
+					if (!authenticatedRouteSession?.projectId) throw new ActionError(403, "Hindsight project scope is unavailable");
+					hindsightRuntimeBridge?.require(authenticatedRouteSession.projectId, capability);
+				}
+				const projectId = authenticatedRouteSession?.projectId;
+				if (projectId && routeName === "runtime-status") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), status: await hindsightRuntimeBridge?.status(projectId) });
+					return;
+				}
+				if (projectId && routeName === "runtime-logs") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), logs: await hindsightRuntimeBridge?.logs(projectId) ?? "" });
+					return;
+				}
+				if (projectId && routeName === "runtime-control") {
+					const body = init.body;
+					const action = body && typeof body === "object" && !Array.isArray(body) ? (body as { action?: unknown }).action : undefined;
+					const consent = body && typeof body === "object" && !Array.isArray(body) ? (body as { consent?: unknown }).consent : undefined;
+					if ((action !== "start" && action !== "stop" && action !== "restart") || consent !== true) {
+						json({ error: "Explicit runtime control consent is required", code: "HINDSIGHT_CONTROL_CONSENT_REQUIRED" }, 422);
+						return;
+					}
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), status: await hindsightRuntimeBridge?.control(projectId, action) });
+					return;
+				}
+				routeRuntime = await hindsightRuntimeBridge?.context({
+					packId: ident.packId,
+					runtimeId: "hindsight",
+					providerId: "memory",
+					projectId,
+				});
+			}
+		} catch (err) {
+			const status = err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;
+			json({ error: status === 403 ? "Hindsight capability is required" : "Hindsight runtime is unavailable", code: err instanceof HindsightCapabilityError ? err.code : "HINDSIGHT_RUNTIME_UNAVAILABLE" }, status);
+			return;
+		}
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
@@ -10561,6 +10689,8 @@ async function handleApiRoute(
 					tool: ident.contributionId,
 					projectId: authenticatedRouteSession?.projectId,
 					...(routeScopeContext ? { scopeContext: routeScopeContext } : {}),
+					...(routeRuntime ? { runtime: routeRuntime } : {}),
+					...(routeOutcome ? routeOutcome : {}),
 					workingDir: routeWorkingDir,
 					sessionArchived: sessionManager.getArchivedSession(guard.sessionId) !== undefined,
 				},
