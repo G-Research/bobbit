@@ -3,9 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { test as base, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, registerProject } from "./_e2e/e2e-setup.js";
 import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.ts";
 import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.ts";
+import { startHindsightStub } from "../../tests/e2e/hindsight-stub.mjs";
 
 // The in-process gateway stages Hindsight as the shipped built-in pack. Keep
 // the test-only resolver available for source-mode route workers in older test
@@ -150,6 +151,50 @@ describe.serial("Hindsight experience API", () => {
 		const reloaded = await apiFetch(settingsPath(project.id));
 		expect(reloaded.status).toBe(200);
 		expect(await reloaded.text()).not.toContain(SECRET);
+	});
+
+	test("retains the server-derived completed outcome idempotently and rejects incomplete goals", async ({ gateway }) => {
+		const project = await createProject(gateway, "outcome-route");
+		const goal = await createGoal({ projectId: project.id, title: "Route-owned completed outcome", cwd: project.rootPath, worktree: false, team: false });
+		const sessionId = await createSession({ projectId: project.id, goalId: goal.id, cwd: project.rootPath });
+		const stub = await startHindsightStub({ port: 0 }) as Awaited<ReturnType<typeof startHindsightStub>>;
+		try {
+			const initial = await json(await apiFetch(settingsPath(project.id)));
+			const configured = await apiFetch(providerPath(project.id), {
+				method: "PATCH", headers: operatorHeaders(),
+				body: JSON.stringify({ expectedRevision: initial.revision, values: { runtimeMode: "external", externalUrl: stub.url } }),
+			});
+			expect(configured.status).toBe(200);
+			await grant(project.id, "memory.write");
+
+			const incomplete = await route(sessionId, "retain-outcome", { content: "forged incomplete outcome", goalId: "forged-goal" });
+			expect(incomplete.status).toBe(200);
+			expect(await json(incomplete)).toEqual({ ok: false, configured: true, code: "OUTCOME_UNAVAILABLE" });
+
+			const context = gateway.projectContextManager.getContextForGoal(goal.id);
+			await context.goalManager.updateGoal(goal.id, { state: "complete" });
+			const beforeRouteCalls = stub.calls.filter((call: any) => call.method === "POST" && /\/memories$/.test(call.path)).length;
+			const first = await route(sessionId, "retain-outcome", { content: "forged first body", completionRevision: "forged" });
+			const second = await route(sessionId, "retain-outcome", { content: "forged second body" });
+			expect(first.status).toBe(200);
+			expect(second.status).toBe(200);
+			const firstBody = await json(first);
+			const secondBody = await json(second);
+			expect(secondBody).toEqual(firstBody);
+			const routeCalls = stub.calls.filter((call: any) => call.method === "POST" && /\/memories$/.test(call.path)).slice(beforeRouteCalls);
+			expect(routeCalls).toHaveLength(2);
+			expect(routeCalls.map((call: any) => call.body.items[0].id)).toEqual([firstBody.outcomeId, firstBody.outcomeId]);
+			expect(routeCalls.map((call: any) => call.body.items[0].tags)).toEqual([
+				["goal:" + goal.id, "kind:outcome", "project:" + project.id],
+				["goal:" + goal.id, "kind:outcome", "project:" + project.id],
+			]);
+			expect(JSON.stringify(routeCalls)).not.toContain("forged first body");
+			expect(JSON.stringify(routeCalls)).not.toContain("forged second body");
+		} finally {
+			await stub.close();
+			await deleteSession(sessionId).catch(() => {});
+			await deleteGoal(goal.id).catch(() => {});
+		}
 	});
 
 	test("enforces live EP-6 grants around typed routes while leaving status and logs read-only", async ({ gateway }) => {

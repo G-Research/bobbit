@@ -4,6 +4,7 @@
 
 import {
 	clientConfig,
+	completedOutcomeRetention,
 	isActive,
 	isConfigured,
 	loadEffectiveConfig,
@@ -208,13 +209,6 @@ function belongsToScope(memory: unknown, scope: MemoryScope): boolean {
 	const tags = new Set(memory.tags.filter((tag): tag is string => typeof tag === "string"));
 	return tags.has(`project:${scope.projectId}`) && (!scope.goalId || tags.has(`goal:${scope.goalId}`));
 }
-function outcomeContent(value: unknown): { content: string; id?: string } | undefined {
-	if (typeof value === "string") return text(value, MAX_CONTENT) ? { content: text(value, MAX_CONTENT)! } : undefined;
-	if (!record(value)) return undefined;
-	const content = text(value.content ?? value.summary, MAX_CONTENT);
-	const id = safeId(value.id ?? value.outcomeId);
-	return content ? { content, ...(id ? { id } : {}) } : undefined;
-}
 
 async function readRows(ctx: MemoryRouteContext, req: MemoryRouteRequest) {
 	const availability = await routeConfig(ctx);
@@ -399,17 +393,18 @@ export const memoryRoutes = {
 		if (!scope) return { ok: false, configured: true, code: "HINDSIGHT_SCOPE_UNAVAILABLE" };
 		const permission = await authorize(ctx, "memory.write");
 		if (!permission.ok) return { ok: false, configured: true, code: permission.code };
-		// Never consume a request body outcome. The host injects the completion
-		// snapshot after resolving the session/goal, so tools cannot forge content.
-		const outcome = outcomeContent(ctx.host.completedOutcome);
+		// Never consume a request body outcome. The host injects the durable
+		// completion envelope after resolving the session/goal, so tools cannot
+		// forge content, revision, or a document identity.
+		const outcome = completedOutcomeRetention(ctx.host.completedOutcome, scope, availability.config);
 		if (!outcome) return { ok: false, configured: true, code: "OUTCOME_UNAVAILABLE" };
 		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const retain = clientMethod(client, "retain");
 			const ensureBank = clientMethod(client, "ensureBank");
 			if (!retain || !ensureBank) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED" };
 			await ensureBank(config.bank);
-			await retain(config.bank, outcome.content, { tags: { kind: "outcome", ...scopedTags(scope) }, sync: true, ...(outcome.id ? { id: outcome.id } : {}) });
-			return { ok: true, configured: true, ...(outcome.id ? { outcomeId: outcome.id } : {}) };
+			await retain(config.bank, outcome.content, { tags: outcome.tags, sync: true, id: outcome.documentId });
+			return { ok: true, configured: true, outcomeId: outcome.documentId };
 		});
 	},
 };
