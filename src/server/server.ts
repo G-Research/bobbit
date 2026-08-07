@@ -568,7 +568,9 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
+import { getAvailableModels, peekCachedAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel, type ApiModel } from "./agent/model-registry.js";
+import { isClaudeAgentSdkSessionId } from "./agent/claude-agent-sdk-bridge.js";
+import { resolveSessionRuntime } from "./agent/session-runtime.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -5112,6 +5114,51 @@ async function handleApiRoute(
 			return false;
 		}
 	};
+
+	/**
+	 * Project durable runtime/model identity onto REST audit rows. Runtime is
+	 * derived through the canonical resolver, while availability is a snapshot
+	 * of the current registry — a saved unavailable tuple must retain its SDK/Pi
+	 * identity rather than being silently presented as Pi.
+	 */
+	const sessionAuditIdentity = (source: {
+		runtime?: unknown;
+		modelProvider?: unknown;
+		modelId?: unknown;
+	} | undefined, models?: readonly ApiModel[]) => {
+		const modelProvider = typeof source?.modelProvider === "string" && source.modelProvider.trim()
+			? source.modelProvider.trim()
+			: undefined;
+		const modelId = typeof source?.modelId === "string" && source.modelId.trim()
+			? source.modelId.trim()
+			: undefined;
+		const persistedRuntime = source?.runtime === "claude-agent-sdk" ? source.runtime : undefined;
+		const initialModel = modelProvider && modelId ? `${modelProvider}/${modelId}` : undefined;
+		const runtime = resolveSessionRuntime({
+			modelProvider,
+			initialModel,
+			// `runtime` is retained for the current resolver; `persistedRuntime` is
+			// the canonical name and keeps this projection compatible with it.
+			runtime: persistedRuntime,
+			persistedRuntime,
+		} as any);
+		const modelAvailable = modelProvider && modelId && models
+			? !!findSessionSelectableModel(models, modelProvider, modelId)
+			: undefined;
+		return {
+			runtime,
+			...(modelProvider ? { modelProvider } : {}),
+			...(modelId ? { modelId } : {}),
+			...(modelAvailable !== undefined ? { modelAvailable } : {}),
+		};
+	};
+	// Session/audit endpoints must never block on or trigger provider discovery.
+	// A cold or failed model catalog is unknown, not unavailable.
+	const auditModels = (): readonly ApiModel[] | undefined => peekCachedAvailableModels();
+	const auditSessionRow = (row: any, models?: readonly ApiModel[]) => {
+		const persisted = typeof row?.id === "string" ? sessionManager.getPersistedSession(row.id) : undefined;
+		return { ...row, ...sessionAuditIdentity(persisted ?? row, models) };
+	};
 	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
 	// and the ToolManager mtime-keyed scan cache both need busting after a
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
@@ -6992,10 +7039,11 @@ async function handleApiRoute(
 		}
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
 		const registeredProjectIds = new Set(projectRegistry.list().map(p => p.id));
-		let sessions = sessionManager.listSessions().map((s) => ({
+		const sessionAuditModels = auditModels();
+		let sessions = sessionManager.listSessions().map((s) => auditSessionRow({
 			...s,
 			colorIndex: colorStore.get(s.id),
-		})).filter(s => !s.projectId || registeredProjectIds.has(s.projectId));
+		}, sessionAuditModels)).filter(s => !s.projectId || registeredProjectIds.has(s.projectId));
 		if (filterProjectId) {
 			sessions = sessions.filter(s => s.projectId === filterProjectId);
 		}
@@ -7007,7 +7055,7 @@ async function handleApiRoute(
 			for (const ctx of projectContextManager.visible()) {
 				const store = ctx.sessionStore;
 				for (const s of store.getArchived()) {
-					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
+					allArchived.push(auditSessionRow({ ...s, colorIndex: colorStore.get(s.id), status: "archived" }, sessionAuditModels) as any);
 				}
 			}
 			// Sort by archivedAt descending
@@ -7049,7 +7097,7 @@ async function handleApiRoute(
 				const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
 					[...liveIdSet, ...liveGoalIds],
 					visibleArchivedRaw(),
-					(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+					(s) => auditSessionRow({ ...s, colorIndex: colorStore.get(s.id), archived: true }, sessionAuditModels) as any,
 				);
 
 				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, limit: paging.limit, offset: !hasCursor ? paging.offset : undefined, hasMore, nextCursor, ...(nextOffset !== undefined ? { nextOffset } : {}), archivedDelegates: archivedDelegatesOfLive });
@@ -7059,7 +7107,7 @@ async function handleApiRoute(
 				const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
 					[...liveIdSet, ...liveGoalIds],
 					visibleArchivedRaw(),
-					(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+					(s) => auditSessionRow({ ...s, colorIndex: colorStore.get(s.id), archived: true }, sessionAuditModels) as any,
 				);
 
 				// Backward compatible: return all archived sessions
@@ -7080,7 +7128,7 @@ async function handleApiRoute(
 			const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
 				[...liveIdSet, ...liveGoalIdsNonPaginated],
 				visibleArchivedRaw(),
-				(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+				(s) => auditSessionRow({ ...s, colorIndex: colorStore.get(s.id), archived: true }, sessionAuditModels) as any,
 			);
 			const paging = readOffsetPaging();
 			if (paging.enabled) {
@@ -7390,6 +7438,7 @@ async function handleApiRoute(
 			// Check if it's an archived session
 			const archived = sessionManager.getArchivedSession(id);
 			if (archived) {
+				const sessionAuditModels = auditModels();
 				json({
 					id: archived.id,
 					title: archived.title,
@@ -7419,6 +7468,7 @@ async function handleApiRoute(
 					archived: true,
 					archivedAt: archived.archivedAt,
 					imageGenerationModel: sessionManager.getImageModelForSession(archived.id),
+					...sessionAuditIdentity(archived, sessionAuditModels),
 				});
 				return;
 			}
@@ -7427,6 +7477,7 @@ async function handleApiRoute(
 			return;
 		}
 		const sessionPs = sessionManager.getSessionStore(session.projectId).get(session.id);
+		const sessionAuditModels = auditModels();
 		json({
 			id: session.id,
 			title: session.title,
@@ -7471,6 +7522,7 @@ async function handleApiRoute(
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 			completedTurnCount: session.completedTurnCount ?? 0,
 			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
+			...sessionAuditIdentity(sessionPs ?? session, sessionAuditModels),
 		});
 		return;
 	}
@@ -8060,6 +8112,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "GET") {
 		// Paginated archived goals — aggregate across all projects
 		if (url.searchParams.get("archived") === "true") {
+			const sessionAuditModels = auditModels();
 			const paging = readOffsetPaging();
 			const cursorParam = url.searchParams.get("cursor") ?? url.searchParams.get("after");
 			const afterCursor = cursorParam !== null ? parseInt(cursorParam, 10) : undefined;
@@ -8103,7 +8156,7 @@ async function handleApiRoute(
 				for (const s of ctx.sessionStore.getArchived()) {
 					if (!seenSessionIds.has(s.id) && (goalIdsInPage.has((s as any).teamGoalId) || goalIdsInPage.has((s as any).goalId))) {
 						seenSessionIds.add(s.id);
-						affiliatedSessions.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+						affiliatedSessions.push(auditSessionRow({ ...s, colorIndex: colorStore.get(s.id), status: "archived" }, sessionAuditModels));
 					}
 				}
 			}
@@ -8111,7 +8164,7 @@ async function handleApiRoute(
 			const delegateEnriched = bfsEnrichArchivedIndexed(
 				affiliatedSessions.map(s => s.id),
 				visibleArchivedRaw(),
-				(s) => ({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any),
+				(s) => auditSessionRow({ ...s, colorIndex: colorStore.get(s.id), status: "archived" }, sessionAuditModels) as any,
 			);
 			for (const s of delegateEnriched) {
 				if (!seenSessionIds.has(s.id)) {
@@ -13868,6 +13921,15 @@ async function handleApiRoute(
 
 		const unsupported = isUnsupportedForkSource(source, ps);
 		if (unsupported) { json({ error: unsupported }, 422); return; }
+		if (sessionAuditIdentity(ps).runtime === "claude-agent-sdk") {
+			// The SDK has resume but no branch primitive. Reject before resolving a
+			// transcript, allocating a destination id, or copying any sidecars.
+			json({
+				error: "Claude Agent SDK sessions cannot be forked",
+				code: "RUNTIME_FORK_UNSUPPORTED",
+			}, 422);
+			return;
+		}
 
 		const projectId = ps.projectId || source.projectId;
 		if (!projectId || !projectRegistry.get(projectId)) {
@@ -14010,6 +14072,7 @@ async function handleApiRoute(
 				projectId: launched.projectId,
 				goalId: launched.goalId,
 				title: launched.title,
+				...sessionAuditIdentity(sessionManager.getPersistedSession(launched.fork.id) ?? launched.fork, auditModels()),
 			}, 201);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -14446,6 +14509,103 @@ async function handleApiRoute(
 		const continueSourceTuple = resolveServerInitialModelTuple(ps);
 		const continueInitialModel = continueSourceTuple.initialModel
 			?? (typeof continueRole?.model === "string" && /^[^/]+\/.+$/.test(continueRole.model) ? continueRole.model : undefined);
+
+		// Agent SDK continuation has no Pi transcript to recover, stat, or copy.
+		// Validate its opaque resume handle and exact persisted model tuple before
+		// allocating a destination or touching any Pi-specific state.
+		if (sessionAuditIdentity(ps).runtime === "claude-agent-sdk") {
+			const modelProvider = typeof ps.modelProvider === "string" ? ps.modelProvider.trim() : "";
+			const modelId = typeof ps.modelId === "string" ? ps.modelId.trim() : "";
+			const claudeAgentSdkSessionId = ps.claudeAgentSdkSessionId;
+			if (!isClaudeAgentSdkSessionId(claudeAgentSdkSessionId) || modelProvider !== "claude-agent-sdk" || !modelId) {
+				json({
+					error: "Claude Agent SDK session requires a valid resume id and model tuple",
+					code: "RUNTIME_CONTINUE_UNSUPPORTED",
+				}, 422);
+				return;
+			}
+			try {
+				await sessionManager.readSdkSessionInfo(ps);
+			} catch {
+				json({
+					error: "Claude Agent SDK session is unavailable",
+					code: "SDK_SESSION_UNAVAILABLE",
+				}, 404);
+				return;
+			}
+
+			const proj = projectRegistry.get(ps.projectId)!;
+			const projCwd = proj.rootPath;
+			const wantWorktree = !!ps.worktreePath;
+			let worktreeOpts: { repoPath: string } | undefined;
+			if (wantWorktree) {
+				const projCtx = projectContextManager.getOrCreate(ps.projectId);
+				const components = projCtx?.projectConfigStore.getComponents() ?? [];
+				const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
+				const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef, commandRunner: serverCommandRunner });
+				if (!support.supported || !support.repoPath) {
+					json({
+						error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
+					}, 500);
+					return;
+				}
+				worktreeOpts = { repoPath: support.repoPath };
+			}
+
+			const newSessionId = randomUUID();
+			const sdkSourceTuple = { ...continueSourceTuple, initialModel: `claude-agent-sdk/${modelId}` };
+			const createOpts: any = {
+				sessionId: newSessionId,
+				projectId: ps.projectId,
+				sandboxed: !!ps.sandboxed,
+				worktreeOpts,
+				awaitWorktreeSetup: !!worktreeOpts,
+				bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
+				// Internal source metadata only — never client-controlled.
+				claudeAgentSdkSessionId,
+			};
+			if (continueRole) {
+				Object.assign(createOpts, roleCreateOptions(continueRole));
+			} else if (ps.role) {
+				createOpts.role = ps.role;
+				createOpts.roleName = ps.role;
+				if (ps.accessory) createOpts.accessory = ps.accessory;
+			} else if (ps.accessory) {
+				createOpts.accessory = ps.accessory;
+			}
+			delete createOpts.initialThinkingLevel;
+			Object.assign(createOpts, sdkSourceTuple);
+
+			let newSession;
+			try {
+				newSession = await sessionManager.createSession(
+					projCwd, undefined, undefined, ps.assistantType, createOpts,
+				);
+				// Keep the opaque resume handle durable even if the bridge does not
+				// emit a state frame before this request returns.
+				sessionManager.getSessionStore(ps.projectId).update(newSession.id, {
+					runtime: "claude-agent-sdk",
+					claudeAgentSdkSessionId,
+				});
+			} catch (err) {
+				jsonError(500, err, { error: `failed to continue Claude Agent SDK session: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
+
+			const baseTitle = (ps.title || "session").trim() || "session";
+			const continuedTitle = `Continued: ${baseTitle}`;
+			sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
+			json({
+				id: newSession.id,
+				cwd: newSession.cwd,
+				status: newSession.status,
+				title: continuedTitle,
+				assistantType: ps.assistantType,
+				...sessionAuditIdentity(sessionManager.getPersistedSession(newSession.id) ?? newSession, auditModels()),
+			}, 201);
+			return;
+		}
+
 		if (continueInitialModel && !(await requireCurrentSessionModel(continueInitialModel, "Continue model"))) return;
 
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
@@ -14454,7 +14614,6 @@ async function handleApiRoute(
 		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
 		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 		const nodeFs = await import("node:fs");
-		const { randomUUID } = await import("node:crypto");
 
 		let sourceJsonl = ps.agentSessionFile;
 		if (!sourceJsonl) {
@@ -14609,6 +14768,7 @@ async function handleApiRoute(
 			status: newSession.status,
 			title: continuedTitle,
 			assistantType: ps.assistantType,
+			...sessionAuditIdentity(sessionManager.getPersistedSession(newSession.id) ?? newSession, auditModels()),
 		}, 201);
 		return;
 	}

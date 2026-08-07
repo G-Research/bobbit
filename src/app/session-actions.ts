@@ -121,7 +121,9 @@ export function canForkSession(session: GatewaySession): boolean {
 		// "assistant" are forkable. Keep client and server consistent.
 		&& session.role !== "team-lead"
 		&& !session.teamGoalId
-		&& !session.teamLeadSessionId;
+		&& !session.teamLeadSessionId
+		// Claude's SDK supports resume but has no session branch primitive.
+		&& session.runtime !== "claude-agent-sdk";
 }
 
 export function isArchivedSessionActionSource(session: GatewaySession): boolean {

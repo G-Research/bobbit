@@ -2,10 +2,10 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1143,
   "buckets": {
-    "daily": 66,
-    "v2-browser": 216,
+    "daily": 67,
+    "v2-browser": 217,
     "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 51,
+    "relocate": 52,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -1408,6 +1408,15 @@
       }
     },
     {
+      "path": "tests2/browser/session-runtime-identity.spec.ts",
+      "reason": "Production browser journey for provider-derived runtime identity: selecting a deterministic Claude Agent SDK model keeps its accessible runtime badge and model tuple visible in picker, live and archived audit rows, through reload and reconnect, and preserves the SDK identity with Model unavailable after provider removal.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/headset-accessory.test.ts",
       "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
       "execution": {
@@ -2435,6 +2444,15 @@
       }
     },
     {
+      "path": "tests2/core/claude-agent-sdk-session-access.test.ts",
+      "reason": "Focused official Claude Agent SDK session-info/history/fork access and history-adapter coverage: cwd scoping, unavailable sanitization, confirmed empty history, and normalized UUID/parent-preserving snapshots without Pi transcript access.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/claude-agent-sdk-bridge.test.ts",
       "reason": "Deterministic fake-Query lifecycle coverage for Agent SDK readiness, streamed prompt/steer acknowledgement, translator forwarding, interruption, terminal stop, model/thinking controls, unsupported controls, and per-session environment isolation.",
       "execution": {
@@ -2446,6 +2464,69 @@
     {
       "path": "tests2/integration/claude-agent-sdk-runtime-persistence.test.ts",
       "reason": "Durable runtime-selection and SessionStore round-trip coverage pinning explicit SDK selection, Pi preservation, opaque SDK session-id persistence, and verified model/thinking tuple recovery.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/session-runtime-route-boundary.test.ts",
+      "reason": "In-process runtime route boundary coverage for archived runtime/model availability projection, legacy Pi fallback, and fail-closed Claude Agent SDK fork rejection before any transcript copy or destination creation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/session-runtime-status-protocol.test.ts",
+      "reason": "Node-core coverage for server-owned runtime derivation on transition, archived, and heartbeat session-status frames.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-agent-sdk-tool-surface.test.ts",
+      "reason": "Literal 0.3.222 native-policy, canonical-name, collision, permission-ceiling, allowlist distinction, and strict-isolation regression coverage for the in-process Bobbit MCP surface.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-runtime-review-roles.test.ts",
+      "reason": "Shipped Claude runtime reviewer-role schema, builtin PackResolver resolution, normalized policy ceilings, required protocol/parity/billing concerns, verifier boundaries, and UTF-8 prompt budgets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-runtime-review-workflow.test.ts",
+      "reason": "Real project claude-runtime inline-workflow validation, canonical DAG and command phases, specialist role resolution, no-custom-engine guard, real-model dogfood evidence, and UTF-8 prompt budgets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/session-runtime-status-protocol.test.ts",
+      "reason": "Happy-dom coverage for applying server runtime and model-availability projections without violating status-version ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/claude-agent-sdk-tool-permissions.test.ts",
+      "reason": "Session grant lifecycle integration coverage for SDK canonical dispatch, cancellation, one-time grants, and PreToolUse defence in depth.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -17493,6 +17574,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Existing real-agent/LLM/Docker manual-integration suite; relocate into the daily tier-3 lane unchanged."
+    },
+    {
+      "file": "tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Process-isolated official Agent SDK and bundled Claude initialization inventory; verifies strict hostile-settings/MCP/plugin/memory isolation without a model turn."
     }
   ]
 }

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { afterAll, afterEach, describe, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 
@@ -117,6 +117,26 @@ function makePreferences(label: string): InstanceType<typeof PreferencesStore> {
 	// Make Anthropic rows authenticated without relying on the developer machine's
 	// environment. No role/default model is set in the no-explicit-selection case.
 	prefs.set("providerKey.anthropic", "test-anthropic-key");
+	return prefs;
+}
+
+const SDK_DEFAULT_MODEL = "claude-agent-sdk/sdk-default";
+
+async function makeSdkDefaultPreferences(label: string): Promise<InstanceType<typeof PreferencesStore>> {
+	const prefs = makePreferences(label);
+	prefs.set("customProviders", [{
+		id: "claude-agent-sdk",
+		name: "claude-agent-sdk",
+		type: "manual",
+		baseUrl: "http://127.0.0.1:9",
+		models: [{ id: "sdk-default", name: "SDK default" }],
+	}]);
+	prefs.set("default.sessionModel", SDK_DEFAULT_MODEL);
+	invalidateModelCache();
+	assert.ok(
+		(await getAvailableModels(prefs)).some((model) => `${model.provider}/${model.id}` === SDK_DEFAULT_MODEL),
+		"fixture requires a selectable SDK default model",
+	);
 	return prefs;
 }
 
@@ -506,6 +526,7 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 					modelProvider: expected.provider,
 					modelId: expected.id,
 					effectiveThinkingLevel: expectedThinking,
+					runtime: "pi",
 				}],
 				hiddenKimiSelected: false,
 			},
@@ -553,6 +574,7 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 				modelProvider: "anthropic",
 				modelId: "claude-opus-5",
 				effectiveThinkingLevel: "xhigh",
+				runtime: "pi",
 			}],
 			"SKIP_AUTO_REVIEWER_TUPLE_DURABILITY: a spawn-pinned reviewer that skips auto mutation must still read back and atomically persist its exact verified model/thinking tuple",
 		);
@@ -717,6 +739,94 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 			},
 			"LEGACY_REPLACEMENTS_EXPLICIT_PIN: role and force-abort replacement bridges must resolve the current Bobbit catalog default when a legacy row has no durable tuple",
 		);
+	});
+
+	it("rejects cross-runtime legacy replacements before constructing an empty SDK bridge", async () => {
+		const prefs = await makeSdkDefaultPreferences("legacy-runtime-replacements");
+		const store = new RecordingStore();
+		const tracker = trackConstructedBridges();
+		const sdkBridgeFactory = vi.fn();
+		const manager: any = new SessionManager({
+			preferencesStore: prefs,
+			stateDir,
+			claudeAgentSdkBridgeDepsFactory: sdkBridgeFactory,
+		});
+		manager._testStore = store;
+		managers.push(manager);
+
+		const restoreId = "legacy-runtime-restore";
+		const restoreRecord = legacySessionRecord(restoreId);
+		store.put(restoreRecord);
+		await expect(manager.restoreSession(restoreRecord)).rejects.toThrow(/would change session runtime from pi to claude-agent-sdk/i);
+
+		const missingResumeRecord = {
+			...legacySessionRecord("sdk-runtime-without-resume"),
+			modelProvider: "claude-agent-sdk",
+			modelId: "sdk-default",
+			runtime: "claude-agent-sdk" as const,
+			sandboxed: true,
+		};
+		const restoreSecret = vi.spyOn(manager.sessionSecretStore, "getOrCreateSecret");
+		const sandboxRestore = vi.spyOn(manager, "applySandboxWiring").mockResolvedValue(false);
+		const restoreMcp = vi.spyOn(manager, "ensureMcpManagerForContext");
+		store.put(missingResumeRecord);
+		await expect(manager.restoreSession(missingResumeRecord)).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK session has no valid resume id",
+		});
+		assert.equal(restoreSecret.mock.calls.length, 0, "invalid SDK restore fails before restoring session credentials");
+		assert.equal(sandboxRestore.mock.calls.length, 0, "invalid SDK restore fails before sandbox setup");
+		assert.equal(restoreMcp.mock.calls.length, 0, "invalid SDK restore fails before MCP/tool activation");
+		assert.equal(sdkBridgeFactory.mock.calls.length, 0, "SDK restore rejects before constructing a bridge without a resume id");
+
+		const roleId = "legacy-runtime-role";
+		const roleTranscript = path.join(agentDir, "sessions", `${roleId}.jsonl`);
+		fs.writeFileSync(roleTranscript, "");
+		const roleSession = await manager.createSession(tmpRoot, [], undefined, undefined, {
+			sessionId: roleId,
+			initialModel: SELECTABLE_DEFAULT,
+			initialThinkingLevel: "high",
+		});
+		if (roleSession.pendingMetadataPersist) await roleSession.pendingMetadataPersist;
+		await flushMicrotasks();
+		store.records.set(roleId, { ...legacySessionRecord(roleId), agentSessionFile: roleTranscript });
+		const originalRoleBridge = roleSession.rpcClient;
+		tracker.reset();
+		await expect(manager.assignRole(roleId, {
+			name: "sdk-default-role",
+			promptTemplate: "must not change runtime",
+			accessory: "none",
+		})).rejects.toThrow(/would change session runtime from pi to claude-agent-sdk/i);
+		assert.equal(manager.sessions.get(roleId)?.rpcClient, originalRoleBridge, "rejected role assignment retains the live Pi bridge");
+		assert.deepEqual(
+			{
+				runtime: store.get(roleId)?.runtime,
+				modelProvider: store.get(roleId)?.modelProvider,
+				modelId: store.get(roleId)?.modelId,
+				claudeAgentSdkSessionId: store.get(roleId)?.claudeAgentSdkSessionId,
+			},
+			{ runtime: undefined, modelProvider: undefined, modelId: undefined, claudeAgentSdkSessionId: undefined },
+			"rejected role assignment preserves the tuple-less Pi persistence identity",
+		);
+		assert.equal(tracker.options.length, 0, "role rejection occurs before any replacement bridge is constructed");
+
+		const forceId = "legacy-runtime-force-abort";
+		const forceTranscript = path.join(agentDir, "sessions", `${forceId}.jsonl`);
+		fs.writeFileSync(forceTranscript, "");
+		const forceSession = await manager.createSession(tmpRoot, [], undefined, undefined, {
+			sessionId: forceId,
+			initialModel: SELECTABLE_DEFAULT,
+			initialThinkingLevel: "high",
+		});
+		if (forceSession.pendingMetadataPersist) await forceSession.pendingMetadataPersist;
+		await flushMicrotasks();
+		store.records.set(forceId, { ...legacySessionRecord(forceId), agentSessionFile: forceTranscript });
+		tracker.reset();
+		forceSession.status = "streaming";
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		await expect(manager.forceAbort(forceId, 1)).rejects.toThrow(/would change session runtime from pi to claude-agent-sdk/i);
+		assert.equal(tracker.options.length, 0, "force-abort rejection occurs before an SDK replacement is constructed");
+		assert.equal(sdkBridgeFactory.mock.calls.length, 0, "no replacement SDK bridge is constructed without a resume id");
 	});
 
 	it("fails cold restore before spawn when its complete durable tuple left the current catalog", async () => {

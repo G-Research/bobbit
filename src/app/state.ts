@@ -3,6 +3,7 @@ import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { SidePanelWorkspace } from "./side-panel-workspace.js";
+import type { SessionRuntime } from "../server/agent/session-runtime.js";
 import { isConfigPageRoute } from "./routing.js";
 import { type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
@@ -79,6 +80,13 @@ export interface GatewaySession {
 	/** Epoch ms when the user last viewed this session. Server-side, shared across browsers. */
 	lastReadAt?: number;
 	clientCount: number;
+	/** Server-derived execution runtime; clients never infer this from the model. */
+	runtime?: SessionRuntime;
+	/** Persisted model identity, including models no longer available for selection. */
+	modelProvider?: string;
+	modelId?: string;
+	/** Whether the persisted provider/model is currently selectable. */
+	modelAvailable?: boolean;
 	isCompacting?: boolean;
 	isAborting?: boolean;
 	goalId?: string;
@@ -939,6 +947,29 @@ export function hasActiveSession(): boolean {
 	return state.remoteAgent !== null;
 }
 
+/** Apply server-provided runtime/model availability to live and archived list rows. */
+export function applyGatewaySessionIdentity(
+	sessionId: string,
+	identity: { runtime?: SessionRuntime; modelAvailable?: boolean },
+): boolean {
+	let changed = false;
+	const apply = (sessions: GatewaySession[]): GatewaySession[] => sessions.map((session) => {
+		if (session.id !== sessionId) return session;
+		const next = {
+			...session,
+			...(identity.runtime !== undefined ? { runtime: identity.runtime } : {}),
+			...(identity.modelAvailable !== undefined ? { modelAvailable: identity.modelAvailable } : {}),
+		};
+		if (next.runtime === session.runtime && next.modelAvailable === session.modelAvailable) return session;
+		changed = true;
+		return next;
+	});
+	state.gatewaySessions = apply(state.gatewaySessions);
+	state.archivedSessions = apply(state.archivedSessions);
+	if (changed) renderApp();
+	return changed;
+}
+
 export function activeSessionId(): string | undefined {
 	// Don't highlight any session when a config page is open
 	if (isConfigPageRoute()) return undefined;
@@ -1006,7 +1037,7 @@ function staffSidebarCacheKey(): string {
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.parentSessionId || "") + (s.childKind || "") + (s.readOnly ? "R" : "") + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.parentSessionId || "") + (s.childKind || "") + (s.archived ? "A" : "")).join(",")}:${staffSidebarCacheKey()}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.parentSessionId || "") + (s.childKind || "") + (s.readOnly ? "R" : "") + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.runtime || "") + (s.modelAvailable === false ? "U" : "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.parentSessionId || "") + (s.childKind || "") + (s.runtime || "") + (s.modelAvailable === false ? "U" : "") + (s.archived ? "A" : "")).join(",")}:${staffSidebarCacheKey()}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));

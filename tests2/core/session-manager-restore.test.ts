@@ -172,6 +172,7 @@ describe("verified model/thinking tuple persistence", () => {
 			modelProvider: "anthropic",
 			modelId: "claude-opus-5",
 			effectiveThinkingLevel: "xhigh",
+			runtime: "pi",
 		}]);
 		const persisted = new SessionStore(stateDir).get("sess-1");
 		assert.deepEqual(
@@ -179,8 +180,9 @@ describe("verified model/thinking tuple persistence", () => {
 				provider: persisted?.modelProvider,
 				modelId: persisted?.modelId,
 				thinking: persisted?.effectiveThinkingLevel,
+				runtime: persisted?.runtime,
 			},
-			{ provider: "anthropic", modelId: "claude-opus-5", thinking: "xhigh" },
+			{ provider: "anthropic", modelId: "claude-opus-5", thinking: "xhigh", runtime: "pi" },
 		);
 	});
 
@@ -217,6 +219,7 @@ describe("verified model/thinking tuple persistence", () => {
 			...makeSession(),
 			modelProvider: "anthropic",
 			modelId: "claude-opus-4-5",
+			runtime: "pi",
 			effectiveThinkingLevel: "high",
 		});
 	});

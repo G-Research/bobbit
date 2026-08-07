@@ -4,6 +4,7 @@ import type { PromptSource } from "../../shared/prompt-source.js";
 import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
 import type { GoalState } from "../agent/goal-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+import type { SessionRuntime } from "../agent/session-runtime.js";
 
 export interface GateResetReopenOutcome {
 	reopened: boolean;
@@ -258,6 +259,8 @@ export type ServerMessage =
 		 *  client can treat them as idempotent (`<= lastStatusVersion` ⇒ ignore).
 		 *  See docs/design/unify-session-status.md. */
 		statusVersion: number;
+		/** Server-derived runtime identity. Omitted only by rolling-upgrade peers. */
+		runtime?: SessionRuntime;
 		streamingStartedAt?: number;
 		archivedAt?: number;
 	}

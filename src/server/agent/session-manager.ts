@@ -24,7 +24,9 @@ import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
-import { isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
+import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
+import { readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
+import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -138,6 +140,7 @@ import {
 	type PiExtensionDiagnostic,
 	resolveMarketplacePiExtensionActivation,
 	scopedToolContext,
+	resolveToolActivation,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -183,6 +186,39 @@ export function switchSessionPathForAgent(ps: PersistedSession): string {
 	if (!ps.sandboxed || !isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) return ps.agentSessionFile;
 	const mountedHostPath = migratedActiveAgentSessionFileForHostPath(ps.agentSessionFile) ?? ps.agentSessionFile;
 	return hostPathToContainer(mountedHostPath);
+}
+
+/** Derive runtime from the durable model tuple, using runtime only as a legacy fallback. */
+function runtimeForPersistedSession(ps: Pick<PersistedSession, "modelProvider" | "modelId" | "runtime">): SessionRuntime {
+	return resolveSessionRuntime({
+		modelProvider: ps.modelProvider,
+		initialModel: ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined,
+		persistedRuntime: ps.runtime,
+	});
+}
+
+/**
+ * Replacements may refresh a model candidate from current role/default settings,
+ * but an existing session's persisted runtime is immutable. In particular,
+ * tuple-less legacy rows remain Pi-backed rather than inheriting a newly chosen
+ * SDK default. Validate before constructing a replacement bridge.
+ */
+function requireReplacementRuntime(
+	ps: Pick<PersistedSession, "modelProvider" | "modelId" | "runtime" | "claudeAgentSdkSessionId">,
+	initialModel: string | undefined,
+	operation: string,
+): SessionRuntime {
+	const persistedRuntime = runtimeForPersistedSession(ps);
+	const candidateRuntime = resolveSessionRuntime({ initialModel });
+	if (candidateRuntime !== persistedRuntime) {
+		throw new Error(
+			`Cannot ${operation}: replacement model would change session runtime from ${persistedRuntime} to ${candidateRuntime}`,
+		);
+	}
+	if (persistedRuntime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
+		throw new Error(`Cannot ${operation}: Claude Agent SDK session has no valid resume id`);
+	}
+	return persistedRuntime;
 }
 
 export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
@@ -1644,8 +1680,8 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 // `broadcastStatus()` lives in `./session-status.ts` so unit tests can import
 // the pure helper without dragging in the full SessionManager dependency
 // graph. Re-exported here for backward compat with existing call sites.
-export { broadcastStatus } from "./session-status.js";
-import { broadcastStatus } from "./session-status.js";
+import { broadcastStatus, buildSessionStatusFrame } from "./session-status.js";
+export { broadcastStatus };
 
 function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
 	if (!event || typeof event !== "object") return event;
@@ -2457,12 +2493,12 @@ export class SessionManager {
 			sessionsWithClients++;
 			frames++;
 			recipients += session.clients.size;
-			broadcast(session.clients, {
-				type: "session_status",
-				status: session.status,
-				statusVersion: session.statusVersion ?? 0,
-				...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}),
-			});
+			broadcast(session.clients, buildSessionStatusFrame(
+				session,
+				session.status,
+				session.statusVersion ?? 0,
+				{ streamingStartedAt: session.streamingStartedAt },
+			));
 		}
 		if (diagEnabled) {
 			const durationMs = performance.now() - diagStart;
@@ -2790,6 +2826,7 @@ export class SessionManager {
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
 			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+			requestToolGrant: (sessionId, toolName, toolGroup, options) => this.requestToolGrant(sessionId, toolName, toolGroup, options),
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -6564,9 +6601,10 @@ export class SessionManager {
 	 * grant request, broadcasts to UI clients, and returns a promise that
 	 * resolves when the user grants/denies or after a 5-minute timeout.
 	 */
-	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<ToolGrantResolution> {
+	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string, options?: { signal?: AbortSignal; toolUseId?: string }): Promise<ToolGrantResolution> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
+		if (options?.signal?.aborted) return { granted: false, reason: "Permission request cancelled." };
 
 		// A later same-tool guard call can arrive after the user already approved
 		// a session-scoped grant. Short-circuit only explicit session grants here:
@@ -6574,6 +6612,23 @@ export class SessionManager {
 		// through the pending request list, not treated as broad tool access.
 		const toolLower = toolName.toLowerCase();
 		const hasTool = (tools?: string[]) => tools?.some((t) => t.toLowerCase() === toolLower) ?? false;
+		type PendingWaiter = NonNullable<NonNullable<SessionInfo["pendingGrantRequest"]>["requests"]>[number];
+		const cancelWaiter = (request: PendingWaiter): void => {
+			const pending = session.pendingGrantRequest;
+			if (!pending?.requests?.includes(request)) return;
+			this.clock.clearTimeout(request.timer);
+			pending.requests = pending.requests.filter(candidate => candidate !== request);
+			request.resolve({ granted: false, reason: "Permission request cancelled." });
+			if (pending.requests.length > 0) return;
+			session.pendingGrantRequest = undefined;
+			broadcast(session.clients, {
+				type: "tool_permission_settled",
+				toolName: pending.toolName,
+				group: pending.toolGroup,
+				status: "cancelled",
+				reason: "Permission request cancelled.",
+			});
+		};
 		if (hasTool(session.sessionOnlyGrantedTools)) {
 			return { granted: true, tools: [toolName], scope: "tool", group: toolGroup, mode: "session-only" };
 		}
@@ -6635,6 +6690,10 @@ export class SessionManager {
 				pending.requests = pending.requests?.length
 					? [...pending.requests, request]
 					: [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }, request];
+				if (options?.signal) {
+					if (options.signal.aborted) cancelWaiter(request);
+					else options.signal.addEventListener("abort", () => cancelWaiter(request), { once: true });
+				}
 				requestCount = pending.requests.length;
 			});
 			const roleName = session.role || "general";
@@ -6683,6 +6742,10 @@ export class SessionManager {
 			}, 5 * 60 * 1000); // 5 minute timeout
 			request = { resolve, reject, timer, seq, ts };
 			session.pendingGrantRequest = { id: permissionId, resolve, reject, toolName, toolGroup, timer, seq, ts, requests: [request] };
+			if (options?.signal) {
+				if (options.signal.aborted) cancelWaiter(request);
+				else options.signal.addEventListener("abort", () => cancelWaiter(request), { once: true });
+			}
 		});
 
 		// Broadcast to UI clients
@@ -7334,7 +7397,7 @@ export class SessionManager {
 				return;
 			}
 		}
-		if (ps.runtime === "claude-agent-sdk") {
+		if (runtimeForPersistedSession(ps) === "claude-agent-sdk") {
 			if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
 				this.addDormantSession(ps, "Claude Agent SDK session has no valid resume id");
 				return;
@@ -7422,6 +7485,12 @@ export class SessionManager {
 	}
 
 	private addDormantSession(ps: PersistedSession, restoreError?: string): void {
+		const runtime = runtimeForPersistedSession(ps);
+		// A dormant entry still needs an inert bridge for the SessionInfo contract,
+		// but never instantiate the SDK bridge unless it can safely resume.
+		const dormantBridgeRuntime = runtime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)
+			? "pi"
+			: runtime;
 		this.sessions.set(ps.id, {
 			id: ps.id,
 			title: ps.title,
@@ -7435,8 +7504,10 @@ export class SessionManager {
 			clients: new Set(),
 			rpcClient: createSessionBridge({
 				cwd: ps.cwd,
-				runtime: resolveSessionRuntime({ modelProvider: ps.modelProvider }),
-				claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+				runtime: dormantBridgeRuntime,
+				claudeAgentSdkSessionId: dormantBridgeRuntime === "claude-agent-sdk"
+					? ps.claudeAgentSdkSessionId
+					: undefined,
 				claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 			}), // placeholder, not started
 			eventBuffer: new EventBuffer(),
@@ -7450,6 +7521,7 @@ export class SessionManager {
 			readOnly: ps.readOnly,
 			allowedTools: ps.allowedTools,
 			projectId: ps.projectId,
+			runtime,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
@@ -7538,10 +7610,20 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
+		// Validate the immutable runtime identity before any restore setup can mutate
+		// sandbox/worktree state, create credentials, activate tools, or construct a
+		// bridge. `restoreOneSession` keeps the normal boot fast-path/dormant guard;
+		// this boundary also protects direct and replacement callers.
+		const persistedRuntime = runtimeForPersistedSession(ps);
+		if (persistedRuntime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
+			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: Claude Agent SDK session has no valid resume id");
+		}
 		const bridgeOptions: SessionBridgeOptions = {
 			cwd: ps.cwd,
-			runtime: resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }),
-			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+			runtime: persistedRuntime,
+			claudeAgentSdkSessionId: persistedRuntime === "claude-agent-sdk"
+				? ps.claudeAgentSdkSessionId
+				: undefined,
 			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 		};
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
@@ -7714,10 +7796,26 @@ export class SessionManager {
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
-		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
+		if (bridgeOptions.runtime === "claude-agent-sdk") {
+			// Restore through the same session-local derivation as initial setup;
+			// Pi activation args cannot construct an SDK MCP surface.
+			const sdkPlan = {
+				id: ps.id,
+				cwd: ps.cwd,
+				projectId: ps.projectId,
+				goalId: ps.goalId,
+				teamGoalId: ps.teamGoalId,
+				roleName: ps.role,
+				bridgeOptions,
+				effectiveAllowedTools: restoredAllowedTools,
+			} as SessionSetupPlan;
+			await resolveToolActivation(sdkPlan, this.buildPipelineContext(ps.projectId, ps.cwd));
+		} else {
+			const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
+			bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
+		}
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
@@ -7862,6 +7960,10 @@ export class SessionManager {
 				ps.effectiveThinkingLevel,
 			);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		bridgeOptions.runtime = requireReplacementRuntime(ps, bridgeOptions.initialModel, `restore session ${ps.id}`);
+		bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
+			? ps.claudeAgentSdkSessionId
+			: undefined;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
 
@@ -8093,7 +8195,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; /** Server-internal opaque SDK resume identity for continue only. */ claudeAgentSdkSessionId?: string; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -8300,6 +8402,7 @@ export class SessionManager {
 				nonInteractive: opts?.nonInteractive,
 				worktreePath,
 				projectId,
+				runtime: resolveSessionRuntime({ initialModel: selectedSpawnModel }),
 				promptQueue: new PromptQueue(),
 			};
 
@@ -8360,7 +8463,8 @@ export class SessionManager {
 				initialThinkingLevel: exactInitialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
-				bridgeOptions: { cwd },
+				claudeAgentSdkSessionId: opts?.claudeAgentSdkSessionId,
+				bridgeOptions: { cwd, runtime: resolveSessionRuntime({ initialModel: selectedSpawnModel }) },
 			};
 
 			// Persist immediately with all known structural fields
@@ -8457,7 +8561,8 @@ export class SessionManager {
 			initialThinkingLevel: exactInitialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
-			bridgeOptions: { cwd },
+			claudeAgentSdkSessionId: opts?.claudeAgentSdkSessionId,
+			bridgeOptions: { cwd, runtime: resolveSessionRuntime({ initialModel: selectedSpawnModel }) },
 		};
 
 		const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
@@ -9708,13 +9813,16 @@ export class SessionManager {
 				const stateResp = await session.rpcClient.getState();
 				if (stateResp.success && stateResp.data?.provider === "claude-agent-sdk") {
 					const sessionId = stateResp.data.sessionId;
-					if (typeof sessionId === "string" && sessionId.length > 0) {
-						this.resolveStoreForSession(session.id).update(session.id, {
-							runtime: "claude-agent-sdk",
-							claudeAgentSdkSessionId: sessionId,
-						});
-						return;
+					if (!isClaudeAgentSdkSessionId(sessionId)) {
+						// An SDK session without its opaque resume UUID must never fall
+						// through to Pi's session-file persistence path.
+						throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: Claude Agent SDK did not provide a valid resumable session id");
 					}
+					this.resolveStoreForSession(session.id).update(session.id, {
+						runtime: "claude-agent-sdk",
+						claudeAgentSdkSessionId: sessionId,
+					});
+					return;
 				}
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
 					if (attempt < maxRetries) {
@@ -9769,6 +9877,9 @@ export class SessionManager {
 				}
 				return; // success
 			} catch (err) {
+				// A strict SDK identity failure is terminal: retrying cannot conjure a
+				// resumable UUID and must not hide the failure behind Pi-style retries.
+				if (err instanceof ClaudeAgentSdkUnavailableError) throw err;
 				if (attempt < maxRetries) {
 					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
 					await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
@@ -9976,6 +10087,9 @@ export class SessionManager {
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
 		projectId?: string;
+		runtime: SessionRuntime;
+		modelProvider?: string;
+		modelId?: string;
 		spawnPinnedModel?: string;
 		spawnPinnedThinkingLevel?: string;
 		effectiveThinkingLevel?: ThinkingLevel;
@@ -10022,6 +10136,9 @@ export class SessionManager {
 				reattemptGoalId: ps?.reattemptGoalId,
 				sandboxed: ps?.sandboxed || s.sandboxed,
 				projectId: ps?.projectId || s.projectId,
+				runtime: ps ? runtimeForPersistedSession(ps) : (s.runtime ?? "pi"),
+				modelProvider: ps?.modelProvider,
+				modelId: ps?.modelId,
 				spawnPinnedModel: s.spawnPinnedModel,
 				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
 				effectiveThinkingLevel: ps?.effectiveThinkingLevel,
@@ -10339,17 +10456,21 @@ export class SessionManager {
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
 		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
-		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		const respawnPersisted = this.resolveStoreForSession(id).get(id);
+		bridgeOptions.runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, modelProvider: respawnPersisted?.modelProvider });
+		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
+		if (bridgeOptions.runtime === "claude-agent-sdk") {
+			await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: respawnAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
+		} else {
+			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
+			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		}
 
 		// Pin one exact model/thinking tuple for the replacement. Model selection
 		// prefers the assigned role, while thinking independently prefers an explicit
 		// role override and otherwise preserves the last verified durable level.
-		const respawnPersisted = this.resolveStoreForSession(id).get(id);
-		bridgeOptions.runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, modelProvider: respawnPersisted?.modelProvider });
-		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
@@ -10378,6 +10499,14 @@ export class SessionManager {
 			roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
 		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+		bridgeOptions.runtime = requireReplacementRuntime(
+			respawnPersisted ?? { runtime: session.runtime },
+			bridgeOptions.initialModel,
+			`assign role for session ${id}`,
+		);
+		bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
+			? respawnPersisted?.claudeAgentSdkSessionId
+			: undefined;
 
 		// Role assignment is an in-place rehydration, so the replacement must stay
 		// in the same filesystem realm as the durable transcript. In particular, a
@@ -10507,6 +10636,7 @@ export class SessionManager {
 		try { oldUnsubscribe(); } catch { /* stopped old bridge; listener cleanup is best-effort */ }
 		session.rpcClient = rpcClient;
 		session.unsubscribe = unsub;
+		session.runtime = bridgeOptions.runtime;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		if (verifiedReplacementTuple) {
@@ -10723,11 +10853,15 @@ export class SessionManager {
 		// writes are deliberately ignored: retaining the previous verified tuple is
 		// safer than combining a new model with stale thinking.
 		if (effectiveThinkingLevel === undefined) return;
+		const runtime = resolveSessionRuntime({ modelProvider: provider });
 		this.resolveStoreForSession(sessionId).update(sessionId, {
 			modelProvider: provider,
 			modelId,
 			effectiveThinkingLevel,
+			runtime,
 		});
+		const live = this.sessions.get(sessionId);
+		if (live) live.runtime = runtime;
 	}
 
 	/** Persist per-session image generation model override. Validates against the
@@ -11089,10 +11223,45 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Parse the .jsonl file for an archived session and return messages. */
+	/** Resolve the existing SDK bridge factory's deterministic history seam. */
+	private sdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
+		if (!this.claudeAgentSdkBridgeDepsFactory || !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
+		const options: ClaudeAgentSdkBridgeOptions = {
+			runtime: "claude-agent-sdk",
+			cwd: ps.cwd,
+			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+		};
+		return this.claudeAgentSdkBridgeDepsFactory(options).sessionAccess;
+	}
+
+	/** Read SDK source metadata through the bridge factory's official SDK access seam. */
+	async readSdkSessionInfo(ps: PersistedSession): Promise<SdkSessionInfo> {
+		if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
+			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: invalid SDK session identity");
+		}
+		return readSdkSessionInfo({
+			sessionId: ps.claudeAgentSdkSessionId,
+			cwd: ps.cwd,
+		}, this.sdkSessionAccessDeps(ps));
+	}
+
+	/** Read archived SDK history from the official SDK store; Pi remains JSONL-backed. */
 	async getArchivedMessages(id: string): Promise<unknown[]> {
 		const ps = this.resolveStoreForId(id)?.get(id);
-		if (!ps?.archived || !ps.agentSessionFile) return [];
+		if (!ps?.archived) return [];
+		if (runtimeForPersistedSession(ps) === "claude-agent-sdk") {
+			if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return [];
+			try {
+				const messages = await readSdkSessionMessages({
+					sessionId: ps.claudeAgentSdkSessionId,
+					cwd: ps.cwd,
+				}, this.sdkSessionAccessDeps(ps));
+				return this.buildVisibleMessageSnapshot(id, adaptSdkSessionMessages(messages));
+			} catch {
+				return [];
+			}
+		}
+		if (!ps.agentSessionFile) return [];
 		try {
 			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
 			if (!safeFile) return [];
@@ -11143,6 +11312,9 @@ export class SessionManager {
 		preview?: boolean;
 		reattemptGoalId?: string;
 		sandboxed?: boolean;
+		runtime: SessionRuntime;
+		modelProvider?: string;
+		modelId?: string;
 		archived: boolean;
 		archivedAt?: number;
 	}> {
@@ -11175,6 +11347,9 @@ export class SessionManager {
 			preview: ps.preview,
 			reattemptGoalId: ps.reattemptGoalId,
 			sandboxed: ps.sandboxed,
+			runtime: runtimeForPersistedSession(ps),
+			modelProvider: ps.modelProvider,
+			modelId: ps.modelId,
 			archived: true,
 			archivedAt: ps.archivedAt,
 		}));
@@ -12787,15 +12962,24 @@ export class SessionManager {
 				? effective
 				: (effective.length > 0 ? effective : undefined);
 			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
-			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
-			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
-			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
+			// Choose the durable runtime before activating tools; SDK sessions require
+			// the in-process Bobbit MCP surface instead of Pi extension arguments.
+			bridgeOptions.runtime = resolveSessionRuntime({
+				runtime: forceRespawnPersisted?.runtime,
+				modelProvider: forceRespawnPersisted?.modelProvider,
+			});
+			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
+			if (bridgeOptions.runtime === "claude-agent-sdk") {
+				await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: forceAbortAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
+			} else {
+				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
+				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
+				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			}
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
-			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
-			bridgeOptions.runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, modelProvider: forceRespawnPersisted?.modelProvider });
-			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
 			const forceRespawnPersistedModel =
 				forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId
 					? normalizeAigwModelString(`${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`)
@@ -12833,6 +13017,14 @@ export class SessionManager {
 					forceRespawnPersisted?.effectiveThinkingLevel,
 				);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
+			bridgeOptions.runtime = requireReplacementRuntime(
+				forceRespawnPersisted ?? { runtime: session.runtime },
+				bridgeOptions.initialModel,
+				`recover force-aborted session ${id}`,
+			);
+			bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
+				? forceRespawnPersisted?.claudeAgentSdkSessionId
+				: undefined;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
 
@@ -12913,6 +13105,7 @@ export class SessionManager {
 			// Swap in the new bridge only after history rehydration.
 			session.rpcClient = rpcClient;
 			session.unsubscribe = unsub;
+			session.runtime = bridgeOptions.runtime;
 			session.spawnPinnedModel = bridgeOptions.initialModel;
 			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 

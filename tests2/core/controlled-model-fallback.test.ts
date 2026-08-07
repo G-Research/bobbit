@@ -382,6 +382,7 @@ function makeRuntimeHarness(options: {
 	initial?: RuntimeTuple;
 	modelResults?: Record<string, RuntimeTuple>;
 	modelCapabilities?: Record<string, { reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> }>;
+	runtime?: "pi" | "claude-agent-sdk";
 	failThinkingLevels?: string[];
 	incompleteStateReads?: number[];
 } = {}) {
@@ -400,6 +401,7 @@ function makeRuntimeHarness(options: {
 	const client = { readyState: 1, send: (raw: string) => messages.push(JSON.parse(raw)) };
 	const session = {
 		id: "runtime-session",
+		runtime: options.runtime ?? "pi",
 		clients: new Set([client]),
 		rpcClient: {
 			async setModel(provider: string, modelId: string) {
@@ -1267,6 +1269,8 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 		const alias = "sonnet";
 		const preferences = sdkRuntimePrefs(alias);
 		const harness = makeRuntimeHarness({
+			initial: { ...SDK_MODEL, thinkingLevel: "off" },
+			runtime: "claude-agent-sdk",
 			modelCapabilities: {
 				[`${SDK_MODEL.provider}/${alias}`]: {
 					reasoning: true,
@@ -1299,6 +1303,8 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 			thinkingLevelMap: { off: "off", minimal: null, low: null, medium: "medium", high: "high", xhigh: null, max: null },
 		};
 		const harness = makeRuntimeHarness({
+			initial: { ...SDK_MODEL, thinkingLevel: "off" },
+			runtime: "claude-agent-sdk",
 			modelCapabilities: { [`${SDK_MODEL.provider}/${SDK_MODEL.id}`]: capability },
 		});
 
@@ -1348,6 +1354,8 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 	it("rolls an SDK model mutation back when its live capability rejects the requested effort", async () => {
 		const preferences = sdkRuntimePrefs();
 		const harness = makeRuntimeHarness({
+			initial: { ...SDK_MODEL, thinkingLevel: "high" },
+			runtime: "claude-agent-sdk",
 			modelCapabilities: {
 				[`${SDK_MODEL.provider}/${SDK_MODEL.id}`]: {
 					reasoning: true,
@@ -1371,7 +1379,32 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 
 		assert.deepEqual(harness.persisted, [], "a rejected SDK capability must never become durable");
 		assert.deepEqual(harness.setThinkingCalls, ["high"], "only durable rollback thinking may reach the bridge");
-		assert.deepEqual(harness.bound, { ...DURABLE_MODEL, thinkingLevel: "high" });
+		assert.deepEqual(harness.bound, { ...SDK_MODEL, thinkingLevel: "high" });
+	});
+
+	it("rejects cross-runtime selection before reading or mutating the live bridge", async () => {
+		const harness = makeRuntimeHarness();
+		const getState = vi.spyOn(harness.session.rpcClient, "getState");
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"claude-agent-sdk",
+				"claude-opus-4-6",
+				"xhigh",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			/cannot change a live session.*create a new session/i,
+		);
+
+		assert.equal(getState.mock.calls.length, 0, "cross-runtime rejection must occur before bridge RPC");
+		assert.deepEqual(harness.setModelCalls, []);
+		assert.deepEqual(harness.setThinkingCalls, []);
+		assert.deepEqual(harness.persisted, []);
+		assert.deepEqual(harness.modelFiles, []);
+		assert.equal(harness.restartCalls, 0);
 	});
 
 	it("never accepts a live fallback and restarts once when rollback cannot verify", async () => {

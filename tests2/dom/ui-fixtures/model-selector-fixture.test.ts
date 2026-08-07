@@ -86,6 +86,28 @@ describe("ModelSelector Opus ordering", () => {
 	});
 });
 
+describe("ModelSelector runtime identity", () => {
+	it("renders registry-projected Pi and Claude Agent SDK badges without changing selectability", async () => {
+		models = [
+			{ ...DEFAULT_MODELS[0], runtime: "pi" },
+			{
+				id: "claude-opus-4-6", name: "Claude Opus 4.6 (SDK)", provider: "claude-agent-sdk", runtime: "claude-agent-sdk",
+				api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], cost, authenticated: true,
+			},
+		];
+		const el = await openSelector();
+		const pi = el.querySelector('[data-model-id="claude-opus-4-7"] [data-runtime-badge="pi"]') as HTMLElement;
+		const sdk = el.querySelector('[data-model-id="claude-opus-4-6"] [data-runtime-badge="claude-agent-sdk"]') as HTMLElement;
+		expect(pi?.getAttribute("aria-label")).toBe("Session runtime: Pi");
+		expect(sdk?.getAttribute("aria-label")).toBe("Session runtime: Claude Agent SDK");
+
+		const sdkRow = el.querySelector('[data-model-id="claude-opus-4-6"]') as HTMLElement;
+		expect(sdkRow.getAttribute("data-session-unavailable")).toBe("false");
+		sdkRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		expect(selectedModel?.provider).toBe("claude-agent-sdk");
+	});
+});
+
 describe("ModelSelector unauthenticated tooltip (Settings-drift regression)", () => {
 	it("locked model row tooltip avoids the dead 'Settings > Providers' path", async () => {
 		models = [{

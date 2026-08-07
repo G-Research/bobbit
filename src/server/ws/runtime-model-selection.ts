@@ -5,12 +5,14 @@ import type { PreferencesStore } from "../agent/preferences-store.js";
 import { sanitizeModelErrorText } from "../agent/model-error-sanitizer.js";
 import { applyModelString } from "../agent/review-model-override.js";
 import { getAvailableModels, resolveModelStateMeta } from "../agent/model-registry.js";
+import { resolveSessionRuntime, type SessionRuntime } from "../agent/session-runtime.js";
 import type { ServerMessage } from "./protocol.js";
 
 type RuntimePersistedSession = {
 	modelProvider?: string;
 	modelId?: string;
 	effectiveThinkingLevel?: string;
+	runtime?: SessionRuntime;
 };
 
 type RuntimeModelSessionManager = Omit<
@@ -28,7 +30,7 @@ type RuntimeModelSessionManager = Omit<
 type RuntimeModelStateSessionManager = Pick<RuntimeModelSessionManager, "getPersistedSession">;
 type RuntimeModelSession = Pick<
 	SessionInfo,
-	"id" | "rpcClient" | "clients" | "spawnPinnedModel" | "spawnPinnedThinkingLevel"
+	"id" | "rpcClient" | "clients" | "runtime" | "spawnPinnedModel" | "spawnPinnedThinkingLevel"
 >;
 type RuntimeModelRpcClient = RuntimeModelSession["rpcClient"];
 type RuntimeRecoveryOwner = {
@@ -517,6 +519,26 @@ function runtimeBridgeIsCanonical(
 	return canonical === session && canonical.rpcClient === rpcClient;
 }
 
+function runtimeLabel(runtime: SessionRuntime): string {
+	return runtime === "claude-agent-sdk" ? "Claude Agent SDK" : "Pi";
+}
+
+/**
+ * Runtime is fixed when a live bridge starts. Reject a runtime change before
+ * reading or mutating that bridge so recovery never touches an incompatible
+ * process. The persisted model tuple wins over its denormalized runtime field.
+ */
+function currentRuntimeForModelSelection(
+	sessionManager: RuntimeModelStateSessionManager,
+	session: RuntimeModelSession,
+): SessionRuntime {
+	const persisted = sessionManager.getPersistedSession(session.id);
+	return resolveSessionRuntime({
+		modelProvider: persisted?.modelProvider,
+		persistedRuntime: session.runtime ?? persisted?.runtime,
+	});
+}
+
 export async function applyRuntimeSessionModelSelection(
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
@@ -526,6 +548,15 @@ export async function applyRuntimeSessionModelSelection(
 	preferencesStore?: PreferencesStore,
 	broadcastModelState?: BroadcastFn,
 ): Promise<RuntimeModelTuple> {
+	const requestedRuntime = resolveSessionRuntime({ modelProvider: provider });
+	const currentRuntime = currentRuntimeForModelSelection(sessionManager, session);
+	if (requestedRuntime !== currentRuntime) {
+		throw new Error(
+			`Cannot change a live session from ${runtimeLabel(currentRuntime)} to ${runtimeLabel(requestedRuntime)}. ` +
+			`Create a new session with ${provider}/${modelId} instead.`,
+		);
+	}
+
 	const mutationRpcClient = session.rpcClient;
 	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 	const durable = persistedTuple(sessionManager, session.id, liveBefore);

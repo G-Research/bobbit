@@ -1,5 +1,7 @@
 # Reopen Archived Proposals
 
+> **Runtime boundary:** proposal/tool sidecar cloning, its carry-over modal text, and rollback are Pi Continue behavior. Claude Agent SDK Continue resumes the SDK conversation in a fresh Bobbit wrapper and deliberately copies no Pi proposal, tool-content, or author sidecars. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md).
+
 When a session that was driving a proposal (`goal`, `project`, `role`, `tool`,
 or `staff`) gets archived — either deliberately or accidentally, mid-edit or
 right after the agent emitted a polished draft — the user used to be stuck.
@@ -13,7 +15,7 @@ complementary paths.
 | Path | Surface | What it does | When to reach for it |
 |---|---|---|---|
 | **A — Resubmit in place** | "Resubmit `<type>` proposal" button on the archived footer | Opens the existing proposal panel hydrated from disk and lets the user submit via the live REST path. No new session, no agent. | The draft is already good enough — you just need to accept it. |
-| **B — Continue assistant** | "Continue in New Session" button on the archived footer | Spawns a fresh assistant session (`assistantType` preserved) and clones the draft + its history snapshots into the new session's slot. The new agent boots with the in-progress draft as its current rev. | You want to keep iterating on the draft with the assistant. |
+| **B — Continue assistant (Pi)** | "Continue in New Session" button on the archived footer | Spawns a fresh assistant session (`assistantType` preserved) and clones the draft + its history snapshots into the new session's slot. The new agent boots with the in-progress draft as its current rev. | You want to keep iterating on the draft with the assistant. |
 
 Both surfaces appear together when the archived session has at least one
 proposal draft on disk; the chat transcript stays read-only either way.
@@ -65,7 +67,7 @@ WS rehydrate broadcast, accept handlers — stays unchanged.
                                                        │
                                        ┌───────────────┴───────────────┐
                                        ▼                               ▼
-                              Path A: resubmit in place      Path B: continue (clone)
+                              Path A: resubmit in place      Path B: Pi continue (clone)
                               (no new session)               (new session id)
 ```
 
@@ -150,14 +152,15 @@ parsed projections the WS broadcast would have, with the
 authoritative `rev` from `latestRev()` stamped on each entry. Like WS
 rehydrate, it never recreates a closed side-panel tab by itself.
 
-## Path B — Continue assistant session
+## Path B — Continue assistant session (Pi)
 
-This piggybacks on the existing lossless Continue-Archived flow
+This Pi-specific path piggybacks on the lossless JSONL Continue-Archived flow
 (`POST /api/sessions/:archivedId/continue`) — see
 [rest-api.md — Continue-Archived endpoint](rest-api.md#continue-archived-endpoint)
 and [design/lossless-continue-archived.md](design/lossless-continue-archived.md)
-for the underlying mechanism. The new piece is two small
-extensions to that flow.
+for the underlying Pi mechanism. The new piece is two small extensions to that
+flow. SDK Continue accepts eligible assistant records but does not carry over
+proposal or tool sidecars.
 
 ### Lifted assistant guard
 
@@ -175,11 +178,11 @@ set (422). That guard is gone:
 The success response now echoes `assistantType` so callers can confirm
 the inheritance worked.
 
-### Proposal-dir clone
+### Proposal-dir clone (Pi)
 
-Adjacent to the existing `.jsonl` clone and the defensive
-`copyToolContentDirIfPresent` helper, the handler now invokes a
-sibling helper `copyProposalDirIfPresent(srcId, dstId, stateDir)`:
+Adjacent to the existing Pi `.jsonl` clone and the defensive
+`copyToolContentDirIfPresent` helper, the Pi handler invokes a sibling helper
+`copyProposalDirIfPresent(srcId, dstId, stateDir)`:
 
 ```ts
 // src/server/agent/continue-archived.ts
@@ -206,19 +209,19 @@ emits `proposal_update {source:"rehydrate", rev}` per surviving file
 without opening tabs. A later explicit `propose_*`, Open Proposal,
 restore, or Resubmit action is what opens the workspace tab.
 
-### Cleanup on failure
+### Cleanup on failure (Pi)
 
-`cleanupFailedContinue` was extended to also `rm -rf` the
-partially-cloned `<stateDir>/proposal-drafts/<newSessionId>/` on
-rollback. Any of the existing failure paths (cross-realm copy,
-`createSession` throw, `switch_session` failure) will leave no
-half-cloned draft behind.
+Pi `cleanupFailedContinue` also `rm -rf`s the partially cloned
+`<stateDir>/proposal-drafts/<newSessionId>/` on rollback. Any Pi clone failure
+(cross-realm copy, `createSession` throw, or `switch_session` failure) leaves
+no half-cloned draft behind. SDK Continue creates no proposal/tool sidecar to
+roll back.
 
-### Carry-over hint in the modal
+### Carry-over hint in the modal (Pi)
 
-`ContinueSessionChooser` accepts a new `proposalTypes` property fed
-from `AgentInterface._archivedProposalTypes`. When non-empty the
-modal renders an extra line under the headline:
+For Pi Continue, `ContinueSessionChooser` accepts a `proposalTypes` property
+fed from `AgentInterface._archivedProposalTypes`. When non-empty the modal
+renders an extra line under the headline:
 
 > Your `<type>` proposal draft will be carried over so you can keep editing.
 
@@ -261,7 +264,7 @@ one we want to keep working.
 | Resubmit button missing on archived footer | `GET /api/sessions/:id/proposals` returned empty, or `canContinueArchived` is false (goal-linked, delegate, team, or unregistered project). | `AgentInterface.canContinueArchived` + `_refreshArchivedProposalTypes`. The endpoint is in `src/server/server.ts` and matches `^/api/sessions/([^/]+)/proposals$`. |
 | Continue assistant returns 422 | Source has `goalId`, `delegateOf`, or `teamGoalId` set. Assistant guard is gone but coding-agent guards stay. | `src/server/server.ts` — the continue handler. |
 | Resubmit toasts a 404 from `DELETE /api/sessions/:id` | The archive-guard was bypassed. The `isSessionArchived` helper in `src/app/render.ts` should short-circuit that DELETE for archived parents. | `isSessionArchived` call sites in `render.ts` — pinned by `tests/e2e/ui/archived-proposal-resubmit.spec.ts`. |
-| Continued session shows no draft | Clone failed silently, or the WS rehydrate fired before the copy completed. Server logs surface a `[continue-archived] proposal-dir copy failed (non-fatal): …` warning when `copyProposalDirIfPresent` throws. | `copyProposalDirIfPresent` in `src/server/agent/continue-archived.ts`; rehydrate emitter in `src/server/ws/handler.ts`. |
+| Pi continued session shows no draft | The Pi clone failed silently, or the WS rehydrate fired before the copy completed. Server logs surface a `[continue-archived] proposal-dir copy failed (non-fatal): …` warning when `copyProposalDirIfPresent` throws. SDK Continue intentionally carries no proposal draft. | `copyProposalDirIfPresent` in `src/server/agent/continue-archived.ts`; rehydrate emitter in `src/server/ws/handler.ts`. |
 | Draft missing on every archived session | `terminateSession` is back to deleting the directory, or `purgeOneSession` ran prematurely. Drafts must outlive archive and only purge on the 7-day mark. | `src/server/agent/session-manager.ts::terminateSession` (skips proposal-drafts) and `purgeOneSession` (removes them). |
 
 ## Cross-references
@@ -273,7 +276,9 @@ one we want to keep working.
   the `<type>.history/<rev>.<ext>` snapshot tree that `copyProposalDirIfPresent`
   carries over.
 - [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md) —
-  the underlying `.jsonl` clone + `switch_session` flow Path B sits on top of.
+  the Pi-only `.jsonl` clone + `switch_session` flow Path B sits on top of.
+- [docs/claude-agent-sdk-sessions.md](claude-agent-sdk-sessions.md) —
+  the SDK Continue boundary, which does not copy proposal/tool sidecars.
 - [docs/rest-api.md — Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) —
   the updated semantics (assistant sessions accepted, `assistantType` echoed).
 - [docs/rest-api.md — Proposal drafts](rest-api.md#proposal-drafts) — the
