@@ -1,0 +1,7 @@
+id: lifecycle-advisor
+module: ../lib/lifecycle-advisor.mjs
+events: [afterTurn]
+mode: decide
+capabilities: []
+budget: { maxTokens: 64, timeoutMs: 1000 }
+schedule: { everyNTurns: 1 }
