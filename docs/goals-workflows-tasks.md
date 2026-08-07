@@ -611,7 +611,7 @@ Verification log output is bounded by default: `gate_status` and `gate_inspect s
 
 Running command steps can include live stdout/stderr tails. The server reads those log files with bounded byte limits before applying the same selection and aggregate response budgets used for persisted output. Live WebSocket events are bounded too: `gate_verification_step_output.text` is truncated to a preview when a single chunk is large, and `gate_verification_step_complete.output` has a separate completion preview cap. Truncated live events include byte-count metadata (`textTruncated` / `outputTruncated`, original bytes, preview bytes) so the UI can show that the live stream is only a preview.
 
-Completed command steps also retain stdout/stderr under Bobbit state. Default status surfaces, implicit inspection, and live WS frames stay compact, but any explicit `gate_inspect(section="verification", mode=...)` request can query the retained logs and returns diagnostics metadata when available. Playwright-style `test-results` and `playwright-report` artifacts are copied into the retained diagnostics tree. Large persisted step output and primary artifact bodies are separately content-addressed by the partitioned gate store; explicit inspection uses those managed copies as durable, root-bound fallbacks without hydrating hot gate state. Retained log streams are capped independently, artifact copying is symlink-hardened, and diagnostics are cleaned up when the owning goal is archived or deleted. Team leads should inspect persisted evidence before rerunning expensive suites. See [Retained gate diagnostics](gate-diagnostics.md) and [Gate store persistence](gate-store-persistence.md).
+Completed command steps also retain stdout/stderr under Bobbit state. Default status surfaces, implicit inspection, and live WS frames stay compact, but any explicit `gate_inspect(section="verification", mode=...)` request can query the retained logs and returns diagnostics metadata when available. Playwright-style `test-results` and `playwright-report` artifacts are copied into the same retained diagnostics tree, including `error-context.md`, traces, screenshots, and reports. Retained log streams are capped at 20 MiB each, artifact copying is symlink-hardened, and diagnostics are cleaned up when the owning goal is archived or deleted. Team leads should inspect these persisted diagnostics before rerunning expensive suites. See [Retained gate diagnostics](gate-diagnostics.md) for the full storage, inspection, cleanup, and full-output recovery model.
 
 #### Command step restart recovery
 
@@ -1062,7 +1062,7 @@ State is per-project — each project has its own copies of these files in `<pro
 |---|---|
 | `defaults/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
 | `<project>/.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
-| `<project>/.bobbit/state/gate-records/v2/` | Partitioned gate truth, bounded signal history, bypass audit, and managed payloads; legacy `gates.json` is migration input only |
+| `<project>/.bobbit/state/gates.json` | Gate state and signal history |
 | `<project>/.bobbit/state/tasks.json` | Tasks with workflow gate links |
 
 ## Key source files
@@ -1073,7 +1073,7 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/workflow-manager.ts` | Workflow CRUD, DAG validation, cloning |
 | `src/server/agent/verification-harness.ts` | Async verification orchestration (command + LLM review + agent-qa, session lifecycle, artifact population) |
 | `src/server/agent/verification-logic.ts` | Pure verification logic — variable substitution, phase grouping, optional step skipping, cache reuse, error pattern matching (unit-testable without server state) |
-| `src/server/agent/gate-store.ts` | Gate truth, reset, partitioned history publication, compaction, and maintenance metrics |
+| `src/server/agent/gate-store.ts` | Gate state, reset, and signal history persistence |
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |

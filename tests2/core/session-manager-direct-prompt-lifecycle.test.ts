@@ -4,8 +4,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createManualClock } from "../harness/clock.js";
-import { createMemFs } from "../harness/mem-fs.js";
-import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
 
 const VIRTUAL_STATE_DIR = path.resolve("/.bobbit-test/session-direct-prompt");
 const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");
@@ -248,26 +246,6 @@ async function flushAsyncWork(): Promise<void> {
 	for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
 }
 
-async function waitFor(predicate: () => boolean, message: string): Promise<void> {
-	for (let attempt = 0; attempt < 100; attempt += 1) {
-		if (predicate()) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	assert.fail(message);
-}
-
-function persistedSession(id: string, overrides: Partial<PersistedSession> = {}): PersistedSession {
-	return {
-		id,
-		title: "Crash-boundary prompt",
-		cwd: "/virtual/project",
-		agentSessionFile: "/virtual/project/agent.jsonl",
-		createdAt: 1,
-		lastActivity: 1,
-		...overrides,
-	};
-}
-
 afterEach(() => {
 	while (managers.length > 0) cleanupManager(managers.pop());
 	virtualSidecarFiles.clear();
@@ -408,9 +386,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			const expectedPrefix = author.kind === "system" ? "[System]: " : "[Caller (caller)]: ";
 			const piText = `${expectedPrefix}${text}`;
 			assert.deepEqual(prompt.mock.calls[0], [piText, undefined]);
-			assert.equal(session.promptQueue.length, 1, "the durable base-text row remains the single owner until Pi acceptance is proven");
-			assert.equal(session.promptQueue.peek()?.id, queued.id);
-			assert.equal((session.promptQueue.peek() as any)?.deliveryState, "dispatching");
+			assert.equal(session.promptQueue.length, 0, "the durable base-text row is consumed while Pi receives the prefixed text");
 			const dispatched = readAuthorSidecar(session.id).find((row) => row.promptId === queued.id);
 			assert.equal(dispatched?.modelPrefix, expectedPrefix);
 			assert.equal(promptAuthorBindingMatchesText(dispatched, piText), true);
@@ -513,9 +489,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(prompt.mock.calls.length, 1);
 		assert.equal(session.status, "streaming");
-		assert.equal(session.promptQueue.length, 1, "the direct prompt keeps one durable in-flight FIFO row");
-		assert.equal((session.promptQueue.peek() as any)?.deliveryState, "dispatching");
-		assert.equal(manager._testStore.update.mock.calls.length, 2);
+		assert.equal(session.promptQueue.length, 0);
+		assert.equal(manager._testStore.update.mock.calls.length, 1);
 		assert.deepEqual(client.sent.at(-1), {
 			type: "session_status",
 			status: "streaming",
@@ -525,117 +500,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		pending.resolve({ success: true });
 		await sendPromise;
-	});
-
-	it("publishes a real SessionStore accepted tombstone before direct row removal survives a hard restart", async () => {
-		const memfs = createMemFs();
-		const stateDir = "/state/direct-accepted-crash";
-		const store = new SessionStore(stateDir, memfs);
-		const sessionId = "s-real-direct-accepted";
-		store.put(persistedSession(sessionId));
-		await store.flushAsync();
-
-		const manager = makeManager();
-		manager._testStore = store;
-		const pending = deferred<any>();
-		const prompt = vi.fn(() => pending.promise);
-		const { session } = putSession(manager, { id: sessionId, rpcClient: { prompt } });
-		const send = manager.enqueuePrompt(sessionId, "accepted before echo");
-		await waitFor(() => prompt.mock.calls.length === 1, "direct prompt did not cross its pre-RPC persistence barrier");
-		const promptId = session.promptQueue.peek()?.id;
-		assert.ok(promptId);
-
-		pending.resolve({ success: true });
-		await send;
-
-		const restartedStore = new SessionStore(stateDir, memfs);
-		const persisted = restartedStore.get(sessionId)!;
-		assert.deepEqual(persisted.messageQueue, []);
-		assert.deepEqual(persisted.acceptedPromptDispatches?.map((entry) => ({
-			promptId: entry.promptId,
-			queueRowIds: entry.queueRowIds,
-		})), [{ promptId, queueRowIds: [promptId] }]);
-
-		const restartPrompt = vi.fn(async () => ({ success: true }));
-		const restartedManager = makeManager();
-		restartedManager._testStore = restartedStore;
-		const { session: restored } = putSession(restartedManager, {
-			id: sessionId,
-			promptQueue: new PromptQueue(persisted.messageQueue),
-			acceptedPromptDispatches: persisted.acceptedPromptDispatches,
-			rpcClient: { prompt: restartPrompt },
-		});
-		restorePromptAuthorBindings(restored, readAuthorSidecar(sessionId));
-		restartedManager.drainQueue(restored);
-		await flushAsyncWork();
-		assert.equal(restartPrompt.mock.calls.length, 0, "accepted direct prompt must not be delivered twice after restart");
-
-		// Simulate an echo fsync followed by a hard crash before queue/tombstone
-		// cleanup publishes. Restore must consult settlement before any drain.
-		appendPromptAuthorSettlement(sessionId, {
-			promptId,
-			settledAt: manager._testClock.now(),
-			outcome: "echoed",
-			messageId: "echo-direct",
-		});
-		const postSettlementStore = new SessionStore(stateDir, memfs);
-		const crashLeft = postSettlementStore.get(sessionId)!;
-		const postSettlementManager = makeManager();
-		postSettlementManager._testStore = postSettlementStore;
-		const postSettlementPrompt = vi.fn(async () => ({ success: true }));
-		const { session: settledRestore } = putSession(postSettlementManager, {
-			id: sessionId,
-			promptQueue: new PromptQueue(crashLeft.messageQueue),
-			acceptedPromptDispatches: crashLeft.acceptedPromptDispatches,
-			rpcClient: { prompt: postSettlementPrompt },
-		});
-		restorePromptAuthorBindings(settledRestore, readAuthorSidecar(sessionId));
-		assert.equal(settledRestore.acceptedPromptDispatches?.length ?? 0, 0);
-		postSettlementManager.drainQueue(settledRestore);
-		assert.equal(postSettlementPrompt.mock.calls.length, 0, "durably echoed prompt must stay settled before cleanup publication");
-	});
-
-	it("preserves two-row FIFO across a real SessionStore restart after queued RPC acceptance", async () => {
-		const memfs = createMemFs();
-		const stateDir = "/state/queued-accepted-crash";
-		const store = new SessionStore(stateDir, memfs);
-		const sessionId = "s-real-queued-accepted";
-		store.put(persistedSession(sessionId));
-		await store.flushAsync();
-
-		const manager = makeManager();
-		manager._testStore = store;
-		const firstAck = deferred<any>();
-		const firstPrompt = vi.fn(() => firstAck.promise);
-		const { session } = putSession(manager, { id: sessionId, rpcClient: { prompt: firstPrompt } });
-		const first = session.promptQueue.enqueue("first queued row", { source: "system" });
-		const second = session.promptQueue.enqueue("second queued row", { source: "system" });
-		manager.broadcastQueueUpdate(sessionId);
-		manager.drainQueue(session);
-		await waitFor(() => firstPrompt.mock.calls.length === 1, "queued prompt did not cross its pre-RPC persistence barrier");
-		firstAck.resolve({ success: true });
-		await waitFor(() => session.acceptedPromptDispatches?.length === 1, "queued acceptance tombstone was not installed");
-		await store.flushAsync();
-
-		const restartedStore = new SessionStore(stateDir, memfs);
-		const persisted = restartedStore.get(sessionId)!;
-		assert.deepEqual(persisted.acceptedPromptDispatches?.[0]?.queueRowIds, [first.id]);
-		assert.deepEqual(persisted.messageQueue?.map((row) => row.id), [second.id]);
-
-		const secondPrompt = vi.fn(async () => ({ success: true }));
-		const restartedManager = makeManager();
-		restartedManager._testStore = restartedStore;
-		const { session: restored } = putSession(restartedManager, {
-			id: sessionId,
-			promptQueue: new PromptQueue(persisted.messageQueue),
-			acceptedPromptDispatches: persisted.acceptedPromptDispatches,
-			rpcClient: { prompt: secondPrompt },
-		});
-		restorePromptAuthorBindings(restored, readAuthorSidecar(sessionId));
-		restartedManager.drainQueue(restored);
-		await waitFor(() => secondPrompt.mock.calls.length === 1, "second FIFO row was not dispatched after restore");
-		assert.equal((secondPrompt.mock.calls[0] as any[])[0], "[System]: second queued row");
-		assert.equal(firstPrompt.mock.calls.length, 1, "first accepted FIFO row must have exactly one Pi delivery");
 	});
 
 	it("recovers a failed direct prompt by restoring idle status and requeueing", async () => {
@@ -697,7 +561,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		session.promptQueue.enqueue("queued transport prompt");
 
 		manager.drainQueue(session);
-		await flushAsyncWork();
+		await Promise.resolve();
+		await Promise.resolve();
 
 		assert.equal(prompt.mock.calls.length, 1, "expected one failed queued dispatch before auto retry timer fires");
 		assert.equal(session.status, "idle", "expected queued dispatch failure recovery to restore idle status");
@@ -732,7 +597,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(prompt.mock.calls.length, 2, "expected only the initial failure plus one auto retry dispatch");
 		assert.equal((prompt.mock.calls[0] as any[])[0], "retry once without duplicate queue replay", "the original human dispatch stays unprefixed");
-		assert.equal((prompt.mock.calls[1] as any[])[0], "retry once without duplicate queue replay", "automatic retry preserves the original prompt identity and accountable author bytes");
+		assert.equal((prompt.mock.calls[1] as any[])[0], "[System]: retry once without duplicate queue replay");
 		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered base-text row before redispatching");
 		assert.equal(session.status, "streaming");
 	});
@@ -807,8 +672,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(
 			(prompt.mock.calls[1] as any[])[0],
-			"retry the newly failed prompt, not old tool work",
-			"automatic retry preserves the original FIFO identity and accountable author bytes",
+			"[System]: retry the newly failed prompt, not old tool work",
+			"the system-owned auto retry prefixes the recovered base prompt only at provider dispatch",
 		);
 		assert.doesNotMatch(
 			(prompt.mock.calls[1] as any[])[0],
@@ -1413,7 +1278,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		session.lastTurnErrored = false;
 		pending.resolve({ success: false, error: "steer rejected after idle" });
 		await assert.rejects(steerPromise, /steer rejected after idle/);
-		await flushAsyncWork();
 
 		assert.equal(prompt.mock.calls.length, 1, "recovered steer should redrain without a fresh user prompt");
 		assert.equal((prompt.mock.calls[0] as any[])[0], "redrain rejected steer");
@@ -1433,8 +1297,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(prompt.mock.calls.length, 1);
 		assert.equal((prompt.mock.calls[0] as any[])[0], taskNotice);
-		assert.equal(session.promptQueue.length, 1, "the task notification keeps its durable row until Pi observes it");
-		assert.equal((session.promptQueue.peek() as any)?.deliveryState, "dispatching");
+		assert.equal(session.promptQueue.length, 0);
 
 		// The agent has accepted the prompt and begun processing it. A late bridge
 		// failure from that same dispatch must not recover the row back into the
@@ -1467,7 +1330,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(prompt.mock.calls.length, 1);
 		assert.equal(session.status, "streaming");
-		assert.equal(session.promptQueue.length, 1, "abort retains the exact in-flight FIFO identity");
+		assert.equal(session.promptQueue.length, 0);
 
 		await manager.abortSessionTurn(session.id);
 		assert.equal(abort.mock.calls.length, 1);
@@ -1513,7 +1376,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 				message: { role: "assistant", ...terminal },
 			});
 			manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
-			manager._testClock.advance(25);
 
 			assert.equal(prompt.mock.calls.length, 1, `external abort must drain for ${JSON.stringify(terminal)}`);
 			assert.equal(session.lastTurnErrored, false, "only cancellation error state is cleared");
@@ -1663,7 +1525,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 0);
 	});
 
-	it("keeps external-abort drain FIFO and ignores duplicate terminal frames", async () => {
+	it("keeps external-abort drain FIFO and ignores duplicate terminal frames", () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => ({ success: true }));
 		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt } });
@@ -1678,8 +1540,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		manager.handleAgentLifecycle(session, terminal); // duplicate/late message_end
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false }); // duplicate agent_end
-		manager._testClock.advance(25);
-		await flushAsyncWork();
 
 		assert.equal(prompt.mock.calls.length, 1, "the final boundary dispatches exactly once");
 		assert.equal((prompt.mock.calls as any[][])[0]?.[0], "first queued delegate report", "drain preserves FIFO order");
@@ -1706,7 +1566,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		manager.handleAgentLifecycle(session, toolUse);
 		manager.handleAgentLifecycle(session, aborted);
 		manager.handleAgentLifecycle(session, end);
-		manager._testClock.advance(25);
 		assert.equal(prompt.mock.calls.length, 1, "the latest abort terminal drains the queued row");
 		assert.equal(session.completedTurnCount, 1);
 
@@ -1732,7 +1591,6 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			message: { id: "success", role: "assistant", stopReason: "stop" },
 		});
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
-		manager._testClock.advance(25);
 
 		assert.equal(session.lastTurnErrored, false, "the latest distinct terminal owns classification");
 		assert.equal(prompt.mock.calls.length, 1, "latest success reaches the normal queue drain");
@@ -1758,12 +1616,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await flushAsyncWork();
 		assert.equal(prompt.mock.calls.length, 1, "terminated sessions must not redrain rejected prompts");
 		assert.equal(session.status, "terminated", "recovery must not broadcast idle over process_exit termination");
-		assert.equal(session.promptQueue.length, 1, "the accepted FIFO row survives an unexpected child exit for restore");
+		assert.equal(session.promptQueue.length, 0, "prompt rejected by a dead child must not be requeued");
 		assert.deepEqual(
 			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
 			["streaming", "terminated"],
 		);
-		assert.equal(client.sent.some((msg: any) => msg.type === "queue_update"), true);
+		assert.equal(client.sent.some((msg: any) => msg.type === "queue_update"), false);
 	});
 
 	it("closes extension channels when process_exit terminates a session", () => {

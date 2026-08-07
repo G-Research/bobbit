@@ -66,7 +66,6 @@ function manager(): any {
 			return 0;
 		},
 	};
-	value.sessions = new Map();
 	value.broadcastQueue = vi.fn();
 	value.markPromptDispatchStreaming = vi.fn((target: any) => { target.status = "streaming"; });
 	value._sessionWriterIsCurrent = vi.fn(() => true);

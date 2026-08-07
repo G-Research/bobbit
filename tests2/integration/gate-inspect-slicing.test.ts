@@ -1,17 +1,13 @@
 // Gate-inspect is an HTTP selection contract, not a command-process fidelity
 // suite. It seeds completed signals and retained diagnostics directly so shared
 // integration forks never wait on an executor selected by another spec.
-import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { vi } from "vitest";
 import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
-import { gateStoreV2Root } from "../../src/server/agent/gate-store-v2-persistence.js";
-import { buildGateVerificationInspectionSnapshot } from "../../src/server/gate-verification-snapshot.js";
+import { GateStore } from "../../src/server/agent/gate-store.js";
+import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import type { GatewayFixture } from "../harness/gateway.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 import { createMemFs } from "../harness/mem-fs.js";
@@ -37,22 +33,6 @@ const CAPPED_RETAINED_LOG_OUTPUT = Array.from(
 	{ length: HUGE_RETAINED_LOG_CHUNKS },
 	() => `CAP-FILL ${"x".repeat(HUGE_RETAINED_LOG_CHUNK_BYTES)}`,
 ).join("\n").slice(0, RETAINED_LOG_CAP_BYTES);
-const MANAGED_PRIMARY_ARTIFACT_MARKER = "MANAGED_PRIMARY_ARTIFACT_BOUNDED_MARKER";
-const MANAGED_QA_ARTIFACT_MARKER = "MANAGED_QA_ARTIFACT_OLDER_THAN_HOT_WINDOW";
-const MANAGED_ARTIFACT_BYTES = 10 * 1024 * 1024;
-const PRODUCTION_SCALE_NO_NEWLINE_BYTES = 64 * 1024 * 1024;
-
-function inspectHeartbeat(): { stop: () => number } {
-	const intervalMs = 5;
-	let last = performance.now();
-	let maxLag = 0;
-	const timer = setInterval(() => {
-		const now = performance.now();
-		maxLag = Math.max(maxLag, now - last - intervalMs);
-		last = now;
-	}, intervalMs);
-	return { stop: () => { clearInterval(timer); return maxLag; } };
-}
 
 function playwrightErrorContext(): string {
 	return [
@@ -541,13 +521,12 @@ test.describe("gate inspect slicing", () => {
 			const reloadedSignal = reloadedGate?.signals.find((signal: any) => signal.id === post.signal.id);
 			expect(reloadedSignal, "RETAINED_GATE_DIAGNOSTICS_RELOAD_MISSING: failed signal must survive gate-store reconstruction").toBeTruthy();
 
-			const snapshot = await buildGateVerificationInspectionSnapshot({
+			const snapshot = buildGateVerificationSnapshot({
 				goalId,
 				gateId: "failed-retained-diagnostics-gate",
 				signalId: post.signal.id,
 				verification: reloadedSignal!.verification,
 				selectionOptions: { mode: "grep", pattern: "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER", context: 1 },
-				v2Root: gateStoreV2Root(inspectStateDir),
 			});
 			expect(snapshot.steps).toHaveLength(1);
 			expect(
@@ -560,407 +539,9 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("hydrates a migrated managed output for inspection and fails closed when its payload is tampered", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gate-inspect-managed-"));
-		try {
-			const stateDir = path.join(root, "state");
-			const v2Root = gateStoreV2Root(stateDir);
-			fs.mkdirSync(stateDir, { recursive: true });
-			const marker = "MIGRATED_MANAGED_INSPECT_MARKER";
-			fs.writeFileSync(path.join(stateDir, "gates.json"), JSON.stringify([{
-				goalId: "migrated-goal",
-				gateId: "migrated-gate",
-				status: "failed",
-				signals: [{
-					id: "migrated-signal",
-					goalId: "migrated-goal",
-					gateId: "migrated-gate",
-					sessionId: "migrated-session",
-					timestamp: 1,
-					commitSha: "abc",
-					verification: { status: "failed", steps: [{ name: "review", type: "llm-review", passed: false, status: "failed", output: marker, duration_ms: 1 }] },
-				}],
-				updatedAt: 1,
-			}]), "utf8");
-
-			const migrated = new GateStore(stateDir);
-			const migratedSignal = migrated.getGate("migrated-goal", "migrated-gate")!.signals[0]!;
-			const hydrated = await buildGateVerificationInspectionSnapshot({
-				goalId: "migrated-goal",
-				gateId: "migrated-gate",
-				signalId: migratedSignal.id,
-				verification: migratedSignal.verification,
-				selectionOptions: { mode: "full" },
-				v2Root,
-			});
-			expect(hydrated.steps[0].output).toBe(marker);
-			const ref = migratedSignal.verification.steps[0]!.outputRef!;
-			fs.writeFileSync(ref.path, "tampered payload", "utf8");
-
-			const reloaded = new GateStore(stateDir);
-			const tamperedSignal = reloaded.getGate("migrated-goal", "migrated-gate")!.signals[0]!;
-			await expect(buildGateVerificationInspectionSnapshot({
-				goalId: "migrated-goal",
-				gateId: "migrated-gate",
-				signalId: tamperedSignal.id,
-				verification: tamperedSignal.verification,
-				selectionOptions: { mode: "full" },
-				v2Root,
-			})).rejects.toThrow(/missing, tampered, or unavailable/i);
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-
-	test("inspects externalized bypass content root-bound and rejects missing, tampered, and cross-project refs", async () => {
-		await withGoal(async (goalId) => {
-			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
-			if (!context) throw new Error(`missing project context for bypass content fixture ${goalId}`);
-			const marker = "EXTERNALIZED_BYPASS_CONTENT_MARKER";
-			const originalStore = context.gateStore;
-			let reloaded: GateStore | undefined;
-			let signal: GateSignal | undefined;
-			let originalRef: GateSignal["contentRef"];
-			let originalBody: Buffer | undefined;
-			const bypassedAt = gatewayFixture.clock.now();
-			originalStore.recordSignal({
-				id: "bypass-externalized-content",
-				signalKind: "human-bypass",
-				goalId,
-				gateId: "signals-gate",
-				sessionId: "human-bypass",
-				timestamp: bypassedAt,
-				commitSha: "",
-				metadata: { bypass: "true", whyBypassed: marker, whoAmI: "inspection-test", bypassedAt: String(bypassedAt) },
-				content: marker,
-				verification: { status: "passed", steps: [] },
-			});
-			await originalStore.flush();
-			try {
-				reloaded = new GateStore(inspectStateDir);
-				Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
-				signal = reloaded.getGate(goalId, "signals-gate")!.signals.find(row => row.id === "bypass-externalized-content")!;
-				originalRef = structuredClone(signal.contentRef!);
-				originalBody = fs.readFileSync(originalRef.path);
-				expect(createHash("sha256").update(originalBody).digest("hex")).toBe(originalRef.sha256);
-				expect(originalBody.byteLength).toBe(originalRef.bytes);
-				expect(signal.content).toBe("");
-
-				const healthy = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "grep", pattern: marker });
-				expect(healthy.status).toBe(200);
-				expect((await healthy.json()).text).toContain(marker);
-
-				fs.writeFileSync(originalRef.path, "tampered bypass payload", "utf8");
-				const tampered = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
-				expect(tampered.status).toBe(400);
-				const tamperedJson = JSON.stringify(await tampered.json());
-				expect(tamperedJson).not.toContain("tampered bypass payload");
-				expect(tamperedJson).not.toContain(originalRef.path);
-				expect(tamperedJson).not.toContain(originalRef.sha256);
-
-				fs.rmSync(originalRef.path, { force: true });
-				const missing = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
-				expect(missing.status).toBe(400);
-
-				const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bypass-content-other-root-"));
-				let otherStore: GateStore | undefined;
-				let otherReloaded: GateStore | undefined;
-				try {
-					const otherState = path.join(otherRoot, "state");
-					otherStore = new GateStore(otherState);
-					otherStore.initGatesForGoal("other-goal", ["other-gate"]);
-					otherStore.recordSignal({ ...structuredClone(signal), id: "bypass-other", goalId: "other-goal", gateId: "other-gate", content: "OTHER_PROJECT_BYPASS_SECRET", contentRef: undefined });
-					await otherStore.flush();
-					otherReloaded = new GateStore(otherState);
-					const foreignRef = otherReloaded.getGate("other-goal", "other-gate")!.signals[0]!.contentRef!;
-					signal.contentRef = foreignRef;
-					const foreign = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
-					expect(foreign.status).toBe(400);
-					const foreignJson = JSON.stringify(await foreign.json());
-					expect(foreignJson).not.toContain("OTHER_PROJECT_BYPASS_SECRET");
-					expect(foreignJson).not.toContain(foreignRef.path);
-					expect(foreignJson).not.toContain(foreignRef.sha256);
-				} finally {
-					await otherReloaded?.close().catch(() => undefined);
-					await otherStore?.close().catch(() => undefined);
-					fs.rmSync(otherRoot, { recursive: true, force: true });
-				}
-			} finally {
-				try {
-					if (signal && originalRef) signal.contentRef = originalRef;
-					if (originalRef && originalBody) {
-						const restoreFile = `${originalRef.path}.${process.pid}.restore.tmp`;
-						fs.mkdirSync(path.dirname(originalRef.path), { recursive: true });
-						try {
-							fs.writeFileSync(restoreFile, originalBody);
-							fs.renameSync(restoreFile, originalRef.path);
-						} finally {
-							fs.rmSync(restoreFile, { force: true });
-						}
-						const restoredBody = fs.readFileSync(originalRef.path);
-						expect(restoredBody.byteLength).toBe(originalRef.bytes);
-						expect(createHash("sha256").update(restoredBody).digest("hex")).toBe(originalRef.sha256);
-					}
-				} finally {
-					try {
-						await reloaded?.close();
-					} finally {
-						Object.defineProperty(context, "gateStore", { configurable: true, value: originalStore, writable: true });
-					}
-				}
-			}
-		});
-	});
-
-	test("rejects two-root forged refs from verification and diagnostics artifact responses", async () => {
-		await withGoal(async (goalId) => {
-			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
-			if (!context) throw new Error(`missing project context for two-root managed ref fixture ${goalId}`);
-			const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-cross-project-managed-ref-"));
-			try {
-				const otherState = path.join(otherRoot, "state");
-				const otherMarker = "PROJECT_B_VERIFICATION_AND_DIAGNOSTICS_MARKER";
-				const otherStore = new GateStore(otherState);
-				otherStore.initGatesForGoal("project-b-goal", ["project-b-gate"]);
-				otherStore.recordSignal({
-					id: "project-b-managed-source", goalId: "project-b-goal", gateId: "project-b-gate",
-					sessionId: "project-b-session", timestamp: gatewayFixture.clock.now(), commitSha: "project-b-commit",
-					verification: { status: "failed", steps: [{ name: "project-b-step", type: "command", passed: false, status: "failed", output: otherMarker, duration_ms: 1 }] },
-				});
-				await otherStore.flush();
-				const otherReloaded = new GateStore(otherState);
-				const foreignRef = otherReloaded.getGate("project-b-goal", "project-b-gate")!.signals[0]!.verification.steps[0]!.outputRef!;
-
-				const signalId = `project-a-forged-ref-${++signalSequence}`;
-				const forgedSignal: any = {
-					id: signalId, goalId, gateId: "signals-gate", sessionId: "project-a-session",
-					timestamp: gatewayFixture.clock.now() + signalSequence, commitSha: "project-a-commit",
-					verification: { status: "failed", steps: [{
-						name: "forged managed output", type: "command", passed: false, status: "failed", output: "", outputRef: foreignRef, duration_ms: 1,
-						diagnostics: {
-							type: "retained-command-diagnostics", createdAt: gatewayFixture.clock.now(),
-							baseDir: path.join(inspectStateDir, "gate-diagnostics", goalId, "signals-gate", signalId, "forged"),
-							artifacts: [{ path: foreignRef.path, relativePath: "test-results/forged/error-context.md", sourcePath: foreignRef.path, bytes: foreignRef.bytes, kind: "test-results", contentType: "text/markdown", contentRef: foreignRef }],
-						},
-					}] },
-				};
-				context.gateStore.recordSignal(forgedSignal);
-				context.gateStore.updateGateStatus(goalId, "signals-gate", "failed");
-				const storedGate = context.gateStore.getGate(goalId, "signals-gate")!;
-				const storedPosition = storedGate.signals.findIndex((signal: GateSignal) => signal.id === signalId);
-				const signalIndex = storedGate.signals[storedPosition]!.persistenceOrdinal ?? storedPosition;
-				const escapedForeignPath = JSON.stringify(foreignRef.path).slice(1, -1);
-
-				const summaryJson = JSON.stringify(await gateSummary(goalId, "signals-gate"));
-				expect(summaryJson, "GATE_SUMMARY_CROSS_PROJECT_PAYLOAD_LEAK: compact summaries must not hydrate project-B refs").not.toContain(otherMarker);
-				expect(summaryJson).not.toContain(foreignRef.sha256);
-				expect(summaryJson).not.toContain(escapedForeignPath);
-
-				const verificationRes = await inspectGate(goalId, "signals-gate", "verification", { signal_index: signalIndex, step: "forged managed output", mode: "full" });
-				expect(verificationRes.status).toBe(400);
-				const verificationJson = JSON.stringify(await verificationRes.json());
-				expect(verificationJson, "GATE_INSPECT_CROSS_PROJECT_VERIFICATION_PAYLOAD_LEAK: explicit verification must fail closed").not.toContain(otherMarker);
-				expect(verificationJson).not.toContain(foreignRef.sha256);
-				expect(verificationJson).not.toContain(escapedForeignPath);
-
-				const artifactRes = await inspectGate(goalId, "signals-gate", "artifact", { signal_index: signalIndex, step: "forged managed output", artifact: "test-results/forged/error-context.md", mode: "full" });
-				expect(artifactRes.status, "GATE_INSPECT_CROSS_PROJECT_DIAGNOSTICS_PAYLOAD_LEAK: a project-B diagnostics fallback must be rejected").not.toBe(200);
-				const artifactJson = JSON.stringify(await artifactRes.json());
-				expect(artifactJson).not.toContain(otherMarker);
-				expect(artifactJson).not.toContain(foreignRef.sha256);
-				expect(artifactJson).not.toContain(escapedForeignPath);
-			} finally {
-				fs.rmSync(otherRoot, { recursive: true, force: true });
-			}
-		});
-	});
-
-	test("inspects primary review and QA artifacts older than 32 signals with one bounded payload pass", async () => {
-		await withGoal(async (goalId) => {
-			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
-			if (!context) throw new Error(`missing project context for managed primary artifact fixture ${goalId}`);
-			const gateStore = context.gateStore;
-			const reviewContent = `review header\n${"x".repeat(MANAGED_ARTIFACT_BYTES)}\n${MANAGED_PRIMARY_ARTIFACT_MARKER}\nreview tail`;
-			const qaContent = Array.from({ length: 120 }, (_, index) => `${index + 1}: ${index === 74 ? MANAGED_QA_ARTIFACT_MARKER : "qa detail"}`).join("\n");
-			for (let ordinal = 0; ordinal < 40; ordinal++) {
-				const type = ordinal === 1 ? "agent-qa" : "llm-review";
-				const content = ordinal === 0 ? reviewContent : ordinal === 1 ? qaContent : `retained primary artifact ${ordinal}`;
-				gateStore.recordSignal({
-					id: `managed-primary-${ordinal}`,
-					goalId,
-					gateId: "signals-gate",
-					sessionId: `managed-primary-session-${ordinal}`,
-					timestamp: gatewayFixture.clock.now() + ordinal,
-					commitSha: `managed-primary-commit-${ordinal}`,
-					verification: {
-						status: "passed",
-						steps: [{
-							name: ordinal === 1 ? "older QA" : `older review ${ordinal}`,
-							type,
-							passed: true,
-							status: "passed",
-							output: "compact verdict",
-							duration_ms: 1,
-							artifact: { content, contentType: type === "agent-qa" ? "text/html" : "text/markdown" },
-						}],
-					},
-				});
-			}
-			await gateStore.flush();
-			const reloaded = new GateStore(inspectStateDir);
-			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
-			const reviewSignal = reloaded.getGate(goalId, "signals-gate")!.signals.find(signal => signal.id === "managed-primary-0")!;
-			const qaSignal = reloaded.getGate(goalId, "signals-gate")!.signals.find(signal => signal.id === "managed-primary-1")!;
-			const reviewRef = reviewSignal.verification.steps[0]!.artifact!.contentRef!;
-			expect(reviewSignal.verification.steps[0]!.artifact!.content).toBe("");
-			expect(qaSignal.verification.steps[0]!.artifact!.content).toBe("");
-
-			// Affected-test reader audit: spying is scoped to managed payloads created
-			// beneath this test's project state. Repository inputs delegate unchanged.
-			const originalReadFileSync = fs.readFileSync.bind(fs);
-			let fullPayloadReads = 0;
-			const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathLike | number, options?: unknown) => {
-				if (typeof file !== "number" && String(file).endsWith(".payload")) fullPayloadReads++;
-				return originalReadFileSync(file, options as never);
-			}) as typeof fs.readFileSync);
-			const heartbeat = inspectHeartbeat();
-			let grepRes: Response;
-			try {
-				grepRes = await inspectGate(goalId, "signals-gate", "artifact", {
-					signal_index: 0,
-					step: "older review 0",
-					artifact: "primary",
-					mode: "grep",
-					pattern: MANAGED_PRIMARY_ARTIFACT_MARKER,
-					context: 0,
-				});
-			} finally {
-				readSpy.mockRestore();
-			}
-			const maxLag = heartbeat.stop();
-			expect(
-				grepRes.status,
-				"GATE_INSPECT_PRIMARY_REVIEW_ARTIFACT_UNAVAILABLE: a primary review artifact older than the 32-signal hot window must remain inspectable",
-			).toBe(200);
-			const grepBody = await grepRes.json();
-			expect(grepBody.text).toContain(MANAGED_PRIMARY_ARTIFACT_MARKER);
-			expect(grepBody.text).not.toContain(reviewRef.path);
-			expect(Buffer.byteLength(JSON.stringify(grepBody))).toBeLessThan(64 * 1024);
-			expect(fullPayloadReads, "GATE_INSPECT_MANAGED_PAYLOAD_FULL_READ: bounded managed artifact inspection must not use readFileSync").toBe(0);
-			expect(maxLag, `GATE_INSPECT_MANAGED_PAYLOAD_EVENT_LOOP_STALL: bounded selection stalled ${maxLag.toFixed(1)}ms`).toBeLessThanOrEqual(75);
-
-			const tailRes = await inspectGate(goalId, "signals-gate", "artifact", {
-				signal_index: 0,
-				step: "older review 0",
-				artifact: "primary",
-				mode: "tail",
-				lines: 1,
-			});
-			expect(tailRes.status, "GATE_INSPECT_PRIMARY_REVIEW_TAIL_UNAVAILABLE: managed primary artifact tail selection must remain supported").toBe(200);
-			expect((await tailRes.json()).text).toContain("review tail");
-
-			const qaRes = await inspectGate(goalId, "signals-gate", "artifact", {
-				signal_index: 1,
-				step: "older QA",
-				artifact: "primary",
-				mode: "slice",
-				from: 74,
-				to: 76,
-			});
-			expect(qaRes.status, "GATE_INSPECT_PRIMARY_QA_ARTIFACT_UNAVAILABLE: a primary QA artifact older than the 32-signal hot window must remain inspectable").toBe(200);
-			const qaBody = await qaRes.json();
-			expect(qaBody.text).toContain(MANAGED_QA_ARTIFACT_MARKER);
-			expect(qaBody.text).not.toContain("73:");
-			expect(qaBody.text).not.toContain("77:");
-
-			fs.writeFileSync(reviewRef.path, "tampered managed primary payload", "utf8");
-			const tamperedRes = await inspectGate(goalId, "signals-gate", "artifact", { signal_index: 0, artifact: "primary", mode: "tail" });
-			expect(tamperedRes.status, "GATE_INSPECT_TAMPERED_PRIMARY_PAYLOAD_ACCEPTED: tampered managed primary artifacts must fail closed").not.toBe(200);
-			expect(JSON.stringify(await tamperedRes.json())).not.toContain("tampered managed primary payload");
-
-			const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-cross-project-managed-primary-"));
-			try {
-				const otherState = path.join(otherRoot, "state");
-				const otherStore = new GateStore(otherState);
-				otherStore.initGatesForGoal("other-goal", ["other-gate"]);
-				otherStore.recordSignal({ ...structuredClone(reviewSignal), goalId: "other-goal", gateId: "other-gate", id: "other-primary", verification: { ...structuredClone(reviewSignal.verification), steps: [{ ...structuredClone(reviewSignal.verification.steps[0]!), artifact: { content: reviewContent, contentType: "text/markdown" } }] } });
-				await otherStore.flush();
-				const otherReloaded = new GateStore(otherState);
-				const otherRef = otherReloaded.getGate("other-goal", "other-gate")!.signals[0]!.verification.steps[0]!.artifact!.contentRef!;
-				reviewSignal.verification.steps[0]!.artifact = { content: "", contentType: "text/markdown", contentRef: otherRef };
-				const crossProjectRes = await inspectGate(goalId, "signals-gate", "artifact", { signal_index: 0, artifact: "primary", mode: "grep", pattern: MANAGED_PRIMARY_ARTIFACT_MARKER });
-				expect(crossProjectRes.status, "GATE_INSPECT_CROSS_PROJECT_PRIMARY_PAYLOAD_ACCEPTED: managed refs must be bound to the owning gate-store root").not.toBe(200);
-			} finally {
-				fs.rmSync(otherRoot, { recursive: true, force: true });
-			}
-		});
-	});
-
-
-	test("keeps production-scale no-newline gate list and verification reads asynchronous and bounded", async () => {
-		await withGoal(async (goalId) => {
-			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
-			if (!context) throw new Error(`missing project context for no-newline payload fixture ${goalId}`);
-			const signalId = `managed-no-newline-${++signalSequence}`;
-			context.gateStore.recordSignal({
-				id: signalId, goalId, gateId: "signals-gate", sessionId: "managed-no-newline-session",
-				timestamp: gatewayFixture.clock.now() + signalSequence, commitSha: "managed-no-newline-commit",
-				verification: { status: "failed", steps: [{
-					name: "production-scale no-newline output", type: "llm-review", passed: false, status: "failed",
-					output: "N".repeat(PRODUCTION_SCALE_NO_NEWLINE_BYTES), duration_ms: 1,
-				}] },
-			});
-			context.gateStore.updateGateStatus(goalId, "signals-gate", "failed");
-			await context.gateStore.flush();
-			const reloaded = new GateStore(inspectStateDir);
-			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
-			const reloadedGate = reloaded.getGate(goalId, "signals-gate")!;
-			const reloadedPosition = reloadedGate.signals.findIndex(signal => signal.id === signalId);
-			const signalIndex = reloadedGate.signals[reloadedPosition]!.persistenceOrdinal ?? reloadedPosition;
-			const managedRef = reloadedGate.signals[reloadedPosition]!.verification.steps[0]!.outputRef!;
-			expect(managedRef.bytes).toBe(PRODUCTION_SCALE_NO_NEWLINE_BYTES);
-
-			const originalReadFileSync = fs.readFileSync.bind(fs);
-			let synchronousPayloadReads = 0;
-			const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathLike | number, options?: unknown) => {
-				if (typeof file !== "number" && String(file).endsWith(".payload")) synchronousPayloadReads++;
-				return originalReadFileSync(file, options as never);
-			}) as typeof fs.readFileSync);
-			const heartbeat = inspectHeartbeat();
-			let listRes: Response;
-			let inspectRes: Response;
-			try {
-				listRes = await apiFetch(`/api/goals/${goalId}/gates?view=summary`);
-				inspectRes = await inspectGate(goalId, "signals-gate", "verification", { signal_index: signalIndex, step: "production-scale no-newline output", mode: "head", lines: 1 });
-				await new Promise(resolve => setTimeout(resolve, 15));
-			} finally {
-				readSpy.mockRestore();
-			}
-			const maxLag = heartbeat.stop();
-			expect(listRes.status).toBe(200);
-			const listText = await listRes.text();
-			expect(Buffer.byteLength(listText), "GATE_LIST_NO_NEWLINE_RESPONSE_UNBOUNDED: list projection must remain body-free and bounded").toBeLessThan(256 * 1024);
-			expect(inspectRes.status).toBe(200);
-			const inspectBody = await inspectRes.json();
-			const inspectJson = JSON.stringify(inspectBody);
-			expect(Buffer.byteLength(inspectJson), "GATE_INSPECT_NO_NEWLINE_RESPONSE_UNBOUNDED: one long line must not escape the byte budget").toBeLessThan(64 * 1024);
-			expect(Buffer.byteLength(inspectBody.steps[0].output), "GATE_INSPECT_NO_NEWLINE_SELECTION_UNBOUNDED: selected text must not scale with payload bytes").toBeLessThanOrEqual(50 * 1024);
-			expect(synchronousPayloadReads, "GATE_INSPECT_MANAGED_PAYLOAD_FULL_READ: list and explicit verification must stream a bounded projection instead of readFileSync hydration").toBe(0);
-			expect(maxLag, `GATE_INSPECT_NO_NEWLINE_EVENT_LOOP_STALL: payload selection stalled ${maxLag.toFixed(1)}ms`).toBeLessThanOrEqual(75);
-		});
-	});
-
 	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async () => {
 		await withGoal(async (goalId) => {
 			await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
-			const authoritativeMarkerLine = (() => {
-				const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
-					.getGate(goalId, "playwright-artifacts-gate")?.signals.at(-1);
-				const artifact = stored?.verification.steps[0]?.diagnostics?.artifacts?.find((file: any) => file.relativePath.endsWith("error-context.md"));
-				if (!artifact) throw new Error("missing authoritative retained artifact fixture");
-				return fs.readFileSync(artifact.path, "utf8").split("\n").find(line => line === PLAYWRIGHT_ERROR_CONTEXT_MARKER)!;
-			})();
 
 			const inspectRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification", { mode: "full" });
 			expect(inspectRes.status).toBe(200);
@@ -983,9 +564,8 @@ test.describe("gate inspect slicing", () => {
 			expect(artifact).toMatchObject({
 				id: "retain-artifact-fixture",
 				relativePath: "test-results/retain-artifact-fixture/error-context.md",
-				bytes: expect.any(Number),
 				kind: "test-results",
-				contentType: "text/markdown",
+				path: expect.stringContaining("gate-diagnostics"),
 			});
 			expect(traceArtifact).toMatchObject({
 				id: "test-results/retain-artifact-fixture/trace.zip",
@@ -996,20 +576,7 @@ test.describe("gate inspect slicing", () => {
 				relativePath: "test-results/retain-artifact-fixture/screenshot.png",
 			});
 			expect(artifactFiles.filter((file: any) => file.id === "retain-artifact-fixture")).toHaveLength(1);
-			for (const file of artifactFiles) {
-				expect(file).not.toHaveProperty("content");
-				expect(file).not.toHaveProperty("path");
-				expect(file).not.toHaveProperty("contentRef");
-			}
-			expect(body.steps[0].diagnostics).toMatchObject({
-				outputSource: "retained-logs",
-				logs: { stderr: { bytes: Buffer.byteLength(PLAYWRIGHT_STYLE_FAILURE_SUMMARY), lines: 1 } },
-				artifacts: { count: 3, files: expect.any(Array) },
-				inspectHints: expect.any(Array),
-			});
-			expect(body.steps[0].diagnostics.inspectHints).toEqual(expect.arrayContaining([
-				expect.stringMatching(/section="artifact".*artifact="retain-artifact-fixture"/),
-			]));
+			expect(artifact).not.toHaveProperty("content");
 
 			const byIdRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				step: "playwright-style failure",
@@ -1022,7 +589,7 @@ test.describe("gate inspect slicing", () => {
 			const byId = await byIdRes.json();
 			expect(byId.section).toBe("artifact");
 			expect(byId.artifact).toMatchObject({ id: artifact.id, relativePath: artifact.relativePath });
-			expect(byId.text).toContain(authoritativeMarkerLine);
+			expect(byId.text).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 			expect(byId.text).toContain("locator");
 			expect(byId.text).not.toContain("artifact detail line 100");
 			expect(byId.text).not.toContain("# Instructions");
@@ -1040,18 +607,22 @@ test.describe("gate inspect slicing", () => {
 				step: "playwright-style failure",
 				artifact: artifact.relativePath,
 				mode: "slice",
-				from: 5,
-				to: 7,
+				from: 1,
+				to: 4,
 			});
 			expect(byPathRes.status).toBe(200);
 			const byPath = await byPathRes.json();
 			expect(byPath.artifact.relativePath).toBe(artifact.relativePath);
-			expect(byPath.text).toMatch(/^5\b.*PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/m);
-			expect(byPath.text).toMatch(/^7\b.*artifact detail line 1/m);
-			expect(byPath.text).not.toContain("artifact detail line 2");
+			expect(byPath.text).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(byPath.text).toContain("artifact detail line 1");
+			expect(byPath.text).not.toContain("artifact detail line 5");
 			expect(byPath.text).not.toContain("# Instructions");
-			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 5, to: 7 } });
+			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 1, to: 4 } });
 
+			expect(
+				fs.readFileSync(artifact.path, "utf8"),
+				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: retained artifact metadata must resolve to the copied error-context after the original worktree artifact is removed.",
+			).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 		});
 	});
 
@@ -1135,67 +706,37 @@ test.describe("gate inspect slicing", () => {
 	test("keeps gate status compact while explicit inspection exposes retained diagnostics", async () => {
 		await withGoal(async (goalId) => {
 			await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
-			const authoritativeMarkerLine = (() => {
-				const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
-					.getGate(goalId, "playwright-artifacts-gate")?.signals.at(-1);
-				const retainedArtifact = stored?.verification.steps[0]?.diagnostics?.artifacts?.find((file: any) => file.relativePath.endsWith("error-context.md"));
-				if (!retainedArtifact) throw new Error("missing retained artifact fixture");
-				return fs.readFileSync(retainedArtifact.path, "utf8").split("\n").find(line => line === PLAYWRIGHT_ERROR_CONTEXT_MARKER)!;
-			})();
 
 			const summary = await gateSummary(goalId, "playwright-artifacts-gate");
 			const summaryJson = JSON.stringify(summary.latestSignal?.verification ?? summary);
 			expect(summary.latestSignal?.verification?.status).toBe("failed");
 			expect(
-				summary.latestSignal?.verification?.steps?.[0]?.diagnostics,
-				"GATE_STATUS_RETAINED_DIAGNOSTICS_TOO_VERBOSE: compact gate status/default verification snapshots must not expose retained diagnostics",
-			).toBeUndefined();
-			expect(summaryJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+				summaryJson,
+				"GATE_STATUS_RETAINED_DIAGNOSTICS_TOO_VERBOSE: compact gate status/default verification snapshots must not expose retained log paths or bulky Playwright artifact file lists",
+			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
 
 			const defaultInspectRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification");
 			expect(defaultInspectRes.status).toBe(200);
 			const defaultInspect = await defaultInspectRes.json();
 			expect(
-				defaultInspect.steps[0].diagnostics,
+				JSON.stringify(defaultInspect.steps),
 				"GATE_INSPECT_DEFAULT_RETAINED_DIAGNOSTICS_TOO_VERBOSE: implicit/default gate_inspect should stay compact unless a mode is explicit",
-			).toBeUndefined();
-			expect(JSON.stringify(defaultInspect.steps)).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
 
 			const explicitRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification", { mode: "full" });
 			expect(explicitRes.status).toBe(200);
 			const explicit = await explicitRes.json();
 			const explicitJson = JSON.stringify(explicit.steps);
-			const diagnostics = explicit.steps[0].diagnostics;
 			expect(
-				diagnostics,
-				"GATE_INSPECT_EXPLICIT_DIAGNOSTICS_MISSING: explicit gate_inspect must expose retained diagnostic and artifact metadata",
-			).toMatchObject({
-				outputSource: "retained-logs",
-				logs: { stderr: { bytes: Buffer.byteLength(PLAYWRIGHT_STYLE_FAILURE_SUMMARY), lines: 1 } },
-				artifacts: { count: 3, files: expect.any(Array) },
-				inspectHints: expect.any(Array),
-			});
-			expect(diagnostics.inspectHints).toEqual(expect.arrayContaining([
-				expect.stringMatching(/section="verification".*step="playwright-style failure"/),
-				expect.stringMatching(/section="artifact".*artifact="retain-artifact-fixture"/),
-			]));
+				explicitJson,
+				"GATE_INSPECT_EXPLICIT_DIAGNOSTICS_MISSING: explicit gate_inspect must expose retained diagnostic log/artifact metadata",
+			).toMatch(/stdout\.log|stderr\.log|gate-diagnostics/i);
+			expect(explicitJson).toContain("error-context.md");
 			expect(explicitJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
-			for (const file of diagnostics.artifacts.files) {
-				expect(file).not.toHaveProperty("content");
-				expect(file).not.toHaveProperty("path");
-				expect(file).not.toHaveProperty("contentRef");
-			}
+			expect(explicit.steps[0].diagnostics.artifacts.files[0]).not.toHaveProperty("content");
 
-			const retainedArtifact = diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
-			const retainedRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
-				step: "playwright-style failure",
-				artifact: retainedArtifact.id,
-				mode: "grep",
-				pattern: PLAYWRIGHT_ERROR_CONTEXT_MARKER,
-				context: 0,
-			});
-			expect(retainedRes.status).toBe(200);
-			expect((await retainedRes.json()).text).toContain(authoritativeMarkerLine);
+			const retainedArtifact = explicit.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			expect(fs.readFileSync(retainedArtifact.path, "utf8")).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 		});
 	});
 
@@ -1324,133 +865,7 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("uses stable ordinals and reports an explicit retained-history gap", async () => {
-		await withGoal(async (goalId) => {
-			const first = await signalAndWait(goalId, "content-gate", { content: "retained ordinal ten" });
-			const second = await signalAndWait(goalId, "content-gate", { content: "retained ordinal eleven" });
-			const gate = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore.getGate(goalId, "content-gate");
-			if (!gate) throw new Error("missing content gate for ordinal-gap fixture");
-			gate.signals[0]!.persistenceOrdinal = 10;
-			gate.signals[1]!.persistenceOrdinal = 11;
-			gate.earliestRetainedOrdinal = 10;
-			gate.prunedSignalRanges = [{ from: 0, to: 9, reason: "count", compactedAt: gatewayFixture.clock.now() }];
-
-			const gapRes = await inspectGate(goalId, "content-gate", "content", { signal_index: 0, mode: "full" });
-			expect(gapRes.status).toBe(410);
-			expect(await gapRes.json()).toMatchObject({
-				code: "GATE_SIGNAL_HISTORY_PRUNED",
-				gateId: "content-gate",
-				signalIndex: 0,
-				earliestRetainedOrdinal: 10,
-				prunedRange: { from: 0, to: 9, reason: "count" },
-			});
-
-			const retainedRes = await inspectGate(goalId, "content-gate", "content", { signal_index: 10, mode: "full" });
-			expect(retainedRes.status).toBe(200);
-			expect(await retainedRes.json()).toMatchObject({ signalIndex: 10, signalId: first.signal.id, text: "retained ordinal ten" });
-
-			const latestRes = await inspectGate(goalId, "content-gate", "content", { signal_index: -1, mode: "full" });
-			expect(latestRes.status).toBe(200);
-			expect(await latestRes.json()).toMatchObject({ signalIndex: 11, signalId: second.signal.id, text: "retained ordinal eleven" });
-
-			const signalsRes = await inspectGate(goalId, "content-gate", "signals", { mode: "full" });
-			expect(signalsRes.status).toBe(200);
-			expect(await signalsRes.json()).toMatchObject({
-				earliestRetainedOrdinal: 10,
-				prunedSignalRanges: [{ from: 0, to: 9, reason: "count" }],
-				signals: [{ index: 10 }, { index: 11 }],
-			});
-		});
-	});
-
-	test("matches long-line prefixes and read-boundary markers across inline, managed, retained-log, and artifact bodies", async () => {
-		await withGoal(async (goalId) => {
-			const inlineMarker = "INLINE-LONG-LINE-PREFIX";
-			await signalAndWait(goalId, "content-gate", { content: `${inlineMarker}${"i".repeat(96 * 1024)}` });
-			const inline = await inspectGate(goalId, "content-gate", "content", { mode: "grep", pattern: inlineMarker });
-			expect(inline.status).toBe(200);
-			expect(await inline.json()).toMatchObject({ selection: { matchCount: 1, shownMatches: 1, range: { from: 1, to: 1 } } });
-
-			const managedMarker = "MANAGED-CHUNK-BOUNDARY";
-			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId)!;
-			const managedBypassedAt = gatewayFixture.clock.now();
-			context.gateStore.recordSignal({
-				id: "bypass-long-line-managed-content",
-				signalKind: "human-bypass",
-				goalId,
-				gateId: "content-gate",
-				sessionId: "human-bypass",
-				timestamp: managedBypassedAt,
-				commitSha: "",
-				content: `${"m".repeat(64 * 1024 - 7)}${managedMarker}${"m".repeat(600 * 1024)}`,
-				metadata: { bypass: "true", whyBypassed: managedMarker, whoAmI: "inspection-test", bypassedAt: String(managedBypassedAt) },
-				verification: { status: "passed", steps: [] },
-			});
-			await context.gateStore.flush();
-			const reloaded = new GateStore(inspectStateDir);
-			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
-			const managedSignal = reloaded.getGate(goalId, "content-gate")!.signals.at(-1)!;
-			expect(managedSignal.contentRef).toBeDefined();
-			const managed = await inspectGate(goalId, "content-gate", "content", { signal_index: -1, mode: "grep", pattern: managedMarker });
-			expect(managed.status).toBe(200);
-			expect(await managed.json()).toMatchObject({ selection: { matchCount: 1, shownMatches: 1 } });
-
-			const retained = await signalAndWaitFailed(goalId, "failed-retained-diagnostics-gate", {});
-			const retainedSignal = reloaded.getGate(goalId, "failed-retained-diagnostics-gate")?.signals.find((row: GateSignal) => row.id === retained.signal.id)!;
-			const logMarker = "RETAINED-LOG-BOUNDARY";
-			fs.writeFileSync(retainedSignal.verification.steps[0]!.diagnostics!.stdout!.path, `${"l".repeat(64 * 1024 - 5)}${logMarker}${"l".repeat(72 * 1024)}`, "utf8");
-			const retainedResult = await inspectGate(goalId, "failed-retained-diagnostics-gate", "verification", { mode: "grep", pattern: logMarker });
-			expect(retainedResult.status).toBe(200);
-			expect((await retainedResult.json()).steps[0].selection).toMatchObject({ matchCount: 1, shownMatches: 1 });
-
-			const artifactResult = await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
-			const artifactSignal = reloaded.getGate(goalId, "playwright-artifacts-gate")?.signals.find((row: GateSignal) => row.id === artifactResult.signal.id)!;
-			const artifact = artifactSignal.verification.steps[0]!.diagnostics!.artifacts![0]!;
-			const artifactMarker = "RETAINED-ARTIFACT-BOUNDARY";
-			fs.writeFileSync(artifact.path, `${"a".repeat(64 * 1024 - 9)}${artifactMarker}${"a".repeat(72 * 1024)}`, "utf8");
-			const artifactInspect = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", { artifact: artifact.relativePath, mode: "grep", pattern: artifactMarker });
-			expect(artifactInspect.status).toBe(200);
-			expect(await artifactInspect.json()).toMatchObject({ selection: { matchCount: 1, shownMatches: 1 } });
-		});
-	});
-
-	test("times out catastrophic inspection regexes off-loop and remains healthy", async () => {
-		await withGoal(async (goalId) => {
-			const nonmatch = `${"a".repeat(64 * 1024 - 1)}!`;
-			await signalAndWait(goalId, "content-gate", { content: nonmatch });
-			const heartbeat = inspectHeartbeat();
-			const timeoutRes = await inspectGate(goalId, "content-gate", "content", { mode: "grep", pattern: "(a+)+$" });
-			await new Promise(resolve => setTimeout(resolve, 15));
-			const maxLag = heartbeat.stop();
-			expect(timeoutRes.status).toBe(408);
-			expect(await timeoutRes.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT" });
-			expect(maxLag, `GATE_INSPECT_REGEX_EVENT_LOOP_STALL: catastrophic regex stalled ${maxLag.toFixed(1)}ms`).toBeLessThanOrEqual(75);
-
-			const retained = await signalAndWaitFailed(goalId, "failed-retained-diagnostics-gate", {});
-			const retainedSignal = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
-				.getGate(goalId, "failed-retained-diagnostics-gate")?.signals.find((row: GateSignal) => row.id === retained.signal.id)!;
-			fs.writeFileSync(retainedSignal.verification.steps[0]!.diagnostics!.stdout!.path, nonmatch, "utf8");
-			const retainedTimeout = await inspectGate(goalId, "failed-retained-diagnostics-gate", "verification", { mode: "grep", pattern: "(a+)+$" });
-			expect(retainedTimeout.status).toBe(408);
-			expect(await retainedTimeout.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT" });
-
-			const artifactSignalResult = await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
-			const artifactSignal = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
-				.getGate(goalId, "playwright-artifacts-gate")?.signals.find((row: GateSignal) => row.id === artifactSignalResult.signal.id)!;
-			const retainedArtifact = artifactSignal.verification.steps[0]!.diagnostics!.artifacts![0]!;
-			fs.writeFileSync(retainedArtifact.path, nonmatch, "utf8");
-			const artifactTimeout = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", { artifact: retainedArtifact.relativePath, mode: "grep", pattern: "(a+)+$" });
-			expect(artifactTimeout.status).toBe(408);
-			expect(await artifactTimeout.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT" });
-
-			await signalAndWait(goalId, "content-gate", { content: "subsequent worker health!" });
-			const healthy = await inspectGate(goalId, "content-gate", "content", { signal_index: -1, mode: "grep", pattern: "!$" });
-			expect(healthy.status).toBe(200);
-			expect((await healthy.json()).text).toContain("subsequent worker health!");
-		});
-	});
-
-	test("returns clear 4xx validation errors for invalid and oversized regexes and slice ranges", async () => {
+	test("returns clear 400 validation errors for invalid regex and slice ranges", async () => {
 		await withGoal(async (goalId) => {
 			await signalAndWait(goalId, "content-gate", { content: contentLines(5) });
 
@@ -1458,10 +873,6 @@ test.describe("gate inspect slicing", () => {
 			expect(regexRes.status).toBe(400);
 			const regexBody = await regexRes.json();
 			expect(regexBody.error).toMatch(/invalid regex|regular expression|unterminated/i);
-
-			const lengthRes = await inspectGate(goalId, "content-gate", "content", { mode: "grep", pattern: "x".repeat(1025) });
-			expect(lengthRes.status).toBe(400);
-			expect(await lengthRes.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TOO_LONG" });
 
 			const rangeRes = await inspectGate(goalId, "content-gate", "content", { mode: "slice", from: 4, to: 2 });
 			expect(rangeRes.status).toBe(400);

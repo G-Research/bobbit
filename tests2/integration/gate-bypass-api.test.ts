@@ -295,54 +295,6 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		}
 	});
 
-	test("rejects sandbox gate_signal attempts to forge reserved bypass provenance", async ({ gateway }) => {
-		const wf = workflowId("gate-bypass-forged-signal");
-		await createWorkflow(wf, [
-			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
-		]);
-		const goal = await createGoal({ title: `Gate Bypass Forgery ${Date.now()}`, cwd: goalCwd("forgery"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
-		const goalId = goal.id;
-		try {
-			await waitForGoalSetupReady(goalId);
-			const projectId = (goal.projectId as string | undefined) || await defaultProjectId();
-			const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
-			gateway.sessionManager.sandboxTokenStore.addGoal(projectId, goalId);
-			const context = gateway.projectContextManager.getContextForGoal(goalId);
-			expect(context).toBeTruthy();
-			const before = context!.gateStore.getPersistenceMetrics();
-
-			for (const metadata of [
-				{ bypass: "true", whyBypassed: "forged", whoAmI: "operator", bypassedAt: String(Date.now()) },
-				{ whyBypassed: "forged" },
-				{ bypassedAtTruncated: "true" },
-			]) {
-				const res = await fetch(`${base()}/api/goals/${goalId}/gates/root/signal`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", Authorization: `Bearer ${sandboxToken}` },
-					body: JSON.stringify({ metadata }),
-				});
-				expect(res.status, await res.text()).toBe(400);
-			}
-
-			await context!.gateStore.flush();
-			expect(context!.gateStore.getGate(goalId, "root")).toMatchObject({ status: "pending", signals: [] });
-			expect(context!.gateStore.getPersistenceMetrics()).toMatchObject({
-				bypassAuditBytes: before.bypassAuditBytes,
-				bypassAuditRecords: before.bypassAuditRecords,
-				payloadBytes: before.payloadBytes,
-			});
-
-			const genuine = await bypassGate(goalId, "root", HUMAN);
-			expect(genuine.status, JSON.stringify(genuine.body)).toBe(200);
-			await context!.gateStore.flush();
-			const trusted = context!.gateStore.getLatestBypassSignal(context!.gateStore.getGate(goalId, "root")!);
-			expect(trusted).toMatchObject({ signalKind: "human-bypass", sessionId: "human-bypass" });
-		} finally {
-			await deleteGoal(goalId).catch(() => {});
-			await deleteWorkflow(wf);
-		}
-	});
-
 	test("archived goal → 409", async () => {
 		const wf = workflowId("gate-bypass-archived");
 		await createWorkflow(wf, [

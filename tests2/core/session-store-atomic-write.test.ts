@@ -132,13 +132,7 @@ describe("SessionStore atomic write", () => {
 
 	it("writes compact v2 JSON with a coalesced epoch and reloads identically", async () => {
 		const store = new SessionStore(stateDir, memfs);
-		const accepted = makeSession("s1");
-		accepted.acceptedPromptDispatches = [{
-			promptId: "prompt-1",
-			queueRowIds: ["queue-row-1"],
-			acceptedAt: 123,
-		}];
-		store.put(accepted);
+		store.put(makeSession("s1"));
 		store.put(makeSession("s2"));
 		store.put(makeSession("s3"));
 		await store.flushAsync();
@@ -152,14 +146,10 @@ describe("SessionStore atomic write", () => {
 		assert.equal(parsed.sessions.length, 3);
 		const ids = parsed.sessions.map((s: PersistedSession) => s.id).sort();
 		assert.deepEqual(ids, ["s1", "s2", "s3"]);
-		assert.deepEqual(parsed.sessions[0].acceptedPromptDispatches, accepted.acceptedPromptDispatches,
-			"Pi acceptance proof must survive restart until its correlated ACK settles");
 
 		const restored = new SessionStore(stateDir, memfs);
 		assert.equal(restored.getLoadedEpoch(), parsed.epoch);
 		assert.deepEqual(restored.getAll(), parsed.sessions);
-		assert.equal(Object.hasOwn(restored.get("s2")!, "acceptedPromptDispatches"), false,
-			"absent optional ledgers must remain omitted from compact v2 rows");
 	});
 
 	it("fully validates the first async save, then skips reads while its own fingerprint is unchanged", async () => {

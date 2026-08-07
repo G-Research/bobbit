@@ -172,7 +172,7 @@ export class GateResetCoordinator {
 		return this.intents.begin(input);
 	}
 
-	async commitDurable(intent: GateResetIntent, workflow: Workflow, gateStore: GateStore = this.gateStore): Promise<GateResetResult> {
+	async commitDurable(intent: GateResetIntent, workflow: Workflow): Promise<GateResetResult> {
 		if (intent.reopenRequired) {
 			const goal = this.goalStore.get(intent.goalId);
 			if (!goal) throw new Error(`Goal ${intent.goalId} no longer exists`);
@@ -186,7 +186,7 @@ export class GateResetCoordinator {
 				throw new Error(`Goal ${intent.goalId} no longer exists`);
 			}
 		}
-		return gateStore.resetGateAndDependentsStrict(intent.goalId, intent.gateId, workflow);
+		return this.gateStore.resetGateAndDependentsStrict(intent.goalId, intent.gateId, workflow);
 	}
 
 	complete(intent: GateResetIntent): void {

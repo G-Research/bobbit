@@ -8,28 +8,6 @@ export interface LocalMockAgentClock {
 }
 
 /**
- * Drive timer-backed gateway lifecycle work in the v2 integration harness.
- * Production uses real timers; the fork-scoped test gateway deliberately uses
- * a manual clock, so positive-delay queue drains only run when a test advances
- * that clock. Yielding through the host timer phase also lets WS and mock-agent
- * promises publish the state that schedules the next lifecycle timer.
- */
-export async function advanceGatewayClockUntil(
-	gateway: any,
-	predicate: () => boolean,
-	description: string,
-	maxVirtualMs = 10_000,
-	stepMs = 25,
-): Promise<void> {
-	for (let advanced = 0; advanced <= maxVirtualMs; advanced += stepMs) {
-		await new Promise<void>((resolve) => setTimeout(resolve, 0));
-		if (predicate()) return;
-		if (advanced < maxVirtualMs) gateway.clock.advance(Math.min(stepMs, maxVirtualMs - advanced));
-	}
-	throw new Error(`gateway did not reach ${description} after ${maxVirtualMs}ms of virtual time`);
-}
-
-/**
  * Restore a session with its per-bridge virtual clock installed at the exact
  * queue-drain boundary. `restoreSessions()` re-enqueues durable steers, then
  * releases its replacement coordinator which drains that queue synchronously.
@@ -131,23 +109,11 @@ export function attachLocalMockAgentClock(gateway: any, sessionId: string): Loca
 
 	async function settleCurrentPrompt(maxVirtualMs = 10_000): Promise<void> {
 		const agent = bridge._agent;
-		if (!agent?._promptChain || typeof agent._promptChain.then !== "function") {
+		const chain = agent?._promptChain;
+		if (!chain || typeof chain.then !== "function") {
 			throw new Error(`session ${sessionId} has no active mock-agent prompt chain`);
 		}
-
-		// Durable prompt acceptance is published before the bridge RPC. A caller can
-		// therefore attach after SessionManager reports streaming but before the mock
-		// has appended that prompt to `_promptChain`. Follow chain replacements until
-		// the canonical session is idle; awaiting only the pre-publication resolved
-		// chain would falsely report settlement while the real prompt starts later.
-		for (let advanced = 0; advanced <= maxVirtualMs; advanced += 5) {
-			const chain = agent._promptChain as Promise<void>;
-			await advanceUntilSettled(chain, Math.max(5, maxVirtualMs - advanced));
-			await yieldTurn();
-			if (gateway.sessionManager.getSession(sessionId)?.status === "idle" && agent._promptChain === chain) return;
-			if (advanced < maxVirtualMs) clock.advance(Math.min(5, maxVirtualMs - advanced));
-		}
-		throw new Error(`session ${sessionId} prompt chain settled without reaching idle after ${maxVirtualMs}ms of local virtual time`);
+		await advanceUntilSettled(chain, maxVirtualMs);
 	}
 
 	return { clock, advanceUntilSettled, waitUntil, settleCurrentPrompt };

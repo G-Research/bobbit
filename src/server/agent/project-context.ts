@@ -6,7 +6,6 @@ import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import { SessionStore } from "./session-store.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { GateStore } from "./gate-store.js";
-import type { GateStorePreloadedState } from "./gate-store-migration-worker.js";
 import { GateResetCoordinator } from "./gate-reset-intent.js";
 import { TaskStore } from "./task-store.js";
 import { TeamStore } from "./team-store.js";
@@ -38,23 +37,6 @@ import type { RemoteGitPolicy } from "../skills/git.js";
  * stateDir/configDir parameters. This file will compile once those
  * changes are merged.
  */
-export interface ProjectContextPaths {
-  bobbitDir: string;
-  stateDir: string;
-  configDir: string;
-}
-
-/** Canonical store layout shared by context construction and pre-open migration. */
-export function resolveProjectContextPaths(project: RegisteredProject): ProjectContextPaths {
-  const isHeadquarters = project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
-  const projectBobbitDir = isHeadquarters ? bobbitDir() : normalProjectBobbitDir(project.rootPath);
-  return {
-    bobbitDir: projectBobbitDir,
-    stateDir: isHeadquarters ? bobbitStateDir() : path.join(projectBobbitDir, "state"),
-    configDir: isHeadquarters ? bobbitConfigDir() : path.join(projectBobbitDir, "config"),
-  };
-}
-
 export class ProjectContext {
   readonly project: RegisteredProject;
   readonly stateDir: string;
@@ -93,22 +75,27 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; gateStorePreload?: GateStorePreloadedState; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
     this.project = project;
     const fsImpl = opts.fsImpl;
     const clock = opts.clock;
     const commandRunner = opts.commandRunner;
     const isHeadquarters = project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
-    const paths = resolveProjectContextPaths(project);
-    this.bobbitDir = paths.bobbitDir;
-    this.stateDir = paths.stateDir;
-    this.configDir = paths.configDir;
+    if (isHeadquarters) {
+      this.bobbitDir = bobbitDir();
+      this.stateDir = bobbitStateDir();
+      this.configDir = bobbitConfigDir();
+    } else {
+      this.bobbitDir = normalProjectBobbitDir(project.rootPath);
+      this.stateDir = path.join(this.bobbitDir, "state");
+      this.configDir = path.join(this.bobbitDir, "config");
+    }
 
     // Instantiate state stores with project-scoped state directory
     this.goalStore = new GoalStore(this.stateDir, fsImpl);
     this.sessionStore = new SessionStore(this.stateDir, fsImpl, clock);
     this.bgProcessStore = new BgProcessStore(this.stateDir, clock);
-    this.gateStore = new GateStore(this.stateDir, fsImpl, opts.gateStorePreload);
+    this.gateStore = new GateStore(this.stateDir, fsImpl);
     // Construct after both stores load: pending reset intents are replayed
     // state-first before any team runtime or boot-resume logic observes them.
     this.gateResetCoordinator = new GateResetCoordinator(this.stateDir, this.goalStore, this.gateStore, fsImpl);
@@ -216,7 +203,7 @@ export class ProjectContext {
     };
     await Promise.all([
       drain(this.goalStore),
-      this.gateStore.close(),
+      drain(this.gateStore),
       drain(this.taskStore),
       drain(this.sessionStore),
     ]);

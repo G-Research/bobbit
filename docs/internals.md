@@ -98,7 +98,7 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
     sessions.json  # Sessions for THIS project
     tasks.json     # Tasks for THIS project's goals
     team-state.json # Team state
-    gate-records/v2/ # Partitioned gate truth, bounded history, audit, and payload refs
+    gates.json     # Gate state and signals
     staff.json     # Staff agents
     search.flex/       # Durable search mirror + derived FlexSearch cache for THIS project
     session-costs.json # Cost tracking (see session-cost.md)
@@ -3399,7 +3399,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `goals.json` | `GoalStore` | Goal definitions |
 | `sessions.json` | `SessionStore` | Session metadata |
 | `tasks.json` | `TaskStore` | Task state |
-| `gate-records/v2/` | `GateStore` | Partitioned gate truth, bounded history/audit, and content-addressed payloads. See [Gate store persistence](gate-store-persistence.md). |
+| `gates.json` | `GateStore` | Gate state + signals |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` worker | Durable document mirror (`index/__docs__.json` + journal), compatibility metadata, and disposable derived cache. See [Semantic search](#semantic-search). |

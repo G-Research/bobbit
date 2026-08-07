@@ -22,7 +22,6 @@ const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
-	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } = await import("../../src/server/agent/author-sidecar.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
@@ -2893,20 +2892,12 @@ describe("executable SessionManager rehydration boundaries", () => {
 		appendPromptAuthorSettlement(sessionId, {
 			promptId: "p1", settledAt: 2, outcome: "echoed",
 		});
-		const p2ModelText = `[System]: ${text}`;
 		appendPromptAuthorDispatch(sessionId, {
-			promptId: "p2",
-			dispatchedAt: 3,
-			modelText: p2ModelText,
-			modelPrefix: "[System]: ",
-			source: "system",
-			author: systemAuthor,
+			promptId: "p2", dispatchedAt: 3, modelText: text, source: "system", author: systemAuthor,
 		});
 
 		let listener: ((event: any) => void) | undefined;
 		const replacement = recordingBridge(() => {});
-		const replacementSteer = vi.fn(async () => ({ success: true }));
-		replacement.steer = replacementSteer;
 		replacement.onEvent = vi.fn((next: (event: any) => void) => {
 			listener = next;
 			return () => { listener = undefined; };
@@ -2945,58 +2936,21 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(preparedReplay.message.role).toBe("user");
 		expect(preparedReplay.message.content).toBe(text);
 		expect(original.promptQueue.toArray()).toMatchObject([{
-			id: "p2:recovered:0",
 			text,
 			isSteered: true,
 			source: "system",
 			author: systemAuthor,
-			deliveryState: "retrying",
-			deliveryAttempt: 1,
-			deliveryPromptId: "p2",
 		}]);
 		expect(original.inFlightSteerTexts).toEqual([]);
 		expect(original.promptAuthorReplayBindings).toBeUndefined();
 		expect(original.lastKeylessPromptAuthorEnd).toBeUndefined();
 		expect(original.lastActivity).toBe(654_321);
-		const restoredBindings = readAuthorSidecar(sessionId);
-		expect(restoredBindings.find((row) => row.promptId === "p1")?.settlement?.outcome).toBe("echoed");
-		const pendingP2 = restoredBindings.find((row) => row.promptId === "p2");
-		expect(pendingP2).toMatchObject({
-			promptId: "p2",
-			source: "system",
-			author: systemAuthor,
-			modelPrefix: "[System]: ",
-		});
-		expect(pendingP2?.settlement).toBeUndefined();
-		expect(promptAuthorBindingMatchesText(pendingP2!, p2ModelText)).toBe(true);
-		const replayMessageEnds = client.send.mock.calls
-			.map((call: any[]) => JSON.parse(call[0]))
-			.filter((frame: any) => frame.type === "event" && frame.data.type === "message_end");
-		expect(replayMessageEnds).toEqual([]);
-
-		await manager._dispatchSteer(original, original.promptQueue.peekAllSteered());
-		expect(replacementSteer).toHaveBeenCalledWith(p2ModelText);
-		expect(original.inFlightSteerTexts).toMatchObject([{
-			promptId: "p2",
-			text,
-			source: "system",
-			author: systemAuthor,
-		}]);
-		expect(readAuthorSidecar(sessionId).find((row) => row.promptId === "p2")?.settlement).toBeUndefined();
-
-		listener?.({ type: "message_end", message: { role: "user", content: p2ModelText } });
-		expect(original.inFlightSteerTexts).toEqual([]);
 		expect(readAuthorSidecar(sessionId).find((row) => row.promptId === "p2")?.settlement?.outcome)
-			.toBe("echoed");
-		const redriveMessageEnds = client.send.mock.calls
+			.toBe("cancelled");
+		const emittedMessageEnds = client.send.mock.calls
 			.map((call: any[]) => JSON.parse(call[0]))
 			.filter((frame: any) => frame.type === "event" && frame.data.type === "message_end");
-		expect(redriveMessageEnds).toHaveLength(1);
-		expect(redriveMessageEnds[0].data.message).toMatchObject({
-			role: "user",
-			content: text,
-			author: systemAuthor,
-		});
+		expect(emittedMessageEnds).toEqual([]);
 	});
 
 	it("fails closed when hard force-abort cannot read declared durable history", async () => {

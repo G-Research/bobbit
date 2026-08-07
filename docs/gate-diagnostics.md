@@ -4,7 +4,7 @@ Retained gate diagnostics preserve the evidence from automated gate verification
 
 ## Where this fits
 
-Gate verification stores compact metadata in the gate history so `gate_status`, notifications, and default `gate_inspect` calls stay small enough for agent context. Large step output and primary artifact bodies are content-addressed under the v2 gate store rather than embedded in hot JSON. Command steps can also emit stdout/stderr streams and Playwright artifacts into the separate retained-diagnostics tree. Verification inspection streams either source with bounded selection; artifact content is fetched only when a caller explicitly targets it.
+Gate verification stores a compact step result in the gate history so `gate_status`, notifications, and default `gate_inspect` calls stay small enough for agent context. Command steps can also emit much larger stdout/stderr streams and Playwright artifacts. Those diagnostics are retained in Bobbit state, outside the goal worktree. Verification inspection reads logs with bounded selection and exposes artifacts as a compact index; artifact file content is fetched only when a caller explicitly targets one artifact.
 
 This split keeps routine status checks cheap while making failed E2E and browser-test gates diagnosable after worktree cleanup or a gateway restart. During restart recovery, the same files let `gate_status` and `gate_inspect` show bounded output from before and after the gateway restart.
 
@@ -23,14 +23,13 @@ For command verification steps, Bobbit writes retained diagnostics under the gat
 
 While a restart-recoverable command is running, the verification harness also persists process recovery files under the verification state tree: a pid/nonce identity file, heartbeat file, and atomic exit-code file. Those files are operational state, not user artifacts, but they point at the same retained stdout/stderr logs used for inspection.
 
-The gate store persists root-bounded diagnostics metadata and managed payload references on the verification step. Completed gate inspection can therefore read durable evidence even if:
+The gate store persists references to the retained diagnostics on the verification step. Completed gate inspection can therefore read the state copy even if:
 
 - the original goal worktree was cleaned up;
 - the gateway restarted while or after the command ran;
-- the compact `GateSignalStep.output` body was externalized;
-- a retained diagnostics file is unavailable but its managed fallback remains.
+- the compact `GateSignalStep.output` only contains a short failure tail.
 
-Default status views use compact metadata only. Explicit inspection prefers retained command logs when available and falls back to the managed output copy; neither source is hydrated into canonical gate state.
+The compact step output is still the source for default status views. The retained files are the source for explicit diagnostic inspection.
 
 ## Inspecting retained logs
 
@@ -80,11 +79,9 @@ Explicit inspection exposes cap and truncation metadata in the verification snap
 
 `mode="full"` still passes through normal line, byte, and tool-result budgets. If those budgets apply, use `grep`, `slice`, or a larger targeted `tail` instead of assuming the selected output contains every retained byte.
 
-## Primary and Playwright-style artifacts
+## Playwright-style artifacts
 
-A verification step's primary artifact, such as an LLM review or HTML QA report, is externalized to the content-addressed gate payload store. Select it explicitly with `section="artifact"` and `artifact="primary"`; the same bounded modes and root/hash checks apply.
-
-When available, Bobbit also copies Playwright-style artifacts from the command working directory into the retained diagnostics tree:
+When available, Bobbit copies Playwright-style artifacts from the command working directory into the retained diagnostics tree:
 
 - `test-results/**/error-context.md`;
 - traces such as `trace.zip`;
@@ -92,7 +89,7 @@ When available, Bobbit also copies Playwright-style artifacts from the command w
 - selected files under Playwright `data/` and `trace/` folders;
 - `playwright-report/**`.
 
-Explicit `gate_inspect(section="verification", mode=...)` returns a compact artifact index under `steps[].diagnostics.artifacts`. Each row is metadata only: `id`, `relativePath`, byte size, kind, optional `testName`, and optional retry metadata. Backing paths and managed references remain private; artifact rows never include file `content`, including for small `error-context.md` files.
+Explicit `gate_inspect(section="verification", mode=...)` returns a compact artifact index under `steps[].diagnostics.artifacts`. Each row is metadata only: `id`, `relativePath`, retained `path`, byte size, kind, optional `testName`, and optional retry metadata. Artifact rows never include file `content`, including for small `error-context.md` files.
 
 Use the index to fetch one artifact at a time:
 
@@ -106,7 +103,7 @@ The `artifact` selector accepts either the stable artifact `id` from the index o
 
 Artifact fetches use the same bounded selection controls as verification output (`grep`, `head`, `tail`, `slice`, and `full`). When `mode` is omitted, `section="artifact"` defaults to a bounded tail rather than a full dump. Explicit `mode="full"` remains capped by normal line, byte, and tool-result budgets.
 
-Use `section="artifact"` with the returned ID or exact relative path. Direct backing-file access is intentionally not part of the inspection contract.
+The retained `path` remains in metadata so agents can still call `read(path)` as a fallback when direct file access is appropriate. Prefer `section="artifact"` for bounded, sandbox-checked inspection.
 
 Artifact capture is best effort. Missing reports do not change the verification result, but available reports are retained before worktree cleanup can remove them.
 
@@ -130,7 +127,6 @@ Gate reset does not delete historical diagnostics; reset changes approval state 
 
 ## Related references
 
-- [Gate store persistence](gate-store-persistence.md)
 - [Goals, workflows, and tasks — Verification](goals-workflows-tasks.md#verification)
 - [Restart-safe command gate verification](verification-restart.md)
 - [REST API — Gate inspect endpoint](rest-api.md#gate-inspect-endpoint)

@@ -1,7 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { stablePromptDeliveryRpcTransportSource } from "./generated-agent-prompt-delivery.js";
 
 export interface RunningSourceProcess {
 	child: ChildProcess;
@@ -78,27 +77,22 @@ export function sourceViteWriteAgentSource(): string {
 	return `#!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
 const html = ${JSON.stringify(SOURCE_VITE_THEME_HTML)};
 const messages = [];
-const transcriptEntries = [];
 const agentDir = process.env.BOBBIT_AGENT_DIR || process.cwd();
 fs.mkdirSync(agentDir, { recursive: true });
 const sessionFile = path.join(agentDir, "source-vite-inline-theme-session.jsonl");
 const model = { provider: "mock", id: "source-vite-write-agent", contextWindow: 128000, maxTokens: 16384, reasoning: false };
 let thinkingLevel = "off";
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-const persist = () => fs.writeFileSync(sessionFile, transcriptEntries.map((entry) => JSON.stringify(entry)).join("\\n") + (transcriptEntries.length ? "\\n" : ""));
+const persist = () => fs.writeFileSync(sessionFile, messages.map((message) => JSON.stringify({ type: "message", message })).join("\\n") + (messages.length ? "\\n" : ""));
 const emit = (event) => send(event);
-const persistPromptReservation = (entry) => { transcriptEntries.push(entry); persist(); };
-const persistPromptAck = (entry) => { transcriptEntries.push(entry); persist(); };
 
 async function runPrompt(text) {
 	const user = { role: "user", content: [{ type: "text", text }] };
 	messages.push(user);
-	transcriptEntries.push({ type: "message", message: user });
 	emit({ type: "message_end", message: user });
 	emit({ type: "agent_start" });
 	emit({ type: "session_status", status: "streaming" });
@@ -113,7 +107,6 @@ async function runPrompt(text) {
 	] };
 	const result = { role: "toolResult", toolCallId: toolId, toolName: "write", isError: false, content: [{ type: "text", text: "Wrote source-Vite inline theme fixture" }] };
 	messages.push(assistant, result);
-	transcriptEntries.push({ type: "message", message: assistant }, { type: "message", message: result });
 	emit({ type: "message_end", message: assistant });
 	emit({ type: "message_end", message: result });
 	persist();
@@ -121,7 +114,15 @@ async function runPrompt(text) {
 	emit({ type: "session_status", status: "idle" });
 }
 
-function handleAgentRpc(message) {
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+	let message;
+	try { message = JSON.parse(line); } catch { return; }
+	if (message.type === "prompt" || message.type === "follow_up") {
+		send({ type: "response", id: message.id, success: true });
+		void runPrompt(message.message || "");
+		return;
+	}
 	if (message.type === "get_state") {
 		persist();
 		send({ type: "response", id: message.id, success: true, data: { status: "idle", sessionFile, model, thinkingLevel } });
@@ -143,8 +144,8 @@ function handleAgentRpc(message) {
 		return;
 	}
 	send({ type: "response", id: message.id, success: true });
-}
-${stablePromptDeliveryRpcTransportSource()}
+});
+send({ type: "session_status", status: "idle" });
 `;
 }
 

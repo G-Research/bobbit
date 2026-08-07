@@ -9,7 +9,7 @@ import {
 	type CachedGateSignalNotifier,
 } from "../../src/server/gate-signal-response.js";
 import { createManualClock, type ManualClock } from "../harness/clock.js";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const DO_NOT_POLL_PATTERN = /Verification is running asynchronously|Do not poll|gate_status|gate_inspect|Go idle|wait for the server/i;
 const GOAL_ID = "gate-signal-reminder-goal";
@@ -74,15 +74,13 @@ function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gat
 
 test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () => {
 	let gateStore: GateStore;
-	let memfs: MemFs;
-	let stateDir: string;
 	let clock: ManualClock;
 	let notifications: Notification[];
 	let notifier: CachedGateSignalNotifier;
 
 	test.beforeEach(() => {
-		memfs = createMemFs();
-		stateDir = path.resolve("/memfs/gate-signal-reminder");
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-signal-reminder");
 		memfs.mkdirSync(stateDir, { recursive: true });
 		gateStore = new GateStore(stateDir, memfs);
 		gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
@@ -111,29 +109,6 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		expect(body.agentReminder).toMatch(/gate_status/);
 		expect(body.agentReminder).toMatch(/gate_inspect/);
 		expect(body.agentReminder).toMatch(/Go idle now/i);
-	});
-
-	test("reuses the exact projected result after flush and reopen without reading a payload", async () => {
-		gateStore.recordSignal(signal({
-			id: "durable-passed-signal",
-			verification: {
-				status: "passed",
-				steps: [{
-					name: "Fast cached verification", type: "command", status: "passed", passed: true,
-					output: "DURABLE_CACHE_MARKER", duration_ms: 4,
-				}],
-			},
-		}));
-		await gateStore.flush();
-		gateStore = new GateStore(stateDir, memfs);
-
-		const body = reuseCachedGateSignal({
-			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, notifier, clock,
-			createSignalId: () => "reopened-cache-signal",
-		});
-
-		expect(body?.signal.steps[0]?.output).toBe("[cached from prior signal] DURABLE_CACHE_MARKER");
-		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.signals.at(-1)?.verification.steps[0]?.output).toBe("[cached from prior signal] DURABLE_CACHE_MARKER");
 	});
 
 	test("cached pass response does not include the async wait reminder", () => {

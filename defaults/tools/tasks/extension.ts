@@ -195,20 +195,17 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gate_inspect",
 		label: "Inspect Gate",
-		description: "Read gate content, verification output, retained artifacts, or signal history.",
-		promptSnippet: "Read detailed gate data: content, verification output, retained artifacts, or signal history.",
+		description: "Read gate content, verification output, or signal history.",
+		promptSnippet: "Read detailed gate data: content, verification output, or signal history.",
 		parameters: Type.Object({
 			gate_id: Type.String(),
 			section: Type.Union([
 				Type.Literal("content"),
 				Type.Literal("verification"),
-				Type.Literal("artifact"),
 				Type.Literal("signals"),
 			]),
 			signal_index: Type.Optional(Type.Number({ description: "0-based, negative from end. Default -1 (latest)." })),
-			step: Type.Optional(Type.String({ description: "Verification step name to scope to (section=verification or artifact only)." })),
-			artifact: Type.Optional(Type.String({ description: "Artifact id/relative path, or 'primary' for a review/QA report (section=artifact only)." })),
-			retry: Type.Optional(Type.Number({ description: "Playwright artifact retry (section=artifact only)." })),
+			step: Type.Optional(Type.String({ description: "Verification step name to scope to (section=verification only)." })),
 			mode: Type.Optional(Type.Union([
 				Type.Literal("full"),
 				Type.Literal("grep"),
@@ -228,8 +225,6 @@ export default function (pi: ExtensionAPI) {
 				const qs = new URLSearchParams({ section: params.section });
 				if (params.signal_index !== undefined) qs.set("signal_index", String(params.signal_index));
 				if (params.step !== undefined) qs.set("step", String(params.step));
-				if (params.artifact !== undefined) qs.set("artifact", String(params.artifact));
-				if (params.retry !== undefined) qs.set("retry", String(params.retry));
 				if (params.mode !== undefined) qs.set("mode", String(params.mode));
 				if (params.pattern !== undefined) qs.set("pattern", String(params.pattern));
 				if (params.context !== undefined) qs.set("context", String(params.context));

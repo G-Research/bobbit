@@ -179,14 +179,9 @@ describe("session-manager.ts has the isUserVisibleActivity filter wired in", () 
 	it("abort-restart's onEvent handler uses isUserVisibleActivity to gate lastActivity", () => {
 		const idx = SOURCE.indexOf("const abortStore = this.resolveStoreForSession(id);");
 		assert.ok(idx > 0, "abortStore declaration not found — abort-restart scope changed");
-		const handlerEnd = SOURCE.indexOf("\n\t\t\t});", idx);
-		assert.ok(handlerEnd > idx, "abort-restart onEvent handler end not found");
-		const handler = SOURCE.slice(idx, handlerEnd);
-		const filterIndex = handler.search(/isUserVisibleActivity\s*\(/);
-		const lastActivityIndex = handler.indexOf("session.lastActivity =");
-		assert.ok(filterIndex >= 0, "abort-restart handler must call isUserVisibleActivity");
+		const window = SOURCE.slice(idx, idx + 800);
 		assert.ok(
-			lastActivityIndex > filterIndex,
+			/isUserVisibleActivity\s*\(/.test(window),
 			"abort-restart handler must call isUserVisibleActivity before bumping lastActivity",
 		);
 	});

@@ -96,27 +96,19 @@ import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
 import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
-import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
-import { gateStoreV2Root, selectGateTextStream, selectManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
-import { findReservedHumanBypassMetadataKey } from "./agent/gate-bypass-provenance.js";
-import {
-	GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS,
-	GateInspectionReadError,
-	GateInspectionRegexError,
-} from "./gate-inspection-regex-worker.js";
+import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import {
 	GateArtifactResolutionError,
 	buildArtifactLookup,
 	isTextInspectableArtifact,
 	resolveArtifactFromLookup,
-	selectRetainedGateArtifact,
 	stripPlaywrightErrorContextBoilerplate,
+	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
 import {
 	TextSelectionError,
 	selectText,
-	validateTextSelectionOptions,
 	type TextSelectionMode,
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
@@ -2435,55 +2427,49 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		remotePolicy: remoteGitPolicy,
 		worktreeSetupRuntime,
 	});
-	const projectContextsReady = projectContextManager.initAll();
-	// createGateway remains synchronous; mark the promise handled immediately so
-	// an early worker failure is retained for start() rather than becoming an
-	// unhandled rejection before the caller reaches the pre-listen barrier.
-	void projectContextsReady.catch(() => {});
-	ck("initAll-started");
+	projectContextManager.initAll();
+	ck("initAll");
 
-	const migrateProjectTokenSecrets = (): void => {
-		// Migrate inline token values from project.yaml → secrets.json (one-time).
-		// Context publication is worker-fenced, so this runs from start() after
-		// projectContextsReady rather than bypassing initialization via getOrCreate.
-		for (const p of projectRegistry.list()) {
-			const ctx = projectContextManager.getOrCreate(p.id);
-			if (!ctx) continue;
-			const tokens = ctx.projectConfigStore.getSandboxTokens();
-			// getSandboxTokens() never includes `value` (typed accessor strips it).
-			// We need the raw values, which are still on the in-memory side-table
-			// after load() but only accessible via the back-compat flat get().
-			const tokensRaw = ctx.projectConfigStore.get("sandbox_tokens");
-			if (!tokensRaw) continue;
-			try {
-				const arr = JSON.parse(tokensRaw);
-				if (!Array.isArray(arr)) continue;
-				const hasValues = arr.some((e: any) => e.value);
-				if (!hasValues) {
-					// No inline values to migrate. Only force a rewrite when the
-					// on-disk format was legacy JSON-string (isDirty() is set during
-					// load()). Without this guard we save() on every server start,
-					// which re-flows multi-line workflow strings through
-					// yaml.stringify and produces a noisy diff every restart.
-					if (ctx.projectConfigStore.isDirty()) {
-						ctx.projectConfigStore.setSandboxTokens(tokens);
-					}
-					continue;
+	// Migrate inline token values from project.yaml → secrets.json (one-time)
+	for (const p of projectRegistry.list()) {
+		const ctx = projectContextManager.getOrCreate(p.id);
+		if (!ctx) continue;
+		const tokens = ctx.projectConfigStore.getSandboxTokens();
+		// getSandboxTokens() never includes `value` (typed accessor strips it).
+		// We need the raw values, which are still on the in-memory side-table
+		// after load() but only accessible via the back-compat flat get().
+		const tokensRaw = ctx.projectConfigStore.get("sandbox_tokens");
+		if (!tokensRaw) continue;
+		try {
+			const arr = JSON.parse(tokensRaw);
+			if (!Array.isArray(arr)) continue;
+			const hasValues = arr.some((e: any) => e.value);
+			if (!hasValues) {
+				// No inline values to migrate. Only force a rewrite when the
+				// on-disk format was legacy JSON-string (isDirty() is set during
+				// load()). Without this guard we save() on every server start,
+				// which re-flows multi-line workflow strings through
+				// yaml.stringify and produces a noisy diff every restart.
+				if (ctx.projectConfigStore.isDirty()) {
+					ctx.projectConfigStore.setSandboxTokens(tokens);
 				}
-				// Move values to secrets store
-				const secretUpdates: Record<string, string> = {};
-				for (const e of arr) {
-					if (e.value) secretUpdates[e.key] = e.value;
-				}
-				ctx.secretsStore.update(secretUpdates);
-				// Strip values from config (write structured form, no JSON-encoded string).
-				ctx.projectConfigStore.setSandboxTokens(
-					arr.map((e: any) => ({ key: e.key, enabled: e.enabled !== false })),
-				);
-				console.log(`[migration] Moved ${Object.keys(secretUpdates).length} token secret(s) to secrets.json for project ${ctx.project.id}`);
-			} catch { /* ignore parse errors */ }
-		}
-	};
+				continue;
+			}
+			// Move values to secrets store
+			const secretUpdates: Record<string, string> = {};
+			for (const e of arr) {
+				if (e.value) secretUpdates[e.key] = e.value;
+			}
+			ctx.secretsStore.update(secretUpdates);
+			// Strip values from config (write structured form, no JSON-encoded string).
+			ctx.projectConfigStore.setSandboxTokens(
+				arr.map((e: any) => ({ key: e.key, enabled: e.enabled !== false })),
+			);
+			console.log(`[migration] Moved ${Object.keys(secretUpdates).length} token secret(s) to secrets.json for project ${ctx.project.id}`);
+		} catch { /* ignore parse errors */ }
+	}
+
+	ck("token-migration-loop");
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
 	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
@@ -2554,6 +2540,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
 	projectContextManager.setDependencies({ sessionManager });
+	// Wire gate status changes to bump goal generation for all project contexts.
+	for (const ctx of projectContextManager.all()) {
+		wireGateStatusGenerationInvalidation(ctx.gateStore, ctx.goalStore);
+	}
+
 	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
 	ck("stores+SessionManager");
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
@@ -4390,13 +4381,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Log each phase (>=50ms) so a slow cold-start is diagnosable from logs.
 			const bootStart = Date.now();
 			const bootPhase = makePhaseTimer("[boot] pre-listen");
-			// Gate migration workers must finish before any session/team/store boot
-			// phase can observe a ProjectContext. Rejection aborts startup loudly.
-			await bootPhase("project-contexts", () => projectContextsReady);
-			migrateProjectTokenSecrets();
-			for (const ctx of projectContextManager.all()) {
-				wireGateStatusGenerationInvalidation(ctx.gateStore, ctx.goalStore);
-			}
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
@@ -6253,7 +6237,7 @@ async function handleApiRoute(
 			if (isHeadquartersOwnedPath(body.rootPath)) {
 				const hq = headquartersProject();
 				if (hq && upsert) {
-					const ctx = await projectContextManager.prepareAndGetOrCreate(hq.id);
+					const ctx = projectContextManager.getOrCreate(hq.id);
 					if (ctx) {
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
@@ -6275,8 +6259,8 @@ async function handleApiRoute(
 			if (upsert) {
 				const existing = projectRegistry.getByPath(body.rootPath);
 				if (existing) {
-					// Join any post-boot preparation for this canonical project root.
-					const ctx = await projectContextManager.prepareAndGetOrCreate(existing.id);
+					// Ensure context is initialized
+					const ctx = projectContextManager.getOrCreate(existing.id);
 					if (ctx) {
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
@@ -6312,24 +6296,13 @@ async function handleApiRoute(
 				}
 				throw regErr;
 			}
-			// Fence the canonical state root immediately after registry publication.
-			// The request succeeds only after worker migration and context publication;
-			// preparation failure rolls back this new registration and leaves legacy
-			// gates.json authoritative for a later retry.
-			let newCtx: ProjectContext | null;
-			try {
-				newCtx = await projectContextManager.prepareAndGetOrCreate(project.id);
-			} catch (error) {
-				try { projectRegistry.remove(project.id); } catch { /* preserve original preparation error */ }
-				throw error;
+			// Initialize project context for the new project
+			const newCtx = projectContextManager.getOrCreate(project.id);
+			if (newCtx) {
+				newCtx.gateStore.onStatusChange = () => {
+					newCtx.goalStore.bumpGeneration();
+				};
 			}
-			if (!newCtx) {
-				try { projectRegistry.remove(project.id); } catch { /* best effort rollback */ }
-				throw new Error(`Project context publication failed: ${project.id}`);
-			}
-			newCtx.gateStore.onStatusChange = () => {
-				newCtx.goalStore.bumpGeneration();
-			};
 
 			// Multi-repo: accept optional components / workflows in the create body.
 			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
@@ -6649,12 +6622,7 @@ async function handleApiRoute(
 	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
 	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
 	if (projectConfigMatch) {
-		// A newly registered descriptor is visible before its worker-preloaded
-		// context is published. Join that exact project/root fence instead of
-		// treating the intentionally unavailable synchronous context as missing.
-		// This keeps proposal config reads/writes ordered behind registration
-		// without bypassing asynchronous GateStore hydration.
-		const ctx = await projectContextManager.prepareAndGetOrCreate(projectConfigMatch[1]);
+		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
 		if (!ctx) {
 			// Endpoint defense in depth: `fields.projectId` drives create-versus-edit
 			// acceptance dispatch on the client. A config mutation that nevertheless
@@ -7796,14 +7764,14 @@ async function handleApiRoute(
 			}
 			provisionalProjectId = provisionalProject.id;
 			resolvedProjectId = provisionalProject.id;
-			// Provisional registration is also a live post-boot publication boundary:
-			// join aliases at the state-root fence before any scoped store is used.
-			const provCtx = await projectContextManager.prepareAndGetOrCreate(provisionalProject.id);
-			if (!provCtx) throw new Error(`Project context publication failed: ${provisionalProject.id}`);
-			provCtx.gateStore.onStatusChange = () => {
-				provCtx.goalStore.bumpGeneration();
-			};
-			wireGoalManagerResolvers(provCtx, { sessionManager, projectContextManager, projectRegistry });
+			// Ensure a ProjectContext exists for the provisional project
+			const provCtx = projectContextManager.getOrCreate(provisionalProject.id);
+			if (provCtx) {
+				provCtx.gateStore.onStatusChange = () => {
+					provCtx.goalStore.bumpGeneration();
+				};
+				wireGoalManagerResolvers(provCtx, { sessionManager, projectContextManager, projectRegistry });
+			}
 		}
 
 		if (!resolvedProjectId && isServerScopeAssistant) {
@@ -7820,11 +7788,7 @@ async function handleApiRoute(
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		resolvedProjectId = resolved.projectId;
 		resolvedProject = resolved.project;
-		// An existing/upserted registration may still be behind a concurrent
-		// post-boot migration. Join it rather than treating the sync fence as a
-		// missing project.
-		const resolvedProjectContext = await projectContextManager.prepareAndGetOrCreate(resolvedProjectId);
-		if (!resolvedProjectContext) throw new Error(`Project context publication failed: ${resolvedProjectId}`);
+		const resolvedProjectContext = projectContextManager.getOrCreate(resolvedProjectId);
 
 		// Server-scope assistants (role/tool) resolve to the hidden `system`
 		// project, which has no user-facing root. They must operate strictly
@@ -11821,12 +11785,10 @@ async function handleApiRoute(
 		if (!gateCtx) { json({ error: "Goal not found in any project" }, 404); return; }
 		const gateStore = gateCtx.gateStore;
 		const gates = gateStore.getGatesForGoal(goalId);
-		// Enrich with workflow gate definitions. Keep the internal body-complete
-		// cache out before spreading or cloning the ordinary response object.
+		// Enrich with workflow gate definitions
 		const enriched = gates.map(g => {
-			const { verificationCache: _verificationCache, ...responseGate } = g;
 			const def = goal.workflow?.gates.find(wg => wg.id === g.gateId);
-			const base = { ...responseGate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
+			const base = { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
 			// Surface human-bypass audit fields as canonical top-level fields so the
 			// UI does not have to couple to internal signal shape.
 			if (g.status === "bypassed") {
@@ -11920,8 +11882,7 @@ async function handleApiRoute(
 			json(slim);
 			return;
 		}
-		const { verificationCache: _verificationCache, ...responseGate } = gate;
-		json({ ...responseGate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream });
+		json({ ...gate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream });
 		return;
 	}
 
@@ -11956,114 +11917,35 @@ async function handleApiRoute(
 			if (section === "artifact" && selectionOptions.mode === undefined) {
 				selectionOptions = { ...selectionOptions, mode: "tail", lines: selectionOptions.lines ?? 200 };
 			}
-			validateTextSelectionOptions(selectionOptions);
+			selectText("", selectionOptions);
 		} catch (err) {
 			if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 			throw err;
 		}
 
-		const idxStr = url.searchParams.get("signal_index");
-		let requestedSignalIndex = idxStr !== null ? parseInt(idxStr, 10) : -1;
-		if (isNaN(requestedSignalIndex)) requestedSignalIndex = -1;
 		const resolveSignal = () => {
-			if (requestedSignalIndex < 0) {
-				const position = gate.signals.length + requestedSignalIndex;
-				if (position < 0 || position >= gate.signals.length) return null;
-				const signal = gate.signals[position];
-				return { signal, index: signal.persistenceOrdinal ?? position };
-			}
-			const position = gate.signals.findIndex((signal, index) =>
-				(signal.persistenceOrdinal ?? index) === requestedSignalIndex,
-			);
-			if (position < 0) return null;
-			return { signal: gate.signals[position], index: requestedSignalIndex };
-		};
-		const respondSignalNotFound = () => {
-			const exactPrunedRange = gate.prunedSignalRanges?.find(range =>
-				requestedSignalIndex >= range.from && requestedSignalIndex <= range.to,
-			);
-			const belowRetentionWatermark = requestedSignalIndex >= 0
-				&& gate.earliestRetainedOrdinal !== undefined
-				&& requestedSignalIndex < gate.earliestRetainedOrdinal;
-			const latestRetainedOrdinal = gate.signals.reduce(
-				(latest, signal, index) => Math.max(latest, signal.persistenceOrdinal ?? index),
-				-1,
-			);
-			const missingWithinRetainedHistory = requestedSignalIndex >= 0 && requestedSignalIndex <= latestRetainedOrdinal;
-			if (requestedSignalIndex >= 0 && (exactPrunedRange || belowRetentionWatermark || missingWithinRetainedHistory)) {
-				json({
-					error: `Signal ordinal ${requestedSignalIndex} was pruned by gate history retention.`,
-					code: "GATE_SIGNAL_HISTORY_PRUNED",
-					gateId,
-					signalIndex: requestedSignalIndex,
-					earliestRetainedOrdinal: gate.earliestRetainedOrdinal,
-					prunedRange: exactPrunedRange ?? {
-						from: requestedSignalIndex,
-						to: Math.max(requestedSignalIndex, (gate.earliestRetainedOrdinal ?? requestedSignalIndex + 1) - 1),
-					},
-				}, 410);
-				return;
-			}
-			json({ error: "Signal not found" }, 404);
+			const idxStr = url.searchParams.get("signal_index");
+			let idx = idxStr !== null ? parseInt(idxStr, 10) : -1;
+			if (isNaN(idx)) idx = -1;
+			if (idx < 0) idx = gate.signals.length + idx;
+			if (idx < 0 || idx >= gate.signals.length) return null;
+			return { signal: gate.signals[idx], index: idx };
 		};
 
 		if (section === "content") {
 			const resolved = resolveSignal();
-			if (!resolved) { respondSignalNotFound(); return; }
+			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
 			try {
 				const rawText = resolved.signal.content || "";
-				const ref = resolved.signal.contentRef;
-				let text: string | null = null;
-				let selection: unknown;
-				if (ref && !rawText) {
-					const selected = await selectManagedGatePayload(gateStoreV2Root(ctx.stateDir), ref, {
-						mode: selectionOptions.mode,
-						lines: selectionOptions.lines ?? (selectionOptions.mode === "full" ? 2_000 : 80),
-						from: selectionOptions.from,
-						to: selectionOptions.to,
-						pattern: selectionOptions.pattern,
-						context: selectionOptions.context,
-						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
-						maxBytes: 50 * 1024,
-					});
-					if (!selected) {
-						json({ error: "Signal content is missing, tampered, or unavailable.", code: "GATE_INSPECT_CONTENT_UNAVAILABLE" }, 400);
-						return;
-					}
-					text = selected.text;
-					selection = {
-						mode: selectionOptions.mode ?? "tail",
-						totalLines: selected.totalLines,
-						range: selected.range,
-						matchCount: selected.matchCount,
-						shownMatches: selected.shownMatches,
-						truncated: selected.truncated,
-					};
-				} else if (rawText && selectionOptions.mode === "grep") {
-					async function* inlineContent(): AsyncGenerator<string> { yield rawText; }
-					const selected = await selectGateTextStream(inlineContent(), {
-						mode: "grep",
-						pattern: selectionOptions.pattern,
-						context: selectionOptions.context,
-						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
-						maxBytes: 50 * 1024,
-					});
-					text = selected.text;
-					selection = { mode: "grep", totalLines: selected.totalLines, range: selected.range, matchCount: selected.matchCount, shownMatches: selected.shownMatches, truncated: selected.truncated };
-				} else {
-					const selected = selectText(rawText, selectionOptions);
-					text = rawText ? selected.text : null;
-					selection = selected.selection;
-				}
+				const selected = selectText(rawText, selectionOptions);
 				json({
 					gateId, section: "content",
 					signalIndex: resolved.index,
 					signalId: resolved.signal.id,
-					text,
-					selection,
+					text: resolved.signal.content ? selected.text : null,
+					selection: selected.selection,
 				});
 			} catch (err) {
-				if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				throw err;
 			}
@@ -12071,13 +11953,10 @@ async function handleApiRoute(
 		}
 
 		if (section === "verification") {
-			// One absolute deadline covers every retained log, managed body, inline
-			// output, and verification step selected by this request.
-			const inspectionDeadlineAt = Date.now() + GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS;
 			const resolved = resolveSignal();
-			if (!resolved) { respondSignalNotFound(); return; }
+			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
 			try {
-				const snapshotInput = {
+				const snapshot = buildGateVerificationSnapshot({
 					goalId,
 					gateId,
 					signalId: resolved.signal.id,
@@ -12086,16 +11965,7 @@ async function handleApiRoute(
 					isActiveVerificationAlive: verificationHarness.areVerificationSessionsAlive(resolved.signal.id),
 					selectionOptions,
 					stepName,
-				};
-				// Default inspection stays metadata-only. An explicit selection is the
-				// only route allowed to stream retained bodies, rooted to this project.
-				const snapshot = selectionOptions.mode === undefined
-					? buildGateVerificationSnapshot(snapshotInput)
-					: await buildGateVerificationInspectionSnapshot({
-						...snapshotInput,
-						v2Root: gateStoreV2Root(ctx.stateDir),
-						inspectionDeadlineAt,
-					});
+				});
 				json({
 					gateId, section: "verification",
 					signalIndex: resolved.index,
@@ -12109,7 +11979,6 @@ async function handleApiRoute(
 					selection: snapshot.selection,
 				});
 			} catch (err) {
-				if (err instanceof GateInspectionRegexError || err instanceof GateInspectionReadError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				if (err instanceof UnknownVerificationStepError) { json({ error: err.message }, 400); return; }
 				throw err;
@@ -12119,7 +11988,7 @@ async function handleApiRoute(
 
 		if (section === "artifact") {
 			const resolved = resolveSignal();
-			if (!resolved) { respondSignalNotFound(); return; }
+			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
 			const artifactTarget = url.searchParams.get("artifact") ?? "";
 			if (!artifactTarget) {
 				json({ error: "artifact query parameter is required with section='artifact'" }, 400);
@@ -12130,84 +11999,6 @@ async function handleApiRoute(
 			if (rawRetry !== null && rawRetry !== "") {
 				if (!/^\d+$/.test(rawRetry)) { json({ error: "retry must be a non-negative integer" }, 400); return; }
 				retry = Number(rawRetry);
-			}
-
-			// Review and QA reports are the step's primary artifact rather than a
-			// command-diagnostics file. Compaction externalizes these bodies behind
-			// root-bound managed references, so inspect them through the streaming
-			// selector without hydrating the canonical gate row or exposing the ref.
-			if (artifactTarget === "primary") {
-				if (retry !== undefined) {
-					json({ error: "retry is not valid for the primary artifact" }, 400);
-					return;
-				}
-				const primarySteps = resolved.signal.verification.steps.filter(step =>
-					(step.type === "llm-review" || step.type === "agent-qa")
-					&& step.artifact?.contentRef
-					&& (stepName === undefined || step.name === stepName),
-				);
-				const validSteps = resolved.signal.verification.steps
-					.filter(step => (step.type === "llm-review" || step.type === "agent-qa") && step.artifact?.contentRef)
-					.map(step => step.name);
-				if (primarySteps.length === 0) {
-					json({ error: stepName === undefined ? "Primary artifact is unavailable." : `Unknown verification step "${stepName}" with a retained primary artifact.`, validSteps }, 400);
-					return;
-				}
-				if (primarySteps.length > 1) {
-					json({ error: "Primary artifact is ambiguous across verification steps; pass step to disambiguate.", validSteps: primarySteps.map(step => step.name) }, 400);
-					return;
-				}
-
-				const primaryStep = primarySteps[0];
-				const ref = primaryStep.artifact!.contentRef!;
-				const requestedMode = selectionOptions.mode ?? "tail";
-				const managedMode = requestedMode === "full" ? "head" : requestedMode;
-				let selected: Awaited<ReturnType<typeof selectManagedGatePayload>>;
-				try {
-					selected = await selectManagedGatePayload(
-						gateStoreV2Root(ctx.stateDir),
-						ref,
-						{
-							mode: managedMode,
-							lines: requestedMode === "full" ? 2_000 : selectionOptions.lines,
-							from: selectionOptions.from,
-							to: selectionOptions.to,
-							pattern: selectionOptions.pattern,
-							context: selectionOptions.context,
-							maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
-							maxBytes: 50 * 1024,
-							// Review/QA bodies can be tens of MiB. A syntactically plain marker
-							// is safe to search linearly while true regexes remain worker-bound.
-							literalSearch: true,
-						},
-					);
-				} catch (err) {
-					if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
-					throw err;
-				}
-				if (!selected) {
-					json({ error: "Primary artifact is missing, tampered, or unavailable.", validSteps }, 400);
-					return;
-				}
-				json({
-					gateId,
-					section: "artifact",
-					signalIndex: resolved.index,
-					signalId: resolved.signal.id,
-					step: primaryStep.name,
-					artifact: { id: "primary", bytes: ref.bytes, contentType: primaryStep.artifact!.contentType },
-					text: selected.text,
-					selection: {
-						mode: requestedMode,
-						totalLines: selected.totalLines,
-						range: selected.range,
-						matchCount: selected.matchCount,
-						shownMatches: selected.shownMatches,
-						truncated: selected.truncated,
-						...(selected.truncated ? { truncationReason: "selected managed artifact output exceeded the bounded selection budget" } : {}),
-					},
-				});
-				return;
 			}
 
 			const candidateSteps = resolved.signal.verification.steps.filter(step =>
@@ -12269,52 +12060,26 @@ async function handleApiRoute(
 
 			const match = matches[0];
 			try {
+				const retainedPath = validateRetainedArtifactPath(match.diagnostics, match.artifact);
 				if (!isTextInspectableArtifact(match.artifact)) {
-					json({ error: `Artifact "${match.artifact.relativePath}" is not a text artifact; inspect it through an authorized binary-file surface.`, validSteps, validArtifactsByStep }, 400);
+					json({ error: `Artifact "${match.artifact.relativePath}" is not a text artifact; use read(path) or inspect the file directly.`, validSteps, validArtifactsByStep }, 400);
 					return;
 				}
-				const selected = await selectRetainedGateArtifact(
-					gateStoreV2Root(ctx.stateDir),
-					match.diagnostics,
-					match.artifact,
-					{
-						mode: selectionOptions.mode,
-						lines: selectionOptions.lines,
-						from: selectionOptions.from,
-						to: selectionOptions.to,
-						pattern: selectionOptions.pattern,
-						context: selectionOptions.context,
-						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
-						maxBytes: 50 * 1024,
-					},
-				);
-				if (!selected) {
-					json({ error: `Artifact "${match.artifact.relativePath}" is missing, tampered, or unavailable.`, validSteps, validArtifactsByStep }, 400);
-					return;
-				}
-				let text = selected.text;
+				let text = fs.readFileSync(retainedPath, "utf8");
 				if (match.artifact.relativePath.endsWith("/error-context.md") || match.artifact.relativePath === "error-context.md") {
 					text = stripPlaywrightErrorContextBoilerplate(text);
 				}
+				const selected = selectText(text, selectionOptions);
 				json({
 					gateId, section: "artifact",
 					signalIndex: resolved.index,
 					signalId: resolved.signal.id,
 					step: match.stepName,
 					artifact: match.artifact,
-					text,
-					selection: {
-						mode: selectionOptions.mode ?? "tail",
-						totalLines: selected.totalLines,
-						range: selected.range,
-						matchCount: selected.matchCount,
-						shownMatches: selected.shownMatches,
-						truncated: selected.truncated,
-						...(selected.truncated ? { truncationReason: "selected retained artifact exceeded the bounded selection budget" } : {}),
-					},
+					text: selected.text,
+					selection: selected.selection,
 				});
 			} catch (err) {
-				if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				if (err instanceof Error) { json({ error: err.message, validSteps, validArtifactsByStep }, 400); return; }
 				throw err;
@@ -12324,52 +12089,30 @@ async function handleApiRoute(
 
 		if (section === "signals") {
 			const summaries = gate.signals.map((s, i) => ({
-				index: s.persistenceOrdinal ?? i,
+				index: i,
 				id: s.id,
 				timestamp: s.timestamp,
 				sessionId: s.sessionId,
 				commitSha: s.commitSha,
 				verdict: s.verification?.status || "running",
-				hasContent: !!s.content || !!s.contentRef,
+				hasContent: !!s.content,
 				metadataKeys: s.metadata ? Object.keys(s.metadata) : [],
 			}));
 			try {
 				const rendered = summaries.map(s => JSON.stringify(s)).join("\n");
-				let selectedText: string;
-				let selection: unknown;
-				let selectedLines: Set<number>;
-				if (selectionOptions.mode === "grep") {
-					async function* summaryChunks(): AsyncGenerator<string> { yield rendered; }
-					const selected = await selectGateTextStream(summaryChunks(), {
-						mode: "grep",
-						pattern: selectionOptions.pattern,
-						context: selectionOptions.context,
-						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
-						maxBytes: 50 * 1024,
-					});
-					selectedText = selected.text;
-					selection = { mode: "grep", totalLines: selected.totalLines, range: selected.range, matchCount: selected.matchCount, shownMatches: selected.shownMatches, truncated: selected.truncated };
-					selectedLines = new Set(selected.text.split("\n").map(line => Number(/^([0-9]+):/.exec(line)?.[1])).filter(Number.isSafeInteger));
-				} else {
-					const selected = selectText(rendered, selectionOptions);
-					selectedText = selected.text;
-					selection = selected.selection;
-					selectedLines = new Set(selected.selectedLineNumbers);
-				}
+				const selected = selectText(rendered, selectionOptions);
+				const selectedLines = new Set(selected.selectedLineNumbers);
 				const signals = summaries.filter((_, i) => selectedLines.has(i + 1));
 				json({
 					gateId, section: "signals",
 					signals,
 					signalsTotal: summaries.length,
-					earliestRetainedOrdinal: gate.earliestRetainedOrdinal,
-					prunedSignalRanges: gate.prunedSignalRanges ?? [],
 					signalsShown: signals.length,
 					signalsTruncated: signals.length < summaries.length,
-					text: selectedText,
-					selection,
+					text: selected.text,
+					selection: selected.selection,
 				});
 			} catch (err) {
-				if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				throw err;
 			}
@@ -12386,7 +12129,7 @@ async function handleApiRoute(
 		}
 
 		const [, goalId, gateId] = gateResetMatch;
-		let gateResetCtx = projectContextManager.getContextForGoal(goalId);
+		const gateResetCtx = projectContextManager.getContextForGoal(goalId);
 		if (!gateResetCtx) { json({ error: "Goal not found in any project" }, 404); return; }
 		const rejectDormantGoal = (candidate: PersistedGoal): boolean => {
 			if (candidate.archived) {
@@ -12420,14 +12163,8 @@ async function handleApiRoute(
 			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
 		}
 
-		// Cancellation is awaited, so reject the captured lifecycle generation and
-		// resolve the canonical context again. A project close/replacement may have
-		// completed while verification cleanup was draining; its old coordinator
-		// and GateStore must never commit a reset beside the authority used by GET
-		// and verification finalization.
-		const currentGateResetCtx = projectContextManager.getContextForGoal(goalId);
-		if (!currentGateResetCtx) { json({ error: "Goal not found in any project" }, 404); return; }
-		gateResetCtx = currentGateResetCtx;
+		// Cancellation is awaited, so re-read the project-owned record and reapply
+		// dormant guards before mutating either persistence store.
 		const goal = gateResetCtx.goalStore.get(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (rejectDormantGoal(goal)) return;
@@ -12464,10 +12201,7 @@ async function handleApiRoute(
 
 		let resetResult: GateResetResult;
 		try {
-			// Bind the transaction to the same current GateStore authority used by
-			// signal, verification, and read routes. The coordinator owns the WAL;
-			// it must not make a replaced construction-time store authoritative.
-			resetResult = await gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow, gateResetCtx.gateStore);
+			resetResult = await gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
 		} catch (err) {
 			// A synchronous failure is compensated when both rollback writes work.
 			// If compensation itself fails, the retained intent remains the source of
@@ -12739,11 +12473,6 @@ async function handleApiRoute(
 
 		const body = await readBody(req);
 		const signalSessionId = body?.sessionId || "unknown";
-		const reservedBypassKey = findReservedHumanBypassMetadataKey(body?.metadata);
-		if (reservedBypassKey) {
-			json({ error: `Reserved gate metadata field: ${reservedBypassKey}` }, 400);
-			return;
-		}
 
 		// Validate dependencies are met
 		for (const depId of gateDef.dependsOn) {
@@ -18467,17 +18196,6 @@ async function handleApiRoute(
 		}
 		try { json(await worktreeInventory().cleanupLegacyArchivedSessionWorktrees(body as any)); }
 		catch (err) { json({ error: err instanceof Error ? err.message : String(err) }, 400); }
-		return;
-	}
-
-	// GET /api/maintenance/gate-store?projectId=...
-	if (url.pathname === "/api/maintenance/gate-store" && req.method === "GET") {
-		const projectId = url.searchParams.get("projectId") || undefined;
-		if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
-		const ctx = projectContextManager.getOrCreate(projectId);
-		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const report = await ctx.gateStore.getMaintenanceReport();
-		json(report, "error" in report ? 503 : 200);
 		return;
 	}
 

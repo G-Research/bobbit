@@ -12,23 +12,8 @@ interface PromptQueueEnqueueOptions {
 	author?: MessageAuthor;
 }
 
-/** Durable delivery state for the single FIFO row owned by a prompt attempt. */
-export type PromptDeliveryState = "dispatching" | "awaiting-ack" | "retrying";
-export type DurableQueuedMessage = QueuedMessage & {
-	deliveryState?: PromptDeliveryState;
-	deliveryAttempt?: number;
-	/** Author-sidecar prompt identity; differs from row IDs for steered batches. */
-	deliveryPromptId?: string;
-};
-
-/** A delivery-owned row is protocol state, not a user-editable queue entry. */
-export function hasPromptDeliveryOwnership(message: DurableQueuedMessage): boolean {
-	return message.deliveryState !== undefined
-		|| (typeof message.deliveryPromptId === "string" && message.deliveryPromptId.length > 0);
-}
-
-function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
-	const normalized: DurableQueuedMessage = { ...message };
+function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
+	const normalized = { ...message };
 	if (normalized.author !== undefined && !isMessageAuthor(normalized.author)) {
 		delete normalized.author;
 	}
@@ -40,25 +25,6 @@ function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
 	if (normalized.source === undefined && isMessageAuthor(normalized.author)) {
 		normalized.source = normalized.author.kind;
 	}
-	if (normalized.deliveryState !== "dispatching"
-		&& normalized.deliveryState !== "awaiting-ack"
-		&& normalized.deliveryState !== "retrying") {
-		delete normalized.deliveryState;
-		delete normalized.deliveryAttempt;
-	} else {
-		// A live generation fences dispatching/awaiting-ACK rows. Constructing a
-		// queue from persisted/replacement state starts a new bridge generation,
-		// where the same stable ID must be eligible for deterministic redrive.
-		if (normalized.deliveryState !== "retrying") normalized.deliveryState = "retrying";
-		if (!Number.isSafeInteger(normalized.deliveryAttempt) || (normalized.deliveryAttempt ?? 0) < 1) {
-			delete normalized.deliveryAttempt;
-		}
-	}
-	// A stable prompt identity is independently sufficient delivery ownership.
-	// Preserve partial crash-window records so generic controls cannot erase them.
-	if (typeof normalized.deliveryPromptId !== "string" || normalized.deliveryPromptId.length === 0) {
-		delete normalized.deliveryPromptId;
-	}
 	return normalized;
 }
 
@@ -67,7 +33,7 @@ function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
  * Steered messages sort before non-steered, stable within each group.
  */
 export class PromptQueue {
-	private queue: DurableQueuedMessage[] = [];
+	private queue: QueuedMessage[] = [];
 
 	/** Create a queue, optionally restoring from persisted data. */
 	constructor(initial?: QueuedMessage[]) {
@@ -117,14 +83,6 @@ export class PromptQueue {
 		return true;
 	}
 
-	/** Generic client removal may not erase a protocol-owned delivery row. */
-	removeUnowned(messageId: string): boolean {
-		const idx = this.queue.findIndex((message) => message.id === messageId);
-		if (idx === -1 || hasPromptDeliveryOwnership(this.queue[idx])) return false;
-		this.queue.splice(idx, 1);
-		return true;
-	}
-
 	/** Pop the next message from the front of the queue. Returns undefined if empty. */
 	dequeue(): QueuedMessage | undefined {
 		return this.queue.shift();
@@ -137,32 +95,6 @@ export class PromptQueue {
 			result.push(this.queue.shift()!);
 		}
 		return result;
-	}
-
-	/** Read all consecutive steered rows without transferring FIFO ownership. */
-	peekAllSteered(): DurableQueuedMessage[] {
-		const result: DurableQueuedMessage[] = [];
-		for (const row of this.queue) {
-			if (!row.isSteered) break;
-			result.push(row);
-		}
-		return result;
-	}
-
-	/** Mark existing rows as dispatched/retrying without changing their identity or order. */
-	markDelivery(
-		messageIds: readonly string[],
-		state: PromptDeliveryState,
-		attempt: number,
-		promptId?: string,
-	): void {
-		const ids = new Set(messageIds);
-		for (const row of this.queue) {
-			if (!ids.has(row.id)) continue;
-			row.deliveryState = state;
-			row.deliveryAttempt = Math.max(1, Math.floor(attempt));
-			if (promptId) row.deliveryPromptId = promptId;
-		}
 	}
 
 	/**
@@ -187,23 +119,13 @@ export class PromptQueue {
 		return msg;
 	}
 
-	/** Restore an already-owned durable row without allocating a new identity. */
-	restoreAtFront(message: DurableQueuedMessage): DurableQueuedMessage {
-		const normalized = normalizeQueuedMessage(message);
-		const existing = this.queue.findIndex((row) => row.id === normalized.id);
-		if (existing !== -1) this.queue.splice(existing, 1);
-		this.queue.unshift(normalized);
-		this.reorder();
-		return normalized;
-	}
-
 	/** Peek at the front of the queue without removing. */
 	peek(): QueuedMessage | undefined {
 		return this.queue[0];
 	}
 
 	/** Get the full queue as an array (for broadcasting). */
-	toArray(): DurableQueuedMessage[] {
+	toArray(): QueuedMessage[] {
 		return [...this.queue];
 	}
 
@@ -220,7 +142,7 @@ export class PromptQueue {
 	/** Reorder queue to match the given ID list. Unknown IDs ignored. Unlisted items appended at end. */
 	reorderByIds(messageIds: string[]): void {
 		const byId = new Map(this.queue.map(m => [m.id, m]));
-		const reordered: DurableQueuedMessage[] = [];
+		const reordered: QueuedMessage[] = [];
 		const seen = new Set<string>();
 		for (const id of messageIds) {
 			const msg = byId.get(id);
@@ -230,39 +152,6 @@ export class PromptQueue {
 			if (!seen.has(msg.id)) reordered.push(msg);
 		}
 		this.queue = reordered;
-	}
-
-	/**
-	 * Apply a generic client reorder without moving protocol-owned rows. Unknown,
-	 * duplicate, or stale attempts to move an explicitly listed owned row fail
-	 * closed. Hidden owned rows remain pinned at their absolute FIFO positions.
-	 */
-	reorderUnownedByIds(messageIds: readonly string[]): boolean {
-		const byId = new Map(this.queue.map((message, index) => [message.id, { message, index }]));
-		const seen = new Set<string>();
-		const requestedUnowned: DurableQueuedMessage[] = [];
-
-		for (let requestedIndex = 0; requestedIndex < messageIds.length; requestedIndex++) {
-			const id = messageIds[requestedIndex];
-			const entry = byId.get(id);
-			if (!entry || seen.has(id)) return false;
-			seen.add(id);
-			if (hasPromptDeliveryOwnership(entry.message)) {
-				if (entry.index !== requestedIndex) return false;
-				continue;
-			}
-			requestedUnowned.push(entry.message);
-		}
-
-		const unowned = [
-			...requestedUnowned,
-			...this.queue.filter((message) => !hasPromptDeliveryOwnership(message) && !seen.has(message.id)),
-		];
-		let nextUnowned = 0;
-		this.queue = this.queue.map((message) => hasPromptDeliveryOwnership(message)
-			? message
-			: unowned[nextUnowned++]);
-		return true;
 	}
 
 	/**

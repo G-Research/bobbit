@@ -29,7 +29,6 @@ function fakeContext(id: string, initialTasks: PersistedTask[] = []) {
 	return {
 		project: { id },
 		taskStore: inMemoryTaskStore(initialTasks),
-		gateStore: { close: async () => {} },
 		close: async () => {},
 	};
 }
@@ -135,7 +134,6 @@ describe("ProjectContext lifecycle barriers", () => {
 			},
 		};
 		context.sessionStore = { flush: () => { order.push("session:flush"); } };
-		context.gateStore = { close: async () => { order.push("gate:close"); } };
 		context.costTracker = { flush: () => { order.push("cost:flush"); } };
 		context.bgProcessStore = { flush: () => { order.push("bg:flush"); } };
 		context.searchIndex = { close: async () => { order.push("search:close"); } };
@@ -152,32 +150,11 @@ describe("ProjectContext lifecycle barriers", () => {
 		assert.deepEqual(order, [
 			"stopSweep:start",
 			"stopSweep:end",
-			"gate:close",
 			"session:flush",
 			"cost:flush",
 			"bg:flush",
 			"search:close",
 		]);
-	});
-
-	it("ProjectContextManager.remove retains a failed context and retries its close", async () => {
-		const context = fakeContext("alpha");
-		let closeCalls = 0;
-		context.close = async () => {
-			closeCalls++;
-			if (closeCalls === 1) throw new Error("INJECTED_CONTEXT_CLOSE_FAILURE");
-		};
-		const manager = contextManager([context]);
-		const topologyBefore = manager.contextTopologyVersion;
-
-		await assert.rejects(manager.remove("alpha"), /INJECTED_CONTEXT_CLOSE_FAILURE/);
-		assert.equal(manager.contexts.get("alpha"), context, "a rejected close must preserve the context for explicit retry");
-		assert.equal(manager.contextTopologyVersion, topologyBefore);
-
-		await manager.remove("alpha");
-		assert.equal(closeCalls, 2);
-		assert.equal(manager.contexts.has("alpha"), false);
-		assert.equal(manager.contextTopologyVersion, topologyBefore + 1);
 	});
 
 	it("ProjectContextManager.remove keeps the context visible until close settles", async () => {
