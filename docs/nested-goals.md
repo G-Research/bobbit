@@ -484,6 +484,71 @@ set with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validate
 so operators effectively set concurrency on the root. Live cap resizes apply in
 place.
 
+### Bounded scheduled-start recovery
+
+A scheduler start is intentionally idempotent. If a child already has a live,
+non-terminated team lead, the scheduled start adopts that lead as the successful
+outcome instead of creating another team or consuming a concurrency permit. This
+also makes a stale queued request harmless after restart.
+
+A rejected start releases its permit before recovery is decided, so another
+eligible sibling can progress. Failures are classified rather than blindly
+requeued:
+
+- **Permanent for the current request** — already-active, missing, archived,
+  disabled, dependency-blocked, complete, shelved, and paused children leave the
+  pending queue. A permanent disposition records one structured terminal error
+  per scheduler request generation, not once per drain pass.
+- **Transient operational failures** — such as setup or worktree contention —
+  retry through real exponential timer backoff. A request has at most eight
+  start attempts; exhaustion becomes a visible, retryable terminal stop rather
+  than disappearing or spinning in microtasks.
+- **Unavailable team lead** — stale team state is torn down and receives exactly
+  one idempotent retry. If teardown or that retry fails, the child enters the
+  same visible operator-recovery path.
+
+Each terminal or exhausted child, and each tripped root breaker, is persisted as
+`schedulerRecovery` on the affected goal and broadcast to the dashboard and
+plan. A retryable record offers a single scheduler-routed retry action. Root
+breaker records also persist the exact affected child IDs because the scheduler
+queue is process-local; retry validates and re-requests only those children
+after a restart, retaining the recovery if none remains actionable.
+Non-retryable records still explain why the stale request was discarded.
+
+This separation prevents the former failure mode where an immediately rejected
+start was re-enqueued in a new microtask forever, starving the gateway's event
+loop. It also preserves valid re-entry paths: dependency integration requests a
+child after its last dependency merges, and resume wakes paused scheduler intent.
+Complete, archived, and missing children have no valid future start, so their
+stale request is deliberately discarded.
+
+#### Inline root circuit breaker
+
+As a last-resort containment measure, the scheduler counts only **unproductive
+immediate re-drives** for each root. It does not count ordinary high-volume or
+successful scheduling. The check is inline before another permit acquisition,
+not timer-driven, because a microtask storm can prevent timers from running.
+
+A root whose count crosses the short monotonic window is circuit-broken without
+affecting other roots. Its visible recovery record supplies the same
+scheduler-routed retry action. Existing delayed retries are retained: the
+breaker contains an immediate storm without silently throwing away slow,
+recoverable work. The breaker clears on demonstrated progress or on a later
+scheduler entry after its window, and then clears its visible record.
+
+#### Operator recovery
+
+1. Open the root dashboard or affected child in the Plan tab and read the
+   scheduler recovery reason.
+2. Resolve the stated lifecycle condition first. Resume paused work; allow
+   dependency integration to clear dependency-blocking; enable or reopen work
+   where required. A retry is intentionally unavailable while the goal remains
+   paused, blocked, complete, or shelved.
+3. Use **Scheduler recovery: retry**. It routes through the scheduler rather
+   than directly starting a team, preserving the root cap and duplicate-start
+   protections. A root record re-requests only its persisted, still-eligible
+   affected children; it never scans the subtree or starts unrelated work.
+
 ### Pause/resume cascade
 
 `POST /api/goals/:id/pause` and `/resume` require a `{cascade: boolean}` body
@@ -501,7 +566,11 @@ Boot-resume/nudge skip predicates apply only to those restored leads, so a
 paused restored lead is not nudged. Restart does not create a new Team Lead for
 an existing goal that is teamless.
 
-Resume re-enables spawns and prompt delivery but does not auto-restart sessions.
+Resume re-enables spawns and prompt delivery but does not generally auto-restart
+sessions. It wakes only existing scheduler-owned child-start intent (plus the
+narrow durable capacity-parked fallback after a scheduler restart). It does not
+invent a start for manual-start children, deliberately torn-down teams,
+unresolved dependencies, or descendants still contained by a paused ancestor.
 Pause/resume is an **operator** action and is distinct from the scheduler's
 dependency `blocked` state.
 

@@ -7,6 +7,17 @@ import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
+/** Durable visible scheduler terminal/circuit-breaker recovery state. */
+export interface PersistedSchedulerRecovery {
+	kind: "child" | "root";
+	/** Durable restart targets for a root circuit-breaker recovery. */
+	affectedChildGoalIds?: string[];
+	code: string;
+	reason: string;
+	retryable: boolean;
+	updatedAt: number;
+}
+
 export interface PersistedGoal {
 	id: string;
 	title: string;
@@ -38,6 +49,8 @@ export interface PersistedGoal {
 	setupStatus?: "ready" | "preparing" | "error";
 	/** Error message when setupStatus === "error" */
 	setupError?: string;
+	/** Visible scheduler terminal/circuit-breaker recovery state. Cleared by a new scheduler request. */
+	schedulerRecovery?: PersistedSchedulerRecovery;
 	/**
 	 * Arbitrary, hierarchically-inherited per-goal metadata (namespaced keys,
 	 * e.g. `bobbit.disabledProviders`, `bobbit.disabledTools`,
@@ -339,6 +352,21 @@ export class GoalStore {
 
 	getArchived(): PersistedGoal[] {
 		return Array.from(this.goals.values()).filter(g => g.archived === true);
+	}
+
+	/** Explicit deletion for optional scheduler recovery metadata. `update()`
+	 * intentionally strips undefined fields, so clearing must not be expressed as
+	 * `{ schedulerRecovery: undefined }`.
+	 */
+	clearSchedulerRecovery(id: string): boolean {
+		const existing = this.goals.get(id);
+		if (!existing || existing.schedulerRecovery === undefined) return false;
+		this.generation++;
+		delete existing.schedulerRecovery;
+		existing.updatedAt = Date.now();
+		this.save();
+		this.onIndexUpdate?.(existing);
+		return true;
 	}
 
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
