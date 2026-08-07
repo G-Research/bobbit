@@ -587,6 +587,14 @@ describe("release contract rules", () => {
 
 	it("requires the release to have been opened as a release", () => {
 		assertPullRequestContract(mergedPr, contract);
+		assertPullRequestContract(
+			{ ...mergedPr, head: { ...mergedPr.head, ref: "release/v0.16.0-retry-1" } },
+			contract,
+		);
+		assertPullRequestContract(
+			{ ...mergedPr, head: { ...mergedPr.head, ref: "release/v0.16.0-retry-12" } },
+			contract,
+		);
 
 		assert.throws(() => assertPullRequestContract(null, contract), /no merged pull request produced/);
 		assert.throws(
@@ -601,10 +609,19 @@ describe("release contract rules", () => {
 				),
 			/Release branches must live in this repository/,
 		);
-		assert.throws(
-			() => assertPullRequestContract({ ...mergedPr, head: { ...mergedPr.head, ref: "deps/bump" } }, contract),
-			/not be the side effect of a version change/,
-		);
+		for (const ref of [
+			"deps/bump",
+			"release/v0.16.0-retry",
+			"release/v0.16.0-retry-0",
+			"release/v0.16.0-retry-01",
+			"release/v0.16.0-retry-one",
+			"release/v0.16.1-retry-1",
+		]) {
+			assert.throws(
+				() => assertPullRequestContract({ ...mergedPr, head: { ...mergedPr.head, ref } }, contract),
+				/not be the side effect of a version change/,
+			);
+		}
 		assert.throws(
 			() => assertPullRequestContract({ ...mergedPr, title: "release 0.16.0" }, contract),
 			/title must be/,

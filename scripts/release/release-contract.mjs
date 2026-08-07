@@ -125,6 +125,13 @@ export function releaseBranchFor(version) {
 	return `release/v${version}`;
 }
 
+export function isReleaseBranchFor(ref, version) {
+	const expected = releaseBranchFor(version);
+	if (ref === expected) return true;
+	const retryPrefix = `${expected}-retry-`;
+	return typeof ref === "string" && ref.startsWith(retryPrefix) && /^[1-9]\d*$/.test(ref.slice(retryPrefix.length));
+}
+
 export function releaseTitleFor(version) {
 	return `chore(release): v${version}`;
 }
@@ -193,11 +200,11 @@ export function assertPullRequestContract(pr, { version, repository, sha }) {
 				`expected ${repository}. Release branches must live in this repository.`,
 		);
 	}
-	if (pr.head?.ref !== releaseBranchFor(version)) {
+	if (!isReleaseBranchFor(pr.head?.ref, version)) {
 		fail(
 			`release branch ${pr.head?.ref} does not match version ${version} ` +
-				`(expected ${releaseBranchFor(version)}). A release must be opened as a release, ` +
-				"not be the side effect of a version change.",
+				`(expected ${releaseBranchFor(version)} or ${releaseBranchFor(version)}-retry-<number>). ` +
+				"A release must be opened as a release, not be the side effect of a version change.",
 		);
 	}
 	if (pr.title !== releaseTitleFor(version)) {

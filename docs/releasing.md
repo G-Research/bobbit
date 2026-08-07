@@ -4,7 +4,7 @@ This doc covers the Bobbit release checks that cannot be inferred from a normal 
 
 ## Automated root release
 
-A release is authorized by squash-merging a same-repository PR from `release/v<version>` into `main`. Merging is the irreversible publication approval.
+A release is authorized by squash-merging a same-repository PR from `release/v<version>` into `main`. If an earlier attempt merged but failed before npm accepted the package, a fresh `release/v<version>-retry-<number>` branch is also accepted; merged branches are never reused. Merging is the irreversible publication approval.
 
 **The trigger is the push to `main`, not the pull request.** Three things follow from that, and each of them is the reason for the choice:
 

@@ -230,6 +230,12 @@ PR_URL=$(gh pr create \
 PR=$(gh pr view "$PR_URL" --json number -q .number)
 ```
 
+If an earlier PR for the same version was merged but failed before npm accepted
+the package, do not recreate or push to its merged branch. Use a fresh numeric
+retry branch such as `release/v<new-version>-retry-1` (incrementing the suffix
+for later attempts). The release contract accepts only the exact branch above
+or this numeric retry form; the PR title remains unchanged.
+
 The PR body must summarize the version, release notes, and gate results, and
 must end with the standard Bobbit footer. Wait for every required check and
 review before publishing:
