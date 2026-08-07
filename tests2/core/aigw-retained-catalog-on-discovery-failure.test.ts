@@ -4,7 +4,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -12,6 +12,8 @@ import os from "node:os";
 import path from "node:path";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import { SessionManager } from "../../src/server/agent/session-manager.js";
+import { registerRpcBridgeFactory } from "../../src/server/agent/rpc-bridge.js";
 import {
 	findSessionSelectableModel,
 	getAvailableModels,
@@ -90,6 +92,7 @@ function writeRetainedCatalog(agentDir: string, configuredUrl: string, providerU
 describe("AIGW retained catalog on discovery failure", () => {
 	let agentDir: string;
 	let previousAgentDir: string | undefined;
+	const managers: any[] = [];
 
 	beforeEach(() => {
 		previousAgentDir = process.env.BOBBIT_AGENT_DIR;
@@ -100,6 +103,13 @@ describe("AIGW retained catalog on discovery failure", () => {
 	});
 
 	afterEach(() => {
+		registerRpcBridgeFactory(null);
+		while (managers.length > 0) {
+			const manager = managers.pop();
+			if (manager?._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
+			manager?.sessions?.clear?.();
+		}
+		vi.restoreAllMocks();
 		invalidateModelCache();
 		if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
 		else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
@@ -156,6 +166,83 @@ describe("AIGW retained catalog on discovery failure", () => {
 				findSessionSelectableModel(refreshedModels, "aigw", "openai/replacement-model"),
 				"the successful live discovery catalog must replace retained availability",
 			);
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("enters session recovery only after a successful authoritative omission", async () => {
+		const gateway = await startGateway();
+		try {
+			const prefs = new PreferencesStore(path.join(agentDir, "state"));
+			prefs.set("aigw.url", gateway.url);
+			writeRetainedCatalog(agentDir, gateway.url);
+
+			const transcript = path.join(agentDir, "retained-session.jsonl");
+			fs.writeFileSync(transcript, `${JSON.stringify({ type: "session", version: 3, id: "aigw-recovery-authority" })}\n`);
+			const persisted = {
+				id: "aigw-recovery-authority",
+				title: "AIGW recovery authority",
+				cwd: agentDir,
+				projectId: "project-aigw",
+				agentSessionFile: transcript,
+				createdAt: Date.now() - 1000,
+				lastActivity: Date.now(),
+				messageQueue: [],
+				wasStreaming: false,
+				modelProvider: "aigw",
+				modelId: RETAINED_ID,
+				effectiveThinkingLevel: "xhigh",
+			};
+			const store = {
+				get: vi.fn(() => persisted),
+				update: vi.fn(),
+				archive: vi.fn(),
+			};
+			registerRpcBridgeFactory(() => ({
+				running: false,
+				start: vi.fn(async () => {}),
+				stop: vi.fn(async () => {}),
+			} as any));
+
+			const manager: any = new SessionManager({
+				preferencesStore: prefs,
+				stateDir: path.join(agentDir, "manager-state"),
+			});
+			manager._testStore = store;
+			managers.push(manager);
+			const ordinaryRestore = vi.spyOn(manager, "_restoreSessionCoalesced").mockResolvedValue(undefined);
+
+			await manager.restoreOneSession(persisted);
+			assert.equal(
+				ordinaryRestore.mock.calls.length,
+				1,
+				"a transient discovery failure must keep the last-published tuple selectable and use ordinary restore",
+			);
+			assert.equal(
+				manager.getSession(persisted.id),
+				undefined,
+				"transient discovery must not fabricate MODEL_SELECTION_REQUIRED recovery state",
+			);
+
+			ordinaryRestore.mockClear();
+			gateway.setMode("success");
+			invalidateModelCache();
+			await manager.restoreOneSession(persisted);
+
+			assert.equal(
+				ordinaryRestore.mock.calls.length,
+				0,
+				"a successful catalog omission must enter recovery before attempting the retired tuple",
+			);
+			assert.deepEqual(
+				manager.getSession(persisted.id)?.condition,
+				{ code: "MODEL_SELECTION_REQUIRED", provider: "aigw", modelId: RETAINED_ID },
+				"successful AIGW omission must reach the stable session recovery condition",
+			);
+			assert.equal(store.update.mock.calls.length, 0, "authority classification must not rewrite the durable tuple");
+			assert.equal(persisted.modelProvider, "aigw");
+			assert.equal(persisted.modelId, RETAINED_ID);
 		} finally {
 			await gateway.close();
 		}
