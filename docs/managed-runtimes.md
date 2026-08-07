@@ -7,8 +7,10 @@ This keeps the same provider/client protocol usable for an externally hosted
 service and for the `local`, `docker`, and `compose` adapters.
 
 This is an authoring and host-integration reference for the generic runtime
-nucleus. It documents the current contracts in `src/server/service-runtime/`;
-it does not define a UI, HTTP route, grant model, or settings persistence API.
+nucleus. It documents the current contracts in `src/server/service-runtime/`.
+The nucleus does not own a UI, route catalogue, grant store, or settings store;
+a host integration composes it with the public EP-6 capability-grant, EP-7
+extension-settings, and pack typed-route contracts described below.
 
 ## Architecture and ownership
 
@@ -387,10 +389,22 @@ interface ServiceRuntimeContext {
 }
 ```
 
-`endpoint` appears only in `ready`. `status()` loads persisted metadata and may
-inspect an already-owned resource, but never resolves secrets, allocates a
-port, starts a runner, or writes state. Its failure categories are stable and
-non-verbatim:
+`endpoint` appears only in `ready`. The public status projection adds identity,
+desired state, and the selected adapter without exposing settings or secrets:
+
+```ts
+interface ServiceRuntimeStatus extends ServiceRuntimeContext {
+  identity: { packId: string; runtimeId: string };
+  desired: "stopped" | "running";
+  mode?: "external" | "local" | "docker" | "compose";
+}
+```
+
+`external` is a ready/not-ready endpoint configuration, not a generic runner
+mode and is never accepted by a generic control request. `status()` loads
+persisted metadata and may inspect an already-owned resource, but never
+resolves secrets, allocates a port, starts a runner, or writes state. Its
+failure categories are stable and non-verbatim:
 
 | State | Meaning |
 |---|---|
@@ -456,29 +470,78 @@ or supervisor. Reads and provider hooks must not call lifecycle control APIs.
 If a managed service is down, providers should return their ordinary bounded
 dormant/degraded behavior so unrelated session work continues.
 
+## Platform composition: EP-6, EP-7, and typed routes
+
+The supervisor is reusable because it consumes narrow host-owned interfaces. A
+service integration must compose them rather than recreating them in a pack:
+
+1. **EP-7 settings** own the project-local typed values, monotonic revision, and
+   write-only secrets. A settings save is inert: validate syntax and persist the
+   redacted state, but do not probe an endpoint, discover a model, contact a
+   registry, pull an image, allocate a port, or start/restart a runtime. Resolve
+   the exact public/secret settings snapshot only for explicit control.
+2. **EP-6 capability grants** authorize sensitive control against the active
+   pack principal on every use. `service.manage` is the pack capability for
+   start, stop, restart, migration, and purge. A valid setting, descriptor, or
+   open panel never substitutes for the grant; an inactive, disabled, shadowed,
+   or revoked principal is denied.
+3. **Typed pack routes** are the UI/data-plane adapter. A panel or entrypoint
+   calls its own declared route via `host.callRoute(name, init)`. It does not
+   construct a URL, choose a pack/project identity, or pass an authorization
+   token. The host derives that scope and may expose `{ settingsRevision,
+   runtime: ServiceRuntimeStatus }` for status/control UI. Control additionally
+   requires explicit user consent in the route request.
+4. **Consumers** receive only `ServiceRuntimeContext` (or the status projection
+   above). A provider, route, tool, or panel must work when it is missing or not
+   `ready`; read paths never auto-start or trigger a fallback provider.
+
+This division prevents a configuration read from becoming a deployment action,
+prevents a route from forging project scope, and keeps credentials out of
+runtime diagnostics. It also means a service integration can use the same
+runtime semantics in every adapter mode.
+
 ### Hindsight reference pack
 
-The Hindsight pack demonstrates this contract without making the generic runtime
-Hindsight-specific:
+Hindsight is the reference composition, not a Hindsight-specific runtime type:
 
-- `market-packs/hindsight/pack.yaml` declares `runtimes: [hindsight]`.
-- `runtimes/hindsight.yaml` has a `http://` endpoint at service port `8888`,
-  probes `/health`, has manual start, and uses bounded `on-failure` recovery.
-- Its `local`, `docker`, and `compose` blocks select an adapter only. The
-  Compose asset dynamically publishes `127.0.0.1::8888` and has
-  `restart: "no"`.
-- The descriptor obtains `llmApiKey` from the write-only secret resolver,
-  generates `databasePassword`, and maps `dataDir` to preserved PostgreSQL
-  storage.
-- `providers/memory.yaml` declares `runtime: hindsight`. Its `runtimeMode` is
-  `external`, `local`, `docker`, or `compose`; `external` means use
-  `externalUrl` and no managed endpoint.
-- `clientConfig` in the pack selects either the external URL or an injected ready
-  endpoint. The client does not import runners, Docker libraries, or the
-  supervisor, so retain/recall behavior is mode-independent.
+- `market-packs/hindsight/pack.yaml` declares `runtimes: [hindsight]` and a
+  finite typed-route allowlist.
+- `runtimes/hindsight.yaml` declares a `http://` endpoint at service port
+  `8888`, probes `/health`, requires manual start, and uses bounded
+  `on-failure` recovery. Its local, Docker, and Compose blocks only choose an
+  adapter; Compose dynamically publishes a loopback port and disables
+  Compose-owned restart.
+- The provider declares `runtime: hindsight`. Its `runtimeMode` selects
+  `external`, `local`, `docker`, or `compose`; `external` uses `externalUrl`
+  and has no managed runner. The client consumes either that configured external
+  endpoint or the injected ready endpoint, never a runner implementation.
+- EP-7 declares local-model provider, model id, base URL, context/output
+  limits, resident keep-alive behavior, OCI image reference, and database mode.
+  API keys, registry credentials, and external database URLs are write-only
+  secrets. A loopback HTTP model endpoint needs no placeholder API key.
+- OCI references are syntax-validated at save time. An unpinned tag produces a
+  mutable-tag warning but is not rejected; only explicit start/restart may
+  resolve or pull it. The shipped default is the reviewed Hindsight `0.8.6`
+  digest reference.
 
-`llmApiKey` deliberately is not ordinary provider configuration. It is resolved
-through the runtime's secret-owner seam only when an authorized start needs it.
+The Hindsight data plane maps its declared typed routes to exact EP-6 memory
+capabilities, returns bounded no-service results when the runtime is down, and
+uses the same client protocol across modes. It does not bind-mount a live
+legacy PostgreSQL `pg0` directory. Any storage replacement must use an
+explicit, confirmed logical migration with backup, compatibility validation, and
+rollback that preserves the source; it must never silently create an empty bank.
+
+### LangFlow reuse
+
+A LangFlow pack follows the same public composition: declare
+`runtimes/langflow.yaml`, link a provider with `runtime: langflow`, place its
+endpoint/model/credential fields in EP-7, use EP-6 `service.manage` for
+explicitly consented control, and consume only the ready endpoint and
+`ServiceRuntimeStatus` through typed routes. It requires no LangFlow-specific
+supervisor, runner, permission store, settings store, secret store, port
+allocator, or deployment-mode branch in the server. If LangFlow is down or
+unhealthy, its provider/routes must return their documented bounded no-service
+result instead of starting it or falling back to a different provider.
 
 ## Host integration checklist
 
@@ -501,12 +564,12 @@ When adding a host integration, preserve these boundaries:
 
 ## Explicit deferrals
 
-The runtime nucleus intentionally does **not** supply:
+The runtime nucleus intentionally does **not** supply on its own:
 
-- a runtime REST API, settings screen, consent dialog, status UI, or private
-  pack UI;
-- authorization/grant persistence or settings/secret storage; it consumes
-  injected interfaces instead;
+- a route catalogue, settings screen, consent dialog, status UI, or private
+  pack UI; the host composes these through typed pack routes and EP-7;
+- authorization/grant persistence or settings/secret storage; it consumes the
+  EP-6/EP-7-owned interfaces instead;
 - automatic starts from install, discovery, configuration reads, status,
   provider dispatch, or endpoint resolution;
 - fixed host ports, arbitrary command strings, arbitrary environment

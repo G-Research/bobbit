@@ -225,6 +225,76 @@ Descriptor-relative `local.cwd` and `compose.file` paths must remain inside the 
 [Service runtimes](managed-runtimes.md) for the complete closed schema, loader failure behavior,
 and host ownership boundaries.
 
+### Managed services: the EP-6, EP-7, runtime, and route boundary
+
+A managed service is a composition of public platform contracts, not a private pack subsystem.
+This is what lets a second service pack reuse the Hindsight pattern without adding another
+permission store, settings store, process supervisor, or deployment-mode branch.
+
+| Concern | Public owner | Pack author supplies |
+|---|---|---|
+| Authority (EP-6) | Project-scoped capability grants | The exact pack capability required by each sensitive operation. The Hindsight vocabulary is `service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`, and `memory.read.all`. |
+| Configuration (EP-7) | Typed project extension settings | Provider/hook `config` descriptors, including `secret` fields for credentials. |
+| Lifecycle | `ServiceRuntimeSupervisor` plus the declared runtime descriptor | A strict `runtimes/<id>.yaml` descriptor and mode-independent endpoint consumer. |
+| UI/data plane | The pack's declared, pack-scoped typed routes | Route names and bounded request/response handling; a panel or entrypoint calls its own route with `host.callRoute`. |
+
+The separation matters. An EP-7 save validates and persists a redacted configuration revision; it
+must not probe a model, resolve/pull an OCI image, allocate a port, or start a service. A secret is
+write-only: public settings projections expose only `secretSet`, and route/status/log responses
+must not serialize a secret. EP-6 grants are exact, project-owned records for an active pack
+principal and are resolved live at use time, so a revoke wins over already-scheduled work. A
+settings switch, pack installation, or a valid descriptor does not confer a grant.
+
+For a sensitive route, make the capability check host-owned and immediate. The route module can
+validate its domain input, but it must not keep an allow decision, read grants from its own store,
+or infer authority from a panel being open. Hindsight is the reference mapping:
+
+| Operation | Required capability |
+|---|---|
+| Explicit runtime control or migration planning/execution | `service.manage` |
+| Browse, search, detail, history, or recall in the session/project scope | `memory.read` |
+| The same read requested with `scope: "all"` | `memory.read.all` |
+| Retain content or a host-derived completed outcome | `memory.write` |
+| Scoped reflection | `memory.reflect` (and its scoped read) |
+| Confirmed invalidation | `memory.invalidate` |
+
+A control route must require a fresh, explicit consent value in addition to the EP-6 grant; a
+route should return a bounded unavailable/degraded result when no endpoint is ready rather than
+starting a service or falling back to another provider. Hindsight's `runtime-control` route accepts
+only `{ action: "start" | "stop" | "restart", consent: true }`. Its status/control projection is
+`{ settingsRevision, runtime }`, where `runtime` is the generic `ServiceRuntimeStatus` shape—not
+an extension-defined copy of lifecycle state.
+
+Use the existing typed route surface rather than adding a pack-specific REST endpoint:
+
+```js
+const runtime = await host.callRoute("runtime-status");
+await host.callRoute("runtime-control", {
+  method: "POST",
+  body: { action: "restart", consent: true },
+});
+```
+
+`host.callRoute` derives the pack and session from its surface binding. Pack code does not choose a
+base URL, send a bearer token, or name another pack. The server selects the project scope and may
+inject only server-derived runtime context, redacted EP-7 values for an authorized route, or a
+bounded completed-outcome snapshot; a request body cannot substitute any of them.
+
+#### Reusing the contract for LangFlow
+
+LangFlow is not a special server integration. A LangFlow pack can declare `runtimes/langflow.yaml`,
+link a provider with `runtime: langflow`, declare its endpoint/model/credential fields in EP-7, and
+have provider/routes/tools consume only a ready `ctx.runtime.endpoint`. It uses the same local,
+Docker, and Compose adapters, `ServiceRuntimeStatus`, EP-6 `service.manage` control, and
+pack-scoped typed-route transport as Hindsight—no LangFlow-specific supervisor, permission,
+settings, secret, port, or mode-selection code belongs in the server.
+
+The descriptor/provider pair still does **not** gain lifecycle authority merely by declaring
+`runtime`. The host integration remains the authority that resolves EP-7 settings, enforces EP-6,
+and exposes explicit control. When the endpoint is absent or unhealthy, LangFlow consumers must
+return their bounded no-service behavior; they must not auto-start it or silently use an external
+or paid fallback.
+
 ## Step 1 — the tool YAML (renderer + actions only)
 
 A tool YAML carries **only** the tool-scoped contributions. A pack tool needs **no
