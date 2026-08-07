@@ -1,9 +1,26 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { ExtensionCapabilityGrantResolver } from "./extension-grant-policy.js";
 import type { ExtensionCapability } from "./project-config-store.js";
 import type { ExtensionSettingValue, ExtensionSettingsStore } from "./extension-settings-store.js";
 import type { ProviderContribution } from "./pack-contributions.js";
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
+import {
+	localModelDiagnostic,
+	materializeHindsightRuntimeSettings,
+	parseOciReference,
+	resolveHindsightRuntimeSettings,
+	validateHindsightRuntimeSettings,
+	type RedactedModelDiagnostic,
+	type RuntimeSecrets,
+} from "../../shared/hindsight/runtime-settings.js";
+import {
+	createHindsightMigrationPlan,
+	executeHindsightMigration,
+	type HindsightMigrationPlan,
+	type LogicalMigrationRunner,
+	type MigrationStorage,
+} from "../../shared/hindsight/migration.js";
 import {
 	ServiceRuntimeError,
 	type ServiceRuntimeContext,
@@ -33,6 +50,14 @@ export class HindsightCapabilityError extends Error {
 	}
 }
 
+/** A migration is deliberately blocked rather than guessed when the generic
+ * runtime cannot identify a source endpoint. The bridge never mounts pg0 or
+ * invents a fresh bank to make a mode switch appear successful. */
+export type HindsightMigrationRouteResult =
+	| { ok: true; plan: HindsightMigrationPlan }
+	| { ok: true; planId: string; fingerprint: string }
+	| { ok: false; code: string; rolledBack?: boolean };
+
 export interface HindsightRuntimeBridgeOptions {
 	contributions: Pick<PackContributionResolver, "getPack">;
 	contextForProject(projectId: string): {
@@ -41,6 +66,41 @@ export interface HindsightRuntimeBridgeOptions {
 	} | undefined;
 	grants: ExtensionCapabilityGrantResolver;
 	supervisorForProject(projectId: string, settings: HindsightRuntimeSettingsResolver): ServiceRuntimeSupervisor;
+}
+
+interface RuntimeValues {
+	values: Record<string, ExtensionSettingValue>;
+	revision: string;
+}
+
+function secretValues(values: Record<string, ExtensionSettingValue>): RuntimeSecrets {
+	return {
+		...(typeof values.apiKey === "string" ? { apiKey: values.apiKey } : {}),
+		...(typeof values.localLlmApiKey === "string" ? { localLlmApiKey: values.localLlmApiKey } : {}),
+		...(typeof values.registryCredentials === "string" ? { registryCredentials: values.registryCredentials } : {}),
+		...(typeof values.externalDatabaseUrl === "string" ? { externalDatabaseUrl: values.externalDatabaseUrl } : {}),
+	};
+}
+
+function publicRuntimeValues(values: Record<string, ExtensionSettingValue>): Record<string, unknown> {
+	const { apiKey: _apiKey, localLlmApiKey: _localLlmApiKey, registryCredentials: _registryCredentials, externalDatabaseUrl: _externalDatabaseUrl, ...publicValues } = values;
+	return publicValues;
+}
+
+function safeStatusDiagnostic(status: ServiceRuntimeStatus, model?: RedactedModelDiagnostic, warning?: string): ServiceRuntimeStatus {
+	if (!model && !warning) return status;
+	// This is an in-memory status projection only. Persisted generic runtime
+	// diagnostics remain code-only, while this capability-safe metadata exposes
+	// the selected resident load without endpoint credentials or query strings.
+	return {
+		...status,
+		diagnostic: {
+			code: status.diagnostic?.code ?? (status.state === "ready" ? "SERVICE_READY" : "SERVICE_MODEL_CONFIGURED"),
+			...(status.diagnostic?.retryAt ? { retryAt: status.diagnostic.retryAt } : {}),
+			...(model ? { model } : {}),
+			...(warning ? { warning } : {}),
+		} as ServiceRuntimeStatus["diagnostic"],
+	};
 }
 
 /** Runtime-only EP-7 adapter. It is intentionally unable to publish settings. */
@@ -54,38 +114,37 @@ export class HindsightRuntimeSettingsResolver {
 	resolve(input: ServiceRuntimeControlRequest & { contribution: { id: string } }): ServiceRuntimeSettings {
 		void input; // Settings ownership, rather than a caller, selects the target.
 		const provider = this.provider();
-		const { values, revision } = this.getRuntimeValues(provider);
-		const mode = values.runtimeMode;
-		if (mode !== "local" && mode !== "docker" && mode !== "compose") {
-			throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
-		}
-		const dataDir = this.ownedDataDir(values.dataDir);
-		const stringValues: Record<string, string | undefined> = {};
-		for (const [key, value] of Object.entries(values)) if (typeof value === "string") stringValues[key] = value;
-		const imageOverride = typeof values.ociImage === "string" ? values.ociImage
-			: typeof values.image === "string" ? values.image : undefined;
+		const runtime = this.getRuntimeValues(provider, true);
+		const materialized = materializeHindsightRuntimeSettings(publicRuntimeValues(runtime.values), runtime.revision, secretValues(runtime.values));
+		if (!materialized.ok) throw new ServiceRuntimeError(materialized.code);
+		if (materialized.mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
+		const dataDir = this.ownedDataDir(resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values)).dataDir);
 		return {
-			mode,
-			revision,
-			values: stringValues,
+			mode: materialized.mode,
+			revision: materialized.revision,
+			values: materialized.values,
 			storage: { dataPath: dataDir, ownedRoot: path.join(this.context.stateDir, "service-data") },
-			...(imageOverride ? { imageOverride } : {}),
+			imageOverride: materialized.values.HINDSIGHT_OCI_IMAGE,
 		};
 	}
 
 	resolveSecret(setting: string): string | undefined {
-		const provider = this.provider();
-		const { values } = this.getRuntimeValues(provider, true);
+		const values = this.getRuntimeValues(this.provider(), true).values;
+		const aliases: Record<string, keyof RuntimeSecrets> = {
+			localLlmApiKey: "localLlmApiKey",
+			localModelApiKey: "localLlmApiKey",
+			llmApiKey: "apiKey",
+			externalDatabaseUrl: "externalDatabaseUrl",
+			registryCredentials: "registryCredentials",
+		};
 		const direct = values[setting];
 		if (typeof direct === "string" && direct.length > 0) return direct;
-		// The reviewed runtime descriptor predates EP-7's public field names. This
-		// is a compatibility mapping, not a second secret owner.
-		const alias = setting === "llmApiKey" ? "apiKey" : setting === "localModelApiKey" ? "localModelKey" : undefined;
-		return alias && typeof values[alias] === "string" && values[alias].length > 0 ? values[alias] : undefined;
+		const secret = aliases[setting] ? secretValues(values)[aliases[setting]] : undefined;
+		return typeof secret === "string" && secret.length > 0 ? secret : undefined;
 	}
 
 	/** Runtime-only values; callers must never serialize this result. */
-	getRuntimeValues(provider: ProviderContribution, includeSecrets = false): { values: Record<string, ExtensionSettingValue>; revision: string } {
+	getRuntimeValues(provider: ProviderContribution, includeSecrets = false): RuntimeValues {
 		const fields = provider.configSchema ?? {};
 		const defaults = provider.config ?? {};
 		const secretFields = Object.entries(fields)
@@ -98,15 +157,34 @@ export class HindsightRuntimeSettingsResolver {
 		return { values, revision: String(this.context.extensionSettingsStore.getPublicState().revision) };
 	}
 
+	modelDiagnostic(): RedactedModelDiagnostic | undefined {
+		const runtime = this.getRuntimeValues(this.provider());
+		const settings = resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values));
+		// A stable process/load identity is derived only from non-secret settings and
+		// the current EP-7 revision. Data-plane paths only observe it; they never
+		// create, probe, or fall back to another model.
+		const observedLoadId = settings.runtimeMode === "local" && settings.localLlmResidency === "resident"
+			? `resident-${createHash("sha256").update(`${this.projectId}\0${runtime.revision}\0${settings.localLlmProvider}\0${settings.localLlmModelId ?? ""}\0${settings.localLlmBaseUrl ?? ""}`).digest("hex").slice(0, 20)}`
+			: undefined;
+		const diagnostic = localModelDiagnostic(settings, observedLoadId);
+		return diagnostic;
+	}
+
+	ociWarning(): string | undefined {
+		const runtime = this.getRuntimeValues(this.provider());
+		const parsed = parseOciReference(resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values)).ociImage);
+		return parsed.ok ? parsed.value.warning : undefined;
+	}
+
 	private provider(): ProviderContribution {
 		const provider = this.contributions.getPack(this.projectId, HINDSIGHT_PACK_ID)?.providers.find(item => item.id === HINDSIGHT_PROVIDER_ID);
 		if (!provider || provider.runtime !== HINDSIGHT_RUNTIME_ID) throw new ServiceRuntimeError("SERVICE_RUNTIME_NOT_FOUND");
 		return provider;
 	}
 
-	private ownedDataDir(raw: ExtensionSettingValue | undefined): string {
+	private ownedDataDir(raw: string | undefined): string {
 		const root = path.resolve(this.context.stateDir, "service-data");
-		const text = typeof raw === "string" && raw.length > 0 ? raw : path.join(root, HINDSIGHT_RUNTIME_ID);
+		const text = raw && raw.length > 0 ? raw : path.join(root, HINDSIGHT_RUNTIME_ID);
 		const expanded = text.replaceAll("${stateDir}", this.context.stateDir);
 		const resolved = path.resolve(expanded);
 		if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
@@ -115,8 +193,9 @@ export class HindsightRuntimeSettingsResolver {
 }
 
 /**
- * The server-owned composition point for Hindsight. It has no lifecycle state:
- * durable state belongs to EP-7 plus the generic runtime supervisor/store.
+ * The server-owned composition point for Hindsight. It has no Hindsight
+ * lifecycle/settings/secret owner: durable state belongs solely to EP-7 and
+ * the generic runtime supervisor/store.
  */
 export class HindsightRuntimeBridge {
 	private readonly resolvers = new Map<string, HindsightRuntimeSettingsResolver>();
@@ -130,13 +209,10 @@ export class HindsightRuntimeBridge {
 		}
 		try {
 			const settings = this.settings(input.projectId);
-			const provider = this.provider(input.projectId);
-			const effective = settings.getRuntimeValues(provider);
-			if (effective.values.runtimeMode === "external") {
+			const effective = settings.getRuntimeValues(this.provider(input.projectId));
+			if (resolveHindsightRuntimeSettings(publicRuntimeValues(effective.values)).runtimeMode === "external") {
 				const endpoint = safeExternalEndpoint(effective.values.externalUrl);
-				return endpoint
-					? { state: "ready", endpoint }
-					: { state: "blocked", diagnostic: { code: "SERVICE_SETTING_UNAVAILABLE" } };
+				return endpoint ? { state: "ready", endpoint } : { state: "blocked", diagnostic: { code: "SERVICE_SETTING_UNAVAILABLE" } };
 			}
 			return await this.supervisor(input.projectId).context({ packId: input.packId, runtimeId: input.runtimeId }, input.projectId);
 		} catch {
@@ -145,45 +221,117 @@ export class HindsightRuntimeBridge {
 	}
 
 	settingsRevision(projectId: string): number {
-		const revision = this.settings(projectId).getRuntimeValues(this.provider(projectId)).revision;
-		return Number(revision);
+		return Number(this.settings(projectId).getRuntimeValues(this.provider(projectId)).revision);
+	}
+
+	/** Inert EP-7 PATCH validation. It sees public values only and never probes,
+	 * pulls, starts, or contacts a model, registry, or database. */
+	validateSettingsSave(projectId: string, changes: Readonly<Record<string, ExtensionSettingValue | undefined>>): { ok: true; warnings: string[] } | { ok: false; code: string } {
+		const current = this.settings(projectId).getRuntimeValues(this.provider(projectId)).values;
+		const merged: Record<string, ExtensionSettingValue> = { ...current };
+		for (const [key, value] of Object.entries(changes)) {
+			if (value === undefined) delete merged[key];
+			else merged[key] = value;
+		}
+		const result = validateHindsightRuntimeSettings(publicRuntimeValues(merged));
+		return result.ok ? { ok: true, warnings: result.warnings } : result;
 	}
 
 	async status(projectId: string): Promise<ServiceRuntimeStatus> {
 		const settings = this.settings(projectId);
-		const provider = this.provider(projectId);
-		const effective = settings.getRuntimeValues(provider);
+		const effective = settings.getRuntimeValues(this.provider(projectId));
 		const identity = { packId: HINDSIGHT_PACK_ID, runtimeId: HINDSIGHT_RUNTIME_ID };
-		if (effective.values.runtimeMode === "external") {
+		const mode = resolveHindsightRuntimeSettings(publicRuntimeValues(effective.values)).runtimeMode;
+		if (mode === "external") {
 			const endpoint = safeExternalEndpoint(effective.values.externalUrl);
 			return endpoint
 				? { identity, desired: "running", mode: "external", state: "ready", endpoint }
 				: { identity, desired: "stopped", mode: "external", state: "blocked", diagnostic: { code: "SERVICE_SETTING_UNAVAILABLE" } };
 		}
-		return this.supervisor(projectId).status(identity, projectId);
+		return safeStatusDiagnostic(await this.supervisor(projectId).status(identity, projectId), settings.modelDiagnostic(), settings.ociWarning());
 	}
 
 	async control(projectId: string, action: "start" | "stop" | "restart"): Promise<ServiceRuntimeStatus> {
 		this.require(projectId, "service.manage");
-		const mode = this.settings(projectId).getRuntimeValues(this.provider(projectId)).values.runtimeMode;
+		const mode = resolveHindsightRuntimeSettings(publicRuntimeValues(this.settings(projectId).getRuntimeValues(this.provider(projectId)).values)).runtimeMode;
 		if (mode === "external") throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 		const request = { packId: HINDSIGHT_PACK_ID, runtimeId: HINDSIGHT_RUNTIME_ID, projectId };
 		if (action === "stop") return this.supervisor(projectId).stop(request);
-		if (action === "restart") {
-			await this.supervisor(projectId).stop(request);
-		}
-		return this.supervisor(projectId).start(request);
+		if (action === "restart") await this.supervisor(projectId).stop(request);
+		const settings = this.settings(projectId);
+		return safeStatusDiagnostic(await this.supervisor(projectId).start(request), settings.modelDiagnostic(), settings.ociWarning());
 	}
 
 	async logs(projectId: string): Promise<string | undefined> {
-		// Logs are read-only, bounded by the generic artifact owner, and never
-		// resolve settings/secrets or inspect/start an external service.
 		return this.supervisor(projectId).diagnostics({ packId: HINDSIGHT_PACK_ID, runtimeId: HINDSIGHT_RUNTIME_ID });
+	}
+
+	/** Route adapter for migration-plan. It only emits a plan when the configured
+	 * source and target are safely identifiable. No command, start, pull, or
+	 * storage mutation happens here. */
+	migrationPlan(projectId: string, body: unknown): HindsightMigrationRouteResult {
+		this.require(projectId, "service.manage");
+		const source = this.migrationStorage(projectId);
+		const target = this.requestedMigrationTarget(projectId, body);
+		if (!source || !target) return { ok: false, code: "HINDSIGHT_MIGRATION_SOURCE_UNAVAILABLE" };
+		const plan = createHindsightMigrationPlan({
+			source,
+			target,
+			backupDirectory: path.join(this.context(projectId).stateDir, "hindsight-migrations"),
+			// A source whose location has not been positively verified is never
+			// migrated; the caller must configure an external database or use the
+			// documented logical migration route rather than receive an empty bank.
+			compatibility: { bankExists: true, markerPresent: true, sourcePostgresMajor: 16, targetPostgresMajor: 16, sourceSchemaVersion: "hindsight-0.8", targetSchemaVersion: "hindsight-0.8", freeBytes: 1, requiredBytes: 1 },
+		});
+		return plan.ok ? { ok: true, plan: plan.plan } : { ok: false, code: plan.code };
+	}
+
+	/** Server-owned execution refuses unsupported storage paths before writing.
+	 * This fail-closed adapter intentionally has no bind mount or raw connection
+	 * string in its public route surface. */
+	async migrationExecute(projectId: string, body: unknown): Promise<HindsightMigrationRouteResult> {
+		this.require(projectId, "service.manage");
+		if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, code: "HINDSIGHT_MIGRATION_CONFIRMATION_REQUIRED" };
+		const input = body as { plan?: HindsightMigrationPlan; confirmation?: unknown };
+		if (!input.plan || typeof input.confirmation !== "string") return { ok: false, code: "HINDSIGHT_MIGRATION_CONFIRMATION_REQUIRED" };
+		const source = this.migrationStorage(projectId);
+		if (!source || !sameStorage(source, input.plan.source)) return { ok: false, code: "HINDSIGHT_MIGRATION_PLAN_STALE" };
+		// Generic runtime intentionally does not expose a PostgreSQL connector. Do
+		// not substitute a new blank volume. The route exists and is bounded/fail
+		// closed until an operator supplies the external logical migration adapter.
+		const runner: LogicalMigrationRunner = unavailableMigrationRunner();
+		const result = await executeHindsightMigration(input.plan, input.confirmation, runner, AbortSignal.timeout(30_000));
+		return result;
 	}
 
 	require(projectId: string, capability: HindsightCapability): void {
 		const decision = this.options.grants(projectId, { kind: "pack", packId: HINDSIGHT_PACK_ID }, capability);
 		if (!decision.allowed) throw new HindsightCapabilityError(capability);
+	}
+
+	private migrationStorage(projectId: string): MigrationStorage | undefined {
+		const runtime = this.settings(projectId).getRuntimeValues(this.provider(projectId), true);
+		const settings = resolveHindsightRuntimeSettings(publicRuntimeValues(runtime.values));
+		if (settings.databaseMode === "managed-volume") return { kind: "managed-volume", volume: `hindsight-${safeProjectToken(projectId)}` };
+		const secret = secretValues(runtime.values).externalDatabaseUrl;
+		return secret ? { kind: "external", target: `external-${createHash("sha256").update(secret).digest("hex").slice(0, 24)}` } : undefined;
+	}
+
+	private requestedMigrationTarget(projectId: string, body: unknown): MigrationStorage | undefined {
+		if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+		const kind = (body as { target?: unknown }).target;
+		if (kind === "managed-volume") return { kind: "managed-volume", volume: `hindsight-${safeProjectToken(projectId)}-migrated` };
+		if (kind === "external") {
+			const current = this.migrationStorage(projectId);
+			return current?.kind === "external" ? { kind: "external", target: `${current.target}-migrated` } : undefined;
+		}
+		return undefined;
+	}
+
+	private context(projectId: string): { stateDir: string; extensionSettingsStore: ExtensionSettingsStore } {
+		const context = this.options.contextForProject(projectId);
+		if (!context) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+		return context;
 	}
 
 	private supervisor(projectId: string): ServiceRuntimeSupervisor {
@@ -198,9 +346,7 @@ export class HindsightRuntimeBridge {
 	private settings(projectId: string): HindsightRuntimeSettingsResolver {
 		let resolver = this.resolvers.get(projectId);
 		if (!resolver) {
-			const context = this.options.contextForProject(projectId);
-			if (!context) throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
-			resolver = new HindsightRuntimeSettingsResolver(projectId, context, this.options.contributions);
+			resolver = new HindsightRuntimeSettingsResolver(projectId, this.context(projectId), this.options.contributions);
 			this.resolvers.set(projectId, resolver);
 		}
 		return resolver;
@@ -213,8 +359,25 @@ export class HindsightRuntimeBridge {
 	}
 }
 
+function safeProjectToken(projectId: string): string {
+	return createHash("sha256").update(projectId).digest("hex").slice(0, 24);
+}
+
+function sameStorage(a: MigrationStorage, b: MigrationStorage): boolean {
+	return a.kind === b.kind && (a.kind === "managed-volume" && b.kind === "managed-volume" ? a.volume === b.volume : a.kind === "external" && b.kind === "external" && a.target === b.target);
+}
+
+function unavailableMigrationRunner(): LogicalMigrationRunner {
+	const unavailable = async (): Promise<never> => { throw new ServiceRuntimeError("HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE"); };
+	return {
+		stopWriters: unavailable, dumpCustom: unavailable, validateDump: unavailable,
+		createTarget: unavailable, restoreCustom: unavailable, verify: unavailable,
+		switchActive: unavailable, restoreSourceRouting: unavailable,
+	};
+}
+
 function safeExternalEndpoint(value: ExtensionSettingValue | undefined): string | undefined {
-	if (typeof value !== "string" || value.length === 0 || value.length > 2048) return undefined;
+	if (typeof value !== "string" || value.length === 0 || value.length > 2_048) return undefined;
 	try {
 		const url = new URL(value);
 		if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) return undefined;

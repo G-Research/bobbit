@@ -89,7 +89,10 @@ const SERVICE_TOKEN_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 // Literal segments and approved substitutions may be safely joined with hyphens.
 const PROJECT_TEMPLATE_RE = /^(?:[a-z0-9][a-z0-9_-]*|\$\{(?:packId|runtimeId|serverIdentity)\})(?:[a-z0-9_-]*|\$\{(?:packId|runtimeId|serverIdentity)\})*$/;
 const COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9._/@+-]*$/;
-const IMAGE_RE = /^(?=.{1,255}$)[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
+// OCI registry hosts may carry a port (for offline/private registries), while
+// image path segments remain shell-free. Resolution still happens only in an
+// explicit runner start, never while parsing or saving settings.
+const IMAGE_RE = /^(?=.{1,255}$)(?:[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
 /** Safe OCI reference accepted on an inert settings save; resolution/pull occurs
  * only when a generic runtime runner explicitly starts. */
 export function isSafeServiceImageReference(value: unknown): value is string {

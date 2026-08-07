@@ -21,7 +21,6 @@ import {
 	type RuntimeContext,
 	type StoreLike,
 	type StoreReadDiagnostic,
-	type Tags,
 } from "./shared.js";
 
 export { __setClientFactory } from "./shared.js";
@@ -44,10 +43,6 @@ interface RouteReq {
 
 function isObj(v: unknown): v is Record<string, unknown> {
 	return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function strOf(v: unknown): string | undefined {
-	return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
 
 /** Keep externally visible durable-store diagnostics stable, useful, and free of
@@ -80,11 +75,6 @@ function configUnavailable(diagnostic: StoreReadDiagnostic): { ok: false; error:
 
 function routeConfigUnavailable(diagnostic: StoreReadDiagnostic) {
 	return { configured: false, error: "HINDSIGHT_CONFIG_UNAVAILABLE", diagnostic: safeDiagnostic(diagnostic) };
-}
-
-function manualTags(extra: Tags | undefined): Tags {
-	const { project: _project, goal: _goal, ...safe } = extra ?? {};
-	return { kind: "manual", ...safe };
 }
 
 export const routes = {
@@ -138,65 +128,6 @@ export const routes = {
 			return { ...base, healthy: (await client.health()).ok === true };
 		} catch {
 			return { ...base, healthy: false };
-		}
-	},
-
-	recall: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), memories: [] };
-		const cfg = loaded.config;
-		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), memories: [] };
-		const body = isObj(req?.body) ? req!.body : {};
-		const query = strOf(body.query) ?? strOf(req?.query?.query);
-		if (!query) return { configured: true, memories: [] };
-		// Route bodies and legacy flat fields cannot choose or broaden a scope.
-		const projectId = strOf(ctx.scopeContext?.project?.id);
-		if (!projectId) return { configured: true, memories: [] };
-		const goalId = strOf(ctx.scopeContext?.goal?.id);
-		const tags: Tags = { project: projectId, ...(goalId ? { goal: goalId } : {}) };
-		try {
-			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			const res = await client.recall(cfg.bank, query, { maxTokens: cfg.recallBudget, tags, tagsMatch: "all_strict" as const });
-			return { configured: true, memories: res?.memories ?? [] };
-		} catch (e) {
-			return { configured: true, memories: [], error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
-	retain: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...configUnavailable(loaded.diagnostic), configured: false };
-		const cfg = loaded.config;
-		if (!isActive(cfg, ctx.runtime)) return { ok: false, configured: isConfigured(cfg) };
-		const body = isObj(req?.body) ? req!.body : {};
-		const content = strOf(body.content);
-		if (!content) return { ok: false, configured: true, error: "content is required" };
-		const projectId = strOf(ctx.scopeContext?.project?.id);
-		if (!projectId) return { ok: false, configured: true, error: "HINDSIGHT_SCOPE_UNAVAILABLE" };
-		const goalId = strOf(ctx.scopeContext?.goal?.id);
-		try {
-			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			await client.ensureBank(cfg.bank);
-			await client.retain(cfg.bank, content, { tags: { ...manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined), project: projectId, ...(goalId ? { goal: goalId } : {}) }, sync: body.sync === true });
-			return { ok: true, configured: true };
-		} catch (e) {
-			return { ok: false, configured: true, error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
-	reflect: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), text: "" };
-		const cfg = loaded.config;
-		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), text: "" };
-		const body = isObj(req?.body) ? req!.body : {};
-		const prompt = strOf(body.prompt);
-		if (!prompt) return { configured: true, text: "" };
-		try {
-			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			return { configured: true, text: (await client.reflect(cfg.bank, prompt))?.text ?? "" };
-		} catch (e) {
-			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };
 		}
 	},
 
