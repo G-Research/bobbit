@@ -254,7 +254,7 @@ export class ServiceRuntimeSupervisor {
 	start(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
 		// Authorization is intentionally outside the shared in-flight operation:
 		// every public caller is checked before it can observe another caller's
-		// endpoint or status. Scheduled restarts call doStart directly below.
+		// endpoint or status. doStart rechecks the live grant when queued work applies.
 		return Promise.resolve()
 			.then(() => this.authorize(request, "start"))
 			.then(() => this.startAuthorized(request));
@@ -268,7 +268,7 @@ export class ServiceRuntimeSupervisor {
 			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 		}
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, true));
+		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, false));
 		this.inFlight.set(key, { mode: request.mode, promise });
 		void promise.finally(() => {
 			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);

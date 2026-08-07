@@ -267,16 +267,39 @@ describe("ServiceRuntimeSupervisor", () => {
 			await launched;
 			return { endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] };
 		} });
-		const authorize = vi.fn(async () => authorize.mock.calls.length !== 2);
+		const authorize = vi.fn(async () => authorize.mock.calls.length !== 3);
 		const { instance } = supervisor({ authorize, runners: [local], probe: vi.fn(async () => true) });
 
 		const permitted = instance.start({ ...identity, mode: "local" });
 		await flush();
 		await expect(instance.start({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
-		assert.equal(authorize.mock.calls.length, 2);
+		assert.equal(authorize.mock.calls.length, 3);
 		release();
 		await expect(permitted).resolves.toMatchObject({ state: "ready", endpoint });
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+	});
+
+	it("re-reads the live grant when applying a queued public start", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+		let releaseStop!: () => void;
+		const stopping = new Promise<void>((resolve) => { releaseStop = resolve; });
+		let allowed = true;
+		const authorize = vi.fn(async (_request: unknown) => allowed);
+		const local = runner("local", { stop: async () => stopping });
+		const { instance } = supervisor({ store, authorize, runners: [local] });
+
+		const stop = instance.stop({ ...identity, mode: "local" });
+		await flush();
+		const start = instance.start({ ...identity, mode: "local" });
+		await flush();
+		allowed = false;
+		releaseStop();
+		await stop;
+		await expect(start).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.equal(authorize.mock.calls.length, 3);
 	});
 
 	it("bounds readiness retries, tears down the failed launch, and never leaks an endpoint outside ready", async () => {
@@ -331,8 +354,8 @@ describe("ServiceRuntimeSupervisor", () => {
 		await flush();
 
 		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 1, "revocation prevents the queued restart launch");
-		assert.equal(authorize.mock.calls.length, 2);
-		assert.deepEqual(authorize.mock.calls[1]?.[0], { ...identity, action: "start" });
+		assert.equal(authorize.mock.calls.length, 3);
+		assert.deepEqual(authorize.mock.calls[2]?.[0], { ...identity, action: "start" });
 		assert.deepEqual(store.replaceCalls.at(-1)?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.010Z" });
 	});
 
