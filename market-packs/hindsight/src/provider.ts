@@ -58,7 +58,11 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query?: string):
 	const scope = scopeOf(ctx); // Fail closed before constructing a client.
 	if (!scope?.projectId || !canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.read")) return [];
 	try {
-		const res = await (await makeClient(clientConfig(cfg, ctx.runtime))).recall(cfg.bank, textOf(query)!, { maxTokens: cfg.recallBudget, tags: { project: scope.projectId, ...(scope.goalId ? { goal: scope.goalId } : {}) }, tagsMatch: "all_strict" });
+		const client = await makeClient(clientConfig(cfg, ctx.runtime));
+		// Client construction can yield to the event loop; the initial check above
+		// is not authority for this disclosure.
+		if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.read")) return [];
+		const res = await client.recall(cfg.bank, textOf(query)!, { maxTokens: cfg.recallBudget, tags: { project: scope.projectId, ...(scope.goalId ? { goal: scope.goalId } : {}) }, tagsMatch: "all_strict" });
 		const memories = res?.memories ?? []; return memories.length ? [{ id: "memory:0", title: TITLE, authority: "memory", priority: 50, reason: `Recall for: ${truncate(textOf(query)!, 80)}`, content: memories.map(m => `- ${m.text}`).join("\n") }] : [];
 	} catch (e) { const store = storeOf(ctx); if (store) await recordAutomaticError(ctx, store, e); return []; }
 }
@@ -90,7 +94,7 @@ async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, key: string,
 	const primary = record.turns.map(t => t.summary); const content = primary.join("\n\n").slice(0, SUMMARY_CAP * 4);
 	const target = eventIdentity(record.scope, { ...cfg, bank: record.identity.bank, namespace: record.identity.namespace }, "turn", record.identity.sessionId, record.flushSeq ?? 0);
 	let durableOutcome = false;
-	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(scopedClientConfig(cfg, record.identity.namespace, ctx.runtime)); if (!canContinue(ctx)) return false; await client.ensureBank(record.identity.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(record.identity.bank, content, { tags: tagsFor(record.scope, "turn"), sync: false, id: documentId(target) }); durableOutcome = true; }
+	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(scopedClientConfig(cfg, record.identity.namespace, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.ensureBank(record.identity.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(record.identity.bank, content, { tags: tagsFor(record.scope, "turn"), sync: false, id: documentId(target) }); durableOutcome = true; }
 	catch (e) { durableOutcome = await queueRecord(store, record.scope, target, content, tagsFor(record.scope, "turn"), false, nowOf(ctx), ctx); if (!durableOutcome) { await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); } await recordAutomaticError(ctx, store, e); }
 	if (!durableOutcome || !canContinue(ctx)) return false;
 	const processed = record.turns.map(t => `${t.capturedAt}\u0000${t.summary}`);
@@ -112,7 +116,7 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, ctx: Provi
 	const loaded = await loadQueue(store, scope.projectId); if (!loaded.loaded) { await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
 	const entry = authorizedEntry(loaded.queue[0], scope.projectId); if (!entry) { if (loaded.queue[0] !== undefined) await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
 	try {
-		if (!await hasMemoryCapability(ctx, "memory.write")) return; const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); if (!canContinue(ctx)) return; await client.ensureBank(entry.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
+		if (!await hasMemoryCapability(ctx, "memory.write")) return; const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return; await client.ensureBank(entry.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
 		await client.retain(entry.bank, entry.content, { tags: entry.tags, sync: entry.sync, id: entry.documentId });
 		if (await hasMemoryCapability(ctx, "memory.write") && !await removeQueuedEntry(store, scope.projectId, entry, deadlineOf(ctx), ctx.signal)) await recordAutomaticError(ctx, store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR));
 	} catch (e) { await recordAutomaticError(ctx, store, e); }
@@ -124,7 +128,7 @@ async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig, ctx: Provid
 		if (!canContinue(ctx)) return;
 		const entry = authorizedEntry(candidate, scope.projectId); if (!entry) { if (candidate !== undefined) await recordAutomaticError(ctx, store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); return; }
 		try {
-			if (!await hasMemoryCapability(ctx, "memory.write")) return; const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); await client.ensureBank(entry.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
+			if (!await hasMemoryCapability(ctx, "memory.write")) return; const client = await makeClient(scopedClientConfig(cfg, entry.namespace, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return; await client.ensureBank(entry.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return;
 			await client.retain(entry.bank, entry.content, { tags: entry.tags, sync: entry.sync, id: entry.documentId });
 			if (!await hasMemoryCapability(ctx, "memory.write") || !await removeQueuedEntry(store, scope.projectId, entry, deadlineOf(ctx), ctx.signal)) { await recordAutomaticError(ctx, store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR)); return; }
 		} catch (e) { await recordAutomaticError(ctx, store, e); return; }
@@ -184,7 +188,7 @@ async function retainImmediate(ctx: ProviderCtx, cfg: EffectiveConfig, content: 
 	const identity = completed?.identity ?? eventIdentity(scope, cfg, kind, eventId, seq);
 	const recordScope = completed?.scope ?? scope;
 	const tags = completed?.tags ?? tagsFor(scope, kind);
-	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(clientConfig(cfg, ctx.runtime)); await client.ensureBank(cfg.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(cfg.bank, content, { tags, sync, id: completed?.documentId ?? documentId(identity) }); return true; }
+	try { if (!await hasMemoryCapability(ctx, "memory.write")) return false; const client = await makeClient(clientConfig(cfg, ctx.runtime)); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.ensureBank(cfg.bank); if (!canContinue(ctx) || !await hasMemoryCapability(ctx, "memory.write")) return false; await client.retain(cfg.bank, content, { tags, sync, id: completed?.documentId ?? documentId(identity) }); return true; }
 	catch (e) { const queued = await queueRecord(store, recordScope, identity, content, tags, sync, nowOf(ctx), ctx); if (!queued) throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); await recordAutomaticError(ctx, store, e); return true; }
 }
 const provider = {

@@ -226,6 +226,10 @@ async function readRows(ctx: MemoryRouteContext, req: MemoryRouteRequest) {
 	return await withActiveClient(ctx, availability.config, async (client, config) => {
 		const browse = clientMethod(client, "browse");
 		if (!browse) return { configured: true, code: "MEMORY_API_UNSUPPORTED", memories: [] };
+		// Client construction is async, so the pre-dispatch grant is only a
+		// fast-fail. Re-read the live decision immediately before the request.
+		const livePermission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
+		if (!livePermission.ok) return { configured: true, code: livePermission.code, memories: [] };
 		const result = await browse(config.bank, { query, cursor, limit, tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
 		const data = record(result) ? result : {};
 		return {
@@ -258,6 +262,8 @@ export const memoryRoutes = {
 		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const recall = clientMethod(client, "recall");
 			if (!recall) return { configured: true, code: "MEMORY_API_UNSUPPORTED", memories: [] };
+			const livePermission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
+			if (!livePermission.ok) return { configured: true, code: livePermission.code, memories: [] };
 			const result = await recall(config.bank, query, { maxTokens: config.recallBudget, tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
 			const data = record(result) ? result : {};
 			return { configured: true, memories: safeRows(data.memories) };
@@ -278,7 +284,11 @@ export const memoryRoutes = {
 			const retain = clientMethod(client, "retain");
 			const ensureBank = clientMethod(client, "ensureBank");
 			if (!retain || !ensureBank) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED" };
+			let livePermission = await authorize(ctx, "memory.write");
+			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code };
 			await ensureBank(config.bank);
+			livePermission = await authorize(ctx, "memory.write");
+			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code };
 			await retain(config.bank, content, { tags: { kind: "manual", ...scopedTags(scope) }, sync: bodyOf(req).sync === true });
 			return { ok: true, configured: true };
 		});
@@ -305,6 +315,10 @@ export const memoryRoutes = {
 			// than reflecting arbitrary project memories.
 			const reflect = clientMethod(client, "reflectScoped");
 			if (!reflect) return { configured: true, code: "MEMORY_API_UNSUPPORTED", text: "" };
+			const liveReflect = await authorize(ctx, "memory.reflect");
+			if (!liveReflect.ok) return { configured: true, code: liveReflect.code, text: "" };
+			const liveRead = await authorize(ctx, "memory.read");
+			if (!liveRead.ok) return { configured: true, code: liveRead.code, text: "" };
 			const result = await reflect(config.bank, prompt, { tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
 			const data = record(result) ? result : {};
 			const reflected = safeText(data.text, MAX_CONTENT);
@@ -325,6 +339,8 @@ export const memoryRoutes = {
 		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const detail = clientMethod(client, "detail");
 			if (!detail) return { configured: true, code: "MEMORY_API_UNSUPPORTED" };
+			const livePermission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
+			if (!livePermission.ok) return { configured: true, code: livePermission.code };
 			const result = await detail(config.bank, id);
 			// Hindsight 0.8.6 detail has no tag-filter parameter. Verify the returned
 			// record before serialization so an id cannot bypass the route scope.
@@ -348,9 +364,13 @@ export const memoryRoutes = {
 			const history = clientMethod(client, "history");
 			if (!detail || !history) return { configured: true, code: "MEMORY_API_UNSUPPORTED", history: [] };
 			// The history endpoint has no tag filter in Hindsight 0.8.6. Authorize it
-			// through the bounded detail record first.
+			// through the bounded detail record first, and re-check before each read.
+			let livePermission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
+			if (!livePermission.ok) return { configured: true, code: livePermission.code, history: [] };
 			const memory = await detail(config.bank, id);
 			if (!belongsToScope(memory, scope)) return { configured: true, code: "MEMORY_NOT_FOUND", history: [] };
+			livePermission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
+			if (!livePermission.ok) return { configured: true, code: livePermission.code, history: [] };
 			const result = await history(config.bank, id);
 			const data = record(result) ? result : {};
 			return { configured: true, history: safeRows(data.history) };
@@ -378,7 +398,11 @@ export const memoryRoutes = {
 			const detail = clientMethod(client, "detail");
 			const invalidate = clientMethod(client, "invalidateMemory") ?? clientMethod(client, "invalidate");
 			if (!detail || !invalidate) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED", id };
+			let livePermission = await authorize(ctx, "memory.invalidate");
+			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code, id };
 			if (!belongsToScope(await detail(config.bank, id), scope)) return { ok: false, configured: true, code: "MEMORY_NOT_FOUND", id };
+			livePermission = await authorize(ctx, "memory.invalidate");
+			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code, id };
 			await invalidate(config.bank, id, { ...(text(body.reason, 1_000) ? { reason: text(body.reason, 1_000) } : {}) });
 			return { ok: true, configured: true, id };
 		});
@@ -402,7 +426,11 @@ export const memoryRoutes = {
 			const retain = clientMethod(client, "retain");
 			const ensureBank = clientMethod(client, "ensureBank");
 			if (!retain || !ensureBank) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED" };
+			let livePermission = await authorize(ctx, "memory.write");
+			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code };
 			await ensureBank(config.bank);
+			livePermission = await authorize(ctx, "memory.write");
+			if (!livePermission.ok) return { ok: false, configured: true, code: livePermission.code };
 			await retain(config.bank, outcome.content, { tags: outcome.tags, sync: true, id: outcome.documentId });
 			return { ok: true, configured: true, outcomeId: outcome.documentId };
 		});
