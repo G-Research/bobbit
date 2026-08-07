@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, registe
 import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.ts";
 import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.ts";
 import { startHindsightStub } from "../../tests/e2e/hindsight-stub.mjs";
+import { ServiceRuntimeStore } from "../../src/server/service-runtime/service-runtime-store.ts";
 
 // The in-process gateway stages Hindsight as the shipped built-in pack. Keep
 // the test-only resolver available for source-mode route workers in older test
@@ -100,6 +102,58 @@ function denied(response: Response, body: any, capability: string): void {
 	expect(JSON.stringify(body)).toContain(capability);
 }
 
+function runtimeStore(gateway: any, projectId: string): ServiceRuntimeStore {
+	const context = gateway.projectContextManager.getOrCreate(projectId);
+	const serverIdentity = `hindsight-${createHash("sha256").update(path.join(gateway.bobbitDir, "state")).digest("hex").slice(0, 24)}`;
+	return new ServiceRuntimeStore({ stateDir: context.stateDir, serverIdentity });
+}
+
+async function seedCleanupRuntime(gateway: any, projectId: string, mode: "local" | "compose"): Promise<ServiceRuntimeStore> {
+	const store = runtimeStore(gateway, projectId);
+	const identity = store.identity(PACK_ID, "hindsight");
+	await store.replace(identity, {
+		version: 1,
+		serverIdentity: `hindsight-${createHash("sha256").update(path.join(gateway.bobbitDir, "state")).digest("hex").slice(0, 24)}`,
+		desired: "running",
+		selectedMode: mode,
+		settingsRevision: "marketplace-cleanup-test",
+		runnerIdentity: mode === "local"
+			? { kind: "local", id: "absent-local-child" }
+			: { kind: "compose", id: "api", composeProject: "forged-project" },
+		endpoint: "http://127.0.0.1:45555",
+		restartAttempts: [],
+		updatedAt: new Date().toISOString(),
+	});
+	return store;
+}
+
+async function installProjectHindsightFixture(gateway: any, project: { id: string; rootPath: string }): Promise<{ sourceId: string; sourceRoot: string }> {
+	const sourceRoot = path.join(gateway.bobbitDir, "hindsight-marketplace-cleanup", `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	fs.mkdirSync(sourceRoot, { recursive: true });
+	fs.cpSync(PACK_SOURCE, path.join(sourceRoot, PACK_ID), { recursive: true });
+	const sourceResponse = await apiFetch("/api/marketplace/sources", {
+		method: "POST",
+		body: JSON.stringify({ url: sourceRoot }),
+	});
+	expect(sourceResponse.status, `add local Hindsight marketplace fixture: ${await sourceResponse.clone().text()}`).toBe(201);
+	const sourceId = (await json(sourceResponse)).source.id as string;
+	const installed = await apiFetch("/api/marketplace/install", {
+		method: "POST",
+		body: JSON.stringify({ sourceId, dirName: PACK_ID, scope: "project", projectId: project.id }),
+	});
+	expect(installed.status, `install local Hindsight marketplace fixture: ${await installed.clone().text()}`).toBe(201);
+	return { sourceId, sourceRoot };
+}
+
+async function cleanupProjectHindsightFixture(projectId: string, fixture: { sourceId: string; sourceRoot: string }): Promise<void> {
+	await apiFetch("/api/marketplace/installed", {
+		method: "DELETE",
+		body: JSON.stringify({ scope: "project", packName: PACK_ID, projectId }),
+	}).catch(() => {});
+	await apiFetch(`/api/marketplace/sources/${encodeURIComponent(fixture.sourceId)}`, { method: "DELETE" }).catch(() => {});
+	fs.rmSync(fixture.sourceRoot, { recursive: true, force: true });
+}
+
 describe.serial("Hindsight experience API", () => {
 	test.beforeAll(async () => {
 		// Hindsight is a normal enabled built-in. Clearing any prior server override
@@ -118,6 +172,71 @@ describe.serial("Hindsight experience API", () => {
 		}).catch(() => {});
 		for (const root of projectRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 	});
+
+	for (const mutation of [
+		{
+			name: "update",
+			successStatus: 200,
+			request: (projectId: string) => apiFetch("/api/marketplace/update", {
+				method: "POST", body: JSON.stringify({ scope: "project", packName: PACK_ID, projectId }),
+			}),
+		},
+		{
+			name: "uninstall",
+			successStatus: 204,
+			request: (projectId: string) => apiFetch("/api/marketplace/installed", {
+				method: "DELETE", body: JSON.stringify({ scope: "project", packName: PACK_ID, projectId }),
+			}),
+		},
+		{
+			name: "deactivate",
+			successStatus: 200,
+			request: (projectId: string) => apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT", body: JSON.stringify({ scope: "project", packName: PACK_ID, projectId, disabled: { runtimes: ["hindsight"] } }),
+			}),
+		},
+	] as const) {
+		test(`stops the owned runtime before Hindsight ${mutation.name}, retaining a retryable contribution on cleanup failure`, async ({ gateway }) => {
+			const project = await createProject(gateway, `marketplace-${mutation.name}`);
+			const fixture = await installProjectHindsightFixture(gateway, project);
+			try {
+				await grant(project.id, "service.manage");
+				const store = await seedCleanupRuntime(gateway, project.id, "compose");
+				const failed = await mutation.request(project.id);
+				expect(failed.status, `${mutation.name} must fail while owned cleanup fails`).not.toBe(mutation.successStatus);
+
+				const stale = await store.load(store.identity(PACK_ID, "hindsight"));
+				expect(stale).toMatchObject({
+					desired: "stopped",
+					runnerIdentity: { kind: "compose", id: "api", composeProject: "forged-project" },
+				});
+				expect(stale?.endpoint).toBeUndefined();
+				const unchanged = await apiFetch(`/api/marketplace/pack-activation?scope=project&projectId=${encodeURIComponent(project.id)}&packName=${PACK_ID}`);
+				expect(unchanged.status, `${mutation.name} failure retains the old contribution`).toBe(200);
+				const unchangedBody = await json(unchanged);
+				expect(unchangedBody.disabled?.runtimes ?? []).not.toContain("hindsight");
+
+				await seedCleanupRuntime(gateway, project.id, "local");
+				const succeeded = await mutation.request(project.id);
+				expect(succeeded.status, `${mutation.name} retry after cleanup: ${await succeeded.clone().text()}`).toBe(mutation.successStatus);
+				const cleaned = await store.load(store.identity(PACK_ID, "hindsight"));
+				expect(cleaned?.desired).toBe("stopped");
+				expect(cleaned?.endpoint).toBeUndefined();
+				expect(cleaned?.runnerIdentity).toBeUndefined();
+
+				const after = await apiFetch(`/api/marketplace/pack-activation?scope=project&projectId=${encodeURIComponent(project.id)}&packName=${PACK_ID}`);
+				if (mutation.name === "uninstall") {
+					expect(after.status).toBe(404);
+				} else {
+					expect(after.status).toBe(200);
+					const afterBody = await json(after);
+					expect(afterBody.disabled?.runtimes ?? []).toEqual(mutation.name === "deactivate" ? ["hindsight"] : []);
+				}
+			} finally {
+				await cleanupProjectHindsightFixture(project.id, fixture);
+			}
+		});
+	}
 
 	test("uses EP-7 compare-and-swap and write-only redaction for Hindsight configuration", async ({ gateway }) => {
 		const project = await createProject(gateway, "settings");
