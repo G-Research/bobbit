@@ -18,10 +18,45 @@ export interface ClaudeSdkEventMetadata {
 	readonly terminal?: Readonly<{ error?: string; terminalReason?: string; subtype?: string }>;
 }
 
+/** The safe cost interpretation of an SDK result; it is never a billed invoice. */
+export type ClaudeSdkCostBasisHint = "subscription-notional" | "api-notional" | "unknown";
+
+export interface ClaudeSdkModelUsage {
+	readonly inputTokens?: number;
+	readonly outputTokens?: number;
+	readonly cacheReadTokens?: number;
+	readonly cacheWriteTokens?: number;
+	readonly notionalCostUsd?: number;
+	readonly contextWindow?: number;
+	readonly maxOutputTokens?: number;
+	readonly contextTokens?: number;
+}
+
+/**
+ * The sole accounting authority emitted by the pinned Agent SDK: its root
+ * terminal result. This is deliberately an event annotation, never a message.
+ */
+export interface ClaudeSdkUsageRecord {
+	readonly source: "claude-agent-sdk-result";
+	readonly sourceResultId: string;
+	readonly sdkSessionId: string;
+	readonly modelUsage: Readonly<Record<string, ClaudeSdkModelUsage>>;
+	readonly total: Readonly<{
+		inputTokens: number;
+		outputTokens: number;
+		cacheReadTokens: number;
+		cacheWriteTokens: number;
+		notionalCostUsd?: number;
+	}>;
+	readonly costBasis: ClaudeSdkCostBasisHint;
+}
+
 /** A Pi event annotated when it belongs to a forwarded subagent stream. */
 type ClaudeSdkEventAnnotation = {
 	readonly parentToolUseId?: string;
 	readonly claudeSdk?: ClaudeSdkEventMetadata;
+	/** Present only on the root terminal `agent_end` for a valid SDK result. */
+	readonly claudeSdkUsage?: ClaudeSdkUsageRecord;
 };
 
 export type ClaudeSdkTranslatedEvent = AgentEvent & ClaudeSdkEventAnnotation;
@@ -172,6 +207,69 @@ function safeText(value: unknown): string {
 function timestampFor(input: Record<string, unknown>): number {
 	const timestamp = input.timestamp_ms ?? input.timestamp;
 	return typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Normalize the exact result/model-usage fields emitted by SDK 0.3.222. A
+ * result must have both opaque identities and complete aggregate usage before
+ * it can enter accounting; malformed and child results remain lifecycle-only.
+ */
+export function normalizeClaudeSdkRootResultUsage(input: unknown): ClaudeSdkUsageRecord | undefined {
+	if (!isRecord(input) || input.type !== "result") return undefined;
+	if (input.parent_tool_use_id !== undefined && input.parent_tool_use_id !== null) return undefined;
+	const sdkSessionId = nonEmptyString(input.session_id);
+	const resultId = nonEmptyString(input.uuid);
+	const usage = isRecord(input.usage) ? input.usage : undefined;
+	const modelUsage = isRecord(input.modelUsage) ? input.modelUsage : undefined;
+	if (!sdkSessionId || !resultId || !usage || !modelUsage) return undefined;
+
+	const inputTokens = nonNegativeNumber(usage.input_tokens);
+	const outputTokens = nonNegativeNumber(usage.output_tokens);
+	const cacheReadTokens = nonNegativeNumber(usage.cache_read_input_tokens);
+	const cacheWriteTokens = nonNegativeNumber(usage.cache_creation_input_tokens);
+	if (inputTokens === undefined || outputTokens === undefined || cacheReadTokens === undefined || cacheWriteTokens === undefined) return undefined;
+
+	const normalizedModels: Record<string, ClaudeSdkModelUsage> = Object.create(null);
+	for (const [model, entry] of Object.entries(modelUsage)) {
+		if (!model || !isRecord(entry)) continue;
+		const normalized: {
+			inputTokens?: number; outputTokens?: number; cacheReadTokens?: number;
+			cacheWriteTokens?: number; notionalCostUsd?: number; contextWindow?: number; maxOutputTokens?: number;
+		} = {};
+		const copy = (source: string, target: keyof typeof normalized) => {
+			const value = nonNegativeNumber(entry[source]);
+			if (value !== undefined) normalized[target] = value;
+		};
+		copy("inputTokens", "inputTokens");
+		copy("outputTokens", "outputTokens");
+		copy("cacheReadInputTokens", "cacheReadTokens");
+		copy("cacheCreationInputTokens", "cacheWriteTokens");
+		copy("costUSD", "notionalCostUsd");
+		copy("contextWindow", "contextWindow");
+		copy("maxOutputTokens", "maxOutputTokens");
+		normalizedModels[model] = normalized;
+	}
+	const notionalCostUsd = nonNegativeNumber(input.total_cost_usd);
+	return {
+		source: "claude-agent-sdk-result",
+		sourceResultId: `${sdkSessionId}:${resultId}`,
+		sdkSessionId,
+		modelUsage: normalizedModels,
+		total: {
+			inputTokens,
+			outputTokens,
+			cacheReadTokens,
+			cacheWriteTokens,
+			...(notionalCostUsd !== undefined ? { notionalCostUsd } : {}),
+		},
+		// The closed SDK bridge only discovers the local Claude subscription; this
+		// is an estimate hint, not a statement that an API invoice was incurred.
+		costBasis: "subscription-notional",
+	};
 }
 
 function usageFor(value: unknown): Usage {
@@ -417,11 +515,15 @@ function drain(state: ClaudeSdkTranslatorState, events: ClaudeSdkTranslatedEvent
 	const error = terminalIsError(source);
 	const terminalReason = nonEmptyString(source.terminal_reason);
 	const errorText = error ? terminalError(source) : undefined;
-	events.push(annotate(
-		{ type: "agent_end", messages: [] },
-		ROOT,
-		{ terminal: { ...(errorText ? { error: errorText } : {}), ...(terminalReason ? { terminalReason } : {}), ...(nonEmptyString(source.subtype) ? { subtype: nonEmptyString(source.subtype) } : {}) } },
-	));
+	const claudeSdkUsage = normalizeClaudeSdkRootResultUsage(source);
+	events.push({
+		...annotate(
+			{ type: "agent_end", messages: [] },
+			ROOT,
+			{ terminal: { ...(errorText ? { error: errorText } : {}), ...(terminalReason ? { terminalReason } : {}), ...(nonEmptyString(source.subtype) ? { subtype: nonEmptyString(source.subtype) } : {}) } },
+		),
+		...(claudeSdkUsage ? { claudeSdkUsage } : {}),
+	});
 	return next;
 }
 
