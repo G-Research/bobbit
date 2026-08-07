@@ -6,6 +6,7 @@ import YAML from "yaml";
 
 import { RoleLoader, PackResolver } from "../../src/server/agent/pack-resolver.ts";
 import type { Role } from "../../src/server/agent/role-store.ts";
+import { ACCESSORY_IDS } from "../../src/ui/bobbit-sprite-data.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 const defaultsDir = path.join(repoRoot, "defaults");
@@ -22,6 +23,7 @@ type RoleSource = {
 	accessory?: unknown;
 	promptTemplate?: unknown;
 	toolPolicies?: unknown;
+	model?: unknown;
 	createdAt?: unknown;
 	updatedAt?: unknown;
 };
@@ -84,6 +86,8 @@ describe("Claude runtime reviewer roles", () => {
 			expect(source.name).toBe(name);
 			expect(source.label, `${name} needs a display label`).toEqual(expect.any(String));
 			expect(source.accessory, `${name} needs an accessory`).toEqual(expect.any(String));
+			expect(ACCESSORY_IDS, `${name} accessory must be registered in the canonical sprite registry`).toContain(source.accessory);
+			expect(source.model, `${name} must not pin a provider-specific model in the builtin YAML`).toBeUndefined();
 			expect(source.promptTemplate, `${name} needs a prompt`).toEqual(expect.any(String));
 			expect((source.promptTemplate as string).trim()).not.toBe("");
 			expect(source.createdAt, `${name} needs creation metadata`).toEqual(expect.any(Number));
@@ -101,6 +105,7 @@ describe("Claude runtime reviewer roles", () => {
 			for (const policy of Object.values(role!.toolPolicies ?? {})) {
 				expect(["allow", "ask", "never"]).toContain(policy);
 			}
+			expect(role!.model, `${name} must use the selected runtime model rather than pin a builtin provider model`).toBeUndefined();
 			expect(Buffer.byteLength(role!.promptTemplate, "utf8"), `${name} prompt must stay within 8 KiB`).toBeLessThanOrEqual(8 * 1024);
 		}
 	});

@@ -10,6 +10,7 @@ import {
 	validateWorkflowDefinition,
 	type ValidatorVerifyStep,
 	type ValidatorWorkflow,
+	type WorkflowComponentRef,
 } from "../../src/server/agent/workflow-validator.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
@@ -18,11 +19,25 @@ const projectYaml = path.join(repoRoot, ".bobbit", "config", "project.yaml");
 const supportedStepTypes = new Set(["command", "llm-review", "agent-qa", "subgoal", "human-signoff"]);
 const runtimeReviewRoles = new Set(["backend-parity-reviewer", "billing-safety-auditor"]);
 
+type ProjectDefinition = {
+	components?: WorkflowComponentRef[];
+	workflows?: Record<string, ValidatorWorkflow>;
+};
+
+function project(): ProjectDefinition {
+	return YAML.parse(fs.readFileSync(projectYaml, "utf8")) as ProjectDefinition;
+}
+
 function workflow(): ValidatorWorkflow {
-	const project = YAML.parse(fs.readFileSync(projectYaml, "utf8")) as { workflows?: Record<string, ValidatorWorkflow> };
-	const runtimeWorkflow = project.workflows?.["claude-runtime"];
+	const runtimeWorkflow = project().workflows?.["claude-runtime"];
 	expect(runtimeWorkflow, "project.yaml must define the claude-runtime inline workflow").toBeDefined();
 	return runtimeWorkflow!;
+}
+
+function projectComponents() {
+	const components = project().components;
+	expect(components, "project.yaml must provide component command definitions for workflow validation").toEqual(expect.any(Array));
+	return components!;
 }
 
 function gate(wf: ValidatorWorkflow, id: string) {
@@ -62,18 +77,9 @@ function normalized(value: string | undefined): string {
 }
 
 describe("claude-runtime inline workflow", () => {
-	it("is accepted by the existing schema and bobbit component command table", () => {
+	it("is accepted by the existing schema and real project component command definitions", () => {
 		const wf = workflow();
-		const errors = validateWorkflowDefinition(wf, [{
-			name: "bobbit",
-			commands: {
-				build: "npm run build",
-				check: "npm run check",
-				unit: "npm run test:unit",
-				browser: "npm run test:browser",
-				e2e: "npm run test:e2e",
-			},
-		}]);
+		const errors = validateWorkflowDefinition(wf, projectComponents());
 		expect(errors.map(error => error.message)).toEqual([]);
 	});
 
@@ -137,7 +143,7 @@ describe("claude-runtime inline workflow", () => {
 
 	it("requires sanitized real-model subscription evidence for dogfood and documents runtime selection", () => {
 		const wf = workflow();
-		const dogfoodPrompt = normalized(steps(wf, "dogfood").find(step => step.type === "llm-review" || step.type === "agent-qa")?.prompt);
+		const dogfoodPrompt = normalized(review(wf, "dogfood", "spec-auditor").prompt);
 		expect(dogfoodPrompt).toMatch(/(?:saniti[sz]|redact)/i);
 		expect(dogfoodPrompt).toMatch(/(?:real[- ]?(?:model|subscription)|subscription.{0,80}(?:model|manual)|manual.{0,80}(?:model|subscription))/i);
 		expect(dogfoodPrompt).toMatch(/(?:transcript|usage|readiness|prompt|steer|interrupt|stop)/i);
