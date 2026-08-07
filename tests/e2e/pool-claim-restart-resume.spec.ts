@@ -27,13 +27,23 @@ import { test, expect } from "./in-process-harness.js";
 // Pool pre-fill must run.
 test.use({ enableWorktreePool: true });
 
-import { apiFetch } from "./e2e-setup.js";
+import { apiFetch, agentEndPredicate, connectWs } from "./e2e-setup.js";
 import { waitForPool, pollSessionUntilSessionBranch } from "./test-utils/pool-polling.mjs";
 import { mkdirSync, existsSync, statSync, mkdtempSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+async function createRestorableAgentSession(sessionId: string): Promise<void> {
+	const ws = await connectWs(sessionId);
+	try {
+		ws.send({ type: "prompt", text: "POOL_RESTART_RESTORE_FIXTURE" });
+		await ws.waitFor(agentEndPredicate(), 10_000);
+	} finally {
+		ws.close();
+	}
+}
 
 function reflog(repo: string, branch: string): string {
 	// Use the branch's own reflog only (NOT --all) so pool replenishment
@@ -100,6 +110,11 @@ test.describe.serial("pool claim restart-resume", () => {
 			sessionId = (await sessResp.json()).id;
 
 			const before = await pollSessionUntilSessionBranch(sessionId);
+			// A cold restore requires a genuine agent session file. A newly-created
+			// session with no completed turn is intentionally archived by recovery,
+			// which makes the live-session endpoint return no branch projection.
+			await createRestorableAgentSession(sessionId);
+			expect(gateway.sessionManager.getPersistedSession(sessionId)?.agentSessionFile).toBeTruthy();
 			expect(before.branch).toMatch(/^session\/[a-f0-9]{8}$/);
 			expect(before.branch).not.toMatch(/^pool\//);
 			expect(before.branch).not.toMatch(/^session\/new-session-/);
