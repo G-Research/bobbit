@@ -26,14 +26,13 @@ import {
 export { __setClientFactory } from "./shared.js";
 
 interface RouteCtx {
-	host: { store: StoreLike; memory?: MemoryRouteHostAdapter };
+	host: { store: StoreLike; memory?: MemoryRouteHostAdapter; providerConfig?: unknown; completedOutcome?: unknown };
 	sessionId?: string;
 	/** Authoritative host snapshot; flat projectId is compatibility-only. */
 	scopeContext?: { project?: { id?: string }; goal?: { id?: string } };
 	projectId?: string;
 	runtime?: RuntimeContext;
-	/** Bounded completion snapshot injected only by the host lifecycle boundary. */
-	outcome?: unknown;
+	signal?: AbortSignal;
 }
 interface RouteReq {
 	method?: string;
@@ -100,7 +99,11 @@ export const routes = {
 
 	status: async (ctx: RouteCtx) => {
 		const store = ctx.host.store;
-		const [configResult, queue, error] = await Promise.all([loadEffectiveConfig(store), queueStatus(store), lastError(store)]);
+		const injectedConfig = ctx.host.providerConfig;
+		const [configResult, queue, error] = await Promise.all([
+			injectedConfig === undefined ? loadEffectiveConfig(store) : Promise.resolve({ available: true as const, config: resolveConfig(injectedConfig), overrides: {} }),
+			queueStatus(store), lastError(store),
+		]);
 		if (!configResult.available) {
 			return {
 				...routeConfigUnavailable(configResult.diagnostic),
@@ -132,7 +135,9 @@ export const routes = {
 	},
 
 	banks: async (ctx: RouteCtx) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
+		const loaded = ctx.host.providerConfig === undefined
+			? await loadEffectiveConfig(ctx.host.store)
+			: { available: true as const, config: resolveConfig(ctx.host.providerConfig), overrides: {} };
 		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), banks: [] };
 		const cfg: EffectiveConfig = loaded.config;
 		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), banks: [] };

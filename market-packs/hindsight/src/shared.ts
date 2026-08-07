@@ -11,8 +11,14 @@ export interface HindsightClientLike {
 	retain(bank: string, content: string, opts?: { tags?: Tags; sync?: boolean; id?: string }): Promise<void>;
 	reflect(bank: string, prompt: string): Promise<{ text: string }>;
 	listBanks(): Promise<{ banks: string[] }>;
+	browse?(bank: string, opts?: { query?: string; cursor?: string; limit?: number; tags?: Tags; tagsMatch?: TagsMatch }): Promise<{ memories: Record<string, unknown>[]; cursor?: string }>;
+	detail?(bank: string, id: string): Promise<Record<string, unknown> | null>;
+	history?(bank: string, id: string): Promise<{ history: Record<string, unknown>[] }>;
+	reflectScoped?(bank: string, prompt: string, opts: { tags?: Tags; tagsMatch?: TagsMatch }): Promise<{ text: string }>;
+	invalidateMemory?(bank: string, id: string, opts?: { tags?: Tags; tagsMatch?: TagsMatch; reason?: string }): Promise<void>;
+	invalidate?(bank: string, id: string, opts?: { tags?: Tags; tagsMatch?: TagsMatch; reason?: string }): Promise<void>;
 }
-export interface ClientConfig { baseUrl: string; apiKey?: string; namespace?: string; timeoutMs?: number }
+export interface ClientConfig { baseUrl: string; apiKey?: string; namespace?: string; timeoutMs?: number; signal?: AbortSignal }
 export interface RuntimeContext { endpoint?: string; state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable"; diagnostic?: { code: string; retryAt?: string } }
 export type ManagedRuntimeMode = "local" | "docker" | "compose";
 export type ClientFactory = (cfg: ClientConfig) => HindsightClientLike | Promise<HindsightClientLike>;

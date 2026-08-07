@@ -50,6 +50,26 @@ describe("Hindsight typed memory routes and tool adapters", () => {
 		assert.deepEqual(denied, { configured: true, code: "EXTENSION_CAPABILITY_DENIED", memories: [] });
 	});
 
+	it("prefers injected EP-7 config and retains only a host-injected completed outcome", async () => {
+		const store = new MemoryStore();
+		const received: Array<{ content?: string; tags?: Record<string, string>; id?: string }> = [];
+		__setClientFactory(() => ({
+			health: async () => ({ ok: true }), ensureBank: async () => {}, recall: async () => ({ memories: [] }),
+			retain: async (_bank, content, options) => { received.push({ content, tags: options?.tags, id: options?.id }); },
+			reflect: async () => ({ text: "" }), listBanks: async () => ({ banks: [] }),
+			browse: async () => ({ memories: [{ id: "m", text: "injected config" }] }),
+		}));
+		const context = {
+			host: { store, providerConfig: { runtimeMode: "external", externalUrl: "http://127.0.0.1:8848" }, completedOutcome: { id: "outcome-1", content: "goal completed" }, memory: { requireCapability: () => ({ allowed: true as const }) } },
+			scopeContext: { project: { id: "project-a" }, goal: { id: "goal-a" } },
+		};
+		const browse = await memoryRoutes.browse(context, { body: {} });
+		assert.deepEqual(browse, { configured: true, memories: [{ id: "m", text: "injected config" }] });
+		const outcome = await memoryRoutes["retain-outcome"](context, { body: { content: "forged body text" } });
+		assert.deepEqual(outcome, { ok: true, configured: true, outcomeId: "outcome-1" });
+		assert.deepEqual(received, [{ content: "goal completed", id: "outcome-1", tags: { kind: "outcome", project: "project-a", goal: "goal-a" } }]);
+	});
+
 	it("registers every exported memory route, including the required browse surface", async () => {
 		const manifest = YAML.parse(fs.readFileSync(path.join(packRoot, "pack.yaml"), "utf8")) as { routes: { names: string[] } };
 		const registeredRouteNames = new Set(manifest.routes.names);

@@ -221,6 +221,58 @@ describe("hindsight-client — namespace path building", () => {
 	});
 });
 
+describe("hindsight-client — 0.8.6 memory management endpoints", () => {
+	it("uses the published list/detail/history/reflect/invalidate routes with scoped tags", async () => {
+		const calls: Array<{ method: string; path: string; query: URLSearchParams; body: any }> = [];
+		const server = http.createServer(async (req, res) => {
+			let raw = ""; for await (const part of req) raw += part;
+			const url = new URL(req.url ?? "/", "http://127.0.0.1");
+			calls.push({ method: req.method ?? "GET", path: url.pathname, query: url.searchParams, body: raw ? JSON.parse(raw) : undefined });
+			if (url.pathname.endsWith("/memories/list")) return void res.end(JSON.stringify({ items: [{ id: "m1", text: "one", tags: ["project:p1"] }], offset: 4, total: 8 }));
+			if (url.pathname.endsWith("/memories/m1/history")) return void res.end(JSON.stringify({ history: [{ type: "created" }] }));
+			if (url.pathname.endsWith("/memories/m1")) return void res.end(JSON.stringify({ id: "m1", text: "one", tags: ["project:p1"] }));
+			if (url.pathname.endsWith("/reflect")) return void res.end(JSON.stringify({ text: "scoped" }));
+			res.statusCode = 204; res.end();
+		});
+		await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+		const client = createClient({ baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
+		try {
+			assert.deepEqual(await client.browse("bank", { query: "find", cursor: "4", limit: 8, tags: { project: "p1" }, tagsMatch: "all_strict" }), { memories: [{ id: "m1", text: "one", tags: ["project:p1"] }], cursor: "5" });
+			assert.deepEqual(await client.detail("bank", "m1"), { id: "m1", text: "one", tags: ["project:p1"] });
+			assert.deepEqual(await client.history("bank", "m1"), { history: [{ type: "created" }] });
+			assert.deepEqual(await client.reflectScoped("bank", "why", { tags: { project: "p1" }, tagsMatch: "all_strict" }), { text: "scoped" });
+			await client.invalidateMemory("bank", "m1", { reason: "obsolete" });
+			const browse = calls[0]!;
+			assert.equal(browse.path, "/v1/default/banks/bank/memories/list");
+			assert.equal(browse.query.get("q"), "find"); assert.equal(browse.query.get("offset"), "4");
+			assert.deepEqual(browse.query.getAll("tags"), ["project:p1"]); assert.equal(browse.query.get("tags_match"), "all_strict");
+			assert.deepEqual(calls.find(call => call.path.endsWith("/reflect"))?.body, { query: "why", tags: ["project:p1"], tags_match: "all_strict" });
+			assert.deepEqual(calls.at(-1)?.body, { state: "invalidated", reason: "obsolete" });
+		} finally { server.closeAllConnections?.(); await new Promise<void>(resolve => server.close(() => resolve())); }
+	});
+});
+
+describe("hindsight-client — bounded body consumption", () => {
+	it("aborts a response that stalls after headers within the request budget", async () => {
+		let closed = false;
+		const server = http.createServer((_req, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.write('{"items":'); res.on("close", () => { closed = true; }); });
+		await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+		const client = createClient({ baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, timeoutMs: 80 });
+		try {
+			await assert.rejects(client.browse("bank"), (error: unknown) => error instanceof HindsightError && error.kind === "timeout");
+			await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(closed, true);
+		} finally { server.closeAllConnections?.(); await new Promise<void>(resolve => server.close(() => resolve())); }
+	});
+
+	it("rejects oversized JSON before parsing or returning rows", async () => {
+		const server = http.createServer((_req, res) => { const body = "x".repeat(600_000); res.writeHead(200, { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) }); res.end(body); });
+		await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+		const client = createClient({ baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
+		try { await assert.rejects(client.browse("bank"), (error: unknown) => error instanceof HindsightError && error.kind === "response"); }
+		finally { server.closeAllConnections?.(); await new Promise<void>(resolve => server.close(() => resolve())); }
+	});
+});
+
 describe("hindsight-client — transport errors", () => {
 	it("throws HindsightError{kind:http,status} on non-2xx", async () => {
 		const server = http.createServer((_req, res) => {

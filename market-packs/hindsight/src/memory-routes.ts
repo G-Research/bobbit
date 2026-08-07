@@ -8,6 +8,7 @@ import {
 	isConfigured,
 	loadEffectiveConfig,
 	makeClient,
+	resolveConfig,
 	type EffectiveConfig,
 	type RuntimeContext,
 	type StoreLike,
@@ -30,16 +31,22 @@ export interface CapabilityDecision {
  * store: decisions must be made by the host against the current project grant. */
 export interface MemoryRouteHostAdapter {
 	requireCapability?(capability: MemoryCapability): Promise<CapabilityDecision> | CapabilityDecision;
-	/** Durable goal-completion writer supplied by the host lifecycle boundary. */
-	retainOutcome?(input: { scope: MemoryScope; outcome: unknown }): Promise<{ ok: boolean; outcomeId?: string; code?: string }>;
 }
 
+export interface MemoryRouteHost {
+	store: StoreLike;
+	memory?: MemoryRouteHostAdapter;
+	/** Canonical, redacted EP-7 provider values injected by the host. */
+	providerConfig?: unknown;
+	/** Bounded, server-derived completion snapshot. Request bodies are ignored. */
+	completedOutcome?: unknown;
+}
 export interface MemoryRouteContext {
-	host: { store: StoreLike; memory?: MemoryRouteHostAdapter };
+	host: MemoryRouteHost;
 	scopeContext?: { project?: { id?: string }; goal?: { id?: string } };
 	runtime?: RuntimeContext;
-	/** Host-built, bounded completion snapshot; request bodies never provide this. */
-	outcome?: unknown;
+	/** Parent dispatch cancellation; supplied by the worker boundary when available. */
+	signal?: AbortSignal;
 }
 
 export type MemoryScope = { projectId: string; goalId?: string; all: boolean };
@@ -49,8 +56,7 @@ const MAX_CONTENT = 16_000;
 const MAX_CURSOR = 512;
 const MAX_ID = 512;
 const MAX_LIMIT = 100;
-/** Route work is independently bounded even when a client adapter ignores its
- * request AbortSignal. The host dispatcher supplies a second outer deadline. */
+const MAX_RESULT_TEXT = 16_000;
 const DATA_PLANE_DEADLINE_MS = 5_000;
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -130,7 +136,12 @@ type RouteConfig =
  * unreadable configuration is not a data-plane operation, so it cannot provoke
  * a client construction or turn a missing grant into a misleading response. */
 async function routeConfig(ctx: MemoryRouteContext): Promise<RouteConfig> {
-	const loaded = await loadEffectiveConfig(ctx.host.store);
+	// EP-7 is authoritative when the route boundary injects it. The legacy pack
+	// record remains a migration fallback for direct/older invocations only.
+	const injected = ctx.host.providerConfig;
+	const loaded = injected === undefined
+		? await loadEffectiveConfig(ctx.host.store)
+		: { available: true as const, config: resolveConfig(injected), overrides: {} };
 	if (!loaded.available) return { state: "unavailable", configured: false, error: "HINDSIGHT_CONFIG_UNAVAILABLE" };
 	if (!isConfigured(loaded.config)) {
 		// A generic runtime context is injected only by the managed H-4 bridge.
@@ -148,31 +159,61 @@ function clientMethod(client: unknown, name: string): ((...args: unknown[]) => P
 	return typeof method === "function" ? method.bind(client) as (...args: unknown[]) => Promise<unknown> : undefined;
 }
 
-async function withinDataPlaneDeadline<T>(work: Promise<T>): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			work,
-			new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error("SERVICE_UNHEALTHY")), DATA_PLANE_DEADLINE_MS); }),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
-/** New read endpoints use the expanded client protocol when present. The legacy
- * client never had browse/detail/history, so fail closed instead of fabricating
- * an empty bank or falling back to a different endpoint. */
+/** A route deadline actively aborts its client, including a body that has already
+ * received headers. This is intentionally not a Promise.race: losing work must
+ * not retain sockets or continue parsing an attacker-controlled response. */
 async function withActiveClient<T>(
 	ctx: MemoryRouteContext,
 	config: EffectiveConfig,
 	work: (client: unknown, config: EffectiveConfig) => Promise<T>,
 ): Promise<T | { configured: true; code: "SERVICE_UNHEALTHY" }> {
+	const controller = new AbortController();
+	const abort = () => controller.abort(ctx.signal?.reason);
+	if (ctx.signal?.aborted) abort(); else ctx.signal?.addEventListener("abort", abort, { once: true });
+	const timer = setTimeout(() => controller.abort(), DATA_PLANE_DEADLINE_MS);
 	try {
-		return await withinDataPlaneDeadline(work(await makeClient(clientConfig(config, ctx.runtime)), config));
+		return await work(await makeClient({ ...clientConfig(config, ctx.runtime), signal: controller.signal }), config);
 	} catch {
 		return { configured: true, code: "SERVICE_UNHEALTHY" };
+	} finally {
+		clearTimeout(timer); ctx.signal?.removeEventListener("abort", abort); controller.abort();
 	}
+}
+
+function safeText(value: unknown, max = MAX_RESULT_TEXT): string | undefined {
+	return typeof value === "string" ? value.slice(0, max) : undefined;
+}
+function safeRecord(value: unknown): Record<string, unknown> | undefined {
+	if (!record(value)) return undefined;
+	const out: Record<string, unknown> = {};
+	for (const key of ["id", "text", "content", "context", "type", "state", "reason", "date", "created_at", "updated_at", "score"] as const) {
+		const scalar = value[key];
+		if (typeof scalar === "string") out[key] = scalar.slice(0, MAX_RESULT_TEXT);
+		else if (typeof scalar === "number" && Number.isFinite(scalar)) out[key] = scalar;
+	}
+	if (Array.isArray(value.tags)) out.tags = value.tags.slice(0, MAX_LIMIT).flatMap(tag => typeof tag === "string" ? [tag.slice(0, MAX_ID)] : []);
+	if (Array.isArray(value.entities)) out.entities = value.entities.slice(0, MAX_LIMIT).flatMap(entity => typeof entity === "string" ? [entity.slice(0, MAX_ID)] : []);
+	return out;
+}
+function safeRows(value: unknown): Record<string, unknown>[] {
+	if (!Array.isArray(value)) return [];
+	const rows: Record<string, unknown>[] = [];
+	for (const row of value.slice(0, MAX_LIMIT)) {
+		const safe = safeRecord(row); if (safe) rows.push(safe);
+	}
+	return rows;
+}
+function belongsToScope(memory: unknown, scope: MemoryScope): boolean {
+	if (scope.all || !record(memory) || !Array.isArray(memory.tags)) return scope.all;
+	const tags = new Set(memory.tags.filter((tag): tag is string => typeof tag === "string"));
+	return tags.has(`project:${scope.projectId}`) && (!scope.goalId || tags.has(`goal:${scope.goalId}`));
+}
+function outcomeContent(value: unknown): { content: string; id?: string } | undefined {
+	if (typeof value === "string") return text(value, MAX_CONTENT) ? { content: text(value, MAX_CONTENT)! } : undefined;
+	if (!record(value)) return undefined;
+	const content = text(value.content ?? value.summary, MAX_CONTENT);
+	const id = safeId(value.id ?? value.outcomeId);
+	return content ? { content, ...(id ? { id } : {}) } : undefined;
 }
 
 async function readRows(ctx: MemoryRouteContext, req: MemoryRouteRequest) {
@@ -195,7 +236,7 @@ async function readRows(ctx: MemoryRouteContext, req: MemoryRouteRequest) {
 		const data = record(result) ? result : {};
 		return {
 			configured: true,
-			memories: Array.isArray(data.memories) ? data.memories : [],
+			memories: safeRows(data.memories),
 			...(text(data.cursor, MAX_CURSOR) ? { cursor: text(data.cursor, MAX_CURSOR) } : {}),
 		};
 	});
@@ -225,7 +266,7 @@ export const memoryRoutes = {
 			if (!recall) return { configured: true, code: "MEMORY_API_UNSUPPORTED", memories: [] };
 			const result = await recall(config.bank, query, { maxTokens: config.recallBudget, tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
 			const data = record(result) ? result : {};
-			return { configured: true, memories: Array.isArray(data.memories) ? data.memories : [] };
+			return { configured: true, memories: safeRows(data.memories) };
 		});
 	},
 
@@ -254,7 +295,10 @@ export const memoryRoutes = {
 		if (availability.state === "unavailable") return { configured: false, error: availability.error, text: "" };
 		if (availability.state === "dormant") return { configured: false, text: "" };
 		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
-		const scope = resolveMemoryScope(ctx, req);
+		const resolvedScope = resolveMemoryScope(ctx, req);
+		// `memory.read.all` is deliberately limited to browse/search/detail/history/
+		// recall. Reflection always remains attached to the current project/goal.
+		const scope = resolvedScope ? { ...resolvedScope, all: false } : undefined;
 		const prompt = text(bodyOf(req).prompt, MAX_QUERY);
 		if (!scope || !prompt) return { configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_PROMPT_REQUIRED", text: "" };
 		const permission = await authorize(ctx, "memory.reflect");
@@ -269,7 +313,8 @@ export const memoryRoutes = {
 			if (!reflect) return { configured: true, code: "MEMORY_API_UNSUPPORTED", text: "" };
 			const result = await reflect(config.bank, prompt, { tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
 			const data = record(result) ? result : {};
-			return { configured: true, text: text(data.text, MAX_CONTENT) ?? "" };
+			const reflected = safeText(data.text, MAX_CONTENT);
+			return reflected === undefined ? { configured: true, code: "MEMORY_RESPONSE_INVALID", text: "" } : { configured: true, text: reflected };
 		});
 	},
 
@@ -286,8 +331,11 @@ export const memoryRoutes = {
 		return await withActiveClient(ctx, availability.config, async (client, config) => {
 			const detail = clientMethod(client, "detail");
 			if (!detail) return { configured: true, code: "MEMORY_API_UNSUPPORTED" };
-			const result = await detail(config.bank, id, { tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
-			return record(result) ? { configured: true, memory: result } : { configured: true, code: "MEMORY_NOT_FOUND" };
+			const result = await detail(config.bank, id);
+			// Hindsight 0.8.6 detail has no tag-filter parameter. Verify the returned
+			// record before serialization so an id cannot bypass the route scope.
+			const memory = safeRecord(result);
+			return memory && belongsToScope(result, scope) ? { configured: true, memory } : { configured: true, code: "MEMORY_NOT_FOUND" };
 		});
 	},
 
@@ -302,11 +350,16 @@ export const memoryRoutes = {
 		const permission = await authorize(ctx, scope.all ? "memory.read.all" : "memory.read");
 		if (!permission.ok) return { configured: true, code: permission.code, history: [] };
 		return await withActiveClient(ctx, availability.config, async (client, config) => {
+			const detail = clientMethod(client, "detail");
 			const history = clientMethod(client, "history");
-			if (!history) return { configured: true, code: "MEMORY_API_UNSUPPORTED", history: [] };
-			const result = await history(config.bank, id, { tags: scope.all ? undefined : scopedTags(scope), tagsMatch: "all_strict" });
+			if (!detail || !history) return { configured: true, code: "MEMORY_API_UNSUPPORTED", history: [] };
+			// The history endpoint has no tag filter in Hindsight 0.8.6. Authorize it
+			// through the bounded detail record first.
+			const memory = await detail(config.bank, id);
+			if (!belongsToScope(memory, scope)) return { configured: true, code: "MEMORY_NOT_FOUND", history: [] };
+			const result = await history(config.bank, id);
 			const data = record(result) ? result : {};
-			return { configured: true, history: Array.isArray(data.history) ? data.history : [] };
+			return { configured: true, history: safeRows(data.history) };
 		});
 	},
 
@@ -315,7 +368,10 @@ export const memoryRoutes = {
 		if (availability.state === "unavailable") return { ok: false, configured: false, error: availability.error };
 		if (availability.state === "dormant") return { ok: false, configured: false, code: "SERVICE_UNHEALTHY" };
 		if (availability.state === "unhealthy") return { configured: availability.configured, code: availability.code };
-		const scope = resolveMemoryScope(ctx, req);
+		const resolvedScope = resolveMemoryScope(ctx, req);
+		// An invalidation is never an all-bank action; body scope cannot broaden a
+		// destructive request beyond the host project/goal context.
+		const scope = resolvedScope ? { ...resolvedScope, all: false } : undefined;
 		const body = bodyOf(req);
 		const id = safeId(body.id);
 		if (!scope || !id) return { ok: false, configured: true, code: !scope ? "HINDSIGHT_SCOPE_UNAVAILABLE" : "MEMORY_ID_REQUIRED" };
@@ -325,9 +381,11 @@ export const memoryRoutes = {
 		const permission = await authorize(ctx, "memory.invalidate");
 		if (!permission.ok) return { ok: false, configured: true, code: permission.code, id };
 		return await withActiveClient(ctx, availability.config, async (client, config) => {
+			const detail = clientMethod(client, "detail");
 			const invalidate = clientMethod(client, "invalidateMemory") ?? clientMethod(client, "invalidate");
-			if (!invalidate) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED", id };
-			await invalidate(config.bank, id, { tags: scopedTags(scope), tagsMatch: "all_strict", ...(text(body.reason, 1_000) ? { reason: text(body.reason, 1_000) } : {}) });
+			if (!detail || !invalidate) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED", id };
+			if (!belongsToScope(await detail(config.bank, id), scope)) return { ok: false, configured: true, code: "MEMORY_NOT_FOUND", id };
+			await invalidate(config.bank, id, { ...(text(body.reason, 1_000) ? { reason: text(body.reason, 1_000) } : {}) });
 			return { ok: true, configured: true, id };
 		});
 	},
@@ -341,14 +399,17 @@ export const memoryRoutes = {
 		if (!scope) return { ok: false, configured: true, code: "HINDSIGHT_SCOPE_UNAVAILABLE" };
 		const permission = await authorize(ctx, "memory.write");
 		if (!permission.ok) return { ok: false, configured: true, code: permission.code };
-		// The durable lifecycle boundary supplies the snapshot. Never consume a body
-		// outcome: that would let a tool forge another project's completed record.
-		if (ctx.outcome === undefined || !ctx.host.memory?.retainOutcome) return { ok: false, configured: true, code: "OUTCOME_UNAVAILABLE" };
-		try {
-			const result = await ctx.host.memory.retainOutcome({ scope, outcome: ctx.outcome });
-			return result.ok ? { ok: true, ...(result.outcomeId ? { outcomeId: result.outcomeId } : {}) } : { ok: false, code: result.code ?? "OUTCOME_NOT_DURABLE" };
-		} catch {
-			return { ok: false, code: "OUTCOME_NOT_DURABLE" };
-		}
+		// Never consume a request body outcome. The host injects the completion
+		// snapshot after resolving the session/goal, so tools cannot forge content.
+		const outcome = outcomeContent(ctx.host.completedOutcome);
+		if (!outcome) return { ok: false, configured: true, code: "OUTCOME_UNAVAILABLE" };
+		return await withActiveClient(ctx, availability.config, async (client, config) => {
+			const retain = clientMethod(client, "retain");
+			const ensureBank = clientMethod(client, "ensureBank");
+			if (!retain || !ensureBank) return { ok: false, configured: true, code: "MEMORY_API_UNSUPPORTED" };
+			await ensureBank(config.bank);
+			await retain(config.bank, outcome.content, { tags: { kind: "outcome", ...scopedTags(scope) }, sync: true, ...(outcome.id ? { id: outcome.id } : {}) });
+			return { ok: true, configured: true, ...(outcome.id ? { outcomeId: outcome.id } : {}) };
+		});
 	},
 };
