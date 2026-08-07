@@ -18,7 +18,9 @@ const scenarioSuccess = "PI_RESULT_GATE_SCENARIO_PASSED\n";
 // Node 26 emits these exact upstream warning frames while loading Pi's
 // published ESM. Remove complete, known frames only: unexpected child stderr
 // remains a test failure rather than being hidden by broad normalization.
-const NODE_26_DEP0205 = /(?:^|\n)\(node:\d+\) \[DEP0205\] DeprecationWarning: (?:Automatic \.js syntax detection is deprecated and may change in the future\.|`module\.register\(\)` is deprecated\. Use `module\.registerHooks\(\)` instead\.)\n\(Use `node --trace-deprecation \.\.\.` to show where the warning was created\)(?=\n|$)\n?/g;
+// The line-start assertion must be zero-width: global matching otherwise consumes
+// the separator newline and prevents an adjacent complete frame from matching.
+const NODE_26_DEP0205 = /(?<![^\n])\(node:\d+\) \[DEP0205\] DeprecationWarning: (?:Automatic \.js syntax detection is deprecated and may change in the future\.|`module\.register\(\)` is deprecated\. Use `module\.registerHooks\(\)` instead\.)\n\(Use `node --trace-deprecation \.\.\.` to show where the warning was created\)(?=\n|$)\n?/g;
 
 function withoutKnownNode26Dep0205(stderr: string): string {
 	return stderr.replace(NODE_26_DEP0205, "");
