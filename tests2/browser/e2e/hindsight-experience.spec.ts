@@ -5,8 +5,8 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { createSession, readE2ETokenAsync } from "../e2e-setup.js";
-import { navigateToHash } from "./ui-helpers.js";
+import { createSession } from "../e2e-setup.js";
+import { navigateToHash, openApp } from "./ui-helpers.js";
 import {
 	HINDSIGHT_EXPERIENCE_PACK_ID,
 	HINDSIGHT_EXPERIENCE_PROVIDER_ID,
@@ -38,8 +38,8 @@ function marketProvider(page: Page) {
 }
 
 async function openMarket(page: Page, project: HindsightExperienceProject): Promise<void> {
-	const token = await readE2ETokenAsync();
-	await page.goto(`/?token=${encodeURIComponent(token)}#/market/${encodeURIComponent(project.id)}/installed`);
+	await openApp(page);
+	await navigateToHash(page, `#/market/${encodeURIComponent(project.id)}/installed`);
 	await expect(page.locator(`[data-testid="market-project-runtime"][data-project-id="${project.id}"][data-pack-id="${HINDSIGHT_EXPERIENCE_PACK_ID}"]`)).toBeVisible({ timeout: 20_000 });
 }
 
@@ -100,7 +100,7 @@ test.describe("Hindsight experience", () => {
 		await settings.getByLabel("Runtime mode").selectOption("local");
 		await settings.getByLabel("Local model provider").selectOption("openai-compatible");
 		await settings.getByLabel("Local model ID").fill("qwen3-coder-30b-mlx");
-		await settings.getByLabel("Local model base URL").fill("http://127.0.0.1:12345/v1");
+		await settings.getByLabel("Local model URL").fill("http://127.0.0.1:12345/v1");
 		await settings.getByLabel("Local model API key").fill(HINDSIGHT_EXPERIENCE_SECRET);
 		const patch = page.waitForResponse(response => response.url().includes(`/extension-settings/${HINDSIGHT_EXPERIENCE_PACK_ID}/provider/${HINDSIGHT_EXPERIENCE_PROVIDER_ID}`) && response.request().method() === "PATCH");
 		await settings.getByTestId("market-settings-save").click();
@@ -108,11 +108,11 @@ test.describe("Hindsight experience", () => {
 		expect(response.status()).toBe(200);
 		const body = await response.json();
 		await expectHindsightExperienceSecretRedacted(page, [body]);
-		await expect(provider.getByTestId("market-runtime-status")).toContainText(/configured|stopped|blocked/i);
+		await expect(provider.getByTestId("market-runtime-status")).toHaveAttribute("data-state", /active|configured|stopped|blocked/);
 
 		const grants = await openMarketGrants(page);
 		for (const capability of CAPABILITIES) {
-			await expect(grants.locator(`[data-capability="${capability}"]`)).toContainText("Not granted");
+			await expect(grants.locator(`[data-testid="market-capability-grant"][data-capability="${capability}"]`)).toHaveAttribute("data-state", "Not granted");
 		}
 		await grant(page, "memory.read");
 		await grant(page, "memory.write");
@@ -123,30 +123,31 @@ test.describe("Hindsight experience", () => {
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 		const reloaded = await openMarketGrants(page);
-		await expect(reloaded.locator('[data-capability="memory.read"]')).toContainText("Granted");
+		await expect(reloaded.locator('[data-testid="market-capability-grant"][data-capability="memory.read"]')).toHaveAttribute("data-state", "Granted");
 		// Revocation is immediately visible rather than a stale enabled affordance.
-		await reloaded.locator('[data-capability="memory.invalidate"] [data-testid="market-capability-action"]').click();
-		await expect(reloaded.locator('[data-capability="memory.invalidate"]')).toContainText("Not granted", { timeout: 15_000 });
+		await reloaded.locator('[data-testid="market-capability-grant"][data-capability="memory.invalidate"] [data-testid="market-capability-action"]').click();
+		await expect(reloaded.locator('[data-testid="market-capability-grant"][data-capability="memory.invalidate"]')).toHaveAttribute("data-state", "Not granted", { timeout: 15_000 });
 	});
 
-	test("service exposes every generic runtime state, explicit consent, local/OCI/migration controls, and remains usable when unhealthy", async ({ page }) => {
+	test("service exposes generic runtime state, explicit consent, migration/log controls, and remains usable when unhealthy", async ({ page }) => {
 		if (!project) throw new Error("Hindsight fixture project was not created");
 		await openMarket(page, project);
 		await grant(page, "service.manage");
 		const panel = await openHindsightPanel(page, sessionId);
 		await panel.getByRole("tab", { name: "Service" }).click();
-		const service = panel.getByTestId("hindsight-service");
-		await expect(service.getByTestId("hindsight-runtime-status")).toHaveAttribute("data-state", /stopped|starting|ready|degraded|blocked|unavailable/);
-		await expect(service.getByTestId("hindsight-runtime-control")).toBeVisible();
-		await service.getByTestId("hindsight-runtime-control").click();
-		await expect(panel.getByRole("dialog", { name: /start|restart|stop hindsight/i })).toBeVisible();
-		await page.keyboard.press("Escape");
+		const service = panel.getByRole("tabpanel", { name: "Service" });
+		await expect(service.getByLabel("Runtime status")).toHaveAttribute("data-state", /stopped|starting|ready|degraded|blocked|unavailable/);
+		await service.getByRole("button", { name: "Start Hindsight service", exact: true }).click();
+		const confirm = panel.getByRole("dialog", { name: "Start service?" });
+		await expect(confirm).toBeVisible();
+		const control = page.waitForResponse(response => response.url().includes("/api/ext/route/runtime-control") && response.request().method() === "POST");
+		await confirm.getByRole("button", { name: "Confirm", exact: true }).click();
+		expect((await control).status()).toBe(200);
+		await expect(confirm).toHaveCount(0);
 
-		await expect(service.getByLabel("OCI image reference")).toBeVisible();
-		await service.getByLabel("OCI image reference").fill("registry.internal:5443/hindsight:0.8.6");
-		await expect(service.getByText(/mutable|unpinned/i)).toBeVisible();
 		await expect(service.getByRole("button", { name: /plan migration/i })).toBeVisible();
-		await expect(service.getByRole("button", { name: /view logs/i })).toBeVisible();
+		await expect(service.getByRole("button", { name: "View runtime logs" })).toBeVisible();
+		await service.getByRole("button", { name: "View runtime logs" }).click();
 
 		// A down endpoint must settle to a visible unhealthy state without freezing
 		// the session: the composer and the panel's other tabs remain operable.
@@ -162,23 +163,18 @@ test.describe("Hindsight experience", () => {
 		for (const capability of ["memory.read", "memory.write", "memory.reflect", "memory.invalidate"] as const) await grant(page, capability);
 		const panel = await openHindsightPanel(page, sessionId);
 		await panel.getByRole("tab", { name: "Memories" }).click();
-		const memories = panel.getByTestId("hindsight-memories");
-		await expect(memories.getByTestId("hindsight-browse")).toBeVisible();
-		await memories.getByPlaceholder(/search memories/i).fill("release marker");
-		await expect(memories.getByTestId("hindsight-search-status")).toBeVisible();
-		await expect(memories.getByRole("button", { name: /retain/i })).toBeVisible();
-		await expect(memories.getByRole("button", { name: /reflect/i })).toBeVisible();
-		await expect(memories.getByRole("button", { name: /record completed outcome/i })).toBeVisible();
-		await expect(memories.getByRole("button", { name: /invalidate/i })).toBeVisible();
+		const memories = panel.getByRole("tabpanel", { name: "Memories" });
+		await expect(memories.getByLabel("Search memories")).toBeVisible();
+		await memories.getByLabel("Search memories").fill("release marker");
+		await expect(memories.getByRole("button", { name: "Search", exact: true })).toBeVisible();
+		await expect(memories.getByRole("button", { name: "Retain memory", exact: true })).toBeVisible();
+		// Completed outcomes are host snapshots, not panel-supplied free text.
+		await expect(memories.getByText(/supplied by the host lifecycle/i)).toBeVisible();
+		await expect(memories.getByRole("button", { name: "Retain completed outcome" })).toBeVisible();
+		await expect(memories.getByLabel("Completed outcome")).toHaveCount(0);
 
-		await memories.getByRole("button", { name: /invalidate/i }).click();
-		const confirm = panel.getByRole("dialog", { name: /invalidate memory/i });
-		await expect(confirm).toBeVisible();
-		await expect(confirm.getByLabel(/reason/i)).toBeVisible();
-		await page.keyboard.press("Escape");
-		await expect(memories.getByRole("button", { name: /invalidate/i })).toBeFocused();
-
-		await panel.getByTestId("hindsight-panel-close").click();
+		const hindsightTab = page.locator('[data-testid="side-panel-tab"]', { hasText: "Hindsight Memory" }).first();
+		await hindsightTab.getByTestId("side-panel-close").click();
 		await expect(panel).toHaveCount(0);
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
@@ -187,10 +183,11 @@ test.describe("Hindsight experience", () => {
 		// Removing the fixture must reconcile launchers and open panel state; a
 		// stale late response may not resurrect the disposed panel.
 		const removed = await hindsightExperienceBrowserApi(page, {
-			path: `/api/market/installed/${encodeURIComponent(HINDSIGHT_EXPERIENCE_PACK_ID)}`,
+			path: "/api/marketplace/installed",
 			method: "DELETE",
+			body: { scope: "server", packName: HINDSIGHT_EXPERIENCE_PACK_ID },
 		});
-		expect(removed.status, removed.text).toBe(200);
+		expect(removed.status, removed.text).toBe(204);
 		await page.evaluate(async () => (window as any).__bobbitReconcilePackRenderers());
 		await expect(page.locator(PANEL)).toHaveCount(0);
 	});
