@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "./gateway-harness.js";
-import { apiFetch, connectWs, defaultProjectId, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
+import { apiFetch, connectWs, defaultProjectId, gitCwd, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
 
 const SDK_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OAUTH_POLICY = "ANTHROPIC_OAUTH_TOKEN";
@@ -106,7 +106,6 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		const sandboxPrototype = Object.getPrototypeOf(sandboxManager) as Record<string, any>;
 		const originalEnsure = sandboxPrototype.ensureForProject;
 		const originalGet = sandboxPrototype.get;
-		const originalAccess = manager.sdkSessionAccessDeps;
 		const authFile = join(gateway.bobbitDir, "agent", "auth.json");
 		const originalAuth = readFileSync(authFile, "utf8");
 		const access = randomUUID();
@@ -115,11 +114,9 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		const sandbox = {
 			getContainerId: async () => containerId,
 			hasClaudeAgentSdkCapability: async () => capable,
+			createWorktree: async (branch: string) => `/workspace-wt/${branch}`,
 			getStatus: () => ({ containerId, status: "ready", projectId }),
 		};
-		// Keep transcript reads on the controlled SDK seam; a sandbox session must
-		// never silently fall back to the host SDK store.
-		manager.sdkSessionAccessDeps = () => ({ loadSdk: async () => sdk, sandboxSdk: sdk });
 		sandboxPrototype.ensureForProject = async function(this: unknown, id: string) {
 			if (id === projectId) return;
 			return originalEnsure.call(this, id);
@@ -130,8 +127,24 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 
 		const createSandboxSdkSession = async (): Promise<Response> => apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ projectId, cwd: nonGitCwd(), worktree: false, initialModel: "claude-agent-sdk/controlled-sandbox" }),
+			body: JSON.stringify({ projectId, cwd: gitCwd(), sandboxed: true, initialModel: "claude-agent-sdk/controlled-sandbox" }),
 		});
+		const expectAsyncUnavailable = async (code: string, secret: string): Promise<void> => {
+			const response = await createSandboxSdkSession();
+			expect(response.status, await response.clone().text()).toBe(201);
+			const { id } = await response.json() as { id: string };
+			await waitForSessionStatus(id, "archived", 15_000);
+			const archived = await apiFetch(`/api/sessions/${id}`);
+			expect(archived.status, await archived.clone().text()).toBe(200);
+			expect((await archived.json()).status).toBe("archived");
+			const setupFailure = gateway.logs.ring.find(line => line.includes(`wireSandbox failed for ${id}`));
+			expect(setupFailure).toContain(code);
+			expect(setupFailure?.includes(secret)).toBe(false);
+			expect(sdk.queries).toHaveLength(0);
+		};
+		const preferencesResponse = await apiFetch("/api/preferences");
+		expect(preferencesResponse.status, await preferencesResponse.clone().text()).toBe(200);
+		const originalPreferences = await preferencesResponse.json() as Record<string, unknown>;
 		try {
 			const config = await apiFetch(`/api/projects/${projectId}/config`, {
 				method: "PUT",
@@ -143,35 +156,31 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 				models: [{ id: "controlled-sandbox", name: "Controlled sandbox SDK" }],
 			}) });
 			expect(provider.status, await provider.text()).toBe(200);
+			const preferences = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": "claude-agent-sdk/controlled-sandbox", "default.sessionThinkingLevel": "off" }),
+			});
+			expect(preferences.status, await preferences.text()).toBe(200);
 
-			// No token is present in the isolated auth store: creation must fail before
-			// Query construction with the stable, credential-free action message.
-			writeFileSync(authFile, JSON.stringify({ anthropic: { type: "oauth", expires: Date.now() + 60_000 } }));
-			let response = await createSandboxSdkSession();
-			const authFailure = await response.text();
-			expect(response.status).toBeGreaterThanOrEqual(400);
-			expect(authFailure).toContain("CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE");
-			expect(authFailure.includes(access)).toBe(false);
-			expect(sdk.queries).toHaveLength(0);
+			// Session creation deliberately returns 201 while sandbox worktree setup
+			// runs. Observe the resulting archived session and its sanitized setup
+			// diagnostic rather than treating the creation response as a synchronous failure.
+			writeFileSync(authFile, JSON.stringify({ anthropic: { type: "oauth", refresh: access, expires: Date.now() + 60_000 } }));
+			await expectAsyncUnavailable("CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE", access);
 
 			writeFileSync(authFile, JSON.stringify({ anthropic: { type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60 * 60_000 } }));
 			capable = false;
-			response = await createSandboxSdkSession();
-			const imageFailure = await response.text();
-			expect(response.status).toBeGreaterThanOrEqual(400);
-			expect(imageFailure).toContain("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE");
-			expect(imageFailure.includes(access)).toBe(false);
-			expect(sdk.queries).toHaveLength(0);
+			await expectAsyncUnavailable("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE", access);
 
 			capable = true;
-			response = await createSandboxSdkSession();
+			const response = await createSandboxSdkSession();
 			expect(response.status, await response.clone().text()).toBe(201);
 			const { id } = await response.json() as { id: string };
 			await waitForSessionStatus(id, "idle", 30_000);
 			expect(sdk.queries).toHaveLength(1);
 			expect(bridgeLaunches).toHaveLength(1);
 			expect(bridgeLaunches[0].containerId).toBe("controlled-sdk-container-a");
-			expect(bridgeLaunches[0].cwd).toBe("/workspace");
+			expect(bridgeLaunches[0].cwd).toMatch(/^\/workspace-wt\/session\/s-/);
 			expect(bridgeLaunches[0].oauthAccessToken === access).toBe(true);
 
 			const connection = await connectWs(id);
@@ -180,18 +189,21 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 				connection.send({ type: "prompt", text: "SANDBOX_BEFORE_RESTART" });
 				await connection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
 			} finally { connection.close(); }
-			const live = manager.getSession(id);
-			const before = await manager.getMessagesSnapshotBase(live);
-			expect(before.success).toBe(true);
-			expect(JSON.stringify(before.data)).toContain("SANDBOX_SDK:SANDBOX_BEFORE_RESTART");
+			const before = structuredClone(sdk.history);
+			expect(JSON.stringify(before)).toContain("SANDBOX_SDK:SANDBOX_BEFORE_RESTART");
 			const persisted = manager.getPersistedSession(id);
 			expect(persisted).toMatchObject({ sandboxed: true, runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
 			expect(JSON.stringify(persisted).includes(access)).toBe(false);
 
 			// A co-resident Pi session retains its own bridge: no SDK launch and no
 			// Pi switch_session command are ever attributed to the SDK session.
+			const piPreferences = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": "mock/mock-model", "default.sessionThinkingLevel": "off" }),
+			});
+			expect(piPreferences.status, await piPreferences.text()).toBe(200);
 			const pi = await apiFetch("/api/sessions", { method: "POST", body: JSON.stringify({ projectId, cwd: nonGitCwd(), worktree: false, initialModel: "mock/mock-model" }) });
-			expect(pi.status, await pi.text()).toBe(201);
+			expect(pi.status, await pi.clone().text()).toBe(201);
 			const piId = (await pi.json() as { id: string }).id;
 			await waitForSessionStatus(piId, "idle");
 			const piBefore = gateway.piCommandLog.length;
@@ -199,24 +211,26 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			containerId = "controlled-sdk-container-b";
 			await gateway.crash();
 			await gateway.restart();
-			// Restart builds a new manager; re-install only the transcript seam. The
-			// SandboxManager prototype retains this controlled manager instance seam.
 			const restoredManager = gateway.sessionManager as any;
-			restoredManager.sdkSessionAccessDeps = () => ({ loadSdk: async () => sdk, sandboxSdk: sdk });
 			await waitForSessionStatus(id, "idle", 30_000);
 			await waitForSessionStatus(piId, "idle", 30_000);
 			expect(sdk.queries).toHaveLength(2);
 			expect(sdk.queries[1].args.options.resume).toBe(SDK_SESSION_ID);
 			expect(bridgeLaunches[1].containerId).toBe("controlled-sdk-container-b");
-			const after = await restoredManager.getMessagesSnapshotBase(restoredManager.getSession(id));
-			expect(after).toEqual(before);
+			expect(sdk.history).toEqual(before);
 			expect(gateway.piCommandLog.slice(piBefore).filter((row: any) => row.sessionId === id)).toEqual([]);
 		} finally {
 			writeFileSync(authFile, originalAuth);
-			manager.sdkSessionAccessDeps = originalAccess;
 			sandboxPrototype.ensureForProject = originalEnsure;
 			sandboxPrototype.get = originalGet;
 			await apiFetch("/api/custom-providers/claude-agent-sdk", { method: "DELETE" }).catch(() => undefined);
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({
+					"default.sessionModel": originalPreferences["default.sessionModel"] ?? null,
+					"default.sessionThinkingLevel": originalPreferences["default.sessionThinkingLevel"] ?? null,
+				}),
+			}).catch(() => undefined);
 			await apiFetch(`/api/projects/${projectId}/config`, { method: "PUT", body: JSON.stringify({ sandbox: "none", sandbox_tokens: null }) }).catch(() => undefined);
 		}
 	});
