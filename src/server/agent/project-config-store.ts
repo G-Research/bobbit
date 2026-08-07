@@ -508,8 +508,9 @@ export function normalizeExtensionGrants(raw: unknown): { value: ExtensionGrantM
 		// Legacy hook rows keep their exact discriminator-free persisted shape.
 		if (candidate.principal === undefined) {
 			const { hookId } = candidate;
-			if (!hasOnlyExtensionGrantFields(candidate, ["packId", "hookId", "capability", "grantedAt", "grantedBy"])
-				|| !isSafeExtensionGrantIdentifier(hookId)
+			// Legacy hook rows historically tolerated unknown keys. Retain that
+			// compatibility while canonicalizing them to the durable hook shape.
+			if (!isSafeExtensionGrantIdentifier(hookId)
 				|| isExtensionPackCapability(capability)) continue;
 			const grant: ExtensionHookGrant = { packId, hookId, capability, grantedAt, grantedBy };
 			byTuple.set(`${packId}\u0000hook\u0000${hookId}\u0000${capability}`, grant);
