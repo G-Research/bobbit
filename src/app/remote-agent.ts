@@ -111,6 +111,28 @@ export interface ProviderAuthRequiredState {
 	receivedAt: number;
 }
 
+export interface ModelSelectionRequiredCondition {
+	code: "MODEL_SELECTION_REQUIRED";
+	provider: string;
+	modelId: string;
+}
+
+function modelSelectionRequiredCondition(value: unknown): ModelSelectionRequiredCondition | null {
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Partial<ModelSelectionRequiredCondition>;
+	return candidate.code === "MODEL_SELECTION_REQUIRED"
+		&& typeof candidate.provider === "string"
+		&& candidate.provider.length > 0
+		&& typeof candidate.modelId === "string"
+		&& candidate.modelId.length > 0
+		? {
+			code: "MODEL_SELECTION_REQUIRED",
+			provider: candidate.provider,
+			modelId: candidate.modelId,
+		}
+		: null;
+}
+
 // ───────────────────────────────────────────────────────────
 // Goal-state subscription fanout — additive bridge so renderer-level
 // custom elements (e.g. <children-goal-state-pill>) can subscribe to
@@ -320,6 +342,7 @@ export class RemoteAgent {
 	private _surfaceTokenAuthorityKey: string | undefined;
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
+	private _conditionSnapshotReceived = false;
 	private _gatewayUrl = "";
 	private _authToken = "";
 	private _sessionId = "";
@@ -677,6 +700,9 @@ export class RemoteAgent {
 			} | null,
 			providerAuthRequired: null as ProviderAuthRequiredState | null,
 			manualRetryRequired: null as { message: string; error?: string } | null,
+			condition: null as ModelSelectionRequiredCondition | null,
+			modelSelectionPending: null as { provider: string; modelId: string } | null,
+			modelSelectionError: null as string | null,
 		};
 		// Single source of truth: status drives every legacy boolean. Defining
 		// these as getters on the underlying object means every existing reader
@@ -702,6 +728,9 @@ export class RemoteAgent {
 
 	get state() {
 		return this._state;
+	}
+	get conditionSnapshotReceived(): boolean {
+		return this._conditionSnapshotReceived;
 	}
 	get sessionId() {
 		return this._sessionId || undefined;
@@ -1356,6 +1385,10 @@ export class RemoteAgent {
 		this._state.error = undefined;
 		this._state.turnStartTime = null;
 		this._state.providerAuthRequired = null;
+		this._state.condition = null;
+		this._state.modelSelectionPending = null;
+		this._state.modelSelectionError = null;
+		this._conditionSnapshotReceived = false;
 		this._pendingAttachments = null;
 		this._pendingSkillExpansions = null;
 		this._highestSeq = 0;
@@ -1422,9 +1455,18 @@ export class RemoteAgent {
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any, thinkingLevel?: string): void {
+		if (this._state.modelSelectionPending) return;
 		const effectiveThinking = thinkingLevel ?? this._state.thinkingLevel;
-		this._state.model = model;
-		this._state.thinkingLevel = effectiveThinking as any;
+		const recoveryCondition = modelSelectionRequiredCondition(this._state.condition);
+		if (recoveryCondition) {
+			// Recovery is verified server-side. Keep the retired tuple visible until an
+			// explicit state publication clears the condition and publishes the replacement.
+			this._state.modelSelectionPending = { provider: model.provider, modelId: model.id };
+			this._state.modelSelectionError = null;
+		} else {
+			this._state.model = model;
+			this._state.thinkingLevel = effectiveThinking as any;
+		}
 		this._clearProviderAuthRequired();
 		this.send({
 			type: "set_model",
@@ -1437,6 +1479,7 @@ export class RemoteAgent {
 	}
 
 	setThinkingLevel(level: any): void {
+		if (modelSelectionRequiredCondition(this._state.condition)) return;
 		this._state.thinkingLevel = level;
 		this.send({ type: "set_thinking_level", level });
 		state.chatPanel?.agentInterface?.requestUpdate();
@@ -1821,6 +1864,14 @@ export class RemoteAgent {
 					// Status will already be "archived" via the branch above; if not
 					// (legacy server payload), force it so the derived getter agrees.
 					if (this._state.status !== "archived") this._state.status = "archived";
+				}
+				// Condition changes are authoritative only when explicitly present. Partial
+				// state_update events must not accidentally unblock the composer.
+				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "condition")) {
+					this._conditionSnapshotReceived = true;
+					this._state.condition = modelSelectionRequiredCondition(msg.data.condition);
+					this._state.modelSelectionPending = null;
+					if (!this._state.condition) this._state.modelSelectionError = null;
 				}
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
@@ -2360,6 +2411,12 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				if (this._state.modelSelectionPending) {
+					this._state.modelSelectionPending = null;
+					this._state.modelSelectionError = typeof msg.message === "string" && msg.message
+						? msg.message
+						: "Couldn’t activate that model. Choose another available model and try again.";
+				}
 				if ((msg as any).code === "SET_MODEL_FAILED" || (msg as any).code === "SET_THINKING_LEVEL_FAILED") {
 					this.send({ type: "get_state" });
 				}
