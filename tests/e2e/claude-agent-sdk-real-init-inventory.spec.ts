@@ -13,14 +13,14 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { createRunChild } from "../../tests2/harness/run-isolation.js";
 import { buildClaudeAgentSdkEnv } from "../../dist/server/agent/claude-agent-sdk-bridge.js";
-import { buildClaudeAgentSdkQueryOptions, buildClaudeSdkToolSurface } from "../../dist/server/agent/claude-agent-sdk-tool-surface.js";
+import { buildClaudeAgentSdkQueryOptions, buildClaudeSdkSubagentPolicy, buildClaudeSdkToolSurface } from "../../dist/server/agent/claude-agent-sdk-tool-surface.js";
 
 const EXPECTED_INVENTORY = {
 	sdkPackageVersion: "0.3.222",
 	claudeCodeVersion: "2.1.222",
-	tools: ["Skill", "mcp__bobbit__ask_user_choices", "mcp__bobbit__read"],
+	tools: ["Agent", "Skill", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"],
 	skills: ["batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design-sync", "doctor", "fewer-permission-prompts", "loop", "run", "run-skill-generator", "simplify", "update-config", "verify"],
-	agents: ["Explore", "Plan", "claude", "general-purpose", "statusline-setup"],
+	agents: ["Explore", "Plan", "bobbit-backend-parity-reviewer", "bobbit-billing-safety-auditor", "bobbit-protocol-scout", "claude", "general-purpose", "statusline-setup"],
 	slash_commands: ["__remote-workflow", "agents", "autocompact", "batch", "claude-api", "clear", "code-review", "color", "compact", "config", "context", "dataviz", "debug", "deep-research", "design", "design-consent", "design-revoke", "design-sync", "doctor", "effort", "fast", "fewer-permission-prompts", "goal", "heapdump", "init", "insights", "loop", "mcp", "model", "recap", "reload-skills", "rename", "review", "run", "run-skill-generator", "security-review", "simplify", "team-onboarding", "update-config", "usage", "verify", "workflow-launch-exec"],
 	mcp_servers: ["bobbit"],
 	plugins: [],
@@ -79,13 +79,29 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 			const hostFilesBefore = allFiles(hostHome);
 			const isolatedMemoryFilesBefore = allFiles(isolatedConfig).filter(file => file.includes("/memory/") || file.startsWith("memory/"));
 
+			// Production D4 projection: all three exact cascade-resolved roles and
+			// only the read/find/grep child subset. This is intentionally not a
+			// hand-written `agents` substitute.
+			const entries = [
+				{ name: "read", description: "Bobbit read", group: "filesystem", inputSchema: { type: "object", properties: { path: { type: "string" } } }, policy: "allow" as const, invoke: async () => "ok" },
+				{ name: "find", description: "Bobbit find", group: "filesystem", inputSchema: { type: "object", properties: { path: { type: "string" } } }, policy: "allow" as const, invoke: async () => "ok" },
+				{ name: "grep", description: "Bobbit grep", group: "filesystem", inputSchema: { type: "object", properties: { path: { type: "string" } } }, policy: "allow" as const, invoke: async () => "ok" },
+			];
+			const subagentPolicy = buildClaudeSdkSubagentPolicy({
+				sessionId: "sdk-real-inventory",
+				goalBranch: "goal/sdk-real-inventory",
+				entries,
+				roles: {
+					"claude-protocol-scout": { name: "claude-protocol-scout", promptTemplate: "Protocol scout {{AGENT_ID}} {{GOAL_BRANCH}}" },
+					"backend-parity-reviewer": { name: "backend-parity-reviewer", promptTemplate: "Parity reviewer {{AGENT_ID}} {{GOAL_BRANCH}}" },
+					"billing-safety-auditor": { name: "billing-safety-auditor", promptTemplate: "Billing auditor {{AGENT_ID}} {{GOAL_BRANCH}}" },
+				},
+			});
 			const surface = buildClaudeSdkToolSurface({
 				sessionId: "sdk-real-inventory",
 				restriction: "restricted",
-				entries: [
-					{ name: "read", description: "Bobbit read", group: "filesystem", inputSchema: { type: "object", properties: { path: { type: "string" } } }, policy: "allow", invoke: async () => "ok" },
-					{ name: "ask_user_choices", description: "Bobbit ask", group: "prompts", inputSchema: { type: "object", properties: { questions: { type: "array" } } }, policy: "ask", invoke: async () => "ok" },
-				],
+				entries,
+				subagentPolicy,
 				requestToolGrant: async () => ({ granted: false }),
 			});
 			const abortController = new AbortController();
@@ -118,6 +134,14 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 				autoMemoryEnabled: EXPECTED_INVENTORY.autoMemoryEnabled,
 				mcpServers: EXPECTED_INVENTORY.mcp_servers,
 			});
+			expect(options.tools).toEqual(["Skill", "Agent"]);
+			expect(options.skills).toEqual(EXPECTED_INVENTORY.skills);
+			expect(options.agents && Object.keys(options.agents).sort()).toEqual([
+				"bobbit-backend-parity-reviewer", "bobbit-billing-safety-auditor", "bobbit-protocol-scout",
+			]);
+			expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"]);
+			expect(options.allowedTools).not.toContain("Task");
+			expect(options.disallowedTools).toContain("Task");
 			for (const forbidden of [gatewaySecret, projectSecret, providerSecret]) {
 				expect(JSON.stringify(options.env)).not.toContain(forbidden);
 			}
@@ -146,11 +170,19 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 					strictMcpConfig: options.strictMcpConfig,
 					autoMemoryEnabled: options.managedSettings?.autoMemoryEnabled,
 				};
-				expect(observed).toEqual(EXPECTED_INVENTORY);
+				try {
+					expect(observed).toEqual(EXPECTED_INVENTORY);
+				} catch (error) {
+					// Pin upgrades must be reviewed against the literal live report, never
+					// accepted by regenerating the fixture. In particular 2.1.222 omits
+					// Agent from this diagnostic inventory despite the option admitting it.
+					console.error("[claude-sdk-real-init-inventory] observed", JSON.stringify(observed));
+					throw error;
+				}
 				expect(names(initialization.commands)).toEqual(EXPECTED_INVENTORY.slash_commands);
 				expect(names(initialization.agents)).toEqual(EXPECTED_INVENTORY.agents);
 				expect(await live.mcpServerStatus()).toEqual([
-					{ name: "bobbit", status: "connected", scope: "dynamic", tools: [{ name: "read", annotations: {} }, { name: "ask_user_choices", annotations: {} }] },
+					{ name: "bobbit", status: "connected", scope: "dynamic", tools: [{ name: "read", annotations: {} }, { name: "find", annotations: {} }, { name: "grep", annotations: {} }] },
 				]);
 				const report = JSON.stringify({ init, initialization });
 				for (const hostile of ["hostile_user", "hostile_project", "hostile_local", "hostile_mcp_json", "hostile_config_dir", "hostile-plugin", "hostile-user", "hostile-plugin-skill", memorySentinel]) {
