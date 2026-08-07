@@ -26,7 +26,7 @@ This guide is the practical how-to.
 **Read first:**
 
 - [docs/marketplace.md](marketplace.md) — packs, sources, scopes/precedence, install/uninstall, activation controls, and the full threat model. This guide assumes you can already author and install a pack.
-- [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants. Exact active `decide` grants enable bounded decision/advisor paths; a hook that declares `mutate` needs a separate exact `mutate` grant for [gated request mutation](request-mutation.md). Grants never change the Extension Host API.
+- [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants. Exact active `decide` grants enable bounded decision/advisor paths; a hook that declares `mutate` needs a separate exact `mutate` grant for [gated request mutation](request-mutation.md). The active pack principal can separately receive the six closed non-hook platform capabilities, including `service.manage` and memory access; grants never change the Extension Host API.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 - [Managed service-extension contract](service-extension-runtime.md) — schema-2 declarative services. The contract is implemented but dormant until an explicit core consumer wires it; it does not change the existing Hindsight external provider.
@@ -1836,7 +1836,13 @@ revoked, malformed, or inactive grants deny.
 This is deliberately distinct from `host.capabilities`, `ctx.host`, and the existing scoped Host
 API. A grant does not add methods, bypass action/session policy, supply a token, or change what a
 trusted pack server module can access. It also does not turn a hook into a provider, route,
-action, channel, or standalone pi extension. See [Extension capability grants](extension-capability-grants.md)
+action, channel, or standalone pi extension.
+
+Separately, an active pack—not a hook—may receive one of the closed non-hook capabilities:
+`service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`, or
+`memory.read.all`. These are platform authority consumed through the server's shared resolver;
+they are not manifest declarations and cannot be granted to a hook. A pack author cannot create a
+new capability string or self-grant one. See [Extension capability grants](extension-capability-grants.md)
 for the operator API, audit, and live-revocation contract.
 
 **Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
