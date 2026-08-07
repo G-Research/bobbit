@@ -160,4 +160,24 @@ describe("ServiceRuntimeStore", () => {
 		const output = sanitizeRuntimeArtifact("PASSWORD=abc123 and abc123", ["abc123"]);
 		assert.equal(output, "PASSWORD=[REDACTED] and [REDACTED]");
 	});
+
+	it("redacts encoded and decoded PostgreSQL userinfo passwords", () => {
+		const databaseUrl = "postgresql://hindsight:p%40ss%2Fword@db.example:5432/hindsight";
+		const output = sanitizeRuntimeArtifact(
+			`connection=${databaseUrl}\npassword=p%40ss%2fword\npassword=p@ss/word`,
+			[databaseUrl],
+		);
+		assert.ok(!output.includes(databaseUrl));
+		assert.ok(!output.includes("p%40ss%2Fword") && !output.includes("p%40ss%2fword") && !output.includes("p@ss/word"));
+	});
+
+	it("redacts decoded and encoded PostgreSQL credential query values", () => {
+		const databaseUrl = "postgresql://hindsight@db.example:5432/hindsight?sslmode=require&password=query%2Dpassword&access_token=token%2Fvalue";
+		const output = sanitizeRuntimeArtifact(
+			`url=${databaseUrl}\npassword=query%2dpassword\npassword=query-password\naccess_token=token%2fvalue\naccess_token=token/value`,
+			[databaseUrl],
+		);
+		assert.ok(!output.includes(databaseUrl));
+		assert.ok(!output.includes("query%2Dpassword") && !output.includes("query%2dpassword") && !output.includes("query-password") && !output.includes("token%2Fvalue") && !output.includes("token%2fvalue") && !output.includes("token/value"));
+	});
 });
