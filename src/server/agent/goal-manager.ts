@@ -244,13 +244,14 @@ export class GoalManager {
 
 	/**
 	 * Boot migration: legacy `paused: true` goals whose deps are still unmet
-	 * become `state: 'blocked', paused: false`. Operator-paused goals (no
-	 * dependsOnPlanIds or all resolved) keep `paused: true`.
+	 * become `state: 'blocked', paused: false`. Explicit operator pauses carry
+	 * provenance and are preserved regardless of dependency state. Records without
+	 * provenance retain the prior inference for backwards compatibility.
 	 */
 	private _migratePausedDepsToBlocked(): void {
 		const all = this.store.getAll();
 		for (const goal of all) {
-			if (!goal.paused || goal.archived) continue;
+			if (!goal.paused || goal.archived || goal.pauseSource === "operator") continue;
 			const deps = goal.dependsOnPlanIds;
 			if (!deps || deps.length === 0) continue;
 			const allResolved = deps.every(depPid => {
@@ -259,7 +260,7 @@ export class GoalManager {
 					g.spawnedFromPlanId === depPid);
 				return !!depSib && depSib.state === "complete";
 			});
-			if (allResolved) continue; // operator-paused — preserve
+			if (allResolved) continue;
 			this.store.update(goal.id, { state: "blocked", paused: false });
 			console.log(`[goal-manager] Migrated goal ${goal.id} ("${goal.title}") from paused=true to state='blocked' (unresolved deps)`);
 		}
@@ -1063,6 +1064,7 @@ export class GoalManager {
 		// after createGoal (no awaits between) — see runSubgoalStep.
 		spawnedFromPlanId?: string;
 		paused?: boolean;
+		pauseSource?: "operator" | "legacy-deps";
 		replanCount?: number;
 		divergencePolicy?: "strict" | "balanced" | "autonomous";
 		maxConcurrentChildren?: number;

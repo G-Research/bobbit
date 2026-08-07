@@ -1,6 +1,6 @@
 # Pause Cascade
 
-The Pause mechanism lets an operator stop all activity on a goal and its subtree without destroying it. This doc covers the full pause lifecycle, including two recent additions: prompt rejection and the in-chat warning banner.
+The Pause mechanism lets an operator stop all activity on a goal and its subtree without destroying it. This doc covers the full pause lifecycle, including durable operator intent, prompt rejection, and the in-chat warning banner.
 
 ## Overview
 
@@ -26,11 +26,53 @@ When a goal is paused:
 - **Spawns are blocked, with one explicit-start exception.** An authorized operator's `POST /api/goals/:id/team/start` may first run the canonical single-goal resume lifecycle and then start that goal's team. It never resumes descendants, and scheduler-owned `blocked` remains scheduler-owned. Bearer credentials and agent-tool callers cannot use this exception; all other spawn paths still return `409 GOAL_PAUSED`. See [Explicit start lifecycle](../rest-api.md#explicit-start-lifecycle).
 - **Prompts are rejected.** `POST /api/goals/:id/team/prompt` and `POST /api/sessions/:id/prompt` continue to return `409 GOAL_PAUSED` when the target session's goal is paused (see [Prompt rejection](#prompt-rejection)).
 - **Boot-resume nudges are skipped.** After a gateway restart, paused restored leads are not nudged to continue.
-- **Pause is durable.** The paused state survives gateway restart and is restored from persisted goal state.
+- **Pause is durable.** Operator pauses survive gateway restart, including when the goal has unresolved dependencies, and the restored goal remains shown as paused in the UI.
+
+## Persistence and dependency scheduling
+
+An operator pause is persisted atomically as `paused: true` with
+`pauseSource: "operator"`. The provenance matters because an operator pause and
+a scheduler dependency wait can both coexist on a `blocked` goal. On gateway
+startup, `GoalManager` preserves records with operator provenance regardless of
+whether their `dependsOnPlanIds` are resolved; it never reclassifies an
+operator's instruction as a dependency wait.
+
+The boot migration remains for compatibility. A pre-provenance paused record
+with unresolved dependencies has no way to distinguish an old dependency pause
+from an old operator pause, so it retains the prior migration: it becomes
+`state: "blocked"` with `paused: false`. Keeping that migration prevents legacy
+records from being stranded after their dependencies resolve. It is deliberately
+skipped only for explicit operator provenance, which is the safe distinction the
+older data did not carry.
+
+When a paused child reaches its final resolved dependency, the dependency path
+still submits it to the unified child scheduler. The scheduler leaves that child
+`blocked` and queued without consuming a concurrency permit or attempting to
+start a team. The queue is process-local, however, so a gateway restart loses
+its membership and FIFO order. The durable `blocked` state plus resolved
+`dependsOnPlanIds` lets a later resume reconstruct only this capacity-parked
+child's scheduler request; it does not treat the volatile queue as persisted.
 
 ## What resume does
 
-Resume generally re-enables spawns and prompt delivery but does **not** auto-restart sessions. The narrow exception is an authorized explicit team start: it resumes only the requested eligible goal before starting or returning its team; other sessions and descendants remain untouched.
+Resume clears the operator pause and re-enables spawns and prompt delivery. It
+does **not** restart existing sessions, directly clear scheduler-owned
+`blocked` state, or create a start for manual-start work.
+
+There is one narrow scheduler re-drive. For each resumed child, the route may
+return a request to the scheduler only when it is an eligible auto-start child,
+its ancestors are unpaused, and all plan dependencies are resolved. It uses
+existing in-memory scheduler intent when available. After a restart has lost
+that volatile queue, a durable `state: "blocked"` child with resolved
+dependencies is the narrow fallback that reconstructs a capacity-parked
+request. The route does not start a team or choose capacity: the scheduler
+retains lifecycle and concurrency-cap ownership. A child with an unresolved
+dependency remains `blocked` for normal dependency integration, and manual-start
+work is never invented.
+
+Separately, an authorized explicit team start resumes only the requested
+eligible goal before starting or returning its team; other sessions and
+descendants remain untouched.
 
 ## Prompt rejection
 
@@ -88,7 +130,10 @@ See [docs/nested-goals.md — Security model](../nested-goals.md#security-model)
 
 | File | Role |
 |---|---|
-| `src/server/agent/nested-goal-routes.ts` | Pause and resume REST handlers |
+| `src/server/agent/nested-goal-routes.ts` | Pause/resume REST handlers and dependency auto-unblock submission |
+| `src/server/agent/goal-store.ts` | Persisted `paused` flag and optional pause provenance |
+| `src/server/agent/goal-manager.ts` | Boot-time legacy dependency-pause migration |
+| `src/server/agent/child-team-scheduler.ts` | Capacity queue that skips paused children without starting them |
 | `src/server/agent/goal-paused-guard.ts` | Spawn-time pause check (`409 GOAL_PAUSED`) |
 | `src/server/server.ts` | Prompt-time pause checks (team/prompt and session/prompt) |
 | `src/app/api.ts` | Shared dashboard/banner pending state and pause/resume dialog entrypoints |
@@ -98,7 +143,9 @@ See [docs/nested-goals.md — Security model](../nested-goals.md#security-model)
 
 ## Test coverage
 
-- `tests/e2e/api-goals-prompt-paused.spec.ts` — 409 GOAL_PAUSED for team/prompt and session/prompt; pause/resume without subgoals enabled.
-- `tests/e2e/api-subgoals-disabled.spec.ts` — pause and resume are excluded from the `SUBGOALS_DISABLED` routes list.
-- `tests/e2e/ui/goal-paused-banner.spec.ts` — banner appears on pause, Resume button opens dialog, banner disappears on resume.
+- `tests2/core/operator-pause-durability-repro.test.ts` — operator provenance survives manager re-initialization with unmet dependencies; pre-provenance dependency pauses still migrate to `blocked` and unpaused; a resolved paused sibling is queued rather than started.
+- `tests2/browser/e2e/crash-restart.journey.spec.ts` — UI and persisted state remain paused after a real gateway crash/restart with an unmet dependency.
+- `tests2/integration/api-goals-prompt-paused.test.ts` — 409 `GOAL_PAUSED` for team/prompt and session/prompt; pause/resume without subgoals enabled.
+- `tests2/integration/api-subgoals-disabled.test.ts` — pause and resume are excluded from the `SUBGOALS_DISABLED` routes list.
+- `tests2/browser/journeys/goal-paused-banner.journey.spec.ts` — banner appears on pause, Resume button opens dialog, banner disappears on resume.
 - `tests2/dom/goal-pause-resume-feedback.test.ts` — dashboard and transcript-banner pending labels, duplicate suppression, and failure recovery.

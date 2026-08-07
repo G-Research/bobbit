@@ -126,6 +126,15 @@ export class ChildTeamScheduler {
 	 */
 	requestStart(childGoalId: string): StartOutcome {
 		const rootGoalId = this._rootOf(childGoalId);
+		// A resume reconstruction or duplicate dependency notification must not
+		// acquire another permit for work the scheduler already owns. A pending
+		// entry may be re-driven after its pause clears; a holding entry is already
+		// starting/running and keeps its original permit until terminal cleanup.
+		if (rootGoalId && this.holding.get(rootGoalId)?.has(childGoalId)) return "started";
+		if (rootGoalId && this.pending.get(rootGoalId)?.includes(childGoalId)) {
+			if (this.deps.getChild(childGoalId)?.paused !== true) this._startNextEligible(rootGoalId);
+			return this.holding.get(rootGoalId)?.has(childGoalId) ? "started" : "capacity-blocked";
+		}
 		if (!rootGoalId) {
 			// No resolvable root (should not happen for a child) — start without
 			// a cap rather than strand the child. No permit to leak here.
@@ -137,7 +146,17 @@ export class ChildTeamScheduler {
 			return "started";
 		}
 		this.childRoot.set(childGoalId, rootGoalId);
+		// Create the semaphore even when this first request is paused: resume's
+		// scheduler drain needs the shared root semaphore to process its queue.
 		const sem = this.getSemaphore(rootGoalId);
+		const child = this.deps.getChild(childGoalId);
+		if (child?.paused === true) {
+			// A dependency may resolve while its child is operator-paused. Keep
+			// it in the scheduler queue for resume, but never consume a permit
+			// or attempt a team start while the pause remains in effect.
+			this._enqueue(rootGoalId, childGoalId);
+			return "capacity-blocked";
+		}
 		if (sem.tryAcquire()) {
 			// `_startHolding` releases the permit + re-enqueues if the start fails
 			// EITHER synchronously (throw) OR asynchronously (rejected start promise,
