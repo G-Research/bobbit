@@ -32,7 +32,11 @@ describe("extension decision gateway seams", () => {
 		fs.mkdirSync(dir, { recursive: true });
 		const store = new DecisionRequestStore(dir, fs);
 		const invalidations: string[] = [];
-		const manager = new DecisionRequestManager({ storeForProject: () => store, invalidateSession: id => invalidations.push(id) });
+		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
+			storeForProject: () => store,
+			invalidateSession: id => invalidations.push(id),
+		});
 		const created = await manager.create(origin(), request());
 		assert.equal(created.status, "created");
 		assert.equal(manager.get("project", created.requestId!)?.sessionId, "session");
@@ -47,7 +51,10 @@ describe("extension decision gateway seams", () => {
 		const dir = path.join("/memfs", `decision-grant-${Date.now()}`);
 		fs.mkdirSync(dir, { recursive: true });
 		const store = new DecisionRequestStore(dir, fs);
-		const manager = new DecisionRequestManager({ storeForProject: () => store });
+		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
+			storeForProject: () => store,
+		});
 		let granted = false;
 		const hook = {
 			id: "hook", mode: "decide", events: ["beforePrompt"], packRoot: "/packs/pack",
@@ -92,6 +99,7 @@ describe("extension decision gateway seams", () => {
 		let granted = true;
 		const proposals: Array<{ type: string; args: Record<string, unknown> }> = [];
 		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store,
 			recheckConsentOperation: record => granted && isCurrentTrustedExtensionDecisionOperation(record),
 			proposalSeedService: {
@@ -224,6 +232,7 @@ describe("extension decision gateway seams", () => {
 				: [];
 			const activeHook = { packId: "pack", hookId: "hook", mode: "decide" as const, capabilities: [] };
 			const manager = new DecisionRequestManager({
+				isHeadless: () => false,
 				storeForProject: () => store,
 				recheckConsentOperation: record => {
 					rechecks++;
@@ -293,7 +302,10 @@ describe("extension decision gateway seams", () => {
 		fs.mkdirSync(dir, { recursive: true });
 		const store = new DecisionRequestStore(dir, fs);
 		const trace = new ContextTraceStore(dir, fs);
-		const manager = new DecisionRequestManager({ storeForProject: () => store });
+		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
+			storeForProject: () => store,
+		});
 		const hook = {
 			id: "setup-request", mode: "decide" as const, events: ["sessionSetup" as const], packRoot: "/packs/decision-pack",
 			sourceFile: "/packs/decision-pack/hooks.yaml", module: "decision.mjs", capabilities: [], budget: { timeoutMs: 100, maxTokens: 1 },
@@ -331,7 +343,10 @@ describe("extension decision gateway seams", () => {
 		fs.mkdirSync(dir, { recursive: true });
 		const store = new DecisionRequestStore(dir, fs);
 		const trace = new ContextTraceStore(dir, fs);
-		const manager = new DecisionRequestManager({ storeForProject: () => store });
+		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
+			storeForProject: () => store,
+		});
 		let granted = false;
 		let releaseDecision: (() => void) | undefined;
 		let delayDecision = false;

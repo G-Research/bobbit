@@ -28,6 +28,7 @@ describe("decision proposal routing", () => {
 		const store = new DecisionRequestStore(dir, fs);
 		const calls: Array<{ sessionId: string; type: string; args: Record<string, unknown> }> = [];
 		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store,
 			proposalSeedService: {
 				seedFromDecision: async (sessionId, type, args) => {
@@ -49,6 +50,7 @@ describe("decision proposal routing", () => {
 		fs.mkdirSync(dir, { recursive: true });
 		const store = new DecisionRequestStore(dir, fs);
 		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store,
 			proposalSeedService: { seedFromDecision: async () => { throw new Error("isolated"); } },
 		});

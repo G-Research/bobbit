@@ -297,6 +297,7 @@ describe("DecisionRequestManager", () => {
 		const resumes: string[] = [];
 		const entries: Array<{ id: string; staffId: string; wake: boolean }> = [];
 		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store, clock,
 			recheckConsentOperation: () => true,
 			consentPauseLifecycle: {
@@ -344,6 +345,7 @@ describe("DecisionRequestManager", () => {
 		const pauseStarted = new Promise<void>(resolve => { entered = resolve; });
 		const pauseSettled = new Promise<void>(resolve => { settled = resolve; });
 		const guarded = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store, clock,
 			consentPauseLifecycle: {
 				pause: async () => { pauses++; entered(); await blocked; settled(); return "paused"; },
@@ -366,6 +368,7 @@ describe("DecisionRequestManager", () => {
 		const { clock, store } = fixture();
 		// Construct with a matching pause service first so timeout stores its exact intent.
 		const pausedManager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store, clock,
 			recheckConsentOperation: () => true,
 			consentPauseLifecycle: { pause: async () => "paused", resume: async () => "not-matching" },
@@ -385,6 +388,7 @@ describe("DecisionRequestManager", () => {
 		let resumeCalls = 0;
 		let transient = true;
 		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store, clock, recheckConsentOperation: () => true,
 			consentPauseLifecycle: {
 				pause: async () => { pauseCalls++; return "paused"; },
@@ -409,6 +413,7 @@ describe("DecisionRequestManager", () => {
 		const { clock, store } = fixture();
 		let resumeCalls = 0;
 		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store, clock, recheckConsentOperation: () => false,
 			consentPauseLifecycle: { pause: async () => "paused", resume: async () => { resumeCalls++; return "resumed"; } },
 		});
@@ -428,6 +433,7 @@ describe("DecisionRequestManager", () => {
 		let continuationCalls = 0;
 		const { clock, store } = fixture();
 		const guarded = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => store, clock,
 			recheckConsentOperation: () => false,
 			continuation: { deliver: async () => { continuationCalls++; return "delivered"; } },
@@ -467,6 +473,7 @@ describe("DecisionRequestManager", () => {
 	it("durably deduplicates and caps advisories through the non-waking inbox seam", () => {
 		const calls: Array<{ input: { context?: string; source: { type: string; packId?: string; hookId?: string } }; options: { wake?: boolean } }> = [];
 		const manager = new DecisionRequestManager({
+			isHeadless: () => false,
 			storeForProject: () => undefined,
 			inboxManager: {
 				hasStaff: () => true,
