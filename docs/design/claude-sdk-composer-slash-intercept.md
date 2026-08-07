@@ -6,7 +6,10 @@ Approved D2 keeps Bobbit slash-command ownership in the composer and the existin
 server prompt pipeline; it does **not** configure Claude commands. The client
 intercepts an exact, full-composer Bobbit control command before `onSend`, while
 skills retain their existing server-side expansion before the prompt is delivered
-to the Claude Agent SDK. Pack launchers use the existing Extension platform
+to the Claude Agent SDK. In an SDK session, the reserved exact text `/compact`
+is consumed locally with an inline unsupported-command alert; it never reaches
+`onSend` or the SDK, and the editor leaves its draft, attachments, and focus
+unchanged. Pack launchers use the existing Extension platform
 `composer-slash` entrypoint and `runLauncherEntrypoint` hook.
 
 The SDK query posture remains unchanged:
@@ -52,8 +55,10 @@ optimistic user row, starts the animation, and calls `session.compact()`. This i
 not a valid generic SDK command: `ClaudeAgentSdkBridge::compact()` returns
 unsupported (the lifecycle contract explicitly pins manual compact unsupported).
 The current universal synthetic `compact` skill in
-`src/server/skills/slash-skills.ts::BUILTIN_SKILLS` is therefore autocomplete
-metadata, not proof that manual compaction works in every runtime.
+`src/server/skills/slash-skills.ts::BUILTIN_SKILLS` is metadata, not proof that
+manual compaction works in every runtime. The composer must not expose that
+synthetic skill as an SDK autocomplete item: exact SDK `/compact` is a hidden
+reserved intercept which reports its unsupported status locally.
 
 ### Extension platform path and reload behavior
 
@@ -87,7 +92,7 @@ The displayed list is a merge, not an SDK command inventory:
 
 | Source | Item | Handling | Runtime condition |
 | --- | --- | --- | --- |
-| Bobbit control | `/compact` | local composer dispatch to the existing `AgentInterface` compaction path; no model prompt | Pi session with callable `compact` only |
+| Bobbit control | `/compact` | Pi: local `AgentInterface` compaction dispatch, no model prompt. SDK: hidden exact-text local intercept with an inline unsupported-command alert, no `onSend` or model prompt | visible only for a Pi session with callable `compact`; the SDK reservation is intentionally not a menu item |
 | Pack contribution | registered `composer-slash` entries | `runLauncherEntrypoint` with the exact compound key | active project registry contains the entry |
 | User/Bobbit skills | project, personal, legacy, custom, built-in-file, and enabled pack skills from `/api/slash-skills` | autocomplete completes text; server `resolveSkillExpansions` injects the existing skill body before runtime delivery | current project/cwd resolution; `userInvocable !== false` |
 
@@ -100,19 +105,31 @@ not a composer command and must not be invented as one.
 1. The composer never queries, mirrors, or renders the Claude Agent SDK bundled
    command list. `settingSources: []` remains the configuration boundary.
 2. An exact registered Bobbit control or pack launcher is intercepted before
-   `onSend`; it cannot reach the SDK as `/name`.
+   `onSend`; it cannot reach the SDK as `/name`. The SDK-only `/compact`
+   reservation is also intercepted even though it is not displayed: it alerts
+   inline and preserves the editor draft, attachments, and focus.
 3. A discovered Bobbit skill has priority over a same-named Claude bundled
    command. It is sent through the existing WebSocket path and expanded before
-   `ClaudeAgentSdkBridge::prompt()`. This makes a user skill named `/goal` or
-   `/review` Bobbit-owned rather than silently invoking Claude semantics.
-4. A name that is neither a current Bobbit control/launcher nor a discovered
-   skill is not advertised and is an ordinary prompt. D2 does not reserve
-   undocumented Claude names, manufacture Bobbit equivalents for `/goal` or
-   `/review`, or reject normal prose merely because it starts with `/`.
-5. Duplicate visible names preserve the current safety rule: a skill wins over a
-   pack launcher in autocomplete. A launcher is invoked only when its exact
-   full-line parser resolves one unambiguous registered launcher. No bare-id
-   fallback may select one of multiple same-id pack launchers.
+   `ClaudeAgentSdkBridge::prompt()`. Thus an exact discovered user/Bobbit skill
+   named `/goal` or `/review` is Bobbit-owned rather than silently invoking
+   Claude semantics.
+4. Conversely, when no current Bobbit skill exists for the exact token,
+   `/goal` and `/review` are not reserved: they take the ordinary `onSend` path
+   as raw prompt text. Near-prefixes (for example `/goa` or `/reviewing`) never
+   inherit an exact command's dispatch; they are ordinary prompts unless they
+   are themselves an exact current skill/control/launcher match. D2 does not
+   manufacture Bobbit equivalents for Claude commands or reject prose merely
+   because it starts with `/`.
+5. Build one shared composer command registry for both menu filtering and send
+   resolution. It contains visible eligible skills, registered launchers, and
+   non-menu reservations such as SDK `/compact`; it also records every
+   server-recognized skill name as a launcher collision claim, including a skill
+   hidden from the menu. A launcher masked by any such skill cannot be visible
+   or dispatchable. This single source prevents hidden-skill/visible-launcher
+   drift while preserving the rule that a skill wins over a pack launcher.
+   A launcher is invoked only when its exact full-line parser resolves one
+   unambiguous registered compound key. No bare-id fallback may select one of
+   multiple same-id pack launchers.
 
 This is deliberately narrow: it prevents Bobbit/Claude ambiguity for Bobbit
 entries without claiming ownership of unconfigured Claude behavior.
@@ -128,22 +145,32 @@ type ComposerRuntime = "pi" | "claude-agent-sdk";
 
 type ComposerSlashDispatch =
   | { kind: "compact" }
+  | { kind: "unsupported-compact" }
   | { kind: "launcher"; entrypointKey: string; label: string; body: Record<string, unknown> };
 
 function resolveComposerSlashDispatch(
   text: string,
-  input: { runtime: ComposerRuntime; hasAttachments: boolean },
+  input: { runtime: ComposerRuntime; registry: ComposerSlashRegistry },
 ): ComposerSlashDispatch | undefined;
 ```
+
+`ComposerSlashRegistry` is built once from the current skill catalogue and
+`listLauncherEntrypoints("composer-slash")`, then supplies both autocomplete
+items and `resolveComposerSlashDispatch()`. It distinguishes menu visibility
+from collision ownership: a hidden server-recognized skill contributes a
+collision claim and uses the ordinary send path, but cannot leave a same-named
+launcher visible or dispatchable.
 
 `MessageEditor::handleSend()` calls the resolver after its existing attachment
 size check and before the ordinary `message-send` / `onSend` branch. For
 `launcher`, retain the current clear, history, feedback, and
-`runLauncherEntrypoint` behavior. For `compact`, call a typed callback supplied
-by `AgentInterface`; that callback owns the current optimistic message,
-attachment-draft cleanup, animation, and `session.compact()` behavior. It must
-return `undefined` for the SDK runtime so a synthetic `/compact` cannot swallow
-a prompt in an SDK session.
+`runLauncherEntrypoint` behavior. For Pi `compact`, call a typed callback
+supplied by `AgentInterface`; that callback owns the current optimistic message,
+attachment-draft cleanup, animation, and `session.compact()` behavior. For
+`unsupported-compact` in an SDK session, render the inline alert and return
+without clearing, recording history, changing attachments, moving focus, or
+calling `onSend`. This exact `/compact` reservation applies even when
+attachments are present; it does not silently send or discard them.
 
 `AgentInterface` derives runtime from the current session model/provider
 (`claude-agent-sdk` selects the SDK; all other current providers select Pi) and
@@ -163,26 +190,30 @@ history without copying skill content to a worktree.
 
 ```text
 textarea input
-  -> MessageEditor autocomplete: API skills + current pack entrypoints
+  -> ComposerSlashRegistry: current skills + current pack entrypoints + hidden reservations
+  -> MessageEditor autocomplete: registry-visible items
   -> Enter/send
-     -> full-line supported Bobbit control? local AgentInterface callback
-     -> full-line registered pack launcher? runLauncherEntrypoint(key, ...)
-     -> otherwise MessageEditor.onSend
+     -> exact SDK `/compact`? inline alert; preserve draft/attachments/focus
+     -> full-line supported Pi Bobbit control? local AgentInterface callback
+     -> full-line registered, unmasked pack launcher? runLauncherEntrypoint(key, ...)
+     -> otherwise MessageEditor.onSend (including absent `/goal`/`/review` and near-prefixes)
         -> AgentInterface.sendMessage -> RemoteAgent.prompt -> WebSocket prompt
         -> resolveSkillExpansions / file mentions -> enqueuePrompt(modelText)
         -> ClaudeAgentSdkBridge.prompt(modelText) or Pi bridge
 ```
 
 Normal prompts, unknown slash-prefixed text, attachment sends, and inline skills
-all take the final branch. Attachments prevent launcher/control interception;
-they retain the established ordinary prompt behavior rather than silently
-throwing away files.
+all take the final branch. Attachments prevent launcher and supported-control
+interception, retaining established ordinary prompt behavior rather than
+silently throwing away files. The sole exception is the hidden exact SDK
+`/compact` reservation, which consumes the command while preserving those files
+and the draft for user correction.
 
 ## Failure and reload behavior
 
 | Condition | Result |
 | --- | --- |
-| SDK session types `/compact` | command is absent from autocomplete and is sent as ordinary text; no false optimistic compaction or unsupported RPC |
+| SDK session types exact `/compact` | command is absent from autocomplete, consumed before `onSend`/SDK delivery, and shows an inline unsupported-command alert without changing draft, attachments, or focus |
 | Pi compaction fails | preserve existing compaction error/event behavior; do not fall through into an SDK/agent prompt |
 | Pack uninstalled/disabled/reconciled away before send | no launcher match; ordinary prompt pass-through, never a stale host call |
 | Launcher route/channel fails after a valid match | existing pending-to-error launcher feedback; editor was cleared/history recorded once; no agent prompt and no automatic retry |
@@ -202,17 +233,20 @@ files are allowed.
    entrypoint dispatch, same-id ambiguity refusal, and launcher never calling
    `onSend`.
 3. Add a small DOM test for the resolver/callback boundary: Pi `/compact`
-   invokes the local handler; SDK `/compact` is absent/not intercepted; a plain
-   prompt and an unknown slash prompt reach `onSend`; attachments bypass command
-   interception.
+   invokes the local handler; exact SDK `/compact` is hidden, alerts inline, and
+   never calls `onSend` while preserving draft/attachments/focus; a plain prompt,
+   absent `/goal`/`/review`, and near-prefixes reach `onSend`; attachments bypass
+   launcher/supported-control interception. Pin that a hidden skill collision
+   masks a same-named launcher in both menu and send resolution.
 4. Extend `tests2/core/claude-agent-sdk-tool-surface.test.ts` with the literal
    SDK isolation assertion: `settingSources` is exactly `[]`, `mcpServers` is
    only `bobbit`, and no command setting source is added by D2.
 5. Add `tests2/browser/journeys/claude-sdk-composer-slash.journey.spec.ts` using
    the real composer/session harness with deterministic SDK bridge deps. Cover:
    autocomplete and selection of a user skill, a successful pack launcher,
-   ordinary prompt delivery to the fake SDK, SDK `/compact` pass-through/no
-   compaction, then reload and repeat autocomplete/ordinary prompt delivery.
+   ordinary prompt delivery to the fake SDK, hidden SDK `/compact` inline-alert
+   consumption/no SDK delivery, then reload and repeat autocomplete/ordinary
+   prompt delivery.
    The journey must assert no generated `.claude/commands` or SDK settings
    source is involved.
 6. Register the new browser file as a `v2Native` `browser`/`playwright` entry in
@@ -237,6 +271,6 @@ npm run check
 | In scope | Explicitly out of scope |
 | --- | --- |
 | Composer resolver/callback wiring, runtime-gated `/compact`, existing pack launcher reuse, and focused DOM/core/browser tests | Claude SDK private hooks, command files/settings sources, worktree materialization, or changing `settingSources` |
-| Current Bobbit skills and pack entrypoint dispatch semantics | New Bobbit `/goal` or `/review` commands, aliases for Claude commands, or importing the Claude command catalogue |
+| Shared menu/send registry for current Bobbit skills, hidden skill collision claims, and pack entrypoint dispatch semantics | New Bobbit `/goal` or `/review` commands, aliases for Claude commands, or importing the Claude command catalogue |
 | Existing server skill expansion before either runtime receives a prompt | Replacing `resolveSkillExpansions`, changing skill files, changing tool policy/MCP surface, or changing SDK transcript storage |
 | Reconcile/reload coverage for current pack registry and drafts | Persisting command registry entries, launcher bodies, or SDK command state |
