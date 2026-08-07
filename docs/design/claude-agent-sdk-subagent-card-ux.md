@@ -275,23 +275,22 @@ Recovery rules:
 
 ### Still unknown after recovery
 
-If an SDK-confirmed `parent_tool_use_id` has child activity but no root call can
-be recovered, synthesize an **ordinary recovered Agent tool-call card** at the
-first authoritative child ordinal:
+If child activity has an SDK-confirmed `parent_tool_use_id` but no matching root
+Agent/legacy Task call can be recovered, keep that partition buffered and
+suppress it from the visual transcript. Do **not** synthesize, recover, or
+mount a fallback Agent/tool card: the existing real parent tool card is the only
+G10b surface.
 
-```text
-⚠ Agent · Recovered activity    Parent call unavailable
-```
-
-Its disclosure contains the confirmed child activity and the warning
-`Original Agent call was not available in this transcript.` It uses the same
-`tool-message` wrapper and Agent renderer, keyed by the missing parent tool-use
-id, and merges into the real parent card if that call later arrives. This is a
-fallback parent tool card, not a standalone subagent card or session UI.
+Retain bounded diagnostic/audit evidence that the confirmed partition could not
+be attached, including the parent tool-use id, child identity when available,
+source/recovery phase, and a bounded count or reason. This evidence belongs in
+existing diagnostic/JSON inspection surfaces, never root assistant prose or a
+new UI treatment. If the real root call is later received, attach the retained
+partition atomically to that exact card. Never attach a partition to the
+nearest Agent card by time or label.
 
 If the relationship itself cannot be confirmed, suppress the untrusted content
-from the visual transcript and retain only a bounded audit diagnostic. Never
-attach it to the nearest Agent card by time or label.
+from the visual transcript and retain only a bounded audit diagnostic.
 
 ## Collapse, expansion, and live updates
 
@@ -377,22 +376,24 @@ parent/child projection:
 - UI expansion defaults may reset on reload; content, state, order, and error
   visibility may not.
 
-## Cost, transcript, and audit presentation
+## Cost metadata, transcript, and audit presentation
 
-SDK children remain part of the root SDK query. Do not add them to the existing
-“By Agent” cost list or show a second cost total. The parent turn remains the
-only billing row, preventing double counting.
+G10b treats SDK usage/cost fields as opaque source metadata. It passes available
+metadata through with its source identity and parent/child partition for audit;
+it does not define aggregation, totals, billing rows, attribution, or accounting
+semantics. G8 owns those decisions and any resulting cost presentation.
 
 For auditability:
 
-- retain child transcript rows with parent partition and child identity in the
-  authoritative normalized data;
+- retain child transcript rows with parent partition, child identity, and any
+  available opaque source metadata in the authoritative normalized data;
+- retain bounded diagnostic/audit evidence for partitions that cannot attach to
+  a real parent card;
 - expose stable, bounded DOM hooks on the ordinary parent card, for example
   `data-subagent-parent-tool-use-id`, `data-subagent-state`, and
   `data-subagent-count`;
-- expose raw ids/types only in existing debug/JSON inspection surfaces;
-- if usage attribution is available, describe it as `Included in parent turn`
-  rather than presenting it as another billable session;
+- expose raw ids/types and opaque source metadata only in existing debug/JSON
+  inspection surfaces; and
 - never include prompts, credentials, transcript paths, or environment data in
   status labels, errors, tool summaries, analytics, or audit rows.
 
@@ -442,7 +443,7 @@ For auditability:
 | Child terminal with dangling tool | That row settles failed; no root `agent_end`, retry, completion sound, or unrelated state change. |
 | Parent fails/aborts | Same outer card becomes `Failed`/`Stopped`, is expanded when detail exists, and preserves child evidence. |
 | Child frames arrive before parent | No page-level flash; buffered activity attaches atomically when the matching parent card appears. |
-| Parent absent on reload | Attempt SDK recovery; if relationship is confirmed, render the ordinary recovered Agent tool card; otherwise suppress untrusted content and audit diagnostically. |
+| Parent absent on reload | Attempt SDK recovery; buffer an SDK-confirmed partition by its exact parent id, but suppress it until the real parent card is present. Retain bounded diagnostic/audit evidence; suppress untrusted content as well. |
 | Collapse during streaming | Header stays focused and updates counts/status; hidden tokens do not reopen the card or force scroll. |
 | Successful reload | Same content/order/state, terminal card collapsed by default, no spinner or duplicated rows. |
 | Failed reload/recovery | Parent result remains visible; inline warning says activity could not be restored; no standalone child UI. |
@@ -451,8 +452,8 @@ For auditability:
 
 ## Non-goals
 
-- No subagent sidebar, tab, standalone card type, transcript route, modal, or
-  cost account.
+- No subagent sidebar, tab, standalone card type, transcript route, or modal.
+  G10b makes no cost/accounting presentation decision; G8 owns that scope.
 - No SDK child avatar, accessory, session link, branch, worktree, Bobbit task,
   task assignment, notification, or completion sound.
 - No change to Bobbit `team_delegate`, `team_spawn`, or durable `task_*` UX.
