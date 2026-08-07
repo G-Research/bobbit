@@ -1,0 +1,8 @@
+id: hindsight.session-menu
+kind: session-menu
+label: Hindsight Memory
+icon: zap
+# Opening the panel is a user gesture only. The panel never starts or probes a
+# service until its explicit, consented controls are selected.
+target:
+  panelId: hindsight.memory
