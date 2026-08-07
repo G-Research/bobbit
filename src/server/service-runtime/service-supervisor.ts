@@ -243,7 +243,16 @@ export class ServiceRuntimeSupervisor {
 				: base;
 		}
 		const contribution = this.options.registry.getRuntime(projectId, identity.packId, identity.runtimeId);
-		if (!contribution) return base;
+		// A persisted endpoint is never authority to use a removed or disabled
+		// contribution. Keep the durable ownership record for a pre-invalidation
+		// cleanup retry, but fail closed for every status/context reader.
+		if (!contribution) {
+			return {
+				...withoutEndpoint(base),
+				state: "unavailable",
+				diagnostic: { code: "SERVICE_RUNTIME_NOT_FOUND" },
+			};
+		}
 		try {
 			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
 			const inspected = await boundedStatusInspection(runner.inspect(await this.inspectInput(identity, contribution, record.runnerIdentity)));
@@ -319,6 +328,21 @@ export class ServiceRuntimeSupervisor {
 		return this.enqueueLifecycle(identity, () => this.doStop(request));
 	}
 
+	/**
+	 * Removes only the runner-owned process/container/Compose project while the
+	 * old descriptor is still resolvable. This is intentionally distinct from
+	 * purge: it retains the durable record, environment artifact, generated
+	 * secrets, and any declared/named storage for diagnostics and retry.
+	 *
+	 * Marketplace lifecycle code must call this before invalidating a runtime
+	 * contribution; otherwise the descriptor needed to prove runner ownership is
+	 * no longer available and cleanup cannot be performed safely.
+	 */
+	removeOwnedResource(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		return this.enqueueLifecycle(identity, () => this.doRemoveOwnedResource(request));
+	}
+
 	purge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		return this.enqueueLifecycle(identity, () => this.doPurge(request));
@@ -349,6 +373,46 @@ export class ServiceRuntimeSupervisor {
 			catch (persistError) { this.options.logger?.warn("service runtime stop failure could not be recorded", { code: toDiagnostic(persistError).code }); }
 			this.options.logger?.warn("service runtime stop failed", { code: toDiagnostic(error).code });
 			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime stop failed", { cause: error });
+		}
+	}
+
+	private async doRemoveOwnedResource(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		// Resolve the contribution before changing marketplace state. This also
+		// prevents a stale cleanup request from operating on an unrelated runner.
+		const contribution = this.requireContribution(request);
+		const old = await this.options.store.load(identity);
+		if (!old) return recordContext(identity, undefined);
+
+		// Authorization is deliberately reread at both mutation boundaries: a
+		// grant revoked while this cleanup was queued must prevent the persistent
+		// state change and the subsequent runner side effect.
+		await this.authorize(request, "stop");
+		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
+		const stopped = this.nextRecord(old, {
+			desired: "stopped",
+			endpoint: undefined,
+			lastDiagnostic: undefined,
+			restartAttempts: [],
+		});
+		await this.options.store.replace(identity, stopped);
+		if (!old.runnerIdentity) return recordContext(identity, stopped);
+
+		try {
+			const runner = selectServiceRunner(this.options.runners, old.runnerIdentity.kind);
+			const input = await this.controlInput(identity, contribution, old.runnerIdentity);
+			await this.authorize(request, "stop");
+			await runner.remove(input);
+			const removed = this.nextRecord(stopped, { runnerIdentity: undefined, lastDiagnostic: undefined });
+			await this.options.store.replace(identity, removed);
+			return recordContext(identity, removed);
+		} catch (error) {
+			const failed = this.nextRecord(stopped, { lastDiagnostic: toDiagnostic(error) });
+			try { await this.options.store.replace(identity, failed); }
+			catch (persistError) { this.options.logger?.warn("service runtime cleanup failure could not be recorded", { code: toDiagnostic(persistError).code }); }
+			this.options.logger?.warn("service runtime cleanup failed", { code: toDiagnostic(error).code });
+			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime cleanup failed", { cause: error });
 		}
 	}
 

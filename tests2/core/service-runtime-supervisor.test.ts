@@ -106,19 +106,19 @@ class FakeStore {
 	async readLog(): Promise<string | undefined> { return "bounded diagnostic"; }
 }
 
-function runner(mode: ServiceRunner["mode"], hooks: Partial<Pick<ServiceRunner, "start" | "inspect" | "stop">> = {}): ServiceRunner {
+function runner(mode: ServiceRunner["mode"], hooks: Partial<Pick<ServiceRunner, "start" | "inspect" | "stop" | "remove">> = {}): ServiceRunner {
 	return {
 		mode,
 		start: vi.fn(hooks.start ?? (async () => ({ endpoint, runnerIdentity: { kind: mode, id: `${mode}-1` }, services: [] }))),
 		inspect: vi.fn(hooks.inspect ?? (async () => undefined)),
 		stop: vi.fn(hooks.stop ?? (async () => {})),
-		remove: vi.fn(async () => {}),
+		remove: vi.fn(hooks.remove ?? (async () => {})),
 	};
 }
 
 function supervisor(input: {
 	store?: FakeStore;
-	contribution?: RuntimeContribution | undefined;
+	contribution?: RuntimeContribution | null;
 	runners?: ServiceRunner[];
 	clock?: ServiceRuntimeClock;
 	probe?: ReturnType<typeof vi.fn>;
@@ -248,6 +248,81 @@ describe("ServiceRuntimeSupervisor", () => {
 		});
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
 		assert.equal((local.inspect as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+	});
+
+	it("never projects a persisted ready endpoint after its contribution disappears", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+		const { instance } = supervisor({ store, contribution: null, runners: [runner("local")] });
+		assert.deepEqual(await instance.status(identity), {
+			identity,
+			desired: "running",
+			mode: "local",
+			state: "unavailable",
+			diagnostic: { code: "SERVICE_RUNTIME_NOT_FOUND" },
+		});
+		assert.deepEqual(await instance.context(identity), {
+			state: "unavailable",
+			diagnostic: { code: "SERVICE_RUNTIME_NOT_FOUND" },
+		});
+	});
+
+	for (const mode of ["local", "docker", "compose"] as const) {
+		it(`removes the owned ${mode} resource before contribution removal without purging durable state`, async () => {
+			const store = new FakeStore();
+			store.records.set(store.key(identity), record({
+				selectedMode: mode,
+				endpoint,
+				runnerIdentity: { kind: mode, id: `${mode}-1`, ...(mode === "compose" ? { composeProject: "fixture-server-1" } : {}) },
+			}));
+			const ownedRunner = runner(mode);
+			const { instance, authorize } = supervisor({ store, runners: [ownedRunner] });
+
+			assert.deepEqual(await instance.removeOwnedResource(identity), {
+				identity, desired: "stopped", mode, state: "stopped",
+			});
+			assert.equal((ownedRunner.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+			assert.equal((ownedRunner.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+			assert.equal(authorize.mock.calls.length, 2, "authorization is live at both cleanup side-effect boundaries");
+			const persisted = await store.load(identity);
+			assert.equal(persisted?.desired, "stopped");
+			assert.equal(persisted?.selectedMode, mode);
+			assert.equal(persisted?.endpoint, undefined);
+			assert.equal(persisted?.runnerIdentity, undefined);
+			assert.equal(persisted?.lastDiagnostic, undefined);
+			assert.equal(store.generated.size, 0, "runner cleanup never purges generated secrets");
+		});
+	}
+
+	it("fails closed before contribution cleanup when the live stop grant is denied", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+		const local = runner("local");
+		const { instance } = supervisor({ store, runners: [local], authorize: vi.fn(async () => false) });
+
+		await assert.rejects(instance.removeOwnedResource(identity), (error: unknown) => error instanceof ServiceRuntimeError && error.code === "SERVICE_AUTHORIZATION_DENIED");
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		assert.deepEqual(await store.load(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } }));
+	});
+
+	it("keeps ownership durable and retryable when contribution cleanup fails", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "docker", id: "docker-1" } }));
+		const remove = vi.fn()
+			.mockRejectedValueOnce(Object.assign(new Error("daemon unavailable"), { code: "SERVICE_DOCKER_UNAVAILABLE" }))
+			.mockResolvedValueOnce(undefined);
+		const docker = runner("docker", { remove });
+		const { instance } = supervisor({ store, runners: [docker] });
+
+		await assert.rejects(instance.removeOwnedResource(identity), (error: unknown) => error instanceof ServiceRuntimeError && error.code === "SERVICE_UNAVAILABLE");
+		const failed = await store.load(identity);
+		assert.equal(failed?.desired, "stopped");
+		assert.equal(failed?.endpoint, undefined);
+		assert.deepEqual(failed?.runnerIdentity, { kind: "docker", id: "docker-1" });
+		assert.deepEqual(failed?.lastDiagnostic, { code: "SERVICE_UNAVAILABLE" });
+		await expect(instance.removeOwnedResource(identity)).resolves.toMatchObject({ desired: "stopped", state: "stopped" });
+		assert.equal(remove.mock.calls.length, 2);
+		assert.equal((await store.load(identity))?.runnerIdentity, undefined);
 	});
 
 	it("maps durable records to stopped, starting, blocked, unavailable, and ready without inventing endpoints", async () => {

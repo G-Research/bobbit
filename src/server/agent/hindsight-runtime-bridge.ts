@@ -269,6 +269,20 @@ export class HindsightRuntimeBridge {
 		return this.supervisor(projectId).diagnostics({ packId: HINDSIGHT_PACK_ID, runtimeId: HINDSIGHT_RUNTIME_ID });
 	}
 
+	/**
+	 * Marketplace lifecycle adapter. The generic supervisor owns the actual
+	 * stop/remove transaction and live `service.manage` checks; this bridge only
+	 * supplies the project-scoped Hindsight identity while its descriptor is
+	 * still resolvable. It never purges runtime storage or secret artifacts.
+	 */
+	async removeOwnedRuntimeForContributionChange(projectId: string): Promise<ServiceRuntimeStatus> {
+		return this.supervisor(projectId).removeOwnedResource({
+			packId: HINDSIGHT_PACK_ID,
+			runtimeId: HINDSIGHT_RUNTIME_ID,
+			projectId,
+		});
+	}
+
 	/** Route adapter for migration-plan. It only emits a plan when the configured
 	 * source and target are safely identifiable. No command, start, pull, or
 	 * storage mutation happens here. */
