@@ -14,7 +14,7 @@ import {
 	redactEndpointHost,
 	validateHindsightRuntimeSettings,
 } from "../../market-packs/hindsight/src/runtime-settings.ts";
-import { HindsightRuntimeSettingsResolver, hindsightStorageContinuity, hindsightStorageIdentity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
+import { HindsightRuntimeBridge, HindsightRuntimeSettingsResolver, hindsightStorageContinuity, hindsightStorageIdentity } from "../../src/server/agent/hindsight-runtime-bridge.ts";
 import { ExtensionSettingsStore } from "../../src/server/agent/extension-settings-store.ts";
 import { ExtensionSettingsSecretStore } from "../../src/server/agent/extension-settings-secret-store.ts";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
@@ -132,6 +132,47 @@ describe("Hindsight EP-7 runtime settings", () => {
 			true,
 		);
 		assert.deepEqual(legacyRequestResidency, { ok: false, code: "HINDSIGHT_RESIDENCY_REQUIRED" });
+	});
+
+	it("returns the supervisor-applied revision rather than a concurrent EP-7 save", async () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "hindsight-control-revision-"));
+		try {
+			const settingsStore = new ExtensionSettingsStore(
+				new ProjectConfigStore(directory),
+				new ExtensionSettingsSecretStore(path.join(directory, "state")),
+			);
+			let entered!: () => void;
+			const snapshotRead = new Promise<void>((resolve) => { entered = resolve; });
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => { release = resolve; });
+			const bridge = new HindsightRuntimeBridge({
+				contributions: { getPack: () => undefined },
+				contextForProject: () => ({ stateDir: path.join(directory, "state"), extensionSettingsStore: settingsStore }),
+				grants: () => ({ allowed: true }) as never,
+				supervisorForProject: () => ({
+					restartWithResult: async () => {
+						entered();
+						await gate;
+						return {
+							settingsRevision: "0",
+							status: { identity: { packId: "hindsight", runtimeId: "hindsight" }, desired: "running", mode: "local", state: "ready", endpoint: "http://127.0.0.1:48123" },
+						};
+					},
+				}) as never,
+			});
+
+			const control = bridge.control("project", "restart");
+			await snapshotRead;
+			settingsStore.compareAndSwap({ packId: "hindsight", kind: "provider", id: "memory" }, 0, { values: { runtimeMode: "docker" } });
+			release();
+
+			assert.deepEqual(await control, {
+				settingsRevision: 0,
+				runtime: { identity: { packId: "hindsight", runtimeId: "hindsight" }, desired: "running", mode: "local", state: "ready", endpoint: "http://127.0.0.1:48123" },
+			});
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	it("uses the production EP-7 resolver for external continuity and rejects unsupported starts before a runtime is selected", () => {
