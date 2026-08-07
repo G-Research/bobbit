@@ -93,6 +93,63 @@ it feeds direct Pi API-key environments and can yield `ANTHROPIC_API_KEY`.
 The sandbox SDK path must never call it, copy its result, or fall back from an
 OAuth failure to an API key.
 
+## Same-scope architectural comparison and selected minimal composition
+
+**Audit baseline.** This comparison is against the merged runtime on the
+parent-synced baseline (`e1e422f47`): Pi sandbox execution is owned by
+`RpcBridge.spawnDockerExec`; Agent SDK construction rejects a sandbox before
+`query()`; and `SessionManager.applySandboxWiring` is the shared project
+container/CWD/gateway/auth setup point. It compares only ways to deliver G9;
+a second container runtime, a host SDK fallback, or an SDK/Pi runtime redesign
+is not an alternative in scope.
+
+| Concern and failure flow | Selected minimal composition | Same-scope option rejected | Added defect surface and reason for selection |
+| --- | --- | --- | --- |
+| SDK subprocess: SDK hook → `docker exec` → child lifecycle | Extract one narrow typed Docker-exec spawn factory from the already-working Pi executor. Pi composes the same factory with its Pi command/remapping; the SDK composes it with its fixed wrapper and opaque SDK args. | Put a separate `spawn("docker", …)` adapter in `ClaudeAgentSdkBridge`. | One factory and one `SpawnOptions`→`SpawnedProcess` adapter, rather than two command builders, two redaction paths, and two abort/kill implementations. It deliberately is not a general container runtime or process manager. |
+| Runtime-specific launch data: setup/recovery → bridge factory → SDK `query()` | Add one ephemeral, typed SDK sandbox launch descriptor after `applySandboxWiring` has obtained the container and translated CWD. | Add optional OAuth/container fields to broad `RpcBridgeOptions`, `SessionInfo`, or persisted records. | One in-memory descriptor transformation. It makes the invalid/missing-descriptor fail-closed branch explicit while preventing credential-bearing data from crossing Pi, persistence, or diagnostics surfaces. |
+| Subscription credential: policy/refresh lock → current access token → one process env entry | Add a narrow resolver that returns only a current token while the existing lock is held; the adapter emits only `CLAUDE_CODE_OAUTH_TOKEN=<value>`. | Add OAuth to `sandboxCredentials` and reuse its generic `-e` loop. | One policy/credential result branch. Generic credentials are intentionally broader and feed Pi; using them would make an SDK-only token available to unrelated processes and make an API-key fallback too easy. |
+| SDK config/history: stable state path → SDK-owned records → visible-history adapter | Add the deterministic per-session state mount and a bounded, read-only SDK accessor using the same pooled container. | Read a host SDK directory, use Pi JSONL, or create another transcript store. | One mount path transformation and one read-only process call. The selected composition keeps the SDK transcript authority and preserves container isolation instead of adding a transcript owner or host-settings mount. |
+| Capability: selected container → SDK wrapper/version check → launch or sanitized error | Reuse the selected `ProjectSandbox` and add one exact SDK image capability/version probe before query startup. | Start the host SDK when the image is stale or let an arbitrary global `claude` run in the container. | One capability branch. It contains platform drift at startup and leaves the existing Pi image/runtime path untouched. |
+
+The first row is the **selected minimal composition**. It changes the least
+ownership: `SandboxManager` still owns containers, `SessionManager` still owns
+session setup/recovery, and `ClaudeAgentSdkBridge` still owns the single SDK
+query. The shared factory owns neither container identity nor session state; it
+only adapts an already-authorized `docker exec` child to the SDK contract.
+
+## Defect-surface inventory
+
+| New or changed surface | Owner/lifetime | Failure containment and required pin |
+| --- | --- | --- |
+| Typed Docker-exec spawn factory and SDK process facade | Factory is stateless; child lifetime remains bridge-owned. | Validate container CWD and pipe streams before query readiness; delegate exit/error/kill exactly once and remove the SDK-supplied abort listener on settlement. Pin command vector, opaque args, lifecycle delegation, redaction, and no Pi remapping. |
+| SDK sandbox launch descriptor | `SessionManager` creates it per bridge construction; never persist it. | Missing container, CWD, capability, gateway values, or OAuth must reject before `query()`. Pin absence from `SessionInfo`, `PersistedSession`, `RpcBridgeOptions.env`, diagnostics, and logs. |
+| Closed container SDK environment | One query/spawn invocation. | Construct from an allowlist, not `process.env` or project credentials. Pin absence of host settings, generic secrets, API keys, refresh token, and admin credentials. |
+| OAuth access-token resolver | Existing project auth lock; result lives only until launch descriptor/spawn construction completes. | Re-read policy after refresh, reject explicit/conflicting credentials and unavailable/expired auth, and return a sanitized stable error. Pin that no credential object, refresh token, or API-key fallback crosses the seam. |
+| Image wrapper/capability validation | Existing sandbox-image lifecycle; no session lifecycle ownership. | Fail only SDK sandbox launch with the rebuild action; pin exact package/binary version and prove stale images do not regress Pi. |
+| Deterministic SDK state mount and container history accessor | Existing final session purge owns deletion; accessor is read-only per history request. | Restrictive owned mount; accessor has bounded output, strict JSON, no OAuth/gateway env, no query, and no write. Pin empty-history validity and `SDK_SESSION_UNAVAILABLE` mapping. |
+| Restore/replacement/recovery descriptor rebuild | Existing `applySandboxWiring`/bridge replacement flow. | Resolve current container and current token afresh before queue drain while preserving only the SDK UUID. Pin recovered container id, resumed UUID, and no `switch_session`. |
+
+No new container manager, persistent credential field, transcript store, host
+settings mount, generic environment merge, provider fallback, or public runtime
+selection API is introduced. Those omissions are intentional constraints, not
+future cleanup work.
+
+## Current merged-runtime preservation audit
+
+The implementation must preserve the following behavior from the audited
+merged baseline. Each row identifies the existing owner and the regression
+proof required when the new SDK sandbox branch is added.
+
+| Existing runtime contract | Current owner/seam | G9 preservation requirement and regression proof |
+| --- | --- | --- |
+| Pi direct execution remains host-local; Pi sandbox execution uses one pooled project container with `docker exec -i`, `-w`, pipe stdio, scoped gateway values, `NODE_TLS_REJECT_UNAUTHORIZED=0`, and `NODE_OPTIONS=--no-warnings`. | `RpcBridge._spawnProcess` / `spawnDockerExec`. | Refactoring must leave the Pi command, Pi-only argument remapping, credential loop, CWD behavior, logging/redaction, and child ownership byte-for-byte equivalent in observable behavior. Pin a Pi direct/sandbox regression beside the new factory tests. |
+| Sandboxed worktree creation and CWD offset happen before bridge construction; restored container paths are not converted back to host paths. | `SessionManager.applySandboxWiring`, called by session setup, restore, delegate, and replacement paths. | Build the SDK descriptor only after this seam resolves the current container and container-relative CWD. Pin fresh/worktree/restore/recovery paths and reject a host CWD rather than silently escaping the sandbox. |
+| Gateway authority is scoped per sandbox session and passed to the child process, not installed in pool-container PID 1. | `mintScopedGatewayToken` and `applySandboxWiring`. | Preserve the existing values and per-process `-e` placement for SDK tools. Pin that the token/session secret are redacted and that neither reaches persistent config or a container-wide environment. |
+| Agent SDK direct sessions use a closed allowlist, strict SDK tool surface, one async-input query, visible-event translator, model/thinking state, soft interrupt/stop, and UUID-based resume. | `ClaudeAgentSdkBridge`, `session-runtime.ts`, SDK tool/history adapters. | The sandbox branch changes only process placement. Pin identical query options except custom spawn/container env, model/thinking calls, event translation, stop/interrupt semantics, and resumed UUID; direct SDK tests remain unchanged. |
+| SDK history remains SDK-owned and is normalized through the visible-message adapter; Pi `switch_session` is excluded for SDK records. | `ClaudeAgentSdkBridge.getMessages`, `claude-agent-sdk-session-access.ts`, `session-setup.ts`. | Select the container accessor only for sandbox SDK records. Pin read-only normalized history after restart/recovery, valid empty history, no Pi JSONL, and no `switch_session`. |
+| Existing sandbox OAuth policy protects Pi's project auth file and refreshes only under the project lock. | `withSandboxAgentAuthFileLock`, `refreshSandboxAnthropicOAuthCredential`, sandbox policy helpers. | Keep Pi behavior unchanged; add a separate in-memory SDK access-token result under that lock. Pin policy absence, refresh failure, API-key rejection, and sanitized errors without changing Pi auth-file inputs. |
+| Container lifecycle, pooled-container recreation, and final session cleanup remain centralized. | `SandboxManager` / `ProjectSandbox` and final session purge. | SDK launch/recovery only reads the selected container and uses the existing state-mount cleanup lifecycle. Pin that recovery reconstructs a bridge with a new container id and that archive/ordinary stop do not delete resumable SDK state. |
+
 ## Spawn design
 
 ### One shared Docker-exec adapter
