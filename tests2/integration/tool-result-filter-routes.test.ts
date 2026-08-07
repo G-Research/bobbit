@@ -131,7 +131,7 @@ async function installLiveGeneratedGate(sessionId: string, credential: ToolResul
 	const originalToken = process.env.BOBBIT_TOKEN;
 	const requests: Array<{ url: string; body: string }> = [];
 	try {
-		await writeFile(file, generateToolResultFilterExtension(sessionId, credential), "utf8");
+		await writeFile(file, generateToolResultFilterExtension(sessionId), "utf8");
 		process.env.BOBBIT_GATEWAY_URL = base();
 		process.env.BOBBIT_TOKEN = readE2EToken();
 		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -141,7 +141,7 @@ async function installLiveGeneratedGate(sessionId: string, credential: ToolResul
 			return originalFetch(url, init);
 		}) as typeof globalThis.fetch;
 		const mod = await import(`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`);
-		const gate = mod.default();
+		const gate = mod.default(credential);
 		if (typeof gate !== "function") throw new Error("generated result gate did not return a function");
 		return {
 			gate,
@@ -220,6 +220,24 @@ test.describe("tool result filter route", () => {
 		if (sessionId) await deleteSession(sessionId);
 	});
 	test.afterAll(async () => { if (packDir) fs.rmSync(packDir, { recursive: true, force: true }); });
+
+	test("rejects a forged bearer callback before dispatcher admission or audit", async () => {
+		const toolCallId = "forged-attempt-call";
+		const response = await apiFetch(filterPath(sessionId), {
+			method: "POST",
+			body: JSON.stringify({ toolCallId, toolName: "fixture-tool", result: result(REJECTED) }),
+			headers: { "X-Bobbit-Tool-Result-Attempt": "v1.bad" },
+		});
+		expect(response.status).toBe(200);
+		const output = await json(response);
+		expect(output).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
+		expect(JSON.stringify(output)).not.toContain(REJECTED);
+		const auditResponse = await apiFetch(`/api/sessions/${sessionId}/tool-result-filter-audit?limit=50`, { headers: { Cookie: cookie } });
+		expect(auditResponse.status).toBe(200);
+		expect((await json(auditResponse)).entries).not.toEqual(expect.arrayContaining([
+			expect.objectContaining({ sessionId, toolCallId }),
+		]));
+	});
 
 	test("is inert without an exact grant", async () => {
 		const envelope = { toolCallId: "ungranted-call", toolName: "fixture-tool", result: result(REJECTED) };

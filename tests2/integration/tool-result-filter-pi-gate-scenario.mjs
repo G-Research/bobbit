@@ -189,7 +189,7 @@ try {
 		}
 		return new Response(nativeStringify({ content: [{ type: "text", text: `${SAFE_CONTENT}:${toolCallId}` }], isError: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 	};
-	const generatedGate = (await import(pathToFileURL(generatedGatePath).href)).default();
+	const generatedGate = (await import(pathToFileURL(generatedGatePath).href)).default({ runtimeGeneration: 0, runtimeKey: "a".repeat(64) });
 	if (typeof generatedGate !== "function") throw new Error("Generated gate factory did not return a gate");
 	session._toolResultGate = async event => {
 		gateCalls++;
@@ -338,9 +338,12 @@ async function runChildScenario(root) {
 function runChildNodeProcess(root) {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [fileURLToPath(import.meta.url), root], {
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["pipe", "pipe", "pipe"],
 			env: { ...process.env, BOBBIT_EP14_GENERATED_GATE: join(root, "generated-tool-result-gate.mjs") },
 		});
+		// Mirrors RpcBridge's private pre-RPC handoff. The patched loader consumes
+		// this one record before loading any ordinary extension.
+		child.stdin.end(JSON.stringify({ runtimeGeneration: 0, runtimeKey: "a".repeat(64) }) + "\n");
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", chunk => { stdout += chunk; });

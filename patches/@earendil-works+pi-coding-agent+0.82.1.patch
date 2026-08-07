@@ -98,17 +98,70 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-sessio
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-@@ -54,6 +54,39 @@
+@@ -54,6 +54,93 @@
      "@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
  };
  const require = createRequire(import.meta.url);
 +// This capability is deliberately loader-private. Bobbit configures its path
 +// before Pi starts; the first extension load snapshots it and invokes the
 +// factory before any ordinary extension has an opportunity to alter globals.
++// The reusable callback key arrives only as this first stdin record. It is not
++// an env var or a mounted file, and this reader is removed before RPC readiness.
 +const defineCoreProperty = Object.defineProperty;
++const CORE_GATE_BOOTSTRAP_MAX_BYTES = 256;
 +let coreToolResultGateInitialized = false;
 +let sealedCoreToolResultGate;
 +let sealedCoreToolResultGateFailure;
++async function consumeCoreToolResultGateBootstrap() {
++    const input = process.stdin;
++    if (!input)
++        throw new Error("Core tool-result gate bootstrap is unavailable");
++    return await new Promise((resolve, reject) => {
++        let buffered = "";
++        let settled = false;
++        const finish = (error, value) => {
++            if (settled)
++                return;
++            settled = true;
++            clearTimeout(timer);
++            input.off("data", onData);
++            input.off("error", onError);
++            input.pause();
++            if (error)
++                reject(error);
++            else
++                resolve(value);
++        };
++        const onError = () => finish(new Error("Core tool-result gate bootstrap failed"));
++        const onData = (chunk) => {
++            buffered += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
++            if (Buffer.byteLength(buffered, "utf8") > CORE_GATE_BOOTSTRAP_MAX_BYTES)
++                return finish(new Error("Core tool-result gate bootstrap is invalid"));
++            const newline = buffered.indexOf("\n");
++            if (newline < 0)
++                return;
++            const line = buffered.slice(0, newline);
++            const remaining = buffered.slice(newline + 1);
++            try {
++                const value = JSON.parse(line);
++                if (!value || typeof value !== "object" || !Number.isSafeInteger(value.runtimeGeneration) || value.runtimeGeneration < 0 || typeof value.runtimeKey !== "string" || !/^[0-9a-f]{64}$/.test(value.runtimeKey))
++                    throw new Error("invalid");
++                // Pause and detach first: unshifting while still flowing would
++                // deliver the first RPC record to this bootstrap listener.
++                finish(undefined, Object.freeze({ runtimeGeneration: value.runtimeGeneration, runtimeKey: value.runtimeKey }));
++                if (remaining)
++                    input.unshift(Buffer.from(remaining, "utf8"));
++            }
++            catch {
++                finish(new Error("Core tool-result gate bootstrap is invalid"));
++            }
++        };
++        const timer = setTimeout(() => finish(new Error("Core tool-result gate bootstrap timed out")), 5_000);
++        input.on("data", onData);
++        input.on("error", onError);
++        input.resume();
++    });
++}
 +async function loadSealedCoreToolResultGate(cwd) {
 +    if (coreToolResultGateInitialized) {
 +        if (sealedCoreToolResultGateFailure)
@@ -124,7 +177,8 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/l
 +        const factory = await loadExtensionModule(resolvedPath, undefined);
 +        if (!factory)
 +            throw new Error("Core tool-result gate does not export a factory");
-+        const gate = await factory();
++        const bootstrap = await consumeCoreToolResultGateBootstrap();
++        const gate = await factory(bootstrap);
 +        if (typeof gate !== "function")
 +            throw new Error("Core tool-result gate factory returned an invalid gate");
 +        sealedCoreToolResultGate = Object.freeze(async (event) => await gate(event));
@@ -138,7 +192,7 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/l
  /**
   * Get aliases for jiti (used in Node.js/development mode).
   * In Bun binary mode, virtualModules is used instead.
-@@ -400,6 +433,15 @@
+@@ -400,6 +487,15 @@
      const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
      const resolvedEventBus = eventBus ?? createEventBus();
      const resolvedRuntime = runtime ?? createExtensionRuntime();

@@ -7,7 +7,7 @@ const TOKEN_RE = /^v1\.([0-9a-z]+)\.([0-9a-f-]{36})\.([0-9a-f]{64})$/;
 
 export interface ToolResultFilterGateCredential {
 	runtimeGeneration: number;
-	/** Private loader input only; never put this in an agent environment. */
+	/** One-shot private bootstrap input; never put this in env or mounted source. */
 	runtimeKey: string;
 }
 

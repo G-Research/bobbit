@@ -35,6 +35,8 @@ export function assertToolResultGatePiCompatibility(requireFn = createRequire(im
 		const agentLoop = fs.readFileSync(path.join(agentCoreDir, "dist", "agent-loop.js"), "utf-8");
 		if (!/setToolResultGate\s*\(/.test(types)
 			&& loader.includes(TOOL_RESULT_FILTER_GATE_ENV)
+			&& loader.includes("consumeCoreToolResultGateBootstrap")
+			&& loader.includes("factory(bootstrap)")
 			&& loader.includes("__bobbitCoreToolResultGate")
 			&& session.includes("__bobbitCoreToolResultGate")
 			&& session.includes("__bobbitCoreToolResultGateActive")
@@ -56,12 +58,7 @@ export function assertToolResultGatePiCompatibility(requireFn = createRequire(im
  * protected-session activation must reject untrusted same-realm code that can
  * replace Pi internals.
  */
-export function generateToolResultFilterExtension(
-	sessionId: string,
-	// Test-only unbound input: production activation always receives a fresh
-	// SessionManager-owned credential and the server has no runtime for this key.
-	credential: { runtimeGeneration: number; runtimeKey: string } = { runtimeGeneration: 0, runtimeKey: "0000000000000000000000000000000000000000000000000000000000000000" },
-): string {
+export function generateToolResultFilterExtension(sessionId: string): string {
 	return `import { createHmac as $createHmac } from "node:crypto";
 const $Object = Object;
 const $Array = Array;
@@ -107,10 +104,6 @@ const $randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? global
 const $random = Math.random.bind(Math);
 const $gatewayUrl = typeof process.env.BOBBIT_GATEWAY_URL === "string" ? process.env.BOBBIT_GATEWAY_URL.trim() : "";
 const $token = typeof process.env.BOBBIT_TOKEN === "string" ? process.env.BOBBIT_TOKEN.trim() : "";
-// This key is a private Pi-loader input, never an environment variable. Each
-// callback derives a short-lived, tool-call/attempt-bound one-use credential.
-const $runtimeGeneration = ${credential.runtimeGeneration};
-const $runtimeKey = ${JSON.stringify(credential.runtimeKey)};
 const MAX_BYTES = ${TOOL_RESULT_FILTER_MAX_INPUT_BYTES};
 const TIMEOUT_MS = ${TOOL_RESULT_FILTER_TIMEOUT_MS};
 
@@ -121,12 +114,12 @@ function ref() {
 function withheld() {
   return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + ref() + "]." }], isError: true };
 }
-function attemptCredential(sessionId, toolCallId) {
+function attemptCredential(sessionId, toolCallId, runtimeGeneration, runtimeKey) {
   const attemptId = ref();
   const issued = Date.now().toString(36);
   try {
-    const payload = "v1\\u0000" + sessionId + "\\u0000" + $runtimeGeneration + "\\u0000" + toolCallId + "\\u0000" + issued + "\\u0000" + attemptId;
-    const signature = $createHmac("sha256", $runtimeKey).update(payload, "utf8").digest("hex");
+    const payload = "v1\\u0000" + sessionId + "\\u0000" + runtimeGeneration + "\\u0000" + toolCallId + "\\u0000" + issued + "\\u0000" + attemptId;
+    const signature = $createHmac("sha256", runtimeKey).update(payload, "utf8").digest("hex");
     return "v1." + issued + "." + attemptId + "." + signature;
   } catch { return undefined; }
 }
@@ -382,8 +375,17 @@ function responseFrom(value) {
   return output;
 }
 
-export default function createCoreToolResultGate() {
+export default function createCoreToolResultGate(bootstrap) {
+  // The loader receives this one-use bootstrap through the child stdin before
+  // the RPC protocol begins. It is deliberately absent from this mounted source
+  // and from the process environment.
+  const runtimeGeneration = bootstrap && typeof bootstrap.runtimeGeneration === "number"
+    && $numberIsSafeInteger(bootstrap.runtimeGeneration) && bootstrap.runtimeGeneration >= 0
+    ? bootstrap.runtimeGeneration : undefined;
+  const runtimeKey = bootstrap && typeof bootstrap.runtimeKey === "string"
+    && /^[0-9a-f]{64}$/.test(bootstrap.runtimeKey) ? bootstrap.runtimeKey : undefined;
   const sessionId = ${JSON.stringify(sessionId)};
+  if (runtimeGeneration === undefined || !runtimeKey) return async function unavailableGate() { return withheld(); };
   return async function gate(event) {
     try {
       const inputSignal = ownData(event, "signal")?.value;
@@ -399,7 +401,7 @@ export default function createCoreToolResultGate() {
       const timer = $setTimeout(abortRequest, TIMEOUT_MS);
       try {
         if (isAborted()) return withheld();
-        const credential = attemptCredential(sessionId, request.toolCallId);
+        const credential = attemptCredential(sessionId, request.toolCallId, runtimeGeneration, runtimeKey);
         if (!credential || isAborted()) return withheld();
         const response = await $fetch($gatewayUrl + "/api/sessions/" + $encodeURIComponent(sessionId) + "/tool-result-filter", {
           method: "POST",
@@ -431,11 +433,8 @@ function hasExpectedRegularFile(filePath: string, expected: string): boolean {
 }
 
 /** Write a content-addressed, read-only core input. Any mismatch fails closed. */
-export function writeToolResultFilterExtension(
-	sessionId: string,
-	credential?: { runtimeGeneration: number; runtimeKey: string },
-): string | undefined {
-	const code = generateToolResultFilterExtension(sessionId, credential);
+export function writeToolResultFilterExtension(sessionId: string): string | undefined {
+	const code = generateToolResultFilterExtension(sessionId);
 	if (cachedPath && hasExpectedRegularFile(cachedPath, code)) return cachedPath;
 	cachedPath = undefined;
 	try {

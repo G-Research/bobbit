@@ -1196,8 +1196,11 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		assertToolResultGatePiCompatibility();
 		const credential = ctx.toolResultFilterGateCredential?.(plan.id);
 		if (!credential) throw new Error("Tool-result filter gate credential installation failed.");
-		const gatePath = writeToolResultFilterExtension(plan.id, credential);
+		const gatePath = writeToolResultFilterExtension(plan.id);
 		if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
+		// RpcBridge writes this directly to Pi stdin before its RPC protocol starts.
+		// It is never included in bridgeOptions.env or the mounted gate source.
+		plan.bridgeOptions.toolResultFilterBootstrap = credential;
 		toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
 	}
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
