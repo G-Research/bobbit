@@ -37,6 +37,15 @@ function packEntry(number: number, overrides: Partial<ExtensionPackGrantAuditEnt
 	};
 }
 
+function isHookEntry(entry: ExtensionGrantAuditEntry): entry is ExtensionHookGrantAuditEntry {
+	return !("principal" in entry);
+}
+
+function hookRows(rows: readonly ExtensionGrantAuditEntry[]): ExtensionHookGrantAuditEntry[] {
+	expect(rows.every(isHookEntry)).toBe(true);
+	return rows.filter(isHookEntry);
+}
+
 describe("ExtensionGrantAuditStore", () => {
 	it("appends normalized tuple records and reads newest rows in chronological order", () => {
 		const fs = createMemFs();
@@ -45,8 +54,8 @@ describe("ExtensionGrantAuditStore", () => {
 		store.append(entry(2));
 		store.append(entry(3));
 
-		expect(store.list().map(row => row.hookId)).toEqual(["hook-1", "hook-2", "hook-3"]);
-		expect(store.list(2).map(row => row.hookId)).toEqual(["hook-2", "hook-3"]);
+		expect(hookRows(store.list()).map(row => row.hookId)).toEqual(["hook-1", "hook-2", "hook-3"]);
+		expect(hookRows(store.list(2)).map(row => row.hookId)).toEqual(["hook-2", "hook-3"]);
 		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain("secret-not-persisted");
 	});
 
@@ -81,7 +90,7 @@ describe("ExtensionGrantAuditStore", () => {
 		}
 
 		expect(store.list(999).length).toBe(200);
-		expect(store.list(0).map(row => row.hookId)).toEqual(["hook-205"]);
+		expect(hookRows(store.list(0)).map(row => row.hookId)).toEqual(["hook-205"]);
 		expect(store.list(Number.NaN).length).toBe(100);
 	});
 
