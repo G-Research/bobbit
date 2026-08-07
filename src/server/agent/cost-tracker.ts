@@ -11,12 +11,68 @@ import type { PersistedGoal } from "./goal-store.js";
  * computed at read time from `cacheReadTokens` and `inputTokens`. See
  * docs/design (Cache-Hit Metric).
  */
+export type CostBasis = "api-billed" | "api-notional" | "subscription-notional" | "unknown";
+
+export interface ModelUsageSnapshot {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	notionalCostUsd: number | null;
+	contextWindow: number | null;
+	maxOutputTokens: number | null;
+}
+
+export interface SessionContextSnapshot {
+	currentTokens: number | null;
+	currentModel: string | null;
+	highWaterTokens: number | null;
+	highWaterModel: string | null;
+	byModel: Record<string, {
+		contextWindow: number | null;
+		currentTokens: number | null;
+		highWaterTokens: number | null;
+	}>;
+}
+
+/** Durable root-result observation supplied by the Claude SDK runtime only. */
+export interface AuthoritativeUsageRecord {
+	sourceResultId: string;
+	total: {
+		inputTokens?: number;
+		outputTokens?: number;
+		cacheReadTokens?: number;
+		cacheWriteTokens?: number;
+		notionalCostUsd?: number;
+	};
+	modelUsage: Record<string, {
+		inputTokens?: number;
+		outputTokens?: number;
+		cacheReadTokens?: number;
+		cacheWriteTokens?: number;
+		notionalCostUsd?: number;
+		contextWindow?: number;
+		maxOutputTokens?: number;
+		contextTokens?: number;
+	}>;
+	costBasis: Exclude<CostBasis, "api-billed">;
+}
+
 export interface RawSessionCost {
 	inputTokens: number;
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
+	/** Actual billed cost. Legacy/Pi counters remain numeric internally. */
 	totalCost: number;
+	/** SDK estimates are explicitly separate from billed cost. */
+	notionalCostUsd?: number;
+	costBasis?: CostBasis;
+	costBasisHistory?: CostBasis[];
+	byModel?: Record<string, ModelUsageSnapshot>;
+	context?: SessionContextSnapshot;
+	/** Durable idempotency ledger for authoritative SDK root results. */
+	appliedSourceResultIds?: string[];
 	/**
 	 * Goal this session's cost belongs to. Stamped once at record time so
 	 * tree-cost rollups survive session purge — `sessionStore` is wiped on
@@ -46,6 +102,19 @@ export interface RawSessionCost {
  */
 export interface SessionCost extends RawSessionCost {
 	cacheHitRate: number | null;
+}
+
+/**
+ * Additive server projection. `totalCost` is null when the runtime has only a
+ * notional SDK estimate; legacy callers can continue using SessionCost.
+ */
+export interface SessionUsageSnapshot extends Omit<SessionCost, "totalCost" | "appliedSourceResultIds" | "notionalCostUsd" | "costBasis" | "costBasisHistory" | "byModel" | "context"> {
+	totalCost: number | null;
+	notionalCostUsd: number | null;
+	costBasis: CostBasis;
+	costBasisHistory: CostBasis[];
+	byModel: Record<string, ModelUsageSnapshot>;
+	context: SessionContextSnapshot;
 }
 
 export interface UsageData {
@@ -114,6 +183,30 @@ function emptyRaw(): RawSessionCost {
 	};
 }
 
+function emptyContext(): SessionContextSnapshot {
+	return { currentTokens: null, currentModel: null, highWaterTokens: null, highWaterModel: null, byModel: {} };
+}
+
+function cloneModelUsage(model: ModelUsageSnapshot): ModelUsageSnapshot {
+	return { ...model };
+}
+
+function withUsageSnapshot(raw: RawSessionCost): SessionUsageSnapshot {
+	const { appliedSourceResultIds: _appliedSourceResultIds, ...publicRaw } = raw;
+	const basis = raw.costBasis ?? "api-billed";
+	const byModel = Object.fromEntries(Object.entries(raw.byModel ?? {}).map(([model, usage]) => [model, cloneModelUsage(usage)]));
+	const context = raw.context ?? emptyContext();
+	return {
+		...publicRaw,
+		totalCost: basis === "subscription-notional" || basis === "api-notional" || basis === "unknown" ? null : raw.totalCost,
+		notionalCostUsd: raw.notionalCostUsd ?? null,
+		costBasis: basis,
+		costBasisHistory: [...(raw.costBasisHistory ?? [basis])],
+		byModel,
+		context: { ...context, byModel: Object.fromEntries(Object.entries(context.byModel).map(([model, value]) => [model, { ...value }])) },
+	};
+}
+
 /**
  * Derive the cache-hit rate from a raw cost snapshot.
  *
@@ -133,6 +226,49 @@ export function deriveCacheHitRate(
 /** Decorate a raw cost with the derived `cacheHitRate` field. */
 export function withDerivedFields(raw: RawSessionCost): SessionCost {
 	return { ...raw, cacheHitRate: deriveCacheHitRate(raw) };
+}
+
+function finiteOrNull(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readPersistedModelUsage(value: unknown): Record<string, ModelUsageSnapshot> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const models: Record<string, ModelUsageSnapshot> = {};
+	for (const [model, candidate] of Object.entries(value)) {
+		if (!model || !candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+		const source = candidate as Record<string, unknown>;
+		models[model] = {
+			inputTokens: finiteOrNull(source.inputTokens) ?? 0,
+			outputTokens: finiteOrNull(source.outputTokens) ?? 0,
+			cacheReadTokens: finiteOrNull(source.cacheReadTokens) ?? 0,
+			cacheWriteTokens: finiteOrNull(source.cacheWriteTokens) ?? 0,
+			notionalCostUsd: finiteOrNull(source.notionalCostUsd),
+			contextWindow: finiteOrNull(source.contextWindow),
+			maxOutputTokens: finiteOrNull(source.maxOutputTokens),
+		};
+	}
+	return Object.keys(models).length > 0 ? models : undefined;
+}
+
+function readPersistedContext(value: unknown): SessionContextSnapshot | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const source = value as Record<string, unknown>;
+	const perModel: SessionContextSnapshot["byModel"] = {};
+	if (source.byModel && typeof source.byModel === "object" && !Array.isArray(source.byModel)) {
+		for (const [model, candidate] of Object.entries(source.byModel)) {
+			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+			const entry = candidate as Record<string, unknown>;
+			perModel[model] = { contextWindow: finiteOrNull(entry.contextWindow), currentTokens: finiteOrNull(entry.currentTokens), highWaterTokens: finiteOrNull(entry.highWaterTokens) };
+		}
+	}
+	return {
+		currentTokens: finiteOrNull(source.currentTokens),
+		currentModel: typeof source.currentModel === "string" ? source.currentModel : null,
+		highWaterTokens: finiteOrNull(source.highWaterTokens),
+		highWaterModel: typeof source.highWaterModel === "string" ? source.highWaterModel : null,
+		byModel: perModel,
+	};
 }
 
 /**
@@ -179,6 +315,12 @@ export class CostTracker {
 							if (typeof c.firstSeenAt === "number" && Number.isFinite(c.firstSeenAt)) {
 								entry.firstSeenAt = c.firstSeenAt;
 							}
+							if (typeof c.notionalCostUsd === "number" && Number.isFinite(c.notionalCostUsd)) entry.notionalCostUsd = c.notionalCostUsd;
+							if (c.costBasis === "api-billed" || c.costBasis === "api-notional" || c.costBasis === "subscription-notional" || c.costBasis === "unknown") entry.costBasis = c.costBasis;
+							if (Array.isArray(c.costBasisHistory)) entry.costBasisHistory = c.costBasisHistory.filter((basis): basis is CostBasis => basis === "api-billed" || basis === "api-notional" || basis === "subscription-notional" || basis === "unknown");
+							if (Array.isArray(c.appliedSourceResultIds)) entry.appliedSourceResultIds = c.appliedSourceResultIds.filter((sourceId): sourceId is string => typeof sourceId === "string" && sourceId.length > 0);
+							entry.byModel = readPersistedModelUsage(c.byModel);
+							entry.context = readPersistedContext(c.context);
 							this.costs.set(id, entry);
 						}
 					}
@@ -226,6 +368,12 @@ export class CostTracker {
 				};
 				if (cost.goalId) entry.goalId = cost.goalId;
 				if (typeof cost.firstSeenAt === "number") entry.firstSeenAt = cost.firstSeenAt;
+				if (typeof cost.notionalCostUsd === "number") entry.notionalCostUsd = cost.notionalCostUsd;
+				if (cost.costBasis) entry.costBasis = cost.costBasis;
+				if (cost.costBasisHistory) entry.costBasisHistory = [...cost.costBasisHistory];
+				if (cost.byModel) entry.byModel = Object.fromEntries(Object.entries(cost.byModel).map(([model, usage]) => [model, cloneModelUsage(usage)]));
+				if (cost.context) entry.context = { ...cost.context, byModel: Object.fromEntries(Object.entries(cost.context.byModel).map(([model, context]) => [model, { ...context }])) };
+				if (cost.appliedSourceResultIds) entry.appliedSourceResultIds = [...cost.appliedSourceResultIds];
 				data[id] = entry;
 			}
 			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
@@ -274,6 +422,77 @@ export class CostTracker {
 		this.dirty = true;
 		this.scheduleSave();
 		return withDerivedFields(existing);
+	}
+
+	/**
+	 * Atomically apply one SDK root-result observation. The source id is persisted
+	 * with the aggregate in the same synchronous save, so bridge replay after a
+	 * restart cannot count the same provider result twice.
+	 */
+	recordAuthoritativeUsage(sessionId: string, record: AuthoritativeUsageRecord, goalId?: string): { applied: boolean; snapshot: SessionUsageSnapshot } {
+		if (!record.sourceResultId || !record.total || !record.modelUsage || typeof record.modelUsage !== "object"
+			|| !Number.isFinite(record.total.inputTokens ?? 0) || !Number.isFinite(record.total.outputTokens ?? 0)) {
+			const current = this.costs.get(sessionId) ?? emptyRaw();
+			return { applied: false, snapshot: withUsageSnapshot(current) };
+		}
+		const existing = this.costs.get(sessionId) ?? emptyRaw();
+		const applied = new Set(existing.appliedSourceResultIds ?? []);
+		if (applied.has(record.sourceResultId)) return { applied: false, snapshot: withUsageSnapshot(existing) };
+
+		existing.inputTokens += record.total.inputTokens ?? 0;
+		existing.outputTokens += record.total.outputTokens ?? 0;
+		existing.cacheReadTokens += record.total.cacheReadTokens ?? 0;
+		existing.cacheWriteTokens += record.total.cacheWriteTokens ?? 0;
+		if (typeof record.total.notionalCostUsd === "number" && Number.isFinite(record.total.notionalCostUsd)) {
+			existing.notionalCostUsd = Math.round(((existing.notionalCostUsd ?? 0) + record.total.notionalCostUsd) * 1_000_000) / 1_000_000;
+		}
+		for (const [model, usage] of Object.entries(record.modelUsage)) {
+			const bucket = existing.byModel?.[model] ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, notionalCostUsd: null, contextWindow: null, maxOutputTokens: null };
+			bucket.inputTokens += usage.inputTokens ?? 0;
+			bucket.outputTokens += usage.outputTokens ?? 0;
+			bucket.cacheReadTokens += usage.cacheReadTokens ?? 0;
+			bucket.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+			if (typeof usage.notionalCostUsd === "number" && Number.isFinite(usage.notionalCostUsd)) bucket.notionalCostUsd = Math.round(((bucket.notionalCostUsd ?? 0) + usage.notionalCostUsd) * 1_000_000) / 1_000_000;
+			if (typeof usage.contextWindow === "number" && Number.isFinite(usage.contextWindow)) bucket.contextWindow = usage.contextWindow;
+			if (typeof usage.maxOutputTokens === "number" && Number.isFinite(usage.maxOutputTokens)) bucket.maxOutputTokens = usage.maxOutputTokens;
+			existing.byModel = { ...(existing.byModel ?? {}), [model]: bucket };
+
+			if (typeof usage.contextTokens === "number" && Number.isFinite(usage.contextTokens)) {
+				const context = existing.context ?? emptyContext();
+				const modelContext = context.byModel[model] ?? { contextWindow: null, currentTokens: null, highWaterTokens: null };
+				modelContext.currentTokens = usage.contextTokens;
+				modelContext.contextWindow = bucket.contextWindow;
+				modelContext.highWaterTokens = Math.max(modelContext.highWaterTokens ?? 0, usage.contextTokens);
+				context.currentTokens = usage.contextTokens;
+				context.currentModel = model;
+				if ((context.highWaterTokens ?? -1) <= usage.contextTokens) {
+					context.highWaterTokens = usage.contextTokens;
+					context.highWaterModel = model;
+				}
+				context.byModel[model] = modelContext;
+				existing.context = context;
+			}
+		}
+		if (goalId && !existing.goalId) existing.goalId = goalId;
+		if (!existing.firstSeenAt) existing.firstSeenAt = Date.now();
+		existing.costBasis = record.costBasis;
+		existing.costBasisHistory = [...new Set([...(existing.costBasisHistory ?? []), record.costBasis])];
+		applied.add(record.sourceResultId);
+		existing.appliedSourceResultIds = [...applied];
+		this.costs.set(sessionId, existing);
+		this.generation++;
+		this.dirty = true;
+		// Do not debounce the idempotency key: the root result is terminal and may
+		// be replayed immediately by a replacement bridge or after process restart.
+		this.cancelScheduledSave();
+		this.saveNow();
+		return { applied: true, snapshot: withUsageSnapshot(existing) };
+	}
+
+	/** Additive authoritative usage projection used by SDK-aware transports. */
+	getSessionUsage(sessionId: string): SessionUsageSnapshot | undefined {
+		const cost = this.costs.get(sessionId);
+		return cost ? withUsageSnapshot(cost) : undefined;
 	}
 
 	/** Current generation tick. Bumped on every cost mutation. */

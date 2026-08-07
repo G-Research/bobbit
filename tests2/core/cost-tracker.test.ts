@@ -7,7 +7,7 @@
  * Uses an injected in-memory FsLike to avoid real filesystem IO.
  */
 import path from "node:path";
-import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { CostTracker, deriveCacheHitRate } from "../../src/server/agent/cost-tracker.ts";
 import { ProjectContext } from "../../src/server/agent/project-context.ts";
@@ -481,6 +481,48 @@ describe("CostTracker", () => {
 			const tracker = new CostTracker(stateDir, memfs);
 			const cost = tracker.getSessionCost("s1")!;
 			assert.equal(cost.cacheHitRate, 0.75);
+		});
+	});
+
+	describe("authoritative SDK usage ledger", () => {
+		const result = (sourceResultId: string, contextTokens = 800) => ({
+			sourceResultId,
+			costBasis: "subscription-notional" as const,
+			total: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, notionalCostUsd: 0.42 },
+			modelUsage: {
+				"claude-sonnet": { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, notionalCostUsd: 0.42, contextWindow: 200_000, contextTokens },
+			},
+		});
+
+		it("persists the source-result ledger before accepting a replay after reload", () => {
+			const tracker = new CostTracker(stateDir, memfs);
+			const first = tracker.recordAuthoritativeUsage("sdk", result("sdk-result-1"), "goal");
+			expect(first.applied).toBe(true);
+			expect(first.snapshot.totalCost).toBeNull();
+			expect(first.snapshot.notionalCostUsd).toBe(0.42);
+			const reloaded = new CostTracker(stateDir, memfs);
+			const replay = reloaded.recordAuthoritativeUsage("sdk", result("sdk-result-1"), "goal");
+			expect(replay.applied).toBe(false);
+			expect(replay.snapshot.inputTokens).toBe(100);
+			expect(replay.snapshot.byModel["claude-sonnet"].outputTokens).toBe(20);
+			expect(replay.snapshot.context.highWaterTokens).toBe(800);
+			expect(replay.snapshot.costBasis).toBe("subscription-notional");
+		});
+
+		it("keeps separate equal-valued results, model attribution, and context high-water", () => {
+			const tracker = new CostTracker(stateDir, memfs);
+			tracker.recordAuthoritativeUsage("sdk", result("one", 800));
+			const second = tracker.recordAuthoritativeUsage("sdk", {
+				...result("two", 400),
+				modelUsage: { "claude-opus": { inputTokens: 100, outputTokens: 20, contextWindow: 200_000, contextTokens: 400 } },
+			});
+			expect(second.applied).toBe(true);
+			expect(second.snapshot.inputTokens).toBe(200);
+			expect(second.snapshot.byModel["claude-sonnet"].inputTokens).toBe(100);
+			expect(second.snapshot.byModel["claude-opus"].inputTokens).toBe(100);
+			expect(second.snapshot.context.currentTokens).toBe(400);
+			expect(second.snapshot.context.highWaterTokens).toBe(800);
+			expect(second.snapshot.context.highWaterModel).toBe("claude-sonnet");
 		});
 	});
 
