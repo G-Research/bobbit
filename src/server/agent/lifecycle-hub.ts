@@ -193,7 +193,7 @@ export class LifecycleHub {
 	private readonly trace: ContextTraceStore;
 	private readonly gatewayInfo: () => { baseUrl: string; token: string };
 	private readonly globalMaxTokens: number;
-	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+	private readonly providerHostApi?: (opts: { sessionId: string; packId: string; projectId?: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
 	private readonly scopeContextResolver?: HookScopeContextResolver;
 	private readonly runtimeContextResolver?: RuntimeContextResolver;
@@ -215,7 +215,7 @@ export class LifecycleHub {
 		 *  per provider invocation so a hook reaches its own pack's durable store
 		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
 		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
-		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+		providerHostApi?: (opts: { sessionId: string; packId: string; projectId?: string }) => ServerHostApi;
 		/** Optional read-only lookup for providers declaring `runtime`. It is invoked
 		 * only during provider dispatch and never receives lifecycle controls. */
 		runtimeContextResolver?: RuntimeContextResolver;
@@ -348,7 +348,7 @@ export class LifecycleHub {
 		const deliveries: GoalCompletedDelivery[] = [];
 		for (const provider of providers) {
 			const packId = packIdFromRoot(provider.packRoot);
-			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId });
+			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId, projectId: ctx.projectId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			const deadline = createLifecycleDeadline(provider.budget.timeoutMs, ctx.signal);
 			try {
@@ -455,7 +455,7 @@ export class LifecycleHub {
 			// in the parent (module-host-worker strips it before serialization) and
 			// services the worker's proxied store calls — the durable retain queue /
 			// diagnostics path. packId is derived from the contribution's pack root.
-			const providerHost = this.providerHostApi?.({ sessionId: dispatchBase.sessionId, packId });
+			const providerHost = this.providerHostApi?.({ sessionId: dispatchBase.sessionId, packId, projectId: dispatchBase.projectId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			const t0 = performance.now();
 			let ms = 0;

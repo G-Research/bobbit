@@ -128,7 +128,7 @@ const ACTIVE = {
 
 function ctx(extra: Record<string, unknown>) {
 	const store = makeStore();
-	return { store, ctx: { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), ...extra } };
+	return { store, ctx: { config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), ...extra } };
 }
 
 test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constructed", async () => {
@@ -141,7 +141,7 @@ test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constru
 		const store = makeStore();
 		const base = {
 			config: { mode: "external", bank: "bobbit", namespace: "default" }, // externalUrl absent
-			host: { store }, scopeContext: scope(),
+			host: { store, memory: liveMemoryGrant() }, scopeContext: scope(),
 			sessionId: "s1",
 			projectId: "p1",
 			goalId: "g1",
@@ -171,7 +171,7 @@ test("autoRecall and autoRetain disable their respective client-backed hooks", a
 		const store = makeStore();
 		const base = {
 			config: { ...ACTIVE, autoRecall: false, autoRetain: false },
-			host: { store }, scopeContext: scope(),
+			host: { store, memory: liveMemoryGrant() }, scopeContext: scope(),
 			prompt: "do not recall or retain this",
 			response: "no remote call",
 			summary: "do not compact this",
@@ -217,7 +217,7 @@ test("recall failure records a diagnostic and a later healthy call recovers", as
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const c = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), prompt: "recoverable recall" };
+		const c = { config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), prompt: "recoverable recall" };
 		state.failRecall = true;
 		assert.deepEqual(await provider.beforePrompt(c), { blocks: [] });
 		const diagnostic = await store.get<{ message: string; ts: number }>(LAST_ERROR_KEY);
@@ -240,17 +240,69 @@ test("recall is fixed to authoritative project and goal scope; flat fields canno
 	__setClientFactory(() => client);
 	try {
 		state.memories = [{ text: "x" }];
-		const scopedCtx = { config: { ...ACTIVE }, host: { store: makeStore() }, scopeContext: scope("proj-42", "goal-42"), projectId: "forged-project", goalId: "forged-goal", prompt: "q" };
+		const scopedCtx = { config: { ...ACTIVE }, host: { store: makeStore(), memory: liveMemoryGrant() }, scopeContext: scope("proj-42", "goal-42"), projectId: "forged-project", goalId: "forged-goal", prompt: "q" };
 		await provider.beforePrompt(scopedCtx);
 		const o = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
 		assert.deepEqual(o.tags, { project: "proj-42", goal: "goal-42" });
 		assert.equal(o.tagsMatch, "all_strict");
 
-		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: makeStore() }, prompt: "must not recall" });
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: makeStore(), memory: liveMemoryGrant() }, prompt: "must not recall" });
 		assert.equal(calls.recall.length, 1, "missing authoritative scope must not issue a remote recall");
 	} finally {
 		__setClientFactory(null);
 	}
+});
+
+test("automatic memory work fails closed when the server grant adapter is absent", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const base = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "absent-grant", prompt: "must not recall", response: "must not retain", summary: "must not compact" };
+		assert.deepEqual(await provider.beforePrompt(base), { blocks: [] });
+		await provider.afterTurn(base);
+		await provider.beforeCompact(base);
+		await provider.sessionShutdown(base);
+		assert.equal(calls.recall.length, 0, "no adapter must prevent automatic recall before client construction");
+		assert.equal(calls.retain.length, 0, "no adapter must prevent automatic retain/replay writes");
+		assert.equal(store.map.size, 0, "no adapter must prevent queue or diagnostic mutations");
+	} finally { __setClientFactory(null); }
+});
+
+test("automatic memory work rechecks live grants and leaves denial or revocation nonfatal", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		let readAllowed = false;
+		let writeAllowed = false;
+		const host = {
+			store,
+			memory: {
+				requireCapability: async (capability: "memory.read" | "memory.write") => {
+					if ((capability === "memory.read" ? readAllowed : writeAllowed) === false) throw new Error("EXTENSION_CAPABILITY_DENIED");
+				},
+			},
+		};
+		const base = { config: { ...ACTIVE }, host, scopeContext: scope(), sessionId: "grant-session", prompt: "grant scoped recall", response: "grant scoped retain" };
+
+		assert.deepEqual(await provider.beforePrompt(base), { blocks: [] });
+		assert.equal(calls.recall.length, 0, "an absent read grant must fail before the client is constructed");
+		assert.equal(store.map.size, 0, "a denied automatic read must not write diagnostics");
+
+		readAllowed = true;
+		await provider.beforePrompt(base);
+		assert.equal(calls.recall.length, 1);
+		readAllowed = false; // Live revoke wins for the next automatic path.
+		await provider.beforePrompt(base);
+		assert.equal(calls.recall.length, 1, "a revoked read grant must prevent the next provider call");
+
+		await provider.afterTurn(base);
+		assert.equal(calls.retain.length, 0);
+		assert.equal(store.map.size, 0, "a denied write grant must not append a pending retain record");
+		await provider.goalCompleted({ ...base, completionRevision: "denied-completion", outcome: { title: "No grant" } });
+		assert.equal(calls.retain.length, 0, "denied completion delivery is intentionally non-fatal");
+	} finally { __setClientFactory(null); }
 });
 
 test("afterTurn retains a compact summary with the full auto-tag taxonomy", async () => {
@@ -260,7 +312,7 @@ test("afterTurn retains a compact summary with the full auto-tag taxonomy", asyn
 		const store = makeStore();
 		const c = {
 			config: { ...ACTIVE },
-			host: { store }, scopeContext: scope(),
+			host: { store, memory: liveMemoryGrant() }, scopeContext: scope(),
 			sessionId: "sess-1",
 			projectId: "forged-project",
 			goalId: "forged-goal",
@@ -293,7 +345,7 @@ test("beforeCompact retains synchronously with kind:compaction", async () => {
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const c = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", summary: "lost span text" };
+		const c = { config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s", summary: "lost span text" };
 		await provider.beforeCompact(c);
 		assert.equal(calls.retain.length, 1);
 		assert.equal(calls.retain[0].content, "lost span text");
@@ -310,7 +362,7 @@ test("compaction document identity is event-stable for queue replay and unique a
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const base = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "same-session" };
+		const base = { config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "same-session" };
 		await provider.beforeCompact({ ...base, now: 101, summary: "first compaction" });
 		const firstDirectId = calls.retain[0]?.opts.id;
 		const queued = (await store.get(queueKey("proj-1"))) as Array<{ documentId: string }>;
@@ -350,7 +402,7 @@ test("UH-2: remote retain and queue persistence failure rejects with a sanitized
 	try {
 		const error = await provider.afterTurn({
 			config: { ...ACTIVE },
-			host: { store }, scopeContext: scope(),
+			host: { store, memory: liveMemoryGrant() }, scopeContext: scope(),
 			sessionId: "s",
 			prompt: "retain this turn",
 		}).then(
@@ -395,7 +447,7 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 	try {
 		const error = await provider.afterTurn({
 			config: { ...ACTIVE },
-			host: { store }, scopeContext: scope(),
+			host: { store, memory: liveMemoryGrant() }, scopeContext: scope(),
 			sessionId: "s",
 			prompt: "retain this turn",
 		}).then(
@@ -433,12 +485,12 @@ test("unknown queue blocks both drains and status never reports it as empty", as
 	__setClientFactory(() => client);
 	try {
 		// No turn summary: this isolates the head drain from a new retain.
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope() });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope() });
 		assert.equal(calls.retain.length, 0, "unknown queue must not issue remote drain retains");
 		assert.deepEqual(await store.get(QUEUE_KEY), [{ content: "must-not-drain", tags: { kind: "turn" }, ts: 1 }]);
 
-		const status = await routes.status({ host: { store } } as never) as Record<string, unknown>;
+		const status = await routes.status({ host: { store, memory: liveMemoryGrant() } } as never) as Record<string, unknown>;
 		assert.equal(status.queueDepth, null, "unknown durable state is not an empty queue");
 		assert.equal(status.queueState, "unavailable");
 		assert.deepEqual(status.queueError, { code: "STORE_READ_IO", retryable: true });
@@ -454,7 +506,7 @@ test("status preserves a valid stored empty queue", async () => {
 	await store.put(QUEUE_KEY, []);
 	__setClientFactory(() => makeClient().client);
 	try {
-		const status = await routes.status({ host: { store } } as never) as Record<string, unknown>;
+		const status = await routes.status({ host: { store, memory: liveMemoryGrant() } } as never) as Record<string, unknown>;
 		assert.equal(status.queueDepth, 0);
 		assert.equal(status.queueState, "available");
 	} finally {
@@ -481,9 +533,9 @@ test("unreadable config is visible, sanitized, and cannot be overwritten", async
 		return makeClient().client;
 	});
 	try {
-		const get = await routes.config({ host: { store } } as never, { method: "GET" } as never) as Record<string, unknown>;
-		const set = await routes.config({ host: { store } } as never, { method: "POST", body: { bank: "new-bank" } } as never) as Record<string, unknown>;
-		const recall = await routes.recall({ host: { store } } as never, { body: { query: "do not call remote" } } as never) as Record<string, unknown>;
+		const get = await routes.config({ host: { store, memory: liveMemoryGrant() } } as never, { method: "GET" } as never) as Record<string, unknown>;
+		const set = await routes.config({ host: { store, memory: liveMemoryGrant() } } as never, { method: "POST", body: { bank: "new-bank" } } as never) as Record<string, unknown>;
+		const recall = await routes.recall({ host: { store, memory: liveMemoryGrant() } } as never, { body: { query: "do not call remote" } } as never) as Record<string, unknown>;
 		assert.equal(get.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
 		assert.equal(set.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
 		assert.equal(recall.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
@@ -501,7 +553,7 @@ test("retry queue: successful durable enqueue remains non-fatal", async () => {
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "retry me" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s", prompt: "retry me" });
 		const q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.deepEqual(q.map((entry) => entry.content), ["User: retry me"]);
 	} finally {
@@ -520,7 +572,7 @@ test("retry queue: failed error-record write does not negate a durable enqueue",
 			if (key === LAST_ERROR_KEY) throw new Error("diagnostic-store-unavailable");
 			await durablePut(key, value);
 		};
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "queued despite error write" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s", prompt: "queued despite error write" });
 		const q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.deepEqual(q.map((entry) => entry.content), ["User: queued despite error write"]);
 	} finally {
@@ -539,7 +591,7 @@ test("retry queue: drain head keeps the durable queue unchanged when save fails"
 			if (key === PROJECT_QUEUE_KEY) throw new Error("queue-save-failed");
 			return durableMutate(key, value, options);
 		};
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), prompt: "new turn" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), prompt: "new turn" });
 		assert.deepEqual(await store.get(PROJECT_QUEUE_KEY), [queueEntry("head", 1)]);
 		assert.equal(calls.retain.filter((call) => call.content === "head").length, 1);
 	} finally {
@@ -559,7 +611,7 @@ test("retry queue: shutdown drain keeps all durable entries when save fails", as
 			if (key === PROJECT_QUEUE_KEY) throw new Error("queue-save-failed");
 			return durableMutate(key, value, options);
 		};
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope() });
 		assert.deepEqual(await store.get(PROJECT_QUEUE_KEY), entries);
 		assert.deepEqual(calls.retain.map((call) => call.content), ["first"], "a failed fenced removal stops rather than risking later stale writes");
 	} finally {
@@ -578,14 +630,14 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		// 105 failing turns ⇒ queue caps at 100, oldest dropped (contents #6..#105).
 		state.failRetain = true;
 		for (let i = 1; i <= 105; i++) {
-			await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: `turn ${i}` });
+			await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s", prompt: `turn ${i}` });
 		}
 		let q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 100, "queue capped at 100");
 		assert.match(q[0].content, /User: turn 6/, "oldest durable queue entry retains its overlap context");
 
 		// status route reads the SAME pack-store queue + reports healthy.
-		const st = (await routes.status({ host: { store } } as never)) as { configured: boolean; healthy: boolean; queueDepth: number };
+		const st = (await routes.status({ host: { store, memory: liveMemoryGrant() } } as never)) as { configured: boolean; healthy: boolean; queueDepth: number };
 		assert.equal(st.configured, true);
 		assert.equal(st.healthy, true);
 		assert.equal(st.queueDepth, 0, "unscoped status cannot inspect a project-partitioned queue");
@@ -594,7 +646,7 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		// (now-succeeding) retain.
 		state.failRetain = false;
 		const retainsBefore = calls.retain.length;
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "turn 106" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s", prompt: "turn 106" });
 		q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 99, "one queued head drained");
 		assert.match(q[0].content, /User: turn 7/, "head removal preserves the next durable queue entry");
@@ -602,7 +654,7 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		assert.ok(calls.retain.length >= retainsBefore + 2);
 
 		// sessionShutdown does a one-pass drain of the rest.
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s" });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s" });
 		q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 0, "shutdown drained the remaining queue");
 	} finally {
@@ -618,13 +670,13 @@ test("routes: dormant store ⇒ clean configured:false signals, no client constr
 	});
 	try {
 		const store = makeStore(); // no config persisted
-		const cfg = (await routes.config({ host: { store } } as never, { method: "GET" } as never)) as { configured: boolean; config: Record<string, unknown> };
+		const cfg = (await routes.config({ host: { store, memory: liveMemoryGrant() } } as never, { method: "GET" } as never)) as { configured: boolean; config: Record<string, unknown> };
 		assert.equal(cfg.configured, false);
 		assert.equal(cfg.config.apiKeySet, false, "secret redacted to a boolean");
 		assert.equal(cfg.config.bank, "bobbit");
 
-		assert.deepEqual(await routes.recall({ host: { store } } as never, { body: { query: "x" } } as never), { configured: false, memories: [] });
-		assert.deepEqual(await routes.banks({ host: { store } } as never), { configured: false, banks: [] });
+		assert.deepEqual(await routes.recall({ host: { store, memory: liveMemoryGrant() } } as never, { body: { query: "x" } } as never), { configured: false, memories: [] });
+		assert.deepEqual(await routes.banks({ host: { store, memory: liveMemoryGrant() } } as never), { configured: false, banks: [] });
 		assert.equal(factoryCalls, 0, "no client constructed while unconfigured");
 	} finally {
 		__setClientFactory(null);
@@ -644,7 +696,7 @@ test("routes recall uses authoritative scope and fails closed without it", async
 		assert.deepEqual(o1.tags, { project: "proj-7", goal: "goal-7" });
 		assert.equal(o1.tagsMatch, "all_strict");
 
-		const missing = await routes.recall({ host: { store } } as never, { body: { query: "q2" } } as never);
+		const missing = await routes.recall({ host: { store, memory: liveMemoryGrant() } } as never, { body: { query: "q2" } } as never);
 		assert.deepEqual(missing, { configured: true, memories: [] });
 		assert.equal(calls.recall.length, 1, "missing scope must not call the remote provider");
 	} finally {
@@ -659,12 +711,12 @@ test("routes config SET validates, persists, and redacts the secret", async () =
 		// An old ordinary config record may still contain the retired field. A
 		// legitimate config write must remove it rather than carrying it forward.
 		await store.put(CONFIG_KEY, { llmApiKey: "legacy-must-not-survive" });
-		const bad = (await routes.config({ host: { store } } as never, { method: "POST", body: { recallScope: "all" } } as never)) as { ok: boolean; error?: string };
+		const bad = (await routes.config({ host: { store, memory: liveMemoryGrant() } } as never, { method: "POST", body: { recallScope: "all" } } as never)) as { ok: boolean; error?: string };
 		assert.equal(bad.ok, false);
 		assert.equal(bad.error, "CONFIG_INVALID");
 
 		const ok = (await routes.config(
-			{ host: { store } } as never,
+			{ host: { store, memory: liveMemoryGrant() } } as never,
 			{ method: "POST", body: { externalUrl: "http://localhost:8888", apiKey: "secret", llmApiKey: "must-not-persist" } } as never,
 		)) as { ok: boolean; configured: boolean; config: Record<string, unknown> };
 		assert.equal(ok.ok, true);
@@ -689,10 +741,10 @@ test("queue remains writable after a healthy shutdown on a fresh store", async (
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope() });
 		assert.equal(await store.get(PROJECT_QUEUE_KEY), null, "an empty shutdown must not create an unversioned queue");
 		state.failRetain = true;
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "durable after shutdown" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s", prompt: "durable after shutdown" });
 		assert.equal(((await store.get(PROJECT_QUEUE_KEY)) as { content: string }[]).length, 1);
 	} finally { __setClientFactory(null); }
 });
@@ -713,7 +765,7 @@ test("queue drain CAS preserves a concurrent appended retry", async () => {
 		}, reflect: async () => ({ text: "" }), listBanks: async () => ({ banks: [] }),
 	}));
 	try {
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope() });
 		assert.deepEqual(await store.get(PROJECT_QUEUE_KEY), [later], "only the exact remotely replayed head may be removed");
 	} finally { __setClientFactory(null); }
 });
@@ -723,7 +775,7 @@ test("turn batches get distinct document IDs and do not resend prior primary tex
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const base = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s" };
+		const base = { config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), sessionId: "s" };
 		await provider.afterTurn({ ...base, prompt: "first primary" });
 		await provider.afterTurn({ ...base, prompt: "second primary" });
 		assert.notEqual(calls.retain[0].opts.id, calls.retain[1].opts.id);
@@ -737,7 +789,7 @@ test("nested host completion payload puts goal fields before tasks and gates", a
 	try {
 		const store = makeStore();
 		await provider.goalCompleted({
-			config: { ...ACTIVE }, host: { store }, scopeContext: scope(), completionRevision: "nested-host-shape",
+			config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), completionRevision: "nested-host-shape",
 			outcome: {
 				version: 1,
 				goal: { id: "goal-1", title: "Nested goal", state: "complete", spec: "Ship the durable behavior", updatedAt: 12 },
@@ -763,22 +815,22 @@ test("outcome retry uses a completion-revision-stable document ID", async () => 
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const completion = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), completionRevision: "complete-42", outcome: { title: "Outcome", tasks: [{ title: "task", state: "complete" }] } };
+		const completion = { config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), completionRevision: "complete-42", outcome: { title: "Outcome", tasks: [{ title: "task", state: "complete" }] } };
 		await provider.goalCompleted(completion);
 		const directId = calls.retain[0].opts.id;
 		const queued = (await store.get(PROJECT_QUEUE_KEY)) as { documentId: string }[];
 		assert.equal(queued[0].documentId, directId);
 		state.failRetain = false;
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope() });
 		assert.equal(calls.retain[1].opts.id, directId);
 	} finally { __setClientFactory(null); }
 });
 
 test("completion without scope, revision, or active runtime cannot claim durable delivery", async () => {
 	const store = makeStore();
-	await assert.rejects(provider.goalCompleted({ config: { ...ACTIVE }, host: { store }, outcome: { title: "missing scope" }, completionRevision: "r" }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
-	await assert.rejects(provider.goalCompleted({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), outcome: { title: "missing revision" } }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
-	await assert.rejects(provider.goalCompleted({ config: { bank: "bobbit" }, host: { store }, scopeContext: scope(), outcome: { title: "inactive" }, completionRevision: "r" }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
+	await assert.rejects(provider.goalCompleted({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, outcome: { title: "missing scope" }, completionRevision: "r" }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
+	await assert.rejects(provider.goalCompleted({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), outcome: { title: "missing revision" } }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
+	await assert.rejects(provider.goalCompleted({ config: { bank: "bobbit" }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(), outcome: { title: "inactive" }, completionRevision: "r" }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
 });
 
 test("project-partitioned queue recovery cannot send project B content through project A", async () => {
@@ -788,9 +840,9 @@ test("project-partitioned queue recovery cannot send project B content through p
 		const store = makeStore();
 		const projectB = "project-b";
 		await store.seed(queueKey(projectB), [queueEntry("private B", 1, projectB, "goal-b")]);
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope("project-a", "goal-a") });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope("project-a", "goal-a") });
 		assert.equal(calls.retain.length, 0, "project A must not inspect or replay project B queue records");
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(projectB, "goal-b") });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store, memory: liveMemoryGrant() }, scopeContext: scope(projectB, "goal-b") });
 		assert.equal(calls.retain.length, 1);
 		assert.equal(calls.retain[0].content, "private B");
 	} finally { __setClientFactory(null); }

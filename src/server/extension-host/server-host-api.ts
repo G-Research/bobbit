@@ -158,6 +158,10 @@ export interface ServerHostApi {
 	readonly agents: ServerHostAgentsApi;
 	/** Server-derived memory capability checks. */
 	readonly memory: ServerHostMemoryApi;
+	/** EP-7 effective provider configuration, confined to an authorized typed route. */
+	readonly providerConfig?: Readonly<Record<string, unknown>>;
+	/** Bounded server-derived completion snapshot, injected only by a typed server route. */
+	readonly completedOutcome?: unknown;
 }
 
 export interface CreateServerHostApiOptions {
@@ -210,6 +214,10 @@ export interface CreateServerHostApiOptions {
 	/** Optional pack-bound memory policy adapter. The gateway resolves its project,
 	 * session and pack identity before constructing this host. */
 	memory?: { requireCapability(capability: string): void | Promise<void> };
+	/** Effective EP-7 values for an authorized typed route; never serialize this host field. */
+	providerConfig?: Readonly<Record<string, unknown>>;
+	/** Bounded completion data selected by the server for retain-outcome. */
+	completedOutcome?: unknown;
 }
 
 /**
@@ -412,6 +420,8 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		session: flags.session ? session : denyNamespace("session", session),
 		agents: flags.agents ? agents : denyNamespace("agents", agents),
 		memory: flags.memory ? memory : denyNamespace("memory", memory),
+		...(opts.providerConfig ? { providerConfig: structuredClone(opts.providerConfig) } : {}),
+		...(opts.completedOutcome === undefined ? {} : { completedOutcome: structuredClone(opts.completedOutcome) }),
 	};
 }
 

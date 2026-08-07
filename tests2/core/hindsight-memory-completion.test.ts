@@ -43,7 +43,7 @@ function pending(scope: { projectId: string; goalId: string; sessionId: string; 
 function setup(store: ReturnType<typeof fakeStore>, projectId: string, now: number, extra: Record<string, unknown> = {}) {
 	return provider.sessionSetup({
 		config: { externalUrl: "https://memory.test", bank: "sweeper-bank", namespace: "sweeper-ns", retainMaxDelayMs: 1_000, timeoutMs: 10_000 },
-		host: { store }, scopeContext: { project: { id: projectId }, goal: { id: "sweeper-goal" }, role: "sweeper" }, sessionId: "sweeper-session", now,
+		host: { store, memory: { requireCapability: () => {} } }, scopeContext: { project: { id: projectId }, goal: { id: "sweeper-goal" }, role: "sweeper" }, sessionId: "sweeper-session", now,
 		...extra,
 	});
 }

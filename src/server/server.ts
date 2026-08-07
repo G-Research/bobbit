@@ -3037,7 +3037,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
 		try {
 			const store = context.extensionSettingsStore;
-			if (!store.hasTargetRecord(ref)) return { state: "absent" as const };
+			// Hindsight's lifecycle/runtime path has one canonical owner: its typed
+			// EP-7 provider settings. Do not resurrect a legacy pack-store config
+			// when no project row has been written; EP-7 defaults are the dormant,
+			// project-scoped source of truth from first use onward.
+			const canonicalHindsightProvider = packId === "hindsight" && kind === "provider" && id === "memory";
+			if (!canonicalHindsightProvider && !store.hasTargetRecord(ref)) return { state: "absent" as const };
 			const schema = kind === "provider" ? (contribution as any).configSchema : contribution.config;
 			const secretFields = Object.entries(schema ?? {})
 				.filter(([, descriptor]) => !!descriptor && typeof descriptor === "object" && (descriptor as { type?: unknown }).type === "secret")
@@ -3142,15 +3147,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// only coordinates owned by the dispatched session and never falls back to
 		// another project by goal id.
 		scopeContextResolver: (input) => resolveHookScopeContext(projectContextManager, input),
-		// Least-privilege, store-only host for provider hooks (capabilities.store ===
-		// true; session/agents denied) — gives a provider its own pack-scoped durable
-		// store via the same parent-authorized path routes use.
-		providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+		// Lifecycle providers receive only their pack store plus Hindsight's exact
+		// live EP-6 check. The resolver is re-read by the provider immediately before
+		// each automatic read/write, so an absent, denied, or revoked grant is a
+		// non-fatal no-op before queue mutation or network work.
+		providerHostApi: ({ sessionId, packId, projectId }) => createServerHostApi({
 			sessionId,
 			packId,
 			contributionId: "",
 			packStore: getPackStore(),
-			capabilityMask: { store: true, session: false, agents: false },
+			...(packId === "hindsight" && projectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (capability !== "memory.read" && capability !== "memory.write") throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(projectId, capability);
+					},
+				},
+			} : {}),
+			capabilityMask: { store: true, session: false, agents: false, memory: packId === "hindsight" && !!projectId },
 		}),
 		runtimeContextResolver: (input) => hindsightRuntimeBridge
 			? hindsightRuntimeBridge.context(input)
@@ -5495,7 +5509,7 @@ async function handleApiRoute(
 		if (["retain", "retain-outcome"].includes(routeName)) return "memory.write";
 		if (routeName === "reflect") return "memory.reflect";
 		if (routeName === "invalidate") return "memory.invalidate";
-		if (["browse", "detail", "recall"].includes(routeName)) {
+		if (["browse", "search", "detail", "history", "recall"].includes(routeName)) {
 			const allScope = !!body && typeof body === "object" && !Array.isArray(body)
 				&& ((body as Record<string, unknown>).scope === "all" || (body as Record<string, unknown>).allScope === true);
 			return allScope ? "memory.read.all" : "memory.read";
@@ -10579,29 +10593,6 @@ async function handleApiRoute(
 			const jsonl = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return projectOwnTranscriptJsonl(guard.sessionId, jsonl);
 		};
-		const host = createServerHostApi({
-			sessionId: guard.sessionId,
-			toolUseId,
-			packId: ident.packId,
-			contributionId: ident.contributionId,
-			packStore: getPackStore(),
-			readOwnTranscript,
-			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
-			orchestrationCore,
-			// Sub-goal C: live status reader for host.agents.status/list (the core has
-			// no public status accessor).
-			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
-			// Drop activation caches when a route persists provider config (host-owned).
-			onStoreWrite: notePackStoreWrite,
-			...(ident.packId === "hindsight" && routeSessionProjectId && hindsightRuntimeBridge ? {
-				memory: {
-					requireCapability: (capability: string) => {
-						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
-						hindsightRuntimeBridge.require(routeSessionProjectId, capability);
-					},
-				},
-			} : {}),
-		});
 		// Resolve rich route scope only from the authenticated session's own live or
 		// persisted coordinates. This is the same host resolver used by lifecycle
 		// hooks; route bodies and flat compatibility fields cannot substitute for it.
@@ -10641,6 +10632,10 @@ async function handleApiRoute(
 			};
 		})();
 		let routeRuntime: ServiceRuntimeContext | undefined;
+		// This value stays inside the server→worker route context. It intentionally
+		// includes EP-7 write-only values for authenticated Hindsight calls, but no
+		// response/status/log/diagnostic serializes this field.
+		let routeProviderConfig: Record<string, unknown> | undefined;
 		try {
 			if (ident.packId === "hindsight") {
 				const capability = hindsightRouteCapability(routeName, init.body);
@@ -10649,6 +10644,11 @@ async function handleApiRoute(
 					hindsightRuntimeBridge?.require(authenticatedRouteSession.projectId, capability);
 				}
 				const projectId = authenticatedRouteSession?.projectId;
+				if (projectId) {
+					const providerSettings = extensionSettingsRuntimeLookup(projectId, "hindsight", "provider", "memory");
+					if (providerSettings.state === "error") throw new Error("HINDSIGHT_CONFIG_UNAVAILABLE");
+					if (providerSettings.state === "present" && providerSettings.enabled) routeProviderConfig = { ...providerSettings.values };
+				}
 				if (projectId && routeName === "runtime-status") {
 					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), runtime: await hindsightRuntimeBridge?.status(projectId) });
 					return;
@@ -10705,6 +10705,27 @@ async function handleApiRoute(
 			}, status);
 			return;
 		}
+		const host = createServerHostApi({
+			sessionId: guard.sessionId,
+			toolUseId,
+			packId: ident.packId,
+			contributionId: ident.contributionId,
+			packStore: getPackStore(),
+			readOwnTranscript,
+			orchestrationCore,
+			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
+			onStoreWrite: notePackStoreWrite,
+			...(ident.packId === "hindsight" && authenticatedRouteSession?.projectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(authenticatedRouteSession.projectId!, capability);
+					},
+				},
+				...(routeProviderConfig ? { providerConfig: routeProviderConfig } : {}),
+				...(routeOutcome ? { completedOutcome: routeOutcome.outcome } : {}),
+			} : {}),
+		});
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
@@ -10722,7 +10743,6 @@ async function handleApiRoute(
 					projectId: authenticatedRouteSession?.projectId,
 					...(routeScopeContext ? { scopeContext: routeScopeContext } : {}),
 					...(routeRuntime ? { runtime: routeRuntime } : {}),
-					...(routeOutcome ? routeOutcome : {}),
 					workingDir: routeWorkingDir,
 					sessionArchived: sessionManager.getArchivedSession(guard.sessionId) !== undefined,
 				},

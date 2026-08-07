@@ -164,6 +164,9 @@ interface SerializableCtx {
 	sessionArchived?: boolean;
 	/** Bounded, server-derived completed-goal snapshot for retain-outcome only. */
 	outcome?: unknown;
+	/** EP-7 effective configuration and bounded outcome copied from the server host. */
+	providerConfig?: Readonly<Record<string, unknown>>;
+	completedOutcome?: unknown;
 	hostVersion?: number;
 	hostContractVersion?: number;
 	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean; memory: boolean };
@@ -536,6 +539,8 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		memory: {
 			requireCapability: (capability: string) => callHost(["memory", "requireCapability"], [capability]),
 		},
+		...(ctx.providerConfig === undefined ? {} : { providerConfig: ctx.providerConfig }),
+		...(ctx.completedOutcome === undefined ? {} : { completedOutcome: ctx.completedOutcome }),
 		agents: {
 			spawn: (spawnOpts: unknown) => callHost(["agents", "spawn"], [spawnOpts]),
 			prompt: (childSessionId: string, message: string) => callHost(["agents", "prompt"], [childSessionId, message]),
