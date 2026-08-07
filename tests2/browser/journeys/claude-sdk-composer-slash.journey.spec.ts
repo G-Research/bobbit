@@ -201,6 +201,22 @@ test.describe("Journey: Claude SDK composer slash interception", () => {
 			await expect(editor(page)).toBeFocused();
 			expect(deliveredPrompts).toHaveLength(2);
 
+			// Ctrl+Enter ordinarily takes the raw STEER path. The hidden reservation
+			// must still consume exact /compact locally before it reaches the SDK.
+			await editor(page).fill("/compact");
+			await editor(page).press("Control+Enter");
+			await expect(page.getByRole("alert")).toContainText("Manual compaction isn’t available for Claude Agent SDK sessions.");
+			await expect(editor(page)).toHaveValue("/compact");
+			await expect(editor(page)).toBeFocused();
+			expect(deliveredPrompts).toHaveLength(2);
+
+			// A Bobbit-owned skill cannot be raw-steered to the SDK either: it takes
+			// the normal server expansion path instead of delivering its slash token.
+			await editor(page).fill("/goal steer safely");
+			await editor(page).press("Control+Enter");
+			await expectSdkPrompt(2, /GOAL SKILL BODY[\s\S]*steer safely/);
+			expect(deliveredPrompts[2]).not.toBe("/goal steer safely");
+
 			// A reconciled pack launcher consumes the composer command via its pack
 			// route rather than adding a third SDK prompt.
 			await editor(page).fill("/pr-walkthrough");
@@ -208,7 +224,7 @@ test.describe("Journey: Claude SDK composer slash interception", () => {
 			const packRoute = page.waitForRequest((request) => request.url().includes("/api/ext/route/run") && request.method() === "POST");
 			await editor(page).press("Enter");
 			await packRoute;
-			expect(deliveredPrompts).toHaveLength(2);
+			expect(deliveredPrompts).toHaveLength(3);
 
 			// Reload repeats current-session discovery; menu inventory is never draft
 			// state and remains scoped to the active project.
