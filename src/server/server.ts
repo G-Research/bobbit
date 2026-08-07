@@ -5590,7 +5590,9 @@ async function handleApiRoute(
 		return pack?.hooks.find(hook => hook.id === hookId);
 	};
 	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[] }, capability: ExtensionCapability): boolean =>
-		capability !== "mutate" && ((capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
+		!extensionPackGrantCapabilities.includes(capability)
+		&& capability !== "mutate"
+		&& ((capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
 	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
 	const broadcastExtensionGrantInvalidation = (projectId: string): void => {
 		invalidateResolverCaches();
