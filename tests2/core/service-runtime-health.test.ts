@@ -135,6 +135,14 @@ async function flush(): Promise<void> {
 	for (let index = 0; index < 16; index++) await Promise.resolve();
 }
 
+async function flushUntil(settled: () => boolean): Promise<void> {
+	for (let index = 0; index < 64; index++) {
+		if (settled()) return;
+		await Promise.resolve();
+	}
+	assert.fail("expected deterministic lifecycle work to settle");
+}
+
 describe("ServiceRuntimeSupervisor health monitor", () => {
 	it("persists a degraded health failure, clears the endpoint, and removes the owned resource", async () => {
 		const clock = new ManualClock();
@@ -237,7 +245,10 @@ describe("ServiceRuntimeSupervisor health monitor", () => {
 		assert.deepEqual(store.record?.lastDiagnostic, { code: "SERVICE_DEGRADED", retryAt: "1970-01-01T00:00:00.020Z" });
 		assert.deepEqual(clock.waits.map((wait) => wait.ms), [10]);
 		clock.advance();
-		await flush();
+		// A replacement launch is not settled until its ready endpoint is durable.
+		// Do not couple this assertion to a particular number of implementation
+		// microtasks between `runner.start` and `store.replace`.
+		await flushUntil(() => store.record?.endpoint === endpoint);
 
 		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 2);
 		assert.equal(store.record?.endpoint, endpoint);
