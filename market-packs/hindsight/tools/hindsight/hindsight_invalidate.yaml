@@ -5,4 +5,4 @@ summary: Confirm and invalidate a memory
 params: [id, confirmation, reason?]
 provider:
   type: bobbit-extension
-  extension: ../../src/tools.ts
+  extension: ../../lib/tools.mjs

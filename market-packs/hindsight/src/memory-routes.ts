@@ -104,8 +104,10 @@ async function authorize(ctx: MemoryRouteContext, capability: MemoryCapability):
 	if (!requireCapability) return { ok: false, code: "EXTENSION_CAPABILITY_REQUIRED" };
 	try {
 		const decision = await requireCapability(capability);
-		if (decision?.allowed === true) return { ok: true };
-		return { ok: false, code: decision?.reason === "denied" ? "EXTENSION_CAPABILITY_DENIED" : "EXTENSION_CAPABILITY_REQUIRED" };
+		// `host.memory` is the public EP-6 adapter: successful checks resolve
+		// void, while test adapters may return a richer decision.
+		if (decision === undefined || decision?.allowed === true) return { ok: true };
+		return { ok: false, code: decision.reason === "denied" ? "EXTENSION_CAPABILITY_DENIED" : "EXTENSION_CAPABILITY_REQUIRED" };
 	} catch {
 		return { ok: false, code: "EXTENSION_CAPABILITY_REQUIRED" };
 	}

@@ -108,7 +108,7 @@ function denied(response: Response, body: any, capability: string): void {
 	expect(JSON.stringify(body)).toContain(capability);
 }
 
-describe.sequential("Hindsight experience API", () => {
+describe.serial("Hindsight experience API", () => {
 	test.beforeAll(async ({ gateway }) => {
 		await installPack(gateway.bobbitDir);
 		operatorCookie = await mintOperatorCookie();

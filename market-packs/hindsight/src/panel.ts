@@ -122,12 +122,15 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 	}
 	async function refreshStatus(entry: Entry): Promise<void> {
 		const result = await call(entry, "runtime-status");
-		if (result) entry.runtime = result;
+		if (result) entry.runtime = record(result.status) ?? record(result.runtime) ?? result;
 		repaint(entry);
 	}
 	async function showLogs(entry: Entry): Promise<void> {
 		const result = await call(entry, "runtime-logs");
-		if (result) entry.logs = (Array.isArray(result.lines) ? result.lines : Array.isArray(result.logs) ? result.logs : []).map((line) => text(line)).slice(-100);
+		if (result) {
+			const raw = Array.isArray(result.lines) ? result.lines : Array.isArray(result.logs) ? result.logs : typeof result.logs === "string" ? result.logs.split("\n") : [];
+			entry.logs = raw.map((line) => text(line)).slice(-100);
+		}
 		repaint(entry);
 	}
 	async function browse(entry: Entry): Promise<void> {
@@ -183,7 +186,9 @@ export default function createHindsightPanel({ html, nothing }: Toolkit) {
 		if (intent.action === "invalidate") {
 			const id = memoryId(entry.selected);
 			if (!id || !entry.invalidateReason.trim()) { entry.error = "A reason is required to invalidate a memory."; repaint(entry); return; }
-			const result = await call(entry, "invalidate", { method: "POST", body: { id, reason: entry.invalidateReason.trim(), confirmed: true } });
+			// The typed route requires the selected id as an exact confirmation, so a
+			// delayed dialog cannot invalidate a newly selected memory.
+			const result = await call(entry, "invalidate", { method: "POST", body: { id, confirmation: id, reason: entry.invalidateReason.trim() } });
 			if (result && result.ok !== false) { entry.message = "Memory invalidated."; entry.selected = undefined; entry.detail = undefined; entry.memories = entry.memories.filter((m) => memoryId(m) !== id); }
 		} else if (intent.action === "migrate") {
 			const result = await call(entry, "migration-execute", { method: "POST", body: { planFingerprint: text(entry.migration?.fingerprint), confirmed: true } });

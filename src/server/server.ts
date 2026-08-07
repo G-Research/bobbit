@@ -10643,11 +10643,16 @@ async function handleApiRoute(
 				}
 				const projectId = authenticatedRouteSession?.projectId;
 				if (projectId && routeName === "runtime-status") {
-					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), status: await hindsightRuntimeBridge?.status(projectId) });
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), runtime: await hindsightRuntimeBridge?.status(projectId) });
 					return;
 				}
 				if (projectId && routeName === "runtime-logs") {
-					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), logs: await hindsightRuntimeBridge?.logs(projectId) ?? "" });
+					const body = init.body;
+					const requestedTail = body && typeof body === "object" && !Array.isArray(body) ? (body as { tail?: unknown }).tail : undefined;
+					const tail = typeof requestedTail === "number" && Number.isSafeInteger(requestedTail)
+						? Math.min(200, Math.max(1, requestedTail)) : 100;
+					const logs = await hindsightRuntimeBridge?.logs(projectId) ?? "";
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), lines: logs.split("\n").filter(Boolean).slice(-tail) });
 					return;
 				}
 				if (projectId && routeName === "runtime-control") {
@@ -10658,7 +10663,7 @@ async function handleApiRoute(
 						json({ error: "Explicit runtime control consent is required", code: "HINDSIGHT_CONTROL_CONSENT_REQUIRED" }, 422);
 						return;
 					}
-					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), status: await hindsightRuntimeBridge?.control(projectId, action) });
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), runtime: await hindsightRuntimeBridge?.control(projectId, action) });
 					return;
 				}
 				routeRuntime = await hindsightRuntimeBridge?.context({
@@ -10670,7 +10675,11 @@ async function handleApiRoute(
 			}
 		} catch (err) {
 			const status = err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;
-			json({ error: status === 403 ? "Hindsight capability is required" : "Hindsight runtime is unavailable", code: err instanceof HindsightCapabilityError ? err.code : "HINDSIGHT_RUNTIME_UNAVAILABLE" }, status);
+			json({
+				error: status === 403 ? "Hindsight capability is required" : "Hindsight runtime is unavailable",
+				code: err instanceof HindsightCapabilityError ? "EXTENSION_CAPABILITY_DENIED" : "HINDSIGHT_RUNTIME_UNAVAILABLE",
+				...(err instanceof HindsightCapabilityError ? { capability: err.capability } : {}),
+			}, status);
 			return;
 		}
 		const start = Date.now();

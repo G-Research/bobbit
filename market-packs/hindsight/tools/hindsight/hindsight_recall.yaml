@@ -5,4 +5,4 @@ summary: Recall scoped long-term memories
 params: [query, scope?]
 provider:
   type: bobbit-extension
-  extension: ../../src/tools.ts
+  extension: ../../lib/tools.mjs

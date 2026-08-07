@@ -5,4 +5,4 @@ summary: Reflect on scoped memories
 params: [prompt, memoryIds?]
 provider:
   type: bobbit-extension
-  extension: ../../src/tools.ts
+  extension: ../../lib/tools.mjs

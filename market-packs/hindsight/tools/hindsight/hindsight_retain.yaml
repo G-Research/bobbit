@@ -5,4 +5,4 @@ summary: Retain a scoped memory
 params: [content, kind?]
 provider:
   type: bobbit-extension
-  extension: ../../src/tools.ts
+  extension: ../../lib/tools.mjs

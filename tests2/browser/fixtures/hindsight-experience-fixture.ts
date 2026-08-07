@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Page } from "@playwright/test";
-import { apiFetch, registerProject } from "../../e2e-setup.js";
+import { apiFetch, registerProject } from "../e2e-setup.js";
 
 export const HINDSIGHT_EXPERIENCE_PACK_ID = "hindsight";
 export const HINDSIGHT_EXPERIENCE_PROVIDER_ID = "memory";
