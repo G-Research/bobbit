@@ -291,6 +291,29 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(1);
 	});
 
+	it("forwards only root-result usage annotations without reconstructing accounting from messages", async () => {
+		const fixture = bridgeFixture();
+		const query = await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+
+		query.emit({
+			type: "result", subtype: "success", uuid: "root-result-usage", session_id: "00000000-0000-4000-8000-000000000001",
+			total_cost_usd: 0.01,
+			usage: { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 1, cache_creation_input_tokens: 0 },
+			modelUsage: { sonnet: {
+				inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 1, cacheCreationInputTokens: 0,
+				costUSD: 0.01, contextWindow: 200_000, maxOutputTokens: 16_384,
+			} },
+		});
+		await flushMicrotasks();
+
+		expect(observed).toEqual([expect.objectContaining({
+			type: "agent_end",
+			claudeSdkUsage: expect.objectContaining({ sourceResultId: "00000000-0000-4000-8000-000000000001:root-result-usage" }),
+		})]);
+	});
+
 	it("does not publish agent_start when an unpulled input delivery times out", async () => {
 		const fixture = bridgeFixture({ autoPullInputs: false });
 		await startReady(fixture);
@@ -487,7 +510,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		const preCompact = (query.options.hooks as any).PreCompact;
 		expect(preCompact).toHaveLength(1);
 		await preCompact[0].hooks[0]({ trigger: "auto" });
-		expect(calls).toHaveLength(1);
+		expect(calls).toEqual([{ source: "claude-agent-sdk", trigger: "auto" }]);
 		await expect(fixture.bridge.compact()).resolves.toMatchObject({ success: false });
 	});
 
