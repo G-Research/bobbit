@@ -335,24 +335,29 @@ allowlists alone are not an execution boundary:
    tools are absent. The SDK gets only native `Skill`, the complete native
    disallow list, and no tool aliases.
 2. **`canUseTool`.** Each raw SDK call is normalized and rechecked. An `allow`
-   tool is approved. An `ask` tool uses the existing
-   `SessionManager.requestToolGrant()` path, which emits the normal
-   `tool_permission_needed` and `tool_permission_settled` UI events. The grant
-   must cover the current canonical tool and group. Cancellation, stale or
-   mismatched decisions, and denied/expired requests deny that invocation.
+   tool is approved. An `ask` tool calls the existing
+   `SessionManager.requestToolGrant()` path with its canonical Bobbit name,
+   resolved group, SDK tool-use id, and abort signal. That path emits the normal
+   `tool_permission_needed` and `tool_permission_settled` UI events; it is not a
+   second SDK permission service. A successful resolution is accepted only when
+   it covers the current canonical tool and, when supplied, the resolved group.
+   Cancellation, timeout, supersession, stale or mismatched decisions, denial,
+   expiry, and grant errors deny that invocation and settle the existing card.
 3. **`PreToolUse`.** The hook normalizes and checks again immediately before
    execution. It rejects native, foreign, malformed, unselected, `never`, and
    subagent-origin calls even if another SDK permission path says allow. An
    `ask` approval is bound to the exact SDK tool-use id and canonical name, then
-   consumed by the hook.
+   consumed by the hook; a direct callback bypass without that approval remains
+   `ask`.
 
 An SDK one-time approval is never added to the query's `allowedTools` or a
-surface callback cache; it is bound to one call and consumed by `PreToolUse`.
-SessionManager retains its normal one-time grant bookkeeping and revokes that
-grant at the end of the agent turn. Session-only and persistent grants retain
-their existing SessionManager semantics; any bridge rebuild derives a fresh
-canonical surface from that current state. Permission mode remains `default`;
-permission bypass options are never set.
+surface callback cache; it permits one exact `PreToolUse` consumption. The
+surface clears unconsumed approvals when disposed, so a late grant cannot pass a
+replacement boundary. SessionManager retains its normal one-time grant
+bookkeeping and revokes that grant at the end of the agent turn. Session-only
+and persistent grants retain their existing SessionManager semantics; any bridge
+rebuild derives a fresh canonical surface from that current state. Permission
+mode remains `default`; permission bypass options are never set.
 
 ## Isolation and credential boundary
 
@@ -443,6 +448,12 @@ The following regressions document the tool-surface contracts:
   canonical dispatch/rendering, existing permission events, cancellation,
   one-time grants, trusted-worker schema preflight, managed MCP operation
   snapshots, credential separation, and cleanup behavior.
+- `tests2/integration/claude-agent-sdk-permission-card-journey.test.ts` drives
+  the real `SessionManager` grant seam through the SDK surface. It covers the
+  canonical tool/group card request and settlement, one-time/session/persistent
+  ownership, exact one-use `PreToolUse` consumption, deny, abort, timeout,
+  stale and mismatched responses, disposal, and callback-bypass/native/foreign/
+  `never`/subagent defenses.
 - `tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts` starts the official
   SDK/bundled Claude in a process-isolated hostile-settings fixture and compares
   a literal initialization inventory: version, tools, reported built-ins,
@@ -453,7 +464,8 @@ Run the focused deterministic coverage with:
 ```bash
 npx vitest run --config vitest.config.ts --silent=passed-only \
   tests2/core/claude-agent-sdk-tool-surface.test.ts \
-  tests2/integration/claude-agent-sdk-tool-permissions.test.ts
+  tests2/integration/claude-agent-sdk-tool-permissions.test.ts \
+  tests2/integration/claude-agent-sdk-permission-card-journey.test.ts
 npm run check
 ```
 
