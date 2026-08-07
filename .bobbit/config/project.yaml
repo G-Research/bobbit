@@ -1171,8 +1171,8 @@ workflows:
             prompt: >-
               Review branch {{branch}} versus origin/{{baseBranch}} only for
               change-caused subscription-only safety defects. Inspect inherited
-              credentials, env/settings creation, apiKeySource, API/auth/
-              Bedrock/Vertex/cloud or container fallbacks, sandbox fail-closed
+              credentials, env/settings creation, apiKeySource, API/auth/Bedrock/Vertex/cloud
+              or container fallbacks, sandbox fail-closed
               behavior, pollution tests for changed spawn boundaries, and
               billed-versus-notional cost separation. Report the exact leak path,
               minimal fix, and regression test.
@@ -1224,13 +1224,13 @@ workflows:
         verify:
           - name: Real subscription manual evidence review
             type: llm-review
-            role: qa-tester
+            role: spec-auditor
             prompt: >-
               Review the submitted dogfood matrix; deterministic tests alone do
               not satisfy this gate. Require the opt-in real-subscription/model
               command, installed SDK/Claude version, unprefixed model id,
-              sanitized apiKeySource/subscription proof, readiness/prompt/steer/
-              interrupt/stop results, transcript and usage observations, and
+              sanitized apiKeySource/subscription proof, readiness/prompt/steer/interrupt/stop
+              results, transcript and usage observations, and
               screenshots for exercised browser-visible rendering. Fail missing,
               unsanitized, or inferred real-model evidence.
       - id: documentation
