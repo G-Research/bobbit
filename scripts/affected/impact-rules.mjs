@@ -894,6 +894,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/tool-result-filter-extension.test.ts",
+		allowReason: "test-owned generated Pi result-gate extension file",
+		reads: frozen([
+			{ expression: "gatePath!", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/verification-restart-resignal.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
