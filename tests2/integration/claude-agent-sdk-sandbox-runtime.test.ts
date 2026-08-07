@@ -3,14 +3,16 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const dockerSpawn = vi.hoisted(() => vi.fn());
-vi.mock("node:child_process", async (importOriginal) => ({
-	...await importOriginal<typeof import("node:child_process")>(),
-	spawn: dockerSpawn,
-}));
-
-import { ClaudeAgentSdkBridge } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
+import { ClaudeAgentSdkBridge, type ClaudeAgentSdkBridgeDeps } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
 import { createSandboxClaudeAgentSdkSessionAccess } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
+
+const dockerSpawn = vi.fn<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>();
+type DockerSpawnOptions = Parameters<ReturnType<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>>[0];
+const dockerLaunches: Array<{
+	input: Parameters<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>[0];
+	options: DockerSpawnOptions;
+	child: FakeChild;
+}> = [];
 
 const SDK_ID = "00000000-0000-4000-8000-000000000009";
 const OAUTH = "subscription-oauth-must-never-leak";
@@ -120,19 +122,24 @@ function bridgeFixture(input: { sessionId: string; containerId: string; cwd: str
 			return query;
 		}) as never,
 		clock: { now: () => 0, setTimeout, setInterval, clearTimeout, clearInterval },
+		createDockerSpawn: dockerSpawn,
 	});
 	return { bridge, get query() { return query; }, get queryCalls() { return queryCalls; } };
 }
 
-afterEach(() => dockerSpawn.mockReset());
+afterEach(() => {
+	dockerSpawn.mockReset();
+	dockerLaunches.splice(0);
+});
 
 describe("Claude Agent SDK sandbox runtime", () => {
 	it("runs fresh and worktree SDK queries in their current pooled containers with isolated state", async () => {
 		const children: FakeChild[] = [];
-		dockerSpawn.mockImplementation(() => {
+		dockerSpawn.mockImplementation((input) => (options) => {
 			const child = new FakeChild();
 			children.push(child);
-			return child;
+			dockerLaunches.push({ input, options, child });
+			return child as never;
 		});
 		const fresh = bridgeFixture({ sessionId: "fresh-session", containerId: "container-fresh", cwd: "/workspace" });
 		const worktree = bridgeFixture({ sessionId: "worktree-session", containerId: "container-worktree", cwd: "/workspace-wt/goal-branch" });
@@ -142,22 +149,23 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		expect(worktree.queryCalls).toBe(1);
 		expect(children).toHaveLength(2);
 
-		const first = dockerSpawn.mock.calls[0];
-		const second = dockerSpawn.mock.calls[1];
-		expect(first[0]).toBe("docker");
-		expect(first[1]).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace", "container-fresh", "/usr/local/bin/bobbit-claude-agent-sdk", "--sdk-protocol", "opaque-sdk-argument"]));
-		expect(second[0]).toBe("docker");
-		expect(second[1]).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/goal-branch", "container-worktree"]));
-		const firstArgs = first[1] as string[];
-		const secondArgs = second[1] as string[];
-		expect(firstArgs).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/fresh-session");
-		expect(secondArgs).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/worktree-session");
-		expect(firstArgs).toContain(`CLAUDE_CODE_OAUTH_TOKEN=${OAUTH}`);
-		for (const args of [firstArgs, secondArgs]) {
-			expect(args.join(" ")).not.toContain("ANTHROPIC_API_KEY");
-			expect(args.join(" ")).not.toContain("host-key-must-not-leak");
-			expect(args.join(" ")).not.toContain("EVIL_HOST_ENV");
-			expect(args.join(" ")).not.toContain("switch_session");
+		const [first, second] = dockerLaunches;
+		expect(first.input).toMatchObject({
+			containerId: "container-fresh",
+			cwd: "/workspace",
+			command: ["/usr/local/bin/bobbit-claude-agent-sdk"],
+		});
+		expect(second.input).toMatchObject({ containerId: "container-worktree", cwd: "/workspace-wt/goal-branch" });
+		expect(first.options.args).toEqual(["--sdk-protocol", "opaque-sdk-argument"]);
+		expect(first.input.env.CLAUDE_CONFIG_DIR).toBe("/bobbit-state/claude-agent-sdk/fresh-session");
+		expect(second.input.env.CLAUDE_CONFIG_DIR).toBe("/bobbit-state/claude-agent-sdk/worktree-session");
+		expect(first.input.env.CLAUDE_CODE_OAUTH_TOKEN).toBe(OAUTH);
+		for (const launch of [first, second]) {
+			const serializedInput = JSON.stringify(launch.input);
+			expect(serializedInput).not.toContain("ANTHROPIC_API_KEY");
+			expect(serializedInput).not.toContain("host-key-must-not-leak");
+			expect(serializedInput).not.toContain("EVIL_HOST_ENV");
+			expect(launch.options.args).not.toContain("switch_session");
 		}
 		expect(fresh.query.options.env).toMatchObject({ HOME: "/home/node", BOBBIT_SESSION_ID: "fresh-session" });
 		expect(fresh.query.options.env).not.toHaveProperty("ANTHROPIC_API_KEY");
@@ -165,7 +173,11 @@ describe("Claude Agent SDK sandbox runtime", () => {
 	});
 
 	it("preserves SDK prompt, steer, interruption, model, thinking, tool, and permission behavior inside Docker", async () => {
-		dockerSpawn.mockImplementation(() => new FakeChild());
+		dockerSpawn.mockImplementation((input) => (options) => {
+			const child = new FakeChild();
+			dockerLaunches.push({ input, options, child });
+			return child as never;
+		});
 		const fixture = bridgeFixture({ sessionId: "interactive", containerId: "container-live", cwd: "/workspace" });
 		const events: any[] = [];
 		fixture.bridge.onEvent(event => events.push(event));
@@ -225,14 +237,18 @@ describe("Claude Agent SDK sandbox runtime", () => {
 	});
 
 	it("rebuilds launch authority for replacement and rejects missing image or OAuth before querying", async () => {
-		dockerSpawn.mockImplementation(() => new FakeChild());
+		dockerSpawn.mockImplementation((input) => (options) => {
+			const child = new FakeChild();
+			dockerLaunches.push({ input, options, child });
+			return child as never;
+		});
 		const original = bridgeFixture({ sessionId: "replace", containerId: "container-old", cwd: "/workspace" });
 		await original.bridge.start();
 		await original.bridge.stop();
 		const recovered = bridgeFixture({ sessionId: "replace", containerId: "container-new", cwd: "/workspace", resume: SDK_ID });
 		await recovered.bridge.start();
 		expect(recovered.query.options.resume).toBe(SDK_ID);
-		expect(dockerSpawn.mock.calls[1][1]).toContain("container-new");
+		expect(dockerLaunches[1].input.containerId).toBe("container-new");
 		await recovered.bridge.stop();
 
 		let queryCalls = 0;

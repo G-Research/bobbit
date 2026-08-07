@@ -20,7 +20,7 @@ import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import type { ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
 import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
-import { createClaudeSdkDockerSpawn, isSandboxContainerCwd } from "./docker-exec-spawn.js";
+import { createClaudeSdkDockerSpawn, isSandboxContainerCwd, type ClaudeSdkDockerSpawn } from "./docker-exec-spawn.js";
 
 import type { Options, Query, SDKUserMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
@@ -56,6 +56,8 @@ export interface ClaudeAgentSdkBridgeDeps {
 	clock: Clock;
 	/** Optional deterministic seam for SDK-owned transcript access. */
 	sessionAccess?: ClaudeAgentSdkSessionAccessDeps;
+	/** Narrow test seam; production uses the shared Docker-exec adapter. */
+	createDockerSpawn?: (input: ClaudeSdkDockerSpawn) => ReturnType<typeof createClaudeSdkDockerSpawn>;
 }
 
 export class ClaudeAgentSdkUnavailableError extends Error {
@@ -352,7 +354,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				cwd: sandboxLaunch?.cwd ?? this.options.cwd,
 				env,
 				abortController: this.abortController,
-				...(sandboxLaunch ? { spawnClaudeCodeProcess: createClaudeSdkDockerSpawn({
+				...(sandboxLaunch ? { spawnClaudeCodeProcess: (this.deps.createDockerSpawn ?? createClaudeSdkDockerSpawn)({
 					containerId: sandboxLaunch.containerId,
 					cwd: sandboxLaunch.cwd,
 					env: {
