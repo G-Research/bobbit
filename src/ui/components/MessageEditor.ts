@@ -864,15 +864,6 @@ export class MessageEditor extends LitElement {
 		// commit is left to the IME. Zero effect for non-IME users.
 		if (e.isComposing || e.keyCode === 229) return;
 
-		// Ctrl/Cmd+Enter is a submit path even while autocomplete is visible. Give
-		// interception priority so an exact Bobbit command cannot bypass the
-		// resolver by being completed as a normal Enter selection.
-		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
-			e.preventDefault();
-			void this.handleSteerShortcut();
-			return;
-		}
-
 		// Slash autocomplete keyboard handling
 		if (this._slashMenuOpen) {
 			if (e.key === "ArrowDown") {
@@ -920,7 +911,12 @@ export class MessageEditor extends LitElement {
 			}
 		}
 
-		if (e.key === "Enter" && !e.shiftKey) {
+		// An open autocomplete menu owns Enter, including Ctrl/Cmd+Enter. Once no
+		// completion applies, the steer resolver still blocks exact Bobbit commands.
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+			e.preventDefault();
+			void this.handleSteerShortcut();
+		} else if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			if (!this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {
 				this.handleSend();
