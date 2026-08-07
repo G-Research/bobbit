@@ -633,7 +633,7 @@ import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, typ
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
-import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
+import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
@@ -5503,6 +5503,36 @@ async function handleApiRoute(
 		});
 	};
 	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+
+	/**
+	 * The runtime descriptor is needed to prove runner ownership, so cleanup must
+	 * happen while the old contribution remains active. A failed cleanup rejects
+	 * the marketplace mutation before its activation/install state changes,
+	 * leaving the record and descriptor available for a later retry.
+	 */
+	const removeHindsightRuntimeBeforeContributionChange = async (
+		packName: string,
+		targetScope: InstallScope,
+		targetProjectId: string | undefined,
+		targetPackRoot: string,
+	): Promise<void> => {
+		if (packName !== "hindsight" || !hindsightRuntimeBridge) return;
+		const projectIds = targetScope === "project"
+			? (targetProjectId ? [targetProjectId] : [])
+			: [...projectContextManager.all()].map((context) => context.project.id);
+		for (const projectId of projectIds) {
+			const runtime = packContributionRegistry.getRuntime(projectId, "hindsight", "hindsight");
+			// A higher-precedence contribution with the same pack id belongs to a
+			// different scope and is not affected by this mutation.
+			if (!runtime || path.resolve(runtime.packRoot) !== path.resolve(targetPackRoot)) continue;
+			await hindsightRuntimeBridge.removeOwnedRuntimeForContributionChange(projectId);
+		}
+	};
+	const marketplacePackRoot = (scope: InstallScope, projectBase: string | undefined, packName: string, builtin = false): string => {
+		if (builtin) return path.join(resolveBuiltinPacksDir(config.builtinPacksDir), packName);
+		const base = scope === "project" ? projectBase : scope === "global-user" ? os.homedir() : headquartersDir();
+		return path.join(scopePaths(scope as PackScope, base ?? "").marketPacksRoot, packName);
+	};
 
 	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
 	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
@@ -11400,6 +11430,7 @@ async function handleApiRoute(
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
+				await removeHindsightRuntimeBeforeContributionChange(body.packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, body.packName));
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
@@ -11427,6 +11458,7 @@ async function handleApiRoute(
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
+				await removeHindsightRuntimeBeforeContributionChange(body.packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, body.packName));
 				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
@@ -11803,6 +11835,14 @@ async function handleApiRoute(
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
+			const disablingHindsightRuntime = packName === "hindsight"
+				&& catalogue.runtimes?.includes("hindsight")
+				&& !beforeActivation.runtimes?.includes("hindsight")
+				&& normalized.runtimes.includes("hindsight");
+			if (disablingHindsightRuntime) {
+				const builtin = isBuiltinPackName(packName) && !hasUserInstall(targetScope, packName, targetProjectId);
+				await removeHindsightRuntimeBeforeContributionChange(packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, packName, builtin));
+			}
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
