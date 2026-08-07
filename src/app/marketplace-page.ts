@@ -7,7 +7,7 @@
 // ============================================================================
 
 import { icon } from "@mariozechner/mini-lit";
-import { html, TemplateResult } from "lit";
+import { html, nothing, TemplateResult } from "lit";
 import {
 	AlertTriangle,
 	ArrowLeft,
@@ -401,6 +401,16 @@ function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: 
 			})),
 		});
 	}
+	// The server owns the targets, but pack rows are aggregate headers in the
+	// Market grid. Keep each header ahead of its contributions and retain the
+	// partial state when only some project contributions are disabled.
+	for (const target of targets.filter((target) => target.kind === "pack")) {
+		const owned = targets.filter((candidate) => candidate.packId === target.packId && candidate.kind !== "pack");
+		if (owned.length > 0 && owned.some((candidate) => candidate.enabled === false) && owned.some((candidate) => candidate.enabled !== false)) {
+			target.status = "partially-enabled";
+		}
+	}
+	targets.sort((left, right) => Number(right.kind === "pack") - Number(left.kind === "pack"));
 	return { projectId, revision: data.revision, targets };
 }
 
@@ -2068,7 +2078,6 @@ function canChangeCapability(target: ExtensionSettingsTarget, capability: string
 	if (isGrantedCapability(state)) return true;
 	return target.enabled !== false
 		&& target.status !== "disabled"
-		&& target.status !== "requires-config"
 		&& target.status !== "review"
 		&& target.status !== "unavailable";
 }
@@ -2154,9 +2163,12 @@ function renderExtensionGrants(target: ExtensionSettingsTarget): TemplateResult 
 			const grantError = capabilityGrantErrors.get(grantKey);
 			const copy = target.kind === "pack" ? packCapabilityCopy[capability] : undefined;
 			const rowId = `market-capability-${grantKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-			const inactiveReason = !granted && !actionable && grant.state !== "Unavailable"
+			const descriptionId = `${rowId}-description`;
+			const inactiveReason = target.kind === "pack" && !granted && !actionable && grant.state !== "Unavailable"
 				? "Enable this pack before granting this capability."
 				: undefined;
+			const reasonId = `${rowId}-reason`;
+			const describedBy = [copy ? descriptionId : undefined, inactiveReason ? reasonId : undefined].filter(Boolean).join(" ");
 			return html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-busy=${grantBusy ? "true" : "false"}>
 				${target.kind === "hook"
 					// Keep the legacy hook row as text, including its punctuation. Existing
@@ -2166,10 +2178,10 @@ function renderExtensionGrants(target: ExtensionSettingsTarget): TemplateResult 
 						${copy ? html`<strong>${copy.label}</strong>` : ""}
 						<code>${grant.capability}</code>
 						<span>${grant.state || "Unavailable"}</span>
-						${copy ? html`<span id=${rowId} class="market-capability-description">${copy.description}</span>` : ""}
-						${inactiveReason ? html`<span id=${rowId} class="market-capability-description">${inactiveReason}</span>` : ""}
+						${copy ? html`<span id=${descriptionId} class="market-capability-description">${copy.description}</span>` : ""}
+						${inactiveReason ? html`<span id=${reasonId} class="market-capability-description">${inactiveReason}</span>` : ""}
 					</div>`}
-				<button type="button" class="market-btn" data-testid="market-capability-action" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-describedby=${copy || inactiveReason ? rowId : undefined} ?disabled=${!actionable || grantBusy} @click=${() => changeCapabilityGrant(target, grant.capability, grant.state)}>${grantBusy ? (granted ? "Revoking…" : "Granting…") : grant.state === "Unavailable" ? "Unavailable" : `${granted ? "Revoke" : "Grant"} ${grant.capability}`}</button>
+				<button type="button" class="market-btn" data-testid="market-capability-action" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-describedby=${describedBy || nothing} ?disabled=${!actionable || grantBusy} @click=${() => changeCapabilityGrant(target, grant.capability, grant.state)}>${grantBusy ? (granted ? "Revoking…" : "Granting…") : grant.state === "Unavailable" ? "Unavailable" : `${granted ? "Revoke" : "Grant"} ${grant.capability}`}</button>
 				${grantError ? html`<div class="market-error" data-testid="market-capability-error" role="alert">${grantError}</div>` : ""}
 			</div>`;
 		})}
@@ -2185,9 +2197,11 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 	const formError = settingsFormErrors.get(owner);
 	const dirty = (settingsDrafts.get(owner)?.size ?? 0) > 0 || (target.fields ?? []).some((field) => secretDrafts.has(secretDraftKey(owner, field.key)));
 	const configurable = target.kind !== "pack";
+	const packControllable = target.kind !== "pack"
+		|| (extensionSettings?.targets.some((candidate) => candidate.packId === target.packId && candidate.kind !== "pack") ?? false);
 	return html`<div class="market-runtime-target market-runtime-target--${target.kind}" data-testid=${target.kind === "provider" ? "market-project-provider-row" : target.kind === "hook" ? "market-project-hook-row" : "market-project-pack-row"} data-contribution-id=${target.id}>
 		<div class="market-runtime-target-main"><span class="market-runtime-kind">${target.kind === "pack" ? "Pack" : target.kind === "provider" ? "Provider" : "Hook"}</span><span>${target.label || target.id}</span></div>
-		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
+		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner || !packControllable} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
 		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
 		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
 		${renderExtensionGrants(target)}
