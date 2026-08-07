@@ -1545,45 +1545,34 @@ export class AgentInterface extends LitElement {
 		this._refreshJumpButton();
 	}
 
+	private async _compactSession(): Promise<void> {
+		const session = this.session;
+		if (!session || typeof (session as any).compact !== "function") return;
+		this._messageEditor.value = "";
+		this._messageEditor.attachments = [];
+		this._clearAttachmentDraft();
+		// Show the command as a user message in chat.
+		const userMsg = {
+			role: "user" as const,
+			content: "/compact",
+			timestamp: Date.now(),
+			id: `compact_cmd_${Date.now()}`,
+		};
+		// Append via the reducer so the optimistic command survives a snapshot.
+		if (typeof (session as any).appendMessage === "function") {
+			(session as any).appendMessage(userMsg);
+		} else {
+			session.state.messages = [...session.state.messages, userMsg];
+		}
+		this.requestUpdate();
+		if (this._streamingContainer) this._streamingContainer.startCompacting();
+		(session as any).compact();
+	}
+
 	public async sendMessage(input: string, attachments?: Attachment[]) {
 		if (!input.trim() && (!attachments || attachments.length === 0)) return;
 		const session = this.session;
 		if (!session) throw new Error("No session set on AgentInterface");
-
-		// Handle /compact slash command
-		if (input.trim().toLowerCase() === "/compact") {
-			if ("compact" in session && typeof (session as any).compact === "function") {
-				this._messageEditor.value = "";
-				this._messageEditor.attachments = [];
-				this._clearAttachmentDraft();
-				// Show the command as a user message in chat
-				const userMsg = {
-					role: "user" as const,
-					content: "/compact",
-					timestamp: Date.now(),
-					id: `compact_cmd_${Date.now()}`,
-				};
-				// Append the /compact user message via the reducer's appendMessage path —
-				// it persists across the post-compaction snapshot via the reducer's
-				// optimistic-survivor rule (id not in snapshot ⇒ kept tail-positioned).
-				if (typeof (session as any).appendMessage === "function") {
-					(session as any).appendMessage(userMsg);
-				} else {
-					session.state.messages = [...session.state.messages, userMsg];
-				}
-				this.requestUpdate();
-
-				// Drive the blob compaction animation from the client side.
-				// We start the squash animation immediately, then listen for
-				// the server's compaction_end event (or messages refresh) to
-				// pop back and show the result.
-				if (this._streamingContainer) {
-					this._streamingContainer.startCompacting();
-				}
-				(session as any).compact();
-			}
-			return;
-		}
 		if (!session.state.model) throw new Error("No model set on AgentInterface");
 
 		const isStreaming = session.state.isStreaming;
@@ -2523,6 +2512,7 @@ export class AgentInterface extends LitElement {
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
 							.projectId=${this.projectId}
+							.runtime=${(state as { runtime?: unknown }).runtime === "claude-agent-sdk" ? "claude-agent-sdk" : "pi"}
 							.isStreaming=${state.isStreaming}
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}
@@ -2535,6 +2525,7 @@ export class AgentInterface extends LitElement {
 								this._setAttachmentDraft(files);
 							}}
 							.onSend=${(input: string, attachments: Attachment[]) => this.sendMessage(input, attachments)}
+							.onCompact=${() => this._compactSession()}
 							.onSteerSend=${(text: string) => this._steerSend(text)}
 							.onAbort=${() => session.abort()}
 							.onSteer=${(msg: any) => {
