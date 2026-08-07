@@ -343,21 +343,59 @@ describe("ServiceRuntimeSupervisor", () => {
 		}
 	});
 
-	it("deduplicates matching starts and rejects a simultaneous selected-mode conflict", async () => {
+	it("deduplicates matching starts but rejects an overlapping restart or selected-mode conflict", async () => {
 		let release!: () => void;
+		let started!: () => void;
 		const launched = new Promise<void>((resolve) => { release = resolve; });
+		const enteredStart = new Promise<void>((resolve) => { started = resolve; });
 		const local = runner("local", { start: async () => {
+			started();
 			await launched;
 			return { endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] };
 		} });
-		const { instance } = supervisor({ runners: [local], probe: vi.fn(async () => true) });
+		const { instance, store } = supervisor({ runners: [local], probe: vi.fn(async () => true) });
 		const first = instance.start({ ...identity, mode: "local" });
+		await enteredStart;
 		const duplicate = instance.start({ ...identity, mode: "local" });
+		await expect(instance.restart({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_START_CONFLICT" });
 		await expect(instance.start({ ...identity, mode: "docker" })).rejects.toMatchObject({ code: "SERVICE_START_CONFLICT" });
 		release();
 		await expect(first).resolves.toMatchObject({ state: "ready", endpoint });
 		await expect(duplicate).resolves.toMatchObject({ state: "ready", endpoint });
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 0, "a rejected restart never inherits or mutates the start lifecycle");
+		expect(await store.load(identity)).toMatchObject({
+			desired: "running", selectedMode: "local", endpoint, runnerIdentity: { kind: "local", id: "local-1" },
+		});
+	});
+
+	it("deduplicates matching restarts into one stop-then-start lifecycle", async () => {
+		const store = new FakeStore();
+		store.records.set(store.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "old-resource" } }));
+		let releaseStop!: () => void;
+		let stopping!: () => void;
+		const stopped = new Promise<void>((resolve) => { releaseStop = resolve; });
+		const enteredStop = new Promise<void>((resolve) => { stopping = resolve; });
+		const restartedEndpoint = `${endpoint}/restarted`;
+		const local = runner("local", {
+			stop: async () => { stopping(); await stopped; },
+			start: async () => ({ endpoint: restartedEndpoint, runnerIdentity: { kind: "local", id: "new-resource" }, services: [] }),
+		});
+		const { instance } = supervisor({ store, runners: [local], probe: vi.fn(async () => true) });
+
+		const first = instance.restart({ ...identity, mode: "local" });
+		await enteredStop;
+		const duplicate = instance.restart({ ...identity, mode: "local" });
+		releaseStop();
+
+		await expect(first).resolves.toMatchObject({ state: "ready", endpoint: restartedEndpoint });
+		await expect(duplicate).resolves.toMatchObject({ state: "ready", endpoint: restartedEndpoint });
+		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		expect(await store.load(identity)).toMatchObject({
+			desired: "running", selectedMode: "local", endpoint: restartedEndpoint, runnerIdentity: { kind: "local", id: "new-resource" },
+		});
 	});
 
 	it("authorizes every public caller before allowing it to join a start", async () => {

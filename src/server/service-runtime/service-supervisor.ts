@@ -219,8 +219,16 @@ function asControl(identity: ServiceRuntimeIdentity, request: Partial<ServiceRun
  * Sole owner of generic runtime lifecycle. Read APIs below deliberately never
  * call the authorizer, settings, secret owner, runner start, or storage writer.
  */
+type StartOperationKind = "start" | "restart";
+
+interface InFlightStartOperation {
+	kind: StartOperationKind;
+	mode?: ServiceRuntimeMode;
+	promise: Promise<ServiceRuntimeControlResult>;
+}
+
 export class ServiceRuntimeSupervisor {
-	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeControlResult> }>();
+	private readonly inFlight = new Map<string, InFlightStartOperation>();
 	private readonly lifecycle = new Map<string, Promise<void>>();
 	private readonly restartTokens = new Map<string, number>();
 	/** Cancels detached periodic health work without letting reads schedule it. */
@@ -293,7 +301,7 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
-		return this.enqueueStart(request, () => this.doStart(request, false));
+		return this.enqueueStart(request, "start", () => this.doStart(request, false));
 	}
 
 	/**
@@ -308,19 +316,27 @@ export class ServiceRuntimeSupervisor {
 	restartWithResult(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeControlResult> {
 		return Promise.resolve()
 			.then(() => this.authorize(request, "start"))
-			.then(() => this.enqueueStart(request, () => this.doRestart(request)));
+			.then(() => this.enqueueStart(request, "restart", () => this.doRestart(request)));
 	}
 
-	private enqueueStart(request: ServiceRuntimeControlRequest, operation: () => Promise<ServiceRuntimeControlResult>): Promise<ServiceRuntimeControlResult> {
+	private enqueueStart(
+		request: ServiceRuntimeControlRequest,
+		kind: StartOperationKind,
+		operation: () => Promise<ServiceRuntimeControlResult>,
+	): Promise<ServiceRuntimeControlResult> {
 		const key = identityKey(request);
 		const prior = this.inFlight.get(key);
 		if (prior) {
+			// `restart` must never inherit a plain start's result: its contract is a
+			// stop followed by a fresh start. Identical control intents may share the
+			// in-flight lifecycle, retaining start deduplication and mode conflicts.
+			if (prior.kind !== kind) return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 			if (prior.mode === request.mode || prior.mode === undefined || request.mode === undefined) return prior.promise;
 			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 		}
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		const promise = this.enqueueLifecycle(identity, operation);
-		this.inFlight.set(key, { mode: request.mode, promise });
+		this.inFlight.set(key, { kind, mode: request.mode, promise });
 		void promise.finally(() => {
 			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
 		}).catch(() => undefined);
