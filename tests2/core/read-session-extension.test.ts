@@ -3,7 +3,7 @@ guardProcessEnv();
 
 import assert from "node:assert/strict";
 import { Value } from "@sinclair/typebox/value";
-import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import registerAgentExtension from "../../defaults/tools/agent/extension.ts";
 
 describe("read_session discriminated tool contract", () => {
@@ -16,15 +16,13 @@ describe("read_session discriminated tool contract", () => {
 		globalThis.fetch = (async (url: any) => { urls.push(String(url)); return { ok: true, status: 200, json: async () => ({ messages: [] }) } as any; }) as any;
 		registerAgentExtension({ registerTool(config: any) { if (config.name === "read_session") tool = config; } } as any);
 	});
-	beforeEach(() => { urls.length = 0; });
 	afterAll(() => { globalThis.fetch = realFetch; for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value; });
 	it("accepts only the closed list and exact inspect variants", () => {
-		const valid = [{ operation: "list", session_id: "s", offset: -20, limit: 20, pattern: "error", case_sensitive: true, context: 2 }, { operation: "inspect", session_id: "s", message_index: 7 }, { operation: "inspect", session_id: "s", message_index: 7, result_index: 1, offset: 5, limit: 40 }];
-		const invalid = [{ session_id: "s" }, { operation: "inspect", session_id: "s" },
-			...(["verbose", "include_tool_results", "includeToolResults"] as const).map((flag) => ({ operation: "list", session_id: "s", [flag]: true })), { operation: "list", session_id: "s", message_index: 1 },
-			{ operation: "inspect", session_id: "s", message_index: 1, pattern: "x" }, { operation: "inspect", session_id: "s", message_index: 1, context: 1 }];
-		for (const value of valid) assert.equal(Value.Check(tool.parameters, value), true, JSON.stringify(value));
-		for (const value of invalid) assert.equal(Value.Check(tool.parameters, value), false, JSON.stringify(value));
+		const cases: [boolean, any[]][] = [
+			[true, [{ operation: "list", session_id: "s", offset: -20, limit: 20, pattern: "error", case_sensitive: true, context: 2 }, { operation: "inspect", session_id: "s", message_index: 7 }, { operation: "inspect", session_id: "s", message_index: 7, result_index: 1, offset: 5, limit: 40 }]],
+			[false, [{ session_id: "s" }, { operation: "inspect", session_id: "s" }, ...["verbose", "include_tool_results", "includeToolResults"].map((flag) => ({ operation: "list", session_id: "s", [flag]: true })), { operation: "list", session_id: "s", message_index: 1 }, { operation: "inspect", session_id: "s", message_index: 1, pattern: "x" }, { operation: "inspect", session_id: "s", message_index: 1, context: 1 }]],
+		];
+		for (const [expected, values] of cases) for (const value of values) assert.equal(Value.Check(tool.parameters, value), expected, JSON.stringify(value));
 	});
 
 	it("forwards list discovery and exact-result bounds without compatibility flags", async () => {
@@ -32,8 +30,7 @@ describe("read_session discriminated tool contract", () => {
 		await tool.execute("inspect", { operation: "inspect", session_id: "target", message_index: 9, result_index: 2, offset: 6, limit: 80 });
 		const [list, inspect] = urls.map((url) => new URL(url));
 		assert.equal(list.pathname, "/api/sessions/target%2Fsession/transcript");
-		assert.deepEqual(Object.fromEntries(list.searchParams), { operation: "list", offset: "-5", limit: "5", pattern: "fail", case_sensitive: "1", context: "1" });
-		assert.deepEqual(Object.fromEntries(inspect.searchParams), { operation: "inspect", message_index: "9", result_index: "2", offset: "6", limit: "80" });
-		for (const url of [list, inspect]) for (const flag of ["verbose", "include_tool_results", "includeToolResults"]) assert.equal(url.searchParams.has(flag), false);
+		for (const [url, expected] of [[list, { operation: "list", offset: "-5", limit: "5", pattern: "fail", case_sensitive: "1", context: "1" }], [inspect, { operation: "inspect", message_index: "9", result_index: "2", offset: "6", limit: "80" }]] as const) assert.deepEqual(Object.fromEntries(url.searchParams), expected);
+		assert.doesNotMatch(urls.join(), /verbose|include_tool_results|includeToolResults/);
 	});
 });

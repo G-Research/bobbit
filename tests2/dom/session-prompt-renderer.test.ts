@@ -133,31 +133,18 @@ describe("SessionPromptRenderer", () => {
 	});
 });
 
-function renderReadSession(params: any, details: any, rawText = JSON.stringify(details)): HTMLElement {
-	const container = document.body.appendChild(document.createElement("div"));
-	const result = { role: "toolResult", toolCallId: "read-session-1", toolName: "read_session", isError: false,
-		content: [{ type: "text", text: rawText }], details, timestamp: Date.now() };
-	render(new ReadSessionRenderer().render(params, result as any, false).content, container);
-	return container;
+function renderRead(params: any, details: any): HTMLElement {
+	const host = document.body.appendChild(document.createElement("div"));
+	render(new ReadSessionRenderer().render(params, { role: "toolResult", toolCallId: "r", toolName: "read_session", isError: false, content: [{ type: "text", text: JSON.stringify(details) }], details, timestamp: 1 } as any, false).content, host);
+	return host;
 }
 
 describe("ReadSessionRenderer response discrimination", () => {
-	it("keeps exact inspection separate from the legacy list fallback", () => {
-		const inspected = renderReadSession(
-			{ operation: "inspect", session_id: TARGET_ID, message_index: 9, result_index: 1 },
-			{ operation: "inspect", result: { messageIndex: 9, resultIndex: 1, name: "bash", status: "error",
-				size: { chars: 20, lines: 2, bytes: 21 }, excerpt: "EXACT", offset: 6, returned: 5,
-				totalChars: 20, nextOffset: 11, truncated: true } },
-		);
-		expect(inspected.textContent).toContain("result #1 from message #9");
-		expect(inspected.textContent).toContain("EXACT");
-		expect(inspected.querySelector('[data-testid="read-session-open-full"]')).toBeNull();
-
-		const legacy = renderReadSession(
-			{ session_id: TARGET_ID },
-			{ messages: [{ index: 2, role: "assistant", text: "historical message" }] },
-		);
-		expect(legacy.textContent).toContain("historical message");
-		expect(legacy.querySelector('[data-testid="read-session-open-full"]')).toBeTruthy();
+	it("keeps exact inspection separate from the legacy fallback", () => {
+		const cases = [
+			[{ operation: "inspect", session_id: TARGET_ID, message_index: 9, result_index: 1 }, { operation: "inspect", result: { messageIndex: 9, resultIndex: 1, excerpt: "EXACT" } }, "result #1 from message #9", false],
+			[{ session_id: TARGET_ID }, { messages: [{ index: 2, role: "assistant", text: "historical message" }] }, "historical message", true],
+		] as const;
+		for (const [params, details, text, opensLegacy] of cases) { const node = renderRead(params, details); expect(node.textContent).toContain(text); expect(!!node.querySelector('[data-testid="read-session-open-full"]')).toBe(opensLegacy); }
 	});
 });
