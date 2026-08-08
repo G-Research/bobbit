@@ -15,6 +15,7 @@ function host(routes: Record<string, RouteHandler>, options: {
 	stored?: unknown;
 	onStatus?: (cb: (value: { status: "idle" | "running" | "error" }) => void) => void;
 	put?: ReturnType<typeof vi.fn>;
+	statusDispose?: ReturnType<typeof vi.fn>;
 } = {}) {
 	return {
 		capabilities: { callRoute: true, session: true, store: true },
@@ -26,7 +27,7 @@ function host(routes: Record<string, RouteHandler>, options: {
 		session: {
 			subscribe: vi.fn((_event: "status", cb: (value: { status: "idle" | "running" | "error" }) => void) => {
 				options.onStatus?.(cb);
-				return vi.fn();
+				return options.statusDispose ?? vi.fn();
 			}),
 		},
 		store: {
@@ -37,7 +38,7 @@ function host(routes: Record<string, RouteHandler>, options: {
 }
 
 function mount(sid: string, fakeHost: ReturnType<typeof host>): HTMLElement {
-	const root = createFileExplorerPanel().render({ __sessionId: sid }, fakeHost) as HTMLElement;
+	const root = createFileExplorerPanel().render({ __sessionId: sid }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]) as HTMLElement;
 	document.body.append(root);
 	mounted.push(root);
 	return root;
@@ -92,7 +93,7 @@ describe("built-in file explorer panel", () => {
 		expect(row(root, "src").getAttribute("aria-expanded")).toBe("true");
 		expect(root.querySelector('[role="group"]')?.getAttribute("aria-label")).toBe("src contents");
 		expect(row(root, "src/app.ts").getAttribute("aria-level")).toBe("2");
-		expect(row(root, "src/app.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Copied from src/base.ts");
+		expect(row(root, "src/app.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged copied from src/base.ts, Unstaged modified");
 
 		click(row(root, "src/app.ts"));
 		await tick();
@@ -104,6 +105,47 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector("textarea, input, [contenteditable=true]")).toBeNull();
 		expect(fakeHost.callRoute).toHaveBeenCalledWith("list", expect.objectContaining({ body: { path: "src" } }));
 		expect(fakeHost.callRoute).toHaveBeenCalledWith("read", expect.objectContaining({ body: { path: "src/app.ts" } }));
+	});
+
+	it("renders backend conflicts once and preserves independent copy and rename worktree badges", async () => {
+		const fakeHost = host({
+			list: ({ path }) => path === "src"
+				? list([
+					{ path: "src/base.ts", name: "base.ts", kind: "file" },
+					{ path: "src/copied.ts", name: "copied.ts", kind: "file" },
+					{ path: "src/renamed.ts", name: "renamed.ts", kind: "file" },
+				])
+				: list([
+					{ path: "src", name: "src", kind: "directory" },
+					{ path: "aa.txt", name: "aa.txt", kind: "file" },
+					{ path: "dd.txt", name: "dd.txt", kind: "file" },
+				], [
+					{ path: "aa.txt", index: "A", worktree: "A", conflict: true, summary: "conflict", staged: true, unstaged: true, added: true },
+					{ path: "dd.txt", index: "D", worktree: "D", conflict: true, summary: "conflict", staged: true, unstaged: true, deleted: true },
+					{ path: "src/copied.ts", oldPath: "src/base.ts", index: "A", worktree: "M", copied: true, staged: true, unstaged: true, added: true },
+					{ path: "src/renamed.ts", oldPath: "src/old.ts", index: "R", worktree: "M", renamed: true, staged: true, unstaged: true },
+				]),
+			read: () => ({ kind: "text", text: "value" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("combined-statuses", fakeHost);
+		await tick();
+
+		for (const path of ["aa.txt", "dd.txt"]) {
+			const badges = row(root, path).querySelector(".bb-explorer-badges");
+			expect(badges?.getAttribute("aria-label")).toBe("Conflict");
+			expect(badges?.querySelectorAll(".bb-explorer-badge")).toHaveLength(1);
+			expect(badges?.textContent).toBe("!");
+		}
+		expect(row(root, "src").querySelector('[aria-label="Contains changes"]')).not.toBeNull();
+
+		click(row(root, "src"));
+		await tick();
+		expect(row(root, "src/base.ts").querySelector(".bb-explorer-badges")).toBeNull();
+		expect(row(root, "src/copied.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged copied from src/base.ts, Unstaged modified");
+		expect([...row(root, "src/copied.ts").querySelectorAll(".bb-explorer-badge")].map((badge) => badge.textContent)).toEqual(["C", "M"]);
+		expect(row(root, "src/renamed.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged renamed from src/old.ts, Unstaged modified");
+		expect([...row(root, "src/renamed.ts").querySelectorAll(".bb-explorer-badge")].map((badge) => badge.textContent)).toEqual(["R", "M"]);
 	});
 
 	it("supports roving focus and Arrow, Home, End, Enter, and Space keyboard behavior", async () => {
@@ -174,6 +216,40 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("new value");
 	});
 
+	it("renders non-empty metadata-only copy and rename diffs through the shared parser", async () => {
+		const fakeHost = host({
+			list: () => list([
+				{ path: "copied.ts", name: "copied.ts", kind: "file" },
+				{ path: "renamed.ts", name: "renamed.ts", kind: "file" },
+			], [
+				{ path: "copied.ts", oldPath: "base.ts", index: "C", worktree: " ", copied: true, staged: true },
+				{ path: "renamed.ts", oldPath: "old.ts", index: "R", worktree: " ", renamed: true, staged: true },
+			]),
+			read: () => ({ kind: "text", text: "unchanged" }),
+			diff: ({ path }) => path === "copied.ts"
+				? { kind: "metadata-only", text: "diff --git a/base.ts b/copied.ts\nsimilarity index 100%\ncopy from base.ts\ncopy to copied.ts\n" }
+				: { kind: "metadata-only", text: "diff --git a/old.ts b/renamed.ts\nsimilarity index 100%\nrename from old.ts\nrename to renamed.ts\n" },
+		});
+		const root = mount("metadata-only-diffs", fakeHost);
+		await tick();
+
+		click(row(root, "copied.ts"));
+		await tick();
+		click(root.querySelector('[data-action="view-diff"]')!);
+		await tick();
+		expect(root.querySelector(".bb-explorer-diff-file-header")?.textContent).toBe("base.ts → copied.ts");
+		expect(root.textContent).toContain("copy from base.ts");
+		expect(root.textContent).toContain("copy to copied.ts");
+
+		click(row(root, "renamed.ts"));
+		await tick();
+		click(root.querySelector('[data-action="view-diff"]')!);
+		await tick();
+		expect(root.querySelector(".bb-explorer-diff-file-header")?.textContent).toBe("old.ts → renamed.ts");
+		expect(root.textContent).toContain("rename from old.ts");
+		expect(root.textContent).toContain("rename to renamed.ts");
+	});
+
 	it("renders explicit root, folder, and preview boundary states with local retry", async () => {
 		let rootAttempts = 0;
 		const fakeHost = host({
@@ -211,28 +287,31 @@ describe("built-in file explorer panel", () => {
 		}
 	});
 
-	it("refreshes manually and only on a non-idle to idle transition while pruning vanished selection", async () => {
+	it("refreshes on the first idle and later non-idle to idle transitions while pruning vanished selection", async () => {
 		let statusCallback: ((value: { status: "idle" | "running" | "error" }) => void) | undefined;
 		let entries: Entry[] = [{ path: "keep.txt", name: "keep.txt", kind: "file" }];
+		const statusDispose = vi.fn();
 		const fakeHost = host({
 			list: () => list(entries),
 			read: ({ path }) => ({ kind: "text", text: String(path) }),
 			diff: () => ({ kind: "empty" }),
-		}, { onStatus: (cb) => { statusCallback = cb; } });
+		}, { onStatus: (cb) => { statusCallback = cb; }, statusDispose });
 		const root = mount("refresh-lifecycle", fakeHost);
 		await tick();
 		click(row(root, "keep.txt"));
 		await tick();
-		const listCount = () => fakeHost.callRoute.mock.calls.filter(([name]) => name === "list").length;
-		const initial = listCount();
-		statusCallback!({ status: "idle" });
+		const rootStatusCount = () => fakeHost.callRoute.mock.calls.filter(([name, init]) => name === "list" && (init?.body as Record<string, unknown> | undefined)?.includeStatus === true).length;
+		const initial = rootStatusCount();
 		statusCallback!({ status: "idle" });
 		await tick();
-		expect(listCount()).toBe(initial);
+		expect(rootStatusCount()).toBe(initial + 1);
+		statusCallback!({ status: "idle" });
+		await tick();
+		expect(rootStatusCount()).toBe(initial + 1);
 		statusCallback!({ status: "running" });
 		statusCallback!({ status: "idle" });
 		await tick();
-		expect(listCount()).toBe(initial + 1);
+		expect(rootStatusCount()).toBe(initial + 2);
 		expect(row(root, "keep.txt").getAttribute("aria-selected")).toBe("true");
 
 		entries = [];
@@ -241,6 +320,36 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("This folder is empty.");
 		expect(root.textContent).toContain("Select a file to preview");
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("Explorer refreshed.");
+
+		root.remove();
+		await tick();
+		await tick();
+		expect(statusDispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("queues one first-idle refresh that arrives during initialization", async () => {
+		let statusCallback: ((value: { status: "idle" | "running" | "error" }) => void) | undefined;
+		const initialList = deferred<unknown>();
+		let listCalls = 0;
+		const fakeHost = host({
+			list: () => ++listCalls === 1 ? initialList.promise : list([]),
+			read: () => ({ kind: "text", text: "value" }),
+			diff: () => ({ kind: "empty" }),
+		}, { onStatus: (cb) => { statusCallback = cb; } });
+		mount("queued-first-idle", fakeHost);
+		await tick();
+		expect(listCalls).toBe(1);
+
+		statusCallback!({ status: "idle" });
+		statusCallback!({ status: "idle" });
+		expect(listCalls).toBe(1);
+		initialList.resolve(list([]));
+		await tick();
+		await tick();
+		expect(listCalls).toBe(2);
+		statusCallback!({ status: "idle" });
+		await tick();
+		expect(listCalls).toBe(2);
 	});
 
 	it("ignores a late preview response after a newer file selection", async () => {

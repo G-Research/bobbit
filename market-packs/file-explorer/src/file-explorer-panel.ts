@@ -55,7 +55,7 @@ type StatusRecord = {
 	deleted?: boolean;
 	renamed?: boolean;
 	copied?: boolean;
-	conflicted?: boolean;
+	conflict?: boolean;
 	untracked?: boolean;
 };
 
@@ -112,6 +112,7 @@ type ExplorerState = {
 	narrow: boolean;
 	narrowPane: "tree" | "preview";
 	lastSessionStatus?: string;
+	pendingIdleRefresh: boolean;
 	statusDispose?: () => void;
 	resizeObserver?: ResizeObserver;
 	detachObserver?: MutationObserver;
@@ -182,7 +183,7 @@ function createState(sid: string): ExplorerState {
 		directories: new Map(), expanded: new Set(), statuses: new Map(), ancestors: new Set(),
 		focused: "", view: "file", filePreview: idlePreview(), diffPreview: idlePreview(),
 		refreshGeneration: 0, selectionGeneration: 0, initialized: false, initializing: false,
-		active: false, narrow: false, narrowPane: "tree",
+		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
 	refreshButton.addEventListener("click", () => void refresh(state!, true));
 	backButton.addEventListener("click", () => showTree(state!, true));
@@ -227,6 +228,8 @@ function deactivate(state: ExplorerState): void {
 	state.tree.setAttribute("aria-busy", "false");
 	state.statusDispose?.();
 	state.statusDispose = undefined;
+	state.lastSessionStatus = undefined;
+	state.pendingIdleRefresh = false;
 	state.resizeObserver?.disconnect();
 	state.resizeObserver = undefined;
 	state.detachObserver?.disconnect();
@@ -244,15 +247,25 @@ async function initialize(state: ExplorerState): Promise<void> {
 	} finally {
 		state.initializing = false;
 	}
+	if (state.pendingIdleRefresh) {
+		state.pendingIdleRefresh = false;
+		if (state.active) await refresh(state, false);
+	}
 }
 
 function subscribeToStatus(state: ExplorerState): void {
 	if (!state.host?.capabilities?.session || !state.host.session?.subscribe || state.statusDispose) return;
 	try {
 		state.statusDispose = state.host.session.subscribe("status", ({ status }) => {
+			if (!state.active) return;
 			const previous = state.lastSessionStatus;
 			state.lastSessionStatus = status;
-			if (status === "idle" && previous !== undefined && previous !== "idle") void refresh(state, false);
+			if (status !== "idle" || previous === "idle") return;
+			if (!state.initialized || state.initializing) {
+				state.pendingIdleRefresh = true;
+				return;
+			}
+			void refresh(state, false);
 		});
 	} catch {
 		// Session events are a refresh convenience; manual refresh remains available.
@@ -361,7 +374,7 @@ function normalizeStatus(input: unknown): StatusRecord | undefined {
 		deleted: flags.deleted === true,
 		renamed: flags.renamed === true,
 		copied: flags.copied === true,
-		conflicted: flags.conflicted === true,
+		conflict: flags.conflict === true,
 		untracked: flags.untracked === true,
 	};
 }
@@ -488,20 +501,24 @@ function renderBadges(status: StatusRecord): HTMLElement {
 }
 
 function statusBadges(status: StatusRecord): Array<{ code: string; label: string; tone: string }> {
-	if (status.conflicted || status.summary === "conflicted" || status.index === "U" || status.worktree === "U") return [{ code: "!", label: "Conflict", tone: "conflict" }];
+	if (status.conflict || status.summary === "conflict" || status.index === "U" || status.worktree === "U") return [{ code: "!", label: "Conflict", tone: "conflict" }];
 	if (status.untracked || status.summary === "untracked" || status.index === "?") return [{ code: "?", label: "Untracked", tone: "untracked" }];
-	if (status.copied || status.summary === "copied") return [{ code: "C", label: status.oldPath ? `Copied from ${status.oldPath}` : "Copied", tone: "copied" }];
-	if (status.renamed || status.summary === "renamed") return [{ code: "R", label: status.oldPath ? `Renamed from ${status.oldPath}` : "Renamed", tone: "renamed" }];
 	const badges: Array<{ code: string; label: string; tone: string }> = [];
-	const index = normalizeStatusCode(status.index, status);
+	const rawIndex = normalizeStatusCode(status.index, status);
+	const index = status.copied && rawIndex === "A" ? "C" : rawIndex;
 	const worktree = normalizeStatusCode(status.worktree, status);
-	if (index) badges.push({ code: index, label: `Staged ${statusWord(index)}`, tone: toneForCode(index) });
-	if (worktree) badges.push({ code: worktree, label: `Unstaged ${statusWord(worktree)}`, tone: toneForCode(worktree) });
+	if (index) badges.push(statusBadge(index, "Staged", status));
+	if (worktree) badges.push(statusBadge(worktree, "Unstaged", status));
 	if (badges.length === 0) {
-		const code = status.deleted ? "D" : status.added ? "A" : "M";
-		badges.push({ code, label: status.summary ? titleCase(status.summary) : statusWord(code), tone: toneForCode(code) });
+		const code = status.copied ? "C" : status.renamed ? "R" : status.deleted ? "D" : status.added ? "A" : "M";
+		badges.push(statusBadge(code, undefined, status));
 	}
 	return badges;
+}
+
+function statusBadge(code: string, scope: "Staged" | "Unstaged" | undefined, status: StatusRecord): { code: string; label: string; tone: string } {
+	const provenance = code === "C" && status.oldPath ? `copied from ${status.oldPath}` : code === "R" && status.oldPath ? `renamed from ${status.oldPath}` : statusWord(code);
+	return { code, label: scope ? `${scope} ${provenance}` : titleCase(provenance), tone: toneForCode(code) };
 }
 
 function normalizeStatusCode(code: string | undefined, status: StatusRecord): string | undefined {
@@ -771,7 +788,7 @@ function renderDiff(state: ExplorerState, preview: PreviewState): void {
 		state.preview.append(previewMessage("too-large", sizeLimitMessage("Diff", preview)));
 		return;
 	}
-	if (["empty", "metadata-only", "empty-added"].includes(kind) || !preview.text) {
+	if (["empty", "empty-added"].includes(kind) || !preview.text) {
 		const message = kind === "empty-added" ? "Empty file added." : "No textual changes to display.";
 		state.preview.append(previewMessage("empty", message));
 		return;
@@ -958,7 +975,7 @@ function recordOf(value: unknown): Record<string, any> | undefined { return valu
 function arrayOf(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function titleCase(value: string): string { return value ? `${value[0].toUpperCase()}${value.slice(1)}` : value; }
 function statusWord(code: string): string { return code === "A" ? "added" : code === "D" ? "deleted" : code === "R" ? "renamed" : code === "C" ? "copied" : "modified"; }
-function toneForCode(code: string): string { return code === "D" ? "deleted" : code === "A" || code === "?" ? "added" : code === "R" || code === "C" ? "renamed" : "modified"; }
+function toneForCode(code: string): string { return code === "D" ? "deleted" : code === "A" || code === "?" ? "added" : code === "C" ? "copied" : code === "R" ? "renamed" : "modified"; }
 function sizeLimitMessage(label: string, preview: PreviewState): string { return preview.limit ? `${label} is too large to display (limit ${formatBytes(preview.limit)}).` : `${label} is too large to display.`; }
 function formatBytes(bytes: number): string { return bytes >= 1024 * 1024 ? `${Math.round(bytes / 1024 / 1024)} MiB` : `${Math.round(bytes / 1024)} KiB`; }
 
@@ -970,7 +987,7 @@ function focusPath(state: ExplorerState, path: string): void {
 }
 function treeItemId(state: ExplorerState, path: string): string { return `bb-explorer-${hash(`${state.sid}:${path}`)}`; }
 function hash(value: string): string { let result = 2166136261; for (let index = 0; index < value.length; index += 1) result = Math.imul(result ^ value.charCodeAt(index), 16777619); return (result >>> 0).toString(36); }
-function cssEscape(value: string): string { return globalThis.CSS?.escape ? CSS.escape(value) : value.replace(/["\\]/g, "\\$&"); }
+function cssEscape(value: string): string { return typeof globalThis.CSS?.escape === "function" ? CSS.escape(value) : value.replace(/["\\]/g, "\\$&"); }
 function setLive(state: ExplorerState, message: string): void { state.live.textContent = ""; requestAnimationFrame(() => { state.live.textContent = message; }); }
 function escapeHtml(value: string): string { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
