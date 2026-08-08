@@ -206,6 +206,7 @@ describe("Goal dashboard Agents-tab durations", () => {
 
 	it.each([
 		["missing", undefined],
+		["zero", 0],
 		["non-finite", Number.NaN],
 		["future", NOW + 24 * 60 * 60_000],
 	])("keeps an archived team lead at zero age when archivedAt is %s", async (_case, archivedAt) => {
@@ -243,7 +244,7 @@ describe("Goal dashboard Agents-tab durations", () => {
 		expect(duration).not.toMatch(/^-|NaN|Infinity|\d{5,}h/);
 	});
 
-	it("keeps the current-time fallback for a regular archived agent without archivedAt", async () => {
+	it("keeps the current-time fallback for a regular archived agent with zero archivedAt", async () => {
 		teamAgents = [{
 			sessionId: "archived-coder",
 			role: "coder",
@@ -252,6 +253,7 @@ describe("Goal dashboard Agents-tab durations", () => {
 			branch: "agent/coder",
 			task: "Archived work",
 			createdAt: NOW - 40 * 60_000,
+			archivedAt: 0,
 		}];
 		let [agentCard] = await renderAgentsDashboard();
 
