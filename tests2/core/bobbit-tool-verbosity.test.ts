@@ -196,6 +196,7 @@ describe("bobbit compact projections", () => {
 			lastActivity: "2026-07-17T11:00:00.000Z",
 			lastTurnErrored: true,
 			consecutiveErrorTurns: 2,
+			restoreError: "Bearer LIST_SESSION_SECRET_SENTINEL",
 			completedTurnCount: 17,
 			cwd: "/hidden",
 			clientCount: 4,
@@ -244,7 +245,10 @@ describe("bobbit compact projections", () => {
 			lastActivity: session.lastActivity,
 			lastTurnErrored: true,
 			consecutiveErrorTurns: 2,
+			restoreFailed: true,
 		});
+		expect(data.sessions[0].restoreError).toBeUndefined();
+		expect(JSON.stringify(data.sessions[0])).not.toContain("LIST_SESSION_SECRET_SENTINEL");
 		for (const dropped of [
 			"completedTurnCount", "cwd", "clientCount", "lastReadAt", "isCompacting",
 			"spawnPinnedModel", "spawnPinnedThinkingLevel", "imageGenerationModel",
@@ -267,24 +271,50 @@ describe("bobbit compact projections", () => {
 		});
 	});
 
-	it("gives get_session useful links, progress, and diagnostics without internal state", async () => {
-		const useful = {
+	it("gives get_session useful links and safe diagnostics without disclosing raw errors", async () => {
+		const safe = {
 			id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester",
 			projectId: "project-1", goalId: "goal-1", teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1",
 			taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1",
 			createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17,
-			lastTurnErrored: true, lastTurnErrorMessage: "Provider authentication failed", consecutiveErrorTurns: 3,
-			transientRetryAttempts: 2, manualRetryRequired: true, restoreError: { code: "RESTORE_FAILED" },
+			lastTurnErrored: true, consecutiveErrorTurns: 3,
 			condition: { kind: "model-selection-required", message: "Choose a supported model" },
+		};
+		const rawDiagnostic = [
+			String.raw`C:\Users\WINDOWS_PATH_SENTINEL\bobbit-wt\session-manager.ts`,
+			"/home/POSIX_PATH_SENTINEL/bobbit/session-manager.ts",
+			"Error: STACK_TRACE_SENTINEL\\n    at restoreSession (session-manager.ts:42:7)",
+			"stderr: STDERR_SENTINEL " + "x".repeat(COMPACT_TEXT_PREVIEW_CHARS * 10),
+			"Authorization: Bearer BEARER_TOKEN_SENTINEL",
+			"api_key=API_TOKEN_SENTINEL",
+			"session_token=SESSION_TOKEN_SENTINEL",
+		].join("\n");
+		const sensitive = {
+			restoreError: { code: "RAW_RESTORE_CODE_SENTINEL", message: rawDiagnostic, stderr: rawDiagnostic },
+			lastTurnErrorMessage: rawDiagnostic,
+			manualRetryRequired: true,
+			transientRetryAttempts: 2,
+			recoverDrainAttempts: 4,
 		};
 		const internal = ["cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace",
 			"storagePath", "model", "providerMetadata", "workflow"];
-		stubFetch(() => ({ body: { ...useful, ...Object.fromEntries(internal.map((field) => [field, "private"])) } }));
+		stubFetch(() => ({ body: { ...safe, ...sensitive, ...Object.fromEntries(internal.map((field) => [field, "private"])) } }));
 		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
-			operation: "get_session", sessionId: useful.id,
+			operation: "get_session", sessionId: safe.id,
 		}));
-		expect(data).toMatchObject(useful);
-		for (const field of internal) expect(data[field], field).toBeUndefined();
+		expect(data).toMatchObject({ ...safe, restoreFailed: true });
+		expect(data.restoreError).toBeUndefined();
+		for (const field of [
+			"lastTurnErrorMessage", "manualRetryRequired", "transientRetryAttempts", "recoverDrainAttempts",
+			...internal,
+		]) expect(data[field], field).toBeUndefined();
+		const projected = JSON.stringify(data);
+		for (const sentinel of [
+			"WINDOWS_PATH_SENTINEL", "POSIX_PATH_SENTINEL", "STACK_TRACE_SENTINEL", "STDERR_SENTINEL",
+			"BEARER_TOKEN_SENTINEL", "API_TOKEN_SENTINEL", "SESSION_TOKEN_SENTINEL", "RAW_RESTORE_CODE_SENTINEL",
+		]) expect(projected, sentinel).not.toContain(sentinel);
+		expect(typeof data.restoreFailed).toBe("boolean");
+		expect(JSON.stringify(data.restoreFailed).length).toBeLessThanOrEqual(5);
 	});
 
 	it("compacts search hits and truncates snippets without losing ranking or pagination", async () => {
