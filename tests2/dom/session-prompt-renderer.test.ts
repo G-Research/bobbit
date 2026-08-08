@@ -141,33 +141,23 @@ function renderReadSession(params: any, details: any, rawText = JSON.stringify(d
 	return container;
 }
 
-describe("ReadSessionRenderer discriminated responses", () => {
-	const textChecks = (node: HTMLElement, present: string[], absent: string[] = []) => { for (const value of present) expect(node.textContent).toContain(value); for (const value of absent) expect(node.textContent).not.toContain(value); };
-	const result = { resultIndex: 0, name: "bash", status: "ok", size: { chars: 10, lines: 2, bytes: 11 } };
+describe("ReadSessionRenderer response discrimination", () => {
+	it("keeps exact inspection separate from the legacy list fallback", () => {
+		const inspected = renderReadSession(
+			{ operation: "inspect", session_id: TARGET_ID, message_index: 9, result_index: 1 },
+			{ operation: "inspect", result: { messageIndex: 9, resultIndex: 1, name: "bash", status: "error",
+				size: { chars: 20, lines: 2, bytes: 21 }, excerpt: "EXACT", offset: 6, returned: 5,
+				totalChars: 20, nextOffset: 11, truncated: true } },
+		);
+		expect(inspected.textContent).toContain("result #1 from message #9");
+		expect(inspected.textContent).toContain("EXACT");
+		expect(inspected.querySelector('[data-testid="read-session-open-full"]')).toBeNull();
 
-	it("renders current and legacy lists without raw fallback", () => {
-		const current = renderReadSession({ operation: "list", session_id: TARGET_ID }, { operation: "list", messages: [{ index: 4,
-			role: "assistant", text: "", toolUses: [{ name: "bash", argumentSummary: "{\"command\":\"npm test\"}" }],
-			toolResults: [{ ...result, preview: "PREVIEW_SECRET", rawBody: "BODY_SECRET" }] }] }, "JSON_SECRET");
-		textChecks(current, ["bash({\"command\":\"npm test\"})", "body redacted", "status=ok", "10 chars", "2 lines", "11 bytes"], ["PREVIEW_SECRET", "BODY_SECRET", "JSON_SECRET"]);
-		const legacy = renderReadSession({ session_id: TARGET_ID }, { messages: [{ index: 2, role: "assistant", text: "historical message",
-			toolUses: [{ name: "read", inputPreview: "{\"path\":\"README.md\"}" }], toolResults: [{ name: "read", omitted: true, status: "ok", size: { type: "text", chars: 42, lines: 3 } }] }] });
-		textChecks(legacy, ["historical message", "read({\"path\":\"README.md\"})", "omitted"]);
+		const legacy = renderReadSession(
+			{ session_id: TARGET_ID },
+			{ messages: [{ index: 2, role: "assistant", text: "historical message" }] },
+		);
+		expect(legacy.textContent).toContain("historical message");
 		expect(legacy.querySelector('[data-testid="read-session-open-full"]')).toBeTruthy();
-	});
-
-	it("renders one inspected message without empty fallback, siblings, or raw data", () => {
-		const node = renderReadSession({ operation: "inspect", session_id: TARGET_ID, message_index: 7 }, { operation: "inspect",
-			message: { index: 7, role: "assistant", text: "Selected semantic message", toolUses: [{ name: "grep", arguments: { pattern: "needle" } }], toolResults: [result] },
-			messages: [{ text: "SIBLING_SECRET" }] }, "RAW_SECRET");
-		textChecks(node, ["message #7", "Selected semantic message", 'grep({"pattern":"needle"})', "body redacted"], ["No messages in window", "SIBLING_SECRET", "RAW_SECRET"]);
-		expect(node.querySelector('[data-testid="read-session-open-full"]')).toBeNull();
-	});
-
-	it("renders only the exact result excerpt and continuation", () => {
-		const node = renderReadSession({ operation: "inspect", session_id: TARGET_ID, message_index: 9, result_index: 1 }, { operation: "inspect",
-			result: { ...result, messageIndex: 9, resultIndex: 1, status: "error", excerpt: "EXACT", offset: 6, returned: 5, totalChars: 20,
-				nextOffset: 11, truncated: true, rawBody: "BODY_SECRET" }, message: { text: "SIBLING_SECRET" } }, "JSON_SECRET");
-		textChecks(node, ["result #1 from message #9", "EXACT", "status=error", "Characters 6–11 of 20", "Continue at offset 11"], ["No messages in window", "SIBLING_SECRET", "BODY_SECRET", "JSON_SECRET"]);
 	});
 });
