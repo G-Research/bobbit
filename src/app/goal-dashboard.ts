@@ -2674,7 +2674,7 @@ function renderAgentsTab(): TemplateResult {
 		const startedAt = Number.isFinite(agent.createdAt) && agent.createdAt > 0 && agent.createdAt <= now
 			? agent.createdAt
 			: now;
-		const hasValidArchivedAt = isArchived && Number.isFinite(agent.archivedAt) && agent.archivedAt! <= now;
+		const hasValidArchivedAt = isArchived && Number.isFinite(agent.archivedAt) && agent.archivedAt! > 0 && agent.archivedAt! <= now;
 		const endedAt = hasValidArchivedAt
 			? agent.archivedAt!
 			: isArchived && agent.role === "team-lead"
