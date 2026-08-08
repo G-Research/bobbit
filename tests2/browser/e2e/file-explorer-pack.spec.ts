@@ -310,7 +310,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await showTreeIfNarrow(panel);
 		await treeItem(page, "src/changed.ts").click();
 		await panel.getByRole("tab", { name: "Diff" }).click();
-		write(root, "new-after-refresh.txt", "created outside Bobbit\n");
+		write(root!, "new-after-refresh.txt", "created outside Bobbit\n");
 		await panel.getByRole("button", { name: "Refresh explorer" }).click();
 		await showTreeIfNarrow(panel);
 		await expect(treeItem(page, "new-after-refresh.txt")).toBeVisible({ timeout: 15_000 });
