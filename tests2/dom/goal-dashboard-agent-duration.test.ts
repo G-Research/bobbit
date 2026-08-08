@@ -207,6 +207,32 @@ describe("Goal dashboard Agents-tab durations", () => {
 	it.each([
 		["missing", undefined],
 		["non-finite", Number.NaN],
+		["future", NOW + 24 * 60 * 60_000],
+	])("keeps an archived team lead at zero age when archivedAt is %s", async (_case, archivedAt) => {
+		archivedSessions = [makeLead({
+			status: "archived",
+			archived: true,
+			createdAt: NOW - 40 * 60_000,
+			archivedAt: archivedAt as number,
+		})];
+		let [leadCard] = await renderAgentsDashboard();
+		const durations = [cardDuration(leadCard)];
+
+		vi.mocked(Date.now).mockReturnValue(NOW + 25 * 60_000);
+		render(renderGoalDashboard(), host);
+		await nextFrame();
+		[leadCard] = await waitForAgentCards(1);
+		durations.push(cardDuration(leadCard));
+
+		expect(
+			durations,
+			"LEAD_UPTIME_INVALID_ARCHIVE_END: archived leads without a valid end time must not keep aging",
+		).toEqual(["0m", "0m"]);
+	});
+
+	it.each([
+		["missing", undefined],
+		["non-finite", Number.NaN],
 		["future", NOW + 5 * 60_000],
 	])("uses a non-negative zero-age fallback for a %s lead createdAt", async (_case, createdAt) => {
 		liveSessions = [makeLead({ createdAt: createdAt as number })];
@@ -215,6 +241,28 @@ describe("Goal dashboard Agents-tab durations", () => {
 
 		expect(duration, "LEAD_UPTIME_INVALID_LIFECYCLE: invalid lead timestamps must not produce epoch or negative durations").toBe("0m");
 		expect(duration).not.toMatch(/^-|NaN|Infinity|\d{5,}h/);
+	});
+
+	it("keeps the current-time fallback for a regular archived agent without archivedAt", async () => {
+		teamAgents = [{
+			sessionId: "archived-coder",
+			role: "coder",
+			status: "archived",
+			worktreePath: "/repo/coder",
+			branch: "agent/coder",
+			task: "Archived work",
+			createdAt: NOW - 40 * 60_000,
+		}];
+		let [agentCard] = await renderAgentsDashboard();
+
+		expect(cardDuration(agentCard)).toBe("40m");
+
+		vi.mocked(Date.now).mockReturnValue(NOW + 25 * 60_000);
+		render(renderGoalDashboard(), host);
+		await nextFrame();
+		[agentCard] = await waitForAgentCards(1);
+
+		expect(cardDuration(agentCard)).toBe("1h 5m");
 	});
 
 	it("preserves live and archived duration behavior for regular team agents", async () => {
