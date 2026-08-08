@@ -11,6 +11,7 @@ import {
 	navigateToHash,
 	openApp,
 	registerProject,
+	sendMessage,
 	test,
 	waitForSessionStatus,
 } from "../_helpers/journey-fixture.js";
@@ -54,7 +55,10 @@ function createGitFixture(): string {
 	write(root, ".hidden", "dotfiles stay visible\n");
 	git(root, "add", "--", ".");
 	git(root, "commit", "-q", "-m", "explorer baseline");
+	return root;
+}
 
+function populateGitChanges(root: string): void {
 	write(root, "src/changed.ts", 'export const version = "staged";\n');
 	git(root, "add", "--", "src/changed.ts");
 	write(root, "src/changed.ts", 'export const version = "staged";\nexport const working = true;\n');
@@ -85,7 +89,6 @@ function createGitFixture(): string {
 		stdio: ["pipe", "ignore", "pipe"],
 	});
 	write(root, "conflict.txt", "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n");
-	return root;
 }
 
 async function createFixtureProject(root: string, label: string): Promise<FixtureProject> {
@@ -115,6 +118,11 @@ async function waitForExplorer(page: Page): Promise<Locator> {
 	await expect(panel).toBeVisible({ timeout: 20_000 });
 	await expect(panel.locator(TREE)).toHaveAttribute("aria-busy", "false", { timeout: 20_000 });
 	return panel;
+}
+
+async function showTreeIfNarrow(panel: Locator): Promise<void> {
+	const back = panel.getByRole("button", { name: "Back to files" });
+	if (await back.isVisible()) await back.click();
 }
 
 async function openFromSessionMenu(page: Page): Promise<void> {
@@ -157,10 +165,15 @@ test.describe("Journey: built-in file explorer pack", () => {
 		gitFixture = undefined;
 	});
 
-	test("launches a singleton, browses Git state read-only, restores it, refreshes, and browses outside Git @smoke", async ({ page }) => {
+	test("launches a singleton, browses Git state read-only, restores it, refreshes, and browses outside Git @smoke", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
-		const root = createGitFixture();
-		gitFixture = await createFixtureProject(root, "git");
+		const projectRoot = createGitFixture();
+		gitFixture = await createFixtureProject(projectRoot, "git");
+		const persisted = gateway.sessionManager?.getPersistedSession(gitFixture.sessionId) as { cwd?: string; worktreePath?: string } | undefined;
+		const root = persisted?.worktreePath ?? persisted?.cwd;
+		expect(root, "the explorer fixture must mutate the bound session working directory").toBeTruthy();
+		populateGitChanges(root!);
+		await page.setViewportSize({ width: 1600, height: 1000 });
 
 		const contributionsResponse = await apiFetch("/api/ext/contributions");
 		expect(contributionsResponse.ok).toBe(true);
@@ -179,6 +192,40 @@ test.describe("Journey: built-in file explorer pack", () => {
 		expect(explorer?.routeNames).toEqual(expect.arrayContaining(["list", "read", "diff"]));
 
 		await openApp(page);
+		await navigateToHash(page, "#/market");
+		const builtinGroup = page.getByTestId("market-builtin-group");
+		await expect(builtinGroup).toBeVisible({ timeout: 15_000 });
+		const explorerCard = builtinGroup.locator('[data-testid="market-installed-pack"][data-builtin="true"][data-pack-name="file-explorer"]');
+		await expect(explorerCard, "Marketplace must expose the shipped explorer as built-in").toBeVisible({ timeout: 15_000 });
+		await expect(explorerCard.getByTestId("market-pack-builtin-badge")).toBeVisible();
+		await expect(explorerCard.getByTestId("market-uninstall-pack"), "built-in packs cannot be uninstalled").toHaveCount(0);
+		const activation = explorerCard.getByTestId("market-toggle-pack-file-explorer");
+		await expect(activation, "the explorer is enabled by default").toBeChecked({ timeout: 15_000 });
+		let activationPut = page.waitForResponse((response) => response.url().includes("/api/marketplace/pack-activation") && response.request().method() === "PUT");
+		await activation.uncheck();
+		expect((await activationPut).ok()).toBe(true);
+		await expect(activation).not.toBeChecked();
+
+		await navigateToHash(page, `#/session/${gitFixture.sessionId}`);
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+		const trigger = page.locator('[data-testid="session-actions-trigger"]').first();
+		await trigger.click();
+		const menu = page.locator("sidebar-actions-popover [role=menu]");
+		await expect(menu).toBeVisible();
+		await expect(menu.getByRole("menuitem", { name: /Open File Explorer/ }), "disabling the pack removes its session launcher").toHaveCount(0);
+		await page.keyboard.press("Escape");
+		const composer = page.locator("message-editor textarea").first();
+		await composer.fill("/files");
+		await expect(page.getByTestId("slash-command-files"), "disabling the pack removes its slash launcher").toHaveCount(0);
+		await composer.fill("");
+
+		await navigateToHash(page, "#/market");
+		await expect(activation).not.toBeChecked({ timeout: 15_000 });
+		activationPut = page.waitForResponse((response) => response.url().includes("/api/marketplace/pack-activation") && response.request().method() === "PUT");
+		await activation.check();
+		expect((await activationPut).ok()).toBe(true);
+		await expect(activation).toBeChecked();
+
 		await navigateToHash(page, `#/session/${gitFixture.sessionId}`);
 		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
@@ -199,6 +246,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await src.focus();
 		await src.press("ArrowRight");
 		await expect(src).toHaveAttribute("aria-expanded", "true");
+		await expect(treeItem(page, "src/added.ts"), "lazy children must load before navigating into the directory").toBeVisible();
 		await src.press("ArrowRight");
 		await expect(treeItem(page, "src/added.ts")).toBeFocused();
 		await treeItem(page, "src/added.ts").press("ArrowLeft");
@@ -207,7 +255,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expectBadge(page, "src/changed.ts", /Staged modified, Unstaged modified/);
 		await expectBadge(page, "src/added.ts", /Staged added/);
 		await expectBadge(page, "src/deleted.txt", /Unstaged deleted/);
-		await expectBadge(page, "rename-new.txt", /Renamed from rename-old\.txt/);
+		await expectBadge(page, "rename-new.txt", /renamed from rename-old\.txt/i);
 		await expectBadge(page, "conflict.txt", /^Conflict$/);
 		await expectBadge(page, "untracked.txt", /^Untracked$/);
 		await expectBadge(page, "binary.dat", /Unstaged modified/);
@@ -216,7 +264,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(nested.locator('.bb-explorer-ancestor[aria-label="Contains changes"]')).toBeVisible();
 		await nested.click();
 		await expect(nested).toHaveAttribute("aria-expanded", "true");
-		await expectBadge(page, "nested/copied.txt", /Copied from copy-source\.txt/);
+		await expectBadge(page, "nested/copied.txt", /copied from copy-source\.txt/i);
 
 		await treeItem(page, "src/changed.ts").click();
 		await expect(panel.locator(PREVIEW)).toContainText("src/changed.ts");
@@ -231,43 +279,58 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(completeDiff).toContainText('export const version = "staged";');
 		await expect(completeDiff).toContainText("export const working = true;");
 
+		await showTreeIfNarrow(panel);
 		await treeItem(page, "nested/copied.txt").click();
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		await expect(panel.locator(".bb-explorer-diff-file")).toContainText("copy from copy-source.txt");
 		await expect(panel.locator(".bb-explorer-diff-file")).toContainText("copy to nested/copied.txt");
 
+		await showTreeIfNarrow(panel);
 		await treeItem(page, "rename-new.txt").click();
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		await expect(panel.locator(".bb-explorer-diff-file")).toContainText("rename from rename-old.txt");
 		await expect(panel.locator(".bb-explorer-diff-file")).toContainText("rename to rename-new.txt");
 
+		await showTreeIfNarrow(panel);
 		await treeItem(page, "binary.dat").click();
 		await expect(panel.locator(PREVIEW)).toContainText("Binary files cannot be previewed.");
+		await showTreeIfNarrow(panel);
 		await treeItem(page, "empty.txt").click();
 		await expect(panel.locator(PREVIEW)).toContainText("This file is empty.");
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		await expect(panel.locator(PREVIEW)).toContainText("Empty file added.");
+		await showTreeIfNarrow(panel);
 		await treeItem(page, "oversized.txt").click();
 		await expect(panel.locator(PREVIEW)).toContainText(/File is too large|File exceeds the preview limit/);
+		await showTreeIfNarrow(panel);
 		await treeItem(page, "src/deleted.txt").click();
 		await expect(panel.getByRole("tab", { name: "Diff" })).toHaveAttribute("aria-selected", "true");
 		await expect(panel.getByRole("region", { name: "Working tree compared with HEAD" })).toContainText("deleted baseline");
 
+		await showTreeIfNarrow(panel);
 		await treeItem(page, "src/changed.ts").click();
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		write(root, "new-after-refresh.txt", "created outside Bobbit\n");
 		await panel.getByRole("button", { name: "Refresh explorer" }).click();
+		await showTreeIfNarrow(panel);
 		await expect(treeItem(page, "new-after-refresh.txt")).toBeVisible({ timeout: 15_000 });
 		await expect(src, "manual refresh preserves valid expansion").toHaveAttribute("aria-expanded", "true");
 		await expect(treeItem(page, "src/changed.ts"), "manual refresh preserves selection").toHaveAttribute("aria-selected", "true");
+
+		await sendMessage(page, "STAY_BUSY:2500 explorer idle refresh");
+		await expect(page.locator("button[title='Stop streaming']"), "the refresh fixture must exercise a real non-idle agent state").toBeVisible({ timeout: 10_000 });
+		write(root!, "new-after-idle.txt", "created while the agent was active\n");
+		await waitForSessionStatus(gitFixture.sessionId, "idle", 15_000);
+		await expect(treeItem(page, "new-after-idle.txt"), "the real transition back to idle refreshes the explorer").toBeVisible({ timeout: 15_000 });
 
 		await page.waitForTimeout(300);
 		await page.reload();
 		const restored = await waitForExplorer(page);
 		await expect(treeItem(page, "src")).toHaveAttribute("aria-expanded", "true");
 		await expect(treeItem(page, "src/changed.ts")).toHaveAttribute("aria-selected", "true");
-		await expect(restored.getByRole("tab", { name: "Diff" })).toHaveAttribute("aria-selected", "true");
-		await expect(restored.getByRole("region", { name: "Working tree compared with HEAD" })).toContainText("export const working = true;");
+		const restoredDiff = restored.locator('[role="tab"]').filter({ hasText: "Diff" });
+		await expect(restoredDiff, "reload restores the selected view even when the responsive preview pane is hidden").toHaveAttribute("aria-selected", "true");
+		await expect(restored.locator('[role="region"][aria-label="Working tree compared with HEAD"]')).toContainText("export const working = true;");
 
 		const nonGitRoot = mkdtempSync(join(tmpdir(), `bobbit-file-explorer-plain-${process.env.E2E_PORT ?? "0"}-`));
 		write(nonGitRoot, "folder/plain.txt", "ordinary non-git file\n");
