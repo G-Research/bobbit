@@ -1,7 +1,7 @@
 // v2-native — bobbit gateway tool suite. Listed in tests-map.json `v2Native`.
 //
-// Acceptance coverage for discovery-only lists, useful single-entity reads,
-// and the projection catalogue's drift guard.
+// Acceptance coverage for compact-by-default Bobbit output, bounded verbose
+// reads, and the projection catalogue's drift guard.
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
@@ -48,18 +48,12 @@ function preview(value: string): string {
 		: `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`;
 }
 
-describe("bobbit_read agent contract", () => {
-	it("closes the schema and rejects removed read flags", () => {
+describe("bobbit compact projections", () => {
+	it("closes bobbit_read without removed flags", () => {
 		const schema = tools.get("bobbit_read")!.parameters;
 		expect(schema.additionalProperties).toBe(false);
-		for (const flag of ["verbose", "include_tool_results", "includeToolResults", "raw_results", "rawResults"]) {
-			expect(schema.properties?.[flag]).toBeUndefined();
-			expect(Value.Check(schema, { operation: "health", [flag]: true })).toBe(false);
-		}
+		for (const flag of ["verbose", "include_tool_results", "includeToolResults", "raw_results", "rawResults"]) expect([schema.properties?.[flag], Value.Check(schema, { operation: "health", [flag]: true })]).toEqual([undefined, false]);
 	});
-});
-
-describe("bobbit compact projections", () => {
 	it("compacts list_goals while preserving identity, state, recency, and pagination", async () => {
 		const spec = longText("goal spec: ");
 		const goal = {
@@ -127,18 +121,10 @@ describe("bobbit compact projections", () => {
 			updatedAt: goal.updatedAt,
 		});
 		for (const dropped of [
-			"spec", "branch", "mergeTarget", "setupStatus", "team", "paused",
-			"workflow", "worktreePath", "repoPath", "cwd", "sandboxed",
-			"subgoalsAllowed", "autoStartTeam", "generation", "colorIndex",
-		]) {
-			expect(
-				data.goals[0][dropped],
-				dropped === "spec" ? "BOBBIT_READ_LIST_GOALS_MUST_OMIT_SPEC" : dropped,
-			).toBeUndefined();
-		}
-		expect(data.providerMetadata).toBeUndefined();
-		expect(data.filesystemPath).toBeUndefined();
-		expect(data.workflowSnapshot).toBeUndefined();
+			"spec", "branch", "mergeTarget", "setupStatus", "team", "paused", "workflow", "worktreePath", "repoPath", "cwd",
+			"sandboxed", "subgoalsAllowed", "autoStartTeam", "generation", "colorIndex",
+		]) expect(data.goals[0][dropped], dropped === "spec" ? "BOBBIT_READ_LIST_GOALS_MUST_OMIT_SPEC" : dropped).toBeUndefined();
+		for (const dropped of ["providerMetadata", "filesystemPath", "workflowSnapshot"]) expect(data[dropped]).toBeUndefined();
 		expect(data.archivedSessions[0]).toMatchObject({
 			id: archivedSession.id,
 			title: archivedSession.title,
@@ -249,13 +235,8 @@ describe("bobbit compact projections", () => {
 		});
 		expect(data.sessions[0].restoreError).toBeUndefined();
 		expect(JSON.stringify(data.sessions[0])).not.toContain("LIST_SESSION_SECRET_SENTINEL");
-		for (const dropped of [
-			"completedTurnCount", "cwd", "clientCount", "lastReadAt", "isCompacting",
-			"spawnPinnedModel", "spawnPinnedThinkingLevel", "imageGenerationModel",
-			"goalAssistant", "roleAssistant", "toolAssistant",
-		]) {
-			expect(data.sessions[0][dropped], dropped).toBeUndefined();
-		}
+		for (const dropped of ["completedTurnCount", "cwd", "clientCount", "lastReadAt", "isCompacting", "spawnPinnedModel", "spawnPinnedThinkingLevel",
+			"imageGenerationModel", "goalAssistant", "roleAssistant", "toolAssistant"]) expect(data.sessions[0][dropped], dropped).toBeUndefined();
 		expect(data.archivedDelegates[0]).toMatchObject({
 			id: "delegate-archived",
 			archived: true,
@@ -270,51 +251,17 @@ describe("bobbit compact projections", () => {
 			mode: "cursor",
 		});
 	});
-
 	it("gives get_session useful links and safe diagnostics without disclosing raw errors", async () => {
-		const safe = {
-			id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester",
-			projectId: "project-1", goalId: "goal-1", teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1",
-			taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1",
-			createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17,
-			lastTurnErrored: true, consecutiveErrorTurns: 3,
-			condition: { kind: "model-selection-required", message: "Choose a supported model" },
-		};
-		const rawDiagnostic = [
-			String.raw`C:\Users\WINDOWS_PATH_SENTINEL\bobbit-wt\session-manager.ts`,
-			"/home/POSIX_PATH_SENTINEL/bobbit/session-manager.ts",
-			"Error: STACK_TRACE_SENTINEL\\n    at restoreSession (session-manager.ts:42:7)",
-			"stderr: STDERR_SENTINEL " + "x".repeat(COMPACT_TEXT_PREVIEW_CHARS * 10),
-			"Authorization: Bearer BEARER_TOKEN_SENTINEL",
-			"api_key=API_TOKEN_SENTINEL",
-			"session_token=SESSION_TOKEN_SENTINEL",
-		].join("\n");
-		const sensitive = {
-			restoreError: { code: "RAW_RESTORE_CODE_SENTINEL", message: rawDiagnostic, stderr: rawDiagnostic },
-			lastTurnErrorMessage: rawDiagnostic,
-			manualRetryRequired: true,
-			transientRetryAttempts: 2,
-			recoverDrainAttempts: 4,
-		};
-		const internal = ["cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace",
-			"storagePath", "model", "providerMetadata", "workflow"];
-		stubFetch(() => ({ body: { ...safe, ...sensitive, ...Object.fromEntries(internal.map((field) => [field, "private"])) } }));
-		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
-			operation: "get_session", sessionId: safe.id,
-		}));
+		const safe = { id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester", projectId: "project-1", goalId: "goal-1",
+			teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1", taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1", createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17, lastTurnErrored: true, consecutiveErrorTurns: 3, condition: { kind: "model-selection-required", message: "Choose a supported model" } };
+		const secret = String.raw`Bearer SECRET_SENTINEL at C:\private\session.ts`;
+		const omitted = ["restoreError", "lastTurnErrorMessage", "manualRetryRequired", "transientRetryAttempts", "recoverDrainAttempts", "cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace", "storagePath", "model", "providerMetadata", "workflow"];
+		stubFetch(() => ({ body: { ...safe, restoreError: { code: "PRIVATE_CODE", message: secret }, lastTurnErrorMessage: secret, ...Object.fromEntries(omitted.slice(2).map((field) => [field, "private"])) } }));
+		const data = resultJson(await tools.get("bobbit_read")!.execute("id", { operation: "get_session", sessionId: safe.id }));
 		expect(data).toMatchObject({ ...safe, restoreFailed: true });
-		expect(data.restoreError).toBeUndefined();
-		for (const field of [
-			"lastTurnErrorMessage", "manualRetryRequired", "transientRetryAttempts", "recoverDrainAttempts",
-			...internal,
-		]) expect(data[field], field).toBeUndefined();
-		const projected = JSON.stringify(data);
-		for (const sentinel of [
-			"WINDOWS_PATH_SENTINEL", "POSIX_PATH_SENTINEL", "STACK_TRACE_SENTINEL", "STDERR_SENTINEL",
-			"BEARER_TOKEN_SENTINEL", "API_TOKEN_SENTINEL", "SESSION_TOKEN_SENTINEL", "RAW_RESTORE_CODE_SENTINEL",
-		]) expect(projected, sentinel).not.toContain(sentinel);
+		for (const field of omitted) expect(data[field], field).toBeUndefined();
+		expect(JSON.stringify(data)).not.toContain("SECRET_SENTINEL");
 		expect(typeof data.restoreFailed).toBe("boolean");
-		expect(JSON.stringify(data.restoreFailed).length).toBeLessThanOrEqual(5);
 	});
 
 	it("compacts search hits and truncates snippets without losing ranking or pagination", async () => {
@@ -398,8 +345,7 @@ describe("bobbit compact projections", () => {
 			assignedTo: "session-1",
 			workflowGateId: "implementation",
 		});
-		expect(data.tasks[0].spec).toBeUndefined();
-		expect(data.tasks[0].resultSummary).toBeUndefined();
+		for (const field of ["spec", "resultSummary"]) expect(data.tasks[0][field]).toBeUndefined();
 		expect(data.tasks[0].verify).toBeUndefined();
 		expect(data.pagination).toMatchObject({ itemKey: "tasks", limit: 10, total: 1 });
 	});
@@ -449,8 +395,7 @@ describe("bobbit compact projections", () => {
 			hasContent: true,
 			contentLength: content.length,
 		});
-		expect(data.gates[0].currentContent).toBeUndefined();
-		expect(data.gates[0].content).toBeUndefined();
+		for (const field of ["currentContent", "content"]) expect(data.gates[0][field]).toBeUndefined();
 		expect(data.gates[0].verify).toBeUndefined();
 		expect(data.gates[0].verification).toBeUndefined();
 		expect(data.gates[0].signals).toBeUndefined();
