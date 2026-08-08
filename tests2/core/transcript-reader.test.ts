@@ -534,32 +534,18 @@ describe("transcript-reader / readTranscript", () => {
 
 describe("transcript-reader / agent list and exact inspection", () => {
 	function agentRead(params: Record<string, unknown>, content: string): Promise<any> {
-		const fn = (transcriptReader as any).readAgentTranscript;
-		assert.equal(typeof fn, "function", "readAgentTranscript export must implement focused agent transcript reads");
-		return fn(params, memoryTranscript(content));
+		return (transcriptReader as any).readAgentTranscript(params, memoryTranscript(content));
 	}
 
-	const nested = [
-		{ type: "text", text: "alpha" },
+	const nested = [{ type: "text", text: "alpha" },
 		{ type: "thinking", thinking: "PROVIDER_THINKING_SENTINEL", signature: "PROVIDER_SIGNATURE_SENTINEL" },
-		{ type: "text", text: "βeta" },
-	];
+		{ type: "text", text: "βeta" }];
 	const focusedFixture = [
-		{ type: "message", message: { role: "assistant", content: [
-			{ type: "tool_use", id: "anth-call", name: "bash", input: { cmd: "echo anthropic" } },
-		] } },
-		{ type: "message", message: { role: "user", content: [
-			{ type: "tool_result", tool_use_id: "anth-call", is_error: false, content: nested },
-		] } },
-		{ type: "message", message: { role: "assistant", content: [
-			{ type: "toolCall", id: "pi-call", name: "read", arguments: { path: "fixture.txt" } },
-		] } },
-		{ type: "message", message: {
-			role: "toolResult", toolCallId: "pi-call", toolName: "read", isError: true, content: nested,
-		} },
-		{ type: "message", message: { role: "user", content: [
-			{ type: "tool_result", tool_use_id: "unknown-call", content: "UNKNOWN_RESULT_BODY_SENTINEL" },
-		] } },
+		{ type: "message", message: { role: "assistant", content: [{ type: "tool_use", id: "anth-call", name: "bash", input: {} }] } },
+		{ type: "message", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "anth-call", is_error: false, content: nested }] } },
+		{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "pi-call", name: "read", arguments: {} }] } },
+		{ type: "message", message: { role: "toolResult", toolCallId: "pi-call", toolName: "read", isError: true, content: nested } },
+		{ type: "message", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "unknown-call", content: "UNKNOWN_RESULT_BODY_SENTINEL" }] } },
 	].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
 
 	it("lists Anthropic and Pi tool-only messages with normalized nested result metadata", async () => {
