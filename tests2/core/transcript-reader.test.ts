@@ -553,6 +553,21 @@ describe("transcript-reader / agent list and exact inspection", () => {
 		assert.ok(messages[5].text.length <= 801 && messages[5].toolUses[0].argumentSummary.length <= 201);
 		for (const secret of ["alpha", "βeta", "UNKNOWN_SECRET", "THINKING_SECRET", "SIGNATURE_SECRET"]) assert.equal(JSON.stringify(messages).includes(secret), false, `${secret} leaked`);
 	});
+	it("regex-matches Anthropic and Pi tool summaries and rejects invalid patterns", async () => {
+		const matches = await read({
+			operation: "list",
+			pattern: '"toolUseId":"(A|P)"',
+			caseSensitive: false,
+			offset: -2,
+			limit: 2,
+		});
+		assert.equal(matches.matchCount, 2);
+		assert.deepEqual(matches.messages.map((message: any) => message.index), [0, 2]);
+		await assert.rejects(
+			() => read({ operation: "list", pattern: "(" }),
+			(error: unknown) => error instanceof TranscriptReaderError && error.code === "invalid_regex",
+		);
+	});
 	it("inspects one sanitized message or one continued result only", async () => {
 		const message = await read({ operation: "inspect", messageIndex: 1 });
 		expect(message.message).toEqual(expect.objectContaining({ index: 1, toolResults: [expect.objectContaining({ resultIndex: 0, size })] }));

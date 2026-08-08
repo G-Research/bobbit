@@ -484,6 +484,7 @@ function buildMatchList(
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
+	searchText?: (message: RawMessage) => string,
 ): { matchCount: number; expanded: number[] } {
 	let regex: RegExp;
 	try {
@@ -493,7 +494,8 @@ function buildMatchList(
 	}
 	const matches: number[] = [];
 	for (const m of messages) {
-		const flat = isMessageLevelToolResult(m) ? flattenText([messageLevelToolResultBlock(m)]) : flattenText(m.content);
+		const flat = searchText?.(m)
+			?? (isMessageLevelToolResult(m) ? flattenText([messageLevelToolResultBlock(m)]) : flattenText(m.content));
 		if (regex.test(flat)) matches.push(m.index);
 	}
 	if (context <= 0) return { matchCount: matches.length, expanded: matches.slice() };
@@ -848,29 +850,6 @@ function agentSearchText(m: RawMessage): string {
 	return [text, ...toolUses.map((use) => safeStringify(use)), ...resultText].join("\n");
 }
 
-function buildAgentMatchList(
-	messages: RawMessage[],
-	pattern: string,
-	caseSensitive: boolean,
-	context: number,
-): { matchCount: number; expanded: number[] } {
-	let regex: RegExp;
-	try {
-		regex = new RegExp(pattern, caseSensitive ? "" : "i");
-	} catch (err) {
-		throw new TranscriptReaderError("invalid_regex", err instanceof Error ? err.message : String(err));
-	}
-	const matches = messages.filter((message) => regex.test(agentSearchText(message))).map((message) => message.index);
-	if (context <= 0) return { matchCount: matches.length, expanded: matches };
-	const expanded = new Set<number>();
-	for (const index of matches) {
-		for (let cursor = Math.max(0, index - context); cursor <= Math.min(messages.length - 1, index + context); cursor++) {
-			expanded.add(cursor);
-		}
-	}
-	return { matchCount: matches.length, expanded: [...expanded].sort((a, b) => a - b) };
-}
-
 function requiredInteger(name: string, value: unknown, minimum?: number, maximum?: number): number {
 	if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
 		throw new TranscriptReaderError("invalid_params", `${name} must be an integer`);
@@ -939,7 +918,7 @@ export async function readAgentTranscript(
 	let workingIndices: number[];
 	let matchCount: number | undefined;
 	if (params.pattern) {
-		const matches = buildAgentMatchList(all, params.pattern, !!params.caseSensitive, context);
+		const matches = buildMatchList(all, params.pattern, !!params.caseSensitive, context, agentSearchText);
 		workingIndices = matches.expanded;
 		matchCount = matches.matchCount;
 	} else {
