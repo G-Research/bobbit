@@ -22,7 +22,7 @@ import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
 import { PlanMutationStore } from "./plan-mutation-store.js";
-import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
+import { realFs, type Clock, type CommandRunner, type FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
 
 /**
@@ -75,7 +75,7 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; gatePersistence?: "sqlite" | "json"; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
     this.project = project;
     const fsImpl = opts.fsImpl;
     const clock = opts.clock;
@@ -95,10 +95,6 @@ export class ProjectContext {
     this.goalStore = new GoalStore(this.stateDir, fsImpl);
     this.sessionStore = new SessionStore(this.stateDir, fsImpl, clock);
     this.bgProcessStore = new BgProcessStore(this.stateDir, clock);
-    this.gateStore = new GateStore(this.stateDir, fsImpl);
-    // Construct after both stores load: pending reset intents are replayed
-    // state-first before any team runtime or boot-resume logic observes them.
-    this.gateResetCoordinator = new GateResetCoordinator(this.stateDir, this.goalStore, this.gateStore, fsImpl);
     this.taskStore = new TaskStore(this.stateDir, fsImpl);
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
@@ -128,6 +124,19 @@ export class ProjectContext {
     // after the config stores above so the project's WorkflowStore is
     // available for workflow-id resolution at goal creation time.
     this.goalManager = new GoalManager(this.goalStore, this.workflowStore, this.stateDir, { commandRunner, clock, remotePolicy: opts.remotePolicy, worktreeSetupRuntime: opts.worktreeSetupRuntime });
+
+    // Open the native database only after every other constructor succeeds so
+    // a later initialization failure cannot orphan a Windows file handle.
+    const gatePersistence = opts.gatePersistence ?? (!fsImpl || fsImpl === realFs ? "sqlite" : "json");
+    this.gateStore = new GateStore(this.stateDir, fsImpl, { persistence: gatePersistence });
+    try {
+      // Pending reset intents become synchronously visible before the context
+      // is returned to ProjectContextManager and before open()/resume logic.
+      this.gateResetCoordinator = new GateResetCoordinator(this.stateDir, this.goalStore, this.gateStore, fsImpl);
+    } catch (error) {
+      this.gateStore.dispose();
+      throw error;
+    }
   }
 
   /** Open resources that require initialization (LanceDB + embedder). */
@@ -190,9 +199,17 @@ export class ProjectContext {
    *  (teardown, shutdown) can guarantee no async I/O outlives this promise —
    *  preventing the FlexSearch flush-on-close race against temp-dir removal. */
   async close(): Promise<void> {
-    // Stop future plan-mutation sweeps and wait for an active prune before
-    // closing resources or allowing this context's state directory to vanish.
-    await this.planMutationStore.stopSweep();
+    const errors: unknown[] = [];
+    const attempt = async (operation: () => void | Promise<void>): Promise<void> => {
+      try { await operation(); }
+      catch (error) { errors.push(error); }
+    };
+
+    // Stop mutation sources and let boot-time reset recovery settle before the
+    // gate database closes. No coordinator write may outlive this context.
+    await attempt(() => this.planMutationStore.stopSweep());
+    await attempt(() => this.gateResetCoordinator?.recovery);
+
     // Wait for coalesced snapshots before the state directory can be removed.
     // Keep the legacy `flush()` fallback for lightweight lifecycle doubles and
     // stores that have not yet gained an async barrier.
@@ -202,18 +219,21 @@ export class ProjectContext {
       else await store.flush?.();
     };
     await Promise.all([
-      drain(this.goalStore),
-      drain(this.gateStore),
-      drain(this.taskStore),
-      drain(this.sessionStore),
+      attempt(() => drain(this.goalStore)),
+      attempt(() => this.gateStore?.close?.()),
+      attempt(() => drain(this.taskStore)),
+      attempt(() => drain(this.sessionStore)),
     ]);
-    this.costTracker?.flush();
+    await attempt(() => { this.costTracker?.flush(); });
     // Mirror sessionStore: flush the bg-process store so its final epoch
     // (exit status, dismiss removals, offset advances) is on disk before exit.
     // Otherwise a pending debounced write lands after the next gateway loads
     // the older epoch, tripping the stale-snapshot guard and silently dropping
     // every subsequent save (re-attach exit code + dismiss).
-    this.bgProcessStore?.flush();
-    await this.searchIndex?.close();
+    await attempt(() => { this.bgProcessStore?.flush(); });
+    await attempt(async () => { await this.searchIndex?.close(); });
+
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, `Failed to close ${errors.length} project resources`);
   }
 }

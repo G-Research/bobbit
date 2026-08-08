@@ -51,7 +51,7 @@ export class ProjectContextManager {
 
   constructor(
     registry: ProjectRegistry,
-    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {},
+    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; gatePersistence?: "sqlite" | "json"; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {},
   ) {
     this.registry = registry;
   }

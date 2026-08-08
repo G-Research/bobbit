@@ -118,7 +118,7 @@ test.beforeEach(() => {
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-resignal-core-"));
 	clock = createManualClock(START_TIME);
 	goalStore = new GoalStore(stateDir);
-	gateStore = new GateStore(stateDir);
+	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 	goalStore.put(makeGoal());
 	gateStore.initGatesForGoal(GOAL_ID, WORKFLOW.gates.map((gate) => gate.id));
 	events = [];

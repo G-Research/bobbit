@@ -2,6 +2,9 @@ import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { createRequire } from "node:module";
+import type Database from "better-sqlite3";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
@@ -85,69 +88,402 @@ function compositeKey(goalId: string, gateId: string): string {
 	return `${goalId}::${gateId}`;
 }
 
-export class GateStore {
-	private readonly storeDir: string;
-	private readonly storeFile: string;
-	private readonly fs: FsLike;
+interface GateWriteMetrics {
+	bytes: number;
+	durationMs: number;
+}
+
+interface GatePersistence {
+	loadInto(gates: Map<string, GateState>): void;
+	schedule(keys: Iterable<string>): void;
+	publishStrict(keys: Iterable<string>): Promise<void>;
+	flush(): Promise<void>;
+	close(): Promise<void>;
+	dispose(): void;
+	getLastWriteMetrics(): GateWriteMetrics | null;
+}
+
+/** Existing JSON persistence retained for FsLike-backed unit fixtures. */
+class JsonGatePersistence implements GatePersistence {
 	private readonly writer: CoalescedJsonWriter;
+	private readonly storeFile: string;
+
+	constructor(
+		private readonly fs: FsLike,
+		stateDir: string,
+		gates: Map<string, GateState>,
+	) {
+		this.storeFile = path.join(stateDir, "gates.json");
+		this.writer = new CoalescedJsonWriter(
+			fs,
+			stateDir,
+			this.storeFile,
+			() => JSON.stringify(Array.from(gates.values())),
+			"gate-store",
+		);
+	}
+
+	loadInto(gates: Map<string, GateState>): void {
+		try {
+			if (!this.fs.existsSync(this.storeFile)) return;
+			const data = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
+			if (!Array.isArray(data)) return;
+			for (const gate of data) {
+				if (gate?.gateId && gate?.goalId) gates.set(compositeKey(gate.goalId, gate.gateId), gate);
+			}
+		} catch (error) {
+			console.error("[gate-store] Failed to load persisted gates:", error);
+		}
+	}
+
+	schedule(_keys: Iterable<string>): void { this.writer.schedule(); }
+	publishStrict(_keys: Iterable<string>): Promise<void> { return this.writer.publishStrict(); }
+	flush(): Promise<void> { return this.writer.flush(); }
+	async close(): Promise<void> { await this.writer.flush(); }
+	dispose(): void { /* no persistent handle */ }
+	getLastWriteMetrics(): GateWriteMetrics | null { return this.writer.getLastWriteMetrics(); }
+}
+
+type GateWriteBarrier = {
+	revision: number;
+	resolve: () => void;
+	reject: (error: unknown) => void;
+};
+
+const nodeRequire = createRequire(import.meta.url);
+const GATE_SQLITE_SCHEMA_VERSION = 1;
+const GATE_SQLITE_FILE = "gates.sqlite";
+const GATE_SQLITE_DEBOUNCE_MS = 500;
+
+class SqliteGatePersistence implements GatePersistence {
+	private readonly db: Database.Database;
+	private readonly legacyFile: string;
+	private readonly dirty = new Set<string>();
+	private timer: ReturnType<typeof setTimeout> | null = null;
+	private inFlight: Promise<void> | null = null;
+	private requested = false;
+	private revision = 0;
+	private publishedRevision = 0;
+	private barriers: GateWriteBarrier[] = [];
+	private lastWriteMetrics: GateWriteMetrics | null = null;
+	private closePromise: Promise<void> | null = null;
+	private closed = false;
+
+	constructor(
+		private readonly fs: FsLike,
+		stateDir: string,
+		private readonly gates: Map<string, GateState>,
+	) {
+		fs.mkdirSync(stateDir, { recursive: true });
+		this.legacyFile = path.join(stateDir, "gates.json");
+		let BetterSqlite: new (filename: string, options?: Database.Options) => Database.Database;
+		try {
+			BetterSqlite = nodeRequire("better-sqlite3") as typeof BetterSqlite;
+		} catch (error) {
+			throw new Error(
+				`[gate-store] Failed to load the better-sqlite3 native binding for ${process.platform}-${process.arch}; reinstall Bobbit on a supported platform`,
+				{ cause: error },
+			);
+		}
+		this.db = new BetterSqlite(path.join(stateDir, GATE_SQLITE_FILE), { timeout: 5_000 });
+		try {
+			this.initialize();
+		} catch (error) {
+			this.db.close();
+			throw error;
+		}
+	}
+
+	private initialize(): void {
+		const versionRow = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+		if (versionRow.user_version > GATE_SQLITE_SCHEMA_VERSION) {
+			throw new Error(`[gate-store] Unsupported gates.sqlite schema ${versionRow.user_version}`);
+		}
+		this.db.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;");
+		if (versionRow.user_version === 0) {
+			this.db.exec("BEGIN IMMEDIATE");
+			try {
+				this.db.exec(`
+					CREATE TABLE gate_store_meta (
+						key TEXT PRIMARY KEY,
+						value TEXT NOT NULL
+					) STRICT, WITHOUT ROWID;
+					CREATE TABLE gate_records (
+						goal_id TEXT NOT NULL,
+						gate_id TEXT NOT NULL,
+						payload TEXT NOT NULL,
+						PRIMARY KEY (goal_id, gate_id)
+					) STRICT;
+					CREATE INDEX gate_records_goal_id_idx ON gate_records(goal_id);
+					PRAGMA user_version = ${GATE_SQLITE_SCHEMA_VERSION};
+				`);
+				this.db.exec("COMMIT");
+			} catch (error) {
+				if (this.db.inTransaction) this.db.exec("ROLLBACK");
+				throw error;
+			}
+		}
+
+		const marker = this.db.prepare("SELECT value FROM gate_store_meta WHERE key = 'migration_complete'").get() as { value: string } | undefined;
+		if (!marker) this.migrateLegacyOrInitialize();
+		else if (marker.value !== "1") throw new Error(`[gate-store] Invalid gates.sqlite migration marker ${marker.value}`);
+	}
+
+	private migrateLegacyOrInitialize(): void {
+		const row = this.db.prepare("SELECT COUNT(*) AS count FROM gate_records").get() as { count: number };
+		if (row.count !== 0) throw new Error("[gate-store] gates.sqlite contains records without a completed migration marker");
+
+		let legacy: GateState[] = [];
+		const hadLegacy = this.fs.existsSync(this.legacyFile);
+		if (hadLegacy) {
+			const parsed = JSON.parse(this.fs.readFileSync(this.legacyFile, "utf-8"));
+			if (!Array.isArray(parsed)) throw new Error("[gate-store] gates.json must contain an array");
+			const seen = new Set<string>();
+			legacy = parsed.map((gate, index) => {
+				if (typeof gate?.goalId !== "string" || gate.goalId.length === 0
+					|| typeof gate?.gateId !== "string" || gate.gateId.length === 0
+					|| !Array.isArray(gate.signals)) {
+					throw new Error(`[gate-store] Invalid legacy gate at index ${index}`);
+				}
+				const key = compositeKey(gate.goalId, gate.gateId);
+				if (seen.has(key)) throw new Error(`[gate-store] Duplicate legacy gate ${gate.goalId}/${gate.gateId}`);
+				seen.add(key);
+				return gate as GateState;
+			});
+		}
+
+		const insert = this.db.prepare("INSERT INTO gate_records(goal_id, gate_id, payload) VALUES (?, ?, ?)");
+		this.db.exec("BEGIN IMMEDIATE");
+		try {
+			for (const gate of legacy) insert.run(gate.goalId, gate.gateId, JSON.stringify(gate));
+			this.db.prepare("INSERT INTO gate_store_meta(key, value) VALUES ('migration_complete', '1')").run();
+			this.db.exec("COMMIT");
+		} catch (error) {
+			if (this.db.inTransaction) this.db.exec("ROLLBACK");
+			throw error;
+		}
+		if (hadLegacy) this.retireLegacyFile();
+	}
+
+	private retireLegacyFile(): void {
+		const preferred = `${this.legacyFile}.sqlite-retired`;
+		const target = this.fs.existsSync(preferred) ? `${preferred}-${Date.now()}` : preferred;
+		this.fs.renameSync(this.legacyFile, target);
+	}
+
+	loadInto(gates: Map<string, GateState>): void {
+		for (const row of this.db.prepare("SELECT goal_id, gate_id, payload FROM gate_records").iterate() as Iterable<{ goal_id: string; gate_id: string; payload: string }>) {
+			let gate: GateState;
+			try {
+				gate = JSON.parse(row.payload) as GateState;
+			} catch (error) {
+				throw new Error(`[gate-store] Invalid SQLite payload for ${row.goal_id}/${row.gate_id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			if (gate.goalId !== row.goal_id || gate.gateId !== row.gate_id || !Array.isArray(gate.signals)) {
+				throw new Error(`[gate-store] SQLite row identity mismatch for ${row.goal_id}/${row.gate_id}`);
+			}
+			gates.set(compositeKey(gate.goalId, gate.gateId), gate);
+		}
+	}
+
+	schedule(keys: Iterable<string>): void {
+		this.assertOpen();
+		let changed = false;
+		for (const key of keys) {
+			this.dirty.add(key);
+			changed = true;
+		}
+		if (!changed) return;
+		this.revision++;
+		this.requested = true;
+		if (this.inFlight || this.timer) return;
+		this.timer = setTimeout(() => {
+			this.timer = null;
+			void this.startDrain();
+		}, GATE_SQLITE_DEBOUNCE_MS);
+		this.timer.unref?.();
+	}
+
+	flush(): Promise<void> {
+		if (this.dirty.size === 0 && !this.requested && !this.inFlight && !this.timer) return Promise.resolve();
+		return this.requestBarrier();
+	}
+
+	publishStrict(keys: Iterable<string>): Promise<void> {
+		this.assertOpen();
+		for (const key of keys) this.dirty.add(key);
+		return this.requestBarrier();
+	}
+
+	getLastWriteMetrics(): GateWriteMetrics | null { return this.lastWriteMetrics; }
+
+	close(): Promise<void> {
+		if (this.closePromise) return this.closePromise;
+		if (this.closed) return Promise.resolve();
+		const flush = this.flush();
+		this.closePromise = flush.finally(() => this.dispose());
+		return this.closePromise;
+	}
+
+	dispose(): void {
+		if (this.timer) {
+			clearTimeout(this.timer);
+			this.timer = null;
+		}
+		if (this.closed) return;
+		this.closed = true;
+		if (this.db.open) this.db.close();
+	}
+
+	private assertOpen(): void {
+		if (this.closed || this.closePromise) throw new Error("[gate-store] SQLite persistence is closing or closed");
+	}
+
+	private requestBarrier(): Promise<void> {
+		this.assertOpen();
+		const revision = ++this.revision;
+		this.requested = true;
+		if (this.timer) {
+			clearTimeout(this.timer);
+			this.timer = null;
+		}
+		const barrier = new Promise<void>((resolve, reject) => this.barriers.push({ revision, resolve, reject }));
+		void this.startDrain();
+		return barrier;
+	}
+
+	private startDrain(): Promise<void> {
+		if (!this.inFlight) {
+			this.inFlight = Promise.resolve().then(() => this.drain()).finally(() => {
+				this.inFlight = null;
+				if (this.requested) queueMicrotask(() => { void this.startDrain(); });
+			});
+		}
+		return this.inFlight;
+	}
+
+	private drain(): void {
+		while (this.requested) {
+			this.requested = false;
+			const revision = this.revision;
+			const keys = [...this.dirty];
+			this.dirty.clear();
+			const snapshots = keys.map(key => ({ key, gate: this.gates.get(key) }));
+			const startedAt = performance.now();
+			let bytes = 0;
+			try {
+				if (snapshots.length > 0) {
+					const upsert = this.db.prepare(`
+						INSERT INTO gate_records(goal_id, gate_id, payload) VALUES (?, ?, ?)
+						ON CONFLICT(goal_id, gate_id) DO UPDATE SET payload = excluded.payload
+					`);
+					const remove = this.db.prepare("DELETE FROM gate_records WHERE goal_id = ? AND gate_id = ?");
+					this.db.exec("BEGIN IMMEDIATE");
+					for (const snapshot of snapshots) {
+						const separator = snapshot.key.indexOf("::");
+						const goalId = snapshot.key.slice(0, separator);
+						const gateId = snapshot.key.slice(separator + 2);
+						if (!snapshot.gate) {
+							remove.run(goalId, gateId);
+							continue;
+						}
+						const payload = JSON.stringify(snapshot.gate);
+						bytes += Buffer.byteLength(payload);
+						upsert.run(snapshot.gate.goalId, snapshot.gate.gateId, payload);
+					}
+					this.db.exec("COMMIT");
+				}
+				this.lastWriteMetrics = { bytes, durationMs: performance.now() - startedAt };
+				this.settlePublished(revision);
+			} catch (error) {
+				if (this.db.inTransaction) {
+					try { this.db.exec("ROLLBACK"); } catch { /* preserve original error */ }
+				}
+				for (const { key } of snapshots) this.dirty.add(key);
+				this.settleFailed(revision, error);
+				console.error("[gate-store] Failed to save SQLite gates:", error);
+				return;
+			}
+		}
+	}
+
+	private settlePublished(revision: number): void {
+		this.publishedRevision = Math.max(this.publishedRevision, revision);
+		const pending: GateWriteBarrier[] = [];
+		for (const barrier of this.barriers) {
+			if (barrier.revision <= this.publishedRevision) barrier.resolve();
+			else pending.push(barrier);
+		}
+		this.barriers = pending;
+	}
+
+	private settleFailed(revision: number, error: unknown): void {
+		const pending: GateWriteBarrier[] = [];
+		for (const barrier of this.barriers) {
+			if (barrier.revision <= revision) barrier.reject(error);
+			else pending.push(barrier);
+		}
+		this.barriers = pending;
+	}
+}
+
+export interface GateStoreOptions {
+	/** Explicit test adapter; production defaults to SQLite. */
+	persistence?: "sqlite" | "json";
+}
+
+export class GateStore {
+	private readonly persistence: GatePersistence;
 	private gates: Map<string, GateState> = new Map();
 
 	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
 
-	constructor(stateDir: string, fsImpl: FsLike = realFs) {
-		this.fs = fsImpl;
-		this.storeDir = stateDir;
-		this.storeFile = path.join(stateDir, "gates.json");
-		this.writer = new CoalescedJsonWriter(
-			this.fs,
-			this.storeDir,
-			this.storeFile,
-			() => JSON.stringify(Array.from(this.gates.values())),
-			"gate-store",
-		);
-		this.load();
-	}
-
-	private load(): void {
+	constructor(stateDir: string, fsImpl: FsLike = realFs, options: GateStoreOptions = {}) {
+		this.persistence = options.persistence === "json"
+			? new JsonGatePersistence(fsImpl, stateDir, this.gates)
+			: new SqliteGatePersistence(fsImpl, stateDir, this.gates);
 		try {
-			if (this.fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
-				if (Array.isArray(data)) {
-					for (const g of data) {
-						if (g.gateId && g.goalId) {
-							this.gates.set(compositeKey(g.goalId, g.gateId), g);
-						}
-					}
-				}
-			}
-		} catch (err) {
-			console.error("[gate-store] Failed to load persisted gates:", err);
+			this.persistence.loadInto(this.gates);
+		} catch (error) {
+			this.persistence.dispose();
+			throw error;
 		}
 	}
 
-	private save(): void {
-		this.writer.schedule();
+	private save(keys: Iterable<string>): void {
+		this.persistence.schedule(keys);
 	}
 
 	/** Await all pending persistence, primarily for orderly shutdown/tests. */
 	flush(): Promise<void> {
-		return this.writer.flush();
+		return this.persistence.flush();
 	}
 
-	/** Latest atomic persistence duration and serialized byte count. */
+	/** Flush pending persistence and release the SQLite database handle. */
+	close(): Promise<void> {
+		return this.persistence.close();
+	}
+
+	/** Release resources after a surrounding constructor fails before ownership transfers. */
+	dispose(): void {
+		this.persistence.dispose();
+	}
+
+	/** Latest transaction duration and serialized payload byte count. */
 	getPersistenceMetrics() {
-		return this.writer.getLastWriteMetrics();
+		return this.persistence.getLastWriteMetrics();
 	}
 
-	/** Strict lifecycle writes share the coalesced writer's publication queue. */
-	private saveStrict(): Promise<void> {
-		return this.writer.publishStrict();
+	/** Strict lifecycle writes share the coalesced persistence queue. */
+	private saveStrict(keys: Iterable<string>): Promise<void> {
+		return this.persistence.publishStrict(keys);
 	}
 
 	/** Initialize pending gate states for a new goal. */
 	initGatesForGoal(goalId: string, gateIds: string[]): void {
 		const now = Date.now();
+		const dirtyKeys: string[] = [];
 		for (const gateId of gateIds) {
 			const key = compositeKey(goalId, gateId);
 			if (!this.gates.has(key)) {
@@ -158,9 +494,10 @@ export class GateStore {
 					signals: [],
 					updatedAt: now,
 				});
+				dirtyKeys.push(key);
 			}
 		}
-		this.save();
+		if (dirtyKeys.length > 0) this.save(dirtyKeys);
 	}
 
 	/**
@@ -175,14 +512,14 @@ export class GateStore {
 		const remainingGateIds = new Set(nextGateIds);
 		const modifiedIds = new Set(modifiedGateIds);
 		const now = Date.now();
-		let changed = false;
+		const dirtyKeys: string[] = [];
 
 		for (const [key, gate] of this.gates) {
 			if (gate.goalId !== goalId) continue;
 
 			if (!remainingGateIds.has(gate.gateId)) {
 				this.gates.delete(key);
-				changed = true;
+				dirtyKeys.push(key);
 				continue;
 			}
 
@@ -191,22 +528,23 @@ export class GateStore {
 				gate.status = "pending";
 				gate.verificationCacheInvalidatedAt = now;
 				gate.updatedAt = now;
-				changed = true;
+				dirtyKeys.push(key);
 			}
 		}
 
 		for (const gateId of remainingGateIds) {
-			this.gates.set(compositeKey(goalId, gateId), {
+			const key = compositeKey(goalId, gateId);
+			this.gates.set(key, {
 				gateId,
 				goalId,
 				status: "pending",
 				signals: [],
 				updatedAt: now,
 			});
-			changed = true;
+			dirtyKeys.push(key);
 		}
 
-		if (changed) this.save();
+		if (dirtyKeys.length > 0) this.save(dirtyKeys);
 	}
 
 	getGate(goalId: string, gateId: string): GateState | undefined {
@@ -228,7 +566,7 @@ export class GateStore {
 		if (!gate) return;
 		gate.signals.push(signal);
 		gate.updatedAt = Date.now();
-		this.save();
+		this.save([key]);
 		this.onStatusChange?.(signal.goalId, signal.gateId);
 	}
 
@@ -266,7 +604,7 @@ export class GateStore {
 		gate.signals.push(signal);
 		gate.status = "bypassed";
 		gate.updatedAt = now;
-		this.save();
+		this.save([key]);
 		this.onStatusChange?.(goalId, gateId);
 		return signal;
 	}
@@ -285,7 +623,7 @@ export class GateStore {
 		if (!gate) return;
 		gate.status = status;
 		gate.updatedAt = Date.now();
-		this.save();
+		this.save([key]);
 		this.onStatusChange?.(goalId, gateId);
 	}
 
@@ -296,7 +634,7 @@ export class GateStore {
 		gate.currentContent = content;
 		gate.currentContentVersion = version;
 		gate.updatedAt = Date.now();
-		this.save();
+		this.save([key]);
 	}
 
 	updateGateMetadata(goalId: string, gateId: string, metadata: Record<string, string>): void {
@@ -305,18 +643,18 @@ export class GateStore {
 		if (!gate) return;
 		gate.currentMetadata = metadata;
 		gate.updatedAt = Date.now();
-		this.save();
+		this.save([key]);
 	}
 
 	/** Update a signal's verification results by signal ID. */
 	updateSignalVerification(signalId: string, verification: GateSignal["verification"]): void {
-		for (const gate of this.gates.values()) {
+		for (const [key, gate] of this.gates) {
 			const signal = gate.signals.find(s => s.id === signalId);
 			if (signal) {
 				if (signal.verification.status !== "running") return; // already finalized
 				signal.verification = verification;
 				gate.updatedAt = Date.now();
-				this.save();
+				this.save([key]);
 				return;
 			}
 		}
@@ -387,6 +725,7 @@ export class GateStore {
 		const unchangedGateIds: string[] = [];
 		const previousStatuses: Record<string, GateStatus> = {};
 		const snapshots = new Map<string, { status: GateStatus; updatedAt: number; cacheAt?: number; hadCacheAt: boolean }>();
+		const affectedKeys: string[] = [];
 		const now = Date.now();
 
 		for (const affectedGateId of affectedGateIds) {
@@ -396,6 +735,7 @@ export class GateStore {
 			previousStatuses[affectedGateId] = previousStatus;
 
 			if (gate) {
+				affectedKeys.push(key);
 				snapshots.set(key, {
 					status: gate.status,
 					updatedAt: gate.updatedAt,
@@ -415,9 +755,9 @@ export class GateStore {
 		}
 
 		try {
-			if (affectedGateIds.length > 0) {
-				if (strict) await this.saveStrict();
-				else if (persist) this.save();
+			if (affectedKeys.length > 0) {
+				if (strict) await this.saveStrict(affectedKeys);
+				else if (persist) this.save(affectedKeys);
 			}
 		} catch (err) {
 			for (const [key, snapshot] of snapshots) {
@@ -460,6 +800,7 @@ export class GateStore {
 	cascadeReset(goalId: string, gateId: string, workflow: Workflow): void {
 		const dependents = this.getDependentGateIds(gateId, workflow, false);
 		const changedGateIds: string[] = [];
+		const dirtyKeys: string[] = [];
 		const now = Date.now();
 
 		for (const depId of dependents) {
@@ -469,9 +810,10 @@ export class GateStore {
 				gate.status = "pending";
 				gate.updatedAt = now;
 				changedGateIds.push(depId);
+				dirtyKeys.push(key);
 			}
 		}
-		if (changedGateIds.length > 0) this.save();
+		if (dirtyKeys.length > 0) this.save(dirtyKeys);
 	}
 
 	/** Remove all gates for a goal (cleanup on goal deletion). */
@@ -483,6 +825,6 @@ export class GateStore {
 		for (const key of keysToRemove) {
 			this.gates.delete(key);
 		}
-		if (keysToRemove.length > 0) this.save();
+		if (keysToRemove.length > 0) this.save(keysToRemove);
 	}
 }

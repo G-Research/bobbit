@@ -619,7 +619,7 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 
 ## Gates
 
-- State in `GateStore` (`.bobbit/state/gates.json`)
+- State in `GateStore` (`.bobbit/state/gates.sqlite`; legacy `.bobbit/state/gates.json` is imported transactionally and retired once)
 - Check dependencies via `GET /api/goals/:id/gates`
 - **Reviewer flags "branch doesn't match design" on a pre-implementation gate?** That is the classic stale-baseline false positive. Pre-implementation gates (`content: true` with no `depends_on` — e.g. design-doc, issue-analysis) are classified by `isPreImplementationGate()` in `src/server/agent/verification-logic.ts` and the harness must strip all `git diff` / `git log` instructions from the review prompt for them. If a reviewer is still citing branch diffs, check that (1) the role YAML's preamble contains the `{{REVIEW_CONTEXT}}` placeholder (reviewer, architect, spec-auditor), (2) `buildReviewPrompt()` in `src/server/agent/verification-harness.ts` is substituting the pre-impl notice, and (3) no user-override role YAML has re-introduced hardcoded diff commands. Implementation-gate reviewers diff against `origin/<primary>...HEAD` — never local `<primary>`, which can be stale. Full convention: [docs/goals-workflows-tasks.md — Gate verification baselines](goals-workflows-tasks.md#gate-verification-baselines).
 - **Verification output modal empty?** The modal has two data sources for step output:
@@ -979,7 +979,7 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 - Use different `phase` values when command checks require explicit ordering
 - Component-linked `command: unit` steps default to a 1200s timeout when `timeout` is omitted; other command steps default to 300s
 - If any step in a phase fails, remaining phases are skipped (status: `"skipped"`)
-- Skipped steps carry `skipped: true` on `GateSignalStep`, persisted in `gates.json` — this lets the UI show the correct dash icon after reload (without it, skipped steps would appear as passed or failed based on the `passed` field alone)
+- Skipped steps carry `skipped: true` on `GateSignalStep`, persisted in the gate's SQLite payload — this lets the UI show the correct dash icon after reload (without it, skipped steps would appear as passed or failed based on the `passed` field alone)
 - `gate_verification_phase_started` WebSocket event fires before each phase
 - Step events include `phase` field; skipped steps show `"Skipped — earlier phase failed"`
 - Check `ActiveVerification.currentPhase` via `GET /api/goals/:goalId/verifications/active`
@@ -991,7 +991,7 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 - Artifacts are capped at 10 MB; content truncated if exceeded
 - Dashboard shows markdown artifacts in collapsible "Full Review" sections; HTML artifacts via "View Report" button
 - If artifacts are missing: check that the `llm-review` step completed (not skipped/cancelled)
-- Artifact data persists in `gates.json` alongside step results
+- Artifact data persists in the gate's SQLite payload alongside step results
 
 ## QA screenshot token bloat
 

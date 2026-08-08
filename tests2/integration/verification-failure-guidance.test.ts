@@ -80,7 +80,7 @@ async function runFailureNotification(options: {
 		// snapshot rather than sharing the runtime verifier's workflow object.
 		const goalStore = new GoalStore(stateDir);
 		const persistedGuidance = goalStore.get(options.goalId)?.workflow?.gates[0].verify?.[0]?.failureGuidance;
-		const gateStore = new GateStore(stateDir);
+		const gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 		gateStore.initGatesForGoal(options.goalId, [GATE_ID]);
 		const context = {
 			goalStore,

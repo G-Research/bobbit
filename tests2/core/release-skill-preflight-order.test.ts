@@ -806,6 +806,7 @@ describe("packed-consumer audit subprocess isolation", () => {
 			cwd: string;
 			env: Record<string, string>;
 		}> = [];
+		const nativeCalls: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string> }> = [];
 		const npmRunner = async (
 			args: string[],
 			options: { cwd: string; env: Record<string, string> },
@@ -834,11 +835,25 @@ describe("packed-consumer audit subprocess isolation", () => {
 			return result;
 		};
 
+		const commandRunner = async (
+			command: string,
+			args: string[],
+			options: { cwd: string; env: Record<string, string> },
+		) => {
+			assert.equal(readFileSync(options.env.npm_config_userconfig, "utf8"), "\n");
+			assert.equal(readFileSync(options.env.npm_config_globalconfig, "utf8"), "\n");
+			nativeCalls.push({ command, args, cwd: options.cwd, env: { ...options.env } });
+			return { code: 0, stdout: "", stderr: "", rendered: `${command} ${args.join(" ")}` };
+		};
+
 		try {
 			Object.assign(process.env, secretEnv);
-			await runPackedConsumerAudit({ npmRunner });
+			await runPackedConsumerAudit({ npmRunner, commandRunner });
 
 			assert.deepEqual(calls.map(call => call.args[0]), ["pack", "config", "install", "audit"]);
+			assert.equal(nativeCalls.length, 1);
+			assert.equal(nativeCalls[0].command, process.execPath);
+			assert.ok(nativeCalls[0].args.join(" ").includes("better-sqlite3"));
 			assert.notEqual(calls[0].cwd, resolve(process.cwd()), "pack must not inherit repository project config");
 			for (const call of calls) {
 				const childKeys = new Set(Object.keys(call.env).map(key => key.toLowerCase()));
@@ -857,6 +872,14 @@ describe("packed-consumer audit subprocess isolation", () => {
 				assert.ok(call.env.npm_config_cache);
 				assert.ok(call.env.HOME);
 				assert.equal(call.env.USERPROFILE, call.env.HOME);
+			}
+			for (const call of nativeCalls) {
+				const childKeys = new Set(Object.keys(call.env).map(key => key.toLowerCase()));
+				for (const forbiddenKey of Object.keys(secretEnv).map(key => key.toLowerCase())) {
+					if (["npm_config_userconfig", "npm_config_globalconfig", "npm_config_registry"].includes(forbiddenKey)) continue;
+					assert.equal(childKeys.has(forbiddenKey), false, `${forbiddenKey} reached native smoke`);
+				}
+				assert.equal(call.env.npm_config_registry, "https://registry.npmjs.org/");
 			}
 			assert.ok(calls[0].args.includes("--ignore-scripts"));
 			assert.ok(calls[2].args.includes("--ignore-scripts"));

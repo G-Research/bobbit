@@ -1062,7 +1062,7 @@ State is per-project — each project has its own copies of these files in `<pro
 |---|---|
 | `defaults/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
 | `<project>/.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
-| `<project>/.bobbit/state/gates.json` | Gate state and signal history |
+| `<project>/.bobbit/state/gates.sqlite` | Gate state and signal history, one transactional row per gate (legacy `gates.json` is imported once) |
 | `<project>/.bobbit/state/tasks.json` | Tasks with workflow gate links |
 
 ## Key source files
