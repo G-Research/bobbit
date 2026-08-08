@@ -167,85 +167,35 @@ test.describe("GET /api/sessions/:id/transcript", () => {
 		expect(optInBody.messages[0].toolResults[0].preview).toBe(secret);
 	});
 
-	test("explicit list and exact inspect operations dispatch without changing the legacy route", async ({ gateway }) => {
-		const firstResult = "FIRST_RESULT_MUST_NOT_LEAK";
-		const secondResult = "0123456789SECOND_RESULT_ONLY_AND_MORE";
-		const signature = "PROVIDER_SIGNATURE_MUST_NOT_LEAK";
-		const jsonl = makeJsonl([
-			{ role: "assistant", content: [
-				{ type: "tool_use", id: "first-call", name: "bash", input: { cmd: "first" } },
-				{ type: "tool_use", id: "second-call", name: "read", input: { path: "second" } },
-			] },
-			{ role: "user", content: [
-				{ type: "tool_result", tool_use_id: "first-call", is_error: false, content: firstResult },
-				{ type: "tool_result", tool_use_id: "second-call", is_error: true, content: [
-					{ type: "text", text: secondResult },
-					{ type: "thinking", thinking: "PROVIDER_THINKING_MUST_NOT_LEAK", signature },
-				] },
-			] },
-		]);
-		const { id } = seedSession(gateway, {}, jsonl);
-
-		const listResp = await fetch(
-			`${base()}/api/sessions/${id}/transcript?operation=list&offset=0&limit=10`,
-			{ headers: authHeaders() },
-		);
-		expect(listResp.status).toBe(200);
-		const listBody = await listResp.json();
-		expect(listBody).toMatchObject({ operation: "list", total: 2, returned: 2 });
-		const resultRow = listBody.messages.find((message: any) => message.index === 1);
-		expect(resultRow.toolResults.map((result: any) => result.resultIndex)).toEqual([0, 1]);
-		expect(resultRow.toolResults[1]).toMatchObject({ status: "error", size: { chars: secondResult.length } });
-		const serializedList = JSON.stringify(listBody);
-		expect(serializedList).not.toContain(firstResult);
-		expect(serializedList).not.toContain(secondResult);
-		expect(serializedList).not.toContain(signature);
-
-		const messageResp = await fetch(
-			`${base()}/api/sessions/${id}/transcript?operation=inspect&message_index=1`,
-			{ headers: authHeaders() },
-		);
-		expect(messageResp.status).toBe(200);
-		const messageBody = await messageResp.json();
-		expect(messageBody.operation).toBe("inspect");
-		expect(messageBody.messages).toBeUndefined();
-		expect(messageBody.message.index).toBe(1);
-		expect(messageBody.message.toolResults.map((result: any) => result.resultIndex)).toEqual([0, 1]);
-		const serializedMessage = JSON.stringify(messageBody);
-		expect(serializedMessage).not.toContain(firstResult);
-		expect(serializedMessage).not.toContain(secondResult);
-		expect(serializedMessage).not.toContain(signature);
-
-		const resultResp = await fetch(
-			`${base()}/api/sessions/${id}/transcript?operation=inspect&message_index=1&result_index=1&offset=10&limit=6`,
-			{ headers: authHeaders() },
-		);
-		expect(resultResp.status).toBe(200);
-		const resultBody = await resultResp.json();
-		expect(resultBody.operation).toBe("inspect");
-		expect(resultBody.result).toMatchObject({
-			messageIndex: 1,
-			resultIndex: 1,
-			excerpt: "SECOND",
-			offset: 10,
-			returned: 6,
-			totalChars: secondResult.length,
-			nextOffset: 16,
-			truncated: true,
-		});
-		expect(JSON.stringify(resultBody)).not.toContain(firstResult);
-		expect(JSON.stringify(resultBody)).not.toContain(signature);
-
-		const legacyResp = await fetch(
-			`${base()}/api/sessions/${id}/transcript?offset=1&limit=1`,
-			{ headers: authHeaders() },
-		);
-		expect(legacyResp.status).toBe(200);
-		const legacyBody = await legacyResp.json();
-		expect(legacyBody.operation).toBeUndefined();
-		expect(legacyBody.messages[0].toolResults[0].preview).toBe(firstResult);
-		expect(legacyBody.messages[0].toolResults[1].preview).toContain(secondResult);
-		expect(legacyBody.messages[0].toolResults[1].preview).toContain(signature);
+	test("dispatches list and exact inspections while preserving the no-operation route", async ({ gateway }) => {
+		const bodies = ["FIRST_MUST_NOT_LEAK", "0123456789SECOND_ONLY_AND_MORE"];
+		const signature = "SIGNATURE_MUST_NOT_LEAK";
+		const { id } = seedSession(gateway, {}, makeJsonl([
+			{ role: "assistant", content: bodies.map((_, i) => ({ type: "tool_use", id: `c${i}`, name: i ? "read" : "bash", input: {} })) },
+			{ role: "user", content: bodies.map((content, i) => ({ type: "tool_result", tool_use_id: `c${i}`, is_error: !!i,
+				content: i ? [{ type: "text", text: content }, { type: "thinking", signature }] : content })) },
+		]));
+		const get = async (query: string) => { const response = await fetch(`${base()}/api/sessions/${id}/transcript?${query}`, { headers: authHeaders() });
+			expect(response.status).toBe(200); return response.json(); };
+		const noLeaks = (value: any) => { for (const secret of [...bodies, signature]) expect(JSON.stringify(value)).not.toContain(secret); };
+		const list = await get("operation=list&offset=0&limit=10");
+		expect(list).toMatchObject({ operation: "list", total: 2, returned: 2 });
+		expect(list.messages[1].toolResults.map((r: any) => r.resultIndex)).toEqual([0, 1]);
+		expect(list.messages[1].toolResults[1]).toMatchObject({ status: "error", size: { chars: bodies[1].length } });
+		noLeaks(list);
+		const message = await get("operation=inspect&message_index=1");
+		expect(message).toMatchObject({ operation: "inspect", message: { index: 1 } });
+		expect(message.messages).toBeUndefined();
+		expect(message.message.toolResults.map((r: any) => r.resultIndex)).toEqual([0, 1]);
+		noLeaks(message);
+		const exact = await get("operation=inspect&message_index=1&result_index=1&offset=10&limit=6");
+		expect(exact.result).toMatchObject({ messageIndex: 1, resultIndex: 1, excerpt: "SECOND", offset: 10,
+			returned: 6, totalChars: bodies[1].length, nextOffset: 16, truncated: true });
+		for (const secret of [bodies[0], signature]) expect(JSON.stringify(exact)).not.toContain(secret);
+		const legacy = await get("offset=1&limit=1");
+		expect(legacy.operation).toBeUndefined();
+		expect(legacy.messages[0].toolResults.map((r: any) => r.preview)).toEqual([bodies[0], expect.stringContaining(bodies[1])]);
+		expect(legacy.messages[0].toolResults[1].preview).toContain(signature);
 	});
 
 	test("session_not_found", async () => {

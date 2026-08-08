@@ -2,7 +2,7 @@
 // Source: tests/transcript-reader.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import {
 	readTranscript,
@@ -10,9 +10,9 @@ import {
 	parseJsonl,
 	resolveOffset,
 	TranscriptReaderError,
+	readAgentTranscript,
 	type ReadTranscriptEnvelope,
 } from "../../src/server/agent/transcript-reader.js";
-import * as transcriptReader from "../../src/server/agent/transcript-reader.js";
 
 function makeJsonl(messages: Array<{ role: string; content: any; ts?: string }>): string {
 	return messages
@@ -533,109 +533,41 @@ describe("transcript-reader / readTranscript", () => {
 });
 
 describe("transcript-reader / agent list and exact inspection", () => {
-	function agentRead(params: Record<string, unknown>, content: string): Promise<any> {
-		return (transcriptReader as any).readAgentTranscript(params, memoryTranscript(content));
-	}
+	const jsonl = (messages: any[]) => messages.map((message) => JSON.stringify({ type: "message", message })).join("\n") + "\n";
+	const read = (params: any, text = fixture): Promise<any> => readAgentTranscript(params, memoryTranscript(text));
+	const nested = [{ type: "text", text: "alpha" }, { type: "thinking", thinking: "THINKING_SECRET", signature: "SIGNATURE_SECRET" }, { type: "text", text: "βeta" }];
+	const fixture = jsonl([
+		{ role: "assistant", content: [{ type: "tool_use", id: "a", name: "bash", input: {} }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "a", is_error: false, content: nested }] },
+		{ role: "assistant", content: [{ type: "toolCall", id: "p", name: "read", arguments: {} }] }, { role: "toolResult", content: nested, toolCallId: "p", toolName: "read", isError: true },
+		{ role: "user", content: [{ type: "tool_result", content: "UNKNOWN_SECRET" }] }, { role: "assistant", content: [{ type: "text", text: "x".repeat(900) }, { type: "tool_use", name: "bash", input: { cmd: "y".repeat(300) } }] },
+	]);
+	const size = { chars: 10, lines: 2, bytes: 11 };
 
-	const nested = [{ type: "text", text: "alpha" },
-		{ type: "thinking", thinking: "PROVIDER_THINKING_SENTINEL", signature: "PROVIDER_SIGNATURE_SENTINEL" },
-		{ type: "text", text: "βeta" }];
-	const focusedFixture = [
-		{ type: "message", message: { role: "assistant", content: [{ type: "tool_use", id: "anth-call", name: "bash", input: {} }] } },
-		{ type: "message", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "anth-call", is_error: false, content: nested }] } },
-		{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "pi-call", name: "read", arguments: {} }] } },
-		{ type: "message", message: { role: "toolResult", toolCallId: "pi-call", toolName: "read", isError: true, content: nested } },
-		{ type: "message", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "unknown-call", content: "UNKNOWN_RESULT_BODY_SENTINEL" }] } },
-	].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
-
-	it("lists Anthropic and Pi tool-only messages with normalized nested result metadata", async () => {
-		const env = await agentRead({ operation: "list" }, focusedFixture);
-		assert.equal(env.returned, 5);
-		assert.deepEqual(env.messages.map((message: any) => message.index), [0, 1, 2, 3, 4]);
-		assert.equal(env.messages[0].toolUses[0].name, "bash");
-		assert.equal(env.messages[2].toolUses[0].name, "read");
-		assert.ok(env.messages[0].text || env.messages[0].toolUses.length, "Anthropic tool-only row must be useful");
-		assert.ok(env.messages[2].text || env.messages[2].toolUses.length, "Pi tool-only row must be useful");
-
-		const anthropic = env.messages[1].toolResults[0];
-		assert.equal(anthropic.resultIndex, 0);
-		assert.equal(anthropic.status, "ok");
-		assert.deepEqual(anthropic.size, { chars: 10, lines: 2, bytes: 11 });
-		const pi = env.messages[3].toolResults[0];
-		assert.equal(pi.resultIndex, 0);
-		assert.equal(pi.status, "error");
-		assert.deepEqual(pi.size, { chars: 10, lines: 2, bytes: 11 });
-		assert.equal(env.messages[4].toolResults[0].status, "unknown");
-
-		const serialized = JSON.stringify(env);
-		for (const secret of ["alpha", "βeta", "UNKNOWN_RESULT_BODY_SENTINEL", "PROVIDER_THINKING_SENTINEL", "PROVIDER_SIGNATURE_SENTINEL"]) {
-			assert.equal(serialized.includes(secret), false, `${secret} leaked from list output`);
-		}
+	it("lists bounded, redacted Anthropic and Pi tool summaries with exact metadata", async () => {
+		const { messages } = await read({ operation: "list" });
+		assert.deepEqual([messages[0].toolUses[0].name, messages[2].toolUses[0].name], ["bash", "read"]);
+		assert.ok(messages[0].toolUses.length && messages[2].toolUses.length, "tool-only rows must be useful");
+		assert.deepEqual(messages.slice(1, 5).map((m: any) => m.toolResults?.[0]?.status), ["ok", undefined, "error", "unknown"]);
+		for (const i of [1, 3]) expect(messages[i].toolResults[0]).toEqual(expect.objectContaining({ resultIndex: 0, size }));
+		assert.deepEqual([messages[5].textTruncated, messages[5].toolUses[0].argumentsTruncated], [true, true]);
+		assert.ok(messages[5].text.length <= 801 && messages[5].toolUses[0].argumentSummary.length <= 201);
+		for (const secret of ["alpha", "βeta", "UNKNOWN_SECRET", "THINKING_SECRET", "SIGNATURE_SECRET"]) assert.equal(JSON.stringify(messages).includes(secret), false, `${secret} leaked`);
 	});
-
-	it("bounds message text and tool argument summaries with explicit truncation", async () => {
-		const fixture = makeJsonl([{ role: "assistant", content: [
-			{ type: "text", text: "x".repeat(900) },
-			{ type: "tool_use", name: "bash", input: { cmd: "y".repeat(300) } },
-		] }]);
-		const env = await agentRead({ operation: "list" }, fixture);
-		const message = env.messages[0];
-		assert.ok(message.text.length <= 801);
-		assert.equal(message.textTruncated, true);
-		const use = message.toolUses[0];
-		const summary = use.argumentSummary ?? use.inputPreview;
-		assert.ok(summary.length <= 201);
-		assert.equal(use.argumentsTruncated ?? use.inputTruncated, true);
+	it("inspects one sanitized message or one continued result only", async () => {
+		const message = await read({ operation: "inspect", messageIndex: 1 });
+		expect(message.message).toEqual(expect.objectContaining({ index: 1, toolResults: [expect.objectContaining({ resultIndex: 0, size })] }));
+		assert.equal(JSON.stringify(message).includes("alpha"), false);
+		const normalized = (await read({ operation: "inspect", messageIndex: 1, resultIndex: 0 })).result;
+		expect(normalized).toEqual(expect.objectContaining({ excerpt: "alpha\nβeta", totalChars: 10, size }));
+		assert.equal(JSON.stringify(normalized).includes("SIGNATURE_SECRET"), false);
+		const values = ["FIRST_MUST_NOT_LEAK", "0123456789SECOND_ONLY"];
+		const two = jsonl([{ role: "user", content: values.map((content, i) => ({ type: "tool_result", content, is_error: !!i })) }]);
+		const exact = (await read({ operation: "inspect", messageIndex: 0, resultIndex: 1, offset: 10, limit: 6 }, two)).result;
+		expect(exact).toEqual(expect.objectContaining({ messageIndex: 0, resultIndex: 1, excerpt: "SECOND", offset: 10, returned: 6, totalChars: values[1].length, nextOffset: 16, truncated: true }));
+		assert.equal(JSON.stringify(exact).includes(values[0]), false);
 	});
-
-	it("inspects exactly one sanitized message without exposing result bodies", async () => {
-		const env = await agentRead({ operation: "inspect", messageIndex: 1 }, focusedFixture);
-		const message = env.message ?? env.messages?.[0];
-		assert.equal(message.index, 1);
-		assert.equal(env.messages === undefined || env.messages.length === 1, true);
-		assert.equal(JSON.stringify(env).includes("alpha"), false);
-		assert.equal(message.toolResults[0].resultIndex, 0);
-		assert.deepEqual(message.toolResults[0].size, { chars: 10, lines: 2, bytes: 11 });
-	});
-
-	it("returns only one exact result excerpt with offset continuation", async () => {
-		const first = "FIRST_RESULT_MUST_NOT_LEAK";
-		const second = "0123456789SECOND_RESULT_ONLY";
-		const fixture = makeJsonl([{ role: "user", content: [
-			{ type: "tool_result", tool_use_id: "first", content: first, is_error: false },
-			{ type: "tool_result", tool_use_id: "second", content: second, is_error: true },
-		] }]);
-		const env = await agentRead({ operation: "inspect", messageIndex: 0, resultIndex: 1, offset: 10, limit: 6 }, fixture);
-		const result = env.result ?? env;
-		assert.equal(result.messageIndex, 0);
-		assert.equal(result.resultIndex, 1);
-		assert.equal(result.excerpt, "SECOND");
-		assert.equal(result.offset, 10);
-		assert.equal(result.returned, 6);
-		assert.equal(result.totalChars, second.length);
-		assert.equal(result.nextOffset, 16);
-		assert.equal(result.truncated, true);
-		assert.equal(JSON.stringify(env).includes(first), false);
-	});
-
-	it("uses the same normalized nested text and size for exact result inspection", async () => {
-		const env = await agentRead({ operation: "inspect", messageIndex: 1, resultIndex: 0 }, focusedFixture);
-		const result = env.result ?? env;
-		assert.equal(result.excerpt, "alpha\nβeta");
-		assert.equal(result.totalChars, 10);
-		assert.deepEqual(result.size, { chars: 10, lines: 2, bytes: 11 });
-		assert.equal(JSON.stringify(env).includes("PROVIDER_SIGNATURE_SENTINEL"), false);
-	});
-
-	it("returns concise structured errors for invalid exact indexes", async () => {
-		await assert.rejects(
-			() => agentRead({ operation: "inspect", messageIndex: 99 }, focusedFixture),
-			(error: any) => error instanceof TranscriptReaderError && error.code === "invalid_params" && /message/i.test(error.message),
-		);
-		await assert.rejects(
-			() => agentRead({ operation: "inspect", messageIndex: 1, resultIndex: 9 }, focusedFixture),
-			(error: any) => error instanceof TranscriptReaderError && error.code === "invalid_params" && /result/i.test(error.message),
-		);
+	it.each([[99, undefined, /message/i], [1, 9, /result/i]])("rejects invalid exact indexes", async (messageIndex, resultIndex, pattern) => {
+		await assert.rejects(() => read({ operation: "inspect", messageIndex, resultIndex }), (error: any) => error instanceof TranscriptReaderError && error.code === "invalid_params" && pattern.test(error.message));
 	});
 });
 
