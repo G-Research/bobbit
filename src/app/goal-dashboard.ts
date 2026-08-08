@@ -2645,7 +2645,8 @@ function renderAgentsTab(): TemplateResult {
 			worktreePath: "",
 			branch: "",
 			task: "",
-			createdAt: 0,
+			createdAt: teamLeadSession.createdAt,
+			archivedAt: teamLeadSession.archivedAt,
 		});
 	}
 	allAgents.push(...agents);
@@ -2669,8 +2670,17 @@ function renderAgentsTab(): TemplateResult {
 				|| state.archivedSessions.find(gs => gs.id === agent.sessionId);
 			return s && c.author === (s.title || s.id.slice(0, 8));
 		}).length;
-		const elapsed = (isArchived && agent.archivedAt ? agent.archivedAt : Date.now()) - agent.createdAt;
-		const mins = Math.floor(elapsed / 60_000);
+		const now = Date.now();
+		const startedAt = Number.isFinite(agent.createdAt) && agent.createdAt > 0 && agent.createdAt <= now
+			? agent.createdAt
+			: now;
+		const hasValidArchivedAt = isArchived && Number.isFinite(agent.archivedAt) && agent.archivedAt! > 0 && agent.archivedAt! <= now;
+		const endedAt = hasValidArchivedAt
+			? agent.archivedAt!
+			: isArchived && agent.role === "team-lead"
+				? startedAt
+				: now;
+		const mins = Math.floor(Math.max(0, endedAt - startedAt) / 60_000);
 		const timeStr = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
 		const displayName = isArchived ? (agent.title || formatAgentName(agent)) : formatAgentName(agent);
 

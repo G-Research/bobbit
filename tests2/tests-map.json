@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/dom/goal-dashboard-agent-duration.test.ts",
+      "reason": "Real dashboard-rendering regression coverage for live and archived team-lead lifecycle timestamps, safe invalid/future timestamp fallbacks, and unchanged regular-agent durations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-dashboard-agent-duration.journey.spec.ts",
+      "reason": "User-visible Agents-tab journey proving the team lead duration remains tied to its session age after tab navigation, cross-dashboard navigation, and page reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/file-explorer-model.test.ts",
       "reason": "Pure file explorer domain coverage for canonical relative paths, stable directory-first ordering, complete porcelain status combinations, retained-source copy augmentation, nested-root filtering, ancestor and virtual-deletion decoration, bounded file classification, and synthesized untracked diffs.",
       "execution": {
@@ -2685,6 +2703,10 @@
     },
     {
       "path": "tests2/browser/journeys/team-operations.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-dashboard-agent-duration.journey.spec.ts",
       "type": "smoke-journey"
     }
   ],
