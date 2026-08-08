@@ -21,6 +21,51 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/file-explorer-model.test.ts",
+      "reason": "Pure file explorer domain coverage for canonical relative paths, stable directory-first ordering, complete porcelain status combinations, retained-source copy augmentation, nested-root filtering, ancestor and virtual-deletion decoration, bounded file classification, and synthesized untracked diffs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/file-explorer-pack.test.ts",
+      "reason": "Built-in shipping contract coverage for the default-active read-only file explorer manifest, singleton panel and both launchers, disableable contributions, route registration, build/copy/harness allowlists, committed bundles, mediated Host API use, and forbidden import boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/file-explorer-routes.test.ts",
+      "reason": "Injected filesystem and Git route coverage for relative session-root list/read/diff behavior, entry and byte caps, deadlines and cleanup, safe error mapping, non-Git and unborn repositories, authoritative status and copy discovery, argv pathspecs, and text, empty, binary, deleted, renamed, copied, untracked, and oversized diffs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/file-explorer-panel.test.ts",
+      "reason": "DOM coverage for the explorer's accessible lazy tree, status badges, mouse and keyboard navigation, read-only preview and complete HEAD diff tabs, bounded loading/error/empty states, local retry, stale-response fencing, manual and idle refresh, state restoration, and responsive narrow-panel flow.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/file-explorer-pack.spec.ts",
+      "reason": "Chromium end-to-end journey for both explorer launchers and singleton restoration, accessible tree browsing, Git status and ancestor decorations including retained-source copies, read-only file and complete HEAD diff previews, binary/empty/oversized/deleted states, external refresh, reload restoration, non-Git browsing, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/pack-list-scan-cache.test.ts",
       "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
       "execution": {
