@@ -6,6 +6,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
+import { Value } from "@sinclair/typebox/value";
 import { describe, it, expect, beforeAll } from "vitest";
 import { loadBobbitTools, stubFetch, type CapturedTool } from "./helpers/bobbit-harness.ts";
 
@@ -43,6 +44,36 @@ describe("bobbit_read — paging schema", () => {
 		expect(props.includeArchived, "includeArchived should be registered in the bobbit_read schema").toBeTruthy();
 		expect(props.includeArchived.type).toBe("boolean");
 		expect(props.includeArchived.description).toMatch(/search|archive/i);
+	});
+});
+
+describe("bobbit_read — closed agent schema", () => {
+	it("does not advertise removed verbosity or raw-result compatibility flags", () => {
+		const schema = tools.get("bobbit_read")!.parameters;
+		const props = schema?.properties ?? {};
+
+		expect(props.verbose, "BOBBIT_READ_REMOVED_VERBOSE_SCHEMA_FLAG").toBeUndefined();
+		for (const removed of [
+			"include_tool_results",
+			"includeToolResults",
+			"raw_results",
+			"rawResults",
+		]) {
+			expect(props[removed], removed).toBeUndefined();
+		}
+		expect(schema.additionalProperties).toBe(false);
+	});
+
+	it.each([
+		["verbose", true],
+		["include_tool_results", true],
+		["includeToolResults", true],
+		["raw_results", true],
+		["rawResults", true],
+	] as const)("rejects removed %s input through normal schema validation", (name, value) => {
+		const schema = tools.get("bobbit_read")!.parameters;
+		expect(Value.Check(schema, { operation: "health" })).toBe(true);
+		expect(Value.Check(schema, { operation: "health", [name]: value })).toBe(false);
 	});
 });
 
