@@ -49,23 +49,16 @@ function preview(value: string): string {
 }
 
 describe("bobbit compact projections", () => {
-	it("closes bobbit_read without removed flags", () => {
-		const schema = tools.get("bobbit_read")!.parameters;
-		expect(schema.additionalProperties).toBe(false);
-		for (const flag of ["verbose", "include_tool_results", "includeToolResults", "raw_results", "rawResults"]) expect([schema.properties?.[flag], Value.Check(schema, { operation: "health", [flag]: true })]).toEqual([undefined, false]);
-	});
+	it("closes bobbit_read without removed flags", () => { const schema = tools.get("bobbit_read")!.parameters; expect(schema.additionalProperties).toBe(false);
+		for (const flag of ["verbose", "include_tool_results", "includeToolResults", "raw_results", "rawResults"]) expect([schema.properties?.[flag], Value.Check(schema, { operation: "health", [flag]: true })]).toEqual([undefined, false]); });
 	it("compacts list_goals while preserving identity, state, recency, and pagination", async () => {
 		const spec = longText("goal spec: ");
 		const goal = {
 			id: "goal-1",
 			title: "Ship compact output",
 			state: "in-progress",
-			projectId: "project-1",
-			parentGoalId: "goal-parent",
-			workflowId: "workflow-1",
-			createdAt: "2026-07-16T10:00:00.000Z",
-			updatedAt: "2026-07-17T10:00:00.000Z",
-			spec,
+			projectId: "project-1", parentGoalId: "goal-parent", workflowId: "workflow-1",
+			createdAt: "2026-07-16T10:00:00.000Z", updatedAt: "2026-07-17T10:00:00.000Z", spec,
 			branch: "goal/compact",
 			mergeTarget: "main",
 			setupStatus: "ready",
@@ -97,9 +90,7 @@ describe("bobbit compact projections", () => {
 				total: 25,
 				hasMore: true,
 				nextCursor: "goal-cursor-1",
-				providerMetadata: { requestId: "provider-only" },
-				filesystemPath: "/private/envelope",
-				workflowSnapshot: { raw: "large snapshot" },
+				providerMetadata: { requestId: "provider-only" }, filesystemPath: "/private/envelope", workflowSnapshot: { raw: "large snapshot" },
 			},
 		}));
 
@@ -110,20 +101,10 @@ describe("bobbit compact projections", () => {
 		}));
 
 		expect(data.goals).toHaveLength(1);
-		expect(data.goals[0]).toMatchObject({
-			id: goal.id,
-			title: goal.title,
-			state: goal.state,
-			projectId: goal.projectId,
-			parentGoalId: goal.parentGoalId,
-			workflowId: goal.workflowId,
-			createdAt: goal.createdAt,
-			updatedAt: goal.updatedAt,
-		});
-		for (const dropped of [
-			"spec", "branch", "mergeTarget", "setupStatus", "team", "paused", "workflow", "worktreePath", "repoPath", "cwd",
-			"sandboxed", "subgoalsAllowed", "autoStartTeam", "generation", "colorIndex",
-		]) expect(data.goals[0][dropped], dropped === "spec" ? "BOBBIT_READ_LIST_GOALS_MUST_OMIT_SPEC" : dropped).toBeUndefined();
+		expect(data.goals[0]).toMatchObject({ id: goal.id, title: goal.title, state: goal.state, projectId: goal.projectId,
+			parentGoalId: goal.parentGoalId, workflowId: goal.workflowId, createdAt: goal.createdAt, updatedAt: goal.updatedAt });
+		for (const dropped of ["spec", "branch", "mergeTarget", "setupStatus", "team", "paused", "workflow", "worktreePath", "repoPath", "cwd",
+			"sandboxed", "subgoalsAllowed", "autoStartTeam", "generation", "colorIndex"]) expect(data.goals[0][dropped], dropped === "spec" ? "BOBBIT_READ_LIST_GOALS_MUST_OMIT_SPEC" : dropped).toBeUndefined();
 		for (const dropped of ["providerMetadata", "filesystemPath", "workflowSnapshot"]) expect(data[dropped]).toBeUndefined();
 		expect(data.archivedSessions[0]).toMatchObject({
 			id: archivedSession.id,
@@ -219,24 +200,11 @@ describe("bobbit compact projections", () => {
 			limit: 1,
 		}));
 
-		expect(data.sessions[0]).toMatchObject({
-			id: session.id,
-			title: session.title,
-			status: session.status,
-			assistantType: session.assistantType,
-			role: session.role,
-			projectId: session.projectId,
-			goalId: session.goalId,
-			createdAt: session.createdAt,
-			lastActivity: session.lastActivity,
-			lastTurnErrored: true,
-			consecutiveErrorTurns: 2,
-			restoreFailed: true,
-		});
-		expect(data.sessions[0].restoreError).toBeUndefined();
-		expect(JSON.stringify(data.sessions[0])).not.toContain("LIST_SESSION_SECRET_SENTINEL");
-		for (const dropped of ["completedTurnCount", "cwd", "clientCount", "lastReadAt", "isCompacting", "spawnPinnedModel", "spawnPinnedThinkingLevel",
-			"imageGenerationModel", "goalAssistant", "roleAssistant", "toolAssistant"]) expect(data.sessions[0][dropped], dropped).toBeUndefined();
+		expect(data.sessions[0]).toMatchObject({ id: session.id, title: session.title, status: session.status, assistantType: session.assistantType,
+			role: session.role, projectId: session.projectId, goalId: session.goalId, createdAt: session.createdAt, lastActivity: session.lastActivity,
+			lastTurnErrored: true, consecutiveErrorTurns: 2, restoreFailed: true });
+		expect(data.sessions[0].restoreError).toBeUndefined(); expect(JSON.stringify(data.sessions[0])).not.toContain("LIST_SESSION_SECRET_SENTINEL");
+		for (const dropped of ["completedTurnCount", "cwd", "clientCount", "lastReadAt", "isCompacting", "spawnPinnedModel", "spawnPinnedThinkingLevel", "imageGenerationModel", "goalAssistant", "roleAssistant", "toolAssistant"]) expect(data.sessions[0][dropped], dropped).toBeUndefined();
 		expect(data.archivedDelegates[0]).toMatchObject({
 			id: "delegate-archived",
 			archived: true,
@@ -252,16 +220,11 @@ describe("bobbit compact projections", () => {
 		});
 	});
 	it("gives get_session useful links and safe diagnostics without disclosing raw errors", async () => {
-		const safe = { id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester", projectId: "project-1", goalId: "goal-1",
-			teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1", taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1", createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17, lastTurnErrored: true, consecutiveErrorTurns: 3, condition: { kind: "model-selection-required", message: "Choose a supported model" } };
-		const secret = String.raw`Bearer SECRET_SENTINEL at C:\private\session.ts`;
-		const omitted = ["restoreError", "lastTurnErrorMessage", "manualRetryRequired", "transientRetryAttempts", "recoverDrainAttempts", "cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace", "storagePath", "model", "providerMetadata", "workflow"];
+		const safe = { id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester", projectId: "project-1", goalId: "goal-1", teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1", taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1", createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17, lastTurnErrored: true, consecutiveErrorTurns: 3, condition: { kind: "model-selection-required", message: "Choose a supported model" } }, secret = String.raw`Bearer SECRET_SENTINEL at C:\private\session.ts`, omitted = ["restoreError", "lastTurnErrorMessage", "manualRetryRequired", "transientRetryAttempts", "recoverDrainAttempts", "cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace", "storagePath", "model", "providerMetadata", "workflow"];
 		stubFetch(() => ({ body: { ...safe, restoreError: { code: "PRIVATE_CODE", message: secret }, lastTurnErrorMessage: secret, ...Object.fromEntries(omitted.slice(2).map((field) => [field, "private"])) } }));
 		const data = resultJson(await tools.get("bobbit_read")!.execute("id", { operation: "get_session", sessionId: safe.id }));
-		expect(data).toMatchObject({ ...safe, restoreFailed: true });
-		for (const field of omitted) expect(data[field], field).toBeUndefined();
-		expect(JSON.stringify(data)).not.toContain("SECRET_SENTINEL");
-		expect(typeof data.restoreFailed).toBe("boolean");
+		expect(data).toMatchObject({ ...safe, restoreFailed: true }); for (const field of omitted) expect(data[field], field).toBeUndefined();
+		expect(JSON.stringify(data)).not.toContain("SECRET_SENTINEL"); expect(typeof data.restoreFailed).toBe("boolean");
 	});
 
 	it("compacts search hits and truncates snippets without losing ranking or pagination", async () => {

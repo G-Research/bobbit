@@ -534,13 +534,13 @@ describe("transcript-reader / readTranscript", () => {
 
 describe("transcript-reader / agent list and exact inspection", () => {
 	const jsonl = (messages: any[]) => messages.map((message) => JSON.stringify({ type: "message", message })).join("\n") + "\n";
-	const read = (params: any, text = fixture): Promise<any> => readAgentTranscript(params, memoryTranscript(text));
 	const nested = [{ type: "text", text: "alpha" }, { type: "thinking", thinking: "THINKING_SECRET", signature: "SIGNATURE_SECRET" }, { type: "text", text: "βeta" }];
 	const fixture = jsonl([
 		{ role: "assistant", content: [{ type: "tool_use", id: "a", name: "bash", input: {} }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "a", is_error: false, content: nested }] },
 		{ role: "assistant", content: [{ type: "toolCall", id: "p", name: "read", arguments: {} }] }, { role: "toolResult", content: nested, toolCallId: "p", toolName: "read", isError: true },
 		{ role: "user", content: [{ type: "tool_result", content: "UNKNOWN_SECRET" }] }, { role: "assistant", content: [{ type: "text", text: "x".repeat(900) }, { type: "tool_use", name: "bash", input: { cmd: "y".repeat(300) } }] },
 	]);
+	const read = (params: any, text = fixture): Promise<any> => readAgentTranscript(params, memoryTranscript(text));
 	const size = { chars: 10, lines: 2, bytes: 11 };
 
 	it("lists bounded, redacted Anthropic and Pi tool summaries with exact metadata", async () => {
@@ -551,38 +551,27 @@ describe("transcript-reader / agent list and exact inspection", () => {
 		for (const i of [1, 3]) expect(messages[i].toolResults[0]).toEqual(expect.objectContaining({ resultIndex: 0, size }));
 		assert.deepEqual([messages[5].textTruncated, messages[5].toolUses[0].argumentsTruncated], [true, true]);
 		assert.ok(messages[5].text.length <= 801 && messages[5].toolUses[0].argumentSummary.length <= 201);
-		for (const secret of ["alpha", "βeta", "UNKNOWN_SECRET", "THINKING_SECRET", "SIGNATURE_SECRET"]) assert.equal(JSON.stringify(messages).includes(secret), false, `${secret} leaked`);
+		for (const secret of ["alpha", "βeta", "UNKNOWN_SECRET", "THINKING_SECRET", "SIGNATURE_SECRET"]) assert.doesNotMatch(JSON.stringify(messages), new RegExp(secret));
 	});
-	it("regex-matches Anthropic and Pi tool summaries and rejects invalid patterns", async () => {
-		const matches = await read({
-			operation: "list",
-			pattern: '"toolUseId":"(A|P)"',
-			caseSensitive: false,
-			offset: -2,
-			limit: 2,
-		});
-		assert.equal(matches.matchCount, 2);
-		assert.deepEqual(matches.messages.map((message: any) => message.index), [0, 2]);
-		await assert.rejects(
-			() => read({ operation: "list", pattern: "(" }),
-			(error: unknown) => error instanceof TranscriptReaderError && error.code === "invalid_regex",
-		);
+	it("keeps regex and negative-offset discovery behavior", async () => {
+		const found = await read({ operation: "list", pattern: '"toolUseId":"(A|P)"', caseSensitive: false, offset: -2, limit: 2 });
+		assert.deepEqual([found.matchCount, found.messages.map((m: any) => m.index)], [2, [0, 2]]);
 	});
-	it("inspects one sanitized message or one continued result only", async () => {
+	it("inspects one sanitized message or one continued exact result", async () => {
 		const message = await read({ operation: "inspect", messageIndex: 1 });
 		expect(message.message).toEqual(expect.objectContaining({ index: 1, toolResults: [expect.objectContaining({ resultIndex: 0, size })] }));
-		assert.equal(JSON.stringify(message).includes("alpha"), false);
+		assert.doesNotMatch(JSON.stringify(message), /alpha/);
 		const normalized = (await read({ operation: "inspect", messageIndex: 1, resultIndex: 0 })).result;
 		expect(normalized).toEqual(expect.objectContaining({ excerpt: "alpha\nβeta", totalChars: 10, size }));
-		assert.equal(JSON.stringify(normalized).includes("SIGNATURE_SECRET"), false);
+		assert.doesNotMatch(JSON.stringify(normalized), /SIGNATURE_SECRET/);
 		const values = ["FIRST_MUST_NOT_LEAK", "0123456789SECOND_ONLY"];
 		const two = jsonl([{ role: "user", content: values.map((content, i) => ({ type: "tool_result", content, is_error: !!i })) }]);
 		const exact = (await read({ operation: "inspect", messageIndex: 0, resultIndex: 1, offset: 10, limit: 6 }, two)).result;
 		expect(exact).toEqual(expect.objectContaining({ messageIndex: 0, resultIndex: 1, excerpt: "SECOND", offset: 10, returned: 6, totalChars: values[1].length, nextOffset: 16, truncated: true }));
-		assert.equal(JSON.stringify(exact).includes(values[0]), false);
+		assert.doesNotMatch(JSON.stringify(exact), new RegExp(values[0]));
 	});
-	it.each([[99, undefined, /message/i], [1, 9, /result/i]])("rejects invalid exact indexes", async (messageIndex, resultIndex, pattern) => {
-		await assert.rejects(() => read({ operation: "inspect", messageIndex, resultIndex }), (error: any) => error instanceof TranscriptReaderError && error.code === "invalid_params" && pattern.test(error.message));
+	it.each([[{ operation: "list", pattern: "(" }, "invalid_regex", /./], [{ operation: "inspect", messageIndex: 99 }, "invalid_params", /message/i], [{ operation: "inspect", messageIndex: 1, resultIndex: 9 }, "invalid_params", /result/i]])("rejects invalid regex/index input", async (params, code, pattern) => {
+		await assert.rejects(() => read(params), (error: any) => error instanceof TranscriptReaderError && error.code === code && pattern.test(error.message));
 	});
 });
 
