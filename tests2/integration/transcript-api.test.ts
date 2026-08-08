@@ -1,14 +1,6 @@
-/**
- * E2E: GET /api/sessions/:id/transcript
- *
- * Backs the `read_session` tool. Tests the HTTP surface end-to-end:
- *   - happy path (slice, tail, pattern+window)
- *   - error mapping (session_not_found, transcript_unavailable, invalid_regex,
- *     invalid_params)
- *   - cross-project transcript access via x-bobbit-session-id header
- */
+/** E2E coverage for exact-session diagnostics and transcript reads. */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, base } from "./_e2e/e2e-setup.js";
+import { readE2EToken, base, createSession } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -20,25 +12,15 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 	return { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...extra };
 }
 
-/** Build a sample JSONL with N message lines. */
 function makeJsonl(messages: Array<{ role: string; content: any; ts?: string }>): string {
-	return messages
-		.map((m) => JSON.stringify({ type: "message", ts: m.ts, message: { role: m.role, content: m.content } }))
-		.join("\n") + "\n";
+	return messages.map((m) => JSON.stringify({ type: "message", ts: m.ts, message: { role: m.role, content: m.content } })).join("\n") + "\n";
 }
 
-/** Inject a fully-formed PersistedSession into a project's store with a real .jsonl on disk. */
-function seedSession(
-	gw: { sessionManager: any; bobbitDir: string },
-	overrides: Record<string, unknown> = {},
-	jsonl?: string,
-): { id: string; agentSessionFile: string; projectId: string } {
-	const sm = gw.sessionManager;
-	const pcm = sm.getProjectContextManager?.() ?? sm.projectContextManager;
+/** Seed persisted transcript metadata and its real JSONL file. */
+function seedSession(gw: { sessionManager: any; bobbitDir: string }, overrides: Record<string, unknown> = {}, jsonl?: string): { id: string; agentSessionFile: string; projectId: string } {
+	const sm = gw.sessionManager, pcm = sm.getProjectContextManager?.() ?? sm.projectContextManager;
 	const reg = pcm?.registry ?? pcm?.projectRegistry ?? sm.projectRegistry;
-	const defaultProjectId: string =
-		(pcm?.getDefaultProjectId?.() as string | undefined) ??
-		(reg?.list?.()?.[0]?.id as string);
+	const defaultProjectId: string = (pcm?.getDefaultProjectId?.() as string | undefined) ?? (reg?.list?.()?.[0]?.id as string);
 	expect(defaultProjectId).toBeTruthy();
 
 	const id = crypto.randomUUID();
@@ -62,6 +44,19 @@ function seedSession(
 }
 
 test.describe("GET /api/sessions/:id/transcript", () => {
+	test("exact session exposes safe live retry diagnostics", async ({ gateway }) => {
+		const id = await createSession(), live = gateway.sessionManager.getSession(id)!;
+		gateway.sessionManager.getSessionStore(live.projectId).update(id, { manualRetryRequired: true });
+		live.manualRetryRequired = undefined; // Exercise the durable fallback used during recovery boundaries.
+		live.transientRetryAttempts = 4; live.recoverDrainAttempts = 2;
+		live.lastTurnErrorMessage = "RAW_ERROR_SENTINEL"; live.promptQueue.enqueue("RAW_QUEUE_SENTINEL");
+		const resp = await fetch(`${base()}/api/sessions/${id}`, { headers: authHeaders() });
+		expect(resp.status).toBe(200);
+		const body = await resp.json();
+		expect(body).toMatchObject({ manualRetryRequired: true, transientRetryAttempts: 4, recoverDrainAttempts: 2 });
+		expect(JSON.stringify(body)).not.toMatch(/RAW_(?:ERROR|QUEUE)_SENTINEL/);
+	});
+
 	test("happy path — head", async ({ gateway }) => {
 		const jsonl = makeJsonl([
 			{ role: "user", content: "alpha" },
