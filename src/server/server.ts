@@ -133,7 +133,13 @@ import {
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
 } from "./agent/compaction-sidecar.js";
-import { projectOwnTranscriptJsonl, readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
+import {
+	projectOwnTranscriptJsonl,
+	readAgentTranscript,
+	readOrphanedBeforeCompaction,
+	readTranscript,
+	TranscriptReaderError,
+} from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
@@ -141,7 +147,6 @@ import { TaskStore } from "./agent/task-store.js";
 import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
-import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
 import {
@@ -15709,27 +15714,51 @@ async function handleApiRoute(
 			throw new TranscriptReaderError("invalid_params", `${foundName} must be a boolean`);
 		}
 		try {
-			const params = {
-				offset: parseIntParam("offset"),
-				limit: parseIntParam("limit"),
-				pattern: qp.get("pattern") ?? undefined,
-				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
-				context: parseIntParam("context"),
-				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
-				includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
-			};
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
-			const envelope = await readTranscript(params, {
+			const options = {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 				authorContext: {
 					session: targetPs,
 					sidecarEntries: readAuthorSidecar(targetId),
 					agentDeps: {
-						getStaff: (id) => staffManager.getStaff(id),
-						getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+						getStaff: (id: string) => staffManager.getStaff(id),
+						getRole: (name: string) => resolveRoleForProject(name, targetPs.projectId),
 					},
 				},
-			});
+			};
+			const operation = qp.get("operation");
+			let envelope;
+			if (operation === "list") {
+				envelope = await readAgentTranscript({
+					operation: "list",
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+					pattern: qp.get("pattern") ?? undefined,
+					caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+					context: parseIntParam("context"),
+				}, options);
+			} else if (operation === "inspect") {
+				envelope = await readAgentTranscript({
+					operation: "inspect",
+					messageIndex: parseIntParam("message_index") as number,
+					resultIndex: parseIntParam("result_index"),
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+				}, options);
+			} else if (operation !== null) {
+				throw new TranscriptReaderError("invalid_params", "operation must be list or inspect");
+			} else {
+				// Direct REST/UI compatibility path. Agent reads always supply an operation.
+				envelope = await readTranscript({
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+					pattern: qp.get("pattern") ?? undefined,
+					caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+					context: parseIntParam("context"),
+					verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
+					includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
+				}, options);
+			}
 			json(envelope);
 		} catch (err) {
 			if (err instanceof TranscriptReaderError) {
