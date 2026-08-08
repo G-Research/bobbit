@@ -15,9 +15,7 @@ that only address the *current* goal. The `bobbit` group fills the gap: an
 ergonomic, gateway-wide surface addressed by explicit id, with auth and
 error-shaping handled for you.
 
-See the design doc [`docs/design/bobbit-gateway-tool.md`](design/bobbit-gateway-tool.md)
-for full endpoint mappings (§5) and the rationale behind every resolved
-decision. This page is the user-facing reference.
+This page and each tool's `detail_docs` are authoritative; the [design](design/bobbit-gateway-tool.md) records historical rationale.
 
 ## The three tiers
 
@@ -87,8 +85,6 @@ that imports a sibling module through `../_shared/*` therefore needs that shared
 tree beside the customized group. The tool customize endpoint copies both the
 selected group and its source `tools/_shared/` directory into the target scope;
 matching shared files are refreshed while unrelated target-only files remain.
-This keeps the Bobbit and Agent extensions connected to their shared runtime
-dependencies after customization.
 
 When copying or maintaining a tool-group override outside the customize
 endpoint, preserve the same layout and copy `tools/_shared/` too. A group-only
@@ -97,30 +93,13 @@ relative import.
 
 ## Focused read output
 
-Each `bobbit_read` operation has one intentional agent-facing response shape.
-Use a compact `list_*` operation to discover an entity, choose its id, then use
-the matching `get_*` operation for useful semantic detail about that exact
-entity. Lists retain identity, title or name, state or type, essential
-relationships, concise diagnostics, timestamps, and pagination while omitting
-specs, prompts, paths, provider metadata, UI state, and embedded snapshots.
-
-Single-entity reads retain the ids and relationships needed for follow-up calls
-and expose relevant detail without unrelated internal data. In particular,
-`get_session` includes identity, status, role, project/goal/task links, progress,
-timing, and actionable error diagnostics while omitting workspace and storage
-paths, drafts, UI state, and provider-only fields.
-
-This projection applies only to the agent tool. Direct gateway REST and UI
-consumers retain their established response bodies. The mutation and admin
-tiers keep their own output controls; `bobbit_read` does not share them.
+`bobbit_read` lists compact discovery fields, then uses matching `get_*` operations for exact detail; direct REST/UI and the admin/orchestrate tiers keep separate response policies.
 
 ## Operation catalogue
 
-Each tool takes an `operation` discriminator plus operation-specific params.
-For `bobbit_read`, list operations are discovery views and matching get
-operations inspect one exact entity. Summaries follow; for full endpoint
-mappings, methods, and body keys see each tool's `detail_docs` and
-[`docs/design/bobbit-gateway-tool.md` §5](design/bobbit-gateway-tool.md).
+Each tool takes an `operation` discriminator plus operation-specific params and
+returns a compact JSON projection by default. Summaries follow; for full endpoint
+mappings, methods, and body keys see each tool's `detail_docs`.
 
 ### `bobbit_read` — read-only introspection
 
@@ -279,10 +258,7 @@ grant policy is the authority and the admin token never leaves the server
 
 ## Result and error shape
 
-- **Success** — returns the operation-specific projection described above.
-  List-style `bobbit_read` operations first apply archive filtering and paging,
-  then return compact discovery rows with usable ids and pagination metadata;
-  matching get operations return useful detail for one entity.
+- **Success** — `bobbit_read` lists return compact identity/state/relationship data and pagination; matching gets return useful detail for one entity.
 - **204 No Content** (e.g. marketplace uninstall) — returns `{ ok: true }`.
 - **Gateway failure** — the gateway's structured `{ error, code }` body is
   surfaced as a readable error line containing the message, machine code when
