@@ -54,7 +54,7 @@ const LIST_PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "ide
 		"teamGoalId", "teamLeadSessionId", "taskId", "staffId", "delegateOf",
 		"parentSessionId", "childKind", "readOnly", "reattemptGoalId", "archived",
 		"archivedAt", "createdAt", "lastActivity",
-		"lastTurnErrored", "consecutiveErrorTurns", "restoreError",
+		"lastTurnErrored", "consecutiveErrorTurns",
 	]),
 	searchHit: new Set([
 		"id", "type", "title", "score", "projectId", "state", "status", "archived",
@@ -115,9 +115,8 @@ const PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity
 		"parentSessionId", "childKind", "readOnly", "reattemptGoalId", "archived",
 		"archivedAt", "createdAt", "updatedAt",
 		"lastActivity", "startedAt", "completedAt", "streamingStartedAt",
-		"lastTurnErrored", "lastTurnErrorMessage", "consecutiveErrorTurns",
-		"transientRetryAttempts", "recoverDrainAttempts", "manualRetryRequired",
-		"completedTurnCount", "restoreError", "condition", "progress",
+		"lastTurnErrored", "consecutiveErrorTurns", "completedTurnCount",
+		"condition", "progress",
 	]),
 	searchHit: new Set([
 		"id", "type", "title", "score", "projectId", "state", "status", "archived",
@@ -266,6 +265,9 @@ function projectEntity(
 
 	const allowed = mode === "list" ? LIST_PROFILE_FIELDS[profile] : PROFILE_FIELDS[profile];
 	const out: Record<string, unknown> = {};
+	// Restore failures may contain raw stacks, stderr, paths, and credentials. Agent
+	// projections expose only the fact of failure; direct REST/UI data is unchanged.
+	if (profile === "session" && value.restoreError) out.restoreFailed = true;
 	for (const [key, child] of Object.entries(value)) {
 		if (UNIVERSAL_DROP_FIELDS.has(key) || isRedundantIdAlias(key, child, value)) continue;
 		if (key === "workflow" && (profile === "goal" || profile === "session")) continue;
