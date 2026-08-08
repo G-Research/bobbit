@@ -242,6 +242,20 @@ function bodyRecord(req: RouteRequest): Record<string, unknown> {
 	return req?.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body as Record<string, unknown> : {};
 }
 
+function isGitMetadataSegment(segment: string): boolean {
+	return process.platform === "win32" || process.platform === "darwin"
+		? segment.toLowerCase() === ".git"
+		: segment === ".git";
+}
+
+/** Route-boundary exclusion for repository internals. This intentionally stays
+ * separate from the generic relative-path parser used for Git output. */
+function normalizeRoutePath(value: unknown, options: { allowRoot?: boolean } = {}): string {
+	const relativePath = normalizeRelativePath(value, options);
+	if (relativePath !== "" && relativePath.split("/").some(isGitMetadataSegment)) throw new ExplorerPathError();
+	return relativePath;
+}
+
 function routeCwd(ctx: RouteContext): string {
 	return typeof ctx?.workingDir === "string" && ctx.workingDir.length > 0 ? ctx.workingDir : process.cwd();
 }
@@ -308,7 +322,7 @@ async function listDirectory(cwd: string, relativePath: string, deps: ExplorerDe
 		while (true) {
 			const entry = await deadline.call(handle.read(), () => { void closeHandle?.().catch(() => undefined); });
 			if (!entry) break;
-			if (entry.name === ".git") continue;
+			if (isGitMetadataSegment(entry.name)) continue;
 			let entryPath: string;
 			try { entryPath = joinRelativePath(relativePath, entry.name); }
 			catch { continue; }
@@ -440,7 +454,7 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 		list: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<ListValue>> => {
 			try {
 				const body = bodyRecord(req);
-				const relativePath = normalizeRelativePath(body.path, { allowRoot: true });
+				const relativePath = normalizeRoutePath(body.path, { allowRoot: true });
 				const cwd = routeCwd(ctx);
 				const listed = await listDirectory(cwd, relativePath, deps);
 				const includeStatus = body.includeStatus === true && relativePath === "";
@@ -453,7 +467,7 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 
 		read: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<ReadValue>> => {
 			try {
-				const relativePath = normalizeRelativePath(bodyRecord(req).path);
+				const relativePath = normalizeRoutePath(bodyRecord(req).path);
 				const content = await readRegularFile(routeCwd(ctx), relativePath, READ_BYTE_LIMIT, deps);
 				return { ok: true, value: { path: relativePath, ...content, limit: READ_BYTE_LIMIT } };
 			} catch (error) {
@@ -463,7 +477,7 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 
 		diff: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<DiffValue>> => {
 			let relativePath: string;
-			try { relativePath = normalizeRelativePath(bodyRecord(req).path); }
+			try { relativePath = normalizeRoutePath(bodyRecord(req).path); }
 			catch (error) { return fsFailure(error, "read"); }
 			const cwd = routeCwd(ctx);
 			const snapshot = await collectGitSnapshot(cwd, deps.git, deps.gitTimeoutMs);

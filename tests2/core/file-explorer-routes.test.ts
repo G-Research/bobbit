@@ -12,6 +12,7 @@ import {
 	type GitRunOptions,
 	type StatLike,
 } from "../../market-packs/file-explorer/src/explorer-routes.ts";
+import { createExplorerRoutes as createPackagedExplorerRoutes } from "../../market-packs/file-explorer/lib/explorer-routes.mjs";
 import {
 	DIFF_BYTE_LIMIT,
 	LIST_ENTRY_LIMIT,
@@ -118,6 +119,14 @@ function neverGit(): ExplorerGitRunner {
 	return { run: async () => { throw new Error("Git must not be called"); } };
 }
 
+function failIfUsedFs(observed: string[]): ExplorerFsAdapter {
+	return {
+		opendir: async () => { observed.push("opendir"); throw new Error("Filesystem must not be called"); },
+		lstat: async () => { observed.push("lstat"); throw new Error("Filesystem must not be called"); },
+		open: async () => { observed.push("open"); throw new Error("Filesystem must not be called"); },
+	};
+}
+
 function presentGit(status: string, staged: string, finalDiff: BoundedGitResult): ScriptedGit {
 	return new ScriptedGit([
 		ok(""),
@@ -171,6 +180,82 @@ describe("file explorer list route", () => {
 			{ path: "zeta.txt", name: "zeta.txt", kind: "file" },
 		]);
 		expect(handle.closed).toBe(1);
+	});
+
+	it("blocks direct .git routes before filesystem or Git I/O in source and packaged handlers", async () => {
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			const fsCalls: string[] = [];
+			const git = new ScriptedGit([]);
+			const routes = createRoutes({ fs: failIfUsedFs(fsCalls), git });
+			const requests = [
+				routes.list({ workingDir: SESSION_ROOT }, { body: { path: ".git" } }),
+				routes.list({ workingDir: SESSION_ROOT }, { body: { path: "nested/.git/objects" } }),
+				routes.read({ workingDir: SESSION_ROOT }, { body: { path: ".git/config" } }),
+				routes.diff({ workingDir: SESSION_ROOT }, { body: { path: ".git/config" } }),
+			];
+			if (process.platform === "win32" || process.platform === "darwin") {
+				requests.push(routes.read({ workingDir: SESSION_ROOT }, { body: { path: ".GIT/config" } }));
+			}
+
+			for (const result of await Promise.all(requests)) {
+				expect(result).toEqual({
+					ok: false,
+					error: {
+						code: "INVALID_PATH",
+						message: "The requested path must be a canonical relative path.",
+						retryable: false,
+					},
+				});
+			}
+			expect(fsCalls).toEqual([]);
+			expect(git.calls).toEqual([]);
+		}
+	});
+
+	it("keeps ordinary dotfiles and nested dotfolders browsable", async () => {
+		const contents = new Map<string, Buffer>([
+			[path.join(SESSION_ROOT, ".env"), Buffer.from("TOKEN=local\n")],
+			[path.join(SESSION_ROOT, "nested", ".config", ".settings"), Buffer.from("enabled=true\n")],
+			...(process.platform === "win32" || process.platform === "darwin"
+				? []
+				: [[path.join(SESSION_ROOT, ".GIT", "notes"), Buffer.from("ordinary dotfolder\n")] as [string, Buffer]]),
+		]);
+		const fs: ExplorerFsAdapter = {
+			opendir: async (target) => {
+				expect(target).toBe(path.join(SESSION_ROOT, "nested", ".config"));
+				return new ArrayDirectoryHandle([entry(".settings", "file")]);
+			},
+			lstat: async (target) => {
+				const bytes = contents.get(target);
+				if (!bytes) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+				return fileStat(bytes.byteLength);
+			},
+			open: async (target) => {
+				const bytes = contents.get(target);
+				if (!bytes) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+				return new BytesFileHandle(bytes);
+			},
+		};
+		const routes = createExplorerRoutes({ fs, git: neverGit() });
+
+		expect(await routes.list({ workingDir: SESSION_ROOT }, { body: { path: "nested/.config" } })).toMatchObject({
+			ok: true,
+			value: { entries: [{ path: "nested/.config/.settings", name: ".settings", kind: "file" }] },
+		});
+		expect(await routes.read({ workingDir: SESSION_ROOT }, { body: { path: ".env" } })).toMatchObject({
+			ok: true,
+			value: { kind: "text", text: "TOKEN=local\n" },
+		});
+		expect(await routes.read({ workingDir: SESSION_ROOT }, { body: { path: "nested/.config/.settings" } })).toMatchObject({
+			ok: true,
+			value: { kind: "text", text: "enabled=true\n" },
+		});
+		if (process.platform !== "win32" && process.platform !== "darwin") {
+			expect(await routes.read({ workingDir: SESSION_ROOT }, { body: { path: ".GIT/notes" } })).toMatchObject({
+				ok: true,
+				value: { kind: "text", text: "ordinary dotfolder\n" },
+			});
+		}
 	});
 
 	it("returns at most 1,000 entries and marks additional output truncated", async () => {
