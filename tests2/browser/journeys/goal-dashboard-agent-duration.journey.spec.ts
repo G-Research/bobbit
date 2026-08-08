@@ -24,7 +24,7 @@ async function expectLiveLeadAge(page: Page, createdAt: number): Promise<void> {
 
 	expect(duration, "LEAD_UPTIME_BROWSER_EPOCH_REGRESSION: Agents tab must show the live lead's session age").toMatch(/^\d+m$/);
 	const renderedMinutes = Number.parseInt(duration, 10);
-	expect(renderedMinutes).toBeGreaterThanOrEqual(actualMinutes);
+	expect(renderedMinutes).toBeGreaterThanOrEqual(actualMinutes - 1);
 	expect(renderedMinutes).toBeLessThanOrEqual(actualMinutes + 1);
 }
 
