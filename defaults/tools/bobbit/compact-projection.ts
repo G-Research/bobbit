@@ -116,6 +116,7 @@ const PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity
 		"archivedAt", "createdAt", "updatedAt",
 		"lastActivity", "startedAt", "completedAt", "streamingStartedAt",
 		"lastTurnErrored", "consecutiveErrorTurns", "completedTurnCount",
+		"manualRetryRequired", "transientRetryAttempts", "recoverDrainAttempts",
 		"condition", "progress",
 	]),
 	searchHit: new Set([
@@ -136,8 +137,8 @@ const PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity
 		"failed", "pending", "running", "verifying", "verifyingCount", "total",
 	]),
 	project: new Set([
-		"id", "name", "title", "state", "status", "rootPath", "primaryBranch",
-		"defaultBranch", "baseRef", "createdAt", "updatedAt", "description",
+		"id", "name", "title", "state", "status", "primaryBranch", "defaultBranch",
+		"baseRef", "createdAt", "updatedAt", "description",
 	]),
 	workflowSummary: new Set([
 		"id", "name", "title", "projectId", "type", "createdAt", "updatedAt",
@@ -271,7 +272,8 @@ function projectEntity(
 	for (const [key, child] of Object.entries(value)) {
 		if (UNIVERSAL_DROP_FIELDS.has(key) || isRedundantIdAlias(key, child, value)) continue;
 		if (key === "workflow" && (profile === "goal" || profile === "session")) continue;
-		if (!allowed.has(key) && !UNIVERSAL_KEEP_FIELDS.has(key)) continue;
+		if (!allowed.has(key) && !UNIVERSAL_KEEP_FIELDS.has(key)
+			&& !(mode === "compact" && profile === "project" && key === "rootPath")) continue;
 		if (profile === "workflowDetail" && key === "gates" && Array.isArray(child)) {
 			out.gates = child.map((gate) => projectEntity(gate, "workflowGate", mode));
 			continue;

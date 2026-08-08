@@ -28,25 +28,10 @@ beforeAll(() => {
 	tools = loadBobbitTools();
 });
 
-function resultText(result: any): string {
-	return result?.content?.[0]?.text ?? "";
-}
-
-function resultJson(result: any): any {
-	expect(result.isError).toBeFalsy();
-	return JSON.parse(resultText(result));
-}
-
-function longText(prefix: string): string {
-	return `${prefix}${"x".repeat(COMPACT_TEXT_PREVIEW_CHARS + 40)}`;
-}
-
-function preview(value: string): string {
-	const chars = Array.from(value);
-	return chars.length <= COMPACT_TEXT_PREVIEW_CHARS
-		? value
-		: `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`;
-}
+function resultText(result: any): string { return result?.content?.[0]?.text ?? ""; }
+function resultJson(result: any): any { expect(result.isError).toBeFalsy(); return JSON.parse(resultText(result)); }
+function longText(prefix: string): string { return `${prefix}${"x".repeat(COMPACT_TEXT_PREVIEW_CHARS + 40)}`; }
+function preview(value: string): string { const chars = Array.from(value); return chars.length <= COMPACT_TEXT_PREVIEW_CHARS ? value : `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`; }
 
 describe("bobbit compact projections", () => {
 	it("closes bobbit_read without removed flags", () => { const schema = tools.get("bobbit_read")!.parameters; expect(schema.additionalProperties).toBe(false);
@@ -220,11 +205,18 @@ describe("bobbit compact projections", () => {
 		});
 	});
 	it("gives get_session useful links and safe diagnostics without disclosing raw errors", async () => {
-		const safe = { id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester", projectId: "project-1", goalId: "goal-1", teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1", taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1", createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17, lastTurnErrored: true, consecutiveErrorTurns: 3, condition: { kind: "model-selection-required", message: "Choose a supported model" } }, secret = String.raw`Bearer SECRET_SENTINEL at C:\private\session.ts`, omitted = ["restoreError", "lastTurnErrorMessage", "manualRetryRequired", "transientRetryAttempts", "recoverDrainAttempts", "cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace", "storagePath", "model", "providerMetadata", "workflow"];
+		const safe = { id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester", projectId: "project-1", goalId: "goal-1", teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1", taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1", createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17, lastTurnErrored: true, consecutiveErrorTurns: 3, manualRetryRequired: true, transientRetryAttempts: 2, recoverDrainAttempts: 1, condition: { kind: "model-selection-required", message: "Choose a supported model" } }, secret = String.raw`Bearer SECRET_SENTINEL at C:\private\session.ts`, omitted = ["restoreError", "lastTurnErrorMessage", "cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace", "storagePath", "model", "providerMetadata", "workflow"];
 		stubFetch(() => ({ body: { ...safe, restoreError: { code: "PRIVATE_CODE", message: secret }, lastTurnErrorMessage: secret, ...Object.fromEntries(omitted.slice(2).map((field) => [field, "private"])) } }));
 		const data = resultJson(await tools.get("bobbit_read")!.execute("id", { operation: "get_session", sessionId: safe.id }));
 		expect(data).toMatchObject({ ...safe, restoreFailed: true }); for (const field of omitted) expect(data[field], field).toBeUndefined();
 		expect(JSON.stringify(data)).not.toContain("SECRET_SENTINEL"); expect(typeof data.restoreFailed).toBe("boolean");
+	});
+
+	it("gives get_project semantic detail without filesystem or internal configuration", async () => {
+		const safe = { id: "project-detail", name: "Detailed project", status: "active", primaryBranch: "main", description: "Useful project detail" }, omitted = ["rootPath", "config", "providerMetadata", "workflowSnapshot"];
+		stubFetch(() => ({ body: { ...safe, ...Object.fromEntries(omitted.map((field) => [field, `PROJECT_SENTINEL_${field}`])) } }));
+		const data = resultJson(await tools.get("bobbit_read")!.execute("id", { operation: "get_project", projectId: safe.id }));
+		expect(data).toMatchObject(safe); for (const field of omitted) expect(data[field], field).toBeUndefined(); expect(JSON.stringify(data)).not.toContain("PROJECT_SENTINEL");
 	});
 
 	it("compacts search hits and truncates snippets without losing ranking or pagination", async () => {
