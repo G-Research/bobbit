@@ -9,6 +9,7 @@ import {
 	withBasePath,
 	type GatewayRoute,
 } from "../shared/base-path.js";
+import { decodePreviewEntry, isValidPreviewEntry } from "../shared/preview-entry-codec.js";
 
 export const GW_URL_KEY = "gateway.url";
 export const GW_TOKEN_KEY = "gateway.token";
@@ -305,13 +306,8 @@ function previewRouteCandidate(raw: string): GatewayRoute | null {
  * reconstructing the internal preview route below.
  */
 export function previewEntryFromStoredValue(value: unknown): string | null {
-	if (typeof value !== "string") return null;
-	const entry = value;
-	if (
-		!entry || entry.length > 255 || entry === "." || entry === ".." ||
-		/[\\/\u0000-\u001f\u007f]/u.test(entry)
-	) return null;
-	return entry;
+	const entry = decodePreviewEntry(value);
+	return isValidPreviewEntry(entry) ? entry : null;
 }
 
 function compactPreviewRouteCandidate(raw: string, entry: string | undefined): GatewayRoute | null {

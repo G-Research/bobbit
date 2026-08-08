@@ -14,6 +14,7 @@ guardProcessEnv();
  */
 import { describe, it, beforeAll, afterAll, beforeEach } from "vitest";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,10 +104,18 @@ describe("preview_open extension (v3 mount contract)", () => {
 		const parsed = parseSnapshot(res.content[1].text);
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
+			assert.strictEqual(parsed.url, `/preview/${SID}/`);
 			assert.strictEqual(parsed.contentHash, HASH);
 			assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 			assert.strictEqual(parsed.entry, "inline.html");
+			// Parser compatibility exposes `entry` as `path` for older callers.
+			assert.strictEqual(parsed.path, "inline.html");
 		}
+		assert.deepEqual(
+			JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length)),
+			{ kind: "preview", url: `/preview/${SID}/`, entry: "inline.html", contentHash: HASH, artifactId: ARTIFACT_ID },
+			"new writer markers use only canonical replay fields",
+		);
 
 		// Body bytes must NEVER appear in the snapshot.
 		assert.ok(!res.content[1].text.includes("<h1>Hello</h1>"));
@@ -162,13 +171,14 @@ describe("preview_open extension (v3 mount contract)", () => {
 			const parsed = parseSnapshot(res.content[1].text);
 			assert.ok(parsed && parsed.kind === "preview");
 			if (parsed && parsed.kind === "preview") {
-				assert.match(parsed.url, /^\/preview\//);
-				// Artifact-backed v3 snapshots keep the entry explicit. The builder may
-				// compact `path` to the entry filename to preserve the 250 B marker cap.
-				assert.strictEqual(parsed.path, "report.html");
+				assert.strictEqual(parsed.url, `/preview/${SID}/`);
+				assert.strictEqual(parsed.path, "report.html", "parser preserves path compatibility for entry callers");
 				assert.strictEqual(parsed.entry, "report.html");
+				assert.strictEqual(parsed.contentHash, HASH);
 				assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 			}
+			const payload = JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+			assert.equal(payload.path, undefined, "new writer payloads must not duplicate entry as path");
 
 			const mountPosts = fetchCalls.filter(
 				c => c.init?.method === "POST" && String(c.url).includes("/api/preview/mount"),
@@ -267,9 +277,11 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
 			assert.equal(parsed.url, `/preview/${SID}/`, "capped marker should use the compact directory URL");
-			assert.equal(parsed.path, entry);
+			assert.equal(parsed.path, entry, "parser preserves path compatibility for entry callers");
 			assert.equal(parsed.entry, entry, "snapshot entry must remain raw rather than URL-decoded");
 		}
+		const payload = JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.equal(payload.path, undefined, "new writer payloads must not duplicate entry as path");
 	});
 
 	it("v3 marker block is constant-size and ≤ 250 bytes for the canonical normalised path", async () => {
@@ -279,32 +291,86 @@ describe("preview_open extension (v3 mount contract)", () => {
 		const relPath = `${SID}/report.html`;
 		const block = buildPreviewSnapshotV3Block(url, relPath, HASH, { artifactId: ARTIFACT_ID, entry: "report.html" });
 		assert.ok(
-			block.length <= 250,
-			`v3 block must be ≤ 250 bytes, got ${block.length} (${block})`,
+			Buffer.byteLength(block, "utf8") <= 250,
+			`v3 block must be ≤ 250 UTF-8 bytes, got ${Buffer.byteLength(block, "utf8")} (${block})`,
 		);
 		assert.ok(block.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
 		const parsed = parseSnapshot(block);
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
-			assert.strictEqual(parsed.path, "report.html");
+			assert.strictEqual(parsed.url, `/preview/${SID}/`);
+			assert.strictEqual(parsed.path, "report.html", "parser preserves path compatibility for entry callers");
 			assert.strictEqual(parsed.entry, "report.html");
 			assert.strictEqual(parsed.contentHash, HASH);
 			assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 		}
+		const payload = JSON.parse(block.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.equal(payload.path, undefined, "new writer payloads must not duplicate entry as path");
 	});
 
-	it("v3 builder fails explicitly rather than omitting a valid contentHash at the cap", () => {
-		// Without an artifact identity, a compact marker must retain `entry` to
-		// reopen. This valid hash-only input has no lossless <=250 B shape.
-		const entry = "x".repeat(100) + ".html";
-		const url = `/preview/${SID}/${entry}`;
-		const relPath = `${SID}/${entry}`;
+	it("returns a v3 marker for a realistic nonrepetitive 43-byte basename", async () => {
+		const tool = getTool();
+		const entry = "quarterly-revenue-breakdown-2024-final.html";
+		assert.equal(Buffer.byteLength(entry, "utf8"), 43, "fixture must remain a 43-byte realistic filename");
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return {
+					status: 200,
+					body: {
+						url: `/preview/${SID}/${entry}`,
+						path: `/state/preview/${SID}/${entry}`,
+						relPath: `${SID}/${entry}`,
+						entry,
+						mtime: 1714512345678,
+						contentHash: HASH,
+						artifactId: ARTIFACT_ID,
+					},
+				};
+			}
+			return { status: 200, body: { ok: true } };
+		};
 
-		assert.throws(
-			() => buildPreviewSnapshotV3Block(url, relPath, HASH, { entry }),
-			/PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity .*250 UTF-8 byte snapshot cap/,
-			"a valid contentHash must never be silently dropped to satisfy the cap",
-		);
+		const res = await tool.execute("call-realistic-long", { html: "<p>realistic filename</p>" });
+		assert.equal(res.content.length, 2);
+		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		const payload = JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.deepEqual(payload, {
+			kind: "preview",
+			url: `/preview/${SID}/`,
+			contentHash: HASH,
+			artifactId: ARTIFACT_ID,
+		});
+	});
+
+	it("surfaces a filename-bearing cap error instead of returning an unrestorable marker", async () => {
+		const tool = getTool();
+		// A maximum-length canonical artifact identity prevents even the trusted
+		// entry-omitted form from fitting, so this is a genuine cap boundary.
+		const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~!$&'()+,;=@[]^{}%";
+		const entry = Array.from({ length: 249 }, (_, index) => alphabet[(index * 17) % alphabet.length]).join("");
+		const maximumArtifactId = "a".repeat(64);
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return {
+					status: 200,
+					body: {
+						url: `/preview/${SID}/${entry}`,
+						path: `/state/preview/${SID}/${entry}`,
+						relPath: `${SID}/${entry}`,
+						entry,
+						mtime: 1714512345678,
+						contentHash: HASH,
+						artifactId: maximumArtifactId,
+					},
+				};
+			}
+			return { status: 200, body: { ok: true } };
+		};
+
+		const res = await tool.execute("call-cap", { html: "<p>cannot compact this name</p>" });
+		assert.deepEqual(res.content.map(block => block.type), ["text"]);
+		assert.match(res.content[0].text, /PREVIEW_SNAPSHOT_CAP/);
+		assert.ok(res.content[0].text.includes(entry), "cap failure must name the unsupported filename");
 	});
 
 	it("v3 builder validates optional metadata before serialising a capped fallback", () => {
@@ -357,15 +423,16 @@ describe("preview_open extension (v3 mount contract)", () => {
 		// builder the host-invariant relPath form rather than the host-absolute
 		// path. See `defaults/tools/html/extension.ts`.
 		assert.ok(
-			res.content[1].text.length <= 250,
-			`snapshot was ${res.content[1].text.length} bytes (cap 250)`,
+			Buffer.byteLength(res.content[1].text, "utf8") <= 250,
+			`snapshot was ${Buffer.byteLength(res.content[1].text, "utf8")} UTF-8 bytes (cap 250)`,
 		);
 		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
 	});
 
-	it("extension falls back to host-absolute path when gateway response omits relPath (older gateway)", async () => {
+	it("extension emits the canonical entry marker when an older gateway omits relPath", async () => {
 		const tool = getTool();
-		// Simulate an older gateway build that doesn't populate `relPath`.
+		// Simulate an older gateway build that doesn't populate `relPath`; its
+		// `entry` still enables the current canonical marker shape.
 		fetchResponder = (url, init) => {
 			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
 				return {
@@ -387,7 +454,14 @@ describe("preview_open extension (v3 mount contract)", () => {
 		const parsed = parseSnapshot(res.content[1].text);
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
-			assert.strictEqual(parsed.path, `/old-gateway/state/preview/${SID}/inline.html`);
+			assert.strictEqual(parsed.url, `/preview/${SID}/`);
+			assert.strictEqual(parsed.entry, "inline.html");
+			assert.strictEqual(parsed.path, "inline.html", "parser preserves path compatibility for entry callers");
 		}
+		assert.deepEqual(
+			JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length)),
+			{ kind: "preview", url: `/preview/${SID}/`, entry: "inline.html" },
+			"an entry-bearing older gateway response still emits the canonical marker",
+		);
 	});
 });
