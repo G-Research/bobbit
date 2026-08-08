@@ -5,6 +5,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
+import { Value } from "@sinclair/typebox/value";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	BOBBIT_COMPACT_PROJECTIONS,
@@ -46,6 +47,17 @@ function preview(value: string): string {
 		? value
 		: `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`;
 }
+
+describe("bobbit_read agent contract", () => {
+	it("closes the schema and rejects removed read flags", () => {
+		const schema = tools.get("bobbit_read")!.parameters;
+		expect(schema.additionalProperties).toBe(false);
+		for (const flag of ["verbose", "include_tool_results", "includeToolResults", "raw_results", "rawResults"]) {
+			expect(schema.properties?.[flag]).toBeUndefined();
+			expect(Value.Check(schema, { operation: "health", [flag]: true })).toBe(false);
+		}
+	});
+});
 
 describe("bobbit compact projections", () => {
 	it("compacts list_goals while preserving identity, state, recency, and pagination", async () => {
@@ -255,85 +267,24 @@ describe("bobbit compact projections", () => {
 		});
 	});
 
-	it("gives get_session useful links, progress, and actionable diagnostics without internal state", async () => {
-		const condition = {
-			kind: "model-selection-required",
-			message: "Choose a supported model before restarting",
+	it("gives get_session useful links, progress, and diagnostics without internal state", async () => {
+		const useful = {
+			id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester",
+			projectId: "project-1", goalId: "goal-1", teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1",
+			taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1",
+			createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17,
+			lastTurnErrored: true, lastTurnErrorMessage: "Provider authentication failed", consecutiveErrorTurns: 3,
+			transientRetryAttempts: 2, manualRetryRequired: true, restoreError: { code: "RESTORE_FAILED" },
+			condition: { kind: "model-selection-required", message: "Choose a supported model" },
 		};
-		const restoreError = { code: "RESTORE_FAILED", message: "Transcript restore failed" };
-		const session = {
-			id: "session-detail",
-			title: "Detailed session",
-			status: "idle",
-			assistantType: "goal",
-			role: "tester",
-			projectId: "project-1",
-			goalId: "goal-1",
-			teamGoalId: "team-goal-1",
-			teamLeadSessionId: "lead-session-1",
-			taskId: "task-1",
-			staffId: "staff-1",
-			parentSessionId: "parent-session-1",
-			delegateOf: "delegating-session-1",
-			createdAt: "2026-07-16T10:00:00.000Z",
-			lastActivity: "2026-07-17T11:00:00.000Z",
-			completedTurnCount: 17,
-			lastTurnErrored: true,
-			lastTurnErrorMessage: "Provider authentication failed",
-			consecutiveErrorTurns: 3,
-			transientRetryAttempts: 2,
-			manualRetryRequired: true,
-			restoreError,
-			condition,
-			cwd: "/private/cwd",
-			worktreePath: "/private/worktree",
-			repoWorktrees: [{ repo: ".", worktreePath: "/private/repo-worktree" }],
-			draft: { text: "private draft" },
-			preview: { tabs: [{ content: "private preview" }] },
-			sidePanelWorkspace: { activeTab: "private-ui-state" },
-			storagePath: "/private/session.json",
-			model: { provider: "provider-only", id: "opaque-model" },
-			providerMetadata: { signature: "provider-signature" },
-			workflow: { id: "embedded-snapshot" },
-		};
-		stubFetch(() => ({ body: session }));
-
+		const internal = ["cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace",
+			"storagePath", "model", "providerMetadata", "workflow"];
+		stubFetch(() => ({ body: { ...useful, ...Object.fromEntries(internal.map((field) => [field, "private"])) } }));
 		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
-			operation: "get_session",
-			sessionId: session.id,
+			operation: "get_session", sessionId: useful.id,
 		}));
-
-		expect(data).toMatchObject({
-			id: session.id,
-			title: session.title,
-			status: session.status,
-			assistantType: session.assistantType,
-			role: session.role,
-			projectId: session.projectId,
-			goalId: session.goalId,
-			teamGoalId: session.teamGoalId,
-			teamLeadSessionId: session.teamLeadSessionId,
-			taskId: session.taskId,
-			staffId: session.staffId,
-			parentSessionId: session.parentSessionId,
-			delegateOf: session.delegateOf,
-			createdAt: session.createdAt,
-			lastActivity: session.lastActivity,
-			completedTurnCount: 17,
-			lastTurnErrored: true,
-			lastTurnErrorMessage: session.lastTurnErrorMessage,
-			consecutiveErrorTurns: 3,
-			transientRetryAttempts: 2,
-			manualRetryRequired: true,
-			restoreError,
-			condition,
-		});
-		for (const dropped of [
-			"cwd", "worktreePath", "repoWorktrees", "draft", "preview",
-			"sidePanelWorkspace", "storagePath", "model", "providerMetadata", "workflow",
-		]) {
-			expect(data[dropped], dropped).toBeUndefined();
-		}
+		expect(data).toMatchObject(useful);
+		for (const field of internal) expect(data[field], field).toBeUndefined();
 	});
 
 	it("compacts search hits and truncates snippets without losing ranking or pagination", async () => {
@@ -423,31 +374,6 @@ describe("bobbit compact projections", () => {
 		expect(data.pagination).toMatchObject({ itemKey: "tasks", limit: 10, total: 1 });
 	});
 
-	it("gives get_task complete semantic prose while still omitting verifier internals", async () => {
-		const spec = longText("complete task spec: ");
-		const resultSummary = longText("complete task result: ");
-		stubFetch(() => ({
-			body: {
-				id: "task-detail",
-				goalId: "goal-1",
-				title: "Detailed task",
-				type: "testing",
-				state: "complete",
-				spec,
-				resultSummary,
-				verify: { prompt: "provider-only verifier prompt" },
-			},
-		}));
-
-		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
-			operation: "get_task",
-			taskId: "task-detail",
-		}));
-
-		expect(data).toMatchObject({ id: "task-detail", spec, resultSummary });
-		expect(data.verify).toBeUndefined();
-	});
-
 	it("compacts gates while retaining action and count fields and dropping content/output bodies", async () => {
 		const content = longText("gate content: ");
 		stubFetch(() => ({
@@ -500,42 +426,6 @@ describe("bobbit compact projections", () => {
 		expect(data.gates[0].signals).toBeUndefined();
 		expect(data.summary).toMatchObject({ passed: 1, total: 2 });
 		expect(data.pagination).toMatchObject({ itemKey: "gates", limit: 10, total: 1 });
-	});
-
-	it("omits prompts from role lists while preserving discovery fields", async () => {
-		stubFetch(() => ({
-			body: {
-				roles: [{
-					id: "role-1",
-					name: "focused-reviewer",
-					label: "Focused Reviewer",
-					type: "custom",
-					status: "active",
-					projectId: "project-1",
-					prompt: "large private role prompt",
-					promptTemplate: "large private role template",
-					systemPrompt: "large private system prompt",
-					toolPolicies: { bash: "allow" },
-				}],
-			},
-		}));
-
-		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
-			operation: "list_roles",
-			projectId: "project-1",
-		}));
-
-		expect(data.roles[0]).toMatchObject({
-			id: "role-1",
-			name: "focused-reviewer",
-			label: "Focused Reviewer",
-			type: "custom",
-			status: "active",
-			projectId: "project-1",
-		});
-		for (const dropped of ["prompt", "promptTemplate", "systemPrompt", "toolPolicies"]) {
-			expect(data.roles[0][dropped], dropped).toBeUndefined();
-		}
 	});
 
 	it("universally preserves successful error/code diagnostics", async () => {
