@@ -1,7 +1,7 @@
 /** Compact, agent-facing projections for Bobbit gateway tool responses. */
 
 export const COMPACT_TEXT_PREVIEW_CHARS = 200;
-export const COMPACT_TRUNCATION_SUFFIX = "…(truncated; pass verbose:true)";
+export const COMPACT_TRUNCATION_SUFFIX = "…(truncated)";
 
 export type BobbitToolName = "bobbit_read" | "bobbit_orchestrate" | "bobbit_admin";
 
@@ -23,8 +23,11 @@ type ProfileName =
 	| "generic"
 	| "identity";
 
+type ProjectionMode = "compact" | "list" | "detail";
+
 export interface ProjectionSpec {
 	profile: ProfileName;
+	mode?: ProjectionMode;
 	/** Entity profiles for named arrays in collection/envelope responses. */
 	collections?: Readonly<Record<string, ProfileName>>;
 }
@@ -41,17 +44,80 @@ const UNIVERSAL_DROP_FIELDS = new Set([
 	"imageGenerationModel", "goalAssistant", "roleAssistant", "toolAssistant",
 ]);
 
+const LIST_PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity">, ReadonlySet<string>>> = {
+	goal: new Set([
+		"id", "title", "state", "workflowId", "projectId", "parentGoalId", "rootGoalId",
+		"archived", "archivedAt", "createdAt", "updatedAt", "setupError",
+	]),
+	session: new Set([
+		"id", "title", "status", "assistantType", "role", "projectId", "goalId",
+		"teamGoalId", "teamLeadSessionId", "taskId", "staffId", "delegateOf",
+		"parentSessionId", "childKind", "readOnly", "reattemptGoalId", "archived",
+		"archivedAt", "createdAt", "lastActivity",
+		"lastTurnErrored", "consecutiveErrorTurns", "restoreError",
+	]),
+	searchHit: new Set([
+		"id", "type", "title", "score", "projectId", "state", "status", "archived",
+		"createdAt", "updatedAt", "lastActivity", "snippet",
+	]),
+	task: new Set([
+		"id", "goalId", "parentTaskId", "title", "type", "state", "dependsOn",
+		"assignedTo", "assignedSessionId", "workflowGateId", "inputGateIds",
+		"createdAt", "updatedAt", "completedAt",
+	]),
+	gate: new Set([
+		"id", "gateId", "goalId", "name", "type", "status", "state", "dependsOn",
+		"assignedTo", "signalCount", "updatedAt", "hasContent", "contentLength",
+		"whyBypassed", "bypassedAt", "optional", "phase", "awaitingSignoffCount",
+		"passed", "failed", "pending", "running", "verifying", "verifyingCount", "total",
+	]),
+	project: new Set([
+		"id", "name", "title", "state", "status", "createdAt", "updatedAt",
+	]),
+	workflowSummary: new Set([
+		"id", "name", "title", "projectId", "type", "createdAt", "updatedAt",
+	]),
+	workflowDetail: new Set([
+		"id", "name", "title", "projectId", "type", "createdAt", "updatedAt",
+	]),
+	workflowGate: new Set([
+		"id", "name", "title", "type", "dependsOn", "optional", "phase",
+	]),
+	role: new Set([
+		"id", "name", "label", "role", "type", "projectId", "status",
+	]),
+	tool: new Set([
+		"id", "name", "label", "type", "group", "grantPolicy", "enabled", "status",
+		"projectId",
+	]),
+	staff: new Set([
+		"id", "name", "title", "status", "state", "role", "roleId", "projectId",
+		"createdAt", "updatedAt", "lastActivity",
+	]),
+	mcpServer: new Set([
+		"id", "name", "title", "type", "status", "projectId", "enabled", "error", "code",
+	]),
+	commit: new Set([
+		"id", "sha", "shortSha", "hash", "title", "subject", "author", "createdAt",
+		"timestamp", "status", "filesChanged", "insertions", "deletions",
+	]),
+};
+
 const PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity">, ReadonlySet<string>>> = {
 	goal: new Set([
 		"id", "title", "state", "workflowId", "projectId", "branch", "mergeTarget",
-		"setupStatus", "setupError", "team", "paused", "parentGoalId", "rootGoalId", "archived",
+		"setupStatus", "setupError", "paused", "parentGoalId", "rootGoalId", "archived",
 		"archivedAt", "createdAt", "updatedAt", "spec",
 	]),
 	session: new Set([
 		"id", "title", "status", "assistantType", "role", "projectId", "goalId",
-		"teamGoalId", "taskId", "delegateOf", "parentSessionId", "archived",
-		"archivedAt", "createdAt", "lastActivity", "lastTurnErrored",
-		"consecutiveErrorTurns", "completedTurnCount", "restoreError",
+		"teamGoalId", "teamLeadSessionId", "taskId", "staffId", "delegateOf",
+		"parentSessionId", "childKind", "readOnly", "reattemptGoalId", "archived",
+		"archivedAt", "createdAt", "updatedAt",
+		"lastActivity", "startedAt", "completedAt", "streamingStartedAt",
+		"lastTurnErrored", "lastTurnErrorMessage", "consecutiveErrorTurns",
+		"transientRetryAttempts", "recoverDrainAttempts", "manualRetryRequired",
+		"completedTurnCount", "restoreError", "condition", "progress",
 	]),
 	searchHit: new Set([
 		"id", "type", "title", "score", "projectId", "state", "status", "archived",
@@ -168,16 +234,16 @@ function isRedundantIdAlias(field: string, value: unknown, owner: Record<string,
 		&& typeof owner.id === "string" && value === owner.id;
 }
 
-function sanitizeGeneric(value: unknown, field?: string): unknown {
-	if (typeof value === "string") return compactString(field, value);
-	if (Array.isArray(value)) return value.map((item) => sanitizeGeneric(item));
+function sanitizeGeneric(value: unknown, field?: string, truncate = true): unknown {
+	if (typeof value === "string") return truncate ? compactString(field, value) : value;
+	if (Array.isArray(value)) return value.map((item) => sanitizeGeneric(item, undefined, truncate));
 	if (!isRecord(value)) return value;
 
 	const out: Record<string, unknown> = {};
 	for (const [key, child] of Object.entries(value)) {
 		if (UNIVERSAL_DROP_FIELDS.has(key) || isRedundantIdAlias(key, child, value)) continue;
 		if (key === "workflow" && isRecord(child) && looksGoalOrSessionShaped(value)) continue;
-		out[key] = sanitizeGeneric(child, key);
+		out[key] = sanitizeGeneric(child, key, truncate);
 	}
 	if (typeof value.workflowId !== "string" && isRecord(value.workflow) && looksGoalOrSessionShaped(value) && typeof value.workflow.id === "string") {
 		out.workflowId = value.workflow.id;
@@ -190,21 +256,25 @@ function looksLikeEntity(value: Record<string, unknown>, profile: Exclude<Profil
 	return ENTITY_MARKERS[profile].some((field) => field in value);
 }
 
-function projectEntity(value: unknown, profile: Exclude<ProfileName, "generic" | "identity">): unknown {
-	if (Array.isArray(value)) return value.map((item) => projectEntity(item, profile));
-	if (!isRecord(value)) return sanitizeGeneric(value);
+function projectEntity(
+	value: unknown,
+	profile: Exclude<ProfileName, "generic" | "identity">,
+	mode: ProjectionMode = "compact",
+): unknown {
+	if (Array.isArray(value)) return value.map((item) => projectEntity(item, profile, mode));
+	if (!isRecord(value)) return sanitizeGeneric(value, undefined, mode !== "detail");
 
-	const allowed = PROFILE_FIELDS[profile];
+	const allowed = mode === "list" ? LIST_PROFILE_FIELDS[profile] : PROFILE_FIELDS[profile];
 	const out: Record<string, unknown> = {};
 	for (const [key, child] of Object.entries(value)) {
 		if (UNIVERSAL_DROP_FIELDS.has(key) || isRedundantIdAlias(key, child, value)) continue;
 		if (key === "workflow" && (profile === "goal" || profile === "session")) continue;
 		if (!allowed.has(key) && !UNIVERSAL_KEEP_FIELDS.has(key)) continue;
 		if (profile === "workflowDetail" && key === "gates" && Array.isArray(child)) {
-			out.gates = child.map((gate) => projectEntity(gate, "workflowGate"));
+			out.gates = child.map((gate) => projectEntity(gate, "workflowGate", mode));
 			continue;
 		}
-		out[key] = sanitizeGeneric(child, key);
+		out[key] = sanitizeGeneric(child, key, mode !== "detail");
 	}
 	if ((profile === "goal" || profile === "session") && typeof value.workflowId !== "string" && isRecord(value.workflow) && typeof value.workflow.id === "string") {
 		out.workflowId = value.workflow.id;
@@ -212,9 +282,13 @@ function projectEntity(value: unknown, profile: Exclude<ProfileName, "generic" |
 	return out;
 }
 
-function projectProfileOrEnvelope(value: unknown, profile: Exclude<ProfileName, "generic" | "identity">): unknown {
-	if (!isRecord(value) || looksLikeEntity(value, profile)) return projectEntity(value, profile);
-	return sanitizeGeneric(value);
+function projectProfileOrEnvelope(
+	value: unknown,
+	profile: Exclude<ProfileName, "generic" | "identity">,
+	mode: ProjectionMode,
+): unknown {
+	if (!isRecord(value) || looksLikeEntity(value, profile)) return projectEntity(value, profile, mode);
+	return sanitizeGeneric(value, undefined, mode !== "detail");
 }
 
 function valueAtPath(value: Record<string, unknown>, path: string): unknown {
@@ -236,6 +310,55 @@ function setValueAtPath(value: Record<string, unknown>, path: string, replacemen
 	current[segments[segments.length - 1]] = replacement;
 }
 
+const LIST_ENVELOPE_FIELDS = new Set([
+	"error", "code", "pagination", "count", "total", "hasMore", "nextOffset",
+	"nextCursor", "createdAt", "updatedAt", "scannedAt", "checkedAt", "generatedAt",
+]);
+
+const LIST_DIAGNOSTIC_FIELDS = new Set([
+	"level", "status", "state", "type", "code", "error", "message", "count",
+]);
+
+const LIST_SUMMARY_FIELDS = new Set([
+	"status", "state", "passed", "failed", "pending", "running", "verifying",
+	"verifyingCount", "total", "bypassed", "bypassedCount", "awaitingSignoffCount",
+	"runningGateIds", "error", "code",
+]);
+
+function projectListEnvelope(
+	value: Record<string, unknown>,
+	collections: Readonly<Record<string, ProfileName>>,
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value)) {
+		if (LIST_ENVELOPE_FIELDS.has(key)) out[key] = sanitizeGeneric(child, key);
+	}
+	if (Array.isArray(value.diagnostics)) {
+		out.diagnostics = value.diagnostics.map((diagnostic) => {
+			if (!isRecord(diagnostic)) return sanitizeGeneric(diagnostic);
+			const projected: Record<string, unknown> = {};
+			for (const [key, child] of Object.entries(diagnostic)) {
+				if (LIST_DIAGNOSTIC_FIELDS.has(key)) projected[key] = sanitizeGeneric(child, key);
+			}
+			return projected;
+		});
+	}
+	if (isRecord(value.summary)) {
+		const summary: Record<string, unknown> = {};
+		for (const [key, child] of Object.entries(value.summary)) {
+			if (LIST_SUMMARY_FIELDS.has(key)) summary[key] = sanitizeGeneric(child, key);
+		}
+		if (Object.keys(summary).length > 0) out.summary = summary;
+	}
+	for (const [path, profile] of Object.entries(collections)) {
+		const collection = valueAtPath(value, path);
+		if (Array.isArray(collection)) {
+			setValueAtPath(out, path, projectEntity(collection, profile as Exclude<ProfileName, "generic" | "identity">, "list"));
+		}
+	}
+	return out;
+}
+
 const generic = Object.freeze({ profile: "generic" as const });
 const identity = Object.freeze({ profile: "identity" as const });
 const goal = Object.freeze({ profile: "goal" as const });
@@ -250,27 +373,27 @@ export const BOBBIT_COMPACT_PROJECTIONS = {
 	bobbit_read: {
 		health: generic,
 		connection_info: generic,
-		list_goals: { profile: "generic", collections: { goals: "goal", archivedSessions: "session" } },
-		get_goal: goal,
+		list_goals: { profile: "generic", mode: "list", collections: { goals: "goal", archivedSessions: "session" } },
+		get_goal: { profile: "goal", mode: "detail" },
 		goal_cost: identity,
 		goal_git_status: generic,
-		goal_commits: { profile: "generic", collections: { commits: "commit" } },
+		goal_commits: { profile: "generic", mode: "list", collections: { commits: "commit" } },
 		goal_pr_status: generic,
-		list_sessions: { profile: "generic", collections: { sessions: "session", archivedDelegates: "session" } },
-		get_session: session,
+		list_sessions: { profile: "generic", mode: "list", collections: { sessions: "session", archivedDelegates: "session" } },
+		get_session: { profile: "session", mode: "detail" },
 		session_cost: identity,
-		search: { profile: "generic", collections: { results: "searchHit" } },
-		list_projects: { profile: "generic", collections: { projects: "project" } },
-		get_project: project,
-		list_workflows: { profile: "generic", collections: { workflows: "workflowSummary" } },
-		get_workflow: { profile: "workflowDetail" },
-		list_roles: { profile: "generic", collections: { roles: "role" } },
-		list_tools: { profile: "generic", collections: { tools: "tool" } },
-		list_gates: { profile: "generic", collections: { gates: "gate", "summary.gates": "gate" } },
-		list_tasks: { profile: "generic", collections: { tasks: "task" } },
-		get_task: task,
-		list_staff: { profile: "generic", collections: { staff: "staff" } },
-		list_mcp_servers: { profile: "generic", collections: { servers: "mcpServer" } },
+		search: { profile: "generic", mode: "list", collections: { results: "searchHit" } },
+		list_projects: { profile: "generic", mode: "list", collections: { projects: "project" } },
+		get_project: { profile: "project", mode: "detail" },
+		list_workflows: { profile: "generic", mode: "list", collections: { workflows: "workflowSummary" } },
+		get_workflow: { profile: "workflowDetail", mode: "detail" },
+		list_roles: { profile: "generic", mode: "list", collections: { roles: "role" } },
+		list_tools: { profile: "generic", mode: "list", collections: { tools: "tool" } },
+		list_gates: { profile: "generic", mode: "list", collections: { gates: "gate", "summary.gates": "gate" } },
+		list_tasks: { profile: "generic", mode: "list", collections: { tasks: "task" } },
+		get_task: { profile: "task", mode: "detail" },
+		list_staff: { profile: "generic", mode: "list", collections: { staff: "staff" } },
+		list_mcp_servers: { profile: "generic", mode: "list", collections: { servers: "mcpServer" } },
 		maintenance_inspect: generic,
 	},
 	bobbit_orchestrate: {
@@ -319,20 +442,16 @@ export function projectBobbitResponse(tool: BobbitToolName, operation: string, d
 	if (!spec) throw new Error(`missing compact projection for ${tool}.${operation}`);
 	if (spec.profile === "identity") return data;
 
+	const mode = spec.mode ?? "compact";
 	if (spec.collections) {
 		const primaryEntry = Object.entries(spec.collections)[0];
-		if (Array.isArray(data) && primaryEntry) return data.map((item) => projectEntity(item, primaryEntry[1] as Exclude<ProfileName, "generic" | "identity">));
-		if (!isRecord(data)) return sanitizeGeneric(data);
-		const projected = sanitizeGeneric(data) as Record<string, unknown>;
-		for (const [path, profile] of Object.entries(spec.collections)) {
-			const collection = valueAtPath(data, path);
-			if (Array.isArray(collection)) {
-				setValueAtPath(projected, path, projectEntity(collection, profile as Exclude<ProfileName, "generic" | "identity">));
-			}
+		if (Array.isArray(data) && primaryEntry) {
+			return data.map((item) => projectEntity(item, primaryEntry[1] as Exclude<ProfileName, "generic" | "identity">, "list"));
 		}
-		return projected;
+		if (!isRecord(data)) return sanitizeGeneric(data);
+		return projectListEnvelope(data, spec.collections);
 	}
 
 	if (spec.profile === "generic") return sanitizeGeneric(data);
-	return projectProfileOrEnvelope(data, spec.profile);
+	return projectProfileOrEnvelope(data, spec.profile, mode);
 }

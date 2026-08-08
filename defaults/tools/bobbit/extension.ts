@@ -669,7 +669,10 @@ export default function (pi: ExtensionAPI) {
 			const data = await api(method, urlPath, body);
 			const processed = spec.postProcess ? spec.postProcess(data, params) : data;
 			const paged = pageSpec ? pageResult(processed, params, pageSpec) : processed;
-			return ok(params.verbose === true ? paged : projectBobbitResponse(tool, params.operation, paged));
+			const output = tool !== "bobbit_read" && params.verbose === true
+				? paged
+				: projectBobbitResponse(tool, params.operation, paged);
+			return ok(output);
 		} catch (e: any) {
 			return err(e.message);
 		}
@@ -685,7 +688,7 @@ export default function (pi: ExtensionAPI) {
 		name: "bobbit_read",
 		label: "Bobbit Read",
 		description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes.",
-		promptSnippet: "Read gateway state by operation; see detail_docs for the catalogue.",
+		promptSnippet: "List compactly, choose one entity id, then inspect that exact entity with get_*.",
 		parameters: Type.Object({
 			operation: opUnion(READ_OPS),
 			goalId: Type.Optional(Type.String({ description: "Goal id." })),
@@ -704,8 +707,7 @@ export default function (pi: ExtensionAPI) {
 			includeArchived: Type.Optional(Type.Boolean({ description: "REST-style search archive opt-in." })),
 			view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
 			probe: Type.Optional(Type.String({ description: "maintenance_inspect probe selector." })),
-			verbose: Type.Optional(Type.Boolean({ description: "Full JSON; default compact. Paged operations require explicit limit <= 10." })),
-		}),
+		}, { additionalProperties: false }),
 		async execute(_id: string, params: Params) {
 			return dispatch("bobbit_read", READ_OPS, params, { pageResults: true });
 		},
