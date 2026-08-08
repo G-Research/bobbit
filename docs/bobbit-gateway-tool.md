@@ -87,62 +87,38 @@ that imports a sibling module through `../_shared/*` therefore needs that shared
 tree beside the customized group. The tool customize endpoint copies both the
 selected group and its source `tools/_shared/` directory into the target scope;
 matching shared files are refreshed while unrelated target-only files remain.
-This keeps the Bobbit and Agent extensions connected to the same context-heavy
-limit policy after customization.
+This keeps the Bobbit and Agent extensions connected to their shared runtime
+dependencies after customization.
 
 When copying or maintaining a tool-group override outside the customize
 endpoint, preserve the same layout and copy `tools/_shared/` too. A group-only
 copy can pass YAML discovery but fail when its extension resolves the missing
 relative import.
 
-## Compact output and bounded verbosity
+## Focused read output
 
-All three tiers project successful responses into a compact, operation-specific
-shape unless `verbose: true` is passed. This policy applies only to agent tool
-results: the gateway REST endpoints and their programmatic/UI consumers still
-receive their established response bodies.
+Each `bobbit_read` operation has one intentional agent-facing response shape.
+Use a compact `list_*` operation to discover an entity, choose its id, then use
+the matching `get_*` operation for useful semantic detail about that exact
+entity. Lists retain identity, title or name, state or type, essential
+relationships, concise diagnostics, timestamps, and pagination while omitting
+specs, prompts, paths, provider metadata, UI state, and embedded snapshots.
 
-Compact mode keeps fields needed to identify an entity, judge its state, take
-the next action, page, and diagnose failures. In particular, identity and label
-fields, state/status/type, project identity, `{ error, code }`, pagination, and
-recency timestamps are retained when present. Long freeform text is shortened
-to a 200-character preview followed by
-`…(truncated; pass verbose:true)`. UI/model bookkeeping, redundant id aliases,
-and embedded goal/session workflow snapshots are omitted. A snapshot's
-`workflowId` is retained or derived so the caller can fetch the workflow
-explicitly.
+Single-entity reads retain the ids and relationships needed for follow-up calls
+and expose relevant detail without unrelated internal data. In particular,
+`get_session` includes identity, status, role, project/goal/task links, progress,
+timing, and actionable error diagnostics while omitting workspace and storage
+paths, drafts, UI state, and provider-only fields.
 
-Projection policy is centralized in the Bobbit extension's compact-projection
-module: every exported operation must have one explicit map entry, so adding an
-operation also requires choosing its compact shape. The projection level varies
-by operation:
-
-| Operations | Compact behavior |
-|---|---|
-| Goal list/get/create/update | Keeps goal state, branch/merge/setup/team fields and a spec preview; omits filesystem paths and the embedded workflow. Archived session enrichments use the session projection. |
-| Session list/get/create/restart | Keeps role/assistant identity, goal/task relationships, recency, archive state, and error-turn diagnostics; omits cwd/path and UI/model bookkeeping. Archived delegate enrichments use the same projection. |
-| Search | Keeps hit id/type/title/score/state and a snippet preview; omits indexed bodies. |
-| Task and gate operations | Keeps ids, dependencies, assignment/workflow links, state, git handoff fields, counts, and short content/spec/result previews; omits verifier prompts and large verification bodies. |
-| Workflow list/get | Lists omit gates. A direct `get_workflow` keeps a compact gate DAG but omits each gate's verifier blocks and prompts. |
-| Project, role, tool, staff, MCP, and commit operations | Keep fields needed for selection and follow-up actions while previewing descriptions/prompts/messages and omitting large nested definitions. |
-| `goal_cost`, `session_cost` | Returned unchanged because the payloads are already small and diagnostic. |
-| Health, git/PR status, maintenance, acknowledgements, and other irregular results | Recursively remove universal bookkeeping and truncate long text while preserving short diagnostics, including legitimate `verify` fields. Verifier prompts are omitted only by the task, gate, and workflow allowlist projections above. |
-
-`verbose: true` is the escape hatch for the processed full gateway payload. For
-any paged `bobbit_read` operation, verbose mode requires an explicit integer
-`limit` from 1 through 10. Missing, invalid, or larger limits fail before the
-request is sent. Fetch successive pages only when full fields are genuinely
-needed, and watch token consumption. Non-paged reads can use verbose mode
-without a limit.
-
-`bobbit_orchestrate` and `bobbit_admin` expose `verbose` but currently have no
-paged operations, so they do not require `limit`. If paging is added to either
-tier, the shared guard applies automatically.
+This projection applies only to the agent tool. Direct gateway REST and UI
+consumers retain their established response bodies. The mutation and admin
+tiers keep their own output controls; `bobbit_read` does not share them.
 
 ## Operation catalogue
 
-Each tool takes an `operation` discriminator plus operation-specific params and
-returns a compact JSON projection by default. Summaries follow; for full endpoint
+Each tool takes an `operation` discriminator plus operation-specific params.
+For `bobbit_read`, list operations are discovery views and matching get
+operations inspect one exact entity. Summaries follow; for full endpoint
 mappings, methods, and body keys see each tool's `detail_docs` and
 [`docs/design/bobbit-gateway-tool.md` §5](design/bobbit-gateway-tool.md).
 
@@ -303,20 +279,14 @@ grant policy is the authority and the admin token never leaves the server
 
 ## Result and error shape
 
-- **Success** — returns the operation's compact projection described above.
+- **Success** — returns the operation-specific projection described above.
   List-style `bobbit_read` operations first apply archive filtering and paging,
-  then project the result, so ids and pagination metadata remain usable.
-  `verbose: true` returns that processed/paged payload without projection.
+  then return compact discovery rows with usable ids and pagination metadata;
+  matching get operations return useful detail for one entity.
 - **204 No Content** (e.g. marketplace uninstall) — returns `{ ok: true }`.
 - **Gateway failure** — the gateway's structured `{ error, code }` body is
   surfaced as a readable error line containing the message, machine code when
   present, and HTTP status. Missing required parameters are caught before fetch.
-- **Context-heavy limit failure** — returns a tool error whose text is parseable
-  JSON with `code: "CONTEXT_HEAVY_LIMIT_REQUIRED"`. Its `error` names the active
-  heavy flag, requires an explicit `limit <= 10`, and directs the agent to use
-  smaller batches only when full verbosity is necessary and to monitor token
-  consumption. Retry the same paged operation with `limit` from 1 through 10,
-  then advance with `offset` or the returned cursor.
 
 ## See also
 
