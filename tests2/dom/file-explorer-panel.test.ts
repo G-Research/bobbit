@@ -107,11 +107,13 @@ describe("built-in file explorer panel", () => {
 		expect(fakeHost.callRoute).toHaveBeenCalledWith("read", expect.objectContaining({ body: { path: "src/app.ts" } }));
 	});
 
-	it("renders backend conflicts once and preserves independent copy and rename worktree badges", async () => {
+	it("renders conflicts once and scopes clean and mixed copy and rename badges to their Git columns", async () => {
 		const fakeHost = host({
 			list: ({ path }) => path === "src"
 				? list([
 					{ path: "src/base.ts", name: "base.ts", kind: "file" },
+					{ path: "src/clean-copied.ts", name: "clean-copied.ts", kind: "file" },
+					{ path: "src/clean-renamed.ts", name: "clean-renamed.ts", kind: "file" },
 					{ path: "src/copied.ts", name: "copied.ts", kind: "file" },
 					{ path: "src/renamed.ts", name: "renamed.ts", kind: "file" },
 				])
@@ -122,6 +124,8 @@ describe("built-in file explorer panel", () => {
 				], [
 					{ path: "aa.txt", index: "A", worktree: "A", conflict: true, summary: "conflict", staged: true, unstaged: true, added: true },
 					{ path: "dd.txt", index: "D", worktree: "D", conflict: true, summary: "conflict", staged: true, unstaged: true, deleted: true },
+					{ path: "src/clean-copied.ts", oldPath: "src/base.ts", index: "A", worktree: " ", copied: true, staged: true, unstaged: false, added: true },
+					{ path: "src/clean-renamed.ts", oldPath: "src/old.ts", index: "R", worktree: " ", renamed: true, staged: true, unstaged: false },
 					{ path: "src/copied.ts", oldPath: "src/base.ts", index: "A", worktree: "M", copied: true, staged: true, unstaged: true, added: true },
 					{ path: "src/renamed.ts", oldPath: "src/old.ts", index: "R", worktree: "M", renamed: true, staged: true, unstaged: true },
 				]),
@@ -142,6 +146,10 @@ describe("built-in file explorer panel", () => {
 		click(row(root, "src"));
 		await tick();
 		expect(row(root, "src/base.ts").querySelector(".bb-explorer-badges")).toBeNull();
+		expect(row(root, "src/clean-copied.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged copied from src/base.ts");
+		expect([...row(root, "src/clean-copied.ts").querySelectorAll(".bb-explorer-badge")].map((badge) => badge.textContent)).toEqual(["C"]);
+		expect(row(root, "src/clean-renamed.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged renamed from src/old.ts");
+		expect([...row(root, "src/clean-renamed.ts").querySelectorAll(".bb-explorer-badge")].map((badge) => badge.textContent)).toEqual(["R"]);
 		expect(row(root, "src/copied.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged copied from src/base.ts, Unstaged modified");
 		expect([...row(root, "src/copied.ts").querySelectorAll(".bb-explorer-badge")].map((badge) => badge.textContent)).toEqual(["C", "M"]);
 		expect(row(root, "src/renamed.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged renamed from src/old.ts, Unstaged modified");

@@ -504,9 +504,9 @@ function statusBadges(status: StatusRecord): Array<{ code: string; label: string
 	if (status.conflict || status.summary === "conflict" || status.index === "U" || status.worktree === "U") return [{ code: "!", label: "Conflict", tone: "conflict" }];
 	if (status.untracked || status.summary === "untracked" || status.index === "?") return [{ code: "?", label: "Untracked", tone: "untracked" }];
 	const badges: Array<{ code: string; label: string; tone: string }> = [];
-	const rawIndex = normalizeStatusCode(status.index, status);
+	const rawIndex = normalizeStatusCode(status.index);
 	const index = status.copied && rawIndex === "A" ? "C" : rawIndex;
-	const worktree = normalizeStatusCode(status.worktree, status);
+	const worktree = normalizeStatusCode(status.worktree);
 	if (index) badges.push(statusBadge(index, "Staged", status));
 	if (worktree) badges.push(statusBadge(worktree, "Unstaged", status));
 	if (badges.length === 0) {
@@ -521,11 +521,9 @@ function statusBadge(code: string, scope: "Staged" | "Unstaged" | undefined, sta
 	return { code, label: scope ? `${scope} ${provenance}` : titleCase(provenance), tone: toneForCode(code) };
 }
 
-function normalizeStatusCode(code: string | undefined, status: StatusRecord): string | undefined {
-	if (code && ![" ", "."].includes(code)) return ["M", "A", "D", "R", "C"].includes(code) ? code : code === "?" ? "?" : "M";
-	if (status.staged && !status.unstaged) return status.deleted ? "D" : status.added ? "A" : "M";
-	if (status.unstaged && !status.staged) return status.deleted ? "D" : "M";
-	return undefined;
+function normalizeStatusCode(code: string | undefined): string | undefined {
+	if (!code || [" ", "."].includes(code)) return undefined;
+	return ["M", "A", "D", "R", "C"].includes(code) ? code : code === "?" ? "?" : "M";
 }
 
 async function toggleDirectory(state: ExplorerState, entry: TreeEntry, focusChild = false): Promise<void> {
