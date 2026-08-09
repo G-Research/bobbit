@@ -1867,36 +1867,9 @@ export function recoverPreMigrationData(stateDir: string): void {
 		}
 	}
 
-	// Gates use composite key
-	try {
-		const gatesBackup = path.join(stateDir, "gates.json" + PRE_MIGRATION_SUFFIX);
-		const gatesCurrent = path.join(stateDir, "gates.json");
-		if (fs.existsSync(gatesBackup)) {
-			const backup: GateState[] = JSON.parse(fs.readFileSync(gatesBackup, "utf-8"));
-			const current: GateState[] = fs.existsSync(gatesCurrent)
-				? JSON.parse(fs.readFileSync(gatesCurrent, "utf-8"))
-				: [];
-			if (Array.isArray(backup) && Array.isArray(current)) {
-				const existingKeys = new Set(current.map(g => `${g.goalId}::${g.gateId}`));
-				let added = 0;
-				for (const gate of backup) {
-					const key = `${gate.goalId}::${gate.gateId}`;
-					if (!existingKeys.has(key)) {
-						current.push(gate);
-						existingKeys.add(key);
-						added++;
-					}
-				}
-				if (added > 0) {
-					fs.writeFileSync(gatesCurrent, JSON.stringify(current, null, 2), "utf-8");
-					console.log(`[migration-recovery] Recovered ${added} entries into gates.json`);
-					totalRecovered += added;
-				}
-			}
-		}
-	} catch (err) {
-		console.warn(`[migration-recovery] Failed to recover gates.json: ${err}`);
-	}
+	// GateStore exclusively owns gates.json and gates.json.pre-migration so
+	// recovered records enter the authoritative SQLite transaction instead of
+	// being written to a JSON file that a completed database would ignore.
 
 	if (totalRecovered > 0) {
 		console.log(`[migration-recovery] Total recovered: ${totalRecovered} entries`);

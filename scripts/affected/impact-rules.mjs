@@ -1419,8 +1419,8 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/release-skill-preflight-order.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
-			{ expression: "options.env.npm_config_userconfig", count: 1 },
-			{ expression: "options.env.npm_config_globalconfig", count: 1 },
+			{ expression: "options.env.npm_config_userconfig", count: 2 },
+			{ expression: "options.env.npm_config_globalconfig", count: 2 },
 		]),
 	},
 	{
@@ -1783,6 +1783,25 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["scan:server-typescript-source-guards"]),
 		reads: frozen([
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/gate-store-sqlite.test.ts",
+		allowReason: "test-owned temporary GateStore state and retirement fixtures",
+		reads: frozen([
+			{ expression: "recoveryFile", count: 1 },
+			{ expression: "invalidFile", count: 1 },
+			{ expression: "duplicateFile", count: 1 },
+			{ expression: "sourceFile", count: 2 },
+			{ expression: "livePreferred", count: 1 },
+			{ expression: "recoveryPreferred", count: 1 },
+			{ expression: "`${livePreferred}.1`", count: 1 },
+			{ expression: "`${recoveryPreferred}.1`", count: 1 },
+			{ expression: "`${livePreferred}.2`", count: 1 },
+			{ expression: "`${recoveryPreferred}.2`", count: 1 },
+			{ expression: "preferred", count: 2 },
+			{ expression: "retryTarget", count: 1 },
+			{ expression: "`${preferred}.2`", count: 1 },
 		]),
 	},
 	{

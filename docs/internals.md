@@ -98,7 +98,7 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
     sessions.json  # Sessions for THIS project
     tasks.json     # Tasks for THIS project's goals
     team-state.json # Team state
-    gates.json     # Gate state and signals
+    gates.sqlite   # Gate state and signals, one row per gate
     staff.json     # Staff agents
     search.flex/       # Durable search mirror + derived FlexSearch cache for THIS project
     session-costs.json # Cost tracking (see session-cost.md)
@@ -195,7 +195,7 @@ On first startup after upgrading to per-project state, `migrateToPerProjectState
 2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
 3. Merges into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
 4. Staff agents without a `projectId` are anchored to the migration target project (`projectRegistry.getByPath(serverCwd)` if registered, else `projects[0]`). This is **migration-only** behavior - it runs once, is guarded by `.migrated-to-per-project`, and does not imply a runtime default. The block comment on `migrateToPerProjectState()` explains why this anchor is safe and why it must not be reused elsewhere.
-5. Renames central files with `.pre-migration` suffix (not deleted)
+5. Renames central files with `.pre-migration` suffix (not deleted). Gate recovery is then owned by each `GateStore`: it transactionally merges the backup into authoritative `gates.sqlite` and retires the source collision-safely, while the generic recovery pass handles the remaining JSON stores.
 6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
 
 The migration is idempotent and handles missing files gracefully (fresh installs have nothing to migrate). Any legacy central or per-project `search.db` is deleted on first startup under the new code - FlexSearch indexes rebuild automatically on first access (see [Semantic search](#semantic-search)).
@@ -3399,7 +3399,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `goals.json` | `GoalStore` | Goal definitions |
 | `sessions.json` | `SessionStore` | Session metadata |
 | `tasks.json` | `TaskStore` | Task state |
-| `gates.json` | `GateStore` | Gate state + signals |
+| `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then moves sources to collision-safe backups using atomic no-replace links before source unlink. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` worker | Durable document mirror (`index/__docs__.json` + journal), compatibility metadata, and disposable derived cache. See [Semantic search](#semantic-search). |
