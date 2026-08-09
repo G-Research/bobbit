@@ -461,7 +461,7 @@ describe("focused tool contract refresh", () => {
 				async stop() {},
 				onEvent() { return () => {}; },
 				async sendCommand() { return { success: true }; },
-			};
+			} as any;
 		});
 
 		const ps: any = {
