@@ -39,6 +39,15 @@
       }
     },
     {
+      "path": "tests2/core/websocket-post-cutover-egress.test.ts",
+      "reason": "Core regression coverage proving delayed-close stream-backpressure cutover sockets receive no status, background-output, join/leave, or cross-module server broadcast traffic while healthy peers remain unaffected.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/remote-agent-assistant-stream-delta.test.ts",
       "reason": "DOM coverage for RemoteAgent auth capability advertisement plus exact compact assistant-stream reconstruction across snapshot and terminal boundaries.",
       "execution": {

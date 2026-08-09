@@ -56,6 +56,7 @@ import {
 	SessionCommandQueueFullError,
 	SessionCommandSerialiser,
 } from "./session-command-serialiser.js";
+import { isSocketSendable } from "./socket-sendability.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -370,10 +371,6 @@ function buildArchivedStateData(
 	return sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
 }
 
-function isSocketSendable(ws: WebSocket): boolean {
-	return ws.readyState === 1 && (ws as any).streamBackpressureCutover !== true;
-}
-
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
 		const data = JSON.stringify(msg);
@@ -453,8 +450,12 @@ function send(ws: WebSocket, msg: ServerMessage): void {
 }
 
 function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
-	if ((ws as any).streamBackpressureCutover === true) return Promise.reject(new Error("websocket was cut over for stream backpressure"));
-	if (!isSocketSendable(ws)) return Promise.reject(new Error("websocket is not open"));
+	if (!isSocketSendable(ws)) {
+		const reason = (ws as any).streamBackpressureCutover === true
+			? "websocket was cut over for stream backpressure"
+			: "websocket is not open";
+		return Promise.reject(new Error(reason));
+	}
 	return new Promise((resolve, reject) => {
 		ws.send(JSON.stringify(msg), (err) => {
 			if (err) reject(err);
@@ -930,7 +931,7 @@ export function handleWebSocketConnection(
 			const joinMsg: ServerMessage = { type: "client_joined", clientId };
 			const joinData = JSON.stringify(joinMsg);
 			for (const client of session.clients) {
-				if (client !== ws && client.readyState === 1) {
+				if (client !== ws && isSocketSendable(client)) {
 					client.send(joinData);
 				}
 			}
@@ -2270,7 +2271,7 @@ export function handleWebSocketConnection(
 				const leaveMsg: ServerMessage = { type: "client_left", clientId };
 				const leaveData = JSON.stringify(leaveMsg);
 				for (const client of session.clients) {
-					if (client.readyState === 1) {
+					if (isSocketSendable(client)) {
 						client.send(leaveData);
 					}
 				}
