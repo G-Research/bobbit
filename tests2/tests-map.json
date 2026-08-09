@@ -39,6 +39,24 @@
       }
     },
     {
+      "path": "tests2/browser/fixtures/review-groups.spec.ts",
+      "reason": "Deterministic Chromium fixture coverage for two grouped-review primaries, review-local navigation-only secondary files, top-layer overflow, close containment, sibling survival, and review-level decisions.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/review-groups.journey.spec.ts",
+      "reason": "Gateway-backed grouped-review journey covering multi-file workspace hierarchy, overflow and narrow geometry, review-wide feedback cleanup, background-session open/close isolation, reload hydration, and replay suppression.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/assistant-stream-delta.test.ts",
       "reason": "Prototype coverage proving Pi cumulative assistant message updates can round-trip through compact text, thinking, and tool-call deltas while materially reducing serialized transport bytes.",
       "execution": {
