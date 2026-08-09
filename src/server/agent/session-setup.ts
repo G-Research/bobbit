@@ -299,6 +299,9 @@ export interface SessionSetupPlan {
 	// Bypasses the role/preference resolver in resolveBridgeOptions.
 	initialModel?: string;
 	initialThinkingLevel?: string;
+	/** Pre-fallback/pre-clamp identity retained for spawn diagnostics. */
+	requestedModel?: string;
+	requestedThinkingLevel?: string;
 
 	// Sandbox worktree: branch to create inside the container
 	sandboxBranch?: string;
@@ -363,6 +366,11 @@ export interface PipelineContext {
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
+	/** Validate and canonicalize the fully assembled Pi tuple before bridge creation. */
+	finalizeSpawnOptions?: (
+		opts: RpcBridgeOptions,
+		requested: { model?: string; thinkingLevel?: string; role?: string; projectId?: string },
+	) => Promise<void>;
 	/** SessionManager-owned author normalization, including current staff/role lookup. */
 	prepareVisibleAgentEvent?: (session: SessionInfo, event: unknown) => unknown;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
@@ -1140,6 +1148,16 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		}
 	}
 
+	// Resolve raw last-wins Pi flags only after extensions and sandbox remaps have
+	// assembled the final argv. Invalid/cross-provider tuples fail before the
+	// bridge is constructed or any effective selection is persisted.
+	await ctx.finalizeSpawnOptions?.(plan.bridgeOptions, {
+		model: plan.requestedModel ?? plan.initialModel,
+		thinkingLevel: plan.requestedThinkingLevel ?? plan.initialThinkingLevel,
+		role: plan.role ?? plan.roleName,
+		projectId: plan.projectId,
+	});
+
 	// Step 7: persist BEFORE spawning — if the spawn fails (e.g. Docker ENOENT),
 	// the session metadata is still saved so the user doesn't lose the session.
 	// The agentSessionFile is empty until spawnAgent populates it.
@@ -1394,6 +1412,15 @@ export async function executeWorktreeAsync(
 		ctx.store.update(session.id, { branch: plan.branch });
 		console.log(`[session-setup] Reconciled branch for sandbox session ${session.id}: ${plan.branch}`);
 	}
+
+	// Worktree setup assembles argv after the placeholder was persisted. Validate
+	// the final target-realm tuple before replacing it with a real bridge.
+	await ctx.finalizeSpawnOptions?.(plan.bridgeOptions, {
+		model: plan.requestedModel ?? plan.initialModel,
+		thinkingLevel: plan.requestedThinkingLevel ?? plan.initialThinkingLevel,
+		role: plan.role ?? plan.roleName,
+		projectId: plan.projectId,
+	});
 
 	// Create real RpcBridge (replacing placeholder)
 	const rpcClient = new RpcBridge(plan.bridgeOptions);

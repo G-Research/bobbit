@@ -1424,7 +1424,7 @@ Loading an archived session needs to show its real model in the footer on first 
 - **Archived auth-ok branch.** Right after `session_title`, the handler builds the payload and sends it. This is the fix - the footer now reads the persisted model on first connect, with no round-trip required.
 - **Legacy `get_state` handler.** The same helper drives the response, so the reconnect path stays consistent with first-connect.
 
-The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow, maxTokens, reasoning, thinkingLevelMap?}` from `resolveModelStateMeta(archived.modelProvider, archived.modelId)` (registry cache → pi-ai catalog → `inferMeta`), plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. Persisted `modelProvider`/`modelId` come from the archived row in the session store. Routing through the resolver instead of `inferMeta` alone keeps the archived frame consistent with the live/dropdown metadata — see [Per-model thinking-level capabilities](thinking-levels.md#the-thinkinglevelmap-has-to-reach-the-client-to-be-useful). `thinkingLevelMap` is omitted when upstream metadata doesn't carry it.
+The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow?, maxTokens?, reasoning?, thinkingLevelMap?, input?}` from `resolveModelStateMeta(archived.modelProvider, archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. The resolver uses the last exact assembled row, then an exact direct Pi row; an unknown tuple carries identity only. This keeps archived state consistent with live/catalog metadata without fabricating capabilities. See [Per-model thinking-level capabilities](thinking-levels.md#live-state-metadata).
 
 The footer model picker remains read-only/disabled for archived sessions - the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from archived-footer model E2E coverage.
 
@@ -1576,7 +1576,7 @@ Roles can pin a specific model and reasoning level for any session that runs und
 
 This is the third role-level override, alongside `toolPolicies` (which tools the role can use) and `defaultPersonalities` (how the role communicates). All three cascade the same way and are edited from the same role-manager page.
 
-> **Authoritative design:** [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) - file-level mechanics, validators, and the rationale behind splitting `applyModelString` from `applyReviewModelOverrides`. Model binding failures and the opt-in fallback policy are covered in [Controlled session model fallback](session-model-fallback.md).
+> **Historical background:** [The original per-role override design](design/per-role-model-overrides.md) predates the authoritative-metadata retirement and is not the current mechanics reference. This section documents current role resolution; see [Thinking-level metadata authority](thinking-levels.md#metadata-authority) for exact capability and clamp rules, [Spawn-time model pinning](#spawn-time-model-pinning) for final selection and verification, and [Controlled session model fallback](session-model-fallback.md) for binding failures and the opt-in fallback policy.
 
 ### Role fields
 
@@ -1632,32 +1632,31 @@ A normal spawn selects an exact current catalog tuple in this order:
 
 An explicit candidate must still be present on Bobbit's current session-selectable catalog; stale, malformed, deferred-provider, or otherwise unavailable selections fail with the existing unavailable-model error instead of falling through to another provider. If no eligible catalog row exists, creation fails rather than delegating provider choice to Pi. `skipAutoModel` skips role/default preference selection, not this deterministic final binding.
 
-The compatibility exception is a caller that supplies non-empty generic raw Pi arguments without selecting a model. That path remains caller-owned and does not synthesize Bobbit's catalog default. Bobbit-generated goal/team argument lists containing only `--extension` pairs are not generic raw arguments and still receive the deterministic tuple.
+Raw Pi arguments are not an escape from catalog validation. They may change the effective tuple under Pi's last-value-wins rules, while the original request remains separate for diagnostics. Bobbit validates that final effect before a real bridge is constructed.
 
 Spawn-pinned models are read-back verified before a session becomes idle/live. If the agent reports a different model or the selected model cannot bind, the controlled policy in [Controlled session model fallback](session-model-fallback.md) decides whether to fail immediately or try `default.sessionModel` exactly once.
 
 ### Bridge options and CLI flags
 
-`RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries two optional fields:
+`RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries the canonical `initialModel` and `initialThinkingLevel` plus separate `requestedModel` and `requestedThinkingLevel` fields. Requested identity is diagnostic and recovery context; the initial fields are the effective tuple Pi receives.
 
-- `initialModel?: string` - literal `<provider>/<modelId>`.
-- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high|xhigh|max`. The level is clamped against the resolved model before injection — see [Per-model thinking-level capabilities](thinking-levels.md) for the rules.
+`resolveEffectivePiSelection(options)` parses the fully assembled raw arguments before process creation. It follows Pi's last-value-wins semantics for repeated `--provider`, `--model`, and `--thinking` flags, qualified models, nested IDs, and the `model:thinking` shorthand. Missing values and unknown thinking tokens fail closed. It removes all raw selection flags from `sanitizedArgs` so they cannot override the validated tuple later.
 
-`buildAgentArgs(options)` translates the tuple to separate Pi arguments:
+After finalization, `buildAgentArgs(options)` emits one canonical tuple:
 
 ```text
 --provider <provider> --model <modelId> --thinking <level>
 ```
 
-It splits `initialModel` only at the first slash. For example, `aigw/aws/us.anthropic.claude-opus-5` becomes provider `aigw` and model id `aws/us.anthropic.claude-opus-5`; slashes inside the model id remain part of its identity. Malformed model strings and unknown thinking tokens are silently omitted at this low-level bridge boundary.
-
-Generated provider/model/thinking arguments precede caller-supplied `options.args`, so Pi's normal last-value-wins parsing preserves explicit overrides in generic raw-argument flows. The existing project-trust and context-file flags are the narrow exception: the bridge strips their caller-supplied forms and emits Bobbit's non-overridable values.
+Provider/model splitting occurs only at the first slash, preserving further slashes inside the model ID. Project-trust and context-file flags remain non-overridable and are sanitized independently.
 
 ### Resolution and catalog validation
 
-`SessionManager.resolveInitialModel(role, projectId)` supplies the role/default candidate used across setup paths. `requireCurrentCatalogSpawnModel` validates an exact requested tuple, while `resolveCurrentCatalogSpawnModel` supplies the deterministic catalog choice only when no exact selection exists. Effective thinking resolves from an explicit value, then the role override, then `default.sessionThinkingLevel`, then `medium`, and is clamped against that exact provider/model before spawn.
+`SessionManager.resolveInitialModel(role, projectId)` supplies the role/default candidate used across setup paths. `resolveCurrentCatalogSpawnModel` supplies the deterministic catalog choice only when no exact selection exists.
 
-The resolved tuple flows through the existing session setup, restore, respawn, delegate/team, host, and sandbox mechanisms as `initialModel` and `initialThinkingLevel`. The live session retains the spawn values as `spawnPinnedModel` and `spawnPinnedThinkingLevel` for read-back verification and later inheritance.
+After every extension, realm remap, and caller argument has been assembled, `finalizeSpawnOptions` resolves the effective tuple and requires its exact provider/model in the current session-selectable target-realm catalog. It clamps thinking against that exact row, replaces raw selection arguments with the canonical initial tuple, and refreshes direct-host credentials if raw arguments changed providers. Invalid, unavailable, cross-provider, or Pi-fabricated tuples fail before bridge construction or durable effective-state mutation.
+
+The same finalizer runs for normal/worktree/delegate/fork/continue setup, cold restore, role replacement, force-abort replacement, review/QA, host execution, and sandbox execution. Requested and effective identity remain separate when controlled fallback intentionally chooses a replacement. The live session retains only the validated effective values as `spawnPinnedModel` and `spawnPinnedThinkingLevel` for read-back verification and later inheritance.
 
 ### Skip-setModel branch preserves hard-fail-on-mismatch
 
@@ -1665,7 +1664,7 @@ The resolved tuple flows through the existing session setup, restore, respawn, d
 
 ### Pool-claimed sessions
 
-The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too; only the explicit generic raw-argument compatibility path may intentionally omit Bobbit's generated model tuple.
+The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same finalization before `new RpcBridge(plan.bridgeOptions)` as a non-pool spawn, so canonical tuple validation and spawn pins are identical.
 
 ### Out of scope
 
@@ -1676,9 +1675,9 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 
 | File | Role |
 |---|---|
-| `src/server/agent/rpc-bridge.ts` | `RpcBridgeOptions.initialModel`/`initialThinkingLevel`, `buildAgentArgs` |
-| `src/server/agent/session-setup.ts` | `resolveBridgeOptions` injects pinned values into `bridgeOptions`; persists them onto the session |
-| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevel`; `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` skip-setModel branch; respawn pinning |
+| `src/server/agent/rpc-bridge.ts` | Effective raw-argument resolver and canonical Pi argument builder |
+| `src/server/agent/session-setup.ts` | Assembles realm-specific options and finalizes them before real bridge creation |
+| `src/server/agent/session-manager.ts` | Exact catalog validation, thinking clamp, requested/effective identity, and recovery replacement finalization |
 | `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
@@ -1759,16 +1758,9 @@ The Bobbit AI Gateway user agent is sent only by AIGW-specific request paths. Di
 
 AI Gateway model discovery is Bobbit's source of truth for gateway-backed pricing because completion responses include token counts but no cost and gateway aggregate endpoints are not reliable for Bobbit usage accounting. Authoritative well-known discovery reads each model's per-million-token `cost`; legacy `/v1/models` discovery reads the optional per-token `pricing` object.
 
-On the legacy path, `pricing.prompt` and `pricing.completion` are USD per token. Bobbit converts them to the per-million-token `cost` shape expected by pi-ai:
+On the legacy path, `pricing.prompt` and `pricing.completion` are USD per token. Bobbit scales those two supplied fields into Pi's per-million-token shape. Legacy discovery does not advertise cache pricing, so `cacheRead` and `cacheWrite` remain zero instead of using heuristic ratios.
 
-```ts
-input = pricing.prompt * 1_000_000
-output = pricing.completion * 1_000_000
-cacheRead = pricing.prompt * 0.1 * 1_000_000
-cacheWrite = pricing.prompt * 1.25 * 1_000_000
-```
-
-Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and safely falls back to `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from discovery metadata plus token counts.
+Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and represented as `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from discovery metadata plus token counts.
 
 The normalized `cost` values flow through two surfaces:
 
@@ -1777,7 +1769,7 @@ The normalized `cost` values flow through two surfaces:
 
 ### Well-known-driven discovery (openai-responses routing)
 
-Model discovery is **well-known-first**. Instead of hand-rolling routing from `/v1/models` + `inferMeta` id heuristics, `discoverAigwModels()` first consults the gateway's authoritative opencode config at `{gatewayOrigin}/.well-known/opencode`. This is the same contract opencode itself uses, so Bobbit inherits opencode's per-provider routing decisions rather than guessing them. When the well-known config is present it is the source of truth; the legacy heuristic path is only a fallback.
+Model discovery is **well-known-first**. Instead of applying `/v1/models` model-name heuristics, `discoverAigwModels()` first consults the gateway's authoritative opencode config at `{gatewayOrigin}/.well-known/opencode`. This is the same contract opencode itself uses, so Bobbit inherits opencode's per-provider routing decisions rather than guessing them. When the well-known config is present it is the source of truth; the explicitly named `inferLegacyAigwMeta` path is only a legacy fallback.
 
 **Why this exists.** On this gateway the `gpt-5.6-sol` / GPT 5.6 family reject function tools combined with `reasoning_effort` on `/v1/chat/completions`:
 
@@ -1791,7 +1783,7 @@ Bobbit historically routed every non-Claude model through pi-ai's `openai-comple
 
 #### Discovery flow and fallback
 
-`discoverAigwModels()` resolves `/.well-known/opencode` against the configured **origin root** (the well-known document never lives under `/v1`). `fetchWellKnownConfig()` returns `null` — triggering the legacy `/v1/models` + `inferMeta` fallback — on HTTP/network/JSON errors, redirects, invalid URLs, timeout, an over-1 MiB body, unsafe targets, excessive indirection, or test-network guards. The initial fetch, optional remote fetch, and provider DNS admission share one eight-second deadline. Distinct provider hostnames resolve concurrently and duplicate hostnames share one lookup, so a large or slow provider list cannot multiply the bound.
+`discoverAigwModels()` resolves `/.well-known/opencode` against the configured **origin root** (the well-known document never lives under `/v1`). `fetchWellKnownConfig()` returns `null` — triggering the legacy `/v1/models` + `inferLegacyAigwMeta` fallback — on HTTP/network/JSON errors, redirects, invalid URLs, timeout, an over-1 MiB body, unsafe targets, excessive indirection, or test-network guards. The initial fetch, optional remote fetch, and provider DNS admission share one eight-second deadline. Distinct provider hostnames resolve concurrently and duplicate hostnames share one lookup, so a large or slow provider list cannot multiply the bound.
 
 The payload resolver accepts raw configs, a top-level `config` wrapper, or exactly one `remote_config` hop. A second unresolved `remote_config` is rejected. A valid `provider` object is authoritative even when filtering leaves zero models, so disabled, unwhitelisted, collided-away, or invalid providers are never repopulated from `/v1/models`. Configure reuses the resolved config and does not fetch it a second time.
 
@@ -1813,7 +1805,7 @@ Token resolution is fully guarded and never throws.
 
 #### Provider adapter → pi-ai `api`
 
-`translateWellKnown()` maps each provider's npm adapter to a pi-ai `api`. Unknown adapters fall back to the conservative `openai-completions`:
+`translateWellKnown()` maps each documented provider npm adapter to its wire-tested Pi API. Unknown adapters are omitted because an authoritative document does not authorize Bobbit to guess a transport:
 
 | provider | `npm` adapter | `options.baseURL` subpath | pi-ai `api` | endpoint |
 |---|---|---|---|---|
@@ -1833,11 +1825,13 @@ Each provider's `options.baseURL` becomes the **per-model `baseUrl`**, which pi-
 
 The SDK's `baseURL`-plus-`/responses` behaviour is exactly why the baseURL must end in `…/openai/v1` and not the bare origin.
 
-`models.json` is published on the host with temp-file-plus-rename atomic replacement. Docker file bind mounts retain the old inode in an already-running container, so configure, refresh, and removal notify every tracked project sandbox. Each sandbox maintains monotonic published/mounted generations and serializes remounts with health recovery; a second publication during recreation therefore triggers another recreation until the mounted generation is current. Workspaces/worktrees survive, and live sandboxed sessions respawn through the normal container-recovery event. Direct host agent processes are not recreated by this path and retain their spawn-time model registry/guard until respawn. The durable model/preferences commit invalidates registry and SessionManager caches and broadcasts preferences before remount recovery; a Docker failure is returned as `remountPending: true` without falsely reporting the committed configuration as rolled back, while normal health recovery remains queued. Startup staleness also compares in-container model content with the active host file, catching a replacement that occurred while Bobbit was down.
+Bobbit publishes only a `providers.aigw` block carrying `x-bobbit-managed: {kind:"aigw-publication",version:1}`. The JSONC editor inserts an absent block or updates documented fields in an unambiguous marked block; an unmarked block is user-owned, while malformed or duplicate target paths fail closed without a preference commit. Localized edits preserve comments and unknown fields outside managed values before temp-file-plus-rename atomic replacement.
+
+Docker file bind mounts retain the old inode in an already-running container, so successful publication or removal notifies every tracked project sandbox. Each sandbox maintains monotonic published/mounted generations and serializes remounts with health recovery; a second publication during recreation therefore triggers another recreation until the mounted generation is current. Workspaces/worktrees survive, and live sandboxed sessions respawn through the normal container-recovery event. Direct host agent processes are not recreated by this path and retain their spawn-time model registry/guard until respawn. The durable model/preferences commit invalidates registry and SessionManager caches and broadcasts preferences before remount recovery; a Docker failure is returned as `remountPending: true` without falsely reporting the committed configuration as rolled back, while normal health recovery remains queued. Startup staleness also compares in-container model content with the active host file, catching a replacement that occurred while Bobbit was down.
 
 #### Filters and per-model metadata
 
-When the well-known config is present, `translateWellKnown()` applies hard filters and never falls back to `inferMeta` guessing:
+When the well-known config is present, `translateWellKnown()` applies hard filters and never calls `inferLegacyAigwMeta`:
 
 - `disabled_providers` — drops whole providers.
 - per-provider `whitelist` — drops any model id not listed.
@@ -1845,20 +1839,18 @@ When the well-known config is present, `translateWellKnown()` applies hard filte
 
 Bare IDs are unique. If multiple eligible providers advertise the same ID, the provider named by top-level `config.model` wins for that ID; otherwise the first provider in object insertion order wins. Provenance remains in `upstreamProvider` rather than being synthesized into the model ID. The registry and `models.json` preserve this field; Settings and model pickers render it as the AIGW provider badge and include it in search without changing the selectable `aigw/<bare-id>` preference.
 
-Per-model fields are mapped straight across:
+A row is published only when it provides positive context/output limits, boolean reasoning, at least one supported input modality, and a documented adapter. Its capability fields then map directly:
 
 | well-known field | Bobbit `AigwModel` field |
 |---|---|
-| `variants` keys | `thinkingLevelMap` (identity per tier; reasoning models also get `off:"none"`) |
+| recognized `variants` keys | `thinkingLevelMap` (identity per advertised tier; advertised `none` also maps `off` to `none`) |
 | `limit.context` | `contextWindow` |
 | `limit.output` | `maxTokens` |
 | `modalities.input` | `input` (filtered to `text`/`image`) |
 | `reasoning` | `reasoning` |
 | `cost` | `cost` via `normalizeWellKnownCost()` |
 
-`buildThinkingLevelMap()` only keeps recognized effort tiers (`minimal/none/low/medium/high/xhigh/max`) and adds `off:"none"` for reasoning models so the responses/completions adapters emit `reasoning_effort:"none"` in the no-effort case — the tool-compatible path the gateway wants.
-
-`normalizeWellKnownCost()` is distinct from the legacy `/v1/models` normalizer. Well-known `cost` is already denominated in **USD per 1M tokens** under `{input,output,cache_read,cache_write}`, so the fields map directly (with `cache_read`/`cache_write` defaulting to the same `input * 0.1` / `input * 1.25` heuristics when omitted). The legacy `normalizeAigwPricing()` instead takes USD **per token** under `{prompt,completion}` and scales up by 1M.
+`buildThinkingLevelMap()` does not add unadvertised tiers. `normalizeWellKnownCost()` maps supplied per-million-token `{input,output,cache_read,cache_write}` values directly; absent or invalid prices become zero rather than heuristic cache-price ratios. The legacy normalizer instead scales supplied per-token `{prompt,completion}` values by one million and likewise leaves unavailable cache prices at zero.
 
 `compat.supportsReasoningEffort` is set `true` only for the OpenAI-style endpoints (`openai-responses` / `openai-completions`) and left undefined for `bedrock-converse-stream` (Bedrock ignores compat). Because `@ai-sdk/openai` now routes to `openai-responses`, the forbidden tools+`reasoning_effort`-on-chat/completions combination can no longer occur.
 
@@ -1870,7 +1862,7 @@ Legacy `aigw/<upstream>/<id>` preferences are conservatively migrated to `aigw/<
 
 #### Fallback path (option-1 fix)
 
-When the well-known config is absent, the legacy `/v1/models` + `inferMeta` path still applies the minimal routing fix: OpenAI-family reasoning ids (`gpt-*` / `o[1-9]`, excluding Claude) are routed to `openai-responses` on `${origin}/openai/v1` with a **bare `wireId`**, so tools + reasoning don't 400 on the chat/completions root. Because the emitted id is bare, the registry and models.json ids for these models are bare (e.g. `gpt-5.6-luna`). Other non-Claude models stay on `openai-completions`, and Claude is remapped to `bedrock-converse-stream` downstream.
+When the well-known config is absent, the legacy `/v1/models` + `inferLegacyAigwMeta` path applies the compatibility routing rules: OpenAI-family reasoning ids (`gpt-*` / `o[1-9]`, excluding Claude) are routed to `openai-responses` on `${origin}/openai/v1` with a **bare `wireId`**, so tools + reasoning don't 400 on the chat/completions root. Because the emitted id is bare, the registry and models.json ids for these models are bare (e.g. `gpt-5.6-luna`). Other non-Claude models stay on `openai-completions`, and Claude is remapped to `bedrock-converse-stream` downstream.
 
 #### Probes and cache behavior
 
@@ -1878,9 +1870,9 @@ When the well-known config is absent, the legacy `/v1/models` + `inferMeta` path
 
 Cold authoritative discovery makes one request, fallback makes the well-known and `/v1/models` requests, and one-hop remote discovery makes two requests within the shared deadline. Configure reuses discovery output. The existing five-second registry and sixty-second SessionManager caches remain unchanged.
 
-### Generated `providers.aigw.headers`
+### Managed `providers.aigw.headers`
 
-`writeAigwModelsJson()` writes the AI Gateway provider into the active agent directory's `models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
+`writeAigwModelsJson()` inserts or refreshes only a provider carrying Bobbit's forward-only ownership marker. It refuses an unmarked user block and malformed or ambiguous JSONC. The managed provider-level header block contains both headers:
 
 ```json
 {
@@ -1910,23 +1902,17 @@ pi-ai v0.79.6+ natively forwards provider-level `headers` into the AWS SDK reque
 
 ### Startup refresh behavior
 
-On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites the active agent directory's `models.json` with:
+On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway.
 
-- the current gateway model list,
-- the current gateway-derived per-model `cost` values from well-known metadata or legacy `/v1/models` pricing,
-- the current canonical `User-Agent: Bobbit/<version>`,
-- the unchanged `x-opencode-session` resolver literal,
-- existing non-aigw providers and user `modelOverrides` preserved.
-
-This means users with older `models.json` files pick up the user-agent header after restart or manual refresh without reconfiguring the gateway. If the configured gateway is unreachable, Bobbit logs the startup warning and leaves the existing file untouched rather than replacing a working cached configuration with a partial one. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
+A successful discovery refreshes the current model, cost, header, and marker fields only when `providers.aigw` is absent or already marked. Historical unmarked blocks are intentionally user-owned; startup does not adopt or rewrite them. Malformed JSONC and ambiguous duplicate target paths also remain byte-identical and produce an ownership/publication diagnostic. If the gateway is unreachable, Bobbit leaves the existing file untouched rather than replacing a working exact catalog with partial data. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
 
 ### No-leakage boundaries
 
 The Bobbit AI Gateway user agent is not a process-wide default HTTP header. It is attached only by AI Gateway-specific helpers or by the generated `providers.aigw` entry:
 
 - `aigwUserAgentHeaders()` is used for AI Gateway discovery, proxying, and gateway title/goal-summary calls.
-- `writeAigwModelsJson()` writes headers only under `providers.aigw`; non-aigw providers are preserved as-is.
-- `removeAigwModelsJson()` removes the entire `aigw` provider block and leaves no orphan AI Gateway headers on other providers.
+- `writeAigwModelsJson()` writes headers only under a marked `providers.aigw`; non-aigw and unmarked AIGW providers are preserved as-is.
+- `removeAigwModelsJson()` removes only a marked Bobbit publication and leaves user-owned blocks unchanged.
 - Direct public-provider paths, such as Anthropic title fallback or non-aigw model completion, do not use the Bobbit AI Gateway user-agent helper.
 - Bedrock custom headers are emitted only by models under the generated `aigw` provider; public Bedrock models are unchanged.
 

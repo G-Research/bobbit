@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1142,
+  "censusTotal": 1141,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
     "v2-core": 514,
     "v2-dom": 145,
-    "v2-integration": 203
+    "v2-integration": 202
   },
   "methods": {
-    "adapter": 276,
+    "adapter": 275,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -959,7 +959,7 @@
     },
     {
       "path": "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
-      "reason": "Focused AIGW catalog regression proving transient discovery failures retain only matching persisted routing metadata while successful discovery omissions remain authoritative.",
+      "reason": "Focused AIGW target-realm regression proving unmarked user rows override reachable discovery and malformed realms fail closed while managed publication retains matching outage metadata.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -4622,15 +4622,6 @@
         "tier": "unit",
         "project": "integration"
       }
-    },
-    {
-      "file": "tests/e2e/context-window-overrides.spec.ts",
-      "bucket": "v2-integration",
-      "method": "adapter",
-      "replacement": [
-        "tests2/core/aigw-context-window-overrides.test.ts"
-      ],
-      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/aigw-context-window-overrides.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/continue-archived-assistant.spec.ts",

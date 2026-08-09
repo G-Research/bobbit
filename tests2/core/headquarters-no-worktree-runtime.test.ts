@@ -35,6 +35,7 @@ let ProjectContextManager: any;
 let GoalManager: any;
 let GoalStore: any;
 let SessionManager: any;
+let PreferencesStore: any;
 let StaffManager: any;
 let registerRpcBridgeFactory: (factory: any) => void = () => {};
 
@@ -47,6 +48,7 @@ beforeAll(async () => {
 	({ GoalManager } = await import("../../src/server/agent/goal-manager.ts"));
 	({ GoalStore } = await import("../../src/server/agent/goal-store.ts"));
 	({ SessionManager } = await import("../../src/server/agent/session-manager.ts"));
+	({ PreferencesStore } = await import("../../src/server/agent/preferences-store.ts"));
 	({ StaffManager } = await import("../../src/server/agent/staff-manager.ts"));
 	({ registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts"));
 	const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
@@ -188,9 +190,19 @@ describe("Headquarters no-worktree runtime", () => {
 		let capturedOptions: any;
 		registerRpcBridgeFactory((options: any) => {
 			capturedOptions = options;
-			return makeBridge();
+			return makeBridge({
+				getState: vi.fn(async () => ({
+					success: true,
+					data: {
+						model: { provider: "openai", id: "gpt-4o" },
+						thinkingLevel: "off",
+						sessionFile: path.join(agentDir, "sessions", "hq-no-worktree.jsonl"),
+					},
+				})),
+			});
 		});
-		const manager: any = new SessionManager({ commandRunner: git.runner });
+		const preferencesStore = new PreferencesStore(path.join(stateDir, "session-preferences"));
+		const manager: any = new SessionManager({ commandRunner: git.runner, preferencesStore });
 		managers.push(manager);
 
 		const session = await manager.createSession(headquartersRoot, [], undefined, undefined, {
@@ -202,6 +214,7 @@ describe("Headquarters no-worktree runtime", () => {
 			sandboxBaseBranch: "master",
 			skipAutoModel: true,
 			skipAutoThinking: true,
+			initialModel: "openai/gpt-4o",
 		});
 		if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
 
@@ -213,6 +226,7 @@ describe("Headquarters no-worktree runtime", () => {
 		assert.equal(session.repoPath, undefined);
 		assert.equal(session.worktreePushPolicy, undefined);
 		assert.equal(capturedOptions.cwd, headquartersRoot);
+		assert.equal(capturedOptions.initialModel, "openai/gpt-4o");
 		assert.deepEqual(git.commands, [], "Headquarters session creation must short-circuit before Git detection");
 	});
 

@@ -274,7 +274,7 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 
 After a server restart, the context bar may show wrong info (e.g. 200k instead of 1M) or nothing at all. This happens because the agent process's `getState()` RPC may fail or return incomplete data before the process is fully ready.
 
-- **Server-side fallback**: `sendFallbackModelState()` in `handler.ts` reads persisted `modelProvider`/`modelId` from the session store and calls `resolveModelStateMeta()` (registry cache → pi-ai catalog → `inferMeta`) to attach the correct `contextWindow` / `reasoning` / `thinkingLevelMap`. This runs when `getState()` fails, is skipped (dormant/preparing sessions), or returns data without model metadata. Deriving the frame from `inferMeta` alone was the cause of the 200k-instead-of-1M symptom and the missing thinking selector for models like Claude Fable 5; reconnect/`get_state` must preserve the full map, including `max` when Pi advertises it — see [Per-model thinking-level capabilities](thinking-levels.md#the-thinkinglevelmap-has-to-reach-the-client-to-be-useful).
+- **Server-side fallback**: `sendFallbackModelState()` reads persisted `modelProvider`/`modelId` and calls `resolveModelStateMeta()` (last exact assembled row → exact direct Pi row → unavailable). It never fabricates family metadata. When exact composed metadata is temporarily unavailable, only identity-matching live fields may be preserved; absent fields stay absent. This keeps reconnect/`get_state` from changing context, modalities, reasoning, or advertised thinking tiers. See [Per-model thinking-level capabilities](thinking-levels.md#live-state-metadata).
 - **Client-side retry**: `remote-agent.ts` retries `get_state` after 3s on reconnect if `contextWindow` is still 0.
 - **Default contextWindow is 0**: Before the server provides real data, `contextWindow` starts at 0 (not 200k), so the context bar shows nothing rather than a misleading value.
 - If context bar still shows wrong info after restart, check that `modelProvider` and `modelId` are persisted in `<project-root>/.bobbit/state/sessions.json` for the affected session.
@@ -290,7 +290,7 @@ This is an expected recovery condition, not a generic terminated-session or retr
 
 1. Inspect the session detail or list response for `condition: { code: "MODEL_SELECTION_REQUIRED", provider, modelId }`. The same tuple should remain in the persisted session record, and `restoreError` should not classify it as a generic restore failure.
 2. Check `GET /api/models` for that exact provider and model ID. A missing row, or one marked non-session-selectable, cannot activate a text session. If the row has returned since cold restore, it can be selected again through the picker; Bobbit does not clear the condition merely because a later catalog read changed.
-3. For AIGW, distinguish omission from outage. A successful discovery that omits the row is authoritative. If live discovery throws, a last-published `models.json` row remains selectable only when its provider URL matches the saved gateway URL after normalization. `GET /api/aigw/status` may show no live models during this outage while `/api/models` still exposes the retained session catalog. See [AI Gateway routing — Transient discovery outages](ai-gateway-routing.md#transient-discovery-outages).
+3. For AIGW, distinguish omission from outage. A successful discovery, including an empty or fully filtered catalog, is authoritative. If discovery throws, `/api/models` may use either a matching marked publication from `models.json` or the current process's last exact discovery snapshot for the unchanged normalized gateway URL when the target is absent or the marked block cannot supply rows. The snapshot does not survive a gateway restart. A valid unmarked target remains authoritative through Pi composition and is never bypassed; malformed or ambiguous targets fail closed. `GET /api/aigw/status` may show no live models without clearing either eligible retention source from `/api/models`. See [AI Gateway routing — Transient discovery outages](ai-gateway-routing.md#transient-discovery-outages).
 
 ### Recover safely
 
@@ -311,9 +311,9 @@ A normal Bobbit-owned spawn binds one exact provider/model/effective-thinking tu
 - Confirm the spawn site routes through `resolveBridgeOptions` in `src/server/agent/session-setup.ts` (normal create) or the equivalent pre-resolve in session restore/replacement, verification setup, and continue-archived paths. The resulting bridge options must carry both `initialModel` and the clamped `initialThinkingLevel`.
 - Confirm `buildAgentArgs` in `src/server/agent/rpc-bridge.ts` splits `initialModel` at only the first slash and emits separate `--provider <provider> --model <modelId> --thinking <effectiveLevel>` arguments. Dotted Bedrock profiles and model IDs containing further slashes remain entirely in `<modelId>`.
 - If the requested provider/model is absent from the current session-selectable catalog—including the deferred exact provider `kimi-coding`—the Bobbit-owned setup path must fail with the actionable unavailable-model error before spawning. It must not omit the tuple, delegate selection to Pi's default, or fall through to a hidden provider.
-- Generic caller-supplied `options.args` are the narrow exception to Bobbit-owned selection: they remain after the injected tuple so Pi's existing last-value-wins CLI behavior is preserved. For a qualified raw `--model <provider>/<modelId>` without a raw `--provider`, the builder keeps the initial pin in qualified model-only form so the later raw argument can change provider without a stale injected provider. Do not use this compatibility behavior for picker, default, role, team, delegate, or restore selection.
+- Inspect the fully assembled raw arguments, not only the early `initialModel`. `resolveEffectivePiSelection` applies Pi's last-value-wins rules, and `finalizeSpawnOptions` must validate that effective tuple against the exact target-realm catalog. The final args must contain one canonical provider/model/thinking tuple with no remaining raw selection flags.
 - Confirm post-spawn helpers pass `skipSetModel: true` when `session.spawnPinnedModel` matches. The flag still performs the `getState()` read-back and exact tuple verification; it elides only the redundant `setModel` RPC and its `model_change` echo.
-- During a transient AIGW discovery failure, a matching last-published `models.json` catalog can still supply the exact selectable tuple. A missing, malformed, or different-URL retained catalog fails closed instead of producing an unpinned spawn, while a successful discovery that omits the old model is authoritative.
+- During a transient AIGW discovery failure, an exact selectable tuple may come from a matching marked publication or the current process's last exact snapshot for the unchanged configured URL when the target is absent or the marked block cannot supply rows. The in-memory snapshot does not survive restart. Unmarked user targets are never bypassed, malformed targets fail closed, and a successful empty or omitting discovery replaces the snapshot instead of merging stale rows.
 
 Coverage lives in `tests2/core/rpc-bridge-spawn-args.test.ts` and the focused model-selection, restore, and spawn-boundary canaries. See [docs/internals.md — Spawn-time model pinning](internals.md#spawn-time-model-pinning).
 
@@ -1107,17 +1107,22 @@ Checklist:
 
 See [Configurable agent directory](configurable-agent-directory.md).
 
-## `models.json` stale / missing AI Gateway headers after gateway upgrade
+## AI Gateway publication leaves `models.json` unchanged
 
-Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose active agent-directory `models.json` predates the generated header block.
+Symptom: configure, refresh, or startup discovers models but does not update the AIGW block, or reports that publication was refused.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-discovers models and rewrites the active agent directory's `models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm.
+Check `providers.aigw` in the active agent directory:
 
-If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the discovery probe failed and the file was deliberately left as-is. `/api/aigw/status` reports that live-discovery outage as `models: []`, but `/api/models` retains the last published AIGW rows only when `providers.aigw.baseUrl` exactly matches the configured URL after normalization. This keeps exact restore/spawn validation available during an outage without accepting routing from a previous gateway. A successful discovery response remains authoritative: a model it omits is unavailable and is not restored from disk. Fix gateway connectivity and restart again when the published catalog itself needs refreshing.
+- Bobbit may insert an absent block or refresh one marked with `"x-bobbit-managed": {"kind":"aigw-publication","version":1}`.
+- An unmarked block is user-owned, including historical generated-looking output. Bobbit does not adopt, rewrite, or remove it. While configured, `/api/models` uses Pi's exact composition of that target realm rather than bypassing it with discovery.
+- Malformed JSONC, duplicate `providers`/`providers.aigw` keys, or duplicate managed fields is ambiguous and fails closed. The file and new preference remain unchanged.
+- Valid JSONC comments and unknown fields are supported. Localized refresh edits only managed values and preserves unrelated bytes.
 
-`BOBBIT_SKIP_AIGW_DISCOVERY=1` skips only the startup network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` remains active.
+If the log instead reports an unreachable gateway, discovery failed before publication. Check `/api/models`, not only `/api/aigw/status`: the status route is a fresh live-discovery view and may report `models: []` without clearing the session catalog. `/api/models` may use a durable marked publication whose normalized URL matches the saved URL. When the target is absent or a marked target cannot supply rows, it may instead use the current process's last exact discovery snapshot for that unchanged URL; this fallback is in memory only and disappears on restart. An unmarked user target is composed by Pi and never bypassed, while malformed or ambiguous targets remain unavailable. A successful discovery, including an empty or fully filtered result, replaces the snapshot and never merges omitted rows back.
 
-See [docs/internals.md — Startup refresh behavior](internals.md#startup-refresh-behavior).
+`BOBBIT_SKIP_AIGW_DISCOVERY=1` skips only startup discovery. It still applies Bedrock environment variables and leaves the current `models.json` active.
+
+See [AI Gateway routing — Publication ownership](ai-gateway-routing.md#publication-ownership-caches-and-containers).
 
 ## Review/naming model mismatch under AI Gateway
 
@@ -1145,7 +1150,7 @@ Troubleshooting checklist:
 6. **Thinking level mismatch is non-fatal.** Unlike model failures, an unsupported `thinkingLevel` only logs a `console.warn` and falls through to the global default. If thinking is not being applied, grep the log for `Role thinking level "..." failed`.
 7. **Spawned worker / team-lead / staff session ignores the role override entirely** (binds straight to `default.sessionModel`, no "Role model ... failed" log line — the resolver never even sees the role id). `SessionSetupPlan` carries two parallel fields naming the same role: `role` (used historically) and `roleName` (used by `team-manager.spawnRole`, `startTeam` for the team lead, and `staff-manager`). `_resolveBridgeOptions` in `src/server/agent/session-setup.ts` falls back to `plan.role ?? plan.roleName` so callers that set only one of them still get role-keyed pinning; the same fallback mirrors onto `session.role` so the post-spawn `tryAutoSelectModel` safety net keys off the right id. If you see this symptom on a new spawn path, the most likely cause is a caller that sets neither field — add `roleName` at the call site rather than re-introducing the fallback elsewhere. Pinned by `tests/session-setup-role-override.test.ts`.
 
-See [docs/internals.md — Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides) and [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) for the full mechanics.
+For current behavior, see [Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides), [Thinking-level metadata authority](thinking-levels.md#metadata-authority), and [Spawn-time model pinning](internals.md#spawn-time-model-pinning). The [original per-role override design](design/per-role-model-overrides.md) is historical background only, not current mechanics.
 
 ## Reviewer session triggers spurious "Agent finished" team-lead nudge after restart
 

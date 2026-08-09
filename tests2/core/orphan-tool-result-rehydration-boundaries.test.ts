@@ -370,6 +370,7 @@ function writeLegacyAigwCatalog(url: string): void {
 					maxTokens: 16_384,
 					reasoning: false,
 					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				}],
 			},
 		},
@@ -1709,7 +1710,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		manager.sessions.set(ps.id, session);
 
-		const selection = applyRuntimeSessionThinkingSelection(manager, session, "medium");
+		const selection = applyRuntimeSessionThinkingSelection(
+			manager,
+			session,
+			"medium",
+			undefined,
+			racePreferences,
+		);
 		const selectionOutcome = selection.then(
 			(value) => ({ value, error: undefined as unknown }),
 			(error) => ({ value: undefined, error }),
@@ -1862,7 +1869,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		manager.sessions.set(ps.id, session);
 
-		const selection = applyRuntimeSessionThinkingSelection(manager, session, "medium");
+		const selection = applyRuntimeSessionThinkingSelection(
+			manager,
+			session,
+			"medium",
+			undefined,
+			racePreferences,
+		);
 		const selectionOutcome = selection.then(
 			(value) => ({ value, error: undefined as unknown }),
 			(error) => ({ value: undefined, error }),
