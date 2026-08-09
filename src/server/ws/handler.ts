@@ -84,57 +84,58 @@ function stampSnapshotOrder(data: unknown): unknown {
 	}
 	return data;
 }
-// patchModelContextWindow removed — live model-state frames now resolve context
-// windows, reasoning, and thinkingLevelMap via resolveModelStateMeta() (registry
-// cache → pi-ai catalog → inferMeta), matching the ModelSelector dropdown.
-
 const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+const isThinkingLevelMap = (v: unknown): v is Record<string, string | null> => !!v && typeof v === "object" && !Array.isArray(v);
+const isInputModalityList = (v: unknown): v is ("text" | "image")[] => Array.isArray(v)
+	&& v.length > 0
+	&& v.every((entry) => entry === "text" || entry === "image");
+
+type OptionalResolvedModelStateMeta = {
+	contextWindow?: unknown;
+	maxTokens?: unknown;
+	reasoning?: unknown;
+	thinkingLevelMap?: unknown;
+	input?: unknown;
+	source?: string;
+	available?: boolean;
+};
+
+function isExactResolvedMeta(meta: OptionalResolvedModelStateMeta | undefined): meta is OptionalResolvedModelStateMeta {
+	if (!meta || meta.available === false || meta.source === "inferred" || meta.source === "unavailable") return false;
+	return isPositiveNumber(meta.contextWindow)
+		|| isPositiveNumber(meta.maxTokens)
+		|| typeof meta.reasoning === "boolean"
+		|| isThinkingLevelMap(meta.thinkingLevelMap)
+		|| isInputModalityList(meta.input);
+}
 
 /**
- * Build the `state.model` payload for a live/rehydrated frame.
- *
- * Authoritative metadata (registry cache / pi-ai catalog) always wins so stale
- * or incorrect live frames get corrected — e.g. Claude Fable 5's 1M context,
- * `reasoning:true`, and `thinkingLevelMap {..., max:"max"}`.
- *
- * When the resolver only produced INFERRED defaults (custom / aigw / unknown
- * providers that legitimately fall through to `inferMeta`), those defaults must
- * NOT clobber more-accurate live fields already present on `base` (the agent's
- * live `state.model`). Inferred values are used only as a fallback for fields
- * the live frame does not already carry.
+ * Build a `state.model` payload from exact registry metadata when available.
+ * During a temporary registry miss, only a live frame whose provider/id exactly
+ * matches the requested identity may supply capability fields. Missing fields
+ * remain missing; Bobbit does not manufacture defaults from the model name.
  */
 export function buildResolvedModelStateModel(provider: string, id: string, base?: Record<string, unknown>): Record<string, unknown> {
-	const meta = resolveModelStateMeta(provider, id);
+	const resolved = resolveModelStateMeta(provider, id) as OptionalResolvedModelStateMeta | undefined;
+	const matchingLive = base?.provider === provider && base?.id === id ? base : undefined;
+	const source = isExactResolvedMeta(resolved) ? resolved : matchingLive;
 	const model: Record<string, unknown> = {
-		...(base ?? {}),
+		...(matchingLive ?? {}),
 		provider,
 		id,
 	};
-	const inferredFallback = meta.source === "inferred";
 
-	// contextWindow / maxTokens: authoritative overwrites; inferred only fills gaps.
-	model.contextWindow = inferredFallback && isPositiveNumber(base?.contextWindow)
-		? base!.contextWindow
-		: meta.contextWindow;
-	model.maxTokens = inferredFallback && isPositiveNumber(base?.maxTokens)
-		? base!.maxTokens
-		: meta.maxTokens;
+	if (isPositiveNumber(source?.contextWindow)) model.contextWindow = source.contextWindow;
+	else delete model.contextWindow;
+	if (isPositiveNumber(source?.maxTokens)) model.maxTokens = source.maxTokens;
+	else delete model.maxTokens;
+	if (typeof source?.reasoning === "boolean") model.reasoning = source.reasoning;
+	else delete model.reasoning;
+	if (isThinkingLevelMap(source?.thinkingLevelMap)) model.thinkingLevelMap = source.thinkingLevelMap;
+	else delete model.thinkingLevelMap;
+	if (isInputModalityList(source?.input)) model.input = source.input;
+	else delete model.input;
 
-	// reasoning: authoritative overwrites; inferred keeps a live boolean when present.
-	model.reasoning = inferredFallback && typeof base?.reasoning === "boolean"
-		? base!.reasoning
-		: meta.reasoning;
-
-	// thinkingLevelMap: authoritative source is the sole owner. On inferred
-	// fallback keep a live map when present (else drop it so the client applies
-	// its family heuristic).
-	if (meta.thinkingLevelMap) {
-		model.thinkingLevelMap = meta.thinkingLevelMap;
-	} else if (inferredFallback && base?.thinkingLevelMap && typeof base.thinkingLevelMap === "object") {
-		model.thinkingLevelMap = base.thinkingLevelMap;
-	} else {
-		delete model.thinkingLevelMap;
-	}
 	return model;
 }
 
@@ -1454,7 +1455,7 @@ export function handleWebSocketConnection(
 						break;
 					}
 					try {
-						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
+						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast, preferencesStore);
 					} catch (err: any) {
 						const safeError = redactSensitive(String(err?.message || err));
 						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, safeError);
