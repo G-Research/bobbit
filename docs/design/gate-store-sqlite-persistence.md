@@ -1,18 +1,45 @@
 # Gate store SQLite persistence
 
-## Goal
+## Context and scope
 
-Remove the write amplification caused by serializing and atomically replacing the complete `gates.json` array after any gate mutation, without changing `GateStore`'s in-memory `Map`, public API, or callers.
+`GateStore` persists workflow gate state and signal history for each project. The former JSON backend rewrote the complete `gates.json` array after every mutation, so a large retained verification payload made even a one-gate update expensive.
+
+The production backend now uses SQLite to update only affected gates while preserving the existing `GateStore` contract:
+
+- callers still use the same synchronous read and mutation API;
+- the in-memory `Map` remains the read model;
+- `(goalId, gateId)` remains the composite identity;
+- a gate's complete, extensible JSON payload remains intact;
+- multi-gate strict resets publish transactionally; and
+- every registered project owns a separate store under its state directory.
+
+SQLite is selected automatically for the real filesystem. There is no migration flag because a flag would create two possible authorities and make startup behavior depend on deployment configuration. Automatic selection gives every normal startup the same one-way migration and prevents a nightly instance from continuing to amplify JSON writes accidentally.
+
+The MVP does not add a rollback command or move persistence to a worker. Retired JSON sources remain available for audit and deliberate offline recovery, but they are not a second live backend.
+
+## Ownership and backend selection
+
+`ProjectContext` owns one `GateStore` and therefore one `gates.sqlite` connection for its project. It constructs the gate store after the other project stores, reducing the chance that a later constructor failure leaves a native handle open. If reset-coordinator construction then fails, the context disposes the gate store immediately.
+
+The default backend depends on the filesystem seam:
+
+| Construction | Backend | Reason |
+|---|---|---|
+| Real production filesystem | SQLite | Durable, transactional per-gate updates are the production authority. |
+| Injected non-real `FsLike`, including memfs | JSON adapter | Native SQLite cannot operate on memfs, and existing unit fixtures need deterministic in-memory files. |
+| Explicit `persistence` option | Requested adapter | This is a test/integration seam, not a production migration toggle. |
+
+The JSON adapter preserves the public API and whole-array fixture format. Production callers do not opt into SQLite; `ProjectContext` and a directly constructed real-filesystem `GateStore` select it automatically.
 
 ## Layout and schema
 
-The production filesystem backend uses `better-sqlite3` 12.11.x with platform prebuilds and opens one database per project. Version 13 is intentionally not used because its implicit `node-gyp` install currently requires a local compiler even when a bundled Windows binary is present:
+The MVP pins `better-sqlite3` 12.11.1 and opens:
 
 ```text
-.bobbit/state/gates.sqlite
+<project-root>/.bobbit/state/gates.sqlite
 ```
 
-SQLite schema version 1 stores one complete, flexible `GateState` JSON payload per row:
+Schema version 1 stores one flexible `GateState` JSON payload per composite identity:
 
 ```sql
 CREATE TABLE gate_records (
@@ -21,59 +48,194 @@ CREATE TABLE gate_records (
   payload TEXT NOT NULL,
   PRIMARY KEY (goal_id, gate_id)
 ) STRICT;
+
+CREATE INDEX gate_records_goal_id_idx ON gate_records(goal_id);
 ```
 
-A small `gate_store_meta` table contains the completed legacy-migration marker, the completed `.pre-migration` recovery marker, and durable pending-retirement intents. Gate records intentionally retain SQLite's rowid table: multi-megabyte JSON payloads append to the table while the composite uniqueness index contains only identifiers, avoiding large-payload B-tree reshuffling during migration. Every loaded payload is checked for JSON validity, row identity, supported gate/signal/step shapes, finite timestamps and durations, and duplicate composite identities. Unknown historical fields are retained.
+`gate_store_meta` is a strict key/value table containing:
 
-The database uses `journal_mode=DELETE`, `synchronous=FULL`, a five-second busy timeout, and no extension loading. Bobbit serves reads from the existing in-memory map, so WAL's read/write concurrency is unnecessary for this single-connection store.
+- `migration_complete`, which makes SQLite authoritative;
+- `pre_migration_recovery_complete`, which prevents a recovered source from being replayed;
+- `pending_retirement:gates.json`; and
+- `pending_retirement:gates.json.pre-migration`.
 
-## Mutation flow
+The retirement keys are durable intent records, not temporary process state. They bridge the unavoidable boundary between a committed database transaction and a filesystem rename.
 
-Mutations mark only their affected composite gate keys dirty. A shared 500 ms drain coalesces bursts and snapshots the dirty gates. One `BEGIN IMMEDIATE` transaction upserts or deletes every affected row and commits the entire batch atomically.
+Gate records retain SQLite's rowid table. Large payloads append to the table while the uniqueness index contains only identifiers, avoiding repeated large-payload B-tree reshuffling. On every startup, each row is parsed and checked for row/payload identity, valid known gate, signal, verification, step, artifact, and diagnostics shapes, and finite numeric fields. Duplicate source identities are rejected. Unknown historical fields and non-empty historical step-type discriminators are preserved rather than normalized away.
 
-`flush()` and strict lifecycle writes remain publication barriers. A failed statement or commit rolls back the transaction, rejects affected barriers, and retains the dirty keys for retry. Multi-gate reset and workflow-reconciliation batches therefore regain all-record atomicity that the per-file sharding experiment could not provide.
+The connection uses `journal_mode=DELETE`, `synchronous=FULL`, and a five-second busy timeout. No extensions are loaded. A single connection is sufficient because Bobbit serves reads from the in-memory map; WAL concurrency would not improve that ownership model.
 
-Persistence metrics report the serialized gate-payload bytes and transaction duration for the latest batch.
+## Mutation and publication flow
 
-## Startup migration and recovery
+Mutations mark only affected composite keys dirty. A 500 ms drain coalesces bursts, snapshots those keys, and uses one `BEGIN IMMEDIATE` transaction to upsert or delete the complete affected batch.
 
-Production real-filesystem stores select SQLite automatically; there is no migration flag. On the first open:
+`flush()` and strict lifecycle writes are publication barriers. If serialization, a statement, or commit fails:
 
-1. Create the versioned schema.
-2. Read and completely validate both `gates.json` and `gates.json.pre-migration`, when present. No source is renamed while either payload is invalid.
-3. Merge by `(goalId, gateId)`, with `gates.json` winning conflicts and backup-only gates retained.
-4. Insert the full merged set, verify its count, identities, and serialized payloads, then write `migration_complete` and durable retirement intents in the same `BEGIN IMMEDIATE` transaction.
-5. Commit before renaming either source.
+- SQLite rolls back the complete batch;
+- affected barriers reject;
+- dirty keys remain queued for retry; and
+- a strict reset restores its prior in-memory status, timestamp, and cache-invalidation fields before returning the error.
 
-When a completed SQLite database already exists, its rows are validated first. A not-yet-recovered `gates.json.pre-migration` is then validated and merged in one transaction with `ON CONFLICT DO NOTHING`, so SQLite wins conflicts. Verification, the recovery-complete marker, and its retirement intent commit atomically. `state-migration.ts` deliberately does not recover gate JSON; `GateStore` is the sole owner, preventing a recovery pass from creating `gates.json` that authoritative SQLite would ignore.
+This preserves all-record transactional reset behavior while ordinary reads continue to use the map. Persistence metrics expose the serialized payload bytes and transaction duration for the latest batch.
 
-## Non-destructive retirement
+## Startup order and authority
 
-Committed sources are renamed, never deleted or overwritten. Preferred names are `gates.json.sqlite-retired` and `gates.json.pre-migration-recovered`; an occupied name is preserved and the first free numeric suffix is used. The durable intent is cleared only after the rename. If commit succeeds but rename is interrupted, startup fails with the source and intent intact; the next startup completes only the rename and cannot re-import stale edits. If the rename succeeded but intent clearing was interrupted, the absent source lets the next startup clear the intent safely.
+Startup is synchronous and establishes one authority before the context becomes available:
 
-Once `migration_complete` exists, an unmarked stray or restored `gates.json` is ignored. Once recovery is recorded, a restored `.pre-migration` source is likewise ignored. Malformed sources, failed imports, incomplete unmarked database rows, unsupported schema versions, corrupt payload JSON, and row/payload identity mismatches fail startup without retiring their source. Constructor failures close the database handle.
+1. Open the native database and reject a schema newer than the supported version.
+2. Create schema version 1 when opening a new database.
+3. If `migration_complete` is absent, require `gate_records` to be empty and run first migration.
+4. Validate every authoritative SQLite row.
+5. Complete any previously committed source retirement.
+6. If eligible, merge `gates.json.pre-migration` into the authoritative database.
+7. Re-read validated rows into the in-memory map.
 
-## Lifecycle and testing
+The generic per-project recovery pass intentionally excludes gate files. `GateStore` is the sole owner of both `gates.json` and `gates.json.pre-migration`; otherwise generic recovery could create a new JSON file that completed SQLite state would ignore.
 
-`GateStore.close()` flushes pending mutations and explicitly closes the SQLite handle. `ProjectContext.close()` uses it before a project state directory can be removed, which is required on Windows.
+### First migration
 
-The existing `FsLike` in-memory fixtures retain the JSON writer as a test adapter because native SQLite cannot run on memfs; passing a non-real filesystem keeps that behavior automatically. Dedicated real-filesystem tests cover automatic `ProjectContext` startup migration, exact restart restoration, dual-source precedence, collision-safe backups, authoritative `.pre-migration` recovery, validation/import rollback, interrupted retirement retry, strict multi-gate atomicity, concurrent close, and corrupt-row handle release. The packed-consumer audit also loads the installed `better-sqlite3` binding and executes an in-memory write/read smoke before querying advisories.
+When `migration_complete` is absent, `GateStore`:
 
-## Qualification benchmark
+1. Requires the SQLite record table to be empty. Unmarked rows are ambiguous and fail startup rather than being guessed authoritative.
+2. Reads and completely validates both legacy sources when present. Both must validate before any import or rename begins.
+3. Merges by `(goalId, gateId)`. `gates.json` wins conflicts; gates found only in `gates.json.pre-migration` are retained.
+4. Inserts the complete merged set and verifies its count, composite identities, and exact serialized payloads inside one `BEGIN IMMEDIATE` transaction.
+5. Writes `migration_complete`, the recovery-complete marker when a recovery source participated, and applicable retirement intents in that same transaction.
+6. Commits before attempting either source rename.
 
-Using a copied 285.3 MiB production `gates.json` with 3,563 gates on the current Windows/Defender-backed worktree, three repeated `better-sqlite3` runs measured:
+An empty project follows the same path and receives a marked, empty authoritative database. Automatic initialization therefore does not depend on a legacy file being present.
 
-- Median transactional first migration: **7.86 s**
-- Median subsequent startup loading all rows into the existing map: **1.75 s**
-- Median-gate mutation: **14.6 KiB written in 7.1 ms**
-- Resulting SQLite database: **288.3 MiB**
+### Recovery into authoritative SQLite
 
-For comparison, the earlier built-in `node:sqlite` run over the nearly identical dataset measured 4.73 s migration, 1.35 s reload, and 5.8 ms mutation. `better-sqlite3` is slower in this workload, but ordinary writes remain tiny and fast while avoiding the experimental API warning on supported Node 22 installations.
+If SQLite already has `migration_complete`, its rows are validated before any source is touched. When `gates.json.pre-migration` exists and recovery has not already completed, `GateStore` validates the complete source and merges it in one transaction using conflict-ignore inserts:
 
-This validates the write-amplification improvement without the thousands-of-files startup penalty. Migration and startup remain synchronous costs.
+- existing SQLite rows win identity conflicts;
+- recovery-only gates are added;
+- count, identity, and exact payload verification occurs before commit; and
+- the recovery-complete marker and retirement intent commit with the merge.
 
-## Follow-up production qualification
+This is additive recovery, not a restore of an older snapshot over current state.
 
-- `better-sqlite3` adds a native dependency. Its published prebuilds cover Bobbit's supported Node versions and current Windows, macOS, Linux glibc, and Linux musl targets. The packed-consumer runtime smoke is pinned; exhaustive platform, filesystem, antivirus, disk-full, and power-loss qualification remains follow-up work.
-- The synchronous driver executes on the gateway thread. Ordinary transactions are small, but the measured one-time migration can delay readiness. If this becomes material, move the same persistence contract behind a dedicated worker rather than changing the `GateStore` API.
-- A rollback command is intentionally not part of this MVP. Retired source files are retained under collision-safe backup names for manual recovery and audit.
+### Mixed-state behavior
+
+| Observed state | Startup behavior |
+|---|---|
+| No migration marker, no SQLite rows, either or both JSON sources present | Validate all present sources, import the merged set, mark SQLite authoritative, then retire sources. |
+| No migration marker and no sources | Mark the empty SQLite database authoritative. |
+| No migration marker but SQLite rows exist | Fail startup; incomplete unmarked rows are never adopted or overwritten. |
+| Migration marker present and a retirement intent remains | Validate SQLite, then retry only the rename. Source edits made after commit are not re-imported. |
+| Migration marker present, unmarked `gates.json` appears, and no retirement intent exists | Ignore the stray legacy file; SQLite remains authoritative. |
+| Migration marker present and an unrecovered `.pre-migration` source appears | Transactionally add recovery-only identities, then mark and retire the source. |
+| Recovery-complete marker present and `.pre-migration` reappears without an intent | Ignore it; replay would resurrect stale state. |
+| Unsupported schema, invalid marker/intent, corrupt SQLite payload, or row/payload identity mismatch | Fail startup and close the constructor-owned handle. |
+
+## Non-destructive source retirement
+
+Committed sources are renamed, never deleted or overwritten:
+
+| Source | Preferred retained name |
+|---|---|
+| `gates.json` | `gates.json.sqlite-retired` |
+| `gates.json.pre-migration` | `gates.json.pre-migration-recovered` |
+
+If the preferred target exists, it is preserved and the first free numeric suffix is used, such as `.sqlite-retired.1` or `.pre-migration-recovered.1`.
+
+The database intent is cleared only after the rename succeeds. If commit succeeds but rename is interrupted, startup fails with the authoritative database, source, and intent intact. The next startup validates SQLite and retries only retirement, so even a modified source cannot be imported twice. If the rename completed but intent clearing did not, the next startup sees the source is absent and safely clears the intent.
+
+## Failure guarantees
+
+Migration and recovery deliberately fail closed:
+
+- Every source eligible for import is read and fully validated before its import transaction. A source covered by an already-committed retirement intent is deliberately not reread; after validating authoritative SQLite, startup retries only its rename. Unmarked sources that are no longer eligible are ignored.
+- Failed validation of an eligible source leaves it byte-for-byte untouched.
+- Failed inserts or verification roll back all imported rows, markers, and intents.
+- A failed first migration may leave the newly created empty SQLite schema file, but it does not commit gate rows or migration metadata.
+- Failed recovery into authoritative SQLite leaves its prior rows unchanged and the recovery source untouched.
+- Retirement never starts until imported state and its durable intent have committed.
+- Existing authoritative rows are validated before pending retirement or new recovery.
+- Constructor and load failures close the native handle, allowing the file to be moved or removed on Windows after failure.
+
+These guarantees prevent silent partial imports. They do not make a live database and its retained backups interchangeable: only the metadata state machine determines whether a source is eligible for import.
+
+## Operational inspection and recovery precautions
+
+Treat `gates.sqlite` as authoritative whenever `migration_complete=1` in `gate_store_meta`.
+
+Before inspection or recovery:
+
+1. Stop the gateway gracefully and await project-context shutdown. This flushes queued gate mutations and releases the native handle; it is mandatory before moving state on Windows.
+2. Copy the entire project state directory to an operator-owned location. Do not work on live state, and do not copy only `gates.sqlite` while a process may be writing it.
+3. Record source sizes and hashes before experimenting. For a migration comparison, record the gate count, sorted `(goalId, gateId)` identities, and a hash of each exact JSON payload.
+4. Inspect the copy read-only. Check `PRAGMA user_version`, `PRAGMA quick_check`, `gate_store_meta`, the `gate_records` count, and that each payload's IDs match its row IDs.
+5. Exercise startup, close, and reopen against another disposable copy before changing any operational state.
+
+For common failures:
+
+- **Pending retirement rename failed:** leave the source and metadata untouched, remove the external file lock or permission problem, and restart. The retry retires the committed source without re-importing it.
+- **Legacy or recovery validation failed before commit:** preserve the rejected bytes, correct or replace the source only while the gateway is stopped, and retry on a copy first. The authoritative database, if one existed, has not incorporated that source.
+- **SQLite validation, schema, or marker validation failed:** preserve the complete state directory and escalate to deliberate offline recovery. Do not delete the database, clear metadata rows, or rename a retired JSON backup into place on the live project.
+
+A retired backup is evidence, not an automatic rollback image. Once migration or recovery is marked complete, simply restoring `gates.json` or `.pre-migration` is intentionally ignored. This MVP has no supported rollback command; a manual restore must build and validate one consistent state offline before replacement during a stopped maintenance window.
+
+## Lifecycle and Windows cleanup
+
+`GateStore.close()` is an idempotent barrier: concurrent calls share the same close promise, pending mutations flush, and then the SQLite connection closes. `ProjectContext.close()` first stops mutation sources and waits for reset recovery, then closes `GateStore` alongside the other durable stores before directory cleanup. Callers must await context close rather than deleting or renaming a project directory directly.
+
+If project construction fails after opening the database, disposal closes the handle without waiting for normal ownership transfer. Startup validation failures do the same. Real-filesystem tests verify the database can be renamed after malformed-source and corrupt-row failures, pinning the Windows handle-release requirement.
+
+## Test coverage
+
+The memfs unit adapter continues to cover the public `GateStore` logic and JSON persistence semantics. Dedicated real-filesystem coverage pins production behavior, including:
+
+- automatic `ProjectContext` migration;
+- mutation, close, restart, and exact restoration;
+- live/recovery precedence and recovery-only gate preservation;
+- collision-safe, non-destructive backup naming;
+- `.pre-migration` merge into already-authoritative SQLite;
+- full validation and transactional import rollback with original bytes preserved;
+- retry after a committed migration whose rename was interrupted;
+- strict multi-gate rollback;
+- gate count, composite identity, historical fields, and payload preservation; and
+- concurrent close plus handle release after startup failure.
+
+The packed-consumer test also rebuilds the installed native dependency with lifecycle scripts enabled only for `better-sqlite3`, then loads the binding and executes an in-memory create/insert/select/close smoke.
+
+## MVP landing qualification
+
+The final ordered qualification ran on the unchanged implementation baseline `0eec79609f8d3ddfa2f9bd9d25da1cadc02c7e1c` on Windows with Node 24.13.1 and npm 11.8.0:
+
+| Check | Result |
+|---|---|
+| `npm run check` | Passed |
+| `npm run build` | Passed |
+| `npm run test:unit` | Passed |
+| `npm run test:browser` | Passed |
+| `npm run test:e2e` | Passed |
+| `npm run test:bundle` | Passed |
+| Packed-consumer native `better-sqlite3` rebuild and write/read smoke | Passed |
+
+A read-only snapshot of representative production gate state was copied into an owned temporary directory, migrated, closed, reopened, queried directly, and removed. Source, post-migration, reopened, and SQLite counts were all 16. Sorted composite identities and every per-gate payload hash matched, and the retired JSON backup was byte-exact. The sorted-identity SHA-256 was `0f06c43d044c35b6d40d2fb5f8aeab2efd7c5540a77d7d907b6e1a65d745eb5e`; the identity-plus-payload-hash manifest SHA-256 was `d3a5b491925f4f7941756e226edf4fabff3a283facc670cf361b8dad9e27d3e1`. The live source's SHA-256, size, and modification time were unchanged before and after the exercise.
+
+The same packed-consumer command was **not audit-clean**: after the native smoke passed, its separate mutable-registry audit reported two moderate and two high vulnerable-package findings, all through upstream `@earendil-works/pi-coding-agent`. The advisory set at qualification time was:
+
+- `brace-expansion`: `GHSA-mh99-v99m-4gvg`, `GHSA-rgw5-rvv9-x895`;
+- `undici`: `GHSA-8xcm-r25x-g524`, `GHSA-4cwx-7wf7-3272`, `GHSA-m8rv-5g2x-5cg5`, `GHSA-jr45-8vmc-qm54`, `GHSA-v3r7-h72x-cjcm`.
+
+Those registry findings are reported separately from the passing SQLite native runtime qualification. They are upstream dependency advisories, not caused by this persistence change, and this MVP did not broaden into a Pi dependency upgrade. Registry results can change independently of source; see [Optional manual packed-consumer audit](../releasing.md#optional-manual-packed-consumer-audit) for policy.
+
+## Performance benchmark
+
+A copied 285.3 MiB production `gates.json` containing 3,563 gates was benchmarked three times on a Windows/Defender-backed worktree:
+
+- median transactional first migration: **7.86 s**;
+- median subsequent startup loading rows into the map: **1.75 s**;
+- median-gate mutation: **14.6 KiB written in 7.1 ms**; and
+- resulting SQLite database: **288.3 MiB**.
+
+The benchmark confirms the intended write-amplification improvement: ordinary mutations write a gate-sized payload rather than the whole store. Migration and startup remain synchronous costs.
+
+## Deferred production work
+
+- **Worker-backed access:** `better-sqlite3` currently runs synchronously on the gateway thread. If migration or transactions materially delay responsiveness, move the same persistence contract behind a dedicated worker without changing the public `GateStore` API.
+- **Exhaustive fault and platform qualification:** the packed native smoke and current suites do not replace broad Windows, macOS, Linux glibc/musl, filesystem, network-share, antivirus, disk-full, abrupt-power-loss, and long-duration contention testing.
+- **Rollback tooling:** no rollback command is included. Any future tool must preserve the single-authority and payload-verification guarantees rather than making retained JSON live again by filename alone.
