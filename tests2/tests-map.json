@@ -1418,7 +1418,7 @@
     },
     {
       "path": "tests2/core/bobbit-tool-verbosity.test.ts",
-      "reason": "Acceptance coverage for compact-by-default Bobbit projections, bounded verbose reads, structured no-fetch limit guidance, unchanged costs, nonpaged verbose mutations/admin calls, and projection-catalogue drift.",
+      "reason": "Acceptance coverage for focused bobbit_read discovery/detail projections, rejection of removed expansion fields, unchanged cost detail, unaffected nonpaged mutation/admin response behavior, and projection-catalogue drift.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
