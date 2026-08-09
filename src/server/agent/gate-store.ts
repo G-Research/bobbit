@@ -702,6 +702,8 @@ export interface GateStoreOptions {
 export class GateStore {
 	private readonly persistence: GatePersistence;
 	private gates: Map<string, GateState> = new Map();
+	private acceptingMutations = true;
+	private closePromise: Promise<void> | null = null;
 
 	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
@@ -719,6 +721,10 @@ export class GateStore {
 		}
 	}
 
+	private assertAcceptingMutations(): void {
+		if (!this.acceptingMutations) throw new Error("[gate-store] GateStore is closing or closed");
+	}
+
 	private save(keys: Iterable<string>): void {
 		this.persistence.schedule(keys);
 	}
@@ -730,11 +736,17 @@ export class GateStore {
 
 	/** Flush pending persistence and release the SQLite database handle. */
 	close(): Promise<void> {
-		return this.persistence.close();
+		if (this.closePromise) return this.closePromise;
+		// This synchronous fence makes every mutation linearize either before the
+		// persistence close barrier or before touching the in-memory snapshot.
+		this.acceptingMutations = false;
+		this.closePromise = this.persistence.close();
+		return this.closePromise;
 	}
 
 	/** Release resources after a surrounding constructor fails before ownership transfers. */
 	dispose(): void {
+		this.acceptingMutations = false;
 		this.persistence.dispose();
 	}
 
@@ -750,6 +762,7 @@ export class GateStore {
 
 	/** Initialize pending gate states for a new goal. */
 	initGatesForGoal(goalId: string, gateIds: string[]): void {
+		this.assertAcceptingMutations();
 		const now = Date.now();
 		const dirtyKeys: string[] = [];
 		for (const gateId of gateIds) {
@@ -777,6 +790,7 @@ export class GateStore {
 		nextGateIds: Iterable<string>,
 		modifiedGateIds: Iterable<string> = [],
 	): void {
+		this.assertAcceptingMutations();
 		const remainingGateIds = new Set(nextGateIds);
 		const modifiedIds = new Set(modifiedGateIds);
 		const now = Date.now();
@@ -829,6 +843,7 @@ export class GateStore {
 
 	/** Append a signal to a gate's history. */
 	recordSignal(signal: GateSignal): void {
+		this.assertAcceptingMutations();
 		const key = compositeKey(signal.goalId, signal.gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -847,6 +862,7 @@ export class GateStore {
 	 * never advertised to agents (no MCP tool). See docs/design Human Gate Bypass.
 	 */
 	bypassGate(goalId: string, gateId: string, opts: { whyBypassed: string; whoAmI: string }): GateSignal {
+		this.assertAcceptingMutations();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) {
@@ -886,6 +902,7 @@ export class GateStore {
 	}
 
 	updateGateStatus(goalId: string, gateId: string, status: GateStatus): void {
+		this.assertAcceptingMutations();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -896,6 +913,7 @@ export class GateStore {
 	}
 
 	updateGateContent(goalId: string, gateId: string, content: string, version: number): void {
+		this.assertAcceptingMutations();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -906,6 +924,7 @@ export class GateStore {
 	}
 
 	updateGateMetadata(goalId: string, gateId: string, metadata: Record<string, string>): void {
+		this.assertAcceptingMutations();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -916,6 +935,7 @@ export class GateStore {
 
 	/** Update a signal's verification results by signal ID. */
 	updateSignalVerification(signalId: string, verification: GateSignal["verification"]): void {
+		this.assertAcceptingMutations();
 		for (const [key, gate] of this.gates) {
 			const signal = gate.signals.find(s => s.id === signalId);
 			if (signal) {
@@ -988,6 +1008,7 @@ export class GateStore {
 		strict: boolean,
 		persist: boolean,
 	): Promise<GateResetResult> {
+		this.assertAcceptingMutations();
 		const affectedGateIds = this.getDependentGateIds(gateId, workflow, true);
 		const changedGateIds: string[] = [];
 		const unchangedGateIds: string[] = [];
@@ -1066,6 +1087,7 @@ export class GateStore {
 	 * Uses the workflow definition to find transitive dependents.
 	 */
 	cascadeReset(goalId: string, gateId: string, workflow: Workflow): void {
+		this.assertAcceptingMutations();
 		const dependents = this.getDependentGateIds(gateId, workflow, false);
 		const changedGateIds: string[] = [];
 		const dirtyKeys: string[] = [];
@@ -1086,6 +1108,7 @@ export class GateStore {
 
 	/** Remove all gates for a goal (cleanup on goal deletion). */
 	removeGoalGates(goalId: string): void {
+		this.assertAcceptingMutations();
 		const keysToRemove: string[] = [];
 		for (const [key, gate] of this.gates) {
 			if (gate.goalId === goalId) keysToRemove.push(key);

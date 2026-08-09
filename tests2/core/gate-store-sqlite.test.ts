@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GateStore, type GateState } from "../../src/server/agent/gate-store.js";
+import { GateStore, type GateSignal, type GateState } from "../../src/server/agent/gate-store.js";
 import { ProjectContext } from "../../src/server/agent/project-context.js";
 import { recoverPreMigrationData } from "../../src/server/agent/state-migration.js";
 import type { Workflow } from "../../src/server/agent/workflow-store.js";
@@ -29,6 +29,18 @@ function openStore(stateDir: string): GateStore {
 function gate(goalId: string, gateId: string, status: GateState["status"] = "pending"): GateState {
 	return { goalId, gateId, status, signals: [], updatedAt: 1 };
 }
+
+const lifecycleWorkflow: Workflow = {
+	id: "gate-store-lifecycle",
+	name: "GateStore lifecycle",
+	description: "",
+	createdAt: 1,
+	updatedAt: 1,
+	gates: [
+		{ id: "root", name: "Root", dependsOn: [] },
+		{ id: "child", name: "Child", dependsOn: ["root"] },
+	],
+};
 
 function representativeGate(goalId: string, gateId: string): GateState {
 	return {
@@ -460,6 +472,155 @@ describe("GateStore SQLite persistence", () => {
 
 		store.updateGateMetadata("goal-1", "child", { fixed: "true" });
 		await store.flush();
+	});
+
+	it("fences every mutation before side effects once close begins and retains an accepted SQLite signal", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.initGatesForGoal("goal-close-fence", ["root", "child"]);
+		store.updateGateStatus("goal-close-fence", "root", "passed");
+		store.updateGateStatus("goal-close-fence", "child", "passed");
+		await store.flush();
+
+		let observerCalls = 0;
+		store.onStatusChange = () => { observerCalls++; };
+		const acceptedSignal: GateSignal = {
+			id: "accepted-before-close",
+			goalId: "goal-close-fence",
+			gateId: "root",
+			sessionId: "session-close-fence",
+			timestamp: 123,
+			commitSha: "abc123",
+			verification: { status: "running", steps: [] },
+		};
+		store.recordSignal(acceptedSignal);
+		const acceptedSnapshot = structuredClone(store.getGatesForGoal("goal-close-fence"));
+		const closing = store.close();
+		expect(store.close()).toBe(closing);
+
+		const syncMutations = [
+			() => store.initGatesForGoal("goal-close-fence", ["late"]),
+			() => store.reconcileGatesForGoal("goal-close-fence", ["root"]),
+			() => store.recordSignal({ ...acceptedSignal, id: "late-signal" }),
+			() => store.bypassGate("goal-close-fence", "root", { whyBypassed: "late", whoAmI: "tester" }),
+			() => store.updateGateStatus("goal-close-fence", "root", "failed"),
+			() => store.updateGateContent("goal-close-fence", "root", "late", 2),
+			() => store.updateGateMetadata("goal-close-fence", "root", { late: "true" }),
+			() => store.updateSignalVerification("accepted-before-close", { status: "passed", steps: [] }),
+			() => store.cascadeReset("goal-close-fence", "root", lifecycleWorkflow),
+			() => store.removeGoalGates("goal-close-fence"),
+		];
+		for (const mutate of syncMutations) expect(mutate).toThrow(/GateStore is closing or closed/);
+		await expect(store.resetGateAndDependents("goal-close-fence", "root", lifecycleWorkflow)).rejects.toThrow(/GateStore is closing or closed/);
+		await expect(store.resetGateAndDependentsStrict("goal-close-fence", "root", lifecycleWorkflow)).rejects.toThrow(/GateStore is closing or closed/);
+		await expect(store.resetGateAndDependentsInMemory("goal-close-fence", "root", lifecycleWorkflow)).rejects.toThrow(/GateStore is closing or closed/);
+
+		expect(store.getGatesForGoal("goal-close-fence")).toEqual(acceptedSnapshot);
+		expect(observerCalls).toBe(1);
+		await closing;
+		stores.splice(stores.indexOf(store), 1);
+
+		const reloaded = openStore(stateDir);
+		const byGateId = (left: GateState, right: GateState) => left.gateId.localeCompare(right.gateId);
+		expect(reloaded.getGatesForGoal("goal-close-fence").sort(byGateId)).toEqual([...acceptedSnapshot].sort(byGateId));
+	});
+
+	it("lets an accepted strict memfs reset cross close and reach the final durable snapshot", async () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-close-strict-success");
+		memfs.mkdirSync(stateDir, { recursive: true });
+		const store = new GateStore(stateDir, memfs, { persistence: "json" });
+		store.initGatesForGoal("goal-1", ["root", "child"]);
+		store.updateGateStatus("goal-1", "root", "passed");
+		store.updateGateStatus("goal-1", "child", "passed");
+		await store.flush();
+
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		let releaseRename!: () => void;
+		let markRenameStarted!: () => void;
+		const renameStarted = new Promise<void>(resolve => { markRenameStarted = resolve; });
+		const renameReleased = new Promise<void>(resolve => { releaseRename = resolve; });
+		let holdOnce = true;
+		(memfs.promises as any).rename = async (from: string, to: string) => {
+			if (holdOnce && String(to).endsWith("gates.json")) {
+				holdOnce = false;
+				markRenameStarted();
+				await renameReleased;
+			}
+			return originalRename(from, to);
+		};
+		let observerCalls = 0;
+		store.onStatusChange = () => { observerCalls++; };
+
+		const reset = store.resetGateAndDependentsStrict("goal-1", "root", lifecycleWorkflow);
+		expect(store.getGate("goal-1", "root")?.status).toBe("pending");
+		await renameStarted;
+		const closing = store.close();
+		expect(() => store.updateGateStatus("goal-1", "root", "failed")).toThrow(/GateStore is closing or closed/);
+		releaseRename();
+		await reset;
+		await closing;
+		expect(observerCalls).toBe(2);
+
+		(memfs.promises as any).rename = originalRename;
+		const reloaded = new GateStore(stateDir, memfs, { persistence: "json" });
+		expect(reloaded.getGate("goal-1", "root")?.status).toBe("pending");
+		expect(reloaded.getGate("goal-1", "child")?.status).toBe("pending");
+		await reloaded.close();
+	});
+
+	it("compensates an accepted strict memfs reset when its close-time publication fails", async () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-close-strict-failure");
+		memfs.mkdirSync(stateDir, { recursive: true });
+		const store = new GateStore(stateDir, memfs, { persistence: "json" });
+		store.initGatesForGoal("goal-1", ["root", "child"]);
+		store.updateGateStatus("goal-1", "root", "passed");
+		store.updateGateStatus("goal-1", "child", "passed");
+		await store.flush();
+
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		let releaseRename!: () => void;
+		let markRenameStarted!: () => void;
+		const renameStarted = new Promise<void>(resolve => { markRenameStarted = resolve; });
+		const renameReleased = new Promise<void>(resolve => { releaseRename = resolve; });
+		(memfs.promises as any).rename = async (_from: string, to: string) => {
+			if (String(to).endsWith("gates.json")) {
+				markRenameStarted();
+				await renameReleased;
+				throw new Error("injected close-time strict failure");
+			}
+			return originalRename(_from, to);
+		};
+		let observerCalls = 0;
+		store.onStatusChange = () => { observerCalls++; };
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const reset = store.resetGateAndDependentsStrict("goal-1", "root", lifecycleWorkflow);
+		await renameStarted;
+		const closing = store.close();
+		expect(() => store.recordSignal({
+			id: "late",
+			goalId: "goal-1",
+			gateId: "root",
+			sessionId: "late",
+			timestamp: 1,
+			commitSha: "",
+			verification: { status: "running", steps: [] },
+		})).toThrow(/GateStore is closing or closed/);
+		releaseRename();
+		await expect(reset).rejects.toThrow(/injected close-time strict failure/);
+		await expect(closing).rejects.toThrow(/injected close-time strict failure/);
+		expect(store.getGate("goal-1", "root")?.status).toBe("passed");
+		expect(store.getGate("goal-1", "child")?.status).toBe("passed");
+		expect(observerCalls).toBe(0);
+		errorSpy.mockRestore();
+
+		(memfs.promises as any).rename = originalRename;
+		const reloaded = new GateStore(stateDir, memfs, { persistence: "json" });
+		expect(reloaded.getGate("goal-1", "root")?.status).toBe("passed");
+		expect(reloaded.getGate("goal-1", "child")?.status).toBe("passed");
+		await reloaded.close();
 	});
 
 	it("retries a transient final flush failure and restores the exact mutation after restart", async () => {
