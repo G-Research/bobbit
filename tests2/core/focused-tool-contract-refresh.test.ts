@@ -5,16 +5,25 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, it } from "vitest";
 
+import agentExtension from "../../defaults/tools/agent/extension.ts";
+import bobbitExtension from "../../defaults/tools/bobbit/extension.ts";
+import { registerRpcBridgeFactory } from "../../src/server/agent/rpc-bridge.ts";
+import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { initPromptDirs } from "../../src/server/agent/system-prompt.ts";
 import { ToolManager, __resetToolScanCache } from "../../src/server/agent/tool-manager.ts";
+import { readAgentTranscript, TranscriptReaderError } from "../../src/server/agent/transcript-reader.ts";
+import { generateToolResultErrorBridgeExtension } from "../../src/server/agent/tool-result-error-bridge-extension.ts";
 import { loadBobbitTools } from "./helpers/bobbit-harness.ts";
 import { guardProcessEnv } from "./helpers/env-guard.ts";
 
 guardProcessEnv();
 
 const roots: string[] = [];
+const managers: any[] = [];
 
 // Exact PR #1016 shipped snapshot, compressed to keep this focused fixture small.
 // Production recognizes its canonical seven-file byte manifest, not this encoding.
@@ -328,7 +337,12 @@ function restoreDirectoryTimes(dir: string, stat: fs.Stats): void {
 }
 
 afterEach(() => {
+	registerRpcBridgeFactory(null);
 	__resetToolScanCache();
+	for (const manager of managers.splice(0)) {
+		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
+		manager.sessions?.clear?.();
+	}
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -381,21 +395,162 @@ describe("focused tool contract refresh", () => {
 		assert.doesNotMatch(refreshedDocs, /verbose/);
 	});
 
-	it("falls back from exact historical Agent snapshots in every config scope", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "focused-agent-snapshot-"));
+	it("restores one persisted session with matching prompt, registered schemas, and focused reads", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "focused-agent-runtime-"));
 		roots.push(root);
+		const stateDir = path.join(root, "state");
+		const configDir = path.join(root, "config");
+		process.env.BOBBIT_DIR = root;
+		process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
+		process.env.BOBBIT_SECRETS_DIR = path.join(root, "secrets");
+		fs.mkdirSync(process.env.BOBBIT_SECRETS_DIR, { recursive: true });
+		fs.writeFileSync(path.join(process.env.BOBBIT_SECRETS_DIR, "token"), "a".repeat(64));
 		const builtinToolsDir = path.resolve("defaults", "tools");
+		const historicalAgentDir = path.join(configDir, "tools", "agent");
+		writeHistoricalAgentSnapshot(historicalAgentDir);
+		initPromptDirs(stateDir);
 
-		for (const scope of ["headquarters", "project"]) {
-			const configDir = path.join(root, scope, "config");
-			writeHistoricalAgentSnapshot(path.join(configDir, "tools", "agent"));
-			const manager = new ToolManager(configDir, builtinToolsDir);
+		const toolManager = new ToolManager(configDir, builtinToolsDir);
+		const warmedDocs = toolManager.getToolDocsForPrompt(["bobbit_read", "read_session"]);
+		assert.match(warmedDocs, /bobbit_read\(operation/);
+		assert.match(warmedDocs, /read_session\(operation, session_id/);
+		assert.doesNotMatch(warmedDocs, /verbose|include_tool_results/);
+		assert.equal(path.resolve(toolManager.getToolGroupBaseDir("agent")), builtinToolsDir);
 
-			assert.equal(path.resolve(manager.getToolGroupBaseDir("agent")), builtinToolsDir);
-			assert.deepEqual(manager.getToolByName("read_session")?.params?.slice(0, 2), ["operation", "session_id"]);
-			assert.equal(manager.getToolByName("read_session")?.params?.includes("verbose?"), false);
-			assert.equal(manager.getLocalTools().some((tool) => tool.name === "read_session"), false);
-		}
+		const transcript = [
+			{ role: "assistant", content: [
+				{ type: "toolCall", id: "p0", name: "read", arguments: { path: "first" } },
+				{ type: "toolCall", id: "p1", name: "read", arguments: { path: "second" } },
+			] },
+			{ role: "user", content: [
+				{ type: "tool_result", tool_use_id: "p0", content: "FIRST_MUST_NOT_LEAK", is_error: false },
+				{ type: "tool_result", tool_use_id: "p1", content: "0123456789SECOND_ONLY_AND_MORE", is_error: false },
+			] },
+		].map((message) => JSON.stringify({ type: "message", message })).join("\n") + "\n";
+		const agentSessionFile = path.join(root, "agent", "sessions", "focused-runtime.jsonl");
+		fs.mkdirSync(path.dirname(agentSessionFile), { recursive: true });
+		fs.writeFileSync(agentSessionFile, transcript);
+
+		const registered = new Map<string, any>();
+		let spawnedOptions: any;
+		const sessionStartHandlers: Array<() => unknown> = [];
+		const pi: any = {
+			on(event: string, handler: () => unknown) { if (event === "session_start") sessionStartHandlers.push(handler); },
+			registerTool(spec: any) { registered.set(spec.name, spec); },
+			getAllTools() { return [...registered.values()]; },
+		};
+		pi.tool = (spec: any) => pi.registerTool(spec);
+		pi.tools = { register: (spec: any) => pi.registerTool(spec) };
+		const bridgeSource = generateToolResultErrorBridgeExtension()
+			.replace("export default function(pi)", "return function(pi)");
+		const validationBridge = new Function(bridgeSource)() as (runtime: any) => void;
+
+		registerRpcBridgeFactory((options: any) => {
+			spawnedOptions = options;
+			return {
+				async start() {
+					const extensions = (options.args ?? []).flatMap((arg: string, index: number, args: string[]) => arg === "--extension" ? [args[index + 1]] : []);
+					assert.ok(extensions.includes(toolManager.getExtensionPath("bobbit", "extension.ts")));
+					assert.ok(extensions.includes(toolManager.getExtensionPath("agent", "extension.ts")));
+					assert.equal(extensions.includes(path.join(historicalAgentDir, "extension.ts")), false);
+					validationBridge(pi);
+					bobbitExtension(pi);
+					agentExtension(pi);
+					for (const handler of sessionStartHandlers) await handler();
+				},
+				async stop() {},
+				onEvent() { return () => {}; },
+				async sendCommand() { return { success: true }; },
+			};
+		});
+
+		const ps: any = {
+			id: "focused-runtime-session",
+			title: "Focused runtime",
+			cwd: root,
+			agentSessionFile,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			projectId: "focused-runtime-project",
+			allowedTools: ["bobbit_read", "read_session"],
+			sandboxed: false,
+		};
+		const store = {
+			get: () => ps,
+			getLive: () => [ps],
+			update: (_id: string, patch: Record<string, unknown>) => Object.assign(ps, patch),
+			put() {}, archive() {},
+		};
+		const manager: any = new SessionManager({ toolManager, stateDir });
+		managers.push(manager);
+		manager._testStore = store;
+		manager.resolveCurrentCatalogSpawnModel = async () => undefined;
+		manager.resolveCurrentCatalogThinkingLevel = async () => undefined;
+		manager.tryAutoSelectModel = async () => {};
+		manager.tryApplyDefaultThinkingLevel = async () => {};
+		manager.ensureMcpManagerForContext = async () => {};
+		await manager.restoreOneSession(ps);
+
+		const restored = manager.getSession(ps.id);
+		assert.ok(restored, "persisted session must reattach");
+		assert.equal(restored.id, ps.id);
+		assert.ok(spawnedOptions.systemPromptPath);
+		const prompt = fs.readFileSync(spawnedOptions.systemPromptPath, "utf8");
+		assert.match(prompt, /bobbit_read\(operation/);
+		assert.match(prompt, /read_session\(operation, session_id/);
+		assert.doesNotMatch(prompt, /verbose|include_tool_results/);
+
+		const bobbitTool = registered.get("bobbit_read");
+		const readSession = registered.get("read_session");
+		assert.ok(bobbitTool?.parameters && readSession?.parameters);
+		const providerSchemas = JSON.parse(JSON.stringify({ bobbit_read: bobbitTool.parameters, read_session: readSession.parameters }));
+		assert.equal(JSON.stringify(providerSchemas).includes("verbose"), false);
+		assert.equal(providerSchemas.bobbit_read.additionalProperties, false);
+		assert.ok(providerSchemas.read_session.anyOf.every((branch: any) => branch.additionalProperties === false));
+		const validate = (tool: any, args: Record<string, unknown>) => validateToolArguments(tool, {
+			type: "toolCall", id: "validate", name: tool.name, arguments: args,
+		});
+		assert.deepEqual(validate(readSession, { operation: "list", session_id: ps.id }), { operation: "list", session_id: ps.id });
+		assert.deepEqual(validate(readSession, { operation: "inspect", session_id: ps.id, message_index: 1 }), { operation: "inspect", session_id: ps.id, message_index: 1 });
+		assert.throws(() => validate(readSession, { operation: "list", session_id: ps.id, message_index: 1 }));
+		assert.throws(() => validate(bobbitTool, { operation: "health", verbose: true }), /Unrecognized field: verbose/);
+
+		process.env.BOBBIT_GATEWAY_URL = "https://focused-runtime.invalid";
+		process.env.BOBBIT_TOKEN = "focused-runtime-token";
+		process.env.BOBBIT_SESSION_ID = ps.id;
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			const url = new URL(String(input));
+			const operation = url.searchParams.get("operation");
+			try {
+				const envelope = await readAgentTranscript(operation === "list" ? {
+					operation: "list",
+					offset: Number(url.searchParams.get("offset") ?? 0),
+					limit: Number(url.searchParams.get("limit") ?? 20),
+				} : {
+					operation: "inspect",
+					messageIndex: Number(url.searchParams.get("message_index")),
+					resultIndex: url.searchParams.has("result_index") ? Number(url.searchParams.get("result_index")) : undefined,
+					offset: url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : undefined,
+					limit: url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined,
+				}, { readContent: async () => transcript });
+				return new Response(JSON.stringify(envelope), { status: 200, headers: { "Content-Type": "application/json" } });
+			} catch (error) {
+				const code = error instanceof TranscriptReaderError ? error.code : "transcript_unavailable";
+				return new Response(JSON.stringify({ error: code }), { status: 400, headers: { "Content-Type": "application/json" } });
+			}
+		}) as typeof fetch;
+
+		const invoke = async (params: Record<string, unknown>) => JSON.parse((await readSession.execute("call", params)).content[0].text);
+		const list = await invoke({ operation: "list", session_id: ps.id });
+		assert.deepEqual(list.messages.map((message: any) => message.index), [0, 1]);
+		assert.equal(list.messages[0].toolUses[0].name, "read");
+		assert.doesNotMatch(JSON.stringify(list), /FIRST_MUST_NOT_LEAK|SECOND_ONLY/);
+		const inspected = await invoke({ operation: "inspect", session_id: ps.id, message_index: 1 });
+		assert.equal(inspected.message.index, 1);
+		assert.equal(inspected.messages, undefined);
+		const exact = await invoke({ operation: "inspect", session_id: ps.id, message_index: 1, result_index: 1, offset: 10, limit: 6 });
+		assert.deepEqual({ excerpt: exact.result.excerpt, returned: exact.result.returned, nextOffset: exact.result.nextOffset }, { excerpt: "SECOND", returned: 6, nextOffset: 16 });
+		assert.doesNotMatch(JSON.stringify(exact), /FIRST_MUST_NOT_LEAK/);
 	});
 
 	it("preserves any customized historical Agent tree as the winning override", () => {
