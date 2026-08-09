@@ -364,11 +364,10 @@ async function handleHashChange(): Promise<void> {
 				revealSidebarTargetForRoute(route);
 				return;
 			}
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
+			// Keep the outgoing session connection owned until connectToSession runs.
+			// Its synchronous select phase transfers the exact panel/agent pair into
+			// the session cache; disconnecting here would drop live background events
+			// emitted after the route switch but before the user returns.
 			state.goalDashboardId = null;
 			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 			if (checkRes.ok) {
