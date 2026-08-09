@@ -2104,7 +2104,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
 		allowReason: "test-owned temporary agent models.json fixture used to verify byte preservation",
 		reads: frozen([
-			{ expression: "path.join(agentDir, \"models.json\")", count: 3 },
+			{ expression: "path.join(agentDir, \"models.json\")", count: 7 },
 		]),
 	},
 	{

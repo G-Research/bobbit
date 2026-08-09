@@ -72,10 +72,12 @@ function writeRetainedCatalog(
 	configuredUrl: string,
 	providerUrl = configuredUrl,
 	jsonc = false,
+	managed = true,
 ): void {
 	const strict = JSON.stringify({
 		providers: {
 			aigw: {
+				...(managed ? { "x-bobbit-managed": { kind: "aigw-publication", version: 1 } } : {}),
 				baseUrl: providerUrl,
 				apiKey: "none",
 				api: "openai-completions",
@@ -252,6 +254,119 @@ describe("AIGW retained catalog on discovery failure", () => {
 				undefined,
 				"a successful empty AIGW catalog must remove the previously retained row",
 			);
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("uses an unmarked user AIGW target realm instead of reachable discovery at every spawn boundary", async () => {
+		const gateway = await startGateway();
+		gateway.setMode("success");
+		try {
+			const prefs = new PreferencesStore(path.join(agentDir, "unmarked-state"));
+			prefs.set("aigw.url", gateway.url);
+			writeRetainedCatalog(agentDir, gateway.url, gateway.url, true, false);
+			const userSource = fs.readFileSync(path.join(agentDir, "models.json"), "utf-8")
+				.replace(RETAINED_ID, "user-only")
+				.replace("Retained GPT 5.4", "User target model");
+			fs.writeFileSync(path.join(agentDir, "models.json"), userSource);
+
+			const models = await getAvailableModels(prefs);
+			assert.equal(fs.readFileSync(path.join(agentDir, "models.json"), "utf-8"), userSource);
+			assert.equal(findSessionSelectableModel(models, "aigw", "openai/replacement-model"), undefined);
+			const userModel = findSessionSelectableModel(models, "aigw", "user-only");
+			assert.ok(userModel, "the exact row Pi composes from the unmarked provider must remain selectable");
+			assert.equal(userModel.contextWindow, 1_000_000);
+			assert.equal(userModel.reasoning, true);
+			assert.deepEqual(userModel.input, ["text", "image"]);
+			assert.deepEqual(resolveModelStateMeta("aigw", "user-only"), {
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				reasoning: true,
+				thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+				input: ["text", "image"],
+				source: "cache",
+			});
+			assert.equal(clampThinkingLevelForModel("max", "aigw", "user-only"), "max");
+
+			let bridgeConstructions = 0;
+			registerRpcBridgeFactory(() => {
+				bridgeConstructions += 1;
+				return { running: false, start: vi.fn(async () => {}), stop: vi.fn(async () => {}) } as any;
+			});
+			const manager: any = new SessionManager({
+				preferencesStore: prefs,
+				stateDir: path.join(agentDir, "unmarked-manager-state"),
+			});
+			managers.push(manager);
+
+			await assert.rejects(
+				manager.finalizeSpawnOptions({
+					cwd: agentDir,
+					initialModel: "aigw/openai/replacement-model",
+					initialThinkingLevel: "high",
+					args: [],
+				}, { model: "aigw/openai/replacement-model", thinkingLevel: "high" }),
+				/not currently available for session selection/i,
+			);
+			assert.equal(bridgeConstructions, 0, "normal finalization must reject before RpcBridge construction");
+
+			const transcript = path.join(agentDir, "unmarked-restore.jsonl");
+			fs.writeFileSync(transcript, `${JSON.stringify({ type: "session", version: 3, id: "unmarked-restore-rejection" })}\n`);
+			const persisted = {
+				id: "unmarked-restore-rejection",
+				title: "Unmarked target restore",
+				cwd: agentDir,
+				projectId: "project-unmarked",
+				agentSessionFile: transcript,
+				createdAt: Date.now() - 1000,
+				lastActivity: Date.now(),
+				messageQueue: [],
+				wasStreaming: false,
+				modelProvider: "aigw",
+				modelId: "openai/replacement-model",
+				effectiveThinkingLevel: "high",
+			};
+			const store = { get: vi.fn(() => persisted), update: vi.fn(), archive: vi.fn() };
+			manager._testStore = store;
+			const ordinaryRestore = vi.spyOn(manager, "_restoreSessionCoalesced").mockResolvedValue(undefined);
+			await manager.restoreOneSession(persisted);
+			assert.equal(ordinaryRestore.mock.calls.length, 0);
+			assert.deepEqual(manager.getSession(persisted.id)?.condition, {
+				code: "MODEL_SELECTION_REQUIRED",
+				provider: "aigw",
+				modelId: "openai/replacement-model",
+			});
+			assert.equal(
+				bridgeConstructions,
+				1,
+				"restore may create only its inert dormant placeholder, never a selected Pi bridge",
+			);
+
+			await assert.rejects(
+				manager.finalizeSpawnOptions({
+					cwd: agentDir,
+					initialModel: "aigw/openai/replacement-model",
+					initialThinkingLevel: "high",
+					args: [],
+					sandboxed: true,
+					containerId: "unmarked-sandbox",
+				}, { model: "aigw/openai/replacement-model", thinkingLevel: "high" }),
+				/not currently available for session selection/i,
+			);
+			assert.equal(bridgeConstructions, 1, "sandbox rejection must not construct another RpcBridge");
+			assert.equal(fs.readFileSync(path.join(agentDir, "models.json"), "utf-8"), userSource);
+
+			for (const invalidSource of [
+				`{ "providers": {}, "providers": { "aigw": { "models": [] } } }`,
+				`{ "providers": { "aigw": { "models": [ } } }`,
+			]) {
+				fs.writeFileSync(path.join(agentDir, "models.json"), invalidSource);
+				invalidateModelCache();
+				const rejected = await getAvailableModels(prefs);
+				assert.equal(findSessionSelectableModel(rejected, "aigw", "openai/replacement-model"), undefined);
+				assert.equal(fs.readFileSync(path.join(agentDir, "models.json"), "utf-8"), invalidSource);
+			}
 		} finally {
 			await gateway.close();
 		}

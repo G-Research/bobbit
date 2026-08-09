@@ -1,4 +1,4 @@
-import { applyEdits, findNodeAtLocation, getNodeValue, modify, parseTree, type Node as JsoncNode, type ParseError } from "jsonc-parser";
+import { applyEdits, findNodeAtLocation, getNodeValue, modify, parse, parseTree, type Node as JsoncNode, type ParseError } from "jsonc-parser";
 
 export const AIGW_MANAGED_MARKER = {
 	kind: "aigw-publication",
@@ -54,6 +54,13 @@ interface AigwPathState {
 	aigw?: JsoncNode;
 }
 
+/** Read-only ownership view of the AIGW provider Pi will load. */
+export type AigwTargetRealm =
+	| { kind: "absent" }
+	| { kind: "managed"; provider: Record<string, unknown> }
+	| { kind: "unmarked-user"; provider: Record<string, unknown> }
+	| { kind: "invalid"; reason: string };
+
 function inspectAigwPath(source: string): AigwPathState {
 	const root = parseDocument(source);
 	const providerProperties = objectProperties(root, "providers");
@@ -81,7 +88,7 @@ function isManagedAigw(aigw: JsoncNode | undefined): boolean {
 	return value?.kind === AIGW_MANAGED_MARKER.kind && value?.version === AIGW_MANAGED_MARKER.version;
 }
 
-function assertManagedFieldsUnambiguous(aigw: JsoncNode): void {
+function assertAigwFieldsUnambiguous(aigw: JsoncNode): void {
 	for (const name of ["baseUrl", "apiKey", "api", "headers", "models", "x-bobbit-managed"]) {
 		if (objectProperties(aigw, name).length > 1) {
 			throw new AigwModelsJsonOwnershipError(
@@ -93,6 +100,37 @@ function assertManagedFieldsUnambiguous(aigw: JsoncNode): void {
 
 function setValue(source: string, path: (string | number)[], value: unknown, formatting: FormattingOptions): string {
 	return applyEdits(source, modify(source, path, value, { formattingOptions: formatting }));
+}
+
+/**
+ * Classify the exact AIGW target realm without changing or normalizing its bytes.
+ * Malformed and duplicate provider paths are unavailable rather than being
+ * replaced with live discovery metadata that Pi will not load.
+ */
+export function inspectAigwTargetRealm(source: string | undefined): AigwTargetRealm {
+	if (source === undefined) return { kind: "absent" };
+	try {
+		const state = inspectAigwPath(source);
+		if (!state.aigw) return { kind: "absent" };
+		if (state.aigw.type !== "object") {
+			return { kind: "invalid", reason: "models.json providers.aigw is not an object" };
+		}
+		assertAigwFieldsUnambiguous(state.aigw);
+		// Reparse only after the tree-level ambiguity checks so returned nested
+		// metadata uses ordinary objects without accepting duplicate target paths.
+		const provider = (parse(source, [], {
+			allowTrailingComma: true,
+			disallowComments: false,
+		}) as Record<string, any>).providers.aigw as Record<string, unknown>;
+		return isManagedAigw(state.aigw)
+			? { kind: "managed", provider }
+			: { kind: "unmarked-user", provider };
+	} catch (error) {
+		return {
+			kind: "invalid",
+			reason: error instanceof Error ? error.message : String(error),
+		};
+	}
 }
 
 /**
@@ -113,7 +151,7 @@ export function publishManagedAigwProvider(source: string | undefined, generated
 			"models.json already contains an unmarked providers.aigw block; it is user-owned and was not changed",
 		);
 	}
-	assertManagedFieldsUnambiguous(state.aigw);
+	assertAigwFieldsUnambiguous(state.aigw);
 
 	// Only Bobbit-managed fields are refreshed. Unknown fields and comments in
 	// the marked provider remain byte-for-byte where jsonc-parser leaves them.
@@ -139,7 +177,7 @@ export function removeManagedAigwProvider(source: string): { text: string; remov
 	const formatting = formattingFor(source);
 	const state = inspectAigwPath(source);
 	if (!state.aigw || !isManagedAigw(state.aigw)) return { text: source, removed: false };
-	assertManagedFieldsUnambiguous(state.aigw);
+	assertAigwFieldsUnambiguous(state.aigw);
 	return {
 		text: setValue(source, ["providers", "aigw"], undefined, formatting),
 		removed: true,

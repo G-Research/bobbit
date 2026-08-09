@@ -13,15 +13,16 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
-import { parse as parseJsonc, parseTree, type Node as JsoncNode, type ParseError } from "jsonc-parser";
 // Pi also exposes provider-scoped `Models` with async catalog refresh/auth.
 // Bobbit intentionally stays on these synchronous static-catalog reads: its own
 // registry composes that snapshot with AI Gateway and local-provider discovery,
 // while credential refresh remains owned by the spawned coding-agent runtime.
 import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import { discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
+import { inspectAigwTargetRealm, type AigwTargetRealm } from "./aigw-models-json.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
@@ -240,88 +241,72 @@ function comparableAigwUrl(value: unknown): string | undefined {
 	}
 }
 
-function objectProperties(node: JsoncNode | undefined, name: string): JsoncNode[] {
-	if (node?.type !== "object") return [];
-	return (node.children ?? []).filter((property) =>
-		property.type === "property" && property.children?.[0]?.value === name,
-	);
-}
-
-function uniquePropertyValue(node: JsoncNode | undefined, name: string): JsoncNode | undefined {
-	const properties = objectProperties(node, name);
-	return properties.length === 1 ? properties[0]?.children?.[1] : undefined;
-}
-
-interface RetainedAigwModels {
-	/** A matching, unambiguous persisted source exists; an empty model list is authoritative. */
+interface ComposedAigwModels {
+	/** A structurally valid target source exists; an empty model list is authoritative. */
 	available: boolean;
 	models: ApiModel[];
 }
 
-/** Read valid JSONC without normalizing or writing any user-owned bytes. */
-function readRetainedAigwModels(configuredUrl: string): RetainedAigwModels {
+/**
+ * Load the exact model rows Pi composes from the active models.json. This keeps
+ * defaults, overrides, compatibility merging, and duplicate-ID behavior owned
+ * by Pi rather than reproducing another metadata composer in Bobbit.
+ */
+async function composeAigwTargetModels(
+	provider: Record<string, unknown>,
+	preservePublishedProvenance = false,
+): Promise<ComposedAigwModels> {
 	try {
-		const source = fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8");
-		const errors: ParseError[] = [];
-		const root = parseTree(source, errors, { allowTrailingComma: true, disallowComments: false });
-		if (!root || root.type !== "object" || errors.length > 0) return { available: false, models: [] };
-
-		const providersNode = uniquePropertyValue(root, "providers");
-		if (!providersNode || providersNode.type !== "object") return { available: false, models: [] };
-		const aigwNode = uniquePropertyValue(providersNode, "aigw");
-		if (!aigwNode || aigwNode.type !== "object") return { available: false, models: [] };
-
-		// `getNodeValue` intentionally creates null-prototype objects. Parse again
-		// after the tree ambiguity check so exposed metadata retains ordinary JSON
-		// object semantics while the source bytes remain untouched.
-		const provider = (parseJsonc(source, [], {
-			allowTrailingComma: true,
-			disallowComments: false,
-		}) as Record<string, any>).providers.aigw as Record<string, any>;
-		const activeUrl = comparableAigwUrl(configuredUrl);
-		const retainedUrl = comparableAigwUrl(provider.baseUrl);
-		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) {
-			return { available: false, models: [] };
+		const runtime = await ModelRuntime.create({
+			modelsPath: path.join(globalAgentDir(), "models.json"),
+			authPath: globalAuthPath(),
+			allowModelNetwork: false,
+		});
+		if (runtime.getError()) return { available: false, models: [] };
+		const published = new Map<string, string>();
+		if (preservePublishedProvenance && Array.isArray(provider.models)) {
+			for (const definition of provider.models) {
+				if (
+					definition && typeof definition === "object"
+					&& typeof (definition as any).id === "string"
+					&& typeof (definition as any).upstreamProvider === "string"
+				) published.set((definition as any).id, (definition as any).upstreamProvider);
+			}
 		}
-
-		const models: ApiModel[] = [];
-		for (const model of provider.models) {
-			if (
-				!model
-				|| typeof model.id !== "string" || !model.id
-				|| typeof model.name !== "string" || !model.name
-				|| typeof (model.api ?? provider.api) !== "string"
-				|| typeof (model.baseUrl ?? provider.baseUrl) !== "string"
-				|| typeof model.contextWindow !== "number"
-				|| typeof model.maxTokens !== "number"
-				|| typeof model.reasoning !== "boolean"
-				|| !Array.isArray(model.input) || model.input.length === 0
-				|| model.input.some((item: unknown) => item !== "text" && item !== "image")
-				|| !model.cost || typeof model.cost !== "object"
-			) return { available: false, models: [] };
-
-			models.push({
-				id: model.id,
-				name: model.name,
-				provider: "aigw",
-				...(typeof model.upstreamProvider === "string" ? { upstreamProvider: model.upstreamProvider } : {}),
-				api: model.api ?? provider.api,
-				baseUrl: model.baseUrl ?? provider.baseUrl,
-				contextWindow: model.contextWindow,
-				maxTokens: model.maxTokens,
-				reasoning: model.reasoning,
-				...(model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
-				input: model.input,
-				cost: model.cost,
-				...(model.headers && typeof model.headers === "object" ? { headers: model.headers } : {}),
-				...(model.compat && typeof model.compat === "object" ? { compat: model.compat } : {}),
-				authenticated: true,
+		const models = runtime.getModels()
+			.filter((model) => model.provider === "aigw")
+			.map((model) => {
+				const row = { ...model, authenticated: true } as ApiModel;
+				if (row.headers === undefined) delete row.headers;
+				const upstreamProvider = published.get(row.id);
+				if (upstreamProvider) row.upstreamProvider = upstreamProvider;
+				return row;
 			});
-		}
 		return { available: true, models };
 	} catch {
 		return { available: false, models: [] };
 	}
+}
+
+/** Read and classify models.json without normalizing or writing user-owned bytes. */
+function readAigwTargetRealm(): AigwTargetRealm {
+	try {
+		const modelsPath = path.join(globalAgentDir(), "models.json");
+		const source = fs.existsSync(modelsPath) ? fs.readFileSync(modelsPath, "utf-8") : undefined;
+		return inspectAigwTargetRealm(source);
+	} catch (error) {
+		return { kind: "invalid", reason: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function readManagedRetainedAigwModels(
+	configuredUrl: string,
+	realm: Extract<AigwTargetRealm, { kind: "managed" }>,
+): Promise<ComposedAigwModels> {
+	const activeUrl = comparableAigwUrl(configuredUrl);
+	const retainedUrl = comparableAigwUrl(realm.provider.baseUrl);
+	if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl) return { available: false, models: [] };
+	return composeAigwTargetModels(realm.provider, true);
 }
 
 interface AssembledModelCatalog {
@@ -391,44 +376,60 @@ async function assembleModels(
 		}
 	}
 
-	// 2. AI Gateway models (if configured)
+	// 2. AI Gateway models (if configured). Selection reflects the provider Pi
+	// will actually load: an unmarked user block is authoritative over discovery,
+	// while malformed/ambiguous target configuration fails closed.
 	if (aigwUrl) {
 		const sourceKey = `aigw:${comparableAigwUrl(aigwUrl) ?? aigwUrl}`;
+		const targetRealm = readAigwTargetRealm();
 		let sourceModels: ApiModel[] | undefined;
-		try {
-			const aigwModels = await discoverAigwModels(aigwUrl);
+		if (targetRealm.kind === "unmarked-user") {
+			const composed = await composeAigwTargetModels(targetRealm.provider);
+			sourceModels = composed.available ? composed.models : [];
+		} else if (targetRealm.kind === "invalid") {
+			console.error(`[model-registry] AIGW target realm is unavailable: ${targetRealm.reason}`);
 			sourceModels = [];
-			for (const m of aigwModels) {
-				if (!m.baseUrl || !m.cost) {
-					console.error(`[model-registry] Omitting incomplete AIGW metadata for ${m.id}`);
-					continue;
+		} else {
+			try {
+				const aigwModels = await discoverAigwModels(aigwUrl);
+				sourceModels = [];
+				for (const m of aigwModels) {
+					if (!m.baseUrl || !m.cost) {
+						console.error(`[model-registry] Omitting incomplete AIGW metadata for ${m.id}`);
+						continue;
+					}
+					sourceModels.push({
+						id: m.wireId ?? m.id,
+						name: m.name,
+						provider: "aigw",
+						...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
+						api: m.api,
+						baseUrl: m.baseUrl,
+						contextWindow: m.contextWindow,
+						maxTokens: m.maxTokens,
+						reasoning: m.reasoning,
+						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+						input: m.input,
+						cost: m.cost,
+						...(m.compat ? { compat: m.compat } : {}),
+						authenticated: true,
+					});
 				}
-				sourceModels.push({
-					id: m.wireId ?? m.id,
-					name: m.name,
-					provider: "aigw",
-					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-					api: m.api,
-					baseUrl: m.baseUrl,
-					contextWindow: m.contextWindow,
-					maxTokens: m.maxTokens,
-					reasoning: m.reasoning,
-					...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
-					input: m.input,
-					cost: m.cost,
-					...(m.compat ? { compat: m.compat } : {}),
-					authenticated: true,
-				});
+			} catch (err) {
+				console.error("[model-registry] Failed to discover AI Gateway models:", err);
+				// Only Bobbit's marked publication can backstop its discovery source.
+				// An absent target keeps the prior exact discovery snapshot; user-owned
+				// targets were handled above and can never be bypassed by that cache.
+				const retained = targetRealm.kind === "managed"
+					? await readManagedRetainedAigwModels(aigwUrl, targetRealm)
+					: { available: false, models: [] };
+				sourceModels = retained.available ? retained.models : previousDynamicModels.get(sourceKey);
 			}
-		} catch (err) {
-			console.error("[model-registry] Failed to discover AI Gateway models:", err);
-			// A matching persisted catalog is the first failure fallback. If none is
-			// usable, retain only the exact rows cached for this unchanged gateway.
-			const retained = readRetainedAigwModels(aigwUrl);
-			sourceModels = retained.available ? retained.models : previousDynamicModels.get(sourceKey);
 		}
 		if (sourceModels) {
-			dynamicModels.set(sourceKey, sourceModels);
+			if (targetRealm.kind === "managed" || targetRealm.kind === "absent") {
+				dynamicModels.set(sourceKey, sourceModels);
+			}
 			results.push(...sourceModels);
 		}
 	}

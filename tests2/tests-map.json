@@ -959,7 +959,7 @@
     },
     {
       "path": "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
-      "reason": "Focused AIGW catalog regression proving transient discovery failures retain only matching persisted routing metadata while successful discovery omissions remain authoritative.",
+      "reason": "Focused AIGW target-realm regression proving unmarked user rows override reachable discovery and malformed realms fail closed while managed publication retains matching outage metadata.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
