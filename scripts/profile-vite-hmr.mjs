@@ -61,6 +61,15 @@ export function percentile(values, percentileValue) {
 	return sorted[index];
 }
 
+export function validateReport(report, maxP95Ms) {
+	if (report.overlappingTwoFileEdit?.delivered !== true) {
+		throw new Error("Overlapping two-file edit was not delivered");
+	}
+	if (maxP95Ms !== null && report.singleFileP95Ms > maxP95Ms) {
+		throw new Error(`Warm single-file p95 ${report.singleFileP95Ms} ms exceeded ${maxP95Ms} ms`);
+	}
+}
+
 export function usage() {
 	return `Usage: npm run profile:hmr -- [options]\n\nRuns a real bundled-development Vite server and Chromium against an isolated copy of Bobbit, then measures source-write to app-paint latency. The live dev server and working tree are not modified.\n\nOptions:\n  --iterations N       Warm single-file reload samples (default: ${DEFAULT_ITERATIONS})\n  --clients N          Connected browser pages contributing HMR clients (default: 1)\n  --exercise-lazy      Import representative lazy application routes before sampling\n  --port N             Isolated Vite port (default: ${DEFAULT_PORT})\n  --max-p95-ms N       Exit non-zero when warm single-file p95 exceeds N ms\n  --fixture-root PATH  Disposable fixture directory\n  --results-root PATH  JSON result directory\n  -h, --help           Show this help`;
 }
@@ -268,9 +277,7 @@ async function runProfile(options) {
 		console.log(`Result: ${path.relative(REPO_ROOT, reportPath)}`);
 		console.log(`Warm p50=${report.singleFileP50Ms} ms p95=${report.singleFileP95Ms} ms`);
 
-		if (options.maxP95Ms !== null && report.singleFileP95Ms > options.maxP95Ms) {
-			throw new Error(`Warm single-file p95 ${report.singleFileP95Ms} ms exceeded ${options.maxP95Ms} ms`);
-		}
+		validateReport(report, options.maxP95Ms);
 		return report;
 	} finally {
 		await browser?.close().catch(() => {});

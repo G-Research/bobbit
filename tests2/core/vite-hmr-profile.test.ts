@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
-import { parseArgs, percentile, usage } from "../../scripts/profile-vite-hmr.mjs";
+import { parseArgs, percentile, usage, validateReport } from "../../scripts/profile-vite-hmr.mjs";
 
 const profilerPath = fileURLToPath(new URL("../../scripts/profile-vite-hmr.mjs", import.meta.url));
 
@@ -23,6 +23,20 @@ describe("Vite HMR profiler", () => {
 		assert.equal(percentile([400, 100, 500, 200, 300], 0.5), 300);
 		assert.equal(percentile([400, 100, 500, 200, 300], 0.95), 500);
 		assert.equal(percentile([], 0.95), 0);
+	});
+
+	it("fails on dropped overlapping edits and optional latency budgets", () => {
+		const passing = {
+			overlappingTwoFileEdit: { delivered: true },
+			singleFileP95Ms: 800,
+		};
+		assert.doesNotThrow(() => validateReport(passing, null));
+		assert.doesNotThrow(() => validateReport(passing, 1000));
+		assert.throws(
+			() => validateReport({ ...passing, overlappingTwoFileEdit: { delivered: false } }, null),
+			/not delivered/,
+		);
+		assert.throws(() => validateReport(passing, 700), /exceeded/);
 	});
 
 	it("keeps profiling isolated from the working tree and live Vite server", () => {
