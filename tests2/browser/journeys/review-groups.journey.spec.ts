@@ -140,8 +140,22 @@ test.describe("Journey: grouped Markdown reviews", () => {
 			await expect(menu).toBeHidden();
 			await expect(overflowPane.locator("review-document").getByText("Overflow body 7.").first()).toBeVisible();
 
+			const overflowTabId = await overflowTab.getAttribute("data-panel-tab-id");
+			expect(overflowTabId, `${REGRESSION}: overflow primary needs a stable workspace identity`).toBeTruthy();
 			await page.setViewportSize({ width: 360, height: 740 });
 			await expectCloseInsideTab(overflowTab, "360px long-title tab");
+			const narrowOverflowPane = page.locator(`.side-panel-pane[data-panel-tab-id="${overflowTabId}"] review-pane`);
+			const narrowMore = narrowOverflowPane.locator('button[aria-haspopup="menu"], button[title="More tabs"], button[aria-label="More tabs"]').first();
+			await expect(narrowMore, `${REGRESSION}: constrained 360px file row must keep More tabs visible`).toBeVisible();
+			await narrowMore.click();
+			const narrowMenu = page.locator('[role="menu"]').filter({ hasText: "Section 6.md" }).first();
+			await expect(narrowMenu, `${REGRESSION}: constrained overflow menu must remain visible`).toBeVisible();
+			const narrowMenuRect = await narrowMenu.boundingBox();
+			expect(narrowMenuRect, `${REGRESSION}: constrained overflow menu needs measurable geometry`).not.toBeNull();
+			expect(narrowMenuRect!.x).toBeGreaterThanOrEqual(0);
+			expect(narrowMenuRect!.x + narrowMenuRect!.width).toBeLessThanOrEqual(360);
+			await narrowMenu.getByRole("menuitem", { name: "Section 6.md", exact: true }).click();
+			await expect(narrowOverflowPane.locator("review-document").getByText("Overflow body 6.").first()).toBeVisible();
 			await page.setViewportSize({ width: 1280, height: 800 });
 
 			const alphaTab = primaryReviewTab(page, "Alpha Review");
@@ -153,7 +167,7 @@ test.describe("Journey: grouped Markdown reviews", () => {
 			await addReviewAnnotation(sessionId, "overflow-file-7", "comment-section-7", "Overflow body 7.", "Fix section seven");
 			await page.reload();
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-			const reloadedPane = await expectReviewReady(page, longTitle, "Overflow body 7.");
+			const reloadedPane = await expectReviewReady(page, longTitle, "Overflow body 6.");
 			await reloadedPane.locator(".review-reject-btn").click();
 			const feedback = page.locator("user-message").filter({ hasText: "Fix section one" }).last();
 			await expect(feedback, `${REGRESSION}: rejecting must submit comments from every file`).toContainText("Fix section seven", { timeout: 15_000 });

@@ -6,7 +6,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	addAnnotation,
 	clearAllAnnotations,
+	clearReviewTombstone,
+	getDocumentAnnotationCount,
 } from "../../src/ui/components/review/AnnotationStore.js";
+import {
+	clearPersistedReviewDocuments,
+	hydrateVisibleReviewGroups,
+	openMarkdownReviewGroup,
+	persistReviewGroup,
+	readPersistedReviewGroups,
+} from "../../src/app/review-sources.js";
+import { applySidePanelWorkspaceFromServer } from "../../src/app/side-panel-workspace.js";
+import { doRenderApp } from "../../src/app/render.js";
+import { setRenderApp, state } from "../../src/app/state.js";
 import "../../src/ui/components/review/ReviewPane.js";
 
 const REGRESSION = "REVIEW_GROUP_PRIMARY_TAB";
@@ -87,6 +99,37 @@ async function settle(pane: DesiredReviewPane): Promise<void> {
 	await pane.updateComplete;
 }
 
+async function waitFor(assertion: () => void): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 50; attempt += 1) {
+		try {
+			assertion();
+			return;
+		} catch (error) {
+			lastError = error;
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+	}
+	throw lastError;
+}
+
+function reviewWorkspaceTab(review: DesiredReviewGroup) {
+	return {
+		id: `review:${encodeURIComponent(review.reviewId)}`,
+		kind: "review" as const,
+		title: `Review: ${review.title}`,
+		label: `Review: ${review.title}`,
+		source: {
+			type: "review" as const,
+			sessionId: review.source.sessionId,
+			reviewId: review.reviewId,
+			documentId: review.reviewId,
+			title: review.title,
+		},
+		updatedAt: 1,
+	};
+}
+
 beforeEach(() => {
 	vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", {
 		status: 200,
@@ -96,9 +139,24 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	setRenderApp(() => {});
 	document.body.innerHTML = "";
 	await Promise.all(Array.from(sessionsToClear, (sessionId) => clearAllAnnotations(sessionId)));
 	sessionsToClear.clear();
+	state.reviewGroupsBySession = {};
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
+	state.reviewDocuments = new Map();
+	state.reviewActiveTab = "";
+	state.reviewPanelOpen = false;
+	state.panelTabsBySession = {};
+	state.panelTabs = [];
+	state.sidePanelWorkspaceBySession = {};
+	state.panelWorkspaceActiveBySession = {};
+	state.activePanelTabId = "chat";
+	state.selectedSessionId = null;
+	state.remoteAgent = null;
+	state.chatPanel = null;
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
 });
@@ -284,6 +342,51 @@ describe("ReviewPane review groups", () => {
 		).toHaveLength(1);
 	});
 
+	it.each([2, 3, 4, 5])("uses measured constrained width to overflow %i long file titles", async (fileCount) => {
+		const review = group(`measured-${fileCount}`, fileCount);
+		review.files.forEach((file, index) => {
+			file.title = `Long descriptive file title ${index + 1}.markdown`;
+		});
+		const pane = await mountReview(review);
+		const bar = secondaryBar(pane)!;
+		bar.getBoundingClientRect = () => ({
+			x: 0,
+			y: 0,
+			width: 310,
+			height: 36,
+			top: 0,
+			right: 310,
+			bottom: 36,
+			left: 0,
+			toJSON: () => ({}),
+		});
+		pane.review = { ...review };
+		await settle(pane);
+		await Promise.resolve();
+		await settle(pane);
+
+		const trigger = overflowTrigger(pane);
+		expect(trigger, `${REGRESSION}: ${fileCount} long files must use measured width rather than the five-file fallback`).not.toBeNull();
+		expect(buttonsByText(bar, review.files[0]!.title)).toHaveLength(1);
+		expect(buttonsByText(bar, review.files[fileCount - 1]!.title)).toHaveLength(0);
+
+		let change: CustomEvent | undefined;
+		pane.addEventListener("review-file-change", (event) => { change = event as CustomEvent; });
+		trigger!.click();
+		await settle(pane);
+		const hiddenItem = controlledMenu(trigger!)?.querySelector<HTMLButtonElement>(
+			`[role="menuitem"][data-file-id="${review.files[fileCount - 1]!.fileId}"]`,
+		) ?? Array.from(controlledMenu(trigger!)?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') || [])
+			.find((item) => item.textContent?.trim() === review.files[fileCount - 1]!.title);
+		expect(hiddenItem, `${REGRESSION}: a measured-overflow file must remain selectable`).toBeDefined();
+		hiddenItem!.click();
+		await settle(pane);
+		expect(change?.detail).toEqual({
+			reviewId: review.reviewId,
+			fileId: review.files[fileCount - 1]!.fileId,
+		});
+	});
+
 	it("exposes an ARIA menu in the top layer and closes it after overflow navigation", async () => {
 		const review = group("overflow-nav", 7);
 		const pane = await mountReview(review);
@@ -319,6 +422,142 @@ describe("ReviewPane review groups", () => {
 		});
 		expect(trigger!.getAttribute("aria-expanded"), `${REGRESSION}: selecting a file must close overflow`).toBe("false");
 		expect(controlledMenu(trigger!), `${REGRESSION}: selected overflow menu must no longer be visible`).toBeNull();
+	});
+
+	it("closes an inactive primary review with its aggregate comments while preserving the selected sibling", async () => {
+		const sessionId = "session-primary-close";
+		const reviewA = group("primary-close-a", 2, sessionId);
+		const reviewB = group("primary-close-b", 2, sessionId);
+		sessionsToClear.add(sessionId);
+		(window as any).happyDOM?.setURL?.(`http://localhost/#/session/${sessionId}`);
+		document.body.innerHTML = '<div id="app"></div>';
+
+		state.appView = "authenticated";
+		state.connectionStatus = "connected";
+		state.gatewaySessions = [{
+			id: sessionId,
+			title: "Review close fixture",
+			cwd: "/fixture",
+			status: "idle",
+			createdAt: 1,
+			lastActivity: 1,
+			clientCount: 1,
+		} as any];
+		state.projects = [];
+		state.goals = [];
+		state.selectedSessionId = null;
+		state.remoteAgent = { gatewaySessionId: sessionId, state: {}, prompt: vi.fn() } as any;
+		state.chatPanel = document.createElement("div") as any;
+		state.reviewGroupsBySession = {};
+		persistReviewGroup(sessionId, reviewA as any);
+		persistReviewGroup(sessionId, reviewB as any);
+		state.selectedSessionId = sessionId;
+		hydrateVisibleReviewGroups(sessionId, [reviewA, reviewB] as any, reviewB.reviewId);
+		applySidePanelWorkspaceFromServer({
+			version: 1,
+			sessionId,
+			revision: 1,
+			tabs: [reviewWorkspaceTab(reviewA), reviewWorkspaceTab(reviewB)],
+			activeTabId: `review:${encodeURIComponent(reviewB.reviewId)}`,
+			sizeMode: "split",
+			updatedAt: 1,
+		}, { source: "hydrate", skipRender: true, force: true });
+
+		const authoritativeTabs = new Set([
+			`review:${encodeURIComponent(reviewA.reviewId)}`,
+			`review:${encodeURIComponent(reviewB.reviewId)}`,
+		]);
+		vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+			const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+			const match = url.pathname.match(/\/side-panel-workspace\/tabs\/([^/]+)$/);
+			if (method === "DELETE" && match) {
+				authoritativeTabs.delete(decodeURIComponent(match[1]!));
+				return new Response(null, { status: 204 });
+			}
+			if (method === "GET" && url.pathname.endsWith("/side-panel-workspace")) {
+				return Response.json({
+					version: 1,
+					sessionId,
+					revision: 2,
+					tabs: [reviewWorkspaceTab(reviewA), reviewWorkspaceTab(reviewB)].filter((tab) => authoritativeTabs.has(tab.id)),
+					activeTabId: `review:${encodeURIComponent(reviewA.reviewId)}`,
+					sizeMode: "split",
+					updatedAt: 2,
+				});
+			}
+			return method === "DELETE" ? new Response(null, { status: 204 }) : Response.json({});
+		}));
+		const confirmMock = vi.fn()
+			.mockReturnValueOnce(false)
+			.mockReturnValueOnce(true);
+		vi.stubGlobal("confirm", confirmMock);
+		await addAnnotation(sessionId, reviewB.files[1]!.fileId, {
+			id: "inactive-b-comment",
+			quote: "Body 2",
+			comment: "Keep B note",
+		});
+
+		setRenderApp(doRenderApp);
+		doRenderApp();
+		await waitFor(() => expect(document.querySelectorAll('[data-panel-tab-kind="review"]')).toHaveLength(2));
+		let pane = document.querySelector("review-pane") as DesiredReviewPane;
+		await pane.updateComplete;
+		const draft = pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")!;
+		draft.value = "Keep B final draft";
+		draft.dispatchEvent(new Event("input", { bubbles: true }));
+		await settle(pane);
+
+		const tab = (reviewId: string) => document.querySelector<HTMLElement>(
+			`[data-panel-tab-id="review:${encodeURIComponent(reviewId)}"]`,
+		)!;
+		tab(reviewA.reviewId).querySelector<HTMLButtonElement>(".goal-tab-select")!.click();
+		await waitFor(() => expect(state.reviewActiveReviewId).toBe(reviewA.reviewId));
+		tab(reviewB.reviewId).querySelector<HTMLButtonElement>("[data-testid='side-panel-close']")!.click();
+
+		expect(confirmMock).toHaveBeenCalledTimes(1);
+		expect(confirmMock.mock.calls[0]![0]).toContain('Close "Review primary-close-b"? 2 unsent comments');
+		expect(state.reviewActiveReviewId).toBe(reviewA.reviewId);
+		expect(state.reviewGroups.has(reviewA.reviewId)).toBe(true);
+		expect(state.reviewGroups.has(reviewB.reviewId)).toBe(true);
+		expect(readPersistedReviewGroups(sessionId).find((review) => review.reviewId === reviewB.reviewId)?.files).toHaveLength(2);
+		expect(getDocumentAnnotationCount(sessionId, reviewB.files[1]!.fileId)).toBe(1);
+
+		tab(reviewB.reviewId).querySelector<HTMLButtonElement>(".goal-tab-select")!.click();
+		await waitFor(() => expect(state.reviewActiveReviewId).toBe(reviewB.reviewId));
+		pane = document.querySelector("review-pane") as DesiredReviewPane;
+		await pane.updateComplete;
+		expect(pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")?.value).toBe("Keep B final draft");
+		tab(reviewA.reviewId).querySelector<HTMLButtonElement>(".goal-tab-select")!.click();
+		await waitFor(() => expect(state.reviewActiveReviewId).toBe(reviewA.reviewId));
+
+		tab(reviewB.reviewId).querySelector<HTMLButtonElement>("[data-testid='side-panel-close']")!.click();
+		await waitFor(() => {
+			expect(state.reviewGroups.has(reviewB.reviewId)).toBe(false);
+			expect(document.querySelector(`[data-panel-tab-id="review:${encodeURIComponent(reviewB.reviewId)}"]`)).toBeNull();
+		});
+		expect(confirmMock).toHaveBeenCalledTimes(2);
+		expect(state.reviewGroups.has(reviewA.reviewId)).toBe(true);
+		expect(state.reviewActiveReviewId).toBe(reviewA.reviewId);
+		expect(getDocumentAnnotationCount(sessionId, reviewB.files[1]!.fileId)).toBe(0);
+		expect(readPersistedReviewGroups(sessionId).map((review) => review.reviewId)).toEqual([reviewA.reviewId]);
+
+		openMarkdownReviewGroup({
+			sessionId,
+			reviewId: reviewB.reviewId,
+			title: reviewB.title,
+			files: reviewB.files,
+			live: true,
+		});
+		await waitFor(() => expect(state.reviewActiveReviewId).toBe(reviewB.reviewId));
+		pane = document.querySelector("review-pane") as DesiredReviewPane;
+		await pane.updateComplete;
+		expect(pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")?.value).toBe("");
+		expect(state.reviewGroups.has(reviewA.reviewId)).toBe(true);
+
+		setRenderApp(() => {});
+		clearPersistedReviewDocuments(sessionId);
+		await clearReviewTombstone(sessionId, reviewB.reviewId);
 	});
 
 	it("dismisses overflow on outside click and Escape, restoring trigger focus", async () => {
