@@ -1825,12 +1825,14 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 		}
 
 		let frame = baseFrame;
+		const needsBaseline = assistantStreamUpdate
+			&& client.assistantStreamDeltaCapable === true
+			&& client.assistantStreamDeltaNeedsBaseline === true;
 		if (assistantStreamUpdate && client.assistantStreamDeltaCapable === true) {
-			const needsBaseline = client.assistantStreamDeltaNeedsBaseline === true;
 			if (needsBaseline ? !baselineCompactComputed : !steadyCompactComputed) {
 				const compactStartedAt = performance.now();
 				const compact = needsBaseline
-					? compactAssistantStreamDelta(spliced)
+					? compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage, { selfContained: true })
 					: compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage);
 				compactMs += performance.now() - compactStartedAt;
 				const compactFrame = compact === spliced ? baseFrame : { ...baseFrame, data: compact };
@@ -1844,7 +1846,10 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 			}
 			frame = (needsBaseline ? baselineCompactFrame : steadyCompactFrame) ?? baseFrame;
 		}
-		if (assistantStreamUpdate) client.assistantStreamDeltaNeedsBaseline = false;
+		const satisfiesBaseline = needsBaseline
+			&& frame !== baseFrame
+			&& (frame.data as any)?.assistantStreamDelta === 1
+			&& !!(frame.data as any)?.assistantMessageBaseline;
 
 		let data = serializedFrames.get(frame);
 		if (data === undefined) {
@@ -1865,6 +1870,7 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 		});
 		const sendStartedAt = performance.now();
 		client.send(data);
+		if (satisfiesBaseline) client.assistantStreamDeltaNeedsBaseline = false;
 		sendMs += performance.now() - sendStartedAt;
 		recipients++;
 		bytes += Buffer.byteLength(data);
