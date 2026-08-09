@@ -2291,6 +2291,8 @@ export function installGatewayBridgeDeps(deps?: GatewayDeps) {
 }
 
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
+	let standaloneTaskStore: TaskStore | undefined;
+	try {
 	// Construction checkpoint timer — createGateway runs fully synchronously
 	// before start(), and earlier profiling showed ~19s of unattributed time
 	// here. Log cumulative elapsed at each major subsystem so the heavy step is
@@ -3506,7 +3508,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// first registered project's store is used when available, otherwise a server-
 	// scoped store is instantiated solely so construction doesn't require a project.
 	const firstCtxForInit = projectContextManager.all().next().value as import("./agent/project-context.js").ProjectContext | undefined;
-	const taskStore = firstCtxForInit ? firstCtxForInit.taskStore : new TaskStore(stateDir);
+	standaloneTaskStore = firstCtxForInit ? undefined : new TaskStore(stateDir);
+	const taskStore = firstCtxForInit?.taskStore ?? standaloneTaskStore!;
 	// OrchestrationCore (docs/design/orchestration-core.md) — the ONE goal-agnostic
 	// child-agent lifecycle implementation. Constructed near teamManager and wired
 	// back into sessionManager (boot index rebuild + restart reminder) and into
@@ -4876,6 +4879,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				shutdownEventLoopLagMonitor();
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 				await phase("session-manager", () => sessionManager.shutdown());
+				const ownedTaskStore = standaloneTaskStore;
+				if (ownedTaskStore) {
+					await phase("standalone-task-store", () => ownedTaskStore.close());
+				}
 				await phase("project-contexts", () => projectContextManager.closeAll());
 				if (sandboxManager) {
 					await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
@@ -4890,6 +4897,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 		},
 	};
+	} catch (error) {
+		standaloneTaskStore?.dispose();
+		throw error;
+	}
 }
 
 // isSetupComplete now lives in ./setup-status.ts (re-exported at top of file).
