@@ -238,6 +238,11 @@ export function packedConsumerInstallArgs(tarballPath) {
 	return ["install", "--ignore-scripts", tarballPath];
 }
 
+/** Enable lifecycle scripts only for the one native dependency after isolated install. */
+export function packedConsumerNativeRebuildArgs() {
+	return ["rebuild", "better-sqlite3", "--foreground-scripts"];
+}
+
 function requireSuccess(label, result) {
 	if (result.code === 0) return;
 	throw new Error(
@@ -378,7 +383,7 @@ function parsePackedTarball(stdout, packDir) {
 	return tarballPath;
 }
 
-async function performPackedConsumerAudit(tempRoot, npmRunner) {
+async function performPackedConsumerAudit(tempRoot, npmRunner, commandRunner) {
 	const packDir = join(tempRoot, "pack");
 	const consumerDir = join(tempRoot, "consumer");
 	await mkdir(packDir, { recursive: true });
@@ -424,6 +429,31 @@ async function performPackedConsumerAudit(tempRoot, npmRunner) {
 	requireSuccess("clean consumer install", installed);
 	await stat(join(consumerDir, "package-lock.json"));
 
+	console.log("[audit:packed-consumer] Installing the packaged SQLite native binding...");
+	const rebuiltNative = await npmRunner(packedConsumerNativeRebuildArgs(), {
+		cwd: consumerDir,
+		env: { ...restrictedNpmEnv, npm_config_ignore_scripts: "false" },
+		timeoutMs: 5 * 60_000,
+	});
+	requireSuccess("packed SQLite native rebuild", rebuiltNative);
+
+	console.log("[audit:packed-consumer] Loading the packaged SQLite native binding...");
+	const sqliteSmoke = await commandRunner(process.execPath, ["-e", `
+		const { createRequire } = require("node:module");
+		const fromBobbit = createRequire(require.resolve("@gresearch/bobbit/package.json"));
+		const Database = fromBobbit("better-sqlite3");
+		const db = new Database(":memory:");
+		db.exec("CREATE TABLE smoke(value TEXT NOT NULL)");
+		db.prepare("INSERT INTO smoke(value) VALUES (?)").run("ok");
+		if (db.prepare("SELECT value FROM smoke").get()?.value !== "ok") process.exit(2);
+		db.close();
+	`], {
+		cwd: consumerDir,
+		env: restrictedNpmEnv,
+		timeoutMs: 30_000,
+	});
+	requireSuccess("packed SQLite native binding smoke", sqliteSmoke);
+
 	console.log("[audit:packed-consumer] Querying the registry advisory service...");
 	const audited = await npmRunner(["audit", "--omit=dev", "--json"], {
 		cwd: consumerDir,
@@ -456,11 +486,11 @@ export function packedConsumerTempPrefix(env = process.env, tempDirectory = tmpd
 	return join(parent, "bobbit-release-packed-audit-");
 }
 
-export async function runPackedConsumerAudit({ npmRunner = runNpm } = {}) {
+export async function runPackedConsumerAudit({ npmRunner = runNpm, commandRunner = runCommand } = {}) {
 	const tempRoot = await mkdtemp(packedConsumerTempPrefix());
 	let operationError;
 	try {
-		await performPackedConsumerAudit(tempRoot, npmRunner);
+		await performPackedConsumerAudit(tempRoot, npmRunner, commandRunner);
 	} catch (error) {
 		operationError = error;
 	}

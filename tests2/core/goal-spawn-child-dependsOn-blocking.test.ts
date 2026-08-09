@@ -88,7 +88,7 @@ async function makeHarness(): Promise<Harness> {
 		},
 	]);
 	const goalManager = new GoalManager(goalStore, wf);
-	const gateStore = new GateStore(stateDir);
+	const gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
 	goalStore.update(parent.id, {

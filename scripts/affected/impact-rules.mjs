@@ -1419,8 +1419,8 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/release-skill-preflight-order.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
-			{ expression: "options.env.npm_config_userconfig", count: 1 },
-			{ expression: "options.env.npm_config_globalconfig", count: 1 },
+			{ expression: "options.env.npm_config_userconfig", count: 2 },
+			{ expression: "options.env.npm_config_globalconfig", count: 2 },
 		]),
 	},
 	{
