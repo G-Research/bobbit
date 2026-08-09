@@ -154,6 +154,162 @@ const nodeRequire = createRequire(import.meta.url);
 const GATE_SQLITE_SCHEMA_VERSION = 1;
 const GATE_SQLITE_FILE = "gates.sqlite";
 const GATE_SQLITE_DEBOUNCE_MS = 500;
+const GATE_MIGRATION_COMPLETE_KEY = "migration_complete";
+const GATE_RECOVERY_COMPLETE_KEY = "pre_migration_recovery_complete";
+const GATE_LEGACY_RETIREMENT_KEY = "pending_retirement:gates.json";
+const GATE_RECOVERY_RETIREMENT_KEY = "pending_retirement:gates.json.pre-migration";
+
+const GATE_STATUSES = new Set<GateStatus>(["pending", "passed", "failed", "bypassed"]);
+const SIGNAL_STATUSES = new Set(["running", "passed", "failed"]);
+const STEP_STATUSES = new Set(["waiting", "running", "passed", "failed", "timeout", "skipped"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalidGate(label: string, detail: string): never {
+	throw new Error(`[gate-store] Invalid ${label}: ${detail}`);
+}
+
+function validateStringRecord(value: unknown, label: string): void {
+	if (!isRecord(value) || Object.values(value).some(item => typeof item !== "string")) {
+		invalidGate(label, "must be an object with string values");
+	}
+}
+
+function validateDiagnosticLog(value: unknown, label: string): void {
+	if (!isRecord(value)
+		|| typeof value.path !== "string"
+		|| !Number.isFinite(value.bytes)
+		|| !Number.isFinite(value.lines)
+		|| (value.truncated !== undefined && typeof value.truncated !== "boolean")
+		|| (value.truncationReason !== undefined && typeof value.truncationReason !== "string")) {
+		invalidGate(label, "has an invalid retained-log shape");
+	}
+}
+
+function validateDiagnostics(value: unknown, label: string): void {
+	if (!isRecord(value)
+		|| value.type !== "retained-command-diagnostics"
+		|| typeof value.baseDir !== "string"
+		|| !Number.isFinite(value.createdAt)
+		|| (value.truncated !== undefined && typeof value.truncated !== "boolean")
+		|| (value.truncationReason !== undefined && typeof value.truncationReason !== "string")) {
+		invalidGate(label, "has an invalid retained-command-diagnostics shape");
+	}
+	if (value.stdout !== undefined) validateDiagnosticLog(value.stdout, `${label} stdout`);
+	if (value.stderr !== undefined) validateDiagnosticLog(value.stderr, `${label} stderr`);
+	if (value.artifacts !== undefined) {
+		if (!Array.isArray(value.artifacts)) invalidGate(label, "artifacts must be an array");
+		for (let index = 0; index < value.artifacts.length; index++) {
+			const artifact = value.artifacts[index];
+			if (!isRecord(artifact)
+				|| typeof artifact.path !== "string"
+				|| typeof artifact.relativePath !== "string"
+				|| typeof artifact.sourcePath !== "string"
+				|| !Number.isFinite(artifact.bytes)
+				|| (artifact.kind !== "test-results" && artifact.kind !== "playwright-report")
+				|| (artifact.content !== undefined && typeof artifact.content !== "string")
+				|| (artifact.contentType !== undefined && typeof artifact.contentType !== "string")) {
+				invalidGate(`${label} artifact at index ${index}`, "has an invalid artifact shape");
+			}
+		}
+	}
+}
+
+/** Validate known GateState fields without normalizing away historical extensions. */
+function validateGateState(value: unknown, label: string, expectedIdentity?: { goalId: string; gateId: string }): GateState {
+	if (!isRecord(value)) invalidGate(label, "must be an object");
+	if (typeof value.goalId !== "string" || value.goalId.length === 0) invalidGate(label, "goalId must be a non-empty string");
+	if (typeof value.gateId !== "string" || value.gateId.length === 0) invalidGate(label, "gateId must be a non-empty string");
+	if (expectedIdentity && (value.goalId !== expectedIdentity.goalId || value.gateId !== expectedIdentity.gateId)) {
+		throw new Error(`[gate-store] SQLite row identity mismatch for ${expectedIdentity.goalId}/${expectedIdentity.gateId}`);
+	}
+	if (typeof value.status !== "string" || !GATE_STATUSES.has(value.status as GateStatus)) invalidGate(label, `unsupported status ${String(value.status)}`);
+	if (!Number.isFinite(value.updatedAt)) invalidGate(label, "updatedAt must be finite");
+	if (!Array.isArray(value.signals)) invalidGate(label, "signals must be an array");
+	if (value.currentContent !== undefined && typeof value.currentContent !== "string") invalidGate(label, "currentContent must be a string");
+	if (value.currentContentVersion !== undefined && !Number.isFinite(value.currentContentVersion)) invalidGate(label, "currentContentVersion must be finite");
+	if (value.currentMetadata !== undefined) validateStringRecord(value.currentMetadata, `${label} currentMetadata`);
+	if (value.verificationCacheInvalidatedAt !== undefined && !Number.isFinite(value.verificationCacheInvalidatedAt)) {
+		invalidGate(label, "verificationCacheInvalidatedAt must be finite");
+	}
+
+	for (let signalIndex = 0; signalIndex < value.signals.length; signalIndex++) {
+		const signal = value.signals[signalIndex];
+		const signalLabel = `${label} signal at index ${signalIndex}`;
+		if (!isRecord(signal)) invalidGate(signalLabel, "must be an object");
+		for (const field of ["id", "goalId", "gateId", "sessionId", "commitSha"] as const) {
+			if (typeof signal[field] !== "string") invalidGate(signalLabel, `${field} must be a string`);
+		}
+		if (signal.goalId !== value.goalId || signal.gateId !== value.gateId) invalidGate(signalLabel, "identity must match its gate");
+		if (!Number.isFinite(signal.timestamp)) invalidGate(signalLabel, "timestamp must be finite");
+		if (signal.metadata !== undefined) validateStringRecord(signal.metadata, `${signalLabel} metadata`);
+		if (signal.content !== undefined && typeof signal.content !== "string") invalidGate(signalLabel, "content must be a string");
+		if (signal.contentVersion !== undefined && !Number.isFinite(signal.contentVersion)) invalidGate(signalLabel, "contentVersion must be finite");
+		if (!isRecord(signal.verification)
+			|| typeof signal.verification.status !== "string"
+			|| !SIGNAL_STATUSES.has(signal.verification.status)
+			|| !Array.isArray(signal.verification.steps)) {
+			invalidGate(signalLabel, "verification must have a supported status and steps array");
+		}
+		for (let stepIndex = 0; stepIndex < signal.verification.steps.length; stepIndex++) {
+			const step = signal.verification.steps[stepIndex];
+			const stepLabel = `${signalLabel} verification step at index ${stepIndex}`;
+			if (!isRecord(step)) invalidGate(stepLabel, "must be an object");
+			// Step types have changed over time (for example remote-state and
+			// integration-test). Historical signal history remains valid as long as
+			// the persisted discriminator is a non-empty string.
+			if (typeof step.name !== "string" || typeof step.type !== "string" || step.type.length === 0) invalidGate(stepLabel, "name and type are required");
+			if (typeof step.passed !== "boolean" || typeof step.output !== "string" || !Number.isFinite(step.duration_ms)) {
+				invalidGate(stepLabel, "passed, output, and finite duration_ms are required");
+			}
+			if (step.skipped !== undefined && typeof step.skipped !== "boolean") invalidGate(stepLabel, "skipped must be boolean");
+			if (step.expect !== undefined && step.expect !== "success" && step.expect !== "failure") invalidGate(stepLabel, "expect is unsupported");
+			if (step.status !== undefined && (typeof step.status !== "string" || !STEP_STATUSES.has(step.status))) invalidGate(stepLabel, "status is unsupported");
+			if (step.phase !== undefined && !Number.isFinite(step.phase)) invalidGate(stepLabel, "phase must be finite");
+			if (step.artifact !== undefined) {
+				if (!isRecord(step.artifact) || typeof step.artifact.content !== "string" || typeof step.artifact.contentType !== "string") {
+					invalidGate(stepLabel, "artifact must contain string content and contentType");
+				}
+				if (step.artifact.metadata !== undefined) validateStringRecord(step.artifact.metadata, `${stepLabel} artifact metadata`);
+			}
+			if (step.diagnostics !== undefined) validateDiagnostics(step.diagnostics, `${stepLabel} diagnostics`);
+			if (step.timeout !== undefined) {
+				if (!isRecord(step.timeout) || !Number.isFinite(step.timeout.configuredSeconds) || !Number.isFinite(step.timeout.elapsedMs)) {
+					invalidGate(stepLabel, "timeout values must be finite");
+				}
+			}
+		}
+	}
+
+	try {
+		if (JSON.stringify(value) === undefined) invalidGate(label, "must be JSON serializable");
+	} catch (error) {
+		invalidGate(label, `must be JSON serializable: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	return value as unknown as GateState;
+}
+
+function parseGateArray(text: string, sourceLabel: string): GateState[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch (error) {
+		throw new Error(`[gate-store] Failed to parse ${sourceLabel}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!Array.isArray(parsed)) throw new Error(`[gate-store] ${sourceLabel} must contain an array`);
+	const seen = new Set<string>();
+	return parsed.map((value, index) => {
+		const gate = validateGateState(value, `${sourceLabel === "gates.json" ? "legacy gate" : "recovery gate"} at index ${index}`);
+		const key = compositeKey(gate.goalId, gate.gateId);
+		if (seen.has(key)) throw new Error(`[gate-store] Duplicate ${sourceLabel} gate ${gate.goalId}/${gate.gateId}`);
+		seen.add(key);
+		return gate;
+	});
+}
+
+type ValidatedGateRow = { goalId: string; gateId: string; payload: string; gate: GateState };
 
 class SqliteGatePersistence implements GatePersistence {
 	private readonly db: Database.Database;
@@ -224,66 +380,142 @@ class SqliteGatePersistence implements GatePersistence {
 			}
 		}
 
-		const marker = this.db.prepare("SELECT value FROM gate_store_meta WHERE key = 'migration_complete'").get() as { value: string } | undefined;
-		if (!marker) this.migrateLegacyOrInitialize();
-		else if (marker.value !== "1") throw new Error(`[gate-store] Invalid gates.sqlite migration marker ${marker.value}`);
+		const marker = this.getMeta(GATE_MIGRATION_COMPLETE_KEY);
+		if (marker === undefined) this.migrateLegacyOrInitialize();
+		else if (marker !== "1") throw new Error(`[gate-store] Invalid gates.sqlite migration marker ${marker}`);
+
+		// Validate authoritative state before touching either recovery source.
+		const rows = this.readValidatedRows();
+		this.retirePendingSources();
+		this.recoverPreMigration(rows);
+	}
+
+	private getMeta(key: string): string | undefined {
+		return (this.db.prepare("SELECT value FROM gate_store_meta WHERE key = ?").get(key) as { value: string } | undefined)?.value;
+	}
+
+	private setMeta(key: string, value: string): void {
+		this.db.prepare(`
+			INSERT INTO gate_store_meta(key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value
+		`).run(key, value);
+	}
+
+	private readValidatedRows(): ValidatedGateRow[] {
+		const rows: ValidatedGateRow[] = [];
+		const seen = new Set<string>();
+		for (const row of this.db.prepare("SELECT goal_id, gate_id, payload FROM gate_records ORDER BY goal_id, gate_id").iterate() as Iterable<{ goal_id: string; gate_id: string; payload: string }>) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(row.payload);
+			} catch (error) {
+				throw new Error(`[gate-store] Invalid SQLite payload for ${row.goal_id}/${row.gate_id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			const gate = validateGateState(parsed, `SQLite payload for ${row.goal_id}/${row.gate_id}`, { goalId: row.goal_id, gateId: row.gate_id });
+			const key = compositeKey(gate.goalId, gate.gateId);
+			if (seen.has(key)) throw new Error(`[gate-store] Duplicate SQLite composite identity ${gate.goalId}/${gate.gateId}`);
+			seen.add(key);
+			rows.push({ goalId: row.goal_id, gateId: row.gate_id, payload: row.payload, gate });
+		}
+		return rows;
+	}
+
+	private verifyRows(expected: Map<string, string>): void {
+		const actual = new Map(this.readValidatedRows().map(row => [compositeKey(row.goalId, row.gateId), row.payload]));
+		if (actual.size !== expected.size) {
+			throw new Error(`[gate-store] SQLite import verification count mismatch: expected ${expected.size}, got ${actual.size}`);
+		}
+		for (const [key, payload] of expected) {
+			if (actual.get(key) !== payload) throw new Error(`[gate-store] SQLite import verification failed for ${key}`);
+		}
+	}
+
+	private readSource(file: string, sourceLabel: string): GateState[] {
+		return parseGateArray(this.fs.readFileSync(file, "utf-8"), sourceLabel);
 	}
 
 	private migrateLegacyOrInitialize(): void {
 		const row = this.db.prepare("SELECT COUNT(*) AS count FROM gate_records").get() as { count: number };
 		if (row.count !== 0) throw new Error("[gate-store] gates.sqlite contains records without a completed migration marker");
 
-		let legacy: GateState[] = [];
+		const recoveryFile = `${this.legacyFile}.pre-migration`;
 		const hadLegacy = this.fs.existsSync(this.legacyFile);
-		if (hadLegacy) {
-			const parsed = JSON.parse(this.fs.readFileSync(this.legacyFile, "utf-8"));
-			if (!Array.isArray(parsed)) throw new Error("[gate-store] gates.json must contain an array");
-			const seen = new Set<string>();
-			legacy = parsed.map((gate, index) => {
-				if (typeof gate?.goalId !== "string" || gate.goalId.length === 0
-					|| typeof gate?.gateId !== "string" || gate.gateId.length === 0
-					|| !Array.isArray(gate.signals)) {
-					throw new Error(`[gate-store] Invalid legacy gate at index ${index}`);
-				}
-				const key = compositeKey(gate.goalId, gate.gateId);
-				if (seen.has(key)) throw new Error(`[gate-store] Duplicate legacy gate ${gate.goalId}/${gate.gateId}`);
-				seen.add(key);
-				return gate as GateState;
-			});
-		}
+		const hadRecovery = this.fs.existsSync(recoveryFile);
+		// Read and validate every source before the transaction or any retirement.
+		const recovery = hadRecovery ? this.readSource(recoveryFile, "gates.json.pre-migration") : [];
+		const legacy = hadLegacy ? this.readSource(this.legacyFile, "gates.json") : [];
+		const merged = new Map<string, GateState>();
+		for (const gate of recovery) merged.set(compositeKey(gate.goalId, gate.gateId), gate);
+		for (const gate of legacy) merged.set(compositeKey(gate.goalId, gate.gateId), gate);
+		const expected = new Map([...merged].map(([key, gate]) => [key, JSON.stringify(gate)]));
 
 		const insert = this.db.prepare("INSERT INTO gate_records(goal_id, gate_id, payload) VALUES (?, ?, ?)");
 		this.db.exec("BEGIN IMMEDIATE");
 		try {
-			for (const gate of legacy) insert.run(gate.goalId, gate.gateId, JSON.stringify(gate));
-			this.db.prepare("INSERT INTO gate_store_meta(key, value) VALUES ('migration_complete', '1')").run();
+			for (const gate of merged.values()) insert.run(gate.goalId, gate.gateId, JSON.stringify(gate));
+			this.verifyRows(expected);
+			this.setMeta(GATE_MIGRATION_COMPLETE_KEY, "1");
+			if (hadLegacy) this.setMeta(GATE_LEGACY_RETIREMENT_KEY, "1");
+			if (hadRecovery) {
+				this.setMeta(GATE_RECOVERY_COMPLETE_KEY, "1");
+				this.setMeta(GATE_RECOVERY_RETIREMENT_KEY, "1");
+			}
 			this.db.exec("COMMIT");
 		} catch (error) {
 			if (this.db.inTransaction) this.db.exec("ROLLBACK");
 			throw error;
 		}
-		if (hadLegacy) this.retireLegacyFile();
 	}
 
-	private retireLegacyFile(): void {
-		const preferred = `${this.legacyFile}.sqlite-retired`;
-		const target = this.fs.existsSync(preferred) ? `${preferred}-${Date.now()}` : preferred;
-		this.fs.renameSync(this.legacyFile, target);
+	private recoverPreMigration(existingRows: ValidatedGateRow[]): void {
+		const recoveryFile = `${this.legacyFile}.pre-migration`;
+		if (!this.fs.existsSync(recoveryFile) || this.getMeta(GATE_RECOVERY_COMPLETE_KEY) === "1") return;
+		const recovery = this.readSource(recoveryFile, "gates.json.pre-migration");
+		const expected = new Map(existingRows.map(row => [compositeKey(row.goalId, row.gateId), row.payload]));
+		for (const gate of recovery) {
+			const key = compositeKey(gate.goalId, gate.gateId);
+			if (!expected.has(key)) expected.set(key, JSON.stringify(gate));
+		}
+
+		const insert = this.db.prepare(`
+			INSERT INTO gate_records(goal_id, gate_id, payload) VALUES (?, ?, ?)
+			ON CONFLICT(goal_id, gate_id) DO NOTHING
+		`);
+		this.db.exec("BEGIN IMMEDIATE");
+		try {
+			for (const gate of recovery) insert.run(gate.goalId, gate.gateId, JSON.stringify(gate));
+			this.verifyRows(expected);
+			this.setMeta(GATE_RECOVERY_COMPLETE_KEY, "1");
+			this.setMeta(GATE_RECOVERY_RETIREMENT_KEY, "1");
+			this.db.exec("COMMIT");
+		} catch (error) {
+			if (this.db.inTransaction) this.db.exec("ROLLBACK");
+			throw error;
+		}
+		this.retirePendingSources();
+	}
+
+	private retirePendingSources(): void {
+		const pending = [
+			{ key: GATE_LEGACY_RETIREMENT_KEY, source: this.legacyFile, preferred: `${this.legacyFile}.sqlite-retired` },
+			{ key: GATE_RECOVERY_RETIREMENT_KEY, source: `${this.legacyFile}.pre-migration`, preferred: `${this.legacyFile}.pre-migration-recovered` },
+		];
+		for (const item of pending) {
+			const intent = this.getMeta(item.key);
+			if (intent === undefined) continue;
+			if (intent !== "1") throw new Error(`[gate-store] Invalid retirement intent ${item.key}=${intent}`);
+			if (this.fs.existsSync(item.source)) {
+				let target = item.preferred;
+				for (let suffix = 1; this.fs.existsSync(target); suffix++) target = `${item.preferred}.${suffix}`;
+				this.fs.renameSync(item.source, target);
+			}
+			this.db.prepare("DELETE FROM gate_store_meta WHERE key = ?").run(item.key);
+		}
 	}
 
 	loadInto(gates: Map<string, GateState>): void {
-		for (const row of this.db.prepare("SELECT goal_id, gate_id, payload FROM gate_records").iterate() as Iterable<{ goal_id: string; gate_id: string; payload: string }>) {
-			let gate: GateState;
-			try {
-				gate = JSON.parse(row.payload) as GateState;
-			} catch (error) {
-				throw new Error(`[gate-store] Invalid SQLite payload for ${row.goal_id}/${row.gate_id}: ${error instanceof Error ? error.message : String(error)}`);
-			}
-			if (gate.goalId !== row.goal_id || gate.gateId !== row.gate_id || !Array.isArray(gate.signals)) {
-				throw new Error(`[gate-store] SQLite row identity mismatch for ${row.goal_id}/${row.gate_id}`);
-			}
-			gates.set(compositeKey(gate.goalId, gate.gateId), gate);
-		}
+		const rows = this.readValidatedRows();
+		for (const row of rows) gates.set(compositeKey(row.gate.goalId, row.gate.gateId), row.gate);
 	}
 
 	schedule(keys: Iterable<string>): void {
@@ -440,7 +672,8 @@ export class GateStore {
 	onStatusChange?: (goalId: string, gateId: string) => void;
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, options: GateStoreOptions = {}) {
-		this.persistence = options.persistence === "json"
+		const persistence = options.persistence ?? (fsImpl === realFs ? "sqlite" : "json");
+		this.persistence = persistence === "json"
 			? new JsonGatePersistence(fsImpl, stateDir, this.gates)
 			: new SqliteGatePersistence(fsImpl, stateDir, this.gates);
 		try {

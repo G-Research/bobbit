@@ -195,7 +195,7 @@ On first startup after upgrading to per-project state, `migrateToPerProjectState
 2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
 3. Merges into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
 4. Staff agents without a `projectId` are anchored to the migration target project (`projectRegistry.getByPath(serverCwd)` if registered, else `projects[0]`). This is **migration-only** behavior - it runs once, is guarded by `.migrated-to-per-project`, and does not imply a runtime default. The block comment on `migrateToPerProjectState()` explains why this anchor is safe and why it must not be reused elsewhere.
-5. Renames central files with `.pre-migration` suffix (not deleted)
+5. Renames central files with `.pre-migration` suffix (not deleted). Gate recovery is then owned by each `GateStore`: it transactionally merges the backup into authoritative `gates.sqlite` and retires the source collision-safely, while the generic recovery pass handles the remaining JSON stores.
 6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
 
 The migration is idempotent and handles missing files gracefully (fresh installs have nothing to migrate). Any legacy central or per-project `search.db` is deleted on first startup under the new code - FlexSearch indexes rebuild automatically on first access (see [Semantic search](#semantic-search)).
@@ -3399,7 +3399,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `goals.json` | `GoalStore` | Goal definitions |
 | `sessions.json` | `SessionStore` | Session metadata |
 | `tasks.json` | `TaskStore` | Task state |
-| `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. First load imports and retires legacy `gates.json`. See [Gate store SQLite persistence prototype](design/gate-store-sqlite-persistence.md). |
+| `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then renames sources to non-destructive collision-safe backups. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` worker | Durable document mirror (`index/__docs__.json` + journal), compatibility metadata, and disposable derived cache. See [Semantic search](#semantic-search). |
