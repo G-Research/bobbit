@@ -2812,53 +2812,56 @@ Full reasoning and alternatives considered are in [docs/design/streaming-dedup-r
 
 ### Server side
 
-`EventBuffer` (`src/server/agent/event-buffer.ts`) stores `{seq, ts, event}` tuples in a 1000-entry ring. `push()` assigns the next `seq` and stamps `ts = Date.now()`. It exposes:
+`EventBuffer` (`src/server/agent/event-buffer.ts`) stores `{seq, ts, event}` entries under two default limits: 1,000 retained events and 2 MiB of estimated serialized UTF-8 data. It caches each retained entry's byte estimate in `retainedBytes`, exposes the configured `maxBytes`, and evicts only from the head until both limits hold. The byte limit matches the resume replay budget because retaining a larger tail would add heap pressure without making that tail replayable.
 
-- `since(fromSeq)` - entries with `seq > fromSeq` (the reconnect tail).
-- `canResumeFrom(fromSeq)` - false if `fromSeq` is older than the retained window (ring eviction).
-- `lastSeq` - highest assigned seq (used in `resume_gap` so the client can resync).
+`push()` always assigns the next monotonic `seq` and stamps `ts = Date.now()`, even when the entry cannot be retained. An event larger than `maxBytes`, an event that cannot be serialized, or a zero-capacity buffer clears retained history and records the assigned sequence as an explicit hole. `pushFrame()` likewise assigns a sequence without retaining the frame. These holes matter because a later retained event must not make an older cursor look safely replayable.
 
-All `{type:"event"}` broadcasts flow through a single helper `emitSessionEvent(session, event)` in `src/server/agent/session-manager.ts`. Callers pass an already-bounded event, and the helper pushes it into the buffer and broadcasts `{type:"event", data, seq, ts}` in lockstep. This replaces the previous pattern of paired `eventBuffer.push(...) + broadcast(...)` calls; the helper is the only place that can assign a seq, which keeps the stream strictly monotonic even across call sites.
+The resume API separates validation from retrieval:
 
-Other broadcast types (`session_status`, `session_title`, `messages`, `state`, `queue_update`, ...) do **not** carry `seq` - they are idempotent snapshots, not stream deltas, and the dup/reorder class of bug doesn't apply.
+- `canResumeFrom(fromSeq)` is true only when the buffer covers a contiguous suffix beginning at `fromSeq + 1`; count or byte eviction and any unretained sequence advance this safe floor.
+- `since(fromSeq)` returns retained entries with `seq > fromSeq`, but is only a retrieval helper. Callers must prove continuity with `canResumeFrom()` first.
+- `lastSeq` is the highest assigned sequence, including unretained entries, and is returned in `resume_gap` so the client can re-baseline after a snapshot.
+
+All `{type:"event"}` broadcasts flow through `emitSessionEvent(session, event)` in the session manager. Callers pass an already-bounded event, and the helper retains the original cumulative event while projecting either a compact live update to negotiated clients or a cumulative update to legacy clients. The durable Pi transcript, replay buffer, and snapshot paths remain cumulative and authoritative; compact frames are a live-only transport optimization. Other snapshot-like broadcasts (`session_status`, `session_title`, `messages`, `state`, `queue_update`, ...) do not use this retained event stream.
 
 ### Resume handshake
 
-The WS protocol (`src/server/ws/protocol.ts`) gains two message types:
+The WS protocol has two resume messages:
 
-- `{type:"resume", fromSeq}` - client → server, sent immediately after `auth_ok` on a reconnect when the client has a non-zero `_highestSeq`.
-- `{type:"resume_gap", lastSeq}` - server → client, sent when `canResumeFrom(fromSeq)` is false (the missed tail has already been evicted). The client resets its seq tracking to `lastSeq` and falls back to the `get_messages` snapshot path.
+- `{type:"resume", fromSeq}` asks the server for the missed retained tail.
+- `{type:"resume_gap", lastSeq}` requires the client to recover through the authoritative `get_messages` snapshot.
 
-`src/server/ws/handler.ts` handles `resume` by replaying `since(fromSeq)` as normal `{type:"event"}` frames (same seq/ts as the originals), then the session continues to broadcast live events as they arrive. Clients that never send `resume` (old clients, or first-time connections with `_highestSeq === 0`) get the existing cold-connect path - `getState()` + `get_messages` - which is backward-compatible.
+The handler calls `canResumeFrom(fromSeq)` before `since(fromSeq)`. It replays a proven contiguous suffix with the original sequence and timestamp, subject to the replay byte budget, drain wait, pacing, and socket-sendability checks. A count/byte eviction, an oversized or unserializable event, an unretained `pushFrame()` sequence, an over-budget tail, or a socket that cannot drain produces `resume_gap`, never a plausible partial replay with a hidden hole.
 
 ### Client side
 
-`RemoteAgent` in `src/app/remote-agent.ts` tracks `_highestSeq` and a small `_pendingEvents` array:
+`RemoteAgent` tracks `_highestSeq` and a bounded `_pendingEvents` array:
 
-- **Duplicate drop.** `seq <= _highestSeq` is silently discarded.
+- **Duplicate drop.** `seq <= _highestSeq` is discarded.
 - **In-order dispatch.** `seq === _highestSeq + 1` advances the watermark and dispatches the event.
-- **Out-of-order buffering.** Any higher seq is inserted into `_pendingEvents` (sorted by seq). After every ingest the drain loop pops entries whose seq is now contiguous and dispatches them. If `_pendingEvents` exceeds 500 entries the client abandons the gap and forces a snapshot refresh - a safety valve so a permanently-gapped client can't grow unbounded.
-- **Baseline adoption.** The first seq'd frame on a fresh connection adopts `seq - 1` as the baseline, so the initial state-snapshot path doesn't stall waiting for a non-existent seq 1.
-- **Reconnect.** On WS reopen, if `_highestSeq > 0`, the client sends `{type:"resume", fromSeq: _highestSeq}` **before** any other traffic. On `resume_gap` it resets `_highestSeq` to the server's `lastSeq` and falls back to `get_messages`.
+- **Out-of-order buffering.** A higher sequence waits in sorted order until the gap closes. If the pending array exceeds its bound, the client abandons the gap and requests a snapshot rather than growing indefinitely.
+- **Baseline adoption.** The first sequenced frame on a fresh client adopts `seq - 1` as its baseline, so initial snapshot hydration does not wait for old live frames.
+- **Reconnect ordering.** After `auth_ok`, the client first flushes queued `prompt`, `steer`, and `retry` frames in FIFO order. It removes an outbox entry only after `WebSocket.send()` accepts it; a close or thrown send leaves the failed current item and every unsent successor queued for the next replacement socket. Only after that flush does the client request sequence resume, or a snapshot when no resume cursor exists. `resume_gap` also falls back to `get_messages` and re-baselines at `lastSeq`.
 
-Seq-less frames (old servers) fall through the dispatch path unchanged - the reducer still runs and the pre-seq dedup heuristics (user messages by text, assistant messages by id) still apply. There is no hard dependency on seq at render time; `messages[]` remains the authoritative ordered list, and seq only governs the event→state reducer.
+This outbox-first order prevents recovered transcript traffic from overtaking user intent issued while disconnected. Seq-less frames from old servers still pass through the reducer, so legacy interoperability remains intact.
+
+See [WebSocket protocol — Cumulative assistant stream compaction](websocket-protocol.md#cumulative-assistant-stream-compaction) for compact-live reconstruction, cumulative replay, slow-client cutover, and the prohibition on semantic-delta replay chains and timer-based coalescing.
 
 ### Tests
 
-- `tests/event-buffer.test.ts` - seq monotonicity, eviction invariants, `since()` / `canResumeFrom()` / `lastSeq` semantics.
-- `tests/remote-agent-seq-dedup.spec.ts` (+ `tests/fixtures/remote-agent-seq-dedup.html`) - file:// fixture driving synthetic WS frames through the reducer: duplicate drop, out-of-order buffering, `resume` on reconnect, compat fallback for seq-less frames, full-buffer replay dedup.
-- `tests/e2e/ui/stories-streaming.spec.ts` - `ST-DEDUP-01` reproducing test: reconnect mid-stream must not duplicate or reorder events. Fails on master pre-fix, passes after.
-- `tests/e2e/ui/stories-resilience.spec.ts` - `RE-07` (reconnect catch-up) unchanged and still green; the new `resume` path is a strict superset of its coverage.
+- `tests2/core/event-buffer.test.ts` covers count/byte head eviction, retained-byte accounting, monotonic allocation, oversized events, `pushFrame()` holes, and the `canResumeFrom()`/`since()` boundary.
+- `tests2/dom/remote-agent-seq-dedup.test.ts`, `remote-agent-seq-overflow.test.ts`, and `remote-agent-sequence-hole.test.ts` cover duplicate suppression, ordering, resume, and bounded snapshot fallback.
+- `tests2/dom/remote-agent-outbox.test.ts` covers offline intent, FIFO flush, and preservation of the failed item plus unsent suffix across a reconnect race.
 
 ### Key files
 
 | File | Purpose |
 |---|---|
-| `src/server/agent/event-buffer.ts` | `{seq, ts, event}` ring buffer + `since()` / `canResumeFrom()` / `lastSeq` |
-| `src/server/agent/session-manager.ts` | `emitSessionEvent()` - single push+broadcast helper |
-| `src/server/ws/protocol.ts` | Additive `seq`/`ts` on `event`; new `resume` / `resume_gap` types |
-| `src/server/ws/handler.ts` | Handles `resume`, emits `resume_gap` on eviction |
-| `src/app/remote-agent.ts` | `_highestSeq`, `_pendingEvents`, reconnect `resume`, gap fallback |
+| `src/server/agent/event-buffer.ts` | Dual-bounded retained events, byte accounting, sequence holes, and contiguous-resume validation |
+| `src/server/agent/session-manager.ts` | Authoritative event retention and capable/legacy live projection |
+| `src/server/ws/protocol.ts` | Additive `seq`/`ts`, capability negotiation, and resume message types |
+| `src/server/ws/handler.ts` | Hole-aware, byte-bounded, paced resume or explicit `resume_gap` |
+| `src/app/remote-agent.ts` | Ordered event ingest, outbox-first reconnect, and snapshot fallback |
 
 ---
 

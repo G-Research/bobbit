@@ -66,6 +66,89 @@ Bobbit keeps normal streaming responsive by bounding payloads before they enter 
 
 Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` frames, serialized `bytes`, recipient kind, and context such as `goalId`. These fields are the first place to look when a reconnect storm follows verification or reviewer activity.
 
+## Cumulative assistant stream compaction
+
+Pi emits cumulative assistant `message_update` events: every text, thinking, or tool-argument fragment repeats the assistant message built so far. Sending and retaining each growing copy made WebSocket serialization, wire traffic, and replay memory grow with transcript length. Bobbit therefore compacts only the live projection for clients that explicitly negotiate it. The durable transcript and replay source remain cumulative and authoritative so an optimization failure cannot corrupt history.
+
+### Negotiation and compatibility
+
+An app client requests version 1 in its authentication frame:
+
+```json
+{
+  "type": "auth",
+  "token": "<token>",
+  "capabilities": { "assistantStreamDelta": 1 }
+}
+```
+
+The gateway echoes `capabilities.assistantStreamDelta: 1` in `auth_ok` only when it accepts that version. A negotiated session socket receives compact live updates for supported assistant text, thinking, and progressive tool-call JSON events. The compact event carries `assistantStreamDelta: 1` plus the semantic fragment and any baseline or block checkpoint required to reconstruct Pi's original cumulative shape exactly.
+
+Compatibility is fail-safe:
+
+- Clients that omit the capability continue to receive cumulative events.
+- Unsupported or non-convergent event shapes remain cumulative even on a capable socket.
+- A socket attaching during a stream receives a self-contained first compact update. This baseline is recipient-specific and is not shared with already-synchronized sockets.
+- Equivalent capable recipients share compact-frame construction and serialization. Legacy and baseline-needing recipients remain separate output classes.
+- Updates are emitted immediately. There is no process-global timer that coalesces, replaces, or defers `message_update` delivery.
+
+The client reconstructs the cumulative `message` and `assistantMessageEvent.partial` before normal reducer processing. It keeps reconstruction state only for the active assistant stream and clears it on an explicit client reset, snapshot application, reconstruction failure, `process_exit`, `agent_end`, and `message_end`. Normal socket teardown does not clear that state: reconnect may continue the same logical stream through cumulative replay. Progressive tool JSON is rebuilt from fragments while preserving the useful parseable prefix. A replacement socket independently starts its compact live projection with a self-contained baseline. If exact reconstruction cannot be proven, the client clears the invalid state, discards the compact frame, and reconnects; cumulative replay or a snapshot remains the authoritative recovery path.
+
+### Sources of truth and replay
+
+Compaction is deliberately not a storage format. The following contracts prevent live, replayed, and reloaded transcripts from drifting:
+
+- Durable Pi JSONL is unchanged and contains the complete original events.
+- `EventBuffer` retains the original cumulative event, never the compact client projection.
+- Snapshots and resume replay remain cumulative and authoritative. Proposals, permissions, compaction notices, verification cards, and event categories outside the supported assistant fragments continue through their existing state and pass-through paths.
+- Per-session sequence numbers stay monotonic even when retention evicts an event, rejects an oversized or unserializable event, or assigns a sequence to an intentionally unretained frame.
+
+The default `EventBuffer` is bounded by both 1,000 events and 2 MiB of estimated serialized UTF-8 data. Eviction is head-only. The 2 MiB retention budget matches the resume replay byte budget; retaining a larger tail would add heap pressure without making it replayable.
+
+A cursor is replayable only when the buffer covers a contiguous suffix beginning at `fromSeq + 1`. Count or byte eviction advances that safe window. Oversized events and unretained sequenced frames create explicit holes. A request that crosses any hole receives `resume_gap` and recovers from `get_messages`; the server never sends a plausible-looking partial suffix with missing history. Replay is paced and checks socket sendability before and during the loop.
+
+### Slow-client isolation and egress fencing
+
+A replaceable assistant update is not allowed to make a slow recipient degrade healthy recipients. When a socket's `bufferedAmount` reaches the 1 MiB soft cutover threshold at an assistant update, the gateway marks that socket as cut over before terminating it. The marker is the durable in-memory fence: all later authenticated send boundaries reject the socket even if transport termination throws or `readyState` temporarily remains open. This includes ordinary events, late snapshots, state, resume responses, and paced replay sends. Other sockets continue independently.
+
+This cutover is narrower than the general overflow guard documented above. The general guard still warns at 1 MiB and protects non-replaceable traffic with its 4 MiB overflow threshold; stream cutover avoids growing a replaceable cumulative-update queue to that point.
+
+After reconnect authentication, queued user-intent frames are flushed before resume or snapshot traffic. The outbox is FIFO and removes an entry only after the replacement socket accepts its send. If the socket closes or a send throws during the flush, the current entry and unsent suffix stay in order for the next reconnect, preventing a prompt or steer from disappearing during a race.
+
+### Diagnostics and lifecycle
+
+Detailed metrics remain opt-in through `BOBBIT_CPU_DIAG=1`; set `BOBBIT_CPU_DIAG_JSONL=<path>` for a JSONL artifact and `BOBBIT_CPU_DIAG_FLUSH_MS` to override the one-second default interval. Disabled diagnostics use no-op recorders.
+
+Stream broadcast diagnostics report retained buffer bytes, recipient/cutover counters, and the normalization, retention, compaction, serialization, and send phases separately. The always-on event-loop lag monitor records named operation breadcrumbs around these phases, making a warning attributable to work such as retention or broadcast rather than only to a delayed timer. Diagnostic labels and timing samples are bounded to prevent the observer from becoming a new unbounded workload.
+
+Each interval also reports GC count, major-GC count, cumulative duration, and maximum duration. Shutdown first drains queued GC observer records, then disconnects the observer and writes the final snapshot after earlier queued writes. This ordering avoids losing terminal GC data or retaining observer/process listeners across lifecycle teardown.
+
+### MVP evidence and qualification
+
+The measurements below apply to the qualified cumulative-replay MVP, not to a semantic-delta replay design:
+
+| Workload | Observation |
+|---|---|
+| Synthetic production shape: 35 sessions, 1,000 updates each, 32 KiB final text | Capable-client wire traffic fell 99.37%, retained replay data fell 93.76%, and median MVP processing time fell 27.22%. |
+| Same-sequence live A/B: 3,401 `message_update` frames | Legacy traffic was 24,049,444 bytes and compact traffic was 831,591 bytes, a 96.54% reduction. Reconstruction reported no failures or final-message hash mismatches. |
+| Workload-matched live windows | Delay-max p95 changed from 146.8 to 70.9 ms, CPU median from 15.5% to 8.5%, and heap p95 from 831.8 to 734.4 MiB. |
+
+The live-window comparison was not randomized and did not control host or client load; the worst single delay also did not improve. Treat those latency, CPU, and heap changes as indicative rather than causal. The same-sequence byte and reconstruction comparison is the stronger protocol-specific evidence.
+
+An exact PR candidate is qualified with:
+
+```bash
+npm run check
+npm run test:unit
+npm run test:browser
+npm run test:e2e
+git diff --check
+```
+
+Focused contract coverage exercises buffer eviction and resume floors, mixed capable/legacy recipients, mid-stream text/thinking/tool baselines, terminal convergence, reconstruction failure, post-cutover egress fencing, reconnect outbox FIFO, and GC observer cleanup. Any correction to these contracts requires a pinning regression test.
+
+Hold or roll back the candidate on transcript divergence, reconstruction loops, silent prompt loss, sequence stalls, reconnect storms, any send after slow-client cutover, or degradation of healthy clients. Do not respond by switching replay storage to semantic delta chains or by adding global timer-based update coalescing; either change requires a separate design and proof.
+
 ## Authenticated session work policy
 
 Live session sockets enforce `readOnly` and `nonInteractive` at the authenticated
@@ -144,7 +227,7 @@ lifecycle, validation, size, or replay rules.
 
 | Type | Fields | Description |
 |---|---|---|
-| `auth` | `token`, `goalId?` | Authenticate the connection. `goalId` is only used by `/ws/viewer` to subscribe immediately after auth. |
+| `auth` | `token`, `goalId?`, `capabilities?` | Authenticate the connection. `goalId` is only used by `/ws/viewer` to subscribe immediately after auth. Session clients may request `capabilities.assistantStreamDelta: 1`; see [Cumulative assistant stream compaction](#cumulative-assistant-stream-compaction). |
 | `subscribe_goal` | `goalId` | `/ws/viewer` only: add a goal subscription for goal-scoped broadcasts. |
 | `unsubscribe_goal` | `goalId` | `/ws/viewer` only: remove one goal subscription. |
 | `clear_goal_subscriptions` | — | `/ws/viewer` only: remove all goal subscriptions. |
@@ -325,7 +408,7 @@ semantics and the shared clamp order.
 
 | Type | Key Fields | Description |
 |---|---|---|
-| `auth_ok` | — | Authentication succeeded |
+| `auth_ok` | `capabilities?` | Authentication succeeded. Accepted optional capabilities are echoed with their negotiated version. |
 | `auth_failed` | — | Authentication failed |
 | `state` | `data` | Current agent state snapshot. `data.condition` may be `{ code: "MODEL_SELECTION_REQUIRED", provider: string, modelId: string }`; partial snapshots that omit it do not clear it, and the server sends explicit `condition: null` only after verified recovery. |
 | `messages` | `data` | Full message history array |

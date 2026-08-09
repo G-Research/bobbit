@@ -56,6 +56,7 @@ import {
 	SessionCommandQueueFullError,
 	SessionCommandSerialiser,
 } from "./session-command-serialiser.js";
+import { isSocketSendable } from "./socket-sendability.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -374,7 +375,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
 		const data = JSON.stringify(msg);
 		for (const client of clients) {
-			if (client.readyState === 1) {
+			if (isSocketSendable(client)) {
 				client.send(data);
 			}
 		}
@@ -390,7 +391,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	let skipped = 0;
 	for (const client of clients) {
 		scanned++;
-		if (client.readyState === 1) {
+		if (isSocketSendable(client)) {
 			client.send(data);
 			recipients++;
 		} else {
@@ -441,13 +442,20 @@ function replayManualRetryRequiredOnAttach(
 }
 
 function send(ws: WebSocket, msg: ServerMessage): void {
-	if (ws.readyState === 1) {
-		ws.send(JSON.stringify(msg));
+	if (!isSocketSendable(ws)) return;
+	ws.send(JSON.stringify(msg));
+	if (msg.type === "messages" && (ws as any).assistantStreamDeltaCapable === true) {
+		(ws as any).assistantStreamDeltaNeedsBaseline = true;
 	}
 }
 
 function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
-	if (ws.readyState !== 1) return Promise.reject(new Error("websocket is not open"));
+	if (!isSocketSendable(ws)) {
+		const reason = (ws as any).streamBackpressureCutover === true
+			? "websocket was cut over for stream backpressure"
+			: "websocket is not open";
+		return Promise.reject(new Error(reason));
+	}
 	return new Promise((resolve, reject) => {
 		ws.send(JSON.stringify(msg), (err) => {
 			if (err) reject(err);
@@ -830,6 +838,11 @@ export function handleWebSocketConnection(
 			(ws as any).authenticated = true;
 			(ws as PrincipalTaggedWebSocket).authPrincipal = authPrincipal;
 
+			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
+			const assistantStreamDeltaCapable = authMsg.capabilities?.assistantStreamDelta === 1;
+			(ws as any).assistantStreamDeltaCapable = assistantStreamDeltaCapable;
+			(ws as any).assistantStreamDeltaNeedsBaseline = assistantStreamDeltaCapable;
+
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
 				(ws as any).isViewer = true;
@@ -838,7 +851,7 @@ export function handleWebSocketConnection(
 				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
 					getViewerGoalIds(ws).add(initialGoalId);
 				}
-				send(ws, { type: "auth_ok" });
+				send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
 				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
@@ -851,7 +864,7 @@ export function handleWebSocketConnection(
 				if (archived) {
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
-					send(ws, { type: "auth_ok" });
+					send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
@@ -880,7 +893,6 @@ export function handleWebSocketConnection(
 			// security boundary against same-origin code that already has the bearer token.
 			// Authority is per app connection, not singleton per session, so multiple tabs
 			// can each mint scoped pack surface tokens without stealing lifecycle state.
-			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
 			if (authMsg.clientKind === "app") {
 				surfaceTokenAuthorityKey = randomUUID();
 			}
@@ -890,7 +902,11 @@ export function handleWebSocketConnection(
 			// session binding, surface-token resolution, and one-time content-bound permits
 			// are the authorization/provenance checks; the WS client kind is not a durable
 			// same-origin security boundary.
-			send(ws, { type: "auth_ok", ...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}) });
+			send(ws, {
+				type: "auth_ok",
+				...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}),
+				...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}),
+			});
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
@@ -915,7 +931,7 @@ export function handleWebSocketConnection(
 			const joinMsg: ServerMessage = { type: "client_joined", clientId };
 			const joinData = JSON.stringify(joinMsg);
 			for (const client of session.clients) {
-				if (client !== ws && client.readyState === 1) {
+				if (client !== ws && isSocketSendable(client)) {
 					client.send(joinData);
 				}
 			}
@@ -1710,7 +1726,9 @@ export function handleWebSocketConnection(
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
 					let replayed = 0;
+					let replayedBytes = 0;
 					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
+					if (!isSocketSendable(ws)) break;
 					const sendResumeGap = (_reason: string, bytes = 0) => {
 						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
 						if (diagEnabled) {
@@ -1742,16 +1760,19 @@ export function handleWebSocketConnection(
 						Date.now() + RESUME_REPLAY_DRAIN_TIMEOUT_MS,
 					);
 					if (!drained) {
+						if (!isSocketSendable(ws)) break;
 						sendResumeGap("backpressure", decision.bytes);
 						break;
 					}
 					const deadline = Date.now() + PACE_TIMEOUT_MS;
 					for (const frame of frames) {
-						await paceAndSend(ws as any, frame.data, deadline);
+						const sent = await paceAndSend(ws as any, frame.data, deadline);
+						if (!sent) break;
 						replayed++;
+						replayedBytes += frame.bytes;
 					}
 					if (diagEnabled) {
-						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: decision.bytes, replayed, sendMs: performance.now() - diagStart });
+						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: replayedBytes, replayed, sendMs: performance.now() - diagStart });
 					}
 					break;
 				}
@@ -2250,7 +2271,7 @@ export function handleWebSocketConnection(
 				const leaveMsg: ServerMessage = { type: "client_left", clientId };
 				const leaveData = JSON.stringify(leaveMsg);
 				for (const client of session.clients) {
-					if (client.readyState === 1) {
+					if (isSocketSendable(client)) {
 						client.send(leaveData);
 					}
 				}

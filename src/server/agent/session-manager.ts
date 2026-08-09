@@ -75,7 +75,7 @@ import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js"
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
 import { profile } from "./profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
@@ -95,6 +95,7 @@ import type { GrantPolicy, Role } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
+import { compactAssistantStreamDelta, reconstructAssistantStreamMessage } from "../../shared/assistant-stream-delta.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "../ws-overflow-guard.js";
 
 let sessionManagerModuleClock: Clock = realClock;
@@ -945,6 +946,8 @@ export interface SessionInfo {
 	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
 	 */
 	latestMessageUpdate?: { id?: string; message: any };
+	/** Previous reconstructed assistant stream message used to build compact live deltas. */
+	previousAssistantStreamMessage?: any;
 	/**
 	 * Memoized agent snapshot base (RPC response plus error normalization), keyed
 	 * by the event buffer's monotonic sequence. Mutable overlays and sidecars are
@@ -1562,7 +1565,18 @@ export function prepareVisibleAgentEvent(
  */
 const WS_BUFFER_OVERFLOW_BYTES = DEFAULT_OVERFLOW_GUARD.overflowBytes;
 const WS_BUFFER_WARN_BYTES = DEFAULT_OVERFLOW_GUARD.warnBytes;
+const WS_REPLACEABLE_MESSAGE_SOFT_CUTOVER_BYTES = 1024 * 1024;
 const _warnedClients = new WeakSet<WebSocket>();
+const _slowReplaceableClients = new WeakSet<WebSocket>();
+
+type AssistantStreamSocket = WebSocket & {
+	assistantStreamDeltaCapable?: boolean;
+	assistantStreamDeltaNeedsBaseline?: boolean;
+	streamBackpressureCutover?: boolean;
+	bufferedAmount?: number;
+	terminate?: () => void;
+	close?: () => void;
+};
 
 /**
  * Tracks clients for which a deferred-terminate re-check is in flight. When
@@ -1577,6 +1591,52 @@ const _warnedClients = new WeakSet<WebSocket>();
  * Decision logic lives in `src/server/ws-overflow-guard.ts` for testability.
  */
 const _pendingOverflowCheck = new WeakSet<WebSocket>();
+
+function isSlowReplaceableClient(client: WebSocket): boolean {
+	return _slowReplaceableClients.has(client);
+}
+
+function cutOverSlowReplaceableClient(client: AssistantStreamSocket): void {
+	if (isSlowReplaceableClient(client)) return;
+	_slowReplaceableClients.add(client);
+	client.streamBackpressureCutover = true;
+	try {
+		if (typeof client.terminate === "function") client.terminate();
+		else if (typeof client.close === "function") client.close();
+	} catch {
+		// Best-effort only. The weak-set fence still suppresses later sends.
+	}
+}
+
+function markAssistantStreamSnapshotSent(client: AssistantStreamSocket, msg: ServerMessage): void {
+	if (msg.type === "messages" && client.assistantStreamDeltaCapable === true) {
+		client.assistantStreamDeltaNeedsBaseline = true;
+	}
+}
+
+function isAssistantStreamMessageUpdate(event: unknown): event is {
+	type: "message_update";
+	message: Record<string, unknown>;
+	assistantMessageEvent: Record<string, unknown>;
+} {
+	return !!event
+		&& typeof event === "object"
+		&& (event as { type?: unknown }).type === "message_update"
+		&& !!(event as { message?: unknown }).message
+		&& typeof (event as { message?: unknown }).message === "object"
+		&& !Array.isArray((event as { message?: unknown }).message)
+		&& ((event as { message?: { role?: unknown } }).message?.role === "assistant")
+		&& !!(event as { assistantMessageEvent?: unknown }).assistantMessageEvent
+		&& typeof (event as { assistantMessageEvent?: unknown }).assistantMessageEvent === "object";
+}
+
+function isAssistantStreamTerminalBoundary(event: unknown): boolean {
+	return !!event
+		&& typeof event === "object"
+		&& (((event as { type?: unknown }).type === "message_end")
+			|| ((event as { type?: unknown }).type === "agent_end")
+			|| ((event as { type?: unknown }).type === "process_exit"));
+}
 
 /**
  * Build the `state.model` payload for a live model-state broadcast. Routes
@@ -1605,7 +1665,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 		const data = JSON.stringify(msg);
 		const baseMeta = describeWsPayload(msg, data);
 		for (const client of clients) {
-			if (client.readyState !== 1) continue;
+			if (isSlowReplaceableClient(client) || client.readyState !== 1) continue;
 			guardWebSocketOverflow(client, { ...baseMeta, recipientKind: "session" }, {
 				pendingOverflowCheck: _pendingOverflowCheck,
 				warnedClients: _warnedClients,
@@ -1617,6 +1677,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 				warnBytes: WS_BUFFER_WARN_BYTES,
 			});
 			client.send(data);
+			markAssistantStreamSnapshotSent(client as AssistantStreamSocket, msg);
 		}
 		return;
 	}
@@ -1631,7 +1692,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	let skipped = 0;
 	for (const client of clients) {
 		scanned++;
-		if (client.readyState !== 1) { skipped++; continue; }
+		if (isSlowReplaceableClient(client) || client.readyState !== 1) { skipped++; continue; }
 		guardWebSocketOverflow(client, { ...baseMeta, recipientKind: "session" }, {
 			pendingOverflowCheck: _pendingOverflowCheck,
 			warnedClients: _warnedClients,
@@ -1643,6 +1704,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 			warnBytes: WS_BUFFER_WARN_BYTES,
 		});
 		client.send(data);
+		markAssistantStreamSnapshotSent(client as AssistantStreamSocket, msg);
 		recipients++;
 	}
 	getCpuDiagnostics().recordWsBroadcast("session-manager:broadcast", (msg as { type?: string }).type || "unknown", {
@@ -1720,24 +1782,147 @@ export function isRetryableAgentEnd(event: unknown): boolean {
  *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
  *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }>; previousAssistantStreamMessage?: any }, truncated: unknown): void {
+	const normalizeStartedAt = performance.now();
 	const normalized = normalizeToolResultErrorEvent(truncated);
 	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
 	const spliced = spliceSkillExpansionsIntoEvent(session, sanitized);
+	const normalizeMs = performance.now() - normalizeStartedAt;
+	const eventType = spliced && typeof spliced === "object" && typeof (spliced as { type?: unknown }).type === "string"
+		? (spliced as { type: string }).type
+		: "unknown";
+	const retainStartedAt = performance.now();
 	const entry = session.eventBuffer.push(spliced);
-	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
+	const retainMs = performance.now() - retainStartedAt;
+	const baseFrame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
+	const assistantStreamUpdate = isAssistantStreamMessageUpdate(spliced);
+	let scanned = 0;
+	let recipients = 0;
+	let skipped = 0;
+	let bytes = 0;
+	let cutovers = 0;
+	let compactMs = 0;
+	let stringifyMs = 0;
+	let sendMs = 0;
+	let steadyCompactFrame: typeof baseFrame | undefined;
+	let baselineCompactFrame: typeof baseFrame | undefined;
+	let steadyCompactComputed = false;
+	let baselineCompactComputed = false;
+	const serializedFrames = new Map<object, string>();
+
+	for (const rawClient of session.clients) {
+		scanned++;
+		const client = rawClient as AssistantStreamSocket;
+		if (isSlowReplaceableClient(client) || client.readyState !== 1) {
+			skipped++;
+			continue;
+		}
+		if (assistantStreamUpdate && (client.bufferedAmount ?? 0) >= WS_REPLACEABLE_MESSAGE_SOFT_CUTOVER_BYTES) {
+			cutOverSlowReplaceableClient(client);
+			cutovers++;
+			skipped++;
+			continue;
+		}
+
+		let frame = baseFrame;
+		const needsBaseline = assistantStreamUpdate
+			&& client.assistantStreamDeltaCapable === true
+			&& client.assistantStreamDeltaNeedsBaseline === true;
+		if (assistantStreamUpdate && client.assistantStreamDeltaCapable === true) {
+			if (needsBaseline ? !baselineCompactComputed : !steadyCompactComputed) {
+				const compactStartedAt = performance.now();
+				const compact = needsBaseline
+					? compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage, { selfContained: true })
+					: compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage);
+				compactMs += performance.now() - compactStartedAt;
+				const compactFrame = compact === spliced ? baseFrame : { ...baseFrame, data: compact };
+				if (needsBaseline) {
+					baselineCompactFrame = compactFrame;
+					baselineCompactComputed = true;
+				} else {
+					steadyCompactFrame = compactFrame;
+					steadyCompactComputed = true;
+				}
+			}
+			frame = (needsBaseline ? baselineCompactFrame : steadyCompactFrame) ?? baseFrame;
+		}
+		const satisfiesBaseline = needsBaseline
+			&& frame !== baseFrame
+			&& (frame.data as any)?.assistantStreamDelta === 1
+			&& !!(frame.data as any)?.assistantMessageBaseline;
+
+		let data = serializedFrames.get(frame);
+		if (data === undefined) {
+			const stringifyStartedAt = performance.now();
+			data = JSON.stringify(frame);
+			stringifyMs += performance.now() - stringifyStartedAt;
+			serializedFrames.set(frame, data);
+		}
+		guardWebSocketOverflow(client, { ...describeWsPayload(frame, data), recipientKind: "session" }, {
+			pendingOverflowCheck: _pendingOverflowCheck,
+			warnedClients: _warnedClients,
+		}, {
+			setTimeout: (cb, ms) => sessionManagerModuleClock.setTimeout(cb, ms),
+			warn: (message) => console.warn(message),
+		}, {
+			overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+			warnBytes: WS_BUFFER_WARN_BYTES,
+		});
+		const sendStartedAt = performance.now();
+		client.send(data);
+		if (satisfiesBaseline) client.assistantStreamDeltaNeedsBaseline = false;
+		sendMs += performance.now() - sendStartedAt;
+		recipients++;
+		bytes += Buffer.byteLength(data);
+	}
+
+	if (assistantStreamUpdate) {
+		const assistantEventType = (spliced as any).assistantMessageEvent?.type;
+		if (assistantEventType === "toolcall_delta") {
+			// Pi's cumulative tool-call message omits the transport-only partialJson
+			// needed to apply the next fragment. Keep the reconstructed chain only in
+			// session memory; the retained event and durable transcript stay raw.
+			const chainDelta = steadyCompactComputed
+				? steadyCompactFrame?.data
+				: compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage);
+			session.previousAssistantStreamMessage = reconstructAssistantStreamMessage(
+				chainDelta,
+				session.previousAssistantStreamMessage,
+			) ?? (spliced as any).message;
+		} else {
+			session.previousAssistantStreamMessage = (spliced as any).message;
+		}
+	} else if (isAssistantStreamTerminalBoundary(spliced)) {
+		session.previousAssistantStreamMessage = undefined;
+	}
+
+	recordEventLoopOperation(`session-event:${eventType}:normalize`, normalizeMs);
+	recordEventLoopOperation(`session-event:${eventType}:retain`, retainMs, {
+		bufferSize: session.eventBuffer.size,
+		retainedBytes: session.eventBuffer.retainedBytes,
+	});
+	recordEventLoopOperation(`session-event:${eventType}:broadcast`, compactMs + stringifyMs + sendMs, {
+		recipients,
+		bytes,
+		cutovers,
+	});
 	if (cpuDiagnosticsEnabled()) {
-		const eventType = spliced && typeof spliced === "object" && typeof (spliced as { type?: unknown }).type === "string"
-			? (spliced as { type: string }).type
-			: "unknown";
 		getCpuDiagnostics().recordWsBroadcast("session-manager:emitSessionEvent", eventType, {
 			frames: 1,
-			recipients: session.clients.size,
-			bytes: Buffer.byteLength(JSON.stringify(frame)) * session.clients.size,
+			scanned,
+			recipients,
+			skipped,
+			bytes,
 			bufferSize: session.eventBuffer.size,
+			retainedBytes: session.eventBuffer.retainedBytes,
+			cutovers,
+			normalizeMs,
+			retainMs,
+			compactMs,
+			stringifyMs,
+			sendMs,
 		});
 	}
-	broadcast(session.clients, frame);
 }
 
 /**
