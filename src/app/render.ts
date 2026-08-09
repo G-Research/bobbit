@@ -2687,13 +2687,13 @@ export function doRenderApp(): void {
 			<review-pane
 				.documents=${state.reviewDocuments}
 				.activeTab=${state.reviewActiveTab}
-				.groups=${state.reviewGroups}
 				.review=${activeGroup}
-				.activeReviewId=${state.reviewActiveReviewId}
 				.sessionId=${activeSessionId() || ""}
-				@review-tab-change=${async (e: CustomEvent) => {
+				@review-file-change=${async (e: CustomEvent) => {
 					const sid = activeSessionId() || "";
 					const reviewId = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : state.reviewActiveReviewId;
+					// documentId/title support is limited to legacy single-document callers;
+					// grouped ReviewPane events always identify the secondary file by fileId.
 					const fileId = typeof e.detail?.fileId === "string" ? e.detail.fileId
 						: typeof e.detail?.documentId === "string" ? e.detail.documentId
 						: typeof e.detail?.title === "string" ? e.detail.title : "";
