@@ -1,27 +1,28 @@
 name: review_open
-description: "Open inline or file markdown for annotation/comments"
+description: "Open one or more Markdown files as a single review"
 summary: "Open markdown in the review pane"
-params: [markdown?, file?, title?, replace?]
+params: [markdown?, file?, files?, title?, replace?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Review
 docs: |-
-  Pass `markdown` for inline content or `file` to load from disk. Each unique title creates a new tab; same title replaces content (unless replace=false).
+  Pass `markdown` or `file` for a one-file review, or a non-empty `files[]` array for a multi-file review. A review owns one primary workspace tab; its files are secondary navigation tabs.
 detail_docs: |-
   ## Parameters
   | Name | Type | Required | Description |
   |------|------|----------|-------------|
-  | title | string | No | Tab label. Defaults to filename or "Review" |
-  | markdown | string | No | Inline markdown content |
-  | file | string | No | Path to a markdown file on disk |
-  | replace | boolean | No | Replace existing tab content (default: true) |
-  
-  Exactly one of `markdown` or `file` should be provided. If both, `markdown` takes priority.
-  
+  | title | string | No | Review title. Defaults to the filename for a legacy file call, otherwise "Review" |
+  | markdown | string | No | Inline Markdown for a one-file review |
+  | file | string | No | Path to a Markdown file for a one-file review |
+  | files | array | No | Non-empty ordered files; each entry has optional `title` and exactly one of `markdown` or `file` |
+  | replace | boolean | No | Replace an existing same-title review (default: true) |
+
+  Supply exactly one top-level source mode: `markdown`, `file`, or `files`. File-entry titles default to an explicit title, the file basename, or `File N`, in that order.
+
   ## Examples
   ```
   review_open(title="Architecture", markdown="# Architecture\n\nOur system uses...")
   review_open(file="docs/api.md")
-  review_open(title="Updated", markdown="# V2", replace=true)
+  review_open(title="Release", files=[{"title":"Summary","markdown":"# Summary"},{"file":"docs/changes.md"}])
   ```
