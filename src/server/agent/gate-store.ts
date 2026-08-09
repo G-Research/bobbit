@@ -218,7 +218,12 @@ function validateDiagnostics(value: unknown, label: string): void {
 	}
 }
 
-/** Validate known GateState fields without normalizing away historical extensions. */
+/**
+ * Validate known GateState fields without normalizing away historical extensions.
+ * The one narrow exception is backfilling a missing verification-step `duration_ms`
+ * (see the step loop): human bypasses and hand-recorded manual passes mark a step
+ * passed without a timed command run and legitimately omit it.
+ */
 function validateGateState(value: unknown, label: string, expectedIdentity?: { goalId: string; gateId: string }): GateState {
 	if (!isRecord(value)) invalidGate(label, "must be an object");
 	if (typeof value.goalId !== "string" || value.goalId.length === 0) invalidGate(label, "goalId must be a non-empty string");
@@ -262,6 +267,11 @@ function validateGateState(value: unknown, label: string, expectedIdentity?: { g
 			// integration-test). Historical signal history remains valid as long as
 			// the persisted discriminator is a non-empty string.
 			if (typeof step.name !== "string" || typeof step.type !== "string" || step.type.length === 0) invalidGate(stepLabel, "name and type are required");
+			// Human bypasses and hand-recorded manual passes mark a step passed
+			// without running a timed command, so historical data legitimately omits
+			// duration_ms. Backfill the default instead of failing the whole load; a
+			// present-but-non-finite value is still corruption and stays rejected.
+			if (step.duration_ms === undefined) step.duration_ms = 0;
 			if (typeof step.passed !== "boolean" || typeof step.output !== "string" || !Number.isFinite(step.duration_ms)) {
 				invalidGate(stepLabel, "passed, output, and finite duration_ms are required");
 			}
