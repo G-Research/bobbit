@@ -159,6 +159,43 @@ describe("TaskStore SQLite persistence", () => {
 		expect(recovered.get("late-deleted")).toBeUndefined();
 	});
 
+	it("recovers missing tasks into authoritative SQLite once with SQLite precedence and tombstone filtering", async () => {
+		const stateDir = tempRoot();
+		const recoveryFile = path.join(stateDir, "tasks.json.pre-migration");
+		const preferredBackup = path.join(stateDir, "tasks.json.pre-migration-recovered");
+		const store = openStore(stateDir);
+		store.put(task("conflict", { state: "complete", completedAt: 2 }));
+		await closeTracked(store);
+
+		fs.writeFileSync(path.join(stateDir, ".deletion-tombstones.json"), JSON.stringify({ "goals.json": ["deleted-goal"] }));
+		const recoveryBytes = Buffer.from(JSON.stringify([
+			task("conflict", { state: "blocked" }),
+			task("eligible", { goalId: "active-goal" }),
+			task("tombstoned", { goalId: "deleted-goal" }),
+		]));
+		fs.writeFileSync(recoveryFile, recoveryBytes);
+		fs.writeFileSync(preferredBackup, "occupied");
+
+		const recovered = openStore(stateDir);
+		expect(recovered.get("conflict")?.state).toBe("complete");
+		expect(recovered.get("eligible")?.goalId).toBe("active-goal");
+		expect(recovered.get("tombstoned")).toBeUndefined();
+		expect(fs.existsSync(recoveryFile)).toBe(false);
+		expect(fs.readFileSync(preferredBackup, "utf-8")).toBe("occupied");
+		expect(fs.readFileSync(`${preferredBackup}.1`)).toEqual(recoveryBytes);
+		await closeTracked(recovered);
+
+		const replayBytes = Buffer.from(JSON.stringify([
+			task("eligible", { state: "blocked" }),
+			task("replayed"),
+		]));
+		fs.writeFileSync(recoveryFile, replayBytes);
+		const reopened = openStore(stateDir);
+		expect(reopened.get("eligible")?.state).toBe("todo");
+		expect(reopened.get("replayed")).toBeUndefined();
+		expect(fs.readFileSync(recoveryFile)).toEqual(replayBytes);
+	});
+
 	it("writes only dirty IDs, batches removeMany atomically, and reports affected bytes", async () => {
 		const stateDir = tempRoot();
 		const store = openStore(stateDir);
@@ -187,6 +224,61 @@ describe("TaskStore SQLite persistence", () => {
 		await closeTracked(store);
 		const reloaded = openStore(stateDir);
 		expect(reloaded.getAll()).toEqual([untouched]);
+	});
+
+	it("rejects invalid published fields transactionally and commits the requeued batch after correction", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(task("durable"));
+		await store.flush();
+
+		store.put(task("durable", { state: "complete", completedAt: 2 }));
+		const invalid = task("invalid");
+		(invalid as unknown as Record<string, unknown>).title = 42;
+		store.put(invalid);
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		await expect(store.flush()).rejects.toThrow(/title must be a non-empty string/);
+		errors.mockRestore();
+
+		const db = new Database(path.join(stateDir, "tasks.sqlite"));
+		expect((db.prepare("SELECT payload FROM task_records WHERE id = ?").get("durable") as { payload: string }).payload)
+			.toBe(JSON.stringify(task("durable")));
+		expect((db.prepare("SELECT COUNT(*) AS count FROM task_records").get() as { count: number }).count).toBe(1);
+		expect(db.prepare("SELECT payload FROM task_records WHERE id = ?").get("invalid")).toBeUndefined();
+		db.close();
+
+		invalid.title = "Corrected";
+		await store.flush();
+		await closeTracked(store);
+		const reopened = openStore(stateDir);
+		expect(reopened.get("durable")?.state).toBe("complete");
+		expect(reopened.get("invalid")?.title).toBe("Corrected");
+	});
+
+	it("rejects dirty-key and serialized payload identity mismatches and retries after correction", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(task("durable"));
+		await store.flush();
+
+		const mismatched = task("dirty-key");
+		store.put(mismatched);
+		mismatched.id = "payload-id";
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		await expect(store.flush()).rejects.toThrow(/identity mismatch/);
+		errors.mockRestore();
+
+		const db = new Database(path.join(stateDir, "tasks.sqlite"));
+		expect((db.prepare("SELECT COUNT(*) AS count FROM task_records").get() as { count: number }).count).toBe(1);
+		expect(db.prepare("SELECT payload FROM task_records WHERE id IN (?, ?)").get("dirty-key", "payload-id")).toBeUndefined();
+		db.close();
+
+		mismatched.id = "dirty-key";
+		await store.flush();
+		await closeTracked(store);
+		const reopened = openStore(stateDir);
+		expect(reopened.get("dirty-key")).toEqual(task("dirty-key"));
+		expect(reopened.get("payload-id")).toBeUndefined();
 	});
 
 	it("rolls back a whole dirty batch after serialization failure and requeues it", async () => {

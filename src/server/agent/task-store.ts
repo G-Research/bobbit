@@ -146,7 +146,7 @@ function validateStringArray(value: unknown, label: string): void {
 	if (!Array.isArray(value) || value.some(item => typeof item !== "string")) invalidTask(label, "must be an array of strings");
 }
 
-function validateTask(value: unknown, label: string, expectedId?: string): PersistedTask {
+function validateTask(value: unknown, label: string, expectedId?: string, validateSerialization = true): PersistedTask {
 	if (!isRecord(value)) invalidTask(label, "must be an object");
 	canonicalizeTask(value);
 	for (const field of ["id", "goalId", "title", "type"] as const) {
@@ -174,12 +174,27 @@ function validateTask(value: unknown, label: string, expectedId?: string): Persi
 			for (const field of ["baseSha", "headSha", "branch"] as const) validateOptionalString(handoff, field, `${label} gitHandoff entry ${repo}`);
 		}
 	}
-	try {
-		if (JSON.stringify(value) === undefined) invalidTask(label, "must be JSON serializable");
-	} catch (error) {
-		invalidTask(label, `must be JSON serializable: ${error instanceof Error ? error.message : String(error)}`);
+	if (validateSerialization) {
+		try {
+			if (JSON.stringify(value) === undefined) invalidTask(label, "must be JSON serializable");
+		} catch (error) {
+			invalidTask(label, `must be JSON serializable: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 	return value as unknown as PersistedTask;
+}
+
+function serializeTaskForPublication(task: PersistedTask, dirtyId: string): string {
+	const label = `runtime task ${dirtyId}`;
+	const payload = JSON.stringify(task);
+	if (payload === undefined) invalidTask(label, "must be JSON serializable");
+
+	// Validate the exact bytes being published so a toJSON hook cannot bypass
+	// known-field or dirty-key identity checks. Canonicalization is confined to
+	// this parsed copy; the in-memory task and its serialized payload stay exact.
+	const serializedTask: unknown = JSON.parse(payload);
+	validateTask(serializedTask, label, dirtyId, false);
+	return payload;
 }
 
 function parseTaskArray(text: string, sourceLabel: string): PersistedTask[] {
@@ -528,9 +543,9 @@ class SqliteTaskPersistence implements TaskPersistence {
 							remove.run(snapshot.id);
 							continue;
 						}
-						const payload = JSON.stringify(snapshot.task);
+						const payload = serializeTaskForPublication(snapshot.task, snapshot.id);
 						bytes += Buffer.byteLength(payload);
-						upsert.run(snapshot.task.id, payload);
+						upsert.run(snapshot.id, payload);
 					}
 					this.db.exec("COMMIT");
 				}
