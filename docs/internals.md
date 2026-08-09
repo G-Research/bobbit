@@ -1576,7 +1576,7 @@ Roles can pin a specific model and reasoning level for any session that runs und
 
 This is the third role-level override, alongside `toolPolicies` (which tools the role can use) and `defaultPersonalities` (how the role communicates). All three cascade the same way and are edited from the same role-manager page.
 
-> **Authoritative design:** [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) - file-level mechanics, validators, and the rationale behind splitting `applyModelString` from `applyReviewModelOverrides`. Model binding failures and the opt-in fallback policy are covered in [Controlled session model fallback](session-model-fallback.md).
+> **Historical background:** [The original per-role override design](design/per-role-model-overrides.md) predates the authoritative-metadata retirement and is not the current mechanics reference. This section documents current role resolution; see [Thinking-level metadata authority](thinking-levels.md#metadata-authority) for exact capability and clamp rules, [Spawn-time model pinning](#spawn-time-model-pinning) for final selection and verification, and [Controlled session model fallback](session-model-fallback.md) for binding failures and the opt-in fallback policy.
 
 ### Role fields
 
