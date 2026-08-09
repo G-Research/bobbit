@@ -1786,6 +1786,20 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/gate-store-sqlite.test.ts",
+		allowReason: "test-owned temporary GateStore state and retirement fixtures",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"gates.json.sqlite-retired\")", count: 1 },
+			{ expression: "path.join(stateDir, \"gates.json.pre-migration-recovered\")", count: 1 },
+			{ expression: "path.join(stateDir, \"gates.json.sqlite-retired.1\")", count: 1 },
+			{ expression: "path.join(stateDir, \"gates.json.pre-migration-recovered.1\")", count: 1 },
+			{ expression: "recoveryFile", count: 1 },
+			{ expression: "invalidFile", count: 1 },
+			{ expression: "duplicateFile", count: 1 },
+			{ expression: "sourceFile", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/extension-host-terminal.test.ts",
 		declarations: frozen(["impact:market-packs"]),
 		reads: frozen([
