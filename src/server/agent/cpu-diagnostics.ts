@@ -61,6 +61,21 @@ export interface CpuDiagnosticsIo {
 	writeStderr(data: string): Promise<void>;
 }
 
+interface GcPerformanceEntry {
+	duration: number;
+	detail?: { kind?: number };
+}
+
+interface GcPerformanceObserver {
+	observe(options: { entryTypes: Array<"gc"> }): void;
+	takeRecords(): GcPerformanceEntry[];
+	disconnect(): void;
+}
+
+type GcPerformanceObserverFactory = (
+	callback: (entries: readonly GcPerformanceEntry[]) => void,
+) => GcPerformanceObserver;
+
 interface TimedBucket {
 	count: number;
 	totalMs: number;
@@ -137,6 +152,10 @@ const realCpuDiagnosticsIo: CpuDiagnosticsIo = {
 		});
 	},
 };
+
+const realGcPerformanceObserverFactory: GcPerformanceObserverFactory = callback => new PerformanceObserver(
+	list => callback(list.getEntries()),
+);
 
 function safeNumber(value: number): number {
 	return Number.isFinite(value) ? value : 0;
@@ -217,7 +236,7 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 	private lastWall = performance.now();
 	private lastElu: EventLoopUtilization = performance.eventLoopUtilization();
 	private delay: ReturnType<typeof monitorEventLoopDelay>;
-	private gcObserver: PerformanceObserver | null = null;
+	private gcObserver: GcPerformanceObserver | null = null;
 	private gcCount = 0;
 	private gcMajorCount = 0;
 	private gcDurationMs = 0;
@@ -234,22 +253,14 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		private readonly clock: Clock = realClock,
 		config: CpuDiagnosticsConfig = RUNTIME_CONFIG,
 		private readonly io: CpuDiagnosticsIo = realCpuDiagnosticsIo,
+		gcObserverFactory: GcPerformanceObserverFactory = realGcPerformanceObserverFactory,
 	) {
 		this.outFile = config.jsonlPath;
 		if (this.outFile) this.enqueueOutputDirectory();
 		this.delay = monitorEventLoopDelay({ resolution: 20 });
 		this.delay.enable();
 		try {
-			this.gcObserver = new PerformanceObserver((list) => {
-				for (const entry of list.getEntries()) {
-					const durationMs = safeNumber(entry.duration);
-					const kind = (entry as unknown as { detail?: { kind?: number } }).detail?.kind;
-					this.gcCount++;
-					if (kind === constants.NODE_PERFORMANCE_GC_MAJOR) this.gcMajorCount++;
-					this.gcDurationMs += durationMs;
-					if (durationMs > this.gcMaxMs) this.gcMaxMs = durationMs;
-				}
-			});
+			this.gcObserver = gcObserverFactory(entries => this.accumulateGcEntries(entries));
 			this.gcObserver.observe({ entryTypes: ["gc"] });
 		} catch {
 			this.gcObserver = null;
@@ -351,13 +362,27 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 			this.timer = null;
 		}
 		try { this.delay.disable(); } catch { /* best-effort */ }
-		try { this.gcObserver?.disconnect(); } catch { /* best-effort */ }
-		this.gcObserver = null;
+		const gcObserver = this.gcObserver;
+		if (gcObserver) {
+			try { this.accumulateGcEntries(gcObserver.takeRecords()); } catch { /* best-effort */ }
+			try { gcObserver.disconnect(); } catch { /* best-effort */ }
+			this.gcObserver = null;
+		}
 		process.off("beforeExit", this.beforeExitHandler);
 		process.off("exit", this.exitHandler);
 		if (singleton === this) singleton = null;
 		this.shutdownPromise = this.flush(reason);
 		return this.shutdownPromise;
+	}
+
+	private accumulateGcEntries(entries: readonly GcPerformanceEntry[]): void {
+		for (const entry of entries) {
+			const durationMs = safeNumber(entry.duration);
+			this.gcCount++;
+			if (entry.detail?.kind === constants.NODE_PERFORMANCE_GC_MAJOR) this.gcMajorCount++;
+			this.gcDurationMs += durationMs;
+			if (durationMs > this.gcMaxMs) this.gcMaxMs = durationMs;
+		}
 	}
 
 	private buildSnapshot(reason?: string): CpuDiagnosticsSnapshot {
@@ -512,9 +537,16 @@ export function cpuDiagnosticsEnabled(env?: NodeJS.ProcessEnv): boolean {
 }
 
 /** Create an isolated diagnostics instance without mutating the process-wide singleton. */
-export function createCpuDiagnostics(options: { env: NodeJS.ProcessEnv; clock?: Clock; io?: CpuDiagnosticsIo }): CpuDiagnostics {
+export function createCpuDiagnostics(options: {
+	env: NodeJS.ProcessEnv;
+	clock?: Clock;
+	io?: CpuDiagnosticsIo;
+	gcObserverFactory?: GcPerformanceObserverFactory;
+}): CpuDiagnostics {
 	const config = cpuDiagnosticsConfig(options.env);
-	return config.enabled ? new EnabledCpuDiagnostics(options.clock, config, options.io) : disabledDiagnostics;
+	return config.enabled
+		? new EnabledCpuDiagnostics(options.clock, config, options.io, options.gcObserverFactory)
+		: disabledDiagnostics;
 }
 
 export function getCpuDiagnostics(clock?: Clock): CpuDiagnostics {
