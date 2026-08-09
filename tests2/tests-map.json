@@ -2631,6 +2631,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/dev-vite-supervisor.test.ts",
+      "reason": "Development-runtime regression coverage proving an unexpected Vite exit is restarted with bounded backoff and every supported dev launcher uses the supervisor.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
