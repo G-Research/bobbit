@@ -8,6 +8,14 @@ import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 let serverModule: any;
 let forceRequestedAt = 1_000;
+type PersistenceMode = "sqlite" | "json" | undefined;
+interface MutableProjectPersistenceOptions {
+	goalPersistence?: PersistenceMode;
+	taskPersistence?: PersistenceMode;
+	gatePersistence?: PersistenceMode;
+}
+let projectPersistenceOptions: MutableProjectPersistenceOptions | undefined;
+let previousPersistence: MutableProjectPersistenceOptions | undefined;
 
 function deterministicGitStatus(opts?: { untracked?: boolean }) {
 	return {
@@ -122,12 +130,33 @@ async function removeSiblingWorktree(runner: any, primary: string, sibling: stri
  * and the only observed fetch is the injected command below.
  */
 test.describe("remote-state coordinator routes", () => {
-	test.beforeAll(async () => {
+	test.beforeAll(async ({ gateway }) => {
+		// This route suite creates four temporary real-filesystem projects but does
+		// not test store persistence. Keep those lazy contexts on the existing JSON
+		// fixture seam; native SQLite ownership is covered by the focused store/E2E
+		// suites and otherwise adds synchronous handles to the tier-1 route budget.
+		projectPersistenceOptions = (gateway.projectContextManager as { options: MutableProjectPersistenceOptions }).options;
+		previousPersistence = {
+			goalPersistence: projectPersistenceOptions.goalPersistence,
+			taskPersistence: projectPersistenceOptions.taskPersistence,
+			gatePersistence: projectPersistenceOptions.gatePersistence,
+		};
+		projectPersistenceOptions.goalPersistence = "json";
+		projectPersistenceOptions.taskPersistence = "json";
+		projectPersistenceOptions.gatePersistence = "json";
+
 		serverModule = (await loadServerTestRuntime()).server;
 		expect(typeof serverModule.__setGitStatusFake).toBe("function");
 		expect(typeof serverModule.__clearGitStatusFake).toBe("function");
 		expect(typeof serverModule.__setRemoteStateForceNowFake).toBe("function");
 		expect(typeof serverModule.__clearRemoteStateForceNowFake).toBe("function");
+	});
+
+	test.afterAll(() => {
+		if (!projectPersistenceOptions || !previousPersistence) return;
+		projectPersistenceOptions.goalPersistence = previousPersistence.goalPersistence;
+		projectPersistenceOptions.taskPersistence = previousPersistence.taskPersistence;
+		projectPersistenceOptions.gatePersistence = previousPersistence.gatePersistence;
 	});
 
 	test.beforeEach(() => {

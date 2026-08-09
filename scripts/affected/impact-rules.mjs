@@ -1829,6 +1829,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "`${liveFile}.sqlite-retired`", count: 1 },
 			{ expression: "`${liveFile}.pre-migration-recovered`", count: 1 },
+			{ expression: "`${legacyFile}.sqlite-retired`", count: 1 },
 			{ expression: "tombstoneFile", count: 1 },
 			{ expression: "preferred", count: 1 },
 			{ expression: "`${preferred}.1`", count: 1 },
@@ -1836,6 +1837,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "malformedFile", count: 1 },
 			{ expression: "duplicateFile", count: 1 },
 			{ expression: "failedFile", count: 1 },
+			{ expression: "sourceFile", count: 1 },
 		]),
 	},
 	{
@@ -1857,9 +1859,12 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "`${recoveryFile}-recovered`", count: 1 },
 			{ expression: "`${recoveryFile}-recovered.1`", count: 1 },
 			{ expression: "path.join(stateDir, \".deletion-tombstones.json\")", count: 1 },
+			{ expression: "preferredBackup", count: 1 },
+			{ expression: "`${preferredBackup}.1`", count: 1 },
 			{ expression: "malformedFile", count: 1 },
 			{ expression: "duplicateFile", count: 1 },
 			{ expression: "failedFile", count: 1 },
+			{ expression: "recoveryFile", count: 1 },
 		]),
 	},
 	{
