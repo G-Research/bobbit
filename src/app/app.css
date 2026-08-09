@@ -1303,9 +1303,21 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	left: -5px;
 }
 
+/* Mobile rows keep status metadata and action controls in separate flex slots.
+   The extra cluster margin makes metadata→first-action spacing match the
+   icon-to-icon spacing between padded action buttons. */
+.sidebar-mobile-action-cluster {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+	flex-shrink: 0;
+	margin-left: 0.25rem;
+}
+
 @media (max-width: 767px) {
 	.sidebar-active-dot {
-		left: 2px !important;
+		left: 0 !important;
+		align-self: center;
 	}
 }
 

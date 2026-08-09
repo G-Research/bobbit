@@ -574,6 +574,12 @@ function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: S
 	})}`;
 }
 
+function wrapSidebarRowActions(buttons: TemplateResult, mobile: boolean): TemplateResult {
+	return mobile
+		? html`<span class="sidebar-mobile-action-cluster">${buttons}</span>`
+		: buttons;
+}
+
 function renderSidebarActionsTrigger(input: {
 	kind: SidebarActionEntityKind;
 	entityId: string;
@@ -673,7 +679,10 @@ export function renderStaffSidebarActions(staffId: string, displayTitle: string,
 		? buildSessionSidebarActions(session, displayTitle, staffId)
 		: [buildStaffEditSidebarAction(staffId)];
 	const actions = buildActions();
-	return html`${renderSidebarQuickActions(actions, { kind: "session", entityId, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId, actions, mobile, btnPad, refresh: buildActions, onBeforeOpen: session ? resetSessionForkNewWorktree : undefined })}`;
+	return wrapSidebarRowActions(
+		html`${renderSidebarQuickActions(actions, { kind: "session", entityId, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId, actions, mobile, btnPad, refresh: buildActions, onBeforeOpen: session ? resetSessionForkNewWorktree : undefined })}`,
+		mobile,
+	);
 }
 
 function buildArchivedSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
@@ -1036,7 +1045,10 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 
 	const actions = buildSessionSidebarActions(session, displayTitle);
 	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
-	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
+	const buttons = wrapSidebarRowActions(
+		html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`,
+		mobile,
+	);
 
 	const navId = `session:${session.id}`;
 	// Keyboard nav can have moved the active row away from this session even
@@ -1191,7 +1203,10 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const btnPad = mobile ? "p-1" : "p-0.5";
 	const actions = buildArchivedSessionSidebarActions(session, displayTitle);
 	const actionRefresh = () => buildArchivedSessionSidebarActions(session, displayTitle);
-	const buttons = renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh });
+	const buttons = wrapSidebarRowActions(
+		renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh }),
+		mobile,
+	);
 	const archivedTime = session.archivedAt ? html`<span class="shrink-0 text-muted-foreground" style="${mobile ? "font-size: 1em;" : "font-size: 0.8333em;"}">${terseRelativeTime(session.archivedAt)}</span>` : "";
 	const archivedNavId = `session:${session.id}`;
 	return html`
@@ -1267,7 +1282,10 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	const actions = buildTeamLeadSidebarActions(session, displayTitle, goalId);
 	const actionRefresh = () => buildTeamLeadSidebarActions(session, displayTitle, goalId);
-	const buttons = html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`;
+	const buttons = wrapSidebarRowActions(
+		html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`,
+		mobile,
+	);
 
 	const chevron = html`<span
 		class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"
@@ -1300,7 +1318,9 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory, false, false, true)}
 			</div>
-			<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal" style="${mobile ? "font-size: 1.3333em;" : ""}"><span class="${mobile ? "truncate" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+			<div class="flex-1 min-w-0 flex flex-col justify-center">
+				<div class="flex items-center gap-1 min-w-0 font-normal"><span class="flex-1 min-w-0 truncate" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+			</div>
 			${mobile
 				? buttons
 				: html`
@@ -1610,7 +1630,10 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
 	const goalActions = buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
 	const goalActionRefresh = () => buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
-	const goalButtons = html`${renderSidebarQuickActions(goalActions, { kind: "goal", entityId: goal.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
+	const goalButtons = wrapSidebarRowActions(
+		html`${renderSidebarQuickActions(goalActions, { kind: "goal", entityId: goal.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`,
+		mobile,
+	);
 
 	const emptyState = html`
 		<div class="pl-2 py-1 text-muted-foreground" style="${mobile ? "" : "font-size: 0.9167em;"}">
