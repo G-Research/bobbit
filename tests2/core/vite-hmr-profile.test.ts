@@ -44,6 +44,9 @@ describe("Vite HMR profiler", () => {
 		assert.match(source, /\.bobbit-qa["'], "vite-hmr-profile/);
 		assert.match(source, /copyFixture\(options\.fixtureRoot\)/);
 		assert.doesNotMatch(source, /appendProbe\(path\.join\(REPO_ROOT, "src"/);
+		const validationIndex = source.indexOf("validateReport(report, options.maxP95Ms);");
+		const latestWriteIndex = source.indexOf('fs.writeFileSync(path.join(options.resultsRoot, "latest.json")');
+		assert.ok(validationIndex >= 0 && validationIndex < latestWriteIndex, "rejected runs must not replace latest.json");
 
 		const help = usage();
 		assert.match(help, /working tree are not modified/);

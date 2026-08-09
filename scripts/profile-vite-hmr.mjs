@@ -269,6 +269,10 @@ async function runProfile(options) {
 				navigations: burstNavigations,
 			},
 		};
+		// Keep latest.json as the last known-good comparison. A failed correctness
+		// or latency gate must not replace it with a run the profiler rejects.
+		validateReport(report, options.maxP95Ms);
+
 		fs.mkdirSync(options.resultsRoot, { recursive: true });
 		const timestamp = report.createdAt.replace(/[:.]/g, "-");
 		const reportPath = path.join(options.resultsRoot, `${timestamp}.json`);
@@ -276,8 +280,6 @@ async function runProfile(options) {
 		fs.writeFileSync(path.join(options.resultsRoot, "latest.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
 		console.log(`Result: ${path.relative(REPO_ROOT, reportPath)}`);
 		console.log(`Warm p50=${report.singleFileP50Ms} ms p95=${report.singleFileP95Ms} ms`);
-
-		validateReport(report, options.maxP95Ms);
 		return report;
 	} finally {
 		await browser?.close().catch(() => {});
