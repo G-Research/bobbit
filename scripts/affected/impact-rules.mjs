@@ -778,6 +778,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/agent-dir-settings.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "target", "test-owned snapshot of isolated agent-directory fixture state"),
+			allowedExecutableOperation("repository-directory-copy", "snapshot.backup", "test-owned agent-directory fixture restored from its temporary snapshot"),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
@@ -1094,7 +1101,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/agent-dir-settings.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
-			{ expression: "bypassPrefsPath", count: 1 },
+			{ expression: "preferencesPath", count: 2 },
 			{ expression: "path.join(bobbitDir(), \"state\", \"preferences.json\")", count: 1 },
 			{ expression: "path.join(active, \"auth.json\")", count: 1 },
 			{ expression: "path.join(pending, \"sessions\", \"session-a\", \"transcript.jsonl\")", count: 1 },
