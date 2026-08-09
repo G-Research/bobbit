@@ -3399,7 +3399,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `goals.json` | `GoalStore` | Goal definitions |
 | `sessions.json` | `SessionStore` | Session metadata |
 | `tasks.json` | `TaskStore` | Task state |
-| `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then renames sources to non-destructive collision-safe backups. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
+| `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then moves sources to collision-safe backups using atomic no-replace links before source unlink. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` worker | Durable document mirror (`index/__docs__.json` + journal), compatibility metadata, and disposable derived cache. See [Semantic search](#semantic-search). |

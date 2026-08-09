@@ -59,7 +59,7 @@ CREATE INDEX gate_records_goal_id_idx ON gate_records(goal_id);
 - `pending_retirement:gates.json`; and
 - `pending_retirement:gates.json.pre-migration`.
 
-The retirement keys are durable intent records, not temporary process state. They bridge the unavoidable boundary between a committed database transaction and a filesystem rename.
+The retirement keys are durable intent records, not temporary process state. They bridge the unavoidable boundary between a committed database transaction and filesystem retirement.
 
 Gate records retain SQLite's rowid table. Large payloads append to the table while the uniqueness index contains only identifiers, avoiding repeated large-payload B-tree reshuffling. On every startup, each row is parsed and checked for row/payload identity, valid known gate, signal, verification, step, artifact, and diagnostics shapes, and finite numeric fields. Duplicate source identities are rejected. Unknown historical fields and non-empty historical step-type discriminators are preserved rather than normalized away.
 
@@ -99,11 +99,11 @@ The generic per-project recovery pass intentionally excludes gate files. `GateSt
 When `migration_complete` is absent, `GateStore`:
 
 1. Requires the SQLite record table to be empty. Unmarked rows are ambiguous and fail startup rather than being guessed authoritative.
-2. Reads and completely validates both legacy sources when present. Both must validate before any import or rename begins.
+2. Reads and completely validates both legacy sources when present. Both must validate before any import or retirement begins.
 3. Merges by `(goalId, gateId)`. `gates.json` wins conflicts; gates found only in `gates.json.pre-migration` are retained.
 4. Inserts the complete merged set and verifies its count, composite identities, and exact serialized payloads inside one `BEGIN IMMEDIATE` transaction.
 5. Writes `migration_complete`, the recovery-complete marker when a recovery source participated, and applicable retirement intents in that same transaction.
-6. Commits before attempting either source rename.
+6. Commits before attempting either source retirement.
 
 An empty project follows the same path and receives a marked, empty authoritative database. Automatic initialization therefore does not depend on a legacy file being present.
 
@@ -125,7 +125,7 @@ This is additive recovery, not a restore of an older snapshot over current state
 | No migration marker, no SQLite rows, either or both JSON sources present | Validate all present sources, import the merged set, mark SQLite authoritative, then retire sources. |
 | No migration marker and no sources | Mark the empty SQLite database authoritative. |
 | No migration marker but SQLite rows exist | Fail startup; incomplete unmarked rows are never adopted or overwritten. |
-| Migration marker present and a retirement intent remains | Validate SQLite, then retry only the rename. Source edits made after commit are not re-imported. |
+| Migration marker present and a retirement intent remains | Validate SQLite, then retry only retirement. Source edits made after commit are not re-imported. |
 | Migration marker present, unmarked `gates.json` appears, and no retirement intent exists | Ignore the stray legacy file; SQLite remains authoritative. |
 | Migration marker present and an unrecovered `.pre-migration` source appears | Transactionally add recovery-only identities, then mark and retire the source. |
 | Recovery-complete marker present and `.pre-migration` reappears without an intent | Ignore it; replay would resurrect stale state. |
@@ -133,22 +133,22 @@ This is additive recovery, not a restore of an older snapshot over current state
 
 ## Non-destructive source retirement
 
-Committed sources are renamed, never deleted or overwritten:
+Committed sources are moved to retained names without overwriting any existing entry:
 
 | Source | Preferred retained name |
 |---|---|
 | `gates.json` | `gates.json.sqlite-retired` |
 | `gates.json.pre-migration` | `gates.json.pre-migration-recovered` |
 
-If the preferred target exists, it is preserved and the first free numeric suffix is used, such as `.sqlite-retired.1` or `.pre-migration-recovered.1`.
+Retirement atomically creates a same-directory hard link at the candidate name. Both Windows and POSIX refuse that no-replace publication with `EEXIST` when another entry already occupies the candidate, including one created concurrently. Only that collision advances to the next numeric suffix, such as `.sqlite-retired.1` or `.pre-migration-recovered.1`; every other link error fails startup without touching the source. After the retained name exists, the source name is unlinked. Thus a failure can leave two names for the same bytes, but cannot leave zero names or overwrite prior evidence.
 
-The database intent is cleared only after the rename succeeds. If commit succeeds but rename is interrupted, startup fails with the authoritative database, source, and intent intact. The next startup validates SQLite and retries only retirement, so even a modified source cannot be imported twice. If the rename completed but intent clearing did not, the next startup sees the source is absent and safely clears the intent.
+The database intent is cleared only after the source unlink succeeds. If commit succeeds but link or unlink is interrupted, startup fails with the authoritative database and intent intact; a successful link followed by failed unlink also leaves both names intact. The next startup validates SQLite and retries only retirement, so even a modified or replaced source cannot be imported twice. If retirement completed but intent clearing did not, the next startup sees the source is absent and safely clears the intent.
 
 ## Failure guarantees
 
 Migration and recovery deliberately fail closed:
 
-- Every source eligible for import is read and fully validated before its import transaction. A source covered by an already-committed retirement intent is deliberately not reread; after validating authoritative SQLite, startup retries only its rename. Unmarked sources that are no longer eligible are ignored.
+- Every source eligible for import is read and fully validated before its import transaction. A source covered by an already-committed retirement intent is deliberately not reread; after validating authoritative SQLite, startup retries only its no-replace retirement. Unmarked sources that are no longer eligible are ignored.
 - Failed validation of an eligible source leaves it byte-for-byte untouched.
 - Failed inserts or verification roll back all imported rows, markers, and intents.
 - A failed first migration may leave the newly created empty SQLite schema file, but it does not commit gate rows or migration metadata.
@@ -173,7 +173,7 @@ Before inspection or recovery:
 
 For common failures:
 
-- **Pending retirement rename failed:** leave the source and metadata untouched, remove the external file lock or permission problem, and restart. The retry retires the committed source without re-importing it.
+- **Pending retirement failed:** leave the source, any already-published retained link, and metadata untouched; remove the external file lock or permission problem, then restart. The retry selects a collision-safe name and retires the committed source without re-importing it.
 - **Legacy or recovery validation failed before commit:** preserve the rejected bytes, correct or replace the source only while the gateway is stopped, and retry on a copy first. The authoritative database, if one existed, has not incorporated that source.
 - **SQLite validation, schema, or marker validation failed:** preserve the complete state directory and escalate to deliberate offline recovery. Do not delete the database, clear metadata rows, or rename a retired JSON backup into place on the live project.
 
@@ -192,10 +192,10 @@ The memfs unit adapter continues to cover the public `GateStore` logic and JSON 
 - automatic `ProjectContext` migration;
 - mutation, close, restart, and exact restoration;
 - live/recovery precedence and recovery-only gate preservation;
-- collision-safe, non-destructive backup naming;
+- atomic no-replace, collision-safe backup naming under deterministic races;
 - `.pre-migration` merge into already-authoritative SQLite;
 - full validation and transactional import rollback with original bytes preserved;
-- retry after a committed migration whose rename was interrupted;
+- retry after a committed migration whose link or source unlink was interrupted;
 - strict multi-gate rollback;
 - gate count, composite identity, historical fields, and payload preservation; and
 - transient and persistent final-flush failures, shared concurrent-close outcomes, and handle release after persistent close and startup failures.

@@ -176,25 +176,52 @@ describe("GateStore SQLite persistence", () => {
 		expect(stateFingerprint(restarted.gateStore.getGatesForGoal(original.goalId))).toEqual(stateFingerprint([expected]));
 	});
 
-	it("imports both legacy sources with live precedence and collision-safe non-destructive retirement", async () => {
+	it("atomically retires both legacy sources without overwriting backups created at the claim boundary", async () => {
 		const stateDir = tempRoot();
 		const liveConflict = representativeGate("goal-1", "conflict");
 		const backupConflict = { ...representativeGate("goal-1", "conflict"), status: "failed" as const };
 		const liveOnly = gate("goal-1", "live-only");
 		const backupOnly = gate("goal-2", "backup-only", "passed");
-		fs.writeFileSync(path.join(stateDir, "gates.json"), JSON.stringify([liveConflict, liveOnly]), "utf-8");
-		fs.writeFileSync(path.join(stateDir, "gates.json.pre-migration"), JSON.stringify([backupConflict, backupOnly]), "utf-8");
-		fs.writeFileSync(path.join(stateDir, "gates.json.sqlite-retired"), "existing-live-backup", "utf-8");
-		fs.writeFileSync(path.join(stateDir, "gates.json.pre-migration-recovered"), "existing-recovery-backup", "utf-8");
+		const liveSource = path.join(stateDir, "gates.json");
+		const recoverySource = path.join(stateDir, "gates.json.pre-migration");
+		const livePreferred = `${liveSource}.sqlite-retired`;
+		const recoveryPreferred = `${recoverySource}-recovered`;
+		fs.writeFileSync(liveSource, JSON.stringify([liveConflict, liveOnly]), "utf-8");
+		fs.writeFileSync(recoverySource, JSON.stringify([backupConflict, backupOnly]), "utf-8");
+		fs.writeFileSync(livePreferred, "existing-live-backup", "utf-8");
+		fs.writeFileSync(recoveryPreferred, "existing-recovery-backup", "utf-8");
 
+		// The preferred names already collide. Create each first free suffix after
+		// GateStore selects it but immediately before its atomic no-replace claim.
+		const racedTargets = new Map([
+			[`${livePreferred}.1`, "racing-live-backup"],
+			[`${recoveryPreferred}.1`, "racing-recovery-backup"],
+		]);
+		const originalLink = fs.linkSync;
+		const link = vi.spyOn(fs, "linkSync").mockImplementation((source, target) => {
+			const targetPath = target.toString();
+			const racingBytes = racedTargets.get(targetPath);
+			if (racingBytes !== undefined) {
+				racedTargets.delete(targetPath);
+				fs.writeFileSync(targetPath, racingBytes, "utf-8");
+			}
+			return originalLink(source, target);
+		});
 		const store = openStore(stateDir);
+		link.mockRestore();
+
+		expect(racedTargets.size).toBe(0);
 		expect(store.getGate("goal-1", "conflict")).toEqual(liveConflict);
 		expect(store.getGate("goal-1", "live-only")).toEqual(liveOnly);
 		expect(store.getGate("goal-2", "backup-only")).toEqual(backupOnly);
-		expect(fs.readFileSync(path.join(stateDir, "gates.json.sqlite-retired"), "utf-8")).toBe("existing-live-backup");
-		expect(fs.readFileSync(path.join(stateDir, "gates.json.pre-migration-recovered"), "utf-8")).toBe("existing-recovery-backup");
-		expect(JSON.parse(fs.readFileSync(path.join(stateDir, "gates.json.sqlite-retired.1"), "utf-8"))).toEqual([liveConflict, liveOnly]);
-		expect(JSON.parse(fs.readFileSync(path.join(stateDir, "gates.json.pre-migration-recovered.1"), "utf-8"))).toEqual([backupConflict, backupOnly]);
+		expect(fs.existsSync(liveSource)).toBe(false);
+		expect(fs.existsSync(recoverySource)).toBe(false);
+		expect(fs.readFileSync(livePreferred, "utf-8")).toBe("existing-live-backup");
+		expect(fs.readFileSync(recoveryPreferred, "utf-8")).toBe("existing-recovery-backup");
+		expect(fs.readFileSync(`${livePreferred}.1`, "utf-8")).toBe("racing-live-backup");
+		expect(fs.readFileSync(`${recoveryPreferred}.1`, "utf-8")).toBe("racing-recovery-backup");
+		expect(JSON.parse(fs.readFileSync(`${livePreferred}.2`, "utf-8"))).toEqual([liveConflict, liveOnly]);
+		expect(JSON.parse(fs.readFileSync(`${recoveryPreferred}.2`, "utf-8"))).toEqual([backupConflict, backupOnly]);
 		expect(stateFingerprint([...store.getGatesForGoal("goal-1"), ...store.getGatesForGoal("goal-2")]))
 			.toEqual(stateFingerprint([liveConflict, liveOnly, backupOnly]));
 	});
@@ -288,25 +315,87 @@ describe("GateStore SQLite persistence", () => {
 		db.close();
 	});
 
-	it("retries an interrupted post-commit retirement without reimporting changed source", () => {
+	it("keeps the source and durable intent when no-replace publication fails", () => {
 		const stateDir = tempRoot();
 		const sourceFile = path.join(stateDir, "gates.json");
-		fs.writeFileSync(sourceFile, JSON.stringify([gate("goal-1", "design", "passed")]), "utf-8");
-		const rename = vi.spyOn(fs, "renameSync").mockImplementationOnce(() => {
-			const error = new Error("injected retirement interruption") as NodeJS.ErrnoException;
+		const sourceBytes = Buffer.from(JSON.stringify([gate("goal-link-failure", "design", "passed")]));
+		fs.writeFileSync(sourceFile, sourceBytes);
+		const link = vi.spyOn(fs, "linkSync").mockImplementationOnce(() => {
+			const error = new Error("injected hard-link publication failure") as NodeJS.ErrnoException;
 			error.code = "EACCES";
 			throw error;
 		});
-		expect(() => openStore(stateDir)).toThrow(/injected retirement interruption/);
-		expect(fs.existsSync(sourceFile)).toBe(true);
-		rename.mockRestore();
+		const unlink = vi.spyOn(fs, "unlinkSync");
 
-		// SQLite committed before the failed rename; this stale edit must only be retired.
-		fs.writeFileSync(sourceFile, JSON.stringify([gate("goal-1", "design", "failed")]), "utf-8");
+		expect(() => openStore(stateDir)).toThrow(/injected hard-link publication failure/);
+		expect(unlink).not.toHaveBeenCalledWith(sourceFile);
+		expect(fs.readFileSync(sourceFile)).toEqual(sourceBytes);
+		expect(fs.existsSync(`${sourceFile}.sqlite-retired`)).toBe(false);
+		link.mockRestore();
+		unlink.mockRestore();
+
+		const db = new Database(path.join(stateDir, "gates.sqlite"));
+		expect(db.prepare("SELECT value FROM gate_store_meta WHERE key = ?").get("pending_retirement:gates.json"))
+			.toEqual({ value: "1" });
+		expect((db.prepare("SELECT COUNT(*) AS count FROM gate_records").get() as { count: number }).count).toBe(1);
+		db.close();
 		const recovered = openStore(stateDir);
+		expect(recovered.getGate("goal-link-failure", "design")?.status).toBe("passed");
+		expect(fs.existsSync(sourceFile)).toBe(false);
+	});
+
+	it("retries interrupted post-commit retirement with atomic collision handling and no reimport", () => {
+		const stateDir = tempRoot();
+		const sourceFile = path.join(stateDir, "gates.json");
+		const preferred = `${sourceFile}.sqlite-retired`;
+		const committedSource = [gate("goal-1", "design", "passed")];
+		fs.writeFileSync(sourceFile, JSON.stringify(committedSource), "utf-8");
+
+		// Preservation succeeds first. An unlink failure must keep the source and
+		// durable intent so the next startup retries retirement only.
+		const originalUnlink = fs.unlinkSync;
+		let interrupted = false;
+		const unlink = vi.spyOn(fs, "unlinkSync").mockImplementation(file => {
+			if (!interrupted && file.toString() === sourceFile) {
+				interrupted = true;
+				const error = new Error("injected source unlink interruption") as NodeJS.ErrnoException;
+				error.code = "EACCES";
+				throw error;
+			}
+			return originalUnlink(file);
+		});
+		expect(() => openStore(stateDir)).toThrow(/injected source unlink interruption/);
+		unlink.mockRestore();
+		expect(fs.existsSync(sourceFile)).toBe(true);
+		expect(JSON.parse(fs.readFileSync(preferred, "utf-8"))).toEqual(committedSource);
+
+		// Replace the still-visible source with stale bytes. SQLite committed before
+		// retirement and must remain authoritative. Race the first free retry suffix.
+		originalUnlink(sourceFile);
+		const staleSource = [gate("goal-1", "design", "failed")];
+		fs.writeFileSync(sourceFile, JSON.stringify(staleSource), "utf-8");
+		const retryTarget = `${preferred}.1`;
+		const originalLink = fs.linkSync;
+		let raced = false;
+		const link = vi.spyOn(fs, "linkSync").mockImplementation((source, target) => {
+			if (!raced && target.toString() === retryTarget) {
+				raced = true;
+				fs.writeFileSync(retryTarget, "racing-restart-backup", "utf-8");
+			}
+			return originalLink(source, target);
+		});
+		const recovered = openStore(stateDir);
+		link.mockRestore();
+
+		expect(raced).toBe(true);
 		expect(recovered.getGate("goal-1", "design")?.status).toBe("passed");
 		expect(fs.existsSync(sourceFile)).toBe(false);
-		expect(fs.existsSync(path.join(stateDir, "gates.json.sqlite-retired"))).toBe(true);
+		expect(JSON.parse(fs.readFileSync(preferred, "utf-8"))).toEqual(committedSource);
+		expect(fs.readFileSync(retryTarget, "utf-8")).toBe("racing-restart-backup");
+		expect(JSON.parse(fs.readFileSync(`${preferred}.2`, "utf-8"))).toEqual(staleSource);
+		const db = new Database(path.join(stateDir, "gates.sqlite"));
+		expect(db.prepare("SELECT value FROM gate_store_meta WHERE key = ?").get("pending_retirement:gates.json")).toBeUndefined();
+		db.close();
 	});
 
 	it("rolls back the whole dirty batch when one payload cannot serialize", async () => {

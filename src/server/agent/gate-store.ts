@@ -496,6 +496,26 @@ class SqliteGatePersistence implements GatePersistence {
 		this.retirePendingSources();
 	}
 
+	/**
+	 * Publish one retained name without a check-then-rename overwrite window.
+	 * A same-directory hard link is atomic and refuses an occupied destination on
+	 * both Windows and POSIX. The source name is removed only after preservation
+	 * succeeds; any other failure leaves the durable retirement intent intact.
+	 */
+	private retireSourceWithoutReplace(source: string, preferred: string): void {
+		for (let suffix = 0; ; suffix++) {
+			const target = suffix === 0 ? preferred : `${preferred}.${suffix}`;
+			try {
+				this.fs.linkSync(source, target);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException | undefined)?.code === "EEXIST") continue;
+				throw error;
+			}
+			this.fs.unlinkSync(source);
+			return;
+		}
+	}
+
 	private retirePendingSources(): void {
 		const pending = [
 			{ key: GATE_LEGACY_RETIREMENT_KEY, source: this.legacyFile, preferred: `${this.legacyFile}.sqlite-retired` },
@@ -505,11 +525,7 @@ class SqliteGatePersistence implements GatePersistence {
 			const intent = this.getMeta(item.key);
 			if (intent === undefined) continue;
 			if (intent !== "1") throw new Error(`[gate-store] Invalid retirement intent ${item.key}=${intent}`);
-			if (this.fs.existsSync(item.source)) {
-				let target = item.preferred;
-				for (let suffix = 1; this.fs.existsSync(target); suffix++) target = `${item.preferred}.${suffix}`;
-				this.fs.renameSync(item.source, target);
-			}
+			if (this.fs.existsSync(item.source)) this.retireSourceWithoutReplace(item.source, item.preferred);
 			this.db.prepare("DELETE FROM gate_store_meta WHERE key = ?").run(item.key);
 		}
 	}
