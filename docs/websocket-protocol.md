@@ -92,7 +92,7 @@ Compatibility is fail-safe:
 - Equivalent capable recipients share compact-frame construction and serialization. Legacy and baseline-needing recipients remain separate output classes.
 - Updates are emitted immediately. There is no process-global timer that coalesces, replaces, or defers `message_update` delivery.
 
-The client reconstructs the cumulative `message` and `assistantMessageEvent.partial` before normal reducer processing. It keeps reconstruction state only for the active assistant stream and clears it at `message_end`, `agent_end`, `process_exit`, snapshot application, and connection teardown. Progressive tool JSON is rebuilt from fragments while preserving the useful parseable prefix. If exact reconstruction cannot be proven, the client discards the compact frame and reconnects; the replacement socket then starts with a self-contained baseline.
+The client reconstructs the cumulative `message` and `assistantMessageEvent.partial` before normal reducer processing. It keeps reconstruction state only for the active assistant stream and clears it on an explicit client reset, snapshot application, reconstruction failure, `process_exit`, `agent_end`, and `message_end`. Normal socket teardown does not clear that state: reconnect may continue the same logical stream through cumulative replay. Progressive tool JSON is rebuilt from fragments while preserving the useful parseable prefix. A replacement socket independently starts its compact live projection with a self-contained baseline. If exact reconstruction cannot be proven, the client clears the invalid state, discards the compact frame, and reconnects; cumulative replay or a snapshot remains the authoritative recovery path.
 
 ### Sources of truth and replay
 
