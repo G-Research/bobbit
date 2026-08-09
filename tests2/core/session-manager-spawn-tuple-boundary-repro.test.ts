@@ -161,7 +161,7 @@ function startDynamicAigw(): Promise<{ url: string; close: () => Promise<void> }
 								name: "Discovered gateway reasoner",
 								reasoning: true,
 								tool_call: true,
-								variants: { off: {}, low: {}, high: {}, xhigh: {}, max: {} },
+								variants: { none: {}, low: {}, high: {}, xhigh: {}, max: {} },
 								limit: { context: 64_000, output: 8_192 },
 								modalities: { input: ["text"] },
 							},
@@ -358,11 +358,12 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 			assert.ok(row, "well-known discovery must expose the arbitrary AIGW row");
 			assert.equal(row.reasoning, true);
 			assert.deepEqual(row.thinkingLevelMap, {
-				off: "none",
+				none: "none",
 				low: "low",
 				high: "high",
 				xhigh: "xhigh",
 				max: "max",
+				off: "none",
 			});
 
 			const store = new RecordingStore();
