@@ -383,6 +383,11 @@ describe("GoalStore SQLite persistence", () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		await expect(store.flush()).rejects.toThrow(/identity mismatch for deceptive/);
 
+		store.put(Object.assign(goal("deceptive"), {
+			toJSON() { return { ...goal("deceptive", { title: "Invalid legacy bytes" }), swarm: "not-a-boolean" }; },
+		}));
+		await expect(store.flush()).rejects.toThrow(/team must be boolean/);
+
 		const reader = new Database(path.join(stateDir, "goals.sqlite"));
 		expect(JSON.parse((reader.prepare("SELECT payload FROM goal_records WHERE id = 'normal'").get() as { payload: string }).payload).title).toBe("Goal normal");
 		expect(JSON.parse((reader.prepare("SELECT payload FROM goal_records WHERE id = 'deceptive'").get() as { payload: string }).payload).title).toBe("Goal deceptive");

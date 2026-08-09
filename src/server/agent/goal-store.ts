@@ -356,10 +356,13 @@ function serializeGoalForPublication(goal: PersistedGoal, dirtyId: string): stri
 	if (payload === undefined) invalidGoal(label, "must be JSON serializable");
 
 	// Validate the exact bytes being published so a toJSON hook cannot bypass
-	// known-field or dirty-key identity checks. Keep canonicalization and any
-	// further serialization confined away from the in-memory goal and payload.
+	// known-field or dirty-key identity checks. Then prove those same bytes remain
+	// valid after authoritative reload applies historical canonicalization. Both
+	// checks stay confined to the parsed temporary object; publish the original
+	// payload without mutating or reserializing the in-memory goal.
 	const serializedGoal: unknown = JSON.parse(payload);
 	validateGoal(serializedGoal, label, dirtyId, false, false);
+	validateGoal(serializedGoal, label, dirtyId, true, false);
 	return payload;
 }
 
