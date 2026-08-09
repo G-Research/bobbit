@@ -35,7 +35,9 @@ import {
 	rememberReviewDocumentIdentity,
 	reviewDocumentIdForTitle,
 	reviewDocumentIdFromPanelTab,
+	reviewIdFromPanelTab,
 	reviewPanelTabId,
+	reviewPanelTabIdFromReviewId,
 	setActivePanelTabIdForSession,
 	type PanelWorkspaceTab,
 } from "../../src/app/panel-workspace.ts";
@@ -171,7 +173,7 @@ describe("panel workspace side-pane tab contract", () => {
 		const reviewTabs = tabs.filter((tab) => tab.kind === "review");
 
 		assert.equal(reviewTabs.length, 1, "REVIEW_GROUP_PRIMARY_TAB: files must not become primary workspace tabs");
-		assert.equal(reviewTabs[0].id, "review:review-alpha");
+		assert.equal(reviewTabs[0].id, reviewPanelTabIdFromReviewId("review-alpha"));
 		assert.equal((reviewTabs[0].source as Record<string, unknown>).reviewId, "review-alpha");
 		assert.equal(reviewTabs[0].title, "Review: Architecture");
 	});
@@ -270,8 +272,10 @@ describe("panel workspace side-pane tab contract", () => {
 		rememberReviewDocumentIdentity("Findings", "review-doc:s1:abc");
 		const tab = reviewTab("Findings");
 		assert.equal(tab.id, "review:review-doc%3As1%3Aabc");
-		assert.equal(reviewDocumentIdFromPanelTab(tab), "review-doc:s1:abc");
+		assert.equal(reviewIdFromPanelTab(tab), "review-doc:s1:abc");
+		assert.equal(reviewDocumentIdFromPanelTab(tab), "review-doc:s1:abc", "legacy getter remains a compatibility alias");
 		assert.equal(findPanelTab([tab], "review:Findings")?.id, tab.id);
+		assert.equal(reviewPanelTabIdFromReviewId("opaque id"), "review:opaque%20id");
 	});
 
 	it("active helpers never return or store chat", () => {

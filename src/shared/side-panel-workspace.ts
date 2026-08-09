@@ -24,12 +24,7 @@ export type SidePanelWorkspaceSource =
 		rev?: number;
 		historical?: boolean;
 	}
-	| {
-		type: "review";
-		sessionId: string;
-		documentId: string;
-		title: string;
-	}
+	| SidePanelReviewSource
 	| {
 		type: "inbox";
 		sessionId: string;
@@ -43,6 +38,26 @@ export type SidePanelWorkspaceSource =
 		instanceKey: string;
 		singleton?: boolean;
 		params?: Record<string, unknown>;
+	};
+
+/** Canonical review workspace identity. `documentId` and a missing `reviewId`
+ * are accepted only while persisted legacy workspaces are canonicalized. */
+export type SidePanelReviewSource =
+	| {
+		type: "review";
+		sessionId: string;
+		reviewId: string;
+		title: string;
+		documentId?: string;
+		reviewTitle?: string;
+	}
+	| {
+		type: "review";
+		sessionId: string;
+		reviewId?: undefined;
+		documentId?: string;
+		title: string;
+		reviewTitle?: string;
 	};
 
 export interface SidePanelWorkspaceTab {
