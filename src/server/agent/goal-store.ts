@@ -350,6 +350,19 @@ function validateGoal(
 	return value as unknown as PersistedGoal;
 }
 
+function serializeGoalForPublication(goal: PersistedGoal, dirtyId: string): string {
+	const label = `runtime goal ${dirtyId}`;
+	const payload = JSON.stringify(goal);
+	if (payload === undefined) invalidGoal(label, "must be JSON serializable");
+
+	// Validate the exact bytes being published so a toJSON hook cannot bypass
+	// known-field or dirty-key identity checks. Keep canonicalization and any
+	// further serialization confined away from the in-memory goal and payload.
+	const serializedGoal: unknown = JSON.parse(payload);
+	validateGoal(serializedGoal, label, dirtyId, false, false);
+	return payload;
+}
+
 function parseGoalArray(text: string, sourceLabel: string): PersistedGoal[] {
 	let parsed: unknown;
 	try {
@@ -664,8 +677,7 @@ class SqliteGoalPersistence implements GoalPersistence {
 						// Validate at the asynchronous publication boundary rather than in
 						// public mutators. Invalid runtime data rolls back and requeues the
 						// complete dirty batch instead of creating a row that bricks restart.
-						validateGoal(snapshot.goal, `runtime goal ${snapshot.id}`, snapshot.id, false, false);
-						const payload = JSON.stringify(snapshot.goal);
+						const payload = serializeGoalForPublication(snapshot.goal, snapshot.id);
 						bytes += Buffer.byteLength(payload);
 						upsert.run(snapshot.id, payload);
 					}

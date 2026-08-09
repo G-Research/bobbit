@@ -369,6 +369,34 @@ describe("GoalStore SQLite persistence", () => {
 		expect(reloaded.get("two")?.metadata).toEqual({ fixed: true });
 	});
 
+	it("validates the exact serialized goal payload before committing a dirty batch", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(goal("normal"));
+		store.put(goal("deceptive"));
+		await store.flush();
+
+		store.update("normal", { title: "Changed" });
+		store.put(Object.assign(goal("deceptive"), {
+			toJSON() { return goal("wrong-id", { title: "Deceptive bytes" }); },
+		}));
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		await expect(store.flush()).rejects.toThrow(/identity mismatch for deceptive/);
+
+		const reader = new Database(path.join(stateDir, "goals.sqlite"));
+		expect(JSON.parse((reader.prepare("SELECT payload FROM goal_records WHERE id = 'normal'").get() as { payload: string }).payload).title).toBe("Goal normal");
+		expect(JSON.parse((reader.prepare("SELECT payload FROM goal_records WHERE id = 'deceptive'").get() as { payload: string }).payload).title).toBe("Goal deceptive");
+		reader.close();
+
+		store.put(goal("deceptive", { title: "Corrected" }));
+		await store.flush();
+		await closeTracked(store);
+		const reopened = openStore(stateDir);
+		expect(reopened.get("normal")?.title).toBe("Changed");
+		expect(reopened.get("deceptive")?.title).toBe("Corrected");
+		await closeTracked(reopened);
+	});
+
 	it("rolls back a statement failure, retains the external delete tombstone, and retries deletion", async () => {
 		const stateDir = tempRoot();
 		const store = openStore(stateDir);
