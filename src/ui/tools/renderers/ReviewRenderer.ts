@@ -4,10 +4,17 @@ import { FileText } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 
+interface ReviewOpenFileParams {
+	title?: string;
+	markdown?: string;
+	file?: string;
+}
+
 interface ReviewOpenParams {
 	title?: string;
 	markdown?: string;
 	file?: string;
+	files?: ReviewOpenFileParams[];
 	replace?: boolean;
 }
 
@@ -18,10 +25,12 @@ export class ReviewOpenRenderer implements ToolRenderer<ReviewOpenParams, any> {
 		isStreaming?: boolean,
 	): ToolRenderResult {
 		const state = getToolState(result, isStreaming);
-		const title = params?.title || "Review";
-		const label = params?.file
-			? html`Review: <span class="font-mono">${params.file}</span>`
-			: html`Review: ${title}`;
+		const title = params?.title ?? "Review";
+		const label = params?.files
+			? html`Review: ${title} (${params.files.length} ${params.files.length === 1 ? "file" : "files"})`
+			: params?.file
+				? html`Review: <span class="font-mono">${params.file}</span>`
+				: html`Review: ${title}`;
 		return { content: renderHeader(state, FileText, label), isCustom: false };
 	}
 }
