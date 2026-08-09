@@ -594,6 +594,48 @@ export class MockAgentCore {
 			return { previewSnapshot: body };
 		}
 
+		// Review-group browser triggers. Stable review/file identities make reload,
+		// background-session, close, and replay-suppression assertions deterministic.
+		const reviewGroupAction = (reviewId, title, files) => ({
+			tool: "review_open",
+			input: { title, files: files.map(({ title: fileTitle, markdown }) => ({ title: fileTitle, markdown })) },
+			output: JSON.stringify({ action: "review_open", reviewId, title, files, replace: true }),
+		});
+		const alphaReviewFiles = [
+			{ fileId: "alpha-file-1", title: "Overview.md", markdown: "# Alpha overview\n\nAlpha overview body." },
+			{ fileId: "alpha-file-2", title: "Details.md", markdown: "# Alpha details\n\nAlpha details body." },
+		];
+		const overflowReviewFiles = Array.from({ length: 7 }, (_, index) => ({
+			fileId: `overflow-file-${index + 1}`,
+			title: `Section ${index + 1}.md`,
+			markdown: `# Overflow section ${index + 1}\n\nOverflow body ${index + 1}.`,
+		}));
+		const backgroundReviewFiles = [
+			{ fileId: "background-file-1", title: "Background A.md", markdown: "# Background A\n\nBackground owner content A." },
+			{ fileId: "background-file-2", title: "Background B.md", markdown: "# Background B\n\nBackground owner content B." },
+		];
+		if (lower.includes("review_groups_two")) {
+			return {
+				multiTool: [
+					reviewGroupAction("alpha-review", "Alpha Review", alphaReviewFiles),
+					reviewGroupAction(
+						"overflow-review",
+						"Overflow Review With A Very Long Primary Workspace Tab Title That Must Truncate",
+						overflowReviewFiles,
+					),
+				],
+			};
+		}
+		if (lower.includes("review_group_background_open")) {
+			return reviewGroupAction("background-review", "Background Session Review", backgroundReviewFiles);
+		}
+		if (lower.includes("review_group_background_close")) {
+			return {
+				tool: "review_close",
+				input: { title: "Background Session Review" },
+				output: JSON.stringify({ action: "review_close", title: "Background Session Review" }),
+			};
+		}
 		if (lower.includes("review_multi")) {
 			const docs = [
 				{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
@@ -1016,6 +1058,11 @@ export class MockAgentCore {
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
+
+		// Give browser journeys a deterministic window to navigate away before a
+		// background session emits its live review_open/review_close result.
+		const reviewGroupDelay = text.match(/REVIEW_GROUP_BACKGROUND_(?:OPEN|CLOSE)_DELAY:(\d+)/);
+		if (reviewGroupDelay) await this.tick(Math.max(0, parseInt(reviewGroupDelay[1], 10)));
 
 		const toolAction = MockAgentCore.respondToPrompt(text);
 
