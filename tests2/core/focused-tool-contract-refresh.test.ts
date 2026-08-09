@@ -486,6 +486,12 @@ describe("focused tool contract refresh", () => {
 		manager._testStore = store;
 		manager.resolveCurrentCatalogSpawnModel = async () => undefined;
 		manager.resolveCurrentCatalogThinkingLevel = async () => undefined;
+		// Model catalog/auth selection is orthogonal to this restore-contract fixture.
+		// Keep the real restore boundary while supplying its deterministic spawn tuple.
+		manager.finalizeSpawnOptions = async (options: any) => {
+			options.initialModel = "fixture/focused-model";
+			options.initialThinkingLevel = "low";
+		};
 		manager.tryAutoSelectModel = async () => {};
 		manager.tryApplyDefaultThinkingLevel = async () => {};
 		manager.ensureMcpManagerForContext = async () => {};
