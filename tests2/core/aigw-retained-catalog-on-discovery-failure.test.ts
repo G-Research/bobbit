@@ -18,12 +18,14 @@ import {
 	findSessionSelectableModel,
 	getAvailableModels,
 	invalidateModelCache,
+	resolveModelStateMeta,
 } from "../../src/server/agent/model-registry.js";
+import { clampThinkingLevelForModel } from "../../src/server/agent/thinking-level-clamp.js";
 
 const RETAINED_ID = "gpt-5.4";
 const RETAINED_COST = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 };
 
-type DiscoveryMode = "failure" | "success";
+type DiscoveryMode = "failure" | "success" | "empty";
 
 function startGateway(): Promise<{
 	url: string;
@@ -44,7 +46,9 @@ function startGateway(): Promise<{
 				return;
 			}
 			res.writeHead(200, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ data: [{ id: "openai/replacement-model", object: "model" }] }));
+			res.end(JSON.stringify({
+				data: mode === "empty" ? [] : [{ id: "openai/replacement-model", object: "model" }],
+			}));
 			return;
 		}
 		res.writeHead(404);
@@ -63,8 +67,13 @@ function startGateway(): Promise<{
 	});
 }
 
-function writeRetainedCatalog(agentDir: string, configuredUrl: string, providerUrl = configuredUrl): void {
-	fs.writeFileSync(path.join(agentDir, "models.json"), JSON.stringify({
+function writeRetainedCatalog(
+	agentDir: string,
+	configuredUrl: string,
+	providerUrl = configuredUrl,
+	jsonc = false,
+): void {
+	const strict = JSON.stringify({
 		providers: {
 			aigw: {
 				baseUrl: providerUrl,
@@ -86,7 +95,44 @@ function writeRetainedCatalog(agentDir: string, configuredUrl: string, providerU
 				}],
 			},
 		},
-	}, null, 2));
+	}, null, 2);
+	const source = jsonc
+		? strict.replace("{\n", "{\n  // Retained authoritative AIGW publication.\n").replace(/\n}$/, ",\n}")
+		: strict;
+	fs.writeFileSync(path.join(agentDir, "models.json"), source);
+}
+
+function startCustomCatalog(): Promise<{
+	url: string;
+	setMode: (mode: DiscoveryMode) => void;
+	close: () => Promise<void>;
+}> {
+	let mode: DiscoveryMode = "success";
+	const server = http.createServer((req, res) => {
+		if (req.url !== "/v1/models") {
+			res.writeHead(404).end();
+			return;
+		}
+		if (mode === "failure") {
+			res.writeHead(503, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "temporarily unavailable" }));
+			return;
+		}
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({
+			data: mode === "empty" ? [] : [{ id: "vision-custom", context_length: 96_000, max_tokens: 12_000 }],
+		}));
+	});
+	return new Promise((resolve) => {
+		server.listen(0, "127.0.0.1", () => {
+			const port = (server.address() as { port: number }).port;
+			resolve({
+				url: `http://127.0.0.1:${port}`,
+				setMode: (next) => { mode = next; },
+				close: () => new Promise<void>((done) => server.close(() => done())),
+			});
+		});
+	});
 }
 
 describe("AIGW retained catalog on discovery failure", () => {
@@ -117,14 +163,22 @@ describe("AIGW retained catalog on discovery failure", () => {
 		fs.rmSync(agentDir, { recursive: true, force: true });
 	});
 
-	it("retains a matching persisted catalog only while discovery fails", async () => {
+	it("retains a matching persisted JSONC catalog only while discovery fails", async () => {
 		const gateway = await startGateway();
 		try {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
 			const prefs = new PreferencesStore(path.join(agentDir, "state"));
 			prefs.set("aigw.url", gateway.url);
-			writeRetainedCatalog(agentDir, gateway.url);
+			writeRetainedCatalog(agentDir, gateway.url, gateway.url, true);
+			const retainedSource = fs.readFileSync(path.join(agentDir, "models.json"), "utf-8");
 
 			const unavailableModels = await getAvailableModels(prefs);
+			assert.equal(
+				fs.readFileSync(path.join(agentDir, "models.json"), "utf-8"),
+				retainedSource,
+				"read-only JSONC retention must not normalize or rewrite user-owned bytes",
+			);
 			const retained = findSessionSelectableModel(unavailableModels, "aigw", RETAINED_ID);
 			assert.ok(retained, "a transient HTTP 503 must retain the exact persisted AIGW model for restore/spawn validation");
 			assert.deepEqual(retained, {
@@ -153,6 +207,21 @@ describe("AIGW retained catalog on discovery failure", () => {
 				"retained routing from a different AIGW URL must not become selectable",
 			);
 
+			for (const invalidSource of [
+				`{ "providers": {}, "providers": { "aigw": { "baseUrl": ${JSON.stringify(gateway.url)}, "models": [] } } }`,
+				`{ "providers": { "aigw": { "baseUrl": ${JSON.stringify(gateway.url)}, "models": [ } } }`,
+			]) {
+				fs.writeFileSync(path.join(agentDir, "models.json"), invalidSource);
+				invalidateModelCache();
+				const rejected = await getAvailableModels(prefs);
+				assert.equal(findSessionSelectableModel(rejected, "aigw", RETAINED_ID), undefined);
+				assert.equal(
+					fs.readFileSync(path.join(agentDir, "models.json"), "utf-8"),
+					invalidSource,
+					"malformed or ambiguous JSONC must fail closed without mutating bytes",
+				);
+			}
+
 			writeRetainedCatalog(agentDir, gateway.url);
 			gateway.setMode("success");
 			invalidateModelCache();
@@ -162,12 +231,114 @@ describe("AIGW retained catalog on discovery failure", () => {
 				undefined,
 				"a successful discovery omission is authoritative catalog drift",
 			);
-			assert.ok(
-				findSessionSelectableModel(refreshedModels, "aigw", "openai/replacement-model"),
-				"the successful live discovery catalog must replace retained availability",
+			const replacement = findSessionSelectableModel(refreshedModels, "aigw", "openai/replacement-model");
+			assert.ok(replacement, "the successful live discovery catalog must replace retained availability");
+
+			fs.rmSync(path.join(agentDir, "models.json"));
+			gateway.setMode("failure");
+			now += 5_001;
+			const failedRefresh = await getAvailableModels(prefs);
+			assert.deepEqual(
+				findSessionSelectableModel(failedRefresh, "aigw", "openai/replacement-model"),
+				replacement,
+				"without a persisted fallback, an unchanged failed AIGW source must retain its full exact row",
+			);
+
+			gateway.setMode("empty");
+			now += 5_001;
+			const authoritativeEmpty = await getAvailableModels(prefs);
+			assert.equal(
+				findSessionSelectableModel(authoritativeEmpty, "aigw", "openai/replacement-model"),
+				undefined,
+				"a successful empty AIGW catalog must remove the previously retained row",
 			);
 		} finally {
 			await gateway.close();
+		}
+	});
+
+	it("retains exact custom rows only for unchanged failed sources", async () => {
+		const custom = await startCustomCatalog();
+		try {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const prefs = new PreferencesStore(path.join(agentDir, "custom-state"));
+			const config = {
+				id: "retained-custom",
+				name: "retained-custom",
+				type: "vllm" as const,
+				baseUrl: custom.url,
+			};
+			prefs.set("customProviders", [config]);
+
+			const initialModels = await getAvailableModels(prefs);
+			const initial = findSessionSelectableModel(initialModels, config.name, "vision-custom");
+			assert.deepEqual(initial, {
+				id: "vision-custom",
+				name: "vision-custom",
+				provider: config.name,
+				api: "openai-completions",
+				baseUrl: `${custom.url}/v1`,
+				contextWindow: 96_000,
+				maxTokens: 12_000,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				authenticated: true,
+			});
+
+			custom.setMode("failure");
+			now += 5_001;
+			const failedRefresh = await getAvailableModels(prefs);
+			assert.deepEqual(
+				findSessionSelectableModel(failedRefresh, config.name, "vision-custom"),
+				initial,
+				"an expired failed refresh must retain the complete exact composed row",
+			);
+			assert.deepEqual(resolveModelStateMeta(config.name, "vision-custom"), {
+				contextWindow: 96_000,
+				maxTokens: 12_000,
+				reasoning: false,
+				input: ["text"],
+				source: "cache",
+			});
+			assert.equal(
+				clampThinkingLevelForModel("high", config.name, "vision-custom"),
+				"off",
+				"thinking clamping must continue to consume the retained exact non-reasoning row",
+			);
+
+			custom.setMode("empty");
+			now += 5_001;
+			const authoritativeEmpty = await getAvailableModels(prefs);
+			assert.equal(findSessionSelectableModel(authoritativeEmpty, config.name, "vision-custom"), undefined);
+			assert.equal(resolveModelStateMeta(config.name, "vision-custom").source, "unavailable");
+			assert.equal(clampThinkingLevelForModel("high", config.name, "vision-custom"), undefined);
+
+			custom.setMode("success");
+			now += 5_001;
+			assert.ok(findSessionSelectableModel(await getAvailableModels(prefs), config.name, "vision-custom"));
+			custom.setMode("failure");
+			invalidateModelCache();
+			assert.equal(
+				findSessionSelectableModel(await getAvailableModels(prefs), config.name, "vision-custom"),
+				undefined,
+				"explicit invalidation must not retain rows from the previous source snapshot",
+			);
+
+			custom.setMode("success");
+			now += 5_001;
+			assert.ok(findSessionSelectableModel(await getAvailableModels(prefs), config.name, "vision-custom"));
+			custom.setMode("failure");
+			prefs.set("customProviders", [{ ...config, baseUrl: `${custom.url}/changed` }]);
+			now += 5_001;
+			assert.equal(
+				findSessionSelectableModel(await getAvailableModels(prefs), config.name, "vision-custom"),
+				undefined,
+				"a changed source identity must never inherit exact rows from the old configuration",
+			);
+		} finally {
+			await custom.close();
 		}
 	});
 
