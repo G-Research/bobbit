@@ -15,6 +15,7 @@ import {
 	proposalPanelTabId,
 	reviewDocumentIdFromPanelTab,
 	reviewPanelTabId,
+	reviewPanelTabIdFromReviewId,
 	reviewTitleFromPanelTab,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
@@ -31,7 +32,8 @@ export interface SidePanelWorkspaceTab {
 	source:
 		| { type: "preview"; sessionId: string; entry: string; live?: boolean; historical?: boolean; version?: number; artifactId?: string; contentHash?: string; path?: string; url?: string; toolUseId?: string; blockIndex?: number }
 		| { type: "proposal"; sessionId: string; proposalType: SidePanelProposalType; rev?: number; historical?: boolean }
-		| { type: "review"; sessionId: string; documentId: string; title: string }
+		| { type: "review"; sessionId: string; reviewId: string; documentId?: string; title: string }
+		| { type: "review"; sessionId: string; reviewId?: undefined; documentId: string; title: string }
 		| { type: "inbox"; sessionId: string; staffId?: string }
 		| { type: "pack"; sessionId: string; packId: string; panelId: string; instanceKey: string; singleton?: boolean; params?: Record<string, unknown> };
 	state?: Record<string, unknown>;
@@ -205,10 +207,20 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 		};
 	}
 	if (kind === "review") {
-		const documentId = stringValue(source.documentId);
-		const title = stringValue(source.title) || base.title.replace(/^Review:\s*/, "");
-		if (!documentId || !title) return null;
-		return { ...base, kind, source: { type: "review", sessionId, documentId, title } };
+		if (!id.startsWith("review:")) return null;
+		const routeReviewId = decodeComponent(id.slice("review:".length));
+		const sourceReviewId = stringValue(source.reviewId).trim();
+		const legacyDocumentId = stringValue(source.documentId).trim();
+		const title = stringValue(source.title) || stringValue(source.reviewTitle) || base.title.replace(/^Review:\s*/, "");
+		if (sourceReviewId && routeReviewId !== sourceReviewId) return null;
+		const reviewId = sourceReviewId || legacyDocumentId;
+		if (!reviewId || !title) return null;
+		return {
+			...base,
+			id: reviewPanelTabIdFromReviewId(reviewId),
+			kind,
+			source: { type: "review", sessionId, reviewId, title },
+		};
 	}
 	if (kind === "inbox") {
 		return { ...base, id: INBOX_PANEL_TAB_ID, kind, source: { type: "inbox", sessionId, ...(stringValue(source.staffId) ? { staffId: stringValue(source.staffId) } : {}) } };

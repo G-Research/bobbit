@@ -39,6 +39,15 @@
       }
     },
     {
+      "path": "tests2/dom/side-panel-workspace-review-normalize.test.ts",
+      "reason": "Client normalization regression coverage for canonical reviewId workspace tabs, legacy documentId migration, and route identity validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/browser/fixtures/review-groups.spec.ts",
       "reason": "Deterministic Chromium fixture coverage for two grouped-review primaries, review-local navigation-only secondary files, top-layer overflow, close containment, sibling survival, and review-level decisions.",
       "execution": {
