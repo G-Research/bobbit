@@ -1644,8 +1644,13 @@ function isAssistantStreamTerminalBoundary(event: unknown): boolean {
  * metadata is temporarily unavailable, retain the verified identity and omit
  * unknown fields rather than fabricating family defaults.
  */
-function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
+export function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
 	const meta = resolveModelStateMeta(provider, id);
+	const input = Array.isArray(meta?.input)
+		&& meta.input.length > 0
+		&& meta.input.every((entry) => entry === "text" || entry === "image")
+		? meta.input
+		: undefined;
 	return {
 		model: {
 			provider,
@@ -1654,6 +1659,7 @@ function buildModelStateData(provider: string, id: string): { model: Record<stri
 			...(meta?.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {}),
 			...(meta?.reasoning !== undefined ? { reasoning: meta.reasoning } : {}),
 			...(meta?.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
+			...(input ? { input } : {}),
 		},
 	};
 }
