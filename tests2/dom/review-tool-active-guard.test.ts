@@ -7,10 +7,10 @@ __syncBeforeAll(() => __syncCE());
 // results. This port does the same under happy-dom — no bundle, no browser.
 //
 // Regression coverage: a live review result belongs to the emitting session.
-// Background opens and closes must update that session's durable review/workspace
-// state without mutating the foreground's globally-hydrated `state.review*`
-// fields. Switching to the owner later hydrates the already-open review. Lazy
-// review-source imports must retain that ownership even if selection changes.
+// Background opens and closes update that session's durable review/workspace
+// state without mutating foreground `state.review*` fields. Switching to the
+// owner later hydrates the already-open group and active file. Lazy imports
+// retain ownership even if selection changes, while replay stays content-only.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const annotationStoreMocks = vi.hoisted(() => ({
@@ -21,9 +21,11 @@ const annotationStoreMocks = vi.hoisted(() => ({
 	isReviewSubmitted: vi.fn(),
 }));
 const reviewSourceMocks = vi.hoisted(() => ({
+	cleanupReviewGroup: vi.fn(),
 	clearPersistedReviewDocuments: vi.fn(),
 	loadReviewSources: vi.fn(),
 	openMarkdownReview: vi.fn(),
+	readPersistedReviewGroups: vi.fn(),
 	removePersistedReviewDocument: vi.fn(),
 	restorePersistedReviewDocuments: vi.fn(),
 }));
@@ -44,11 +46,13 @@ import { RemoteAgent } from "../../src/app/remote-agent.js";
 import { state } from "../../src/app/state.js";
 
 const mockReviewSourcesModule = {
+	cleanupReviewGroup: reviewSourceMocks.cleanupReviewGroup,
 	clearPersistedReviewDocuments: reviewSourceMocks.clearPersistedReviewDocuments,
 	// Keep both names at this mocked boundary while the single-document API is
 	// migrated to an explicit review-group API. Assertions use the shared spy.
 	openMarkdownReviewDocument: reviewSourceMocks.openMarkdownReview,
 	openMarkdownReviewGroup: reviewSourceMocks.openMarkdownReview,
+	readPersistedReviewGroups: reviewSourceMocks.readPersistedReviewGroups,
 	removePersistedReviewDocument: reviewSourceMocks.removePersistedReviewDocument,
 	restorePersistedReviewDocuments: reviewSourceMocks.restorePersistedReviewDocuments,
 };
@@ -92,6 +96,9 @@ function setActive(a: RemoteAgent): void {
 	state.selectedSessionId = (a as any)._sessionId;
 }
 function clearReviewState(): void {
+	state.reviewGroupsBySession = {};
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
@@ -170,6 +177,7 @@ beforeEach(() => {
 	annotationStoreMocks.isReviewSubmitted.mockReset();
 	annotationStoreMocks.isReviewSubmitted.mockReturnValue(false);
 
+	reviewSourceMocks.cleanupReviewGroup.mockReset();
 	reviewSourceMocks.clearPersistedReviewDocuments.mockReset();
 	reviewSourceMocks.loadReviewSources.mockReset();
 	reviewSourceMocks.loadReviewSources.mockResolvedValue(mockReviewSourcesModule);
@@ -177,21 +185,42 @@ beforeEach(() => {
 	reviewSourceMocks.openMarkdownReview.mockReset();
 	reviewSourceMocks.openMarkdownReview.mockImplementation((options: any) => {
 		const sessionId = String(options.sessionId || "");
+		const files = (options.files || [{ title: options.title, markdown: options.markdown }]).map((file: any, index: number) => ({
+			...file,
+			fileId: file.fileId || `${options.reviewId || options.title}-file-${index + 1}`,
+		}));
 		const persisted = structuredClone({
 			...options,
-			activeFileId: options.activeFileId ?? options.files?.[0]?.fileId,
+			files,
+			activeFileId: options.activeFileId ?? files[0]?.fileId,
 		});
 		persistedReviewOpens.set(sessionId, [
 			...(persistedReviewOpens.get(sessionId) || []),
 			persisted,
 		]);
-		const document = { title: options.title, markdown: options.markdown ?? options.files?.[0]?.markdown ?? "" };
+		state.reviewGroupsBySession[sessionId] = persistedReviewOpens.get(sessionId)! as any;
+		const document = { title: files[0].title, markdown: files[0].markdown };
 		if (sessionId !== state.selectedSessionId) return document;
-		state.reviewDocuments = new Map(state.reviewDocuments);
-		state.reviewDocuments.set(options.title, document as any);
-		state.reviewActiveTab = options.title;
+		state.reviewGroups = new Map([[persisted.reviewId || options.title, persisted as any]]);
+		state.reviewActiveReviewId = persisted.reviewId || options.title;
+		state.reviewDocuments = new Map(files.map((file: any) => [file.fileId, {
+			title: file.title,
+			markdown: file.markdown,
+			reviewId: persisted.reviewId,
+			fileId: file.fileId,
+		}]));
+		state.reviewActiveTab = persisted.activeFileId;
 		state.reviewPanelOpen = true;
 		return document;
+	});
+	reviewSourceMocks.readPersistedReviewGroups.mockReset();
+	reviewSourceMocks.readPersistedReviewGroups.mockImplementation((sessionId: string) => persistedReviewOpens.get(sessionId) || []);
+	reviewSourceMocks.cleanupReviewGroup.mockReset();
+	reviewSourceMocks.cleanupReviewGroup.mockImplementation((sessionId: string, reviewId: string) => {
+		const reviews = persistedReviewOpens.get(sessionId) || [];
+		const removed = reviews.find((review) => review.reviewId === reviewId);
+		persistedReviewOpens.set(sessionId, reviews.filter((review) => review.reviewId !== reviewId));
+		return removed;
 	});
 	reviewSourceMocks.removePersistedReviewDocument.mockReset();
 	reviewSourceMocks.removePersistedReviewDocument.mockImplementation((sessionId: string, identity: string) => {
@@ -203,11 +232,16 @@ beforeEach(() => {
 	reviewSourceMocks.restorePersistedReviewDocuments.mockImplementation((sessionId: string) => {
 		if (sessionId !== state.selectedSessionId) return;
 		const reviews = persistedReviewOpens.get(sessionId) || [];
-		state.reviewDocuments = new Map(reviews.map((review) => [review.title, {
-			title: review.title,
-			markdown: review.markdown ?? review.files?.[0]?.markdown ?? "",
+		state.reviewGroups = new Map(reviews.map((review) => [review.reviewId || review.title, review]));
+		state.reviewActiveReviewId = reviews[0]?.reviewId || reviews[0]?.title || "";
+		const active = reviews[0];
+		state.reviewDocuments = new Map((active?.files || []).map((file: any) => [file.fileId, {
+			title: file.title,
+			markdown: file.markdown,
+			reviewId: active.reviewId,
+			fileId: file.fileId,
 		}]));
-		state.reviewActiveTab = reviews[0]?.title || "";
+		state.reviewActiveTab = active?.activeFileId || "";
 		state.reviewPanelOpen = reviews.length > 0;
 	});
 	faviconMocks.showFaviconBadge.mockReset();
@@ -227,7 +261,7 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-describe("review tool active-session guard", () => {
+describe("review tool session ownership", () => {
 	it("REVIEW_BACKGROUND_OPEN_DURABILITY: live background review_open persists the full group for its owner without replacing foreground state", async () => {
 		const active = makeAgent("active-session");
 		const background = makeAgent("background-session");
@@ -270,9 +304,9 @@ describe("review tool active-session guard", () => {
 
 		const result = getReviewState();
 		expect(result.open).toBe(true);
-		expect(result.activeTab).toBe("PR-from-active");
+		expect(result.activeTab).toBe("PR-from-active-file-1");
 		expect(result.docCount).toBe(1);
-		expect(result.docTitles).toEqual(["PR-from-active"]);
+		expect(result.docTitles).toEqual(["PR-from-active-file-1"]);
 	});
 
 	it("REVIEW_BACKGROUND_OPEN_DURABILITY: lazy review_open remains durable for its owner after a session switch", async () => {
@@ -309,9 +343,25 @@ describe("review tool active-session guard", () => {
 
 		const result = getReviewState();
 		expect(result.open).toBe(true);
-		expect(result.activeTab).toBe("Structured inline markdown");
+		expect(result.activeTab).toBe("Structured inline markdown-file-1");
 		expect(result.docCount).toBe(1);
-		expect(result.docTitles).toEqual(["Structured inline markdown"]);
+		expect(result.docTitles).toEqual(["Structured inline markdown-file-1"]);
+	});
+
+	it("historical replay cannot recreate an absent review primary", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		clearReviewState();
+
+		await deliverReviewToolResult(active, "review_open", {
+			reviewId: "closed-review",
+			title: "Closed review",
+			files: [{ fileId: "closed-file", title: "Closed", markdown: "# Closed" }],
+		}, false);
+
+		expect(reviewSourceMocks.openMarkdownReview).not.toHaveBeenCalled();
+		expect(persistedReviewOpens.has("active-session")).toBe(false);
+		expect(getReviewState()).toEqual({ open: false, activeTab: "", docCount: 0, docTitles: [] });
 	});
 
 	it("REVIEW_BACKGROUND_OPEN_DURABILITY: background review_close removes only the owner's persisted review", async () => {
@@ -331,9 +381,9 @@ describe("review tool active-session guard", () => {
 			title: "Background PR",
 		});
 
-		expect(reviewSourceMocks.removePersistedReviewDocument).toHaveBeenCalledWith(
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledWith(
 			"background-session",
-			expect.stringMatching(/^(background-review|Background PR)$/),
+			"background-review",
 		);
 		expect(persistedReviewOpens.get("background-session")).toEqual([]);
 		expect(getReviewState()).toEqual(before);
@@ -358,9 +408,9 @@ describe("review tool active-session guard", () => {
 		const nextBefore = getReviewState();
 		await pending;
 
-		expect(reviewSourceMocks.removePersistedReviewDocument).toHaveBeenCalledWith(
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledWith(
 			"closing-session",
-			expect.stringMatching(/^(closing-review|Closing PR)$/),
+			"closing-review",
 		);
 		expect(persistedReviewOpens.get("closing-session")).toEqual([]);
 		expect(getReviewState()).toEqual(nextBefore);
@@ -391,9 +441,9 @@ describe("review tool active-session guard", () => {
 		);
 		expect(getReviewState()).toEqual({
 			open: true,
-			activeTab: "Durable background PR",
-			docCount: 1,
-			docTitles: ["Durable background PR"],
+			activeTab: "selected-file",
+			docCount: 2,
+			docTitles: ["selected-file", "other-file"],
 		});
 		expect(persistedReviewOpens.get("background-session")?.[0]).toEqual(expect.objectContaining({
 			activeFileId: "selected-file",

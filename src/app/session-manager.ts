@@ -1543,6 +1543,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -2421,6 +2423,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -3133,6 +3137,8 @@ export function backToSessions(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
@@ -3159,6 +3165,8 @@ export function disconnectGateway(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
