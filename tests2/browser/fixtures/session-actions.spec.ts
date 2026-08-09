@@ -304,6 +304,98 @@ test.describe("unified session actions", () => {
 		expectCanonicalActionsPresentInPriorityOrder(sidebarIds);
 	});
 
+	test("mobile sidebar aligns team-lead activity, active spinner, and action spacing", async ({ page }) => {
+		test.slow();
+		const referenceSessionId = await createSession();
+		sessionsToDelete.add(referenceSessionId);
+		await waitForSessionStatus(referenceSessionId, "idle");
+
+		const goal = await createGoal({
+			title: `Mobile sidebar alignment ${Date.now()}`,
+			team: true,
+			autoStartTeam: false,
+			worktree: false,
+		});
+		goalsToDelete.add(goal.id as string);
+		const teamLeadId = await startTeam(goal.id as string);
+		teamsToTeardown.add(goal.id as string);
+		sessionsToDelete.add(teamLeadId);
+		await waitForSessionStatus(teamLeadId, "idle", 30_000);
+
+		await page.setViewportSize({ width: 390, height: 844 });
+		await openApp(page);
+		await page.evaluate((goalId) => {
+			(window as any).__bobbitExpandedGoals?.add(goalId);
+			(window as any).__bobbitRenderApp?.();
+		}, goal.id);
+
+		const referenceRow = sessionRow(page, referenceSessionId);
+		const leadRow = sessionRow(page, teamLeadId);
+		await expect(referenceRow, "reference session row should be visible on the mobile landing page").toBeVisible({ timeout: 20_000 });
+		await expect(leadRow, "expanded team goal should expose its team-lead row").toBeVisible({ timeout: 20_000 });
+		await expect(referenceRow.locator('[data-testid="sidebar-session-last-activity"]')).toBeVisible();
+		await expect(leadRow.locator('[data-testid="sidebar-session-last-activity"]')).toBeVisible();
+
+		type MobileRowMetrics = {
+			indicatorLeft: number;
+			indicatorRight: number;
+			indicatorCenterY: number;
+			firstIconLeft: number;
+			firstIconCenterY: number;
+			firstIconRight: number;
+			secondIconLeft: number;
+		};
+		const measure = (row: Locator, indicatorSelector: string) => row.evaluate((element, selector): MobileRowMetrics => {
+			const indicator = element.querySelector<HTMLElement>(selector);
+			const cluster = element.querySelector<HTMLElement>(".sidebar-mobile-action-cluster");
+			const icons = cluster
+				? Array.from(cluster.querySelectorAll<HTMLElement>("button .sidebar-scale-icon"))
+				: [];
+			if (!indicator || icons.length < 2) throw new Error("Missing mobile row indicator or action icons");
+			const indicatorRect = indicator.getBoundingClientRect();
+			const firstRect = icons[0]!.getBoundingClientRect();
+			const secondRect = icons[1]!.getBoundingClientRect();
+			return {
+				indicatorLeft: indicatorRect.left,
+				indicatorRight: indicatorRect.right,
+				indicatorCenterY: indicatorRect.top + indicatorRect.height / 2,
+				firstIconLeft: firstRect.left,
+				firstIconCenterY: firstRect.top + firstRect.height / 2,
+				firstIconRight: firstRect.right,
+				secondIconLeft: secondRect.left,
+			};
+		}, indicatorSelector);
+
+		const referenceIdle = await measure(referenceRow, '[data-testid="sidebar-session-last-activity"]');
+		const leadIdle = await measure(leadRow, '[data-testid="sidebar-session-last-activity"]');
+		expect(Math.abs(leadIdle.indicatorRight - referenceIdle.indicatorRight), "team-lead activity should share the ordinary session metadata column").toBeLessThanOrEqual(1);
+		expect(Math.abs(leadIdle.indicatorCenterY - leadIdle.firstIconCenterY), "team-lead activity should be vertically centered with its actions").toBeLessThanOrEqual(1);
+		expect(
+			Math.abs((leadIdle.firstIconLeft - leadIdle.indicatorRight) - (leadIdle.secondIconLeft - leadIdle.firstIconRight)),
+			"activity-to-first-action whitespace should match the whitespace between action icons",
+		).toBeLessThanOrEqual(1);
+
+		await page.evaluate((sessionId) => {
+			const state = (window as any).__bobbitState;
+			const session = state?.gatewaySessions?.find((candidate: { id?: string }) => candidate.id === sessionId);
+			if (!session) throw new Error(`Missing client session ${sessionId}`);
+			session.status = "busy";
+			(window as any).__bobbitRenderApp?.();
+		}, referenceSessionId);
+		await expect(referenceRow.locator(".sidebar-active-dot")).toBeVisible();
+		const active = await measure(referenceRow, ".sidebar-active-dot");
+		expect(Math.abs(active.indicatorCenterY - referenceIdle.indicatorCenterY), "active spinner should occupy the last-activity vertical center").toBeLessThanOrEqual(1);
+		expect(Math.abs(active.indicatorCenterY - active.firstIconCenterY), "active spinner should be vertically centered with its actions").toBeLessThanOrEqual(1);
+		expect(
+			Math.abs((active.firstIconLeft - active.indicatorRight) - (active.secondIconLeft - active.firstIconRight)),
+			"spinner-to-first-action whitespace should match the whitespace between action icons",
+		).toBeLessThanOrEqual(1);
+		expect(await referenceRow.locator(".sidebar-active-dot").evaluate((element) => ({
+			left: getComputedStyle(element).left,
+			alignSelf: getComputedStyle(element).alignSelf,
+		}))).toEqual({ left: "0px", alignSelf: "center" });
+	});
+
 	test("staff and team-lead sessions keep canonical labels and visibility", async ({ page }) => {
 		test.slow(); // staff-session sidebar lookup: extend timeout for concurrent verification load
 		await page.setViewportSize({ width: 900, height: 900 });
