@@ -238,6 +238,90 @@ describe("assistant stream session broadcast", () => {
 		assert.equal(JSON.stringify(retained).includes("partialJson"), false, "raw replay must not retain transport chain state");
 	});
 
+	it("gives a capable mid-tool attach a self-contained baseline without changing replay", async () => {
+		const session: any = {
+			id: "sess-tool-attach",
+			projectId: "project-1",
+			status: "idle",
+			statusVersion: 1,
+			title: "Session",
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: { toArray: () => [] },
+			cwd: process.cwd(),
+			rpcClient: { getState: async () => ({ success: false }) },
+		};
+		const steady = await authenticate(session, { assistantStreamDelta: 1 });
+		const legacy = await authenticate(session);
+		steady.sent.length = 0;
+		legacy.sent.length = 0;
+
+		emitSessionEvent(session, makeToolUpdate({}, "toolcall_start"));
+		const fragments = ['{"path":"src/assi', 'stant.ts","flags":[tru', 'e]}'];
+		let json = fragments[0];
+		emitSessionEvent(session, makeToolUpdate(parsePartialToolArguments(json), "toolcall_delta", fragments[0]));
+
+		const attached = await authenticate(session, { assistantStreamDelta: 1 });
+		assert.equal((attached as any).assistantStreamDeltaNeedsBaseline, true);
+		attached.sent.length = 0;
+		steady.sent.length = 0;
+
+		for (const fragment of fragments.slice(1)) {
+			json += fragment;
+			emitSessionEvent(session, makeToolUpdate(parsePartialToolArguments(json), "toolcall_delta", fragment));
+		}
+
+		const attachedFrames = eventFrames(attached);
+		assert.equal(attachedFrames.length, 2);
+		assert.equal(attachedFrames[0].data.assistantStreamDelta, 1);
+		assert.ok(attachedFrames[0].data.assistantMessageBaseline, "first attached frame must carry prior tool JSON state");
+		assert.equal(attachedFrames[0].data.assistantMessageBaseline.content[0].partialJson, fragments[0]);
+		assert.equal((attached as any).assistantStreamDeltaNeedsBaseline, false);
+		let reconstructed = reconstructAssistantStreamDelta(attachedFrames[0].data) as any;
+		assert.deepEqual(reconstructed.message.content[0].arguments, parsePartialToolArguments(fragments.slice(0, 2).join("")));
+		assert.equal("assistantMessageBaseline" in attachedFrames[1].data, false);
+		reconstructed = reconstructAssistantStreamDelta(attachedFrames[1].data, reconstructed.message) as any;
+		assert.deepEqual(reconstructed.message.content[0].arguments, { path: "src/assistant.ts", flags: [true] });
+
+		for (const frame of eventFrames(steady)) {
+			assert.equal(frame.data.assistantStreamDelta, 1, "an established capable recipient stays on steady compact frames");
+			assert.equal("assistantMessageBaseline" in frame.data, false);
+		}
+		const retained = session.eventBuffer.getAll().map((entry: any) => entry.event);
+		assert.deepEqual(retained, eventFrames(legacy).map((frame) => frame.data));
+		assert.equal(JSON.stringify(retained).includes("partialJson"), false, "authoritative replay stays cumulative and transport-free");
+	});
+
+	it("keeps a new recipient baseline armed across raw fallback until a compact boundary", async () => {
+		const session: any = {
+			id: "sess-baseline-fallback",
+			projectId: "project-1",
+			status: "idle",
+			statusVersion: 1,
+			title: "Session",
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: { toArray: () => [] },
+			cwd: process.cwd(),
+			rpcClient: {},
+		};
+		const capable = await authenticate(session, { assistantStreamDelta: 1 });
+		capable.sent.length = 0;
+
+		const unsupported: any = makeAssistantUpdate("opaque", "opaque");
+		unsupported.assistantMessageEvent.type = "image_delta";
+		emitSessionEvent(session, unsupported);
+		assert.deepEqual(eventFrames(capable)[0].data, unsupported);
+		assert.equal((capable as any).assistantStreamDeltaNeedsBaseline, true, "raw fallback must not consume the baseline fence");
+
+		emitSessionEvent(session, { type: "process_exit" });
+		emitSessionEvent(session, makeAssistantUpdate("Fresh", "Fresh"));
+		const compact = eventFrames(capable).at(-1)!.data;
+		assert.equal(compact.assistantStreamDelta, 1);
+		assert.ok(compact.assistantMessageBaseline);
+		assert.equal((capable as any).assistantStreamDeltaNeedsBaseline, false);
+	});
+
 	it("re-arms only capable recipients sent a compaction snapshot", async () => {
 		const session: any = {
 			id: "sess-snapshot",

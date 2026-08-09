@@ -126,6 +126,42 @@ describe("assistant stream delta compaction", () => {
 		roundTrip(events);
 	});
 
+	it("forces a self-contained progressive tool baseline from reconstructed session state", () => {
+		const tool: AnyObject = { type: "toolCall", id: "call-attach", name: "edit", arguments: {} };
+		const current = message([tool]);
+		const start = update(current, { type: "toolcall_start", contentIndex: 0 });
+		const compactStart = compactAssistantStreamDelta(start) as AnyObject;
+		let previous = (reconstructAssistantStreamDelta(compactStart) as AnyObject).message;
+
+		const fragments = ['{"path":"src/assi', 'stant.ts","flags":[tru', 'e]}'];
+		let json = fragments[0];
+		tool.arguments = parsePartialToolArguments(json);
+		const firstDelta = update(current, { type: "toolcall_delta", contentIndex: 0, delta: fragments[0] });
+		const compactFirst = compactAssistantStreamDelta(firstDelta, previous) as AnyObject;
+		previous = (reconstructAssistantStreamDelta(compactFirst, previous) as AnyObject).message;
+
+		json += fragments[1];
+		tool.arguments = parsePartialToolArguments(json);
+		const attachDelta = update(current, { type: "toolcall_delta", contentIndex: 0, delta: fragments[1] });
+		const selfContained = compactAssistantStreamDelta(attachDelta, previous, { selfContained: true }) as AnyObject;
+		assert.equal(selfContained.assistantStreamDelta, 1);
+		assert.equal("message" in selfContained, false);
+		assert.equal(selfContained.assistantMessageBaseline.content[0].partialJson, fragments[0]);
+		const attached = reconstructAssistantStreamDelta(selfContained) as AnyObject;
+		assert.deepEqual(withoutTransportPartialJson(attached), withoutTransportPartialJson(attachDelta));
+		assert.equal(attached.message.content[0].partialJson, json);
+
+		json += fragments[2];
+		tool.arguments = parsePartialToolArguments(json);
+		const nextDelta = update(current, { type: "toolcall_delta", contentIndex: 0, delta: fragments[2] });
+		const steady = compactAssistantStreamDelta(nextDelta, attached.message) as AnyObject;
+		assert.equal(steady.assistantStreamDelta, 1);
+		assert.equal("assistantMessageBaseline" in steady, false);
+		const continued = reconstructAssistantStreamDelta(steady, attached.message) as AnyObject;
+		assert.deepEqual(continued.message.content[0].arguments, { path: "src/assistant.ts", flags: [true] });
+		assert.equal(continued.message.content[0].partialJson, json);
+	});
+
 	it("round-trips mixed text, thinking, and tool blocks", () => {
 		const current = message([{ type: "thinking", thinking: "" }]);
 		const events = [update(current, { type: "thinking_start", contentIndex: 0 })];

@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import "../../src/app/session-manager.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
 import { setRenderApp } from "../../src/app/state.js";
-import { compactAssistantStreamDelta } from "../../src/shared/assistant-stream-delta.ts";
+import {
+	compactAssistantStreamDelta,
+	parsePartialToolArguments,
+	reconstructAssistantStreamDelta,
+} from "../../src/shared/assistant-stream-delta.ts";
 
 setRenderApp(() => {});
 
@@ -37,6 +41,25 @@ function makeAssistantUpdate(text: string, delta: string) {
 			type: "text_delta",
 			contentIndex: 0,
 			delta,
+			partial: structuredClone(message),
+		},
+	};
+}
+
+function makeToolUpdate(argumentsValue: Record<string, unknown>, type: "toolcall_start" | "toolcall_delta", delta?: string) {
+	const message = {
+		role: "assistant",
+		id: "stream-tool-1",
+		content: [{ type: "toolCall", id: "call-1", name: "edit", arguments: structuredClone(argumentsValue) }],
+		timestamp: 1_735_000_000_000,
+	};
+	return {
+		type: "message_update",
+		message,
+		assistantMessageEvent: {
+			type,
+			contentIndex: 0,
+			...(delta === undefined ? {} : { delta }),
 			partial: structuredClone(message),
 		},
 	};
@@ -106,6 +129,39 @@ describe("RemoteAgent assistant stream delta", () => {
 			data: { type: "message_end", message: { role: "assistant", id: "stream-1", content: [{ type: "text", text: "Again" }] } },
 		});
 		expect(agent._previousRawAssistantStreamMessage).toBeUndefined();
+	});
+
+	it("continues progressive tool JSON after a snapshot with a self-contained baseline", async () => {
+		const agent: any = new RemoteAgent();
+		const ws = new FakeWS("ws://test");
+		agent.ws = ws;
+		agent.send = () => {};
+		agent._assistantStreamDeltaEnabled = true;
+
+		const start = makeToolUpdate({}, "toolcall_start");
+		let previous = (reconstructAssistantStreamDelta(compactAssistantStreamDelta(start)) as any).message;
+		const fragments = ['{"path":"src/assi', 'stant.ts","flags":[tru', 'e]}'];
+		let json = fragments[0];
+		const first = makeToolUpdate(parsePartialToolArguments(json), "toolcall_delta", fragments[0]);
+		const compactFirst = compactAssistantStreamDelta(first, previous);
+		previous = (reconstructAssistantStreamDelta(compactFirst, previous) as any).message;
+
+		await agent.handleServerMessage({ type: "messages", data: [first.message] });
+		expect(agent._previousRawAssistantStreamMessage).toBeUndefined();
+
+		json += fragments[1];
+		const attach = makeToolUpdate(parsePartialToolArguments(json), "toolcall_delta", fragments[1]);
+		const selfContained = compactAssistantStreamDelta(attach, previous, { selfContained: true });
+		await agent.handleServerMessage({ type: "event", seq: 1, ts: 10, data: selfContained });
+		expect(agent.state.streamingMessage.content[0].arguments).toEqual(parsePartialToolArguments(json));
+		expect(ws.readyState).toBe(FakeWS.OPEN);
+
+		json += fragments[2];
+		const next = makeToolUpdate(parsePartialToolArguments(json), "toolcall_delta", fragments[2]);
+		const steady = compactAssistantStreamDelta(next, agent._previousRawAssistantStreamMessage);
+		await agent.handleServerMessage({ type: "event", seq: 2, ts: 20, data: steady });
+		expect(agent.state.streamingMessage.content[0].arguments).toEqual({ path: "src/assistant.ts", flags: [true] });
+		expect(ws.readyState).toBe(FakeWS.OPEN);
 	});
 
 	it("reconnects when a compact delta cannot be reconstructed so the server resets its socket baseline", async () => {

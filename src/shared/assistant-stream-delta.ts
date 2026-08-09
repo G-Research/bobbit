@@ -319,8 +319,14 @@ function applyDelta(message: JsonObject, assistantEvent: JsonObject, checkpoint?
 /**
  * Remove cumulative `message` and `assistantMessageEvent.partial` snapshots.
  * `previousMessage` is the preceding reconstructed message, when available.
+ * A self-contained frame carries that predecessor as its live-only baseline so
+ * a recipient that just discarded local reconstruction state can resume safely.
  */
-export function compactAssistantStreamDelta(event: unknown, previousMessage?: unknown): unknown {
+export function compactAssistantStreamDelta(
+	event: unknown,
+	previousMessage?: unknown,
+	options?: { selfContained?: boolean },
+): unknown {
 	if (!isObject(event) || event.type !== "message_update" || !isObject(event.message)
 		|| !isObject(event.assistantMessageEvent) || typeof event.assistantMessageEvent.type !== "string"
 		|| !SUPPORTED_TYPES.has(event.assistantMessageEvent.type)
@@ -336,6 +342,7 @@ export function compactAssistantStreamDelta(event: unknown, previousMessage?: un
 		? clone(previousMessage)
 		: baselineFor(event.message, event.assistantMessageEvent);
 	if (!baseline) return event;
+	const selfContained = options?.selfContained === true;
 	const checkpoint = checkpointFor(event.message, event.assistantMessageEvent);
 	const { partial: _partial, ...assistantMessageEvent } = event.assistantMessageEvent;
 	if (assistantMessageEvent.type === "text_end" || assistantMessageEvent.type === "thinking_end") {
@@ -347,10 +354,10 @@ export function compactAssistantStreamDelta(event: unknown, previousMessage?: un
 		assistantMessageEvent,
 		assistantStreamDelta: COMPACT_VERSION,
 	};
-	if (!isObject(previousMessage)) compact.assistantMessageBaseline = baseline;
+	if (selfContained || !isObject(previousMessage)) compact.assistantMessageBaseline = baseline;
 	if (checkpoint) compact.assistantBlockCheckpoint = checkpoint;
 
-	const reconstructed = reconstructAssistantStreamDelta(compact, previousMessage);
+	const reconstructed = reconstructAssistantStreamDelta(compact, selfContained ? undefined : previousMessage);
 	return isObject(reconstructed)
 		&& deepEqual(comparable(reconstructed.message), comparable(event.message))
 		&& isObject(reconstructed.assistantMessageEvent)
