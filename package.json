@@ -102,6 +102,7 @@
     "better-sqlite3": "12.11.1",
     "docx-preview": "^0.3.7",
     "flexsearch": "0.8.158",
+    "jsonc-parser": "^3.3.1",
     "jszip": "^3.10.1",
     "lit": "^3.3.1",
     "lucide": "^0.544.0",
