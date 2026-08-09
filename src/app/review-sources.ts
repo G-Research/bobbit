@@ -17,9 +17,15 @@ import {
 } from "./state.js";
 import {
 	clearAnnotations,
+	clearReviewTombstone,
 	flushPendingWrites,
 	getInlineCommentPayloadsForDocument,
+	getReviewTombstones,
+	isReviewSubmitted,
+	setReviewTombstone,
 } from "../ui/components/review/AnnotationStore.js";
+
+export { clearReviewTombstone, setReviewTombstone } from "../ui/components/review/AnnotationStore.js";
 
 const REVIEW_CONTEXT_STORAGE_PREFIX = "bobbit-review-contexts-v1:";
 const REVIEW_CONTEXT_VERSION = 2;
@@ -455,14 +461,71 @@ function reviewIdentityFromWorkspaceTab(tab: any): string | undefined {
 	return normalizeIdentity(source?.reviewId) || normalizeIdentity(source?.documentId) || reviewDocumentIdFromPanelTab(tab);
 }
 
+const pendingTombstoneTabCloses = new Map<string, Promise<void>>();
+
+/**
+ * Remove only workspace tabs covered by an exact hydrated tombstone. The
+ * legacy session-wide flag remains a compatibility fallback for old data that
+ * could represent only one review. All closes use the normal authoritative
+ * mutation/retry path, including for background owner sessions.
+ */
+export async function reconcileTombstonedReviewWorkspace(
+	sessionId: string,
+	options: { includeLegacySubmitted?: boolean } = {},
+): Promise<void> {
+	const tombstones = getReviewTombstones(sessionId);
+	const reviewTabs = getSidePanelWorkspace(sessionId).tabs.filter((tab) =>
+		tab.kind === "review" || tab.id.startsWith("review:"));
+	const closeLegacyReview = options.includeLegacySubmitted === true
+		&& tombstones.size === 0
+		&& reviewTabs.length === 1;
+	const targets = reviewTabs.flatMap((tab) => {
+		const reviewId = reviewIdentityFromWorkspaceTab(tab);
+		const exact = !!reviewId && tombstones.has(reviewId);
+		return exact || closeLegacyReview ? [{ tab, reviewId: exact ? reviewId : undefined }] : [];
+	});
+
+	for (const { tab, reviewId } of targets) {
+		const pendingKey = `${sessionId}\u0000${tab.id}`;
+		let pending = pendingTombstoneTabCloses.get(pendingKey);
+		if (!pending) {
+			pending = closeSidePanelTab(tab.id, { sessionId, retryConflictOnce: true })
+				.then(() => undefined, (err) => {
+					console.warn("[review-sources] tombstoned review workspace cleanup failed:", err);
+				})
+				.finally(() => pendingTombstoneTabCloses.delete(pendingKey));
+			pendingTombstoneTabCloses.set(pendingKey, pending);
+		}
+		await pending;
+
+		// A fresh explicit live open clears its exact tombstone synchronously.
+		// If it raced an already-dispatched stale close, issue the idempotent open
+		// again after that close settles so the new live request wins final order.
+		if (reviewId && !getReviewTombstones(sessionId).has(reviewId)) {
+			const reopened = sessionGroups(sessionId).find((group) => group.reviewId === reviewId);
+			if (reopened) openReviewWorkspace(reopened, sessionId);
+		}
+	}
+}
+
 export function restorePersistedReviewDocuments(sessionId: string, _options: { select?: boolean } = {}): void {
 	const persisted = readPersistedReviewGroups(sessionId);
+	const tombstones = getReviewTombstones(sessionId);
+	const legacySubmitted = isReviewSubmitted(sessionId)
+		&& tombstones.size === 0
+		&& persisted.length <= 1;
+	const eligible = legacySubmitted
+		? []
+		: persisted.filter((group) => !tombstones.has(group.reviewId));
+	if (eligible.length !== persisted.length) writeSessionGroups(sessionId, eligible);
+
 	const workspace = getSidePanelWorkspace(sessionId);
 	const tabs = workspace.tabs.filter((tab) => tab.kind === "review");
 	const openIds = new Set(tabs.map(reviewIdentityFromWorkspaceTab).filter((id): id is string => !!id));
 	const legacyTitles = new Set(tabs.map((tab) => reviewTitleFromPanelTab(tab as any) || tab.title.replace(/^Review:\s*/, "")).filter(Boolean));
-	const restored = persisted.filter((group) => openIds.has(group.reviewId) || (!openIds.size && legacyTitles.has(group.title)));
-	state.reviewGroupsBySession = { ...state.reviewGroupsBySession, [sessionId]: persisted };
+	const restored = eligible.filter((group) => openIds.has(group.reviewId) || (!openIds.size && legacyTitles.has(group.title)));
+	state.reviewGroupsBySession = { ...state.reviewGroupsBySession, [sessionId]: eligible };
+	void reconcileTombstonedReviewWorkspace(sessionId, { includeLegacySubmitted: legacySubmitted });
 	if (!isVisibleSession(sessionId)) return;
 	const activeTab = tabs.find((tab) => tab.id === workspace.activeTabId);
 	const activeIdentity = reviewIdentityFromWorkspaceTab(activeTab) || restored.find((group) => reviewTitleFromPanelTab(activeTab as any) === group.title)?.reviewId;
@@ -705,19 +768,6 @@ async function postSignoffDecision(source: Extract<ReviewSource, { kind: "verifi
 	}
 	dispatchHumanSignoffResolved({ goalId: source.goalId, gateId: source.gateId, signalId: source.signalId, stepName: source.stepName, decision: body.decision as "pass" | "fail" });
 	await refreshGateStatusForGoal(source.goalId);
-}
-
-export async function setReviewTombstone(sessionId: string, reviewId: string, tombstone: "submitted" | "closed"): Promise<void> {
-	await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}`, {
-		method: "PUT",
-		body: JSON.stringify({ state: tombstone }),
-	}).catch(() => undefined);
-}
-
-export async function clearReviewTombstone(sessionId: string, reviewId: string): Promise<void> {
-	await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}`, {
-		method: "DELETE",
-	}).catch(() => undefined);
 }
 
 async function markReviewSubmittedExact(sessionId: string, reviewId: string): Promise<void> {

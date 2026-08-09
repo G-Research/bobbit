@@ -64,6 +64,12 @@ export type ReviewTombstoneState = "submitted" | "closed";
 /** sessionId → (reviewId → durable replay tombstone). */
 const _reviewTombstoneCache = new Map<string, Map<string, ReviewTombstoneState>>();
 
+/** Tombstone mutations must win over an annotation GET already in flight. */
+let _tombstoneMutationVersion = 0;
+const _tombstoneMutationVersions = new Map<string, Map<string, number>>();
+const _pendingTombstoneWrites = new Map<string, Set<Promise<void>>>();
+const _annotationHydrationGeneration = new Map<string, number>();
+
 /**
  * Monotonically increasing version counter, bumped on cache hydration.
  * Used internally to track mutations; not exported.
@@ -119,18 +125,40 @@ function _ensureSessionCache(sessionId: string): Map<string, ReviewAnnotation[]>
 
 // ── Initialization ───────────────────────────────────────────────────
 
+function _applyTombstoneMutationsAfter(
+  sessionId: string,
+  hydrated: Map<string, ReviewTombstoneState>,
+  afterVersion: number,
+): Map<string, ReviewTombstoneState> {
+  const local = _reviewTombstoneCache.get(sessionId);
+  for (const [reviewId, version] of _tombstoneMutationVersions.get(sessionId) || []) {
+    if (version <= afterVersion) continue;
+    const state = local?.get(reviewId);
+    if (state) hydrated.set(reviewId, state);
+    else hydrated.delete(reviewId);
+  }
+  return hydrated;
+}
+
 /**
  * Hydrate the in-memory cache from the server for a given session.
  * Call once on session connect, before reading annotations or submitted state.
  */
 export async function initAnnotationStore(sessionId: string): Promise<void> {
+  const generation = (_annotationHydrationGeneration.get(sessionId) || 0) + 1;
+  _annotationHydrationGeneration.set(sessionId, generation);
+  const pendingBeforeHydration = [...(_pendingTombstoneWrites.get(sessionId) || [])];
+  if (pendingBeforeHydration.length > 0) await Promise.all(pendingBeforeHydration);
+  const mutationVersionAtRequest = _tombstoneMutationVersion;
   try {
     const res = await gatewayFetch(gatewayRoute(`/api/sessions/${sessionId}/review/annotations`));
+    if (_annotationHydrationGeneration.get(sessionId) !== generation) return;
     if (!res.ok) {
-      // Server doesn't have data yet or session not found — start empty
+      // Server doesn't have data yet or session not found — start empty, while
+      // retaining a live exact mutation that landed during this request.
       _annotationCache.set(sessionId, new Map());
       _submittedCache.set(sessionId, false);
-      _reviewTombstoneCache.set(sessionId, new Map());
+      _reviewTombstoneCache.set(sessionId, _applyTombstoneMutationsAfter(sessionId, new Map(), mutationVersionAtRequest));
       return;
     }
     const data = await res.json();
@@ -155,7 +183,7 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
         if (typeof reviewId === "string" && reviewId.trim()) tombstones.set(reviewId, "closed");
       }
     }
-    _reviewTombstoneCache.set(sessionId, tombstones);
+    _reviewTombstoneCache.set(sessionId, _applyTombstoneMutationsAfter(sessionId, tombstones, mutationVersionAtRequest));
     _cacheVersion++;
     // Notify any open review panes so they can refresh annotation counts.
     // This handles the race where a review pane was created (via a concurrent
@@ -164,10 +192,12 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
       window.dispatchEvent(new CustomEvent("annotation-cache-ready", { detail: { sessionId } }));
     }
   } catch {
-    // Network error — initialize empty caches for graceful degradation
+    if (_annotationHydrationGeneration.get(sessionId) !== generation) return;
+    // Network error — initialize empty caches for graceful degradation while
+    // retaining a live exact mutation that landed during this request.
     _annotationCache.set(sessionId, new Map());
     _submittedCache.set(sessionId, false);
-    _reviewTombstoneCache.set(sessionId, new Map());
+    _reviewTombstoneCache.set(sessionId, _applyTombstoneMutationsAfter(sessionId, new Map(), mutationVersionAtRequest));
   }
 }
 
@@ -232,6 +262,30 @@ function _ensureTombstoneCache(sessionId: string): Map<string, ReviewTombstoneSt
   return sessionCache;
 }
 
+function _recordTombstoneMutation(sessionId: string, reviewId: string): void {
+  _tombstoneMutationVersion += 1;
+  let versions = _tombstoneMutationVersions.get(sessionId);
+  if (!versions) {
+    versions = new Map();
+    _tombstoneMutationVersions.set(sessionId, versions);
+  }
+  versions.set(reviewId, _tombstoneMutationVersion);
+}
+
+function _trackTombstoneWrite(sessionId: string, write: Promise<void>): Promise<void> {
+  let pending = _pendingTombstoneWrites.get(sessionId);
+  if (!pending) {
+    pending = new Set();
+    _pendingTombstoneWrites.set(sessionId, pending);
+  }
+  pending.add(write);
+  write.finally(() => {
+    pending?.delete(write);
+    if (pending?.size === 0) _pendingTombstoneWrites.delete(sessionId);
+  });
+  return write;
+}
+
 /** Persist an exact review's replay tombstone without suppressing sibling reviews. */
 export function setReviewTombstone(
   sessionId: string,
@@ -239,25 +293,27 @@ export function setReviewTombstone(
   state: ReviewTombstoneState,
 ): Promise<void> {
   _ensureTombstoneCache(sessionId).set(reviewId, state);
-  return _serverFetch(
+  _recordTombstoneMutation(sessionId, reviewId);
+  return _trackTombstoneWrite(sessionId, _serverFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ state }),
     },
-  );
+  ));
 }
 
 /** Clear only the exact review's tombstone when a fresh live open arrives. */
 export function clearReviewTombstone(sessionId: string, reviewId: string): Promise<void> {
   _reviewTombstoneCache.get(sessionId)?.delete(reviewId);
+  _recordTombstoneMutation(sessionId, reviewId);
   // Deliberately unconditional: a background live open can arrive before this
   // browser hydrated the owner session's cache, while the server is tombstoned.
-  return _serverFetch(
+  return _trackTombstoneWrite(sessionId, _serverFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}`,
     { method: "DELETE" },
-  );
+  ));
 }
 
 export function getReviewTombstone(sessionId: string, reviewId: string): ReviewTombstoneState | undefined {
