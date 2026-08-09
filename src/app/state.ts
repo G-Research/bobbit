@@ -215,6 +215,8 @@ export type AppView = "disconnected" | "gateway-starting" | "authenticated";
 export type ReviewDecision = "approve" | "reject";
 
 export interface ReviewInlineCommentPayload {
+	/** Stable file identity for grouped reviews. Legacy callers may omit it. */
+	fileId?: string;
 	documentTitle: string;
 	quote: string;
 	comment: string;
@@ -256,10 +258,28 @@ export type ReviewSource =
 		stepLabel?: string;
 	};
 
+export interface ReviewFileModel {
+	fileId: string;
+	title: string;
+	markdown: string;
+}
+
+export interface ReviewGroupModel {
+	reviewId: string;
+	title: string;
+	files: ReviewFileModel[];
+	activeFileId: string;
+	source: ReviewSource;
+}
+
+/** Compatibility model for one-document and sign-off review callers. */
 export interface ReviewDocumentModel {
 	title: string;
 	markdown: string;
 	source?: ReviewSource;
+	documentId?: string;
+	fileId?: string;
+	reviewId?: string;
 }
 
 // ============================================================================
@@ -572,7 +592,13 @@ export const state = {
 	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
 	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 
-	// Review pane state (agent-initiated markdown and verification sign-off documents)
+	// Review pane state. Groups are persisted per owning session; only the
+	// selected session is hydrated into `reviewGroups` and the compatibility
+	// one-document mirrors below.
+	reviewGroupsBySession: {} as Record<string, ReviewGroupModel[]>,
+	reviewGroups: new Map() as Map<string, ReviewGroupModel>,
+	reviewActiveReviewId: "" as string,
+	// Compatibility mirrors for the original one-document/sign-off surface.
 	reviewDocuments: new Map() as Map<string, ReviewDocumentModel>,
 	reviewActiveTab: "" as string,
 	reviewPanelOpen: false,
