@@ -246,30 +246,55 @@ The test split keeps native setup focused:
 
 Packed-consumer qualification must rebuild/load the installed `better-sqlite3` binding and execute a native write/read/close smoke. That check belongs in bundle qualification rather than the general unit lane.
 
-## Benchmark and qualification status
+## Benchmark and qualification evidence
 
-**Pending measured evidence.** Do not infer performance or full-suite impact from the design. Before merge, replace or extend this subsection only with evidence from copied representative files and an ordered qualification run.
+### Representative copied-state benchmark
 
-Required benchmark evidence for both stores:
+The benchmark ran on Windows 10.0.26200 x64 with Node 24.13.1, 24 logical CPUs, and local C: NTFS storage. It used owned temporary copies only: no store was opened against live state, source hashes and file metadata were unchanged before and after the benchmark, and the temporary directory was removed.
 
-- source record count and source JSON size;
-- transactional first-migration time;
-- subsequent reload time;
-- median single-record mutation duration and serialized payload bytes; and
-- resulting SQLite database size.
+Each store used three migration samples, three reload samples, and 33 public `put()` plus `flush()` mutation samples after one warmup. Times below are medians; parenthesized migration and reload values are the complete three-sample sets.
 
-Required qualification evidence:
+| Store | Records | Source JSON | SQLite database | Migration | Reload | Mutation wall time | Store metric | Target payload |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Goals | 862 | 11,491,291 B | 12,226,560 B | 417.50 ms (417.50, 372.14, 437.78) | 126.31 ms (122.92, 126.31, 196.57) | 5.53 ms | 5.37 ms; 13,619 B median (13,618–13,619 B) | 13,599 B |
+| Tasks | 6,049 | 15,329,158 B | 20,058,112 B | 898.07 ms (913.93, 894.23, 898.07) | 359.76 ms (385.17, 359.76, 321.90) | 4.37 ms | 4.27 ms; 1,959 B median (1,958–1,959 B) | 1,939 B |
 
-- `npm run check`;
-- `npm run build`;
-- `npm run test:unit`;
-- `npm run test:browser`;
-- `npm run test:e2e`;
-- `npm run test:bundle`;
-- packed-consumer native SQLite write/read smoke; and
-- before/after full-suite wall time, reported as observations without claiming causation from one run.
+For every sample, source count, sorted identities, direct SQLite count and identities, and post-reload state matched. This fixture required zero historical field transforms. The retired backups were byte-exact copies of their sources.
 
-Benchmark only copies in an owned temporary directory. Never open or mutate live production state for measurement.
+Evidence digests:
+
+| Evidence | Goals | Tasks |
+|---|---|---|
+| Source JSON SHA-256 | `09e73ea6aa92a305aa4d3cbb6da3104e3ffcaa27892f64879dc7efbb207188df` | `b63c279b035dd7b98b7545966d690c595e89508c0a8c45fed039deb8e983cc6a` |
+| Sorted-identity SHA-256 | `681fc5322f5ac3df92b5785c556e69c882dc94cff5a046fee326c05db1a0ba87` | `a4f186ee9603d6d71c0ce30cac34ef8c20e7940030ac6b7dbafde2f0f4e75bc9` |
+| Per-ID payload-manifest SHA-256 | `f4f44038512d8d259cfaea321eb055c7666159c66919ee1966f53ca7dcb0a097` | `c2bf24d304981376a2c48b0a78ca05845517d715bf87c87e7dc7736063a2824a` |
+
+The per-ID manifests exactly matched parsed source payloads to database payloads. These measurements demonstrate dirty-record publication for these copies; they do not predict other hardware, payload distributions, or filesystem conditions.
+
+An independently running gateway appended one task to live state later during qualification. That occurred after the benchmark and was not a benchmark write; the benchmark's before/after source hash and metadata checks had already proved that its live inputs were unchanged.
+
+### Ordered landing qualification
+
+The required sequence passed on baseline `de0fde14221bdb4ef0074aec89710258085fe5f7` in the same Windows environment:
+
+| Check | Result |
+|---|---|
+| `npm run check` | Passed in 68 s |
+| `npm run build` | Passed in 24 s |
+| `npm run test:unit` | Passed in 251 s; 1,073 files passed, 3 skipped; 9,918 tests passed, 20 skipped |
+| `npm run test:browser` | Passed in 476 s; 718 passed, 8 skipped, 1 flaky retry; browser budget passed |
+| `npm run test:e2e` | Passed in 427 s; groups A, B, C, and D passed; browser phases passed 52 + 90 with 12 skipped; fidelity Vitest passed 181 with 1 skipped |
+| `npm run test:bundle` | Passed in 7 s; 2 files and 4 tests passed |
+| Packed-consumer native smoke | Passed during a 98 s packed-consumer run: native rebuild and binding load, GoalStore/TaskStore durable write/read, and handle cleanup |
+
+The check-through-bundle sequence took 1,253 seconds (20m53s). The gate-store qualification document records a historical single run of 1,027 seconds (17m07s: 40/18/202/381/379/7 seconds by phase). That older run is an uncontrolled historical observation, not a causal baseline: suite contents, machine load, caches, and other conditions were not controlled between runs.
+
+After the packed-consumer native smoke passed, its separate mutable-registry audit exited 1 with two moderate and two high findings through upstream `@earendil-works/pi-coding-agent`:
+
+- `brace-expansion`: `GHSA-mh99-v99m-4gvg`, `GHSA-rgw5-rvv9-x895`;
+- `undici`: `GHSA-8xcm-r25x-g524`, `GHSA-4cwx-7wf7-3272`, `GHSA-m8rv-5g2x-5cg5`, `GHSA-jr45-8vmc-qm54`, `GHSA-v3r7-h72x-cjcm`.
+
+Those registry findings are reported separately from the passing native SQLite smoke. They are upstream dependency advisories, can change with the registry independently of this source, and are outside this persistence migration's scope.
 
 ## Limitations and non-goals
 
