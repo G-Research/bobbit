@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { UserConfig } from "vite";
 
@@ -32,6 +33,16 @@ describe("Vite bundled development mode", () => {
 			if (previous === undefined) delete process.env.BOBBIT_VITE_SOURCE_GRAPH;
 			else process.env.BOBBIT_VITE_SOURCE_GRAPH = previous;
 		}
+	});
+
+	it("keeps Tailwind source detection out of non-UI agent edit paths", () => {
+		const css = readFileSync(new URL("../../src/ui/app.css", import.meta.url), "utf8");
+
+		expect(css).toContain('@import "tailwindcss" source(none)');
+		expect(css).toContain('@source "../"');
+		expect(css).toContain('@source "../../index.html"');
+		expect(css).toContain('@source "../../node_modules/@mariozechner/mini-lit/dist"');
+		expect(css).not.toMatch(/@source\s+["'][^"']*(?:tests|docs|\.bobbit)/);
 	});
 
 	it("guards Tailwind's unreleased bundled-dev hot-update fix", async () => {
