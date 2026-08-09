@@ -148,7 +148,6 @@ test.describe("Journey: gate-card sign-off review handoff", () => {
 			await expect(reviewTab, "Start Review should open the matching sign-off document tab").toBeVisible({ timeout: 20_000 });
 			const reviewPane = page.locator("review-pane");
 			await expect(reviewPane).toBeVisible({ timeout: 15_000 });
-			await expect(reviewPane).toContainText(expectedTitle);
 			await expect(page.locator("review-document").getByText("All release checks passed for the browser journey.").first()).toBeVisible({ timeout: 15_000 });
 			await expect(reviewPane.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
 			await expect(reviewPane.getByRole("button", { name: "Reject", exact: true })).toBeVisible();

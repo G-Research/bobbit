@@ -76,12 +76,20 @@ async function sessionStatus(sessionId: string): Promise<string> {
 	return body.status || "unknown";
 }
 
-async function awaitDelayedBackgroundTurn(sessionId: string): Promise<void> {
+async function navigateToSession(page: Page, sessionId: string): Promise<void> {
+	await navigateToHash(page, `#/session/${sessionId}`);
+	await expect(page).toHaveURL(new RegExp(`#\\/session\\/${sessionId}$`), { timeout: 15_000 });
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? null),
+		{ timeout: 15_000, message: `session ${sessionId} should be selected before continuing` },
+	).toBe(sessionId);
+}
+
+async function waitForBackgroundStreaming(sessionId: string): Promise<void> {
 	await expect.poll(() => sessionStatus(sessionId), {
 		timeout: 10_000,
 		message: "background review fixture should enter streaming before its delayed tool result",
 	}).toBe("streaming");
-	await waitForSessionStatus(sessionId, "idle");
 }
 
 test.describe("Journey: grouped Markdown reviews", () => {
@@ -90,7 +98,7 @@ test.describe("Journey: grouped Markdown reviews", () => {
 		const sessionId = await createSession();
 		try {
 			await Promise.all([openApp(page), waitForSessionStatus(sessionId, "idle")]);
-			await navigateToHash(page, `#/session/${sessionId}`);
+			await navigateToSession(page, sessionId);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			await sendAndWait(page, sessionId, "REVIEW_GROUPS_TWO");
 
@@ -169,19 +177,20 @@ test.describe("Journey: grouped Markdown reviews", () => {
 
 			// Give the foreground the same review identity/title so session isolation is
 			// proven rather than inferred from different labels.
-			await navigateToHash(page, `#/session/${foregroundId}`);
+			await navigateToSession(page, foregroundId);
 			await sendAndWait(page, foregroundId, "REVIEW_GROUP_BACKGROUND_OPEN");
 			await expectReviewReady(page, "Background Session Review", "Background owner content A.");
 
-			await navigateToHash(page, `#/session/${ownerId}`);
-			await sendMessage(page, "REVIEW_GROUP_BACKGROUND_OPEN_DELAY:500");
-			await navigateToHash(page, `#/session/${foregroundId}`);
-			await awaitDelayedBackgroundTurn(ownerId);
+			await navigateToSession(page, ownerId);
+			await sendMessage(page, "REVIEW_GROUP_BACKGROUND_OPEN_DELAY:2000");
+			await waitForBackgroundStreaming(ownerId);
+			await navigateToSession(page, foregroundId);
+			await waitForSessionStatus(ownerId, "idle");
 			expect(page.url(), "REVIEW_BACKGROUND_OPEN_DURABILITY: background open must not navigate away").toContain(`/session/${foregroundId}`);
 			await expect(primaryReviewTab(page, "Background Session Review"), "REVIEW_BACKGROUND_OPEN_DURABILITY: foreground review state must remain intact").toHaveCount(1);
 			await expect(page.locator("review-document").getByText("Background owner content A.").first()).toBeVisible();
 
-			await navigateToHash(page, `#/session/${ownerId}`);
+			await navigateToSession(page, ownerId);
 			const ownerPane = await expectReviewReady(page, "Background Session Review", "Background owner content A.");
 			await expect(primaryReviewTab(page, "Background Session Review"), "REVIEW_BACKGROUND_OPEN_DURABILITY: owner gets one focused primary review tab").toHaveClass(/goal-tab-pill--active/);
 			await ownerPane.locator(".review-tab-bar").getByRole("tab", { name: "Background B.md", exact: true }).click();
@@ -190,19 +199,20 @@ test.describe("Journey: grouped Markdown reviews", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await expectReviewReady(page, "Background Session Review", "Background owner content B.");
 
-			await sendMessage(page, "REVIEW_GROUP_BACKGROUND_CLOSE_DELAY:500");
-			await navigateToHash(page, `#/session/${foregroundId}`);
-			await awaitDelayedBackgroundTurn(ownerId);
+			await sendMessage(page, "REVIEW_GROUP_BACKGROUND_CLOSE_DELAY:2000");
+			await waitForBackgroundStreaming(ownerId);
+			await navigateToSession(page, foregroundId);
+			await waitForSessionStatus(ownerId, "idle");
 			expect(page.url(), "REVIEW_BACKGROUND_OPEN_DURABILITY: background close must not navigate away").toContain(`/session/${foregroundId}`);
 			await expectReviewReady(page, "Background Session Review", "Background owner content A.");
 
-			await navigateToHash(page, `#/session/${ownerId}`);
+			await navigateToSession(page, ownerId);
 			await expect(primaryReviewTab(page, "Background Session Review"), "REVIEW_BACKGROUND_OPEN_DURABILITY: close applies only to the owner session").toHaveCount(0, { timeout: 15_000 });
 			await page.reload();
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await expect(primaryReviewTab(page, "Background Session Review"), "REVIEW_BACKGROUND_OPEN_DURABILITY: historical replay must not resurrect a closed review").toHaveCount(0);
 
-			await navigateToHash(page, `#/session/${foregroundId}`);
+			await navigateToSession(page, foregroundId);
 			await expect(primaryReviewTab(page, "Background Session Review"), "REVIEW_BACKGROUND_OPEN_DURABILITY: owner close must leave foreground review untouched").toBeVisible();
 		} finally {
 			await deleteSession(ownerId);
