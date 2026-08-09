@@ -58,12 +58,28 @@ function installStyles(): void {
 	document.head.appendChild(style);
 }
 
+installStyles();
+const root = document.createElement("main");
+root.id = "review-groups-fixture";
+const primary = document.createElement("div");
+primary.className = "fixture-primary-row";
+primary.setAttribute("data-panel-tab-bar", "true");
+const pane = document.createElement("review-pane") as unknown as HTMLElement & { review: ReviewGroup; sessionId: string };
+pane.sessionId = SESSION_ID;
+pane.addEventListener("review-file-change", (event) => {
+	const detail = (event as CustomEvent<{ reviewId: string; fileId: string }>).detail;
+	openGroups = openGroups.map((group) => group.reviewId === detail.reviewId ? { ...group, activeFileId: detail.fileId } : group);
+	render();
+});
+pane.addEventListener("review-decision", (event) => {
+	event.preventDefault();
+	decisions.push((event as CustomEvent).detail);
+});
+root.append(primary, pane);
+document.body.appendChild(root);
+
 function render(): void {
-	const root = document.getElementById("review-groups-fixture")!;
-	root.innerHTML = "";
-	const primary = document.createElement("div");
-	primary.className = "fixture-primary-row";
-	primary.setAttribute("data-panel-tab-bar", "true");
+	primary.replaceChildren();
 	for (const group of openGroups) {
 		const tab = document.createElement("div");
 		tab.setAttribute("role", "button");
@@ -91,28 +107,15 @@ function render(): void {
 		});
 		primary.appendChild(tab);
 	}
-	root.appendChild(primary);
 	const selected = openGroups.find((group) => group.reviewId === selectedReviewId);
-	if (!selected) return;
-	const pane = document.createElement("review-pane") as unknown as HTMLElement & { review: ReviewGroup; sessionId: string };
+	if (!selected) {
+		pane.remove();
+		return;
+	}
 	pane.review = selected;
-	pane.sessionId = SESSION_ID;
-	pane.addEventListener("review-file-change", (event) => {
-		const detail = (event as CustomEvent<{ reviewId: string; fileId: string }>).detail;
-		openGroups = openGroups.map((group) => group.reviewId === detail.reviewId ? { ...group, activeFileId: detail.fileId } : group);
-		render();
-	});
-	pane.addEventListener("review-decision", (event) => {
-		event.preventDefault();
-		decisions.push((event as CustomEvent).detail);
-	});
-	root.appendChild(pane);
+	if (!pane.isConnected) root.appendChild(pane);
 }
 
-installStyles();
-const root = document.createElement("main");
-root.id = "review-groups-fixture";
-document.body.appendChild(root);
 render();
 
 (window as any).__resetReviewGroupsFixture = () => {
