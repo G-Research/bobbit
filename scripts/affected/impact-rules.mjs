@@ -756,7 +756,7 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/core/tool-result-error-bridge-extension.test.ts",
 		operations: frozen([
-			allowedExecutableOperation("dynamic-import", "`data:text/javascript,${encodeURIComponent(source)}`", "in-memory generated data URL module"),
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(filePath).href}?nonce=${Date.now()}-${Math.random()}`", "test-owned generated error bridge extension"),
 		]),
 	},
 	{
