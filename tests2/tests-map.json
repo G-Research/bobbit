@@ -2,12 +2,12 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1138,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 514,
-    "v2-dom": 145,
+    "v2-core": 512,
+    "v2-dom": 144,
     "v2-integration": 202
   },
   "methods": {
@@ -20,6 +20,24 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/review-extension.test.ts",
+      "reason": "Core regression coverage for the review_open multi-file schema and runtime contract, including exclusive source modes, atomic inline/file loading, title defaults, duplicate identities, and legacy single-document compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/review-pane-groups.test.ts",
+      "reason": "DOM regression coverage for review-group secondary navigation, one-file simplification, review-wide feedback, and accessible unclipped overflow menu behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
     {
       "path": "tests2/core/assistant-stream-delta.test.ts",
       "reason": "Prototype coverage proving Pi cumulative assistant message updates can round-trip through compact text, thinking, and tool-call deltas while materially reducing serialized transport bytes.",
