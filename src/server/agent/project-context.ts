@@ -67,6 +67,7 @@ export class ProjectContext {
    * that don't need the trigger surface.
    */
   private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
+  private closePromise: Promise<void> | null = null;
 
   // Config stores
   readonly roleStore: RoleStore;
@@ -75,7 +76,7 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; gatePersistence?: "sqlite" | "json"; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; goalPersistence?: "sqlite" | "json"; taskPersistence?: "sqlite" | "json"; gatePersistence?: "sqlite" | "json"; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
     this.project = project;
     const fsImpl = opts.fsImpl;
     const clock = opts.clock;
@@ -91,11 +92,10 @@ export class ProjectContext {
       this.configDir = path.join(this.bobbitDir, "config");
     }
 
-    // Instantiate state stores with project-scoped state directory
-    this.goalStore = new GoalStore(this.stateDir, fsImpl);
+    // Build dependencies without native database handles first. A failure in
+    // this section needs no store-specific cleanup.
     this.sessionStore = new SessionStore(this.stateDir, fsImpl, clock);
     this.bgProcessStore = new BgProcessStore(this.stateDir, clock);
-    this.taskStore = new TaskStore(this.stateDir, fsImpl);
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
     this.inboxStore = new InboxStore(this.stateDir, fsImpl);
@@ -105,13 +105,8 @@ export class ProjectContext {
     this.secretsStore = new SecretsStore(this.stateDir, fsImpl);
     this.planMutationStore = new PlanMutationStore(this.stateDir, undefined, fsImpl, clock);
 
-    // Instantiate config stores with project-scoped config directory.
-    // ProjectConfigStore must come before WorkflowStore — the inline
-    // workflow store reads workflows from project.yaml. WorkflowStore
-    // must be constructed before GoalManager so the manager can resolve
-    // workflow snapshots without callers having to thread the store
-    // through every createGoal call (WorkflowStore-required invariant — see
-    // docs/_phase-1-notes.md).
+    // ProjectConfigStore must precede WorkflowStore because inline workflows
+    // are loaded from project.yaml.
     this.roleStore = new RoleStore(this.configDir);
     this.projectConfigStore = isHeadquarters && opts.headquartersProjectConfigStore
       ? opts.headquartersProjectConfigStore
@@ -120,21 +115,35 @@ export class ProjectContext {
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);
 
-    // GoalManager depends on workflowStore (GoalManager requires WorkflowStore — fail-loud). Constructed
-    // after the config stores above so the project's WorkflowStore is
-    // available for workflow-id resolution at goal creation time.
-    this.goalManager = new GoalManager(this.goalStore, this.workflowStore, this.stateDir, { commandRunner, clock, remotePolicy: opts.remotePolicy, worktreeSetupRuntime: opts.worktreeSetupRuntime });
-
-    // Open the native database only after every other constructor succeeds so
-    // a later initialization failure cannot orphan a Windows file handle.
-    const gatePersistence = opts.gatePersistence ?? (!fsImpl || fsImpl === realFs ? "sqlite" : "json");
-    this.gateStore = new GateStore(this.stateDir, fsImpl, { persistence: gatePersistence });
+    // GoalStore, TaskStore, and GateStore may own native SQLite handles. Keep
+    // their construction and every dependent constructor in one guarded tail;
+    // reverse disposal guarantees a later failure releases all opened handles.
+    const defaultPersistence = !fsImpl || fsImpl === realFs ? "sqlite" : "json";
+    let goalStore: GoalStore | undefined;
+    let taskStore: TaskStore | undefined;
+    let gateStore: GateStore | undefined;
     try {
+      goalStore = new GoalStore(this.stateDir, fsImpl, { persistence: opts.goalPersistence ?? defaultPersistence });
+      this.goalStore = goalStore;
+      taskStore = new TaskStore(this.stateDir, fsImpl, { persistence: opts.taskPersistence ?? defaultPersistence });
+      this.taskStore = taskStore;
+      gateStore = new GateStore(this.stateDir, fsImpl, { persistence: opts.gatePersistence ?? defaultPersistence });
+      this.gateStore = gateStore;
+
+      // GoalManager requires WorkflowStore and GoalStore (fail-loud).
+      this.goalManager = new GoalManager(this.goalStore, this.workflowStore, this.stateDir, { commandRunner, clock, remotePolicy: opts.remotePolicy, worktreeSetupRuntime: opts.worktreeSetupRuntime });
       // Pending reset intents become synchronously visible before the context
       // is returned to ProjectContextManager and before open()/resume logic.
       this.gateResetCoordinator = new GateResetCoordinator(this.stateDir, this.goalStore, this.gateStore, fsImpl);
     } catch (error) {
-      this.gateStore.dispose();
+      const disposalErrors: unknown[] = [];
+      for (const store of [gateStore, taskStore, goalStore]) {
+        try { store?.dispose(); }
+        catch (disposeError) { disposalErrors.push(disposeError); }
+      }
+      if (disposalErrors.length > 0) {
+        throw new AggregateError([error, ...disposalErrors], "Project context construction failed and native store cleanup also failed");
+      }
       throw error;
     }
   }
@@ -195,10 +204,15 @@ export class ProjectContext {
     this.goalStore.onGoalArchived = (goal) => d.onGoalArchived(goal);
   }
 
-  /** Close resources for clean shutdown. Awaits the search flush so callers
-   *  (teardown, shutdown) can guarantee no async I/O outlives this promise —
-   *  preventing the FlexSearch flush-on-close race against temp-dir removal. */
-  async close(): Promise<void> {
+  /** Close every owned resource exactly once. The shared promise is also the
+   *  barrier for pending writes and native-handle release. */
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = this.closeResources();
+    return this.closePromise;
+  }
+
+  private async closeResources(): Promise<void> {
     const errors: unknown[] = [];
     const attempt = async (operation: () => void | Promise<void>): Promise<void> => {
       try { await operation(); }
@@ -210,26 +224,25 @@ export class ProjectContext {
     await attempt(() => this.planMutationStore.stopSweep());
     await attempt(() => this.gateResetCoordinator?.recovery);
 
-    // Wait for coalesced snapshots before the state directory can be removed.
-    // Keep the legacy `flush()` fallback for lightweight lifecycle doubles and
-    // stores that have not yet gained an async barrier.
     const drain = async (store: { flush?: () => void | Promise<void>; flushAsync?: () => Promise<void> } | undefined): Promise<void> => {
       if (!store) return;
       if (typeof store.flushAsync === "function") await store.flushAsync();
       else await store.flush?.();
     };
+    const closeStore = async (store: { close?: () => void | Promise<void>; flush?: () => void | Promise<void>; flushAsync?: () => Promise<void> } | undefined): Promise<void> => {
+      if (typeof store?.close === "function") await store.close();
+      else await drain(store);
+    };
+
+    // Each operation captures its own failure so one broken store cannot skip
+    // sibling drains or leave another native database open on Windows.
     await Promise.all([
-      attempt(() => drain(this.goalStore)),
-      attempt(() => this.gateStore?.close?.()),
-      attempt(() => drain(this.taskStore)),
+      attempt(() => closeStore(this.goalStore)),
+      attempt(() => closeStore(this.taskStore)),
+      attempt(() => closeStore(this.gateStore)),
       attempt(() => drain(this.sessionStore)),
     ]);
     await attempt(() => { this.costTracker?.flush(); });
-    // Mirror sessionStore: flush the bg-process store so its final epoch
-    // (exit status, dismiss removals, offset advances) is on disk before exit.
-    // Otherwise a pending debounced write lands after the next gateway loads
-    // the older epoch, tripping the stale-snapshot guard and silently dropping
-    // every subsequent save (re-attach exit code + dismiss).
     await attempt(() => { this.bgProcessStore?.flush(); });
     await attempt(async () => { await this.searchIndex?.close(); });
 
