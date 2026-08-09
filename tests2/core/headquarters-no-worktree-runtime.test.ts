@@ -131,7 +131,7 @@ describe("Headquarters no-worktree runtime", () => {
 	it("forces Headquarters goals to ready no-worktree state even inside a git repo", async () => {
 		const repo = makeRepoMarker("goal-hq");
 		const git = makeGitRepoRunner(repo);
-		const goalStore = new GoalStore(makeTmpDir("hq-goal-store-"));
+		const goalStore = new GoalStore(makeTmpDir("hq-goal-store-"), undefined, { persistence: "json" });
 		const goalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: git.runner });
 
 		const goal = await goalManager.createGoal("HQ requested worktree", repo, {
@@ -151,7 +151,7 @@ describe("Headquarters no-worktree runtime", () => {
 	it("keeps normal project goal worktree preparation unchanged", async () => {
 		const repo = makeRepoMarker("goal-normal");
 		const git = makeGitRepoRunner(repo);
-		const goalStore = new GoalStore(makeTmpDir("normal-goal-store-"));
+		const goalStore = new GoalStore(makeTmpDir("normal-goal-store-"), undefined, { persistence: "json" });
 		const goalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: git.runner });
 
 		const goal = await goalManager.createGoal("Normal requested worktree", repo, {

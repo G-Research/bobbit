@@ -447,12 +447,77 @@ async function performPackedConsumerAudit(tempRoot, npmRunner, commandRunner) {
 		db.prepare("INSERT INTO smoke(value) VALUES (?)").run("ok");
 		if (db.prepare("SELECT value FROM smoke").get()?.value !== "ok") process.exit(2);
 		db.close();
+
+		const assert = require("node:assert/strict");
+		const { existsSync, mkdtempSync, rmSync } = require("node:fs");
+		const { tmpdir } = require("node:os");
+		const { dirname, join } = require("node:path");
+		const { pathToFileURL } = require("node:url");
+		(async () => {
+			const packageDir = dirname(require.resolve("@gresearch/bobbit/package.json"));
+			const { GoalStore } = await import(pathToFileURL(join(packageDir, "dist", "server", "agent", "goal-store.js")).href);
+			const { TaskStore } = await import(pathToFileURL(join(packageDir, "dist", "server", "agent", "task-store.js")).href);
+			const root = mkdtempSync(join(tmpdir(), "bobbit-packed-store-smoke-"));
+			const stateDir = join(root, "state");
+			const expectedGoal = {
+				id: "packed-goal",
+				title: "Packed SQLite goal ✓",
+				cwd: root,
+				state: "in-progress",
+				spec: "Round-trip the installed GoalStore payload.",
+				createdAt: 1700000000000,
+				updatedAt: 1700000000001,
+				setupStatus: "ready",
+				metadata: { source: "packed-consumer", unicode: "雪" },
+				packedExtension: { nested: ["preserved", 7] },
+			};
+			const expectedTask = {
+				id: "packed-task",
+				goalId: expectedGoal.id,
+				title: "Packed SQLite task ✓",
+				type: "testing",
+				state: "todo",
+				spec: "Round-trip the installed TaskStore payload.",
+				createdAt: 1700000000010,
+				updatedAt: 1700000000011,
+				dependsOn: [],
+				gitHandoff: { api: { baseSha: "base", headSha: "head", branch: "test/packed" } },
+				packedExtension: { nested: { unicode: "λ" } },
+			};
+			let goals;
+			let tasks;
+			let reloadedGoals;
+			let reloadedTasks;
+			try {
+				goals = new GoalStore(stateDir);
+				tasks = new TaskStore(stateDir);
+				goals.put(expectedGoal);
+				tasks.put(expectedTask);
+				await Promise.all([goals.close(), tasks.close()]);
+				assert.equal(existsSync(join(stateDir, "goals.sqlite")), true);
+				assert.equal(existsSync(join(stateDir, "tasks.sqlite")), true);
+				reloadedGoals = new GoalStore(stateDir);
+				reloadedTasks = new TaskStore(stateDir);
+				assert.deepEqual(reloadedGoals.get(expectedGoal.id), expectedGoal);
+				assert.deepEqual(reloadedTasks.get(expectedTask.id), expectedTask);
+				await Promise.all([reloadedGoals.close(), reloadedTasks.close()]);
+			} finally {
+				await Promise.allSettled([goals, tasks, reloadedGoals, reloadedTasks]
+					.filter(Boolean)
+					.map(store => store.close()));
+				rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+				assert.equal(existsSync(root), false, "native stores must release handles before cleanup");
+			}
+		})().catch(error => {
+			console.error(error);
+			process.exitCode = 3;
+		});
 	`], {
 		cwd: consumerDir,
 		env: restrictedNpmEnv,
 		timeoutMs: 30_000,
 	});
-	requireSuccess("packed SQLite native binding smoke", sqliteSmoke);
+	requireSuccess("packed SQLite native binding and store smoke", sqliteSmoke);
 
 	console.log("[audit:packed-consumer] Querying the registry advisory service...");
 	const audited = await npmRunner(["audit", "--omit=dev", "--json"], {
