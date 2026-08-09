@@ -179,16 +179,71 @@ describe("ReviewPane review groups", () => {
 		expect(decision, `${REGRESSION}: a comment on any file must permit rejecting the whole review`).toBeDefined();
 		const payload = decision!.detail.payload;
 		expect(
-			payload.inlineComments.map((comment: { documentTitle: string; comment: string }) => [comment.documentTitle, comment.comment]),
+			payload.inlineComments.map((comment: { fileId: string; documentTitle: string; comment: string }) => [comment.fileId, comment.documentTitle, comment.comment]),
 			`${REGRESSION}: the review decision must include comments from every file in file order`,
 		).toEqual([
-			["A.md", "Fix alpha"],
-			["B.md", "Fix beta"],
+			[review.files[0]!.fileId, "A.md", "Fix alpha"],
+			[review.files[1]!.fileId, "B.md", "Fix beta"],
 		]);
 		expect(payload.feedback.indexOf('"A.md"'), `${REGRESSION}: alpha feedback section is missing`).toBeGreaterThan(-1);
 		expect(payload.feedback.indexOf('"B.md"'), `${REGRESSION}: beta feedback section is missing`).toBeGreaterThan(payload.feedback.indexOf('"A.md"'));
 		expect(payload.feedback.match(/Fix alpha/g), `${REGRESSION}: alpha feedback must be submitted exactly once`).toHaveLength(1);
 		expect(payload.feedback.match(/Fix beta/g), `${REGRESSION}: beta feedback must be submitted exactly once`).toHaveLength(1);
+	});
+
+	it("keeps duplicate file titles separate by stable identity", async () => {
+		const review = group("duplicates", 2);
+		review.files[0]!.title = "same.md";
+		review.files[1]!.title = "same.md";
+		const sessionId = review.source.sessionId;
+		sessionsToClear.add(sessionId);
+		await addAnnotation(sessionId, review.files[0]!.fileId, {
+			id: "first-duplicate",
+			quote: "Body 1",
+			comment: "First file note",
+		});
+		await addAnnotation(sessionId, review.files[1]!.fileId, {
+			id: "second-duplicate",
+			quote: "Body 2",
+			comment: "Second file note",
+		});
+
+		const pane = await mountReview(review);
+		let decision: CustomEvent | undefined;
+		pane.addEventListener("review-decision", (event) => {
+			decision = event as CustomEvent;
+			event.preventDefault();
+		});
+		pane.querySelector<HTMLButtonElement>(".review-reject-btn")!.click();
+		await settle(pane);
+
+		expect(decision?.detail.payload.inlineComments.map((comment: { fileId: string }) => comment.fileId)).toEqual(
+			review.files.map((file) => file.fileId),
+		);
+		expect(decision?.detail.payload.feedback.match(/### "same\.md"/g)).toHaveLength(2);
+	});
+
+	it("requires review-wide feedback before rejecting and exposes exact dismiss identity", async () => {
+		const review = group("event-detail", 2);
+		const pane = await mountReview(review);
+		const decisions: CustomEvent[] = [];
+		pane.addEventListener("review-decision", (event) => decisions.push(event as CustomEvent));
+		pane.querySelector<HTMLButtonElement>(".review-reject-btn")!.click();
+		await settle(pane);
+
+		expect(decisions).toHaveLength(0);
+		expect(pane.querySelector("[role=alert]")?.textContent).toContain("inline comment");
+
+		let dismiss: CustomEvent | undefined;
+		pane.addEventListener("review-dismiss", (event) => { dismiss = event as CustomEvent; });
+		pane.querySelector<HTMLButtonElement>(".review-dismiss-btn")!.click();
+		await settle(pane);
+		expect(dismiss?.detail).toMatchObject({
+			reviewId: review.reviewId,
+			sessionId: review.source.sessionId,
+			review,
+			unsentCommentCount: 0,
+		});
 	});
 
 	it("keeps one review-level final draft while switching files and submits it once", async () => {

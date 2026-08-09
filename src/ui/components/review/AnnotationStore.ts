@@ -9,6 +9,7 @@ import type {
   ReviewDecision,
   ReviewDecisionPayload,
   ReviewDocumentModel,
+  ReviewGroupModel,
   ReviewInlineCommentPayload,
 } from "./review-types.js";
 
@@ -55,8 +56,13 @@ export interface ReviewAnnotation {
 /** sessionId → (docTitle → annotations[]) */
 const _annotationCache = new Map<string, Map<string, ReviewAnnotation[]>>();
 
-/** sessionId → submitted flag */
+/** sessionId → submitted flag (legacy one-review compatibility only). */
 const _submittedCache = new Map<string, boolean>();
+
+export type ReviewTombstoneState = "submitted" | "closed";
+
+/** sessionId → (reviewId → durable replay tombstone). */
+const _reviewTombstoneCache = new Map<string, Map<string, ReviewTombstoneState>>();
 
 /**
  * Monotonically increasing version counter, bumped on cache hydration.
@@ -124,6 +130,7 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
       // Server doesn't have data yet or session not found — start empty
       _annotationCache.set(sessionId, new Map());
       _submittedCache.set(sessionId, false);
+      _reviewTombstoneCache.set(sessionId, new Map());
       return;
     }
     const data = await res.json();
@@ -137,6 +144,18 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
     }
     _annotationCache.set(sessionId, sessionCache);
     _submittedCache.set(sessionId, !!data.submitted);
+    const tombstones = new Map<string, ReviewTombstoneState>();
+    if (Array.isArray(data.submittedReviewIds)) {
+      for (const reviewId of data.submittedReviewIds) {
+        if (typeof reviewId === "string" && reviewId.trim()) tombstones.set(reviewId, "submitted");
+      }
+    }
+    if (Array.isArray(data.closedReviewIds)) {
+      for (const reviewId of data.closedReviewIds) {
+        if (typeof reviewId === "string" && reviewId.trim()) tombstones.set(reviewId, "closed");
+      }
+    }
+    _reviewTombstoneCache.set(sessionId, tombstones);
     _cacheVersion++;
     // Notify any open review panes so they can refresh annotation counts.
     // This handles the race where a review pane was created (via a concurrent
@@ -148,6 +167,7 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
     // Network error — initialize empty caches for graceful degradation
     _annotationCache.set(sessionId, new Map());
     _submittedCache.set(sessionId, false);
+    _reviewTombstoneCache.set(sessionId, new Map());
   }
 }
 
@@ -201,15 +221,64 @@ export function clearAllAnnotations(sessionId: string): Promise<void> {
   });
 }
 
-// ── Submitted flag ───────────────────────────────────────────────────
+// ── Review replay tombstones ─────────────────────────────────────────
+
+function _ensureTombstoneCache(sessionId: string): Map<string, ReviewTombstoneState> {
+  let sessionCache = _reviewTombstoneCache.get(sessionId);
+  if (!sessionCache) {
+    sessionCache = new Map();
+    _reviewTombstoneCache.set(sessionId, sessionCache);
+  }
+  return sessionCache;
+}
+
+/** Persist an exact review's replay tombstone without suppressing sibling reviews. */
+export function setReviewTombstone(
+  sessionId: string,
+  reviewId: string,
+  state: ReviewTombstoneState,
+): Promise<void> {
+  _ensureTombstoneCache(sessionId).set(reviewId, state);
+  return _serverFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state }),
+    },
+  );
+}
+
+/** Clear only the exact review's tombstone when a fresh live open arrives. */
+export function clearReviewTombstone(sessionId: string, reviewId: string): Promise<void> {
+  _reviewTombstoneCache.get(sessionId)?.delete(reviewId);
+  // Deliberately unconditional: a background live open can arrive before this
+  // browser hydrated the owner session's cache, while the server is tombstoned.
+  return _serverFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function getReviewTombstone(sessionId: string, reviewId: string): ReviewTombstoneState | undefined {
+  return _reviewTombstoneCache.get(sessionId)?.get(reviewId);
+}
+
+export function getReviewTombstones(sessionId: string): ReadonlyMap<string, ReviewTombstoneState> {
+  return new Map(_reviewTombstoneCache.get(sessionId) || []);
+}
+
+export function isReviewTombstoned(sessionId: string, reviewId: string): boolean {
+  return getReviewTombstone(sessionId, reviewId) !== undefined;
+}
 
 /**
- * Mark that the review has been submitted for a session.
- * Prevents review pane from reopening on reconnect/replay.
+ * Mark a review submitted. Supplying reviewId uses the canonical per-review
+ * route; the one-argument form remains for historical one-review callers.
  */
-export function markReviewSubmitted(sessionId: string): Promise<void> {
+export function markReviewSubmitted(sessionId: string, reviewId?: string): Promise<void> {
+  if (reviewId) return setReviewTombstone(sessionId, reviewId, "submitted");
   _submittedCache.set(sessionId, true);
-
   return _serverFetch(`/api/sessions/${sessionId}/review/submitted`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -217,23 +286,19 @@ export function markReviewSubmitted(sessionId: string): Promise<void> {
   });
 }
 
-/**
- * Check whether the review was already submitted for a session.
- */
-export function isReviewSubmitted(sessionId: string): boolean {
-  return _submittedCache.get(sessionId) || false;
+/** Check exact review state when reviewId is supplied; preserve legacy reads otherwise. */
+export function isReviewSubmitted(sessionId: string, reviewId?: string): boolean {
+  return reviewId
+    ? getReviewTombstone(sessionId, reviewId) === "submitted"
+    : _submittedCache.get(sessionId) || false;
 }
 
 /**
- * Clear the submitted flag (e.g. when a new review is opened).
- *
- * Only PUTs to the server if the cached value was actually `true` — a
- * redundant PUT(submitted=false) was racing with concurrent PUT(true) calls
- * from external clients (test harness, second browser tab) and clobbering
- * them on reload. Keeping the PUT conditional eliminates the race without
- * losing the across-reconnect persistence the call site relies on. RP-09.
+ * Clear submitted replay state. Exact review clearing never mutates the legacy
+ * session-wide flag or another review's tombstone.
  */
-export function clearReviewSubmitted(sessionId: string): Promise<void> | void {
+export function clearReviewSubmitted(sessionId: string, reviewId?: string): Promise<void> | void {
+  if (reviewId) return clearReviewTombstone(sessionId, reviewId);
   const wasSubmitted = _submittedCache.get(sessionId) === true;
   _submittedCache.set(sessionId, false);
   if (!wasSubmitted) return;
@@ -343,6 +408,8 @@ function _documentForComment(
   comment: ReviewInlineCommentPayload,
   documents: ReviewDocumentCollection,
 ): ReviewDocumentLike | undefined {
+  const identityMatch = comment.fileId ? documents.get(comment.fileId) : undefined;
+  if (identityMatch) return identityMatch;
   const directMatch = documents.get(comment.documentTitle);
   if (directMatch) return directMatch;
   for (const [key, doc] of documents) {
@@ -364,16 +431,20 @@ function _formatInlineCommentSections(
   inlineComments: ReviewInlineCommentPayload[],
   documents: ReviewDocumentCollection,
 ): string[] {
-  const commentsByTitle = new Map<string, ReviewInlineCommentPayload[]>();
+  const commentsByIdentity = new Map<string, ReviewInlineCommentPayload[]>();
   for (const comment of inlineComments) {
-    commentsByTitle.set(comment.documentTitle, [...(commentsByTitle.get(comment.documentTitle) || []), comment]);
+    const identity = comment.fileId || comment.documentTitle;
+    commentsByIdentity.set(identity, [...(commentsByIdentity.get(identity) || []), comment]);
   }
 
   const sections: string[] = [];
-  for (const [title, comments] of commentsByTitle) {
+  const rendered = new Set<string>();
+  const appendSection = (identity: string, title: string) => {
+    const comments = commentsByIdentity.get(identity) || [];
+    if (comments.length === 0 || rendered.has(identity)) return;
+    rendered.add(identity);
     const commentWord = comments.length === 1 ? "comment" : "comments";
     sections.push(`### "${title}" — ${comments.length} ${commentWord}`);
-
     for (const comment of comments) {
       const quotedText = comment.isCode ? `\`${comment.quote}\`` : `"${comment.quote}"`;
       const lineNum = _lineNumberForComment(comment, documents);
@@ -383,7 +454,12 @@ function _formatInlineCommentSections(
       const location = locationParts.length > 0 ? ` (${locationParts.join(", ")})` : "";
       sections.push(`> ${quotedText}${location}\n${comment.comment}`);
     }
-  }
+  };
+
+  // The document map's insertion order is the review file order. This keeps
+  // duplicate display titles distinct because stable file identity is the key.
+  for (const [identity, document] of documents) appendSection(identity, _displayTitle(identity, document));
+  for (const [identity, comments] of commentsByIdentity) appendSection(identity, comments[0]?.documentTitle || identity);
   return sections;
 }
 
@@ -415,6 +491,7 @@ function _inlineCommentPayloadsForEntries(
   for (const [title, doc] of entries) {
     for (const ann of getAnnotationsForDocument(sessionId, title, doc, documents)) {
       inlineComments.push({
+        fileId: doc.documentId || title,
         documentTitle: _displayTitle(title, doc),
         quote: ann.quote,
         comment: ann.comment,
@@ -471,13 +548,13 @@ export function composeReviewDecisionFeedback(
   const sections: string[] = [`## ${heading}`];
   const trimmedFinalComment = finalComment.trim();
 
-  if (trimmedFinalComment) {
-    sections.push(`### Final comment\n\n${trimmedFinalComment}`);
-  }
-
   const inlineSections = _formatInlineCommentSections(inlineComments, documents);
   if (inlineSections.length > 0) {
     sections.push(`### Inline comments\n\n${inlineSections.join("\n\n")}`);
+  }
+
+  if (trimmedFinalComment) {
+    sections.push(`### Final comment\n\n${trimmedFinalComment}`);
   }
 
   if (sections.length === 1) {
@@ -506,7 +583,7 @@ export function buildReviewDecisionPayload(
 export function buildReviewDecisionPayloadForDocument(
   sessionId: string,
   documentTitle: string,
-  document: Pick<ReviewDocumentModel, "title" | "markdown">,
+  document: Pick<ReviewDocumentModel, "title" | "markdown" | "documentId">,
   decision: ReviewDecision,
   finalComment: string,
 ): ReviewDecisionPayload {
@@ -519,6 +596,29 @@ export function buildReviewDecisionPayloadForDocument(
     inlineComments,
     feedback: composeReviewDecisionFeedback(decision, normalizedFinalComment, inlineComments, documents),
   };
+}
+
+function _documentsForReview(review: ReviewGroupModel): ReviewDocumentCollection {
+  return new Map(review.files.map((file) => [file.fileId, {
+    title: file.title,
+    markdown: file.markdown,
+    documentId: file.fileId,
+  }]));
+}
+
+/** Count inline annotations across every ordered file in one review. */
+export function getReviewAnnotationCount(sessionId: string, review: ReviewGroupModel): number {
+  return getTotalAnnotationCount(sessionId, _documentsForReview(review));
+}
+
+/** Build one deterministic whole-review decision grouped by stable file identity. */
+export function buildReviewDecisionPayloadForReview(
+  sessionId: string,
+  review: ReviewGroupModel,
+  decision: ReviewDecision,
+  finalComment: string,
+): ReviewDecisionPayload {
+  return buildReviewDecisionPayload(sessionId, _documentsForReview(review), decision, finalComment);
 }
 
 // ── Default backend adapter (REST-backed review-pane store) ─────────
