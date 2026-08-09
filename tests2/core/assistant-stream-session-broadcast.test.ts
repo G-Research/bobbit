@@ -2,8 +2,9 @@ import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
-import { emitSessionEvent } from "../../src/server/agent/session-manager.ts";
+import { emitSessionEvent, SessionManager } from "../../src/server/agent/session-manager.ts";
 import { handleWebSocketConnection } from "../../src/server/ws/handler.ts";
+import { parsePartialToolArguments, reconstructAssistantStreamDelta } from "../../src/shared/assistant-stream-delta.ts";
 
 class FakeWebSocket extends EventEmitter {
 	readyState = 1;
@@ -45,6 +46,25 @@ function makeAssistantUpdate(text: string, delta: string) {
 	};
 }
 
+function makeToolUpdate(argumentsValue: Record<string, unknown>, type: "toolcall_start" | "toolcall_delta", delta?: string) {
+	const message = {
+		role: "assistant",
+		id: "stream-tool-1",
+		content: [{ type: "toolCall", id: "call-1", name: "edit", arguments: structuredClone(argumentsValue) }],
+		timestamp: 1_735_000_000_000,
+	};
+	return {
+		type: "message_update",
+		message,
+		assistantMessageEvent: {
+			type,
+			contentIndex: 0,
+			...(delta === undefined ? {} : { delta }),
+			partial: structuredClone(message),
+		},
+	};
+}
+
 function eventFrames(ws: FakeWebSocket) {
 	return ws.sent.filter((msg) => msg?.type === "event");
 }
@@ -70,6 +90,8 @@ function makeSessionManager(session: any) {
 		getSessionCostUpdate: () => undefined,
 		getPendingToolPermission: () => undefined,
 		getProjectContextManager: () => undefined,
+		isKnownImageModel: () => true,
+		persistSessionImageModel: () => {},
 	};
 }
 
@@ -172,6 +194,96 @@ describe("assistant stream session broadcast", () => {
 		);
 	});
 
+	it("keeps progressive tool JSON compact while retaining raw cumulative events", async () => {
+		const session: any = {
+			id: "sess-tools",
+			projectId: "project-1",
+			status: "idle",
+			statusVersion: 1,
+			title: "Session",
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: { toArray: () => [] },
+			cwd: process.cwd(),
+			rpcClient: {},
+		};
+		const capable = await authenticate(session, { assistantStreamDelta: 1 });
+		const legacy = await authenticate(session);
+		capable.sent.length = 0;
+		legacy.sent.length = 0;
+
+		emitSessionEvent(session, makeToolUpdate({}, "toolcall_start"));
+		let json = "";
+		const fragments = ['{"path":"src/assi', 'stant-stream.ts","flags":[tru', 'e,2]}'];
+		for (const fragment of fragments) {
+			json += fragment;
+			emitSessionEvent(session, makeToolUpdate(parsePartialToolArguments(json), "toolcall_delta", fragment));
+		}
+
+		let previous: any;
+		for (const frame of eventFrames(capable)) {
+			assert.equal(frame.data.assistantStreamDelta, 1, "every capable tool frame stays compact");
+			assert.equal("message" in frame.data, false);
+			const reconstructed = reconstructAssistantStreamDelta(frame.data, previous) as any;
+			previous = reconstructed.message;
+		}
+		assert.deepEqual(previous.content[0].arguments, { path: "src/assistant-stream.ts", flags: [true, 2] });
+
+		const retained = session.eventBuffer.getAll().map((entry: any) => entry.event);
+		assert.deepEqual(retained, eventFrames(legacy).map((frame) => frame.data));
+		assert.deepEqual(
+			retained.slice(1).map((event: any) => event.message.content[0].arguments),
+			fragments.map((_, index) => parsePartialToolArguments(fragments.slice(0, index + 1).join(""))),
+		);
+		assert.equal(JSON.stringify(retained).includes("partialJson"), false, "raw replay must not retain transport chain state");
+	});
+
+	it("re-arms only capable recipients sent a compaction snapshot", async () => {
+		const session: any = {
+			id: "sess-snapshot",
+			projectId: "project-1",
+			status: "idle",
+			statusVersion: 1,
+			title: "Session",
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: { toArray: () => [] },
+			cwd: process.cwd(),
+			rpcClient: {
+				getMessages: async () => ({ success: true, data: [{ role: "assistant", content: [{ type: "text", text: "Hello" }] }] }),
+				getState: async () => ({ success: false }),
+			},
+		};
+		const capable = await authenticate(session, { assistantStreamDelta: 1 });
+		const legacy = await authenticate(session);
+		capable.sent.length = 0;
+		legacy.sent.length = 0;
+		emitSessionEvent(session, makeAssistantUpdate("Hello", "Hello"));
+		assert.equal((capable as any).assistantStreamDeltaNeedsBaseline, false);
+		const legacyBaselineBeforeSnapshot = (legacy as any).assistantStreamDeltaNeedsBaseline;
+
+		const closedCapable = new FakeWebSocket() as any;
+		closedCapable.readyState = 3;
+		closedCapable.assistantStreamDeltaCapable = true;
+		closedCapable.assistantStreamDeltaNeedsBaseline = false;
+		session.clients.add(closedCapable);
+		const manager = Object.create(SessionManager.prototype) as any;
+		manager.broadcastSessionCost = () => {};
+		manager.buildVisibleMessageSnapshot = (_id: string, data: unknown) => data;
+		await manager.refreshAfterCompaction(session);
+
+		assert.equal(capable.sent.at(-1)?.type, "messages");
+		assert.equal((capable as any).assistantStreamDeltaNeedsBaseline, true);
+		assert.equal((legacy as any).assistantStreamDeltaNeedsBaseline, legacyBaselineBeforeSnapshot);
+		assert.equal(closedCapable.assistantStreamDeltaNeedsBaseline, false, "an unsent snapshot must not alter the baseline");
+
+		emitSessionEvent(session, makeAssistantUpdate("Hello world", " world"));
+		const compact = eventFrames(capable).at(-1)!.data;
+		assert.ok(compact.assistantMessageBaseline, "the first post-snapshot delta must be self-contained");
+		const reconstructed = reconstructAssistantStreamDelta(compact) as any;
+		assert.equal(reconstructed.message.content[0].text, "Hello world");
+	});
+
 	it("cuts over only the slow replaceable client and fences later sends on that socket", async () => {
 		const session: any = {
 			id: "sess-3",
@@ -204,6 +316,14 @@ describe("assistant stream session broadcast", () => {
 		assert.equal(slow.sent.length, 0, "later sends must stay fenced on the cut-over socket even if readyState never changed");
 		assert.equal(fast.sent.at(-1)?.data?.type, "tool_execution_start");
 		assert.equal(legacy.sent.at(-1)?.data?.type, "tool_execution_start");
+
+		fast.emit("message", JSON.stringify({ type: "set_image_model", provider: "test", modelId: "image-test" }));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(slow.sent.length, 0, "handler-local state broadcasts must honor delayed-close cutover");
+		assert.deepEqual(fast.sent.at(-1), {
+			type: "state",
+			data: { imageGenerationModel: { provider: "test", id: "image-test" } },
+		});
 
 		// Async handler responses must honor the same fence. The fake terminate()
 		// intentionally leaves readyState OPEN to reproduce a delayed-close transport.
