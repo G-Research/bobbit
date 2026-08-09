@@ -807,6 +807,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	{
+		consumer: "tests2/core/focused-tool-contract-refresh.test.ts",
+		allowReason: "test-owned temporary system prompt produced by the restored session fixture",
+		reads: frozen([
+			{ expression: "spawnedOptions.systemPromptPath", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/extension-host-surface-token.test.ts",
 		declarations: frozen(["scan:server-typescript-source-guards"]),
 		reads: frozen([
