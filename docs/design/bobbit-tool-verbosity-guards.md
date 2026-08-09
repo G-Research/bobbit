@@ -1,6 +1,6 @@
 # Design: Bobbit tool verbosity guards
 
-Status: **implemented**
+Status: **historical design** — Its `bobbit_read`/`read_session` verbosity policy is superseded; direct REST and unrelated admin/orchestrate behavior remain separate.
 Goal: **Bobbit Tool Verbosity Guards**
 
 ## 1. Problem and scope

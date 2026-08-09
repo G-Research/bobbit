@@ -5,7 +5,6 @@ export const CONTEXT_HEAVY_FLAGS = {
 	bobbit_read: ["verbose"],
 	bobbit_orchestrate: ["verbose"],
 	bobbit_admin: ["verbose"],
-	read_session: ["verbose", "include_tool_results"],
 } as const;
 
 export const CONTEXT_HEAVY_LIMIT_GUIDANCE =
