@@ -168,6 +168,42 @@ test.describe("Journey: grouped Markdown reviews", () => {
 		}
 	});
 
+	test("failed session lookup releases foreground ownership before delayed review delivery", async ({ page }) => {
+		test.setTimeout(60_000);
+		const ownerId = await createSession();
+		try {
+			await Promise.all([openApp(page), waitForSessionStatus(ownerId, "idle")]);
+			await navigateToSession(page, ownerId);
+			await sendMessage(page, "REVIEW_GROUP_BACKGROUND_OPEN_DELAY:2000");
+			await waitForBackgroundStreaming(ownerId);
+
+			await page.evaluate(() => { window.location.hash = "#/session/does-not-exist-review-route"; });
+			await expect(page).toHaveURL(/#\/$/, { timeout: 15_000 });
+			await expect.poll(
+				() => page.evaluate(() => {
+					const current = (window as any).bobbitState;
+					return {
+						selectedSessionId: current?.selectedSessionId ?? null,
+						remoteSessionId: current?.remoteAgent?.gatewaySessionId ?? null,
+						hasChatPanel: !!current?.chatPanel,
+					};
+				}),
+				{ timeout: 15_000, message: "missing target must release all outgoing foreground ownership" },
+			).toEqual({ selectedSessionId: null, remoteSessionId: null, hasChatPanel: false });
+
+			await waitForSessionStatus(ownerId, "idle");
+			await expect(page.locator(REVIEW_TABS), "a delayed event from the old owner must not render on landing").toHaveCount(0);
+			await expect(page.locator("review-pane"), "landing must not retain the old session panel").toHaveCount(0);
+
+			// The released owner remains a managed background session: its live result
+			// is durable and hydrates only when the user explicitly returns.
+			await navigateToSession(page, ownerId);
+			await expectReviewReady(page, "Background Session Review", "Background owner content A.");
+		} finally {
+			await deleteSession(ownerId);
+		}
+	});
+
 	test("background live open and close stay owner-scoped, hydrate on switch/reload, and do not replay after close", async ({ page }) => {
 		test.setTimeout(120_000);
 		const foregroundId = await createSession();

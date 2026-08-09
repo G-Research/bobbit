@@ -34,7 +34,7 @@ import {
 import { fetchProjects, gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { revealSidebarTargetForRoute } from "./sidebar-reveal.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
+import { authenticateGateway, backToSessions, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { selectProposalWorkspaceTab } from "./preview-panel.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
@@ -375,10 +375,11 @@ async function handleHashChange(): Promise<void> {
 				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 				revealSidebarTargetForRoute(route);
 			} else {
-				setHashRoute("landing");
-				state.appView = "authenticated";
-				renderApp();
-				await refreshSessions();
+				// The outgoing agent stayed active until the target lookup resolved so a
+				// valid switch could transfer it into the background cache. A missing
+				// target has no connectToSession select phase, so release that foreground
+				// ownership explicitly before showing the landing page.
+				backToSessions();
 			}
 		} else if (route.view === "goal-dashboard" && route.goalId) {
 			// Preserve prior UI state so a missing goal can keep the current view.
