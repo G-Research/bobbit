@@ -6,12 +6,11 @@ __syncBeforeAll(() => __syncCE());
 // drove the private `_checkReviewToolResult` directly with synthetic tool
 // results. This port does the same under happy-dom — no bundle, no browser.
 //
-// Regression coverage: when an agent in a background/cached session emits a
-// review_open/review_close tool result, its `_checkReviewToolResult` must NOT
-// mutate the globally-shared `state.review*` fields (which would land on
-// whichever session the user is currently viewing). The fix gates every
-// mutation on the agent session still matching `state.selectedSessionId`,
-// including after lazy review-source imports resume.
+// Regression coverage: a live review result belongs to the emitting session.
+// Background opens and closes must update that session's durable review/workspace
+// state without mutating the foreground's globally-hydrated `state.review*`
+// fields. Switching to the owner later hydrates the already-open review. Lazy
+// review-source imports must retain that ownership even if selection changes.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const annotationStoreMocks = vi.hoisted(() => ({
@@ -24,7 +23,7 @@ const annotationStoreMocks = vi.hoisted(() => ({
 const reviewSourceMocks = vi.hoisted(() => ({
 	clearPersistedReviewDocuments: vi.fn(),
 	loadReviewSources: vi.fn(),
-	openMarkdownReviewDocument: vi.fn(),
+	openMarkdownReview: vi.fn(),
 	removePersistedReviewDocument: vi.fn(),
 	restorePersistedReviewDocuments: vi.fn(),
 }));
@@ -46,10 +45,15 @@ import { state } from "../../src/app/state.js";
 
 const mockReviewSourcesModule = {
 	clearPersistedReviewDocuments: reviewSourceMocks.clearPersistedReviewDocuments,
-	openMarkdownReviewDocument: reviewSourceMocks.openMarkdownReviewDocument,
+	// Keep both names at this mocked boundary while the single-document API is
+	// migrated to an explicit review-group API. Assertions use the shared spy.
+	openMarkdownReviewDocument: reviewSourceMocks.openMarkdownReview,
+	openMarkdownReviewGroup: reviewSourceMocks.openMarkdownReview,
 	removePersistedReviewDocument: reviewSourceMocks.removePersistedReviewDocument,
 	restorePersistedReviewDocuments: reviewSourceMocks.restorePersistedReviewDocuments,
 };
+
+const persistedReviewOpens = new Map<string, any[]>();
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -169,9 +173,20 @@ beforeEach(() => {
 	reviewSourceMocks.clearPersistedReviewDocuments.mockReset();
 	reviewSourceMocks.loadReviewSources.mockReset();
 	reviewSourceMocks.loadReviewSources.mockResolvedValue(mockReviewSourcesModule);
-	reviewSourceMocks.openMarkdownReviewDocument.mockReset();
-	reviewSourceMocks.openMarkdownReviewDocument.mockImplementation((options: any) => {
-		const document = { title: options.title, markdown: options.markdown };
+	persistedReviewOpens.clear();
+	reviewSourceMocks.openMarkdownReview.mockReset();
+	reviewSourceMocks.openMarkdownReview.mockImplementation((options: any) => {
+		const sessionId = String(options.sessionId || "");
+		const persisted = structuredClone({
+			...options,
+			activeFileId: options.activeFileId ?? options.files?.[0]?.fileId,
+		});
+		persistedReviewOpens.set(sessionId, [
+			...(persistedReviewOpens.get(sessionId) || []),
+			persisted,
+		]);
+		const document = { title: options.title, markdown: options.markdown ?? options.files?.[0]?.markdown ?? "" };
+		if (sessionId !== state.selectedSessionId) return document;
 		state.reviewDocuments = new Map(state.reviewDocuments);
 		state.reviewDocuments.set(options.title, document as any);
 		state.reviewActiveTab = options.title;
@@ -179,7 +194,22 @@ beforeEach(() => {
 		return document;
 	});
 	reviewSourceMocks.removePersistedReviewDocument.mockReset();
+	reviewSourceMocks.removePersistedReviewDocument.mockImplementation((sessionId: string, identity: string) => {
+		const reviews = persistedReviewOpens.get(sessionId) || [];
+		persistedReviewOpens.set(sessionId, reviews.filter((review) =>
+			review.reviewId !== identity && review.title !== identity));
+	});
 	reviewSourceMocks.restorePersistedReviewDocuments.mockReset();
+	reviewSourceMocks.restorePersistedReviewDocuments.mockImplementation((sessionId: string) => {
+		if (sessionId !== state.selectedSessionId) return;
+		const reviews = persistedReviewOpens.get(sessionId) || [];
+		state.reviewDocuments = new Map(reviews.map((review) => [review.title, {
+			title: review.title,
+			markdown: review.markdown ?? review.files?.[0]?.markdown ?? "",
+		}]));
+		state.reviewActiveTab = reviews[0]?.title || "";
+		state.reviewPanelOpen = reviews.length > 0;
+	});
 	faviconMocks.showFaviconBadge.mockReset();
 
 	clearReviewState();
@@ -198,22 +228,34 @@ afterEach(() => {
 });
 
 describe("review tool active-session guard", () => {
-	it("background session's review_open does NOT mutate global review state", async () => {
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: live background review_open persists the full group for its owner without replacing foreground state", async () => {
 		const active = makeAgent("active-session");
 		const background = makeAgent("background-session");
 		setActive(active);
-		clearReviewState();
+		seedReviewState();
+		const foregroundBefore = getReviewState();
+		const files = [
+			{ fileId: "background-file-1", title: "Overview", markdown: "# Background overview" },
+			{ fileId: "background-file-2", title: "Details", markdown: "# Background details" },
+		];
 
-		// Simulate the bug: background session's agent emits review_open.
 		await deliverReviewToolResult(background, "review_open", {
-			title: "PR-from-background",
-			markdown: "# Should not appear",
+			reviewId: "background-review-1",
+			title: "PR from background",
+			files,
+			replace: true,
 		});
 
-		const result = getReviewState();
-		expect(result.open).toBe(false);
-		expect(result.activeTab).toBe("");
-		expect(result.docCount).toBe(0);
+		expect(reviewSourceMocks.openMarkdownReview).toHaveBeenCalledWith(expect.objectContaining({
+			reviewId: "background-review-1",
+			title: "PR from background",
+			files,
+			replace: true,
+			sessionId: "background-session",
+		}));
+		expect(persistedReviewOpens.get("background-session")).toHaveLength(1);
+		expect(getReviewState()).toEqual(foregroundBefore);
+		expect(state.selectedSessionId).toBe("active-session");
 	});
 
 	it("active session's review_open DOES open the review pane", async () => {
@@ -233,23 +275,26 @@ describe("review tool active-session guard", () => {
 		expect(result.docTitles).toEqual(["PR-from-active"]);
 	});
 
-	it("review_open does NOT mutate state after a lazy-import session switch", async () => {
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: lazy review_open remains durable for its owner after a session switch", async () => {
 		const active = makeAgent("active-session");
 		const next = makeAgent("next-session");
 		setActive(active);
 		clearReviewState();
 
 		const pending = deliverReviewToolResult(active, "review_open", {
-			title: "Late-PR",
-			markdown: "# Must not appear after session switch",
+			reviewId: "late-review",
+			title: "Late PR",
+			files: [{ fileId: "late-file", title: "Late", markdown: "# Must persist for the prior session" }],
 		});
 		setActive(next);
 		await pending;
 
-		const result = getReviewState();
-		expect(result.open).toBe(false);
-		expect(result.activeTab).toBe("");
-		expect(result.docCount).toBe(0);
+		expect(reviewSourceMocks.openMarkdownReview).toHaveBeenCalledWith(expect.objectContaining({
+			reviewId: "late-review",
+			sessionId: "active-session",
+		}));
+		expect(persistedReviewOpens.get("active-session")).toHaveLength(1);
+		expect(getReviewState()).toEqual({ open: false, activeTab: "", docCount: 0, docTitles: [] });
 	});
 
 	it("active session's inline review_open also handles structured tool-result payloads", async () => {
@@ -269,52 +314,90 @@ describe("review tool active-session guard", () => {
 		expect(result.docTitles).toEqual(["Structured inline markdown"]);
 	});
 
-	it("background session's review_close does NOT clear active session's documents", async () => {
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: background review_close removes only the owner's persisted review", async () => {
 		const active = makeAgent("active-session");
 		const background = makeAgent("background-session");
 		setActive(active);
-		clearReviewState();
-
-		// Active session opens a review.
-		await deliverReviewToolResult(active, "review_open", {
-			title: "Active-PR",
-			markdown: "# Important",
-		});
+		seedReviewState("Active PR");
 		const before = getReviewState();
+		persistedReviewOpens.set("background-session", [{
+			reviewId: "background-review",
+			title: "Background PR",
+			files: [{ fileId: "background-file", title: "Notes", markdown: "# Notes" }],
+		}]);
 
-		// Background session emits review_close — must NOT clear the active doc.
-		await deliverReviewToolResult(background, "review_close", {});
-		const after = getReviewState();
+		await deliverReviewToolResult(background, "review_close", {
+			reviewId: "background-review",
+			title: "Background PR",
+		});
 
-		expect(before.open).toBe(true);
-		expect(before.docCount).toBe(1);
-		expect(after.open).toBe(true);
-		expect(after.docCount).toBe(1);
-		expect(after.activeTab).toBe("Active-PR");
+		expect(reviewSourceMocks.removePersistedReviewDocument).toHaveBeenCalledWith(
+			"background-session",
+			expect.stringMatching(/^(background-review|Background PR)$/),
+		);
+		expect(persistedReviewOpens.get("background-session")).toEqual([]);
+		expect(getReviewState()).toEqual(before);
 	});
 
-	it("review_close does NOT mutate state after a lazy-import session switch", async () => {
-		const active = makeAgent("active-session");
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: lazy review_close remains scoped to its owner after a session switch", async () => {
+		const closing = makeAgent("closing-session");
 		const next = makeAgent("next-session");
-		setActive(active);
-		clearReviewState();
+		setActive(closing);
+		persistedReviewOpens.set("closing-session", [{
+			reviewId: "closing-review",
+			title: "Closing PR",
+			files: [{ fileId: "closing-file", title: "File", markdown: "# Closing" }],
+		}]);
 
-		await deliverReviewToolResult(active, "review_open", {
-			title: "Active-PR",
-			markdown: "# Important",
+		const pending = deliverReviewToolResult(closing, "review_close", {
+			reviewId: "closing-review",
+			title: "Closing PR",
 		});
-		const before = getReviewState();
-
-		const pending = deliverReviewToolResult(active, "review_close", { title: "Active-PR" });
 		setActive(next);
+		seedReviewState("Next foreground review");
+		const nextBefore = getReviewState();
 		await pending;
-		const after = getReviewState();
 
-		expect(before.open).toBe(true);
-		expect(before.docCount).toBe(1);
-		expect(after.open).toBe(true);
-		expect(after.docCount).toBe(1);
-		expect(after.activeTab).toBe("Active-PR");
+		expect(reviewSourceMocks.removePersistedReviewDocument).toHaveBeenCalledWith(
+			"closing-session",
+			expect.stringMatching(/^(closing-review|Closing PR)$/),
+		);
+		expect(persistedReviewOpens.get("closing-session")).toEqual([]);
+		expect(getReviewState()).toEqual(nextBefore);
+	});
+
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: switching to the owner hydrates the background review and selected file", async () => {
+		const foreground = makeAgent("foreground-session");
+		const background = makeAgent("background-session");
+		setActive(foreground);
+		seedReviewState();
+
+		await deliverReviewToolResult(background, "review_open", {
+			reviewId: "durable-review",
+			title: "Durable background PR",
+			files: [
+				{ fileId: "selected-file", title: "Selected file", markdown: "# Selected" },
+				{ fileId: "other-file", title: "Other file", markdown: "# Other" },
+			],
+		});
+		expect(getReviewState().docTitles).toEqual(["Foreground review"]);
+
+		setActive(background);
+		await deliverSnapshot(background, []);
+
+		expect(reviewSourceMocks.restorePersistedReviewDocuments).toHaveBeenCalledWith(
+			"background-session",
+			{ select: true },
+		);
+		expect(getReviewState()).toEqual({
+			open: true,
+			activeTab: "Durable background PR",
+			docCount: 1,
+			docTitles: ["Durable background PR"],
+		});
+		expect(persistedReviewOpens.get("background-session")?.[0]).toEqual(expect.objectContaining({
+			activeFileId: "selected-file",
+		}));
 	});
 });
 
