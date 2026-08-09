@@ -9,6 +9,8 @@
  *   GET    /api/sessions/:id/review/submitted              — get submitted flag
  *   PUT    /api/sessions/:id/review/submitted              — set submitted flag
  *   POST   /api/sessions/:id/review/annotations/bulk       — bulk overwrite
+ *   GET    /api/sessions/:id/review/tombstones              — list per-review tombstones
+ *   GET/PUT/DELETE /api/sessions/:id/review/tombstones/:id  — exact tombstone lifecycle
  *
  * User story references: RP-05, RP-08, RP-09, RP-16, RP-18
  */
@@ -268,6 +270,70 @@ test.describe("Review Annotations API", () => {
 			const data = await (await apiFetch(`/api/sessions/${sid}/review/annotations`)).json();
 			expect(data.annotations["Up"]).toHaveLength(1);
 			expect(data.annotations["Up"][0].comment).toBe("updated");
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("per-review submitted and closed tombstones round-trip and clear by exact ID", async () => {
+		const sid = await createSession();
+		try {
+			const submitted = await apiFetch(`/api/sessions/${sid}/review/tombstones/review-a`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "submitted" }),
+			});
+			const closed = await apiFetch(`/api/sessions/${sid}/review/tombstones`, {
+				method: "PUT",
+				body: JSON.stringify({ reviewId: "review-b", state: "closed" }),
+			});
+			expect(submitted.status).toBe(200);
+			expect(closed.status).toBe(200);
+
+			const all = await (await apiFetch(`/api/sessions/${sid}/review/tombstones`)).json();
+			expect(all).toEqual({
+				submittedReviewIds: ["review-a"],
+				closedReviewIds: ["review-b"],
+				legacySubmitted: false,
+			});
+			const exact = await (await apiFetch(`/api/sessions/${sid}/review/tombstones/review-b`)).json();
+			expect(exact).toMatchObject({ reviewId: "review-b", state: "closed", submitted: false, closed: true });
+
+			const cleared = await apiFetch(`/api/sessions/${sid}/review/tombstones/review-a`, { method: "DELETE" });
+			expect(cleared.status).toBe(200);
+			const after = await (await apiFetch(`/api/sessions/${sid}/review/tombstones`)).json();
+			expect(after.submittedReviewIds).toEqual([]);
+			expect(after.closedReviewIds).toEqual(["review-b"]);
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("bulk annotation save cannot clobber per-review tombstones", async () => {
+		const sid = await createSession();
+		try {
+			await apiFetch(`/api/sessions/${sid}/review/tombstones/review-a`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "submitted" }),
+			});
+			await apiFetch(`/api/sessions/${sid}/review/tombstones/review-b`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "closed" }),
+			});
+
+			await apiFetch(`/api/sessions/${sid}/review/annotations/bulk`, {
+				method: "POST",
+				body: JSON.stringify({
+					annotations: { Doc: [makeAnnotation("bulk-1")] },
+					submitted: false,
+					submittedReviewIds: [],
+					closedReviewIds: [],
+				}),
+			});
+
+			const annotations = await (await apiFetch(`/api/sessions/${sid}/review/annotations`)).json();
+			expect(annotations.annotations.Doc).toHaveLength(1);
+			expect(annotations.submittedReviewIds).toEqual(["review-a"]);
+			expect(annotations.closedReviewIds).toEqual(["review-b"]);
 		} finally {
 			await deleteSession(sid);
 		}
