@@ -69,6 +69,13 @@ The connection uses `journal_mode=DELETE`, `synchronous=FULL`, and a five-second
 
 Mutations mark only affected composite keys dirty. A 500 ms drain coalesces bursts, snapshots those keys, and uses one `BEGIN IMMEDIATE` transaction to upsert or delete the complete affected batch.
 
+`close()` first sets a synchronous store-level mutation fence, then enters the persistence close barrier. Every mutation therefore has one unambiguous order:
+
+- a mutation admitted before the fence may update the in-memory map and remains ordered into the final flush, including a strict reset already awaiting publication; or
+- a mutation attempted after the fence fails before changing the map, scheduling persistence, or notifying an observer. Synchronous mutators throw, while the asynchronous reset variants return a rejected promise.
+
+This fence applies to both SQLite and the JSON/memfs adapter. It prevents a late mutation from changing the read model after the final persistence snapshot has already been chosen.
+
 `flush()` and strict lifecycle writes are publication barriers. If serialization, a statement, or commit fails:
 
 - SQLite rolls back the complete batch;
@@ -181,7 +188,9 @@ A retired backup is evidence, not an automatic rollback image. Once migration or
 
 ## Lifecycle and Windows cleanup
 
-`GateStore.close()` is an idempotent barrier: concurrent calls share the same close promise, pending mutations flush with at most one immediate retry, and then the SQLite connection closes. A persistent final-publication failure rejects that shared promise but still closes the connection, so the failure is visible without retaining a Windows file handle. `ProjectContext.close()` first stops mutation sources and waits for reset recovery, then closes `GateStore` alongside the other durable stores before directory cleanup. Callers must await context close rather than deleting or renaming a project directory directly.
+`GateStore.close()` is an idempotent barrier: its first call synchronously stops admission of new mutations before requesting the final persistence flush, and concurrent calls share the same close promise. Work accepted before that fence remains in the persistence queue. Post-fence mutation and reset calls fail before any map or observer effect. A strict reset accepted before close retains its normal contract across the barrier: successful publication reaches the final durable snapshot, while failed publication compensates the in-memory reset and does not notify observers.
+
+Pending SQLite mutations flush with at most one immediate retry, and then the connection closes. A persistent final-publication failure rejects the shared close promise but still closes the connection, so the failure is visible without retaining a Windows file handle. `ProjectContext.close()` first stops mutation sources and waits for reset recovery, then closes `GateStore` alongside the other durable stores before directory cleanup. Callers must await context close rather than deleting or renaming a project directory directly.
 
 If project construction fails after opening the database, disposal closes the handle without waiting for normal ownership transfer. Startup validation failures do the same. Real-filesystem tests verify the database can be renamed after malformed-source and corrupt-row failures, pinning the Windows handle-release requirement.
 
@@ -197,26 +206,27 @@ The memfs unit adapter continues to cover the public `GateStore` logic and JSON 
 - full validation and transactional import rollback with original bytes preserved;
 - retry after a committed migration whose link or source unlink was interrupted;
 - strict multi-gate rollback;
-- gate count, composite identity, historical fields, and payload preservation; and
-- transient and persistent final-flush failures, shared concurrent-close outcomes, and handle release after persistent close and startup failures.
+- gate count, composite identity, historical fields, and payload preservation;
+- transient and persistent final-flush failures, shared concurrent-close outcomes, and handle release after persistent close and startup failures; and
+- the close mutation fence across every public mutator and reset variant, including durable pre-fence work, post-fence map/observer isolation, and strict-reset compensation.
 
 The packed-consumer test also rebuilds the installed native dependency with lifecycle scripts enabled only for `better-sqlite3`, then loads the binding and executes an in-memory create/insert/select/close smoke.
 
 ## MVP landing qualification
 
-The final ordered qualification ran on the unchanged atomic-retirement implementation baseline `27eac56fa2f6eb6345cc21ec33fede297d0a0923` on Windows with Node 24.13.1 and npm 11.8.0:
+The final ordered qualification ran without source edits on the exact close-fence baseline `72763194d87190036b60fb02635e5c063fa86267` on Windows with Node 24.13.1 and npm 11.8.0. Environment setup ran separately: `npm ci` passed in 35 seconds, then a probe identified missing generated server imports and `npm run build:server` restored them in 13 seconds. The authoritative matrix restarted from the beginning in the required order:
 
 | Check | Result |
 |---|---|
-| `npm run check` | Passed |
-| `npm run build` | Passed |
-| `npm run test:unit` | Passed |
-| `npm run test:browser` | Passed |
-| `npm run test:e2e` | Passed |
-| `npm run test:bundle` | Passed |
-| Packed-consumer native `better-sqlite3` rebuild and write/read smoke | Passed |
+| `npm run check` | Passed (40 s) |
+| `npm run build` | Passed (18 s) |
+| `npm run test:unit` | Passed (202 s; 1,064 files passed, 3 skipped; 9,837 tests passed, 20 skipped) |
+| `npm run test:browser` | Passed (381 s; 717 passed, 9 skipped; browser budget passed) |
+| `npm run test:e2e` | Passed (379 s; groups A, B, C, and D passed) |
+| `npm run test:bundle` | Passed (7 s; 2 files, 4 tests) |
+| Packed-consumer native `better-sqlite3` rebuild and write/read smoke | Passed before the separate registry audit |
 
-A read-only snapshot of representative production gate state was copied into an owned temporary directory, migrated, closed, reopened, queried directly, and removed. Source, post-migration, reopened, and SQLite counts were all 16. Sorted composite identities and every per-gate payload hash matched, and the retired JSON backup was byte-exact. The sorted-identity SHA-256 was `0f06c43d044c35b6d40d2fb5f8aeab2efd7c5540a77d7d907b6e1a65d745eb5e`; the identity-plus-payload-hash manifest SHA-256 was `d3a5b491925f4f7941756e226edf4fabff3a283facc670cf361b8dad9e27d3e1`. The live source's SHA-256, size, and modification time were unchanged before and after the exercise.
+A read-only snapshot of representative production gate state was copied into an owned temporary directory, migrated, closed, reopened, queried directly, and removed. Source, post-migration, reopened, and SQLite counts were all 16. Sorted composite identities and every per-gate payload hash matched, and the retired JSON backup was byte-exact. The sorted-identity SHA-256 was `0f06c43d044c35b6d40d2fb5f8aeab2efd7c5540a77d7d907b6e1a65d745eb5e`; the identity-plus-payload-hash manifest SHA-256 was `d3a5b491925f4f7941756e226edf4fabff3a283facc670cf361b8dad9e27d3e1`. Before and after the exercise, the live source remained byte-for-byte unchanged at SHA-256 `c1a015d2f28cebe27ceff104f230f133a213fd6644e7b8607fe2638ab5504240`, 44,685 bytes, with modification time `2026-08-07T07:55:00.694Z`.
 
 The same packed-consumer command was **not audit-clean**: after the native smoke passed, its separate mutable-registry audit reported two moderate and two high vulnerable-package findings, all through upstream `@earendil-works/pi-coding-agent`. The advisory set at qualification time was:
 
