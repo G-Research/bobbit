@@ -20,8 +20,7 @@ import path from "node:path";
 import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
-import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
-import { getOpenAIModelAdditions } from "./openai-model-additions.js";
+import { discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
@@ -128,49 +127,25 @@ export function invalidateModelCache(): void {
  * bar and thinking selector consume.
  */
 export interface ResolvedModelStateMeta {
-	contextWindow: number;
-	maxTokens: number;
-	reasoning: boolean;
-	/** Present only when upstream metadata provides it (omitted otherwise). */
+	contextWindow?: number;
+	maxTokens?: number;
+	reasoning?: boolean;
+	/** Present only when authoritative metadata provides it. */
 	thinkingLevelMap?: Record<string, string | null>;
-	input: ("text" | "image")[];
-	/**
-	 * Which resolution tier produced this metadata:
-	 *   - `cache` / `catalog`: authoritative — safe to overwrite live frame fields
-	 *     (fixes stale/incorrect frames, e.g. Fable's 1M context + max thinking).
-	 *   - `inferred`: last-resort defaults from `inferMeta`. Callers holding more
-	 *     accurate live fields (custom/aigw/unknown providers) should PRESERVE the
-	 *     live values rather than clobber them with these inferred defaults.
-	 */
-	source: "cache" | "catalog" | "inferred";
+	input?: ("text" | "image")[];
+	/** `unavailable` carries identity only; callers must not fabricate capabilities. */
+	source: "cache" | "catalog" | "unavailable";
 }
 
 /**
- * SINGLE SOURCE OF TRUTH for the metadata embedded in live model-state frames.
+ * Resolve authoritative metadata for a live model-state frame.
  *
- * Every `state.model` broadcast (model select, spawn-pin, role/default pin,
- * fallback, archived rehydration) must route through here so the values the
- * client renders after selecting a model MATCH what the ModelSelector dropdown
- * shows (which is built from `getAvailableModels` / `assembleModels`). Deriving
- * live state from `inferMeta` alone clobbers the correct merged pi-ai metadata
- * (e.g. Claude Fable 5's 1M context, `reasoning:true`, and
- * `thinkingLevelMap {off:null, xhigh:"xhigh", max:"max"}`).
- *
- * Resolution order (first hit wins):
- *   1. Registry cache (`cachedModels`) keyed by exact provider+id — the same
- *      merged list `getAvailableModels` returns. The 5s TTL is intentionally
- *      IGNORED: model metadata is static per id, so a stale cache entry is
- *      strictly better than dropping to inferMeta. Synchronous, so it serves
- *      the sync broadcast sites (e.g. sendFallbackModelState).
- *   2. pi-ai catalog via `getBuiltinModel(provider, id)` for known upstream providers
- *      (skip empty / `aigw` / `custom`; aigw strips prefixes and merges no
- *      thinkingLevelMap, so it legitimately falls through to inferMeta). Any
- *      missing numeric is filled from inferMeta.
- *   3. `inferMeta(id)` — last resort for genuinely-unknown models. Carries no
- *      thinkingLevelMap (the client then falls back to the family heuristic).
+ * The last assembled cache is checked first, even after its TTL, so temporary
+ * custom/AIGW discovery failures do not discard trustworthy metadata. Direct Pi
+ * providers then use the exact built-in row. Unknown tuples are explicitly
+ * unavailable and carry no guessed capability fields.
  */
 export function resolveModelStateMeta(provider: string | undefined, modelId: string): ResolvedModelStateMeta {
-	// Tier 1: registry cache (ignore TTL — metadata is static per id).
 	if (cachedModels) {
 		const hit = cachedModels.find(m => m.provider === provider && m.id === modelId);
 		if (hit) {
@@ -185,47 +160,26 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 		}
 	}
 
-	// Tier 2: pi-ai catalog for known upstream providers (not aigw / custom).
 	const normalizedProvider = (provider ?? "").toLowerCase();
 	if (normalizedProvider && normalizedProvider !== "aigw" && normalizedProvider !== "custom") {
 		try {
-			const model = getBuiltinModel(normalizedProvider as any, modelId as any) as {
-				contextWindow?: number; maxTokens?: number; reasoning?: boolean;
-				thinkingLevelMap?: Record<string, string | null>; input?: ("text" | "image")[];
-			} | undefined;
+			const model = getBuiltinModel(normalizedProvider as any, modelId as any);
 			if (model) {
-				const inferred = inferMeta(modelId);
-				const contextWindow = typeof model.contextWindow === "number" && model.contextWindow > 0 ? model.contextWindow : inferred.contextWindow;
-				const maxTokens = typeof model.maxTokens === "number" && model.maxTokens > 0 ? model.maxTokens : inferred.maxTokens;
-				const input = (model.input && model.input.length > 0 ? model.input : inferred.input) as ("text" | "image")[];
 				return {
-					contextWindow,
-					maxTokens,
-					reasoning: model.reasoning ?? inferred.reasoning,
-					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
-					input,
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
+					reasoning: model.reasoning,
+					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap as Record<string, string | null> } : {}),
+					input: model.input as ("text" | "image")[],
 					source: "catalog",
 				};
 			}
 		} catch {
-			// Unknown provider/id — fall through to inferMeta.
+			// Unknown provider/id is represented conservatively below.
 		}
 	}
 
-	// Tier 3: inferMeta. Marked `inferred` so live-frame callers preserve any
-	// more-accurate live metadata instead of clobbering it. inferMeta usually
-	// carries no thinkingLevelMap (client then applies the family heuristic), but
-	// a few routed families (e.g. GPT 5.6 Luna/Sol/Terra) attach an explicit map
-	// so extended `xhigh`/`max` thinking survives the fallback path.
-	const meta = inferMeta(modelId);
-	return {
-		contextWindow: meta.contextWindow,
-		maxTokens: meta.maxTokens,
-		reasoning: meta.reasoning,
-		...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
-		input: meta.input,
-		source: "inferred",
-	};
+	return { source: "unavailable" };
 }
 
 /**
@@ -271,20 +225,6 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 
 // ── Model Assembly ─────────────────────────────────────────────────
 
-function shouldRaiseBuiltInMeta(modelId: string, explicitValue: number | undefined, inferredValue: number): boolean {
-	if (!explicitValue || inferredValue <= explicitValue) return false;
-	// Bobbit intentionally patches stale Claude Sonnet/Opus metadata upward (see
-	// writeContextWindowOverrides). Do not use generic inference to inflate newer
-	// OpenAI built-ins; pi-ai's provider-specific metadata is authoritative there.
-	return /claude-(?:opus|sonnet)/i.test(modelId);
-}
-
-function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: number): number {
-	const explicit = typeof explicitValue === "number" && explicitValue > 0 ? explicitValue : undefined;
-	if (shouldRaiseBuiltInMeta(modelId, explicit, inferredValue)) return inferredValue;
-	return explicit ?? inferredValue;
-}
-
 function comparableAigwUrl(value: unknown): string | undefined {
 	if (typeof value !== "string" || !value.trim()) return undefined;
 	try {
@@ -305,29 +245,33 @@ function readRetainedAigwModels(configuredUrl: string): ApiModel[] {
 		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) return [];
 
 		return provider.models.flatMap((model: any): ApiModel[] => {
-			if (!model || typeof model.id !== "string" || !model.id) return [];
-			const api = typeof model.api === "string" ? model.api : provider.api;
-			const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : provider.baseUrl;
-			if (typeof api !== "string" || typeof baseUrl !== "string") return [];
-			const input = Array.isArray(model.input)
-				? model.input.filter((item: unknown): item is "text" | "image" => item === "text" || item === "image")
-				: [];
+			if (
+				!model
+				|| typeof model.id !== "string" || !model.id
+				|| typeof model.name !== "string" || !model.name
+				|| typeof (model.api ?? provider.api) !== "string"
+				|| typeof (model.baseUrl ?? provider.baseUrl) !== "string"
+				|| typeof model.contextWindow !== "number"
+				|| typeof model.maxTokens !== "number"
+				|| typeof model.reasoning !== "boolean"
+				|| !Array.isArray(model.input) || model.input.length === 0
+				|| model.input.some((item: unknown) => item !== "text" && item !== "image")
+				|| !model.cost || typeof model.cost !== "object"
+			) return [];
 
 			return [{
 				id: model.id,
-				name: typeof model.name === "string" && model.name ? model.name : model.id,
+				name: model.name,
 				provider: "aigw",
 				...(typeof model.upstreamProvider === "string" ? { upstreamProvider: model.upstreamProvider } : {}),
-				api,
-				baseUrl,
-				contextWindow: typeof model.contextWindow === "number" ? model.contextWindow : 0,
-				maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : 0,
-				reasoning: model.reasoning === true,
+				api: model.api ?? provider.api,
+				baseUrl: model.baseUrl ?? provider.baseUrl,
+				contextWindow: model.contextWindow,
+				maxTokens: model.maxTokens,
+				reasoning: model.reasoning,
 				...(model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
-				input: input.length > 0 ? input : ["text"],
-				cost: model.cost && typeof model.cost === "object"
-					? model.cost
-					: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				input: model.input,
+				cost: model.cost,
 				...(model.headers && typeof model.headers === "object" ? { headers: model.headers } : {}),
 				...(model.compat && typeof model.compat === "object" ? { compat: model.compat } : {}),
 				authenticated: true,
@@ -359,29 +303,12 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 			for (const providerId of providers) {
 				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
-				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
-				const mergedModels = [
-					...models,
-					...bobbitAdditions.filter(addition => !models.some(m => m.id === addition.id)),
-				];
-				for (const m of mergedModels) {
-					const meta = inferMeta(m.id);
+				for (const m of models) {
 					results.push({
-						id: m.id,
-						name: m.name,
+						...m,
 						provider: providerId as string,
-						api: m.api as string,
-						baseUrl: m.baseUrl,
-						contextWindow: builtInNumber(m.id, m.contextWindow, meta.contextWindow),
-						maxTokens: builtInNumber(m.id, m.maxTokens, meta.maxTokens),
-						reasoning: meta.reasoning || m.reasoning || false,
-						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap as Record<string, string | null> } : {}),
-						input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],
-						cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						...((m as any).headers ? { headers: (m as any).headers } : {}),
-						...((m as any).compat ? { compat: (m as any).compat } : {}),
 						authenticated: isAuth,
-					});
+					} as ApiModel);
 				}
 			}
 		} catch (err) {
@@ -405,66 +332,26 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	if (aigwUrl) {
 		try {
 			const aigwModels = await discoverAigwModels(aigwUrl);
-			// IMPORTANT: Claude models get their provider prefix stripped and are
-			// routed through bedrock-converse-stream by configureAigw() when writing
-			// models.json. The agent's rpc `set_model` does a strict equality match
-			// against that file, so the IDs we return here MUST match the stripped
-			// form — otherwise picking a Claude model from the UI silently fails
-			// (the agent rejects with "Model not found", the error is swallowed,
-			// and the next prompt goes to the previously bound model).
-			const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
-			const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
 			for (const m of aigwModels) {
-				// AUTHORITATIVE path: a model carrying both `api` and `baseUrl` came from
-				// well-known discovery (or the fallback option-1 OpenAI-responses fix).
-				// Trust those fields verbatim and DON'T re-derive via inferMeta — the
-				// id/baseUrl/api must match writeAigwModelsJson (which emits the bare
-				// wireId) so `set_model`'s strict-equality match keeps working.
-				if (m.api && m.baseUrl) {
-					const wireId = m.wireId ?? m.id;
-					results.push({
-						id: wireId,
-						name: m.name,
-						provider: "aigw",
-						...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-						api: m.api,
-						baseUrl: m.baseUrl,
-						contextWindow: m.contextWindow || 0,
-						maxTokens: m.maxTokens || 0,
-						reasoning: m.reasoning || false,
-						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
-						input: m.input || ["text"],
-						cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						...(m.compat ? { compat: m.compat as Record<string, unknown> } : {}),
-						authenticated: true,
-					});
+				if (!m.baseUrl || !m.cost) {
+					console.error(`[model-registry] Omitting incomplete AIGW metadata for ${m.id}`);
 					continue;
 				}
-				// ── Fallback heuristic path (no authoritative api/baseUrl) ──
-				// Claude models get their provider prefix stripped and are routed
-				// through bedrock-converse-stream by configureAigw() when writing
-				// models.json. The agent's rpc `set_model` does a strict equality match
-				// against that file, so the IDs we return here MUST match the stripped
-				// form — otherwise picking a Claude model from the UI silently fails.
-				const normalizedId = isClaudeModel(m.id) ? stripPrefix(m.id) : m.id;
-				const meta = inferMeta(normalizedId);
 				results.push({
-					id: normalizedId,
+					id: m.wireId ?? m.id,
 					name: m.name,
 					provider: "aigw",
 					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-					api: isClaudeModel(m.id) ? "bedrock-converse-stream" : (m.api || "openai-completions"),
-					baseUrl: aigwUrl,
-					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
-					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
-					reasoning: meta.reasoning || m.reasoning || false,
-					// Preserve extended-thinking metadata for routed families that would
-					// otherwise lose it (e.g. AIGW-routed GPT 5.6 Luna/Sol/Terra, whose
-					// `openai/gpt-5.6-*` id only matches inferMeta's substring rule).
-					...(meta.thinkingLevelMap ?? m.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap ?? m.thinkingLevelMap } : {}),
-					input: meta.input || ["text"],
-					cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					authenticated: true, // aigw is always authenticated (no key needed)
+					api: m.api,
+					baseUrl: m.baseUrl,
+					contextWindow: m.contextWindow,
+					maxTokens: m.maxTokens,
+					reasoning: m.reasoning,
+					...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+					input: m.input,
+					cost: m.cost,
+					...(m.compat ? { compat: m.compat } : {}),
+					authenticated: true,
 				});
 			}
 		} catch (err) {
