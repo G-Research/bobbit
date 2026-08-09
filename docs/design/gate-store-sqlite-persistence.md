@@ -204,7 +204,7 @@ The packed-consumer test also rebuilds the installed native dependency with life
 
 ## MVP landing qualification
 
-The final ordered qualification ran on the unchanged implementation baseline `0eec79609f8d3ddfa2f9bd9d25da1cadc02c7e1c` on Windows with Node 24.13.1 and npm 11.8.0:
+The final ordered qualification ran on the unchanged atomic-retirement implementation baseline `27eac56fa2f6eb6345cc21ec33fede297d0a0923` on Windows with Node 24.13.1 and npm 11.8.0:
 
 | Check | Result |
 |---|---|
