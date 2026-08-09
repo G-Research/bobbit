@@ -854,8 +854,8 @@ details.wf-proposal-workflow .wf-proposal-gates {
 .goal-tab-pill {
 	display: inline-flex;
 	align-items: center;
-	gap: 5px;
-	padding: 3px 10px 4px 12px;
+	gap: 2px;
+	padding: 0 5px 0 0;
 	font-size: 13px;
 	font-weight: 500;
 	border-radius: 8px 8px 0 0;
@@ -866,8 +866,11 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	transition: background 150ms ease, color 150ms ease;
 	line-height: 1.4;
 	position: relative;
+	box-sizing: border-box;
+	flex: 0 1 220px;
 	max-width: 220px;
 	min-width: 0;
+	overflow: hidden;
 }
 
 /* Clicking a tab is the primary action; reordering is secondary. Keep the
@@ -921,9 +924,29 @@ details.wf-proposal-workflow .wf-proposal-gates {
 
 
 
-.goal-tab-pill-label {
+.goal-tab-pill > .goal-tab-pill-label {
+	padding: 3px 10px 4px 12px;
+}
+
+.goal-tab-select {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	flex: 1 1 auto;
 	min-width: 0;
-	max-width: 14rem;
+	padding: 3px 2px 4px 12px;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	line-height: inherit;
+	cursor: pointer;
+}
+
+.goal-tab-pill-label {
+	flex: 1 1 auto;
+	min-width: 0;
+	max-width: none;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -933,10 +956,13 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 16px;
-	height: 16px;
-	margin-right: -3px;
+	flex: 0 0 20px;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: 0;
 	border-radius: 9999px;
+	background: transparent;
 	color: currentColor;
 	opacity: 0.68;
 	cursor: pointer;
