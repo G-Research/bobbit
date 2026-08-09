@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import path from "node:path";
-import { monitorEventLoopDelay, performance, type EventLoopUtilization } from "node:perf_hooks";
+import { constants, monitorEventLoopDelay, PerformanceObserver, performance, type EventLoopUtilization } from "node:perf_hooks";
 
 const DEFAULT_FLUSH_MS = 1000;
 /** Always-on guard threshold. Kept separate from opt-in JSONL CPU diagnostics. */
@@ -94,6 +94,10 @@ export interface CpuDiagnosticsSnapshot {
 	delayP50Ms: number;
 	delayP95Ms: number;
 	delayMaxMs: number;
+	gcCount: number;
+	gcMajorCount: number;
+	gcDurationMs: number;
+	gcMaxMs: number;
 	rssMb: number;
 	heapUsedMb: number;
 	heapTotalMb: number;
@@ -213,6 +217,11 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 	private lastWall = performance.now();
 	private lastElu: EventLoopUtilization = performance.eventLoopUtilization();
 	private delay: ReturnType<typeof monitorEventLoopDelay>;
+	private gcObserver: PerformanceObserver | null = null;
+	private gcCount = 0;
+	private gcMajorCount = 0;
+	private gcDurationMs = 0;
+	private gcMaxMs = 0;
 	private timer: ReturnType<Clock["setInterval"]> | null = null;
 	private shutdownPromise: Promise<void> | null = null;
 	private writeQueue: Promise<void> = Promise.resolve();
@@ -230,6 +239,21 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		if (this.outFile) this.enqueueOutputDirectory();
 		this.delay = monitorEventLoopDelay({ resolution: 20 });
 		this.delay.enable();
+		try {
+			this.gcObserver = new PerformanceObserver((list) => {
+				for (const entry of list.getEntries()) {
+					const durationMs = safeNumber(entry.duration);
+					const kind = (entry as unknown as { detail?: { kind?: number } }).detail?.kind;
+					this.gcCount++;
+					if (kind === constants.NODE_PERFORMANCE_GC_MAJOR) this.gcMajorCount++;
+					this.gcDurationMs += durationMs;
+					if (durationMs > this.gcMaxMs) this.gcMaxMs = durationMs;
+				}
+			});
+			this.gcObserver.observe({ entryTypes: ["gc"] });
+		} catch {
+			this.gcObserver = null;
+		}
 		this.timer = this.clock.setInterval(() => {
 			// flush owns and logs write failures, so this scheduled promise cannot reject.
 			void this.flush("tick");
@@ -327,6 +351,8 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 			this.timer = null;
 		}
 		try { this.delay.disable(); } catch { /* best-effort */ }
+		try { this.gcObserver?.disconnect(); } catch { /* best-effort */ }
+		this.gcObserver = null;
 		process.off("beforeExit", this.beforeExitHandler);
 		process.off("exit", this.exitHandler);
 		if (singleton === this) singleton = null;
@@ -358,6 +384,10 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 			delayP50Ms: round(this.delay.percentile(50) / 1e6),
 			delayP95Ms: round(this.delay.percentile(95) / 1e6),
 			delayMaxMs: round(this.delay.max / 1e6),
+			gcCount: this.gcCount,
+			gcMajorCount: this.gcMajorCount,
+			gcDurationMs: round(this.gcDurationMs),
+			gcMaxMs: round(this.gcMaxMs),
 			rssMb: mb(memory.rss),
 			heapUsedMb: mb(memory.heapUsed),
 			heapTotalMb: mb(memory.heapTotal),
@@ -371,6 +401,10 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		};
 		if (reason) snapshot.reason = reason;
 		try { this.delay.reset(); } catch { /* best-effort */ }
+		this.gcCount = 0;
+		this.gcMajorCount = 0;
+		this.gcDurationMs = 0;
+		this.gcMaxMs = 0;
 		return snapshot;
 	}
 

@@ -143,12 +143,16 @@ export interface ChannelInfo {
 	closeReason?: string;
 }
 
+export interface SessionStreamCapabilities {
+	assistantStreamDelta?: 1;
+}
+
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
 	// `clientKind` is routing/product metadata for connection setup. It is not an
 	// unspoofable browser authority signal; endpoint auth still comes from the bearer
 	// token plus server-side session/surface/capability checks.
-	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel" }
+	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel"; capabilities?: SessionStreamCapabilities }
 	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
 	| { type: "steer"; text: string }
 	| { type: "steer_queued"; messageId: string }
@@ -255,7 +259,7 @@ export interface RemoteStateSnapshotMessage {
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok"; surfaceTokenKey?: string }
+	| { type: "auth_ok"; surfaceTokenKey?: string; capabilities?: SessionStreamCapabilities }
 	| { type: "ext_surface_token_result"; requestId: string; ok: boolean; token?: string; error?: string }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
 	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }

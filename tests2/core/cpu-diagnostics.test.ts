@@ -107,6 +107,10 @@ describe("cpu diagnostics", () => {
 			assert.equal(typeof first.cpuPct, "number");
 			assert.equal(typeof first.elu, "number");
 			assert.equal(typeof first.delayP95Ms, "number");
+			assert.equal(typeof first.gcCount, "number");
+			assert.equal(typeof first.gcMajorCount, "number");
+			assert.equal(typeof first.gcDurationMs, "number");
+			assert.equal(typeof first.gcMaxMs, "number");
 			assert.equal(typeof first.rssMb, "number");
 			assert.equal(typeof first.handles, "object");
 

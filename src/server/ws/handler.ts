@@ -441,12 +441,17 @@ function replayManualRetryRequiredOnAttach(
 }
 
 function send(ws: WebSocket, msg: ServerMessage): void {
+	if ((ws as any).streamBackpressureCutover === true) return;
+	if (msg.type === "messages" && (ws as any).assistantStreamDeltaCapable === true) {
+		(ws as any).assistantStreamDeltaNeedsBaseline = true;
+	}
 	if (ws.readyState === 1) {
 		ws.send(JSON.stringify(msg));
 	}
 }
 
 function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
+	if ((ws as any).streamBackpressureCutover === true) return Promise.reject(new Error("websocket was cut over for stream backpressure"));
 	if (ws.readyState !== 1) return Promise.reject(new Error("websocket is not open"));
 	return new Promise((resolve, reject) => {
 		ws.send(JSON.stringify(msg), (err) => {
@@ -830,6 +835,11 @@ export function handleWebSocketConnection(
 			(ws as any).authenticated = true;
 			(ws as PrincipalTaggedWebSocket).authPrincipal = authPrincipal;
 
+			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
+			const assistantStreamDeltaCapable = authMsg.capabilities?.assistantStreamDelta === 1;
+			(ws as any).assistantStreamDeltaCapable = assistantStreamDeltaCapable;
+			(ws as any).assistantStreamDeltaNeedsBaseline = assistantStreamDeltaCapable;
+
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
 				(ws as any).isViewer = true;
@@ -838,7 +848,7 @@ export function handleWebSocketConnection(
 				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
 					getViewerGoalIds(ws).add(initialGoalId);
 				}
-				send(ws, { type: "auth_ok" });
+				send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
 				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
@@ -851,7 +861,7 @@ export function handleWebSocketConnection(
 				if (archived) {
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
-					send(ws, { type: "auth_ok" });
+					send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
@@ -880,7 +890,6 @@ export function handleWebSocketConnection(
 			// security boundary against same-origin code that already has the bearer token.
 			// Authority is per app connection, not singleton per session, so multiple tabs
 			// can each mint scoped pack surface tokens without stealing lifecycle state.
-			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
 			if (authMsg.clientKind === "app") {
 				surfaceTokenAuthorityKey = randomUUID();
 			}
@@ -890,7 +899,11 @@ export function handleWebSocketConnection(
 			// session binding, surface-token resolution, and one-time content-bound permits
 			// are the authorization/provenance checks; the WS client kind is not a durable
 			// same-origin security boundary.
-			send(ws, { type: "auth_ok", ...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}) });
+			send(ws, {
+				type: "auth_ok",
+				...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}),
+				...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}),
+			});
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
@@ -1747,6 +1760,7 @@ export function handleWebSocketConnection(
 					}
 					const deadline = Date.now() + PACE_TIMEOUT_MS;
 					for (const frame of frames) {
+						if ((ws as any).streamBackpressureCutover === true) break;
 						await paceAndSend(ws as any, frame.data, deadline);
 						replayed++;
 					}
