@@ -52,15 +52,21 @@ The only remaining model-name inference boundary is the legacy `/v1/models` fall
 
 ## Transient discovery outages
 
-The last atomically published AIGW catalog is an outage-only availability fallback. When live discovery throws, `/api/models` may read `providers.aigw.models` from the active agent directory's `models.json` only if the persisted provider `baseUrl` and the saved `aigw.url` are the same normalized HTTP(S) URL. This exact-URL check prevents routing metadata from a previously configured gateway from becoming selectable.
+When discovery throws, `/api/models` retains only exact metadata from the same configured source. The target-realm state determines which fallback is allowed:
 
-Retained rows preserve their published provider/model identity, API, endpoint, limits, input modes, thinking map, costs, headers, and compatibility metadata. Keeping that exact catalog available lets existing session pins, cold restore, and new spawn validation continue through a transient discovery outage; Bobbit does not choose a different provider or a hidden Pi default.
+| Target realm | Catalog used during the outage | Restart lifetime |
+|---|---|---|
+| Valid marked publication whose normalized `baseUrl` matches the saved `aigw.url` | Pi's exact composition of the published rows | Durable; the matching publication can be composed again after restart |
+| No `providers.aigw` target | The current process's last exact discovery snapshot for the unchanged normalized `aigw.url` | In memory only; unavailable after restart |
+| Marked target that cannot supply rows, such as a URL mismatch or composition failure | The same-process last exact discovery snapshot for the unchanged normalized `aigw.url` | In memory only; unavailable after restart |
+| Valid unmarked target | Pi's exact composition of the user-owned block; discovery and its snapshot are not consulted | Durable as user configuration |
+| Malformed or ambiguous target | No AIGW rows; fail closed | No fallback |
 
-Retention never masks a successful discovery result. If discovery succeeds and omits a previously published model, that omission is authoritative and the old row becomes unavailable. A missing, malformed, or URL-mismatched persisted provider also yields no retained AIGW rows.
+Both the durable marked publication and the same-process snapshot preserve complete exact rows: provider/model identity, API, endpoint, limits, input modes, thinking map, costs, headers, and compatibility metadata. Neither can authorize a different saved gateway or synthesize missing capability metadata.
 
-`GET /api/aigw/status` is deliberately a live-discovery view and therefore returns `models: []` on an outage. `/api/models` is the session-selection view and may still include the matching retained rows. The empty status response does not erase `models.json` or by itself mean that durable routing was disconnected.
+Retention is outage-only. A successful discovery result is used by itself and replaces the same-process snapshot, including when validation or filtering produces an empty catalog; stale rows are not merged into that result. A successful configure or refresh also publishes that result to the marked block. Changing the normalized saved `aigw.url` changes the snapshot key, so a prior gateway's rows cannot carry over.
 
-An unmarked `providers.aigw` block is different from this outage fallback: it is the user-owned target realm. When present and structurally valid, Pi's exact composition of that block is authoritative for selection instead of live Bobbit discovery. Bobbit does not bypass it with a previous discovery cache.
+`GET /api/aigw/status` is deliberately a fresh live-discovery view and therefore returns `models: []` when that request cannot discover models. It does not mutate the registry's outage snapshot or `models.json`. `/api/models` is the session-selection catalog and may still contain eligible durable or same-process retained rows, so an empty status response does not by itself mean routing was disconnected or the selectable catalog was cleared.
 
 ## Saved sessions after authoritative model removal
 
@@ -74,7 +80,7 @@ While the condition is active:
 - Bobbit persists the replacement and clears the condition only after successful verification. An ordinary retryable activation failure keeps the unavailable tuple, transcript, and condition intact; its sanitized `MODEL_SELECTION_RECOVERY_FAILED` message tells the user to retry or choose another model.
 - An unverified transcript rollback uses the same error code but fails closed. Its sanitized message says that the original conversation transcript could not be restored and not to retry model selection. The unavailable tuple and `MODEL_SELECTION_REQUIRED` condition remain authoritative, but transcript integrity is not guaranteed; an administrator must inspect the server logs and restore the transcript before the session continues.
 
-For AIGW, a successful discovery that omits the old row can trigger this condition. A thrown discovery request alone is not evidence of retirement: when the matching last-published row is eligible for retention, it remains the session-selection authority during that outage. This distinction is why operators should compare `/api/models`, not only the live `/api/aigw/status` response, before concluding that a saved model was retired.
+For AIGW, a successful discovery that omits the old row can trigger this condition. A thrown discovery request alone is not evidence of retirement: an eligible matching marked publication or same-process exact snapshot may remain the session-selection authority during that outage. This distinction is why operators should compare `/api/models`, not only the fresh `/api/aigw/status` response, before concluding that a saved model was retired.
 
 See [Debugging — restored session requires a model](debugging.md#restored-session-requires-a-model) for diagnosis and recovery checks.
 
