@@ -17240,18 +17240,13 @@ async function handleApiRoute(
 				}
 			}
 		}
-		// If `submitted` is omitted (or non-boolean), preserve whatever is
-		// already on disk. This is critical: the page-unload beacon historically
-		// sent `submitted: false` whenever the local cache hadn't observed a
-		// `true`, which clobbered out-of-band PUT(submitted=true) calls (other
-		// tabs, REST clients, the test harness) on the next page reload (RP-09).
-		// The client now omits the field unless it positively wants to write
-		// `true`; the legacy clear path still goes through the dedicated
-		// /review/submitted PUT.
-		const submitted = typeof body.submitted === "boolean"
-			? body.submitted
-			: reviewAnnotationStore.isSubmitted(sessionId);
-		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
+		// writeAll merges with the latest persisted state so this annotation-only
+		// unload payload can never clobber per-review submitted/closed tombstones.
+		reviewAnnotationStore.writeAll(
+			sessionId,
+			annotations,
+			typeof body.submitted === "boolean" ? body.submitted : undefined,
+		);
 		json({ ok: true });
 		return;
 	}
@@ -17308,21 +17303,96 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/sessions/:id/review/submitted
+	// GET /api/sessions/:id/review/tombstones[/:reviewId]
+	// Collection reads expose every durable ID. Exact reads also perform the
+	// one-time migration from a legacy session-wide submitted flag.
+	const reviewTombstoneMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/review\/tombstones(?:\/([^/]+))?$/);
+	if (reviewTombstoneMatch && req.method === "GET") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		if (!reviewTombstoneMatch[2]) {
+			json(reviewAnnotationStore.getReviewTombstones(sessionId));
+			return;
+		}
+		let reviewId: string;
+		try { reviewId = decodeURIComponent(reviewTombstoneMatch[2]); }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		if (!reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		const state = reviewAnnotationStore.getReviewTombstone(sessionId, reviewId);
+		json({ reviewId, state: state ?? null, submitted: state === "submitted", closed: state === "closed" });
+		return;
+	}
+
+	// PUT /api/sessions/:id/review/tombstones[/:reviewId]
+	if (reviewTombstoneMatch && req.method === "PUT") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = await readBody(req);
+		let pathReviewId: string | undefined;
+		try { pathReviewId = reviewTombstoneMatch[2] ? decodeURIComponent(reviewTombstoneMatch[2]) : undefined; }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		const reviewId = pathReviewId ?? body?.reviewId;
+		const tombstoneState = body?.state;
+		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		if (tombstoneState !== "submitted" && tombstoneState !== "closed") {
+			json({ error: "state must be submitted or closed" }, 400);
+			return;
+		}
+		reviewAnnotationStore.setReviewTombstone(sessionId, reviewId, tombstoneState);
+		json({ ok: true });
+		return;
+	}
+
+	// DELETE /api/sessions/:id/review/tombstones[/:reviewId]
+	if (reviewTombstoneMatch && req.method === "DELETE") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = reviewTombstoneMatch[2] ? undefined : await readBody(req);
+		let pathReviewId: string | undefined;
+		try { pathReviewId = reviewTombstoneMatch[2] ? decodeURIComponent(reviewTombstoneMatch[2]) : undefined; }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		const reviewId = pathReviewId ?? url.searchParams.get("reviewId") ?? body?.reviewId;
+		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		reviewAnnotationStore.clearReviewTombstone(sessionId, reviewId);
+		json({ ok: true });
+		return;
+	}
+
+	// GET /api/sessions/:id/review/submitted[?reviewId=...] — legacy session
+	// boolean when omitted; exact per-review compatibility when supplied.
 	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
 		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const reviewId = url.searchParams.get("reviewId");
+		if (reviewId !== null) {
+			if (!reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+			json({ submitted: reviewAnnotationStore.getReviewTombstone(sessionId, reviewId) === "submitted" });
+			return;
+		}
 		json({ submitted: reviewAnnotationStore.isSubmitted(sessionId) });
 		return;
 	}
 
-	// PUT /api/sessions/:id/review/submitted
+	// PUT /api/sessions/:id/review/submitted — legacy, or exact when reviewId is present.
 	if (req.method === "PUT" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
 		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		const body = await readBody(req);
+		if (typeof body?.reviewId === "string") {
+			if (!body.reviewId.trim() || typeof body.submitted !== "boolean") {
+				json({ error: "reviewId and boolean submitted are required" }, 400);
+				return;
+			}
+			if (body.submitted) reviewAnnotationStore.setReviewTombstone(sessionId, body.reviewId, "submitted");
+			else reviewAnnotationStore.clearReviewTombstone(sessionId, body.reviewId);
+			json({ ok: true });
+			return;
+		}
 		reviewAnnotationStore.setSubmitted(sessionId, !!body?.submitted);
 		json({ ok: true });
 		return;
