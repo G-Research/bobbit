@@ -56,6 +56,7 @@ import {
 	SessionCommandQueueFullError,
 	SessionCommandSerialiser,
 } from "./session-command-serialiser.js";
+import { isSocketSendable } from "./socket-sendability.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -83,57 +84,58 @@ function stampSnapshotOrder(data: unknown): unknown {
 	}
 	return data;
 }
-// patchModelContextWindow removed — live model-state frames now resolve context
-// windows, reasoning, and thinkingLevelMap via resolveModelStateMeta() (registry
-// cache → pi-ai catalog → inferMeta), matching the ModelSelector dropdown.
-
 const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+const isThinkingLevelMap = (v: unknown): v is Record<string, string | null> => !!v && typeof v === "object" && !Array.isArray(v);
+const isInputModalityList = (v: unknown): v is ("text" | "image")[] => Array.isArray(v)
+	&& v.length > 0
+	&& v.every((entry) => entry === "text" || entry === "image");
+
+type OptionalResolvedModelStateMeta = {
+	contextWindow?: unknown;
+	maxTokens?: unknown;
+	reasoning?: unknown;
+	thinkingLevelMap?: unknown;
+	input?: unknown;
+	source?: string;
+	available?: boolean;
+};
+
+function isExactResolvedMeta(meta: OptionalResolvedModelStateMeta | undefined): meta is OptionalResolvedModelStateMeta {
+	if (!meta || meta.available === false || meta.source === "inferred" || meta.source === "unavailable") return false;
+	return isPositiveNumber(meta.contextWindow)
+		|| isPositiveNumber(meta.maxTokens)
+		|| typeof meta.reasoning === "boolean"
+		|| isThinkingLevelMap(meta.thinkingLevelMap)
+		|| isInputModalityList(meta.input);
+}
 
 /**
- * Build the `state.model` payload for a live/rehydrated frame.
- *
- * Authoritative metadata (registry cache / pi-ai catalog) always wins so stale
- * or incorrect live frames get corrected — e.g. Claude Fable 5's 1M context,
- * `reasoning:true`, and `thinkingLevelMap {..., max:"max"}`.
- *
- * When the resolver only produced INFERRED defaults (custom / aigw / unknown
- * providers that legitimately fall through to `inferMeta`), those defaults must
- * NOT clobber more-accurate live fields already present on `base` (the agent's
- * live `state.model`). Inferred values are used only as a fallback for fields
- * the live frame does not already carry.
+ * Build a `state.model` payload from exact registry metadata when available.
+ * During a temporary registry miss, only a live frame whose provider/id exactly
+ * matches the requested identity may supply capability fields. Missing fields
+ * remain missing; Bobbit does not manufacture defaults from the model name.
  */
 export function buildResolvedModelStateModel(provider: string, id: string, base?: Record<string, unknown>): Record<string, unknown> {
-	const meta = resolveModelStateMeta(provider, id);
+	const resolved = resolveModelStateMeta(provider, id) as OptionalResolvedModelStateMeta | undefined;
+	const matchingLive = base?.provider === provider && base?.id === id ? base : undefined;
+	const source = isExactResolvedMeta(resolved) ? resolved : matchingLive;
 	const model: Record<string, unknown> = {
-		...(base ?? {}),
+		...(matchingLive ?? {}),
 		provider,
 		id,
 	};
-	const inferredFallback = meta.source === "inferred";
 
-	// contextWindow / maxTokens: authoritative overwrites; inferred only fills gaps.
-	model.contextWindow = inferredFallback && isPositiveNumber(base?.contextWindow)
-		? base!.contextWindow
-		: meta.contextWindow;
-	model.maxTokens = inferredFallback && isPositiveNumber(base?.maxTokens)
-		? base!.maxTokens
-		: meta.maxTokens;
+	if (isPositiveNumber(source?.contextWindow)) model.contextWindow = source.contextWindow;
+	else delete model.contextWindow;
+	if (isPositiveNumber(source?.maxTokens)) model.maxTokens = source.maxTokens;
+	else delete model.maxTokens;
+	if (typeof source?.reasoning === "boolean") model.reasoning = source.reasoning;
+	else delete model.reasoning;
+	if (isThinkingLevelMap(source?.thinkingLevelMap)) model.thinkingLevelMap = source.thinkingLevelMap;
+	else delete model.thinkingLevelMap;
+	if (isInputModalityList(source?.input)) model.input = source.input;
+	else delete model.input;
 
-	// reasoning: authoritative overwrites; inferred keeps a live boolean when present.
-	model.reasoning = inferredFallback && typeof base?.reasoning === "boolean"
-		? base!.reasoning
-		: meta.reasoning;
-
-	// thinkingLevelMap: authoritative source is the sole owner. On inferred
-	// fallback keep a live map when present (else drop it so the client applies
-	// its family heuristic).
-	if (meta.thinkingLevelMap) {
-		model.thinkingLevelMap = meta.thinkingLevelMap;
-	} else if (inferredFallback && base?.thinkingLevelMap && typeof base.thinkingLevelMap === "object") {
-		model.thinkingLevelMap = base.thinkingLevelMap;
-	} else {
-		delete model.thinkingLevelMap;
-	}
 	return model;
 }
 
@@ -374,7 +376,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
 		const data = JSON.stringify(msg);
 		for (const client of clients) {
-			if (client.readyState === 1) {
+			if (isSocketSendable(client)) {
 				client.send(data);
 			}
 		}
@@ -390,7 +392,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	let skipped = 0;
 	for (const client of clients) {
 		scanned++;
-		if (client.readyState === 1) {
+		if (isSocketSendable(client)) {
 			client.send(data);
 			recipients++;
 		} else {
@@ -441,13 +443,20 @@ function replayManualRetryRequiredOnAttach(
 }
 
 function send(ws: WebSocket, msg: ServerMessage): void {
-	if (ws.readyState === 1) {
-		ws.send(JSON.stringify(msg));
+	if (!isSocketSendable(ws)) return;
+	ws.send(JSON.stringify(msg));
+	if (msg.type === "messages" && (ws as any).assistantStreamDeltaCapable === true) {
+		(ws as any).assistantStreamDeltaNeedsBaseline = true;
 	}
 }
 
 function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
-	if (ws.readyState !== 1) return Promise.reject(new Error("websocket is not open"));
+	if (!isSocketSendable(ws)) {
+		const reason = (ws as any).streamBackpressureCutover === true
+			? "websocket was cut over for stream backpressure"
+			: "websocket is not open";
+		return Promise.reject(new Error(reason));
+	}
 	return new Promise((resolve, reject) => {
 		ws.send(JSON.stringify(msg), (err) => {
 			if (err) reject(err);
@@ -830,6 +839,11 @@ export function handleWebSocketConnection(
 			(ws as any).authenticated = true;
 			(ws as PrincipalTaggedWebSocket).authPrincipal = authPrincipal;
 
+			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
+			const assistantStreamDeltaCapable = authMsg.capabilities?.assistantStreamDelta === 1;
+			(ws as any).assistantStreamDeltaCapable = assistantStreamDeltaCapable;
+			(ws as any).assistantStreamDeltaNeedsBaseline = assistantStreamDeltaCapable;
+
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
 				(ws as any).isViewer = true;
@@ -838,7 +852,7 @@ export function handleWebSocketConnection(
 				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
 					getViewerGoalIds(ws).add(initialGoalId);
 				}
-				send(ws, { type: "auth_ok" });
+				send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
 				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
@@ -851,7 +865,7 @@ export function handleWebSocketConnection(
 				if (archived) {
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
-					send(ws, { type: "auth_ok" });
+					send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
@@ -880,7 +894,6 @@ export function handleWebSocketConnection(
 			// security boundary against same-origin code that already has the bearer token.
 			// Authority is per app connection, not singleton per session, so multiple tabs
 			// can each mint scoped pack surface tokens without stealing lifecycle state.
-			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
 			if (authMsg.clientKind === "app") {
 				surfaceTokenAuthorityKey = randomUUID();
 			}
@@ -890,7 +903,11 @@ export function handleWebSocketConnection(
 			// session binding, surface-token resolution, and one-time content-bound permits
 			// are the authorization/provenance checks; the WS client kind is not a durable
 			// same-origin security boundary.
-			send(ws, { type: "auth_ok", ...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}) });
+			send(ws, {
+				type: "auth_ok",
+				...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}),
+				...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}),
+			});
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
@@ -915,7 +932,7 @@ export function handleWebSocketConnection(
 			const joinMsg: ServerMessage = { type: "client_joined", clientId };
 			const joinData = JSON.stringify(joinMsg);
 			for (const client of session.clients) {
-				if (client !== ws && client.readyState === 1) {
+				if (client !== ws && isSocketSendable(client)) {
 					client.send(joinData);
 				}
 			}
@@ -1438,7 +1455,7 @@ export function handleWebSocketConnection(
 						break;
 					}
 					try {
-						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
+						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast, preferencesStore);
 					} catch (err: any) {
 						const safeError = redactSensitive(String(err?.message || err));
 						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, safeError);
@@ -1710,7 +1727,9 @@ export function handleWebSocketConnection(
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
 					let replayed = 0;
+					let replayedBytes = 0;
 					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
+					if (!isSocketSendable(ws)) break;
 					const sendResumeGap = (_reason: string, bytes = 0) => {
 						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
 						if (diagEnabled) {
@@ -1742,16 +1761,19 @@ export function handleWebSocketConnection(
 						Date.now() + RESUME_REPLAY_DRAIN_TIMEOUT_MS,
 					);
 					if (!drained) {
+						if (!isSocketSendable(ws)) break;
 						sendResumeGap("backpressure", decision.bytes);
 						break;
 					}
 					const deadline = Date.now() + PACE_TIMEOUT_MS;
 					for (const frame of frames) {
-						await paceAndSend(ws as any, frame.data, deadline);
+						const sent = await paceAndSend(ws as any, frame.data, deadline);
+						if (!sent) break;
 						replayed++;
+						replayedBytes += frame.bytes;
 					}
 					if (diagEnabled) {
-						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: decision.bytes, replayed, sendMs: performance.now() - diagStart });
+						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: replayedBytes, replayed, sendMs: performance.now() - diagStart });
 					}
 					break;
 				}
@@ -2250,7 +2272,7 @@ export function handleWebSocketConnection(
 				const leaveMsg: ServerMessage = { type: "client_left", clientId };
 				const leaveData = JSON.stringify(leaveMsg);
 				for (const client of session.clients) {
-					if (client.readyState === 1) {
+					if (isSocketSendable(client)) {
 						client.send(leaveData);
 					}
 				}

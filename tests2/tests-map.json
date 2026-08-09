@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1139,
+  "censusTotal": 1141,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 512,
-    "v2-dom": 144,
-    "v2-integration": 203
+    "v2-core": 514,
+    "v2-dom": 145,
+    "v2-integration": 202
   },
   "methods": {
-    "adapter": 276,
+    "adapter": 275,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -27,6 +27,42 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/assistant-stream-delta.test.ts",
+      "reason": "Prototype coverage proving Pi cumulative assistant message updates can round-trip through compact text, thinking, and tool-call deltas while materially reducing serialized transport bytes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/assistant-stream-session-broadcast.test.ts",
+      "reason": "Core broadcast coverage for assistant-stream capability negotiation, capable-vs-legacy live payloads, authoritative cumulative replay retention, and per-client slow-socket cutover isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/websocket-post-cutover-egress.test.ts",
+      "reason": "Core regression coverage proving delayed-close stream-backpressure cutover sockets receive no status, background-output, join/leave, or cross-module server broadcast traffic while healthy peers remain unaffected.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/remote-agent-assistant-stream-delta.test.ts",
+      "reason": "DOM coverage for RemoteAgent auth capability advertisement plus exact compact assistant-stream reconstruction across snapshot and terminal boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
       }
     },
     {
@@ -4595,15 +4631,6 @@
         "tier": "unit",
         "project": "integration"
       }
-    },
-    {
-      "file": "tests/e2e/context-window-overrides.spec.ts",
-      "bucket": "v2-integration",
-      "method": "adapter",
-      "replacement": [
-        "tests2/core/aigw-context-window-overrides.test.ts"
-      ],
-      "rationale": "COVERED-ELSEWHERE: behaviour is covered by tests2/core/aigw-context-window-overrides.test.ts. Legacy kept as safety-net until suite retirement (not 1:1 migrated; no v2Path)."
     },
     {
       "file": "tests/e2e/continue-archived-assistant.spec.ts",

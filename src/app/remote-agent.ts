@@ -73,6 +73,7 @@ import {
 import type { AutoRetryPendingEvent, ManualRetryRequiredEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction, RemoteStateSnapshotMessage } from "../server/ws/protocol.js";
 import { LOCAL_USER_AUTHOR, type BobbitMessage, type MessageAuthor } from "../shared/message-author.js";
 import type { PromptSource } from "../shared/prompt-source.js";
+import { reconstructAssistantStreamDelta } from "../shared/assistant-stream-delta.js";
 
 const CLIENT_SYSTEM_AUTHOR: MessageAuthor = {
 	kind: "system",
@@ -337,6 +338,8 @@ export class RemoteAgent {
 	private _sessionPoster: ((req: SessionPostRequest) => Promise<void>) | undefined;
 	private _surfaceTokenMinter: ((surface: PackSurfaceRef) => Promise<string>) | undefined;
 	private _surfaceTokenAuthorityKey: string | undefined;
+	private _assistantStreamDeltaEnabled = false;
+	private _previousRawAssistantStreamMessage: any;
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
 	private _conditionSnapshotReceived = false;
@@ -915,7 +918,12 @@ export class RemoteAgent {
 
 			ws.onopen = () => {
 				bootMark("ws-open");
-				ws.send(JSON.stringify({ type: "auth", token: this._authToken, clientKind: "app" }));
+				ws.send(JSON.stringify({
+					type: "auth",
+					token: this._authToken,
+					clientKind: "app",
+					capabilities: { assistantStreamDelta: 1 },
+				}));
 			};
 
 			ws.onmessage = (evt) => {
@@ -937,6 +945,7 @@ export class RemoteAgent {
 					if (msg.type === "auth_ok") {
 						settled = true;
 						this._surfaceTokenAuthorityKey = typeof msg.surfaceTokenKey === "string" ? msg.surfaceTokenKey : undefined;
+						this._assistantStreamDeltaEnabled = msg.capabilities?.assistantStreamDelta === 1;
 						// Register the sanctioned WS transports for pack-bound surface-token minting
 						// and `host.session.postMessage` (C2 session WRITE, extension-host-phase2.md
 						// §8 C2.1). Server-side session binding, surface-token resolution, and
@@ -1384,6 +1393,8 @@ export class RemoteAgent {
 		this._conditionSnapshotReceived = false;
 		this._pendingAttachments = null;
 		this._pendingSkillExpansions = null;
+		this._assistantStreamDeltaEnabled = false;
+		this._previousRawAssistantStreamMessage = undefined;
 		this._highestSeq = 0;
 		this._seqInitialized = false;
 		this._pendingEvents = [];
@@ -1764,14 +1775,20 @@ export class RemoteAgent {
 	 *  reconciliation replaces the pending pills. (S2) */
 	private _flushOutbox(): void {
 		if (this._pendingOutbox.length === 0) return;
-		const pending = this._pendingOutbox;
-		this._pendingOutbox = [];
-		for (const entry of pending) {
-			if (this.ws?.readyState === WebSocket.OPEN) {
-				try { this.ws.send(JSON.stringify(entry.frame)); } catch { /* re-drop on a racing close; rare */ }
+		let sent = 0;
+		while (this._pendingOutbox.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
+			const entry = this._pendingOutbox[0];
+			try {
+				this.ws.send(JSON.stringify(entry.frame));
+			} catch {
+				// Keep this entry and the unsent suffix in FIFO order. A later auth_ok
+				// retries them on the replacement socket instead of silently losing intent.
+				break;
 			}
+			this._pendingOutbox.shift();
+			sent++;
 		}
-		this.onQueueUpdate?.(this.getQueue());
+		if (sent > 0) this.onQueueUpdate?.(this.getQueue());
 	}
 
 	private async handleServerMessage(msg: any) {
@@ -1884,6 +1901,7 @@ export class RemoteAgent {
 					// the server, so future visibility ticks can short-circuit
 					// `requestMessages()` until the WS drops again.
 					this._hadDisconnectSinceLastSnapshot = false;
+					this._previousRawAssistantStreamMessage = undefined;
 					// Streaming preview: if the snapshot contains the streaming
 					// message id, it's no longer in-flight on this client.
 					this.streamingMessageId = undefined;
@@ -2881,7 +2899,30 @@ export class RemoteAgent {
 		this._state.providerAuthRequired = null;
 	}
 
+	private _normalizeAssistantStreamUpdate(event: any): any | null {
+		if (!event || event.type !== "message_update") return event;
+		const expectsCompact = this._assistantStreamDeltaEnabled && event.assistantStreamDelta === 1;
+		const reconstructed: any = event.assistantStreamDelta === 1
+			? reconstructAssistantStreamDelta(event, this._previousRawAssistantStreamMessage)
+			: event;
+		if (event.assistantStreamDelta === 1 && (!reconstructed || reconstructed === event || !reconstructed.message)) {
+			console.warn(`[RemoteAgent] assistantStreamDelta reconstruction failed${expectsCompact ? "" : " (unexpected compact frame)"}; reconnecting for a fresh delta baseline`);
+			this._previousRawAssistantStreamMessage = undefined;
+			// A snapshot alone cannot reset the server's per-socket delta baseline.
+			// Reconnect so auth negotiation marks the replacement socket as needing a
+			// self-contained first update; cumulative replay remains authoritative.
+			try { this.ws?.close(4009, "assistant stream resync"); } catch { this.requestMessages(); }
+			return null;
+		}
+		if (reconstructed?.message?.role === "assistant") {
+			this._previousRawAssistantStreamMessage = reconstructed.message;
+		}
+		return reconstructed;
+	}
+
 	private handleAgentEvent(event: any) {
+		event = this._normalizeAssistantStreamUpdate(event);
+		if (!event) return;
 		// Track current event seq so live-event reducer dispatches use it.
 		const eventSeq = this._highestSeq;
 		// Update local state BEFORE emitting (UI reads state in event handlers)
@@ -2956,7 +2997,15 @@ export class RemoteAgent {
 				break;
 			}
 
+			case "process_exit":
+				// The server clears its delta-chain base on process death. Mirror that
+				// boundary so a replacement agent's self-contained first update is not
+				// incorrectly applied to stale pre-crash content.
+				this._previousRawAssistantStreamMessage = undefined;
+				break;
+
 			case "agent_end": {
+				this._previousRawAssistantStreamMessage = undefined;
 				this.streamingMessageId = undefined;
 				// Status is owned by `session_status` (server). agent_end is a
 				// signal: streaming-message cleanup + per-tag flag clear + beep + badge.
@@ -3039,6 +3088,7 @@ export class RemoteAgent {
 				break;
 
 			case "message_end":
+				this._previousRawAssistantStreamMessage = undefined;
 				if (event.message) {
 					let msg = normalizeProposalToolCallInputs(event.message, (id) => this._toolCallInputsById.get(id));
 					if (msg.role === "assistant") {

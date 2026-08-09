@@ -1368,7 +1368,7 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. A discovery failure returns `models: []` as live status even when `/api/models` can use the matching last-published catalog. |
+| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. `models: []` describes that live status request and does not clear eligible durable or same-process retention in `/api/models`. |
 | `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
 | `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
 | `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
@@ -1377,7 +1377,9 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
 
-Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. On a discovery error, `/api/models` may read the last atomically published `providers.aigw.models` only when its normalized `baseUrl` exactly matches the currently configured URL. A successful discovery is authoritative, including model omissions; retained rows are never merged back into a successful result. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, outage retention, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
+Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. If discovery throws, `/api/models` uses Pi's exact rows from a valid marked publication when its normalized `baseUrl` matches the saved `aigw.url`. If the target is absent, or a marked target cannot supply rows, it may instead use the current process's last exact discovery snapshot keyed to that unchanged normalized URL. This snapshot is in memory only and does not survive restart. A valid unmarked target remains user-owned and authoritative through Pi composition; discovery retention never bypasses it. A malformed or ambiguous target fails closed.
+
+A successful discovery result replaces the same-process snapshot and is authoritative even when empty after validation or filtering; retained rows are not merged into it. `GET /api/aigw/status` performs its own fresh discovery and may return `models: []` without mutating `models.json` or the catalog retention used by `/api/models`. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md#transient-discovery-outages) for the full outage matrix, precedence, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
 
 ### OAuth
 

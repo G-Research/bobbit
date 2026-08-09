@@ -232,6 +232,12 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		consumers: frozen(["tests2/core/async-background-cleanup-static.test.ts"]),
 	},
 	{
+		id: "metadata-retirement-source-guard",
+		roots: frozen(["src"]),
+		matches: (path) => path.startsWith("src/") && /\.ts$/i.test(path),
+		consumers: frozen(["tests2/core/openai-model-additions-merge.test.ts"]),
+	},
+	{
 		id: "search-worker-main-thread-boundary",
 		roots: frozen(["src/server/search"]),
 		matches: (path) => path.startsWith("src/server/search/") && /\.ts$/i.test(path),
@@ -653,6 +659,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/openai-model-additions-merge.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "productionTypeScriptFiles", ["scan:metadata-retirement-source-guard"]),
+		]),
+	},
+	{
 		consumer: "tests2/core/no-general-workflow-default.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("recursive-directory-scan", "listSourceFiles", ["scan:workflow-default-source-guard"]),
@@ -763,6 +775,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		consumer: "tests2/core/worktree-setup-fallback.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("recursive-directory-scan", "walk", ["scan:worktree-setup-source-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/integration/agent-dir-settings.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "target", "test-owned snapshot of isolated agent-directory fixture state"),
+			allowedExecutableOperation("repository-directory-copy", "snapshot.backup", "test-owned agent-directory fixture restored from its temporary snapshot"),
 		]),
 	},
 	{
@@ -1089,7 +1108,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/agent-dir-settings.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
-			{ expression: "bypassPrefsPath", count: 1 },
+			{ expression: "preferencesPath", count: 2 },
 			{ expression: "path.join(bobbitDir(), \"state\", \"preferences.json\")", count: 1 },
 			{ expression: "path.join(active, \"auth.json\")", count: 1 },
 			{ expression: "path.join(pending, \"sessions\", \"session-a\", \"transcript.jsonl\")", count: 1 },
@@ -1571,9 +1590,9 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/core/openai-model-additions-merge.test.ts",
-		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		declarations: frozen(["scan:metadata-retirement-source-guard"]),
 		reads: frozen([
-			{ expression: "f", count: 1 },
+			{ expression: "file", count: 1 },
 		]),
 	},
 	{
@@ -2076,6 +2095,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "path.join(tmpAgentDir, \"models.json\")", count: 1 },
+			{ expression: "modelsPath", count: 5 },
 		]),
 	},
 	{
@@ -2083,7 +2103,15 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "f", count: 1 },
-			{ expression: "path.join(tmp, \"models.json\")", count: 6 },
+			{ expression: "path.join(tmp, \"models.json\")", count: 4 },
+			{ expression: "modelsPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
+		allowReason: "test-owned temporary agent models.json fixture used to verify byte preservation",
+		reads: frozen([
+			{ expression: "path.join(agentDir, \"models.json\")", count: 7 },
 		]),
 	},
 	{

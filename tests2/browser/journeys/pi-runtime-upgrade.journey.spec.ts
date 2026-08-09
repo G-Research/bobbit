@@ -1,6 +1,6 @@
 /**
  * Journey: Pi runtime upgrade — browser-facing compatibility coverage.
- * Covers the Pi-authoritative Opus 5 picker/runtime tuple, provider key testing
+ * Covers Pi-authoritative model picker/runtime metadata, provider key testing
  * through browser-safe pi-ai routes, and session restore after transcript parsing.
  */
 import type { Page } from "@playwright/test";
@@ -46,12 +46,12 @@ async function loadModelsFromApi(): Promise<ApiModel[]> {
 	return models;
 }
 
-const OPUS_5 = { provider: "anthropic", id: "claude-opus-5", thinkingLevel: "xhigh" } as const;
-const OPUS_5_LEVEL_LABELS = ["Off", "Minimal", "Low", "Medium", "High", "Extra high", "Max"] as const;
+const AUTHORITATIVE_CLAUDE = { provider: "anthropic", id: "claude-opus-4-1", thinkingLevel: "high" } as const;
+const AUTHORITATIVE_CLAUDE_LEVEL_LABELS = ["Off", "Minimal", "Low", "Medium", "High"] as const;
 
-function requireOpus5Model(models: ApiModel[]): ApiModel {
-	const model = models.find((candidate) => candidate.provider === OPUS_5.provider && candidate.id === OPUS_5.id);
-	expect(model, "expected anthropic/claude-opus-5 in /api/models").toBeTruthy();
+function requireAuthoritativeClaude(models: ApiModel[]): ApiModel {
+	const model = models.find((candidate) => candidate.provider === AUTHORITATIVE_CLAUDE.provider && candidate.id === AUTHORITATIVE_CLAUDE.id);
+	expect(model, "expected anthropic/claude-opus-4-1 in /api/models").toBeTruthy();
 	return model as ApiModel;
 }
 
@@ -62,22 +62,20 @@ async function openModelsSettings(page: Page): Promise<void> {
 }
 
 test.describe("Journey: Pi Runtime Upgrade", () => {
-	test("selects Pi 0.82.1 Opus 5 with xhigh, uses it, and restores the authoritative tuple after reload", async ({ page }) => {
+	test("selects a formerly inflated Claude row and restores exact Pi metadata after reload", async ({ page }) => {
 		test.setTimeout(90_000);
 		const models = await loadModelsFromApi();
-		const model = requireOpus5Model(models);
+		const model = requireAuthoritativeClaude(models);
 		expect(model).toMatchObject({
-			name: "Claude Opus 5",
+			name: "Claude Opus 4.1 (latest)",
 			api: "anthropic-messages",
 			baseUrl: "https://api.anthropic.com",
-			contextWindow: 1_000_000,
-			maxTokens: 128_000,
+			contextWindow: 200_000,
+			maxTokens: 32_000,
 			reasoning: true,
 			input: ["text", "image"],
-			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-			thinkingLevelMap: { xhigh: "xhigh", max: "max" },
-			compat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true },
 		});
+		expect(model.thinkingLevelMap).toBeUndefined();
 
 		const beforePreferences = await (await apiFetch("/api/preferences")).json();
 		const sentFrames: Array<Record<string, unknown>> = [];
@@ -113,10 +111,12 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 
 			const selector = page.locator("agent-model-selector");
 			await expect(selector.getByText("Select Model").first()).toBeVisible({ timeout: 15_000 });
-			await selector.getByPlaceholder("Search models...").fill(OPUS_5.id);
-			const item = selector.locator(`[data-model-item][data-model-id="${OPUS_5.id}"]`).filter({ hasText: OPUS_5.provider }).first();
-			await expect(item, `expected ${OPUS_5.provider}/${OPUS_5.id} in the session picker`).toBeVisible({ timeout: 15_000 });
-			await expect(item).toContainText("1MK/128K");
+			await selector.getByPlaceholder("Search models...").fill(AUTHORITATIVE_CLAUDE.id);
+			const item = selector.locator(`[data-model-item][data-model-id="${AUTHORITATIVE_CLAUDE.id}"]`).filter({ hasText: AUTHORITATIVE_CLAUDE.provider }).first();
+			await expect(item, `expected ${AUTHORITATIVE_CLAUDE.provider}/${AUTHORITATIVE_CLAUDE.id} in the session picker`).toBeVisible({ timeout: 15_000 });
+			// The selector must render the exact /api/models limits rather than the
+			// retired blanket Claude 1M override.
+			await expect(item).toContainText("200K/32K");
 
 			// These filters consume the same reasoning/image metadata as the row icons.
 			await selector.getByText("Thinking", { exact: true }).click();
@@ -125,12 +125,12 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 			await expect(item).toBeVisible();
 			await item.click();
 
-			await expect(footerModel).toHaveText(OPUS_5.id, { timeout: 20_000 });
-			await expect(page.locator(".thinking-select-compact")).toHaveAttribute("title", "Extra high", { timeout: 20_000 });
+			await expect(footerModel).toHaveText(AUTHORITATIVE_CLAUDE.id, { timeout: 20_000 });
+			await expect(page.locator(".thinking-select-compact")).toHaveAttribute("title", "High", { timeout: 20_000 });
 			await expect.poll(
-				() => sentFrames.find((frame) => frame.type === "set_model" && frame.modelId === OPUS_5.id),
-				{ timeout: 15_000, message: "picker should send one combined Opus 5/xhigh request" },
-			).toEqual({ type: "set_model", provider: OPUS_5.provider, modelId: OPUS_5.id, thinkingLevel: OPUS_5.thinkingLevel });
+				() => sentFrames.find((frame) => frame.type === "set_model" && frame.modelId === AUTHORITATIVE_CLAUDE.id),
+				{ timeout: 15_000, message: "picker should send one combined exact model/thinking request" },
+			).toEqual({ type: "set_model", provider: AUTHORITATIVE_CLAUDE.provider, modelId: AUTHORITATIVE_CLAUDE.id, thinkingLevel: AUTHORITATIVE_CLAUDE.thinkingLevel });
 
 			const readRemoteTuple = () => page.evaluate(() => {
 				const appState = (window as any).bobbitState ?? (window as any).__bobbitState;
@@ -141,37 +141,40 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 					thinkingLevel: state?.thinkingLevel,
 					contextWindow: state?.model?.contextWindow,
 					maxTokens: state?.model?.maxTokens,
+					reasoning: state?.model?.reasoning,
+					input: state?.model?.input,
+					thinkingLevelMap: state?.model?.thinkingLevelMap ?? null,
 				};
 			});
-			await expect.poll(readRemoteTuple, { timeout: 20_000 }).toEqual({
-				...OPUS_5,
-				contextWindow: 1_000_000,
-				maxTokens: 128_000,
-			});
+			const expectedLiveMetadata = {
+				...AUTHORITATIVE_CLAUDE,
+				contextWindow: model.contextWindow,
+				maxTokens: model.maxTokens,
+				reasoning: model.reasoning,
+				input: model.input,
+				thinkingLevelMap: model.thinkingLevelMap ?? null,
+			};
+			await expect.poll(readRemoteTuple, { timeout: 20_000 }).toEqual(expectedLiveMetadata);
 
 			const thinking = page.locator(".thinking-select-compact");
 			await thinking.locator("button").click();
 			const listbox = page.locator('[role="listbox"]').last();
 			await expect(listbox).toBeVisible();
 			const labels = (await listbox.locator('[role="option"]').allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
-			expect(labels).toEqual(OPUS_5_LEVEL_LABELS);
+			expect(labels).toEqual(AUTHORITATIVE_CLAUDE_LEVEL_LABELS);
 			await thinking.locator("button").click();
 
 			const editor = page.locator("message-editor textarea").first();
 			await expect(editor).toBeVisible({ timeout: 15_000 });
-			await editor.fill("Opus 5 xhigh browser journey");
+			await editor.fill("Authoritative Claude metadata browser journey");
 			await editor.press("Enter");
 			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(footerModel).toHaveText(OPUS_5.id, { timeout: 20_000 });
-			await expect(page.locator(".thinking-select-compact")).toHaveAttribute("title", "Extra high", { timeout: 20_000 });
-			await expect.poll(readRemoteTuple, { timeout: 20_000 }).toEqual({
-				...OPUS_5,
-				contextWindow: 1_000_000,
-				maxTokens: 128_000,
-			});
+			await expect(footerModel).toHaveText(AUTHORITATIVE_CLAUDE.id, { timeout: 20_000 });
+			await expect(page.locator(".thinking-select-compact")).toHaveAttribute("title", "High", { timeout: 20_000 });
+			await expect.poll(readRemoteTuple, { timeout: 20_000 }).toEqual(expectedLiveMetadata);
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => undefined);
 			await apiFetch("/api/preferences", {

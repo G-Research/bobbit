@@ -22,7 +22,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -75,7 +75,7 @@ import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js"
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
 import { profile } from "./profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
@@ -95,6 +95,7 @@ import type { GrantPolicy, Role } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
+import { compactAssistantStreamDelta, reconstructAssistantStreamMessage } from "../../shared/assistant-stream-delta.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "../ws-overflow-guard.js";
 
 let sessionManagerModuleClock: Clock = realClock;
@@ -945,6 +946,8 @@ export interface SessionInfo {
 	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
 	 */
 	latestMessageUpdate?: { id?: string; message: any };
+	/** Previous reconstructed assistant stream message used to build compact live deltas. */
+	previousAssistantStreamMessage?: any;
 	/**
 	 * Memoized agent snapshot base (RPC response plus error normalization), keyed
 	 * by the event buffer's monotonic sequence. Mutable overlays and sidecars are
@@ -1562,7 +1565,18 @@ export function prepareVisibleAgentEvent(
  */
 const WS_BUFFER_OVERFLOW_BYTES = DEFAULT_OVERFLOW_GUARD.overflowBytes;
 const WS_BUFFER_WARN_BYTES = DEFAULT_OVERFLOW_GUARD.warnBytes;
+const WS_REPLACEABLE_MESSAGE_SOFT_CUTOVER_BYTES = 1024 * 1024;
 const _warnedClients = new WeakSet<WebSocket>();
+const _slowReplaceableClients = new WeakSet<WebSocket>();
+
+type AssistantStreamSocket = WebSocket & {
+	assistantStreamDeltaCapable?: boolean;
+	assistantStreamDeltaNeedsBaseline?: boolean;
+	streamBackpressureCutover?: boolean;
+	bufferedAmount?: number;
+	terminate?: () => void;
+	close?: () => void;
+};
 
 /**
  * Tracks clients for which a deferred-terminate re-check is in flight. When
@@ -1578,24 +1592,74 @@ const _warnedClients = new WeakSet<WebSocket>();
  */
 const _pendingOverflowCheck = new WeakSet<WebSocket>();
 
+function isSlowReplaceableClient(client: WebSocket): boolean {
+	return _slowReplaceableClients.has(client);
+}
+
+function cutOverSlowReplaceableClient(client: AssistantStreamSocket): void {
+	if (isSlowReplaceableClient(client)) return;
+	_slowReplaceableClients.add(client);
+	client.streamBackpressureCutover = true;
+	try {
+		if (typeof client.terminate === "function") client.terminate();
+		else if (typeof client.close === "function") client.close();
+	} catch {
+		// Best-effort only. The weak-set fence still suppresses later sends.
+	}
+}
+
+function markAssistantStreamSnapshotSent(client: AssistantStreamSocket, msg: ServerMessage): void {
+	if (msg.type === "messages" && client.assistantStreamDeltaCapable === true) {
+		client.assistantStreamDeltaNeedsBaseline = true;
+	}
+}
+
+function isAssistantStreamMessageUpdate(event: unknown): event is {
+	type: "message_update";
+	message: Record<string, unknown>;
+	assistantMessageEvent: Record<string, unknown>;
+} {
+	return !!event
+		&& typeof event === "object"
+		&& (event as { type?: unknown }).type === "message_update"
+		&& !!(event as { message?: unknown }).message
+		&& typeof (event as { message?: unknown }).message === "object"
+		&& !Array.isArray((event as { message?: unknown }).message)
+		&& ((event as { message?: { role?: unknown } }).message?.role === "assistant")
+		&& !!(event as { assistantMessageEvent?: unknown }).assistantMessageEvent
+		&& typeof (event as { assistantMessageEvent?: unknown }).assistantMessageEvent === "object";
+}
+
+function isAssistantStreamTerminalBoundary(event: unknown): boolean {
+	return !!event
+		&& typeof event === "object"
+		&& (((event as { type?: unknown }).type === "message_end")
+			|| ((event as { type?: unknown }).type === "agent_end")
+			|| ((event as { type?: unknown }).type === "process_exit"));
+}
+
 /**
- * Build the `state.model` payload for a live model-state broadcast. Routes
- * through `resolveModelStateMeta` (registry cache → pi-ai catalog → inferMeta)
- * so the frame carries the SAME contextWindow / maxTokens / reasoning /
- * thinkingLevelMap the ModelSelector dropdown shows. The client full-replaces
- * `state.model`, so every field must be present. `thinkingLevelMap` is omitted
- * when upstream metadata doesn't provide it.
+ * Build the `state.model` payload for a live model-state broadcast. Capability
+ * fields come only from an exact registry/direct-Pi row. When exact composed
+ * metadata is temporarily unavailable, retain the verified identity and omit
+ * unknown fields rather than fabricating family defaults.
  */
-function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
+export function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
 	const meta = resolveModelStateMeta(provider, id);
+	const input = Array.isArray(meta?.input)
+		&& meta.input.length > 0
+		&& meta.input.every((entry) => entry === "text" || entry === "image")
+		? meta.input
+		: undefined;
 	return {
 		model: {
 			provider,
 			id,
-			contextWindow: meta.contextWindow,
-			maxTokens: meta.maxTokens,
-			reasoning: meta.reasoning,
-			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
+			...(meta?.contextWindow !== undefined ? { contextWindow: meta.contextWindow } : {}),
+			...(meta?.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {}),
+			...(meta?.reasoning !== undefined ? { reasoning: meta.reasoning } : {}),
+			...(meta?.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
+			...(input ? { input } : {}),
 		},
 	};
 }
@@ -1605,7 +1669,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 		const data = JSON.stringify(msg);
 		const baseMeta = describeWsPayload(msg, data);
 		for (const client of clients) {
-			if (client.readyState !== 1) continue;
+			if (isSlowReplaceableClient(client) || client.readyState !== 1) continue;
 			guardWebSocketOverflow(client, { ...baseMeta, recipientKind: "session" }, {
 				pendingOverflowCheck: _pendingOverflowCheck,
 				warnedClients: _warnedClients,
@@ -1617,6 +1681,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 				warnBytes: WS_BUFFER_WARN_BYTES,
 			});
 			client.send(data);
+			markAssistantStreamSnapshotSent(client as AssistantStreamSocket, msg);
 		}
 		return;
 	}
@@ -1631,7 +1696,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	let skipped = 0;
 	for (const client of clients) {
 		scanned++;
-		if (client.readyState !== 1) { skipped++; continue; }
+		if (isSlowReplaceableClient(client) || client.readyState !== 1) { skipped++; continue; }
 		guardWebSocketOverflow(client, { ...baseMeta, recipientKind: "session" }, {
 			pendingOverflowCheck: _pendingOverflowCheck,
 			warnedClients: _warnedClients,
@@ -1643,6 +1708,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 			warnBytes: WS_BUFFER_WARN_BYTES,
 		});
 		client.send(data);
+		markAssistantStreamSnapshotSent(client as AssistantStreamSocket, msg);
 		recipients++;
 	}
 	getCpuDiagnostics().recordWsBroadcast("session-manager:broadcast", (msg as { type?: string }).type || "unknown", {
@@ -1720,24 +1786,147 @@ export function isRetryableAgentEnd(event: unknown): boolean {
  *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
  *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }>; previousAssistantStreamMessage?: any }, truncated: unknown): void {
+	const normalizeStartedAt = performance.now();
 	const normalized = normalizeToolResultErrorEvent(truncated);
 	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
 	const spliced = spliceSkillExpansionsIntoEvent(session, sanitized);
+	const normalizeMs = performance.now() - normalizeStartedAt;
+	const eventType = spliced && typeof spliced === "object" && typeof (spliced as { type?: unknown }).type === "string"
+		? (spliced as { type: string }).type
+		: "unknown";
+	const retainStartedAt = performance.now();
 	const entry = session.eventBuffer.push(spliced);
-	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
+	const retainMs = performance.now() - retainStartedAt;
+	const baseFrame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
+	const assistantStreamUpdate = isAssistantStreamMessageUpdate(spliced);
+	let scanned = 0;
+	let recipients = 0;
+	let skipped = 0;
+	let bytes = 0;
+	let cutovers = 0;
+	let compactMs = 0;
+	let stringifyMs = 0;
+	let sendMs = 0;
+	let steadyCompactFrame: typeof baseFrame | undefined;
+	let baselineCompactFrame: typeof baseFrame | undefined;
+	let steadyCompactComputed = false;
+	let baselineCompactComputed = false;
+	const serializedFrames = new Map<object, string>();
+
+	for (const rawClient of session.clients) {
+		scanned++;
+		const client = rawClient as AssistantStreamSocket;
+		if (isSlowReplaceableClient(client) || client.readyState !== 1) {
+			skipped++;
+			continue;
+		}
+		if (assistantStreamUpdate && (client.bufferedAmount ?? 0) >= WS_REPLACEABLE_MESSAGE_SOFT_CUTOVER_BYTES) {
+			cutOverSlowReplaceableClient(client);
+			cutovers++;
+			skipped++;
+			continue;
+		}
+
+		let frame = baseFrame;
+		const needsBaseline = assistantStreamUpdate
+			&& client.assistantStreamDeltaCapable === true
+			&& client.assistantStreamDeltaNeedsBaseline === true;
+		if (assistantStreamUpdate && client.assistantStreamDeltaCapable === true) {
+			if (needsBaseline ? !baselineCompactComputed : !steadyCompactComputed) {
+				const compactStartedAt = performance.now();
+				const compact = needsBaseline
+					? compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage, { selfContained: true })
+					: compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage);
+				compactMs += performance.now() - compactStartedAt;
+				const compactFrame = compact === spliced ? baseFrame : { ...baseFrame, data: compact };
+				if (needsBaseline) {
+					baselineCompactFrame = compactFrame;
+					baselineCompactComputed = true;
+				} else {
+					steadyCompactFrame = compactFrame;
+					steadyCompactComputed = true;
+				}
+			}
+			frame = (needsBaseline ? baselineCompactFrame : steadyCompactFrame) ?? baseFrame;
+		}
+		const satisfiesBaseline = needsBaseline
+			&& frame !== baseFrame
+			&& (frame.data as any)?.assistantStreamDelta === 1
+			&& !!(frame.data as any)?.assistantMessageBaseline;
+
+		let data = serializedFrames.get(frame);
+		if (data === undefined) {
+			const stringifyStartedAt = performance.now();
+			data = JSON.stringify(frame);
+			stringifyMs += performance.now() - stringifyStartedAt;
+			serializedFrames.set(frame, data);
+		}
+		guardWebSocketOverflow(client, { ...describeWsPayload(frame, data), recipientKind: "session" }, {
+			pendingOverflowCheck: _pendingOverflowCheck,
+			warnedClients: _warnedClients,
+		}, {
+			setTimeout: (cb, ms) => sessionManagerModuleClock.setTimeout(cb, ms),
+			warn: (message) => console.warn(message),
+		}, {
+			overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+			warnBytes: WS_BUFFER_WARN_BYTES,
+		});
+		const sendStartedAt = performance.now();
+		client.send(data);
+		if (satisfiesBaseline) client.assistantStreamDeltaNeedsBaseline = false;
+		sendMs += performance.now() - sendStartedAt;
+		recipients++;
+		bytes += Buffer.byteLength(data);
+	}
+
+	if (assistantStreamUpdate) {
+		const assistantEventType = (spliced as any).assistantMessageEvent?.type;
+		if (assistantEventType === "toolcall_delta") {
+			// Pi's cumulative tool-call message omits the transport-only partialJson
+			// needed to apply the next fragment. Keep the reconstructed chain only in
+			// session memory; the retained event and durable transcript stay raw.
+			const chainDelta = steadyCompactComputed
+				? steadyCompactFrame?.data
+				: compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage);
+			session.previousAssistantStreamMessage = reconstructAssistantStreamMessage(
+				chainDelta,
+				session.previousAssistantStreamMessage,
+			) ?? (spliced as any).message;
+		} else {
+			session.previousAssistantStreamMessage = (spliced as any).message;
+		}
+	} else if (isAssistantStreamTerminalBoundary(spliced)) {
+		session.previousAssistantStreamMessage = undefined;
+	}
+
+	recordEventLoopOperation(`session-event:${eventType}:normalize`, normalizeMs);
+	recordEventLoopOperation(`session-event:${eventType}:retain`, retainMs, {
+		bufferSize: session.eventBuffer.size,
+		retainedBytes: session.eventBuffer.retainedBytes,
+	});
+	recordEventLoopOperation(`session-event:${eventType}:broadcast`, compactMs + stringifyMs + sendMs, {
+		recipients,
+		bytes,
+		cutovers,
+	});
 	if (cpuDiagnosticsEnabled()) {
-		const eventType = spliced && typeof spliced === "object" && typeof (spliced as { type?: unknown }).type === "string"
-			? (spliced as { type: string }).type
-			: "unknown";
 		getCpuDiagnostics().recordWsBroadcast("session-manager:emitSessionEvent", eventType, {
 			frames: 1,
-			recipients: session.clients.size,
-			bytes: Buffer.byteLength(JSON.stringify(frame)) * session.clients.size,
+			scanned,
+			recipients,
+			skipped,
+			bytes,
 			bufferSize: session.eventBuffer.size,
+			retainedBytes: session.eventBuffer.retainedBytes,
+			cutovers,
+			normalizeMs,
+			retainMs,
+			compactMs,
+			stringifyMs,
+			sendMs,
 		});
 	}
-	broadcast(session.clients, frame);
 }
 
 /**
@@ -2833,6 +3022,7 @@ export class SessionManager {
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
+			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
@@ -7934,6 +8124,12 @@ export class SessionManager {
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
+		await this.finalizeSpawnOptions(bridgeOptions, {
+			model: exactRestoreModel ?? bridgeOptions.initialModel,
+			thinkingLevel: ps.effectiveThinkingLevel ?? bridgeOptions.initialThinkingLevel,
+			role: ps.role,
+			projectId: ps.projectId,
+		});
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -8447,17 +8643,11 @@ export class SessionManager {
 			?? rawInitialDefaultModel
 			?? (!opts?.skipAutoModel ? this.resolveInitialModel(initialRole, projectId) : undefined);
 		let currentModels: Awaited<ReturnType<typeof getAvailableModels>> | undefined;
-		// A normal Bobbit spawn must bind one of Bobbit's current catalog rows
-		// explicitly rather than letting Pi choose a newly published hidden provider.
-		// skipAutoModel bypasses role/preferences selection, not this deterministic
-		// catalog binding. Goal/team extension-only args are Bobbit-owned setup, not
-		// generic raw Pi arguments; every other non-empty agentArgs input keeps the
-		// legacy exemption.
-		const bobbitOwnedExtensionSpawn = !!(goalId || opts?.teamGoalId || opts?.teamLeadSessionId)
-			&& !!agentArgs?.length
-			&& agentArgs.length % 2 === 0
-			&& agentArgs.every((arg, index) => index % 2 === 0 ? arg === "--extension" : arg.length > 0);
-		if (!rawSelectedSpawnModel && (!agentArgs?.length || bobbitOwnedExtensionSpawn) && this.preferencesStore) {
+		const requestedSpawnModel = rawSelectedSpawnModel;
+		// Every Bobbit spawn starts from an exact catalog row. Raw Pi selection flags
+		// are resolved later at the fully assembled boundary; they are not an
+		// exemption from catalog validation or an invitation to Pi's fallback model.
+		if (!rawSelectedSpawnModel && this.preferencesStore) {
 			currentModels = await getAvailableModels(this.preferencesStore);
 			rawSelectedSpawnModel = await this.resolveCurrentCatalogSpawnModel([], currentModels);
 		}
@@ -8628,6 +8818,8 @@ export class SessionManager {
 				skipAutoThinking: opts?.skipAutoThinking,
 				initialModel: selectedSpawnModel,
 				initialThinkingLevel: exactInitialThinkingLevel,
+				requestedModel: requestedSpawnModel ?? selectedSpawnModel,
+				requestedThinkingLevel: opts?.initialThinkingLevel ?? exactInitialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 				bridgeOptions: { cwd },
@@ -8725,6 +8917,8 @@ export class SessionManager {
 			skipAutoThinking: opts?.skipAutoThinking,
 			initialModel: selectedSpawnModel,
 			initialThinkingLevel: exactInitialThinkingLevel,
+			requestedModel: requestedSpawnModel ?? selectedSpawnModel,
+			requestedThinkingLevel: opts?.initialThinkingLevel ?? exactInitialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 			bridgeOptions: { cwd },
@@ -8955,6 +9149,8 @@ export class SessionManager {
 			// level so a delegate no longer silently drops to the system default.
 			initialModel: delegateInitialModel,
 			initialThinkingLevel: delegateInitialThinking,
+			requestedModel: exactDelegateModel ?? delegateInitialModel,
+			requestedThinkingLevel: delegateThinkingCandidate ?? delegateInitialThinking,
 			// Caller toolEnv is non-secret metadata. directGatewayEnv is minted by the
 			// gateway and spread last so user-supplied env cannot widen the inherited
 			// project/session scope.
@@ -9382,6 +9578,73 @@ export class SessionManager {
 			if (isSpawnPinnableModelString(normalized)) return normalized;
 		}
 		return undefined;
+	}
+
+	/**
+	 * Final authority for the tuple that Pi will actually receive. Raw argv is
+	 * last-wins, so this runs only after every extension/remap has assembled args.
+	 * It validates the effective model against the exact target catalog row,
+	 * clamps thinking from that row, then removes raw selection flags and leaves
+	 * one canonical initial tuple. Requested identity remains diagnostic-only.
+	 */
+	private async finalizeSpawnOptions(
+		options: RpcBridgeOptions,
+		requested: { model?: string; thinkingLevel?: string; role?: string; projectId?: string } = {},
+	): Promise<void> {
+		options.requestedModel = requested.model ?? options.requestedModel ?? options.initialModel;
+		options.requestedThinkingLevel = requested.thinkingLevel
+			?? options.requestedThinkingLevel
+			?? options.initialThinkingLevel;
+		if (options.initialThinkingLevel && !isKnownThinkingLevel(options.initialThinkingLevel)) {
+			throw new Error(`Invalid Pi spawn thinking level "${sanitizeModelErrorText(options.initialThinkingLevel)}"`);
+		}
+
+		const resolved = resolveEffectivePiSelection(options);
+		if (!resolved.effectiveModel) {
+			throw new Error(
+				`Pi spawn selection is incomplete (requested model: ${sanitizeModelErrorText(resolved.requestedModel ?? "<none>")})`,
+			);
+		}
+		if (!this.preferencesStore) throw new Error("the model catalog is unavailable");
+		const models = await getAvailableModels(this.preferencesStore);
+		let effectiveModel: string;
+		try {
+			effectiveModel = await this.requireCurrentCatalogSpawnModel(resolved.effectiveModel, models);
+		} catch (error) {
+			const requestedModel = resolved.requestedModel;
+			if (requestedModel && normalizeAigwModelString(requestedModel) !== resolved.effectiveModel) {
+				throw new Error(
+					`Effective Pi model ${sanitizeModelErrorText(resolved.effectiveModel)} from requested model ${sanitizeModelErrorText(requestedModel)} is not currently available for session selection; ${sanitizeModelErrorText(error)}`,
+				);
+			}
+			throw error;
+		}
+		const slash = effectiveModel.indexOf("/");
+		const catalogModel = findSessionSelectableModel(
+			models,
+			effectiveModel.slice(0, slash),
+			effectiveModel.slice(slash + 1),
+		);
+		if (!catalogModel) {
+			throw new Error(`Model ${sanitizeModelErrorText(effectiveModel)} is not currently available for session selection`);
+		}
+		const effectiveThinking = resolved.effectiveThinking
+			? clampThinkingLevel(resolved.effectiveThinking, catalogModel)
+			: undefined;
+
+		options.args = resolved.sanitizedArgs;
+		options.initialModel = effectiveModel;
+		if (effectiveThinking) options.initialThinkingLevel = effectiveThinking;
+		else delete options.initialThinkingLevel;
+
+		// Raw argv may have crossed providers after earlier env assembly. Refresh
+		// direct-host credentials from the validated effective provider; sandbox
+		// credentials remain owned by its already-applied realm wiring.
+		await this.applyDirectProviderEnv(
+			options,
+			options.sandboxed === true || !!options.containerId,
+			effectiveModel.slice(0, slash),
+		);
 	}
 
 	/** Require one exact provider/model tuple to remain in Bobbit's current catalog. */
@@ -10631,6 +10894,12 @@ export class SessionManager {
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
+		await this.finalizeSpawnOptions(bridgeOptions, {
+			model: exactRoleReplacementModel ?? bridgeOptions.initialModel,
+			thinkingLevel: roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+			role: role.name,
+			projectId: session.projectId,
+		});
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -13063,6 +13332,12 @@ export class SessionManager {
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
+			await this.finalizeSpawnOptions(bridgeOptions, {
+				model: exactForceReplacementModel ?? bridgeOptions.initialModel,
+				thinkingLevel: forceRespawnPersisted?.effectiveThinkingLevel ?? bridgeOptions.initialThinkingLevel,
+				role: session.role,
+				projectId: session.projectId,
+			});
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;

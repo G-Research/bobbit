@@ -50,6 +50,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus, shutdownOAuthFlows } from "./auth/oauth.js";
 import { handleWebSocketConnection, hasUiWebSocketPrincipal } from "./ws/handler.js";
+import { isSocketSendable } from "./ws/socket-sendability.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
@@ -570,9 +571,8 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
-import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -3898,7 +3898,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const data = JSON.stringify(event);
 			const baseMeta = describeWsPayload(event, data);
 			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				if (!(ws as any).authenticated || !isSocketSendable(ws)) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
@@ -3946,7 +3946,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skippedViewerUnsubscribed = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			if (!(ws as any).authenticated || !isSocketSendable(ws)) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
@@ -4014,7 +4014,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of wss.clients) {
-				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+				if ((ws as any).authenticated && isSocketSendable(ws)) {
 					ws.send(data);
 				}
 			}
@@ -4030,7 +4030,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+			if ((ws as any).authenticated && isSocketSendable(ws)) {
 				ws.send(data);
 				recipients++;
 			} else {
@@ -4057,7 +4057,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	function broadcastToUi(event: any): void {
 		const isRecipient = (ws: WebSocket): boolean =>
 			(ws as any).authenticated === true
-			&& ws.readyState === 1 /* OPEN */
+			&& isSocketSendable(ws)
 			&& hasUiWebSocketPrincipal(ws);
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
@@ -4104,7 +4104,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				if (!(ws as any).authenticated || !isSocketSendable(ws)) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
@@ -4125,7 +4125,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			if (!(ws as any).authenticated || !isSocketSendable(ws)) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
@@ -4239,7 +4239,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of session.clients) {
-				if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+				if (isSocketSendable(ws)) ws.send(data);
 			}
 			return;
 		}
@@ -4253,7 +4253,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of session.clients) {
 			scanned++;
-			if ((ws as any).readyState === 1 /* OPEN */) {
+			if (isSocketSendable(ws)) {
 				ws.send(data);
 				recipients++;
 			} else {
@@ -4392,8 +4392,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await bootPhase("aigw-check", () => startupAigwCheck(preferencesStore));
-			writeContextWindowOverrides();
-			writeOpenAIModelAdditions();
 			await bootPhase("extension-channels", () => initExtensionChannelsOnce());
 
 			// Initialize MCP servers (skip when disabled by gateway runtime config)
