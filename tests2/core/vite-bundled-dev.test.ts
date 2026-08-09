@@ -1,7 +1,10 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { UserConfig } from "vite";
 
-import viteConfig from "../../vite.config.ts";
+import viteConfig, { configuredPublicViteHosts } from "../../vite.config.ts";
 
 async function configFor(command: "serve" | "build", mode = "development"): Promise<UserConfig> {
 	const raw = typeof viteConfig === "function"
@@ -32,6 +35,33 @@ describe("Vite bundled development mode", () => {
 			if (previous === undefined) delete process.env.BOBBIT_VITE_SOURCE_GRAPH;
 			else process.env.BOBBIT_VITE_SOURCE_GRAPH = previous;
 		}
+	});
+
+	it("allows the configured public hostname on the HMR WebSocket", () => {
+		const stateDir = mkdtempSync(join(tmpdir(), "bobbit-vite-host-"));
+		try {
+			writeFileSync(join(stateDir, "desec.json"), JSON.stringify({
+				domain: "Mobile.Example.test.",
+				token: "must-not-leak",
+			}));
+			expect(configuredPublicViteHosts(stateDir)).toEqual(["mobile.example.test"]);
+			expect(JSON.stringify(configuredPublicViteHosts(stateDir))).not.toContain("must-not-leak");
+
+			writeFileSync(join(stateDir, "desec.json"), JSON.stringify({ domain: "bad/host" }));
+			expect(configuredPublicViteHosts(stateDir)).toEqual([]);
+		} finally {
+			rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps Tailwind source detection out of non-UI agent edit paths", () => {
+		const css = readFileSync(new URL("../../src/ui/app.css", import.meta.url), "utf8");
+
+		expect(css).toContain('@import "tailwindcss" source(none)');
+		expect(css).toContain('@source "../"');
+		expect(css).toContain('@source "../../index.html"');
+		expect(css).toContain('@source "../../node_modules/@mariozechner/mini-lit/dist"');
+		expect(css).not.toMatch(/@source\s+["'][^"']*(?:tests|docs|\.bobbit)/);
 	});
 
 	it("guards Tailwind's unreleased bundled-dev hot-update fix", async () => {

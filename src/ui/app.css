@@ -117,13 +117,18 @@
 	}
 }
 
-/* Tell Tailwind to scan mini-lit components */
+/* Scan only UI-owned sources. Tests, docs, runtime state, and agent output must
+   not enter Tailwind's development rebuild queue. */
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
+@source "../";
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
+@source "../../index.html";
 /* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
 @source "../../node_modules/@mariozechner/mini-lit/dist";
 
-/* Import Tailwind */
-/* biome-ignore lint/correctness/noInvalidPositionAtImportRule: fuck you */
-@import "tailwindcss";
+/* Import Tailwind without its default repository-wide source detection. */
+/* biome-ignore lint/correctness/noInvalidPositionAtImportRule: Tailwind extension */
+@import "tailwindcss" source(none);
 
 /* ── Bobbit palette overrides ──
    Warm the neutrals with a hint of green-yellow (hue ~140) so the

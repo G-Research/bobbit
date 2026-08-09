@@ -2616,7 +2616,25 @@
     },
     {
       "path": "tests2/core/vite-bundled-dev.test.ts",
-      "reason": "Vite config regression coverage proving development uses bundled browser chunks to avoid the large native-ESM request waterfall, guards Tailwind's unreleased bundled-dev hot-update fix, and keeps production asset URL rewriting separate.",
+      "reason": "Vite config regression coverage proving development uses bundled browser chunks to avoid the large native-ESM request waterfall, scopes Tailwind scanning away from non-UI edits, guards Tailwind's unreleased bundled-dev hot-update fix, and keeps production asset URL rewriting separate.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/vite-hmr-profile.test.ts",
+      "reason": "Contract coverage for the isolated Vite bundled-development HMR performance feedback loop, including bounded CLI options, percentile reporting, and working-tree isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/dev-vite-supervisor.test.ts",
+      "reason": "Development-runtime regression coverage proving an unexpected Vite exit is restarted with bounded backoff and every supported dev launcher uses the supervisor.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
