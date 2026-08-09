@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/dom/review-group-model.test.ts",
+      "reason": "Focused DOM regression coverage for stable review replacement identity, duplicate-title and file-occurrence reconciliation, replace:false replay idempotence, legacy one-file normalization, and canonical primary workspace persistence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/dom/review-pane-groups.test.ts",
       "reason": "DOM regression coverage for review-group secondary navigation, one-file simplification, review-wide feedback, and accessible unclipped overflow menu behavior.",
       "execution": {
