@@ -759,34 +759,38 @@ export class RemoteAgent {
 		return this._sessionId;
 	}
 	/**
-	 * Remove review tabs restored from the server after this session's review
-	 * was already submitted. Initial/reconnect workspace hydration can finish
-	 * after transcript replay performed the same cleanup against an empty local
-	 * workspace, so callers replay it at the workspace-apply boundary.
+	 * Remove stale review tabs after the owner session's annotation/tombstone
+	 * cache and workspace have hydrated. Exact tombstones close only their own
+	 * review; the session-wide submitted flag is retained solely for legacy data.
 	 *
 	 * This intentionally has no active-session guard: cached/background sessions
-	 * still own their keyed workspace and must not retain a submitted review tab.
+	 * still own their keyed workspace and must not retain a tombstoned review tab.
 	 */
-	async reconcileSubmittedReviewWorkspace(): Promise<void> {
+	async reconcileSubmittedReviewWorkspace(options: {
+		annotationStoreHydrated?: boolean;
+		reviewSources?: any;
+	} = {}): Promise<void> {
 		const sessionId = this._sessionId;
-		if (!sessionId || !isReviewSubmitted(sessionId)) return;
-		const isReviewTab = (tab: { id?: string; kind?: string }): boolean =>
-			tab.kind === "review" || tab.id?.startsWith("review:") === true;
-		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
-			.filter(isReviewTab)
-			.map((tab) => tab.id);
-		if (reviewTabIds.length === 0) return;
+		if (!sessionId) return;
+		if (!options.annotationStoreHydrated) await initAnnotationStore(sessionId);
+		const legacySubmitted = isReviewSubmitted(sessionId);
+		const reviewSources = options.reviewSources || await loadReviewSources();
+		if (typeof reviewSources.reconcileTombstonedReviewWorkspace === "function") {
+			await reviewSources.reconcileTombstonedReviewWorkspace(sessionId, {
+				includeLegacySubmitted: legacySubmitted,
+			});
+			return;
+		}
 
-		// Keep every deletion on the normal mutation path. A confirmed compatible
-		// 204 settles the optimistic close, while a 409 workspace remains
-		// authoritative and may be retried once at its newer revision. Refetches,
-		// network failures, and rollbacks are never locally filtered afterward.
+		// Compatibility for test/legacy lazy modules predating exact tombstones.
+		if (!legacySubmitted) return;
+		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
+			.filter((tab) => tab.kind === "review" || tab.id.startsWith("review:"))
+			.map((tab) => tab.id);
+		if (reviewTabIds.length !== 1) return;
 		for (const tabId of reviewTabIds) {
-			try {
-				await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
-			} catch (err) {
-				console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err);
-			}
+			try { await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true }); }
+			catch (err) { console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err); }
 		}
 	}
 	private _isActiveSession(): boolean {
@@ -1933,9 +1937,9 @@ export class RemoteAgent {
 						state.reviewDocuments = new Map();
 						state.reviewActiveTab = "";
 						state.reviewPanelOpen = false;
-						if (isReviewSubmitted(reviewSessionId)) await this.reconcileSubmittedReviewWorkspace();
+						const reviewSources = await loadReviewSources();
 						if (this._isActiveSession()) {
-							const reviewSources = await loadReviewSources();
+							await this.reconcileSubmittedReviewWorkspace({ annotationStoreHydrated: true, reviewSources });
 							if (this._isActiveSession()) reviewSources.restorePersistedReviewDocuments(reviewSessionId, { select: true });
 						}
 					}
