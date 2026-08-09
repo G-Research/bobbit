@@ -296,7 +296,7 @@ test.describe.serial("GoalStore and TaskStore SQLite upgrade restart", () => {
 				method: "PUT",
 				body: JSON.stringify({
 					title: "Durable task mutation ✓",
-					state: "blocked",
+					state: "in-progress",
 					spec: "Mutated through the supported task API before restart.",
 					resultSummary: "Durable task result.",
 				}),
