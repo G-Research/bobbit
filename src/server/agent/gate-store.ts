@@ -154,6 +154,7 @@ const nodeRequire = createRequire(import.meta.url);
 const GATE_SQLITE_SCHEMA_VERSION = 1;
 const GATE_SQLITE_FILE = "gates.sqlite";
 const GATE_SQLITE_DEBOUNCE_MS = 500;
+const GATE_SQLITE_CLOSE_ATTEMPTS = 2;
 const GATE_MIGRATION_COMPLETE_KEY = "migration_complete";
 const GATE_RECOVERY_COMPLETE_KEY = "pre_migration_recovery_complete";
 const GATE_LEGACY_RETIREMENT_KEY = "pending_retirement:gates.json";
@@ -537,7 +538,7 @@ class SqliteGatePersistence implements GatePersistence {
 	}
 
 	flush(): Promise<void> {
-		if (this.dirty.size === 0 && !this.requested && !this.inFlight && !this.timer) return Promise.resolve();
+		if (!this.hasPendingWork()) return Promise.resolve();
 		return this.requestBarrier();
 	}
 
@@ -552,8 +553,7 @@ class SqliteGatePersistence implements GatePersistence {
 	close(): Promise<void> {
 		if (this.closePromise) return this.closePromise;
 		if (this.closed) return Promise.resolve();
-		const flush = this.flush();
-		this.closePromise = flush.finally(() => this.dispose());
+		this.closePromise = this.flushForClose().finally(() => this.dispose());
 		return this.closePromise;
 	}
 
@@ -571,8 +571,27 @@ class SqliteGatePersistence implements GatePersistence {
 		if (this.closed || this.closePromise) throw new Error("[gate-store] SQLite persistence is closing or closed");
 	}
 
-	private requestBarrier(): Promise<void> {
-		this.assertOpen();
+	private hasPendingWork(): boolean {
+		return this.dirty.size > 0 || this.requested || this.inFlight !== null || this.timer !== null;
+	}
+
+	/** Retry one failed shutdown publication immediately, then fail loud and release the handle. */
+	private async flushForClose(): Promise<void> {
+		if (!this.hasPendingWork()) return;
+		let lastError: unknown;
+		for (let attempt = 0; attempt < GATE_SQLITE_CLOSE_ATTEMPTS; attempt++) {
+			try {
+				await this.requestBarrier(true);
+				return;
+			} catch (error) {
+				lastError = error;
+			}
+		}
+		throw lastError;
+	}
+
+	private requestBarrier(allowClosing = false): Promise<void> {
+		if (!allowClosing) this.assertOpen();
 		const revision = ++this.revision;
 		this.requested = true;
 		if (this.timer) {

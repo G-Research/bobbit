@@ -22,7 +22,7 @@
   "v2Native": [
     {
       "path": "tests2/core/gate-store-sqlite.test.ts",
-      "reason": "Real-file SQLite coverage for automatic startup migration, exact restart restoration, authoritative pre-migration recovery, collision-safe retirement retry, validation/import rollback, and native-handle cleanup.",
+      "reason": "Real-file SQLite coverage for automatic startup migration, exact restart restoration, authoritative pre-migration recovery, collision-safe retirement and bounded final-flush retry, validation/import rollback, and native-handle cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

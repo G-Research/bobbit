@@ -76,6 +76,8 @@ Mutations mark only affected composite keys dirty. A 500 ms drain coalesces burs
 - dirty keys remain queued for retry; and
 - a strict reset restores its prior in-memory status, timestamp, and cache-invalidation fields before returning the error.
 
+An orderly close gives a failed final publication one immediate retry. This retry uses the same requeued dirty keys and transaction path, without sleeping or accepting new mutations. A transient failure therefore closes only after the retry commits. If both attempts fail, every concurrent close caller receives the failure and the native handle is still released; shutdown never loops indefinitely or reports false durability.
+
 This preserves all-record transactional reset behavior while ordinary reads continue to use the map. Persistence metrics expose the serialized payload bytes and transaction duration for the latest batch.
 
 ## Startup order and authority
@@ -179,7 +181,7 @@ A retired backup is evidence, not an automatic rollback image. Once migration or
 
 ## Lifecycle and Windows cleanup
 
-`GateStore.close()` is an idempotent barrier: concurrent calls share the same close promise, pending mutations flush, and then the SQLite connection closes. `ProjectContext.close()` first stops mutation sources and waits for reset recovery, then closes `GateStore` alongside the other durable stores before directory cleanup. Callers must await context close rather than deleting or renaming a project directory directly.
+`GateStore.close()` is an idempotent barrier: concurrent calls share the same close promise, pending mutations flush with at most one immediate retry, and then the SQLite connection closes. A persistent final-publication failure rejects that shared promise but still closes the connection, so the failure is visible without retaining a Windows file handle. `ProjectContext.close()` first stops mutation sources and waits for reset recovery, then closes `GateStore` alongside the other durable stores before directory cleanup. Callers must await context close rather than deleting or renaming a project directory directly.
 
 If project construction fails after opening the database, disposal closes the handle without waiting for normal ownership transfer. Startup validation failures do the same. Real-filesystem tests verify the database can be renamed after malformed-source and corrupt-row failures, pinning the Windows handle-release requirement.
 
@@ -196,7 +198,7 @@ The memfs unit adapter continues to cover the public `GateStore` logic and JSON 
 - retry after a committed migration whose rename was interrupted;
 - strict multi-gate rollback;
 - gate count, composite identity, historical fields, and payload preservation; and
-- concurrent close plus handle release after startup failure.
+- transient and persistent final-flush failures, shared concurrent-close outcomes, and handle release after persistent close and startup failures.
 
 The packed-consumer test also rebuilds the installed native dependency with lifecycle scripts enabled only for `better-sqlite3`, then loads the binding and executes an in-memory create/insert/select/close smoke.
 

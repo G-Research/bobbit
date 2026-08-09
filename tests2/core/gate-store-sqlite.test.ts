@@ -373,6 +373,73 @@ describe("GateStore SQLite persistence", () => {
 		await store.flush();
 	});
 
+	it("retries a transient final flush failure and restores the exact mutation after restart", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.initGatesForGoal("goal-close-retry", ["design"]);
+		await store.flush();
+		store.updateGateStatus("goal-close-retry", "design", "passed");
+		let serializeAttempts = 0;
+		const transientMetadata = {
+			toJSON() {
+				serializeAttempts++;
+				if (serializeAttempts === 1) throw new Error("injected transient final flush failure");
+				return { recovered: "true" };
+			},
+		} as unknown as Record<string, string>;
+		store.updateGateMetadata("goal-close-retry", "design", transientMetadata);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const firstClose = store.close();
+		const concurrentClose = store.close();
+		expect(concurrentClose).toBe(firstClose);
+		await expect(firstClose).resolves.toBeUndefined();
+		expect(serializeAttempts).toBe(2);
+		errorSpy.mockRestore();
+		stores.splice(stores.indexOf(store), 1);
+
+		const reloaded = openStore(stateDir);
+		expect(reloaded.getGate("goal-close-retry", "design")).toMatchObject({
+			status: "passed",
+			currentMetadata: { recovered: "true" },
+		});
+	});
+
+	it("rejects a persistent final flush failure for every close caller and releases the handle", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.initGatesForGoal("goal-close-failure", ["design"]);
+		await store.flush();
+		let serializeAttempts = 0;
+		const persistentMetadata = {
+			toJSON() {
+				serializeAttempts++;
+				throw new Error("injected persistent final flush failure");
+			},
+		} as unknown as Record<string, string>;
+		store.updateGateMetadata("goal-close-failure", "design", persistentMetadata);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const firstClose = store.close();
+		const concurrentClose = store.close();
+		expect(concurrentClose).toBe(firstClose);
+		const outcomes = await Promise.allSettled([firstClose, concurrentClose]);
+		expect(outcomes).toMatchObject([
+			{ status: "rejected", reason: { message: "injected persistent final flush failure" } },
+			{ status: "rejected", reason: { message: "injected persistent final flush failure" } },
+		]);
+		expect(serializeAttempts).toBe(2);
+		errorSpy.mockRestore();
+		stores.splice(stores.indexOf(store), 1);
+
+		const dbFile = path.join(stateDir, "gates.sqlite");
+		const moved = `${dbFile}.released`;
+		fs.renameSync(dbFile, moved);
+		fs.renameSync(moved, dbFile);
+		const reloaded = openStore(stateDir);
+		expect(reloaded.getGate("goal-close-failure", "design")?.currentMetadata).toBeUndefined();
+	});
+
 	it("closes concurrently and releases the handle after a corrupt-row startup failure", async () => {
 		const stateDir = tempRoot();
 		const store = openStore(stateDir);
