@@ -1839,6 +1839,16 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/goal-task-store-lifecycle.test.ts",
+		allowReason: "test-owned temporary pre-migration recovery and native-handle release fixtures",
+		reads: frozen([
+			{ expression: "goalRecovery", count: 1 },
+			{ expression: "taskRecovery", count: 1 },
+			{ expression: "tombstoneFile", count: 1 },
+			{ expression: "path.join(stateDir, \"sessions.json\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/task-store-sqlite.test.ts",
 		allowReason: "test-owned temporary TaskStore state, migration, and retirement fixtures",
 		reads: frozen([

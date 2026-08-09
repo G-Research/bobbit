@@ -208,45 +208,45 @@ export class ProjectContext {
    *  barrier for pending writes and native-handle release. */
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
-    this.closePromise = this.closeResources();
+    this.closePromise = closeProjectContextResources(this);
     return this.closePromise;
   }
+}
 
-  private async closeResources(): Promise<void> {
-    const errors: unknown[] = [];
-    const attempt = async (operation: () => void | Promise<void>): Promise<void> => {
-      try { await operation(); }
-      catch (error) { errors.push(error); }
-    };
+async function closeProjectContextResources(context: ProjectContext): Promise<void> {
+  const errors: unknown[] = [];
+  const attempt = async (operation: () => void | Promise<void>): Promise<void> => {
+    try { await operation(); }
+    catch (error) { errors.push(error); }
+  };
 
-    // Stop mutation sources and let boot-time reset recovery settle before the
-    // gate database closes. No coordinator write may outlive this context.
-    await attempt(() => this.planMutationStore.stopSweep());
-    await attempt(() => this.gateResetCoordinator?.recovery);
+  // Stop mutation sources and let boot-time reset recovery settle before the
+  // gate database closes. No coordinator write may outlive this context.
+  await attempt(() => context.planMutationStore.stopSweep());
+  await attempt(() => context.gateResetCoordinator?.recovery);
 
-    const drain = async (store: { flush?: () => void | Promise<void>; flushAsync?: () => Promise<void> } | undefined): Promise<void> => {
-      if (!store) return;
-      if (typeof store.flushAsync === "function") await store.flushAsync();
-      else await store.flush?.();
-    };
-    const closeStore = async (store: { close?: () => void | Promise<void>; flush?: () => void | Promise<void>; flushAsync?: () => Promise<void> } | undefined): Promise<void> => {
-      if (typeof store?.close === "function") await store.close();
-      else await drain(store);
-    };
+  const drain = async (store: { flush?: () => void | Promise<void>; flushAsync?: () => Promise<void> } | undefined): Promise<void> => {
+    if (!store) return;
+    if (typeof store.flushAsync === "function") await store.flushAsync();
+    else await store.flush?.();
+  };
+  const closeStore = async (store: { close?: () => void | Promise<void>; flush?: () => void | Promise<void>; flushAsync?: () => Promise<void> } | undefined): Promise<void> => {
+    if (typeof store?.close === "function") await store.close();
+    else await drain(store);
+  };
 
-    // Each operation captures its own failure so one broken store cannot skip
-    // sibling drains or leave another native database open on Windows.
-    await Promise.all([
-      attempt(() => closeStore(this.goalStore)),
-      attempt(() => closeStore(this.taskStore)),
-      attempt(() => closeStore(this.gateStore)),
-      attempt(() => drain(this.sessionStore)),
-    ]);
-    await attempt(() => { this.costTracker?.flush(); });
-    await attempt(() => { this.bgProcessStore?.flush(); });
-    await attempt(async () => { await this.searchIndex?.close(); });
+  // Each operation captures its own failure so one broken store cannot skip
+  // sibling drains or leave another native database open on Windows.
+  await Promise.all([
+    attempt(() => closeStore(context.goalStore)),
+    attempt(() => closeStore(context.taskStore)),
+    attempt(() => closeStore(context.gateStore)),
+    attempt(() => drain(context.sessionStore)),
+  ]);
+  await attempt(() => { context.costTracker?.flush(); });
+  await attempt(() => { context.bgProcessStore?.flush(); });
+  await attempt(async () => { await context.searchIndex?.close(); });
 
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new AggregateError(errors, `Failed to close ${errors.length} project resources`);
-  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, `Failed to close ${errors.length} project resources`);
 }
