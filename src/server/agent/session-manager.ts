@@ -22,7 +22,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -1639,12 +1639,10 @@ function isAssistantStreamTerminalBoundary(event: unknown): boolean {
 }
 
 /**
- * Build the `state.model` payload for a live model-state broadcast. Routes
- * through `resolveModelStateMeta` (registry cache → pi-ai catalog → inferMeta)
- * so the frame carries the SAME contextWindow / maxTokens / reasoning /
- * thinkingLevelMap the ModelSelector dropdown shows. The client full-replaces
- * `state.model`, so every field must be present. `thinkingLevelMap` is omitted
- * when upstream metadata doesn't provide it.
+ * Build the `state.model` payload for a live model-state broadcast. Capability
+ * fields come only from an exact registry/direct-Pi row. When exact composed
+ * metadata is temporarily unavailable, retain the verified identity and omit
+ * unknown fields rather than fabricating family defaults.
  */
 function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
 	const meta = resolveModelStateMeta(provider, id);
@@ -1652,10 +1650,10 @@ function buildModelStateData(provider: string, id: string): { model: Record<stri
 		model: {
 			provider,
 			id,
-			contextWindow: meta.contextWindow,
-			maxTokens: meta.maxTokens,
-			reasoning: meta.reasoning,
-			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
+			...(meta?.contextWindow !== undefined ? { contextWindow: meta.contextWindow } : {}),
+			...(meta?.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {}),
+			...(meta?.reasoning !== undefined ? { reasoning: meta.reasoning } : {}),
+			...(meta?.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
 		},
 	};
 }
@@ -3018,6 +3016,7 @@ export class SessionManager {
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
+			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
@@ -8119,6 +8118,12 @@ export class SessionManager {
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
+		await this.finalizeSpawnOptions(bridgeOptions, {
+			model: exactRestoreModel ?? bridgeOptions.initialModel,
+			thinkingLevel: ps.effectiveThinkingLevel ?? bridgeOptions.initialThinkingLevel,
+			role: ps.role,
+			projectId: ps.projectId,
+		});
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -8632,17 +8637,11 @@ export class SessionManager {
 			?? rawInitialDefaultModel
 			?? (!opts?.skipAutoModel ? this.resolveInitialModel(initialRole, projectId) : undefined);
 		let currentModels: Awaited<ReturnType<typeof getAvailableModels>> | undefined;
-		// A normal Bobbit spawn must bind one of Bobbit's current catalog rows
-		// explicitly rather than letting Pi choose a newly published hidden provider.
-		// skipAutoModel bypasses role/preferences selection, not this deterministic
-		// catalog binding. Goal/team extension-only args are Bobbit-owned setup, not
-		// generic raw Pi arguments; every other non-empty agentArgs input keeps the
-		// legacy exemption.
-		const bobbitOwnedExtensionSpawn = !!(goalId || opts?.teamGoalId || opts?.teamLeadSessionId)
-			&& !!agentArgs?.length
-			&& agentArgs.length % 2 === 0
-			&& agentArgs.every((arg, index) => index % 2 === 0 ? arg === "--extension" : arg.length > 0);
-		if (!rawSelectedSpawnModel && (!agentArgs?.length || bobbitOwnedExtensionSpawn) && this.preferencesStore) {
+		const requestedSpawnModel = rawSelectedSpawnModel;
+		// Every Bobbit spawn starts from an exact catalog row. Raw Pi selection flags
+		// are resolved later at the fully assembled boundary; they are not an
+		// exemption from catalog validation or an invitation to Pi's fallback model.
+		if (!rawSelectedSpawnModel && this.preferencesStore) {
 			currentModels = await getAvailableModels(this.preferencesStore);
 			rawSelectedSpawnModel = await this.resolveCurrentCatalogSpawnModel([], currentModels);
 		}
@@ -8813,6 +8812,8 @@ export class SessionManager {
 				skipAutoThinking: opts?.skipAutoThinking,
 				initialModel: selectedSpawnModel,
 				initialThinkingLevel: exactInitialThinkingLevel,
+				requestedModel: requestedSpawnModel ?? selectedSpawnModel,
+				requestedThinkingLevel: opts?.initialThinkingLevel ?? exactInitialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 				bridgeOptions: { cwd },
@@ -8910,6 +8911,8 @@ export class SessionManager {
 			skipAutoThinking: opts?.skipAutoThinking,
 			initialModel: selectedSpawnModel,
 			initialThinkingLevel: exactInitialThinkingLevel,
+			requestedModel: requestedSpawnModel ?? selectedSpawnModel,
+			requestedThinkingLevel: opts?.initialThinkingLevel ?? exactInitialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 			bridgeOptions: { cwd },
@@ -9140,6 +9143,8 @@ export class SessionManager {
 			// level so a delegate no longer silently drops to the system default.
 			initialModel: delegateInitialModel,
 			initialThinkingLevel: delegateInitialThinking,
+			requestedModel: exactDelegateModel ?? delegateInitialModel,
+			requestedThinkingLevel: delegateThinkingCandidate ?? delegateInitialThinking,
 			// Caller toolEnv is non-secret metadata. directGatewayEnv is minted by the
 			// gateway and spread last so user-supplied env cannot widen the inherited
 			// project/session scope.
@@ -9567,6 +9572,73 @@ export class SessionManager {
 			if (isSpawnPinnableModelString(normalized)) return normalized;
 		}
 		return undefined;
+	}
+
+	/**
+	 * Final authority for the tuple that Pi will actually receive. Raw argv is
+	 * last-wins, so this runs only after every extension/remap has assembled args.
+	 * It validates the effective model against the exact target catalog row,
+	 * clamps thinking from that row, then removes raw selection flags and leaves
+	 * one canonical initial tuple. Requested identity remains diagnostic-only.
+	 */
+	private async finalizeSpawnOptions(
+		options: RpcBridgeOptions,
+		requested: { model?: string; thinkingLevel?: string; role?: string; projectId?: string } = {},
+	): Promise<void> {
+		options.requestedModel = requested.model ?? options.requestedModel ?? options.initialModel;
+		options.requestedThinkingLevel = requested.thinkingLevel
+			?? options.requestedThinkingLevel
+			?? options.initialThinkingLevel;
+		if (options.initialThinkingLevel && !isKnownThinkingLevel(options.initialThinkingLevel)) {
+			throw new Error(`Invalid Pi spawn thinking level "${sanitizeModelErrorText(options.initialThinkingLevel)}"`);
+		}
+
+		const resolved = resolveEffectivePiSelection(options);
+		if (!resolved.effectiveModel) {
+			throw new Error(
+				`Pi spawn selection is incomplete (requested model: ${sanitizeModelErrorText(resolved.requestedModel ?? "<none>")})`,
+			);
+		}
+		if (!this.preferencesStore) throw new Error("the model catalog is unavailable");
+		const models = await getAvailableModels(this.preferencesStore);
+		let effectiveModel: string;
+		try {
+			effectiveModel = await this.requireCurrentCatalogSpawnModel(resolved.effectiveModel, models);
+		} catch (error) {
+			const requestedModel = resolved.requestedModel;
+			if (requestedModel && normalizeAigwModelString(requestedModel) !== resolved.effectiveModel) {
+				throw new Error(
+					`Effective Pi model ${sanitizeModelErrorText(resolved.effectiveModel)} from requested model ${sanitizeModelErrorText(requestedModel)} is not currently available for session selection; ${sanitizeModelErrorText(error)}`,
+				);
+			}
+			throw error;
+		}
+		const slash = effectiveModel.indexOf("/");
+		const catalogModel = findSessionSelectableModel(
+			models,
+			effectiveModel.slice(0, slash),
+			effectiveModel.slice(slash + 1),
+		);
+		if (!catalogModel) {
+			throw new Error(`Model ${sanitizeModelErrorText(effectiveModel)} is not currently available for session selection`);
+		}
+		const effectiveThinking = resolved.effectiveThinking
+			? clampThinkingLevel(resolved.effectiveThinking, catalogModel)
+			: undefined;
+
+		options.args = resolved.sanitizedArgs;
+		options.initialModel = effectiveModel;
+		if (effectiveThinking) options.initialThinkingLevel = effectiveThinking;
+		else delete options.initialThinkingLevel;
+
+		// Raw argv may have crossed providers after earlier env assembly. Refresh
+		// direct-host credentials from the validated effective provider; sandbox
+		// credentials remain owned by its already-applied realm wiring.
+		await this.applyDirectProviderEnv(
+			options,
+			options.sandboxed === true || !!options.containerId,
+			effectiveModel.slice(0, slash),
+		);
 	}
 
 	/** Require one exact provider/model tuple to remain in Bobbit's current catalog. */
@@ -10816,6 +10888,12 @@ export class SessionManager {
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
+		await this.finalizeSpawnOptions(bridgeOptions, {
+			model: exactRoleReplacementModel ?? bridgeOptions.initialModel,
+			thinkingLevel: roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+			role: role.name,
+			projectId: session.projectId,
+		});
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -13248,6 +13326,12 @@ export class SessionManager {
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
+			await this.finalizeSpawnOptions(bridgeOptions, {
+				model: exactForceReplacementModel ?? bridgeOptions.initialModel,
+				thinkingLevel: forceRespawnPersisted?.effectiveThinkingLevel ?? bridgeOptions.initialThinkingLevel,
+				role: session.role,
+				projectId: session.projectId,
+			});
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
