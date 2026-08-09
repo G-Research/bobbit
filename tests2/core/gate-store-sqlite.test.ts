@@ -276,6 +276,27 @@ describe("GateStore SQLite persistence", () => {
 		expect(fs.existsSync(path.join(stateDir, "gates.json.pre-migration-recovered"))).toBe(true);
 	});
 
+	it("migrates a hand-recorded manual pass whose step omits duration_ms instead of failing the load", async () => {
+		const stateDir = tempRoot();
+		const manualPass = representativeGate("goal-bypass", "qualification");
+		// A human bypass / hand-recorded manual pass marks a step passed without a
+		// timed command run, so the persisted step legitimately has no duration_ms.
+		// The old JSON loader tolerated this; the strict migration must not fatal.
+		delete (manualPass.signals[0].verification.steps[0] as unknown as Record<string, unknown>).duration_ms;
+		fs.writeFileSync(path.join(stateDir, "gates.json"), JSON.stringify([manualPass]), "utf-8");
+
+		const store = openStore(stateDir);
+		expect(store.getGate("goal-bypass", "qualification")?.signals[0]?.verification.steps[0]?.duration_ms).toBe(0);
+		expect(fs.existsSync(path.join(stateDir, "gates.sqlite"))).toBe(true);
+		expect(fs.existsSync(path.join(stateDir, "gates.json.sqlite-retired"))).toBe(true);
+
+		// The backfilled default is durable across a restart.
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		const reloaded = openStore(stateDir);
+		expect(reloaded.getGate("goal-bypass", "qualification")?.signals[0]?.verification.steps[0]?.duration_ms).toBe(0);
+	});
+
 	it("rejects malformed authoritative recovery transactionally and releases the database handle", async () => {
 		const stateDir = tempRoot();
 		const authoritative = openStore(stateDir);
