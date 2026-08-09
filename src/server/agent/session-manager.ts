@@ -95,7 +95,7 @@ import type { GrantPolicy, Role } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
-import { compactAssistantStreamDelta } from "../../shared/assistant-stream-delta.js";
+import { compactAssistantStreamDelta, reconstructAssistantStreamMessage } from "../../shared/assistant-stream-delta.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "../ws-overflow-guard.js";
 
 let sessionManagerModuleClock: Clock = realClock;
@@ -946,7 +946,7 @@ export interface SessionInfo {
 	 * row entirely (H3-D convergent loss across tabs). See the H3 design doc.
 	 */
 	latestMessageUpdate?: { id?: string; message: any };
-	/** Previous raw cumulative assistant streaming message for compact live deltas. */
+	/** Previous reconstructed assistant stream message used to build compact live deltas. */
 	previousAssistantStreamMessage?: any;
 	/**
 	 * Memoized agent snapshot base (RPC response plus error normalization), keyed
@@ -1608,6 +1608,12 @@ function cutOverSlowReplaceableClient(client: AssistantStreamSocket): void {
 	}
 }
 
+function markAssistantStreamSnapshotSent(client: AssistantStreamSocket, msg: ServerMessage): void {
+	if (msg.type === "messages" && client.assistantStreamDeltaCapable === true) {
+		client.assistantStreamDeltaNeedsBaseline = true;
+	}
+}
+
 function isAssistantStreamMessageUpdate(event: unknown): event is {
 	type: "message_update";
 	message: Record<string, unknown>;
@@ -1671,6 +1677,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 				warnBytes: WS_BUFFER_WARN_BYTES,
 			});
 			client.send(data);
+			markAssistantStreamSnapshotSent(client as AssistantStreamSocket, msg);
 		}
 		return;
 	}
@@ -1697,6 +1704,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 			warnBytes: WS_BUFFER_WARN_BYTES,
 		});
 		client.send(data);
+		markAssistantStreamSnapshotSent(client as AssistantStreamSocket, msg);
 		recipients++;
 	}
 	getCpuDiagnostics().recordWsBroadcast("session-manager:broadcast", (msg as { type?: string }).type || "unknown", {
@@ -1863,7 +1871,21 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 	}
 
 	if (assistantStreamUpdate) {
-		session.previousAssistantStreamMessage = (spliced as any).message;
+		const assistantEventType = (spliced as any).assistantMessageEvent?.type;
+		if (assistantEventType === "toolcall_delta") {
+			// Pi's cumulative tool-call message omits the transport-only partialJson
+			// needed to apply the next fragment. Keep the reconstructed chain only in
+			// session memory; the retained event and durable transcript stay raw.
+			const chainDelta = steadyCompactComputed
+				? steadyCompactFrame?.data
+				: compactAssistantStreamDelta(spliced, session.previousAssistantStreamMessage);
+			session.previousAssistantStreamMessage = reconstructAssistantStreamMessage(
+				chainDelta,
+				session.previousAssistantStreamMessage,
+			) ?? (spliced as any).message;
+		} else {
+			session.previousAssistantStreamMessage = (spliced as any).message;
+		}
 	} else if (isAssistantStreamTerminalBoundary(spliced)) {
 		session.previousAssistantStreamMessage = undefined;
 	}

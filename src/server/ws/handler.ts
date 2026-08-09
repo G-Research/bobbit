@@ -370,11 +370,15 @@ function buildArchivedStateData(
 	return sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
 }
 
+function isSocketSendable(ws: WebSocket): boolean {
+	return ws.readyState === 1 && (ws as any).streamBackpressureCutover !== true;
+}
+
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
 		const data = JSON.stringify(msg);
 		for (const client of clients) {
-			if (client.readyState === 1) {
+			if (isSocketSendable(client)) {
 				client.send(data);
 			}
 		}
@@ -390,7 +394,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	let skipped = 0;
 	for (const client of clients) {
 		scanned++;
-		if (client.readyState === 1) {
+		if (isSocketSendable(client)) {
 			client.send(data);
 			recipients++;
 		} else {
@@ -441,18 +445,16 @@ function replayManualRetryRequiredOnAttach(
 }
 
 function send(ws: WebSocket, msg: ServerMessage): void {
-	if ((ws as any).streamBackpressureCutover === true) return;
+	if (!isSocketSendable(ws)) return;
+	ws.send(JSON.stringify(msg));
 	if (msg.type === "messages" && (ws as any).assistantStreamDeltaCapable === true) {
 		(ws as any).assistantStreamDeltaNeedsBaseline = true;
-	}
-	if (ws.readyState === 1) {
-		ws.send(JSON.stringify(msg));
 	}
 }
 
 function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
 	if ((ws as any).streamBackpressureCutover === true) return Promise.reject(new Error("websocket was cut over for stream backpressure"));
-	if (ws.readyState !== 1) return Promise.reject(new Error("websocket is not open"));
+	if (!isSocketSendable(ws)) return Promise.reject(new Error("websocket is not open"));
 	return new Promise((resolve, reject) => {
 		ws.send(JSON.stringify(msg), (err) => {
 			if (err) reject(err);
@@ -1723,7 +1725,9 @@ export function handleWebSocketConnection(
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
 					let replayed = 0;
+					let replayedBytes = 0;
 					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
+					if (!isSocketSendable(ws)) break;
 					const sendResumeGap = (_reason: string, bytes = 0) => {
 						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
 						if (diagEnabled) {
@@ -1755,17 +1759,19 @@ export function handleWebSocketConnection(
 						Date.now() + RESUME_REPLAY_DRAIN_TIMEOUT_MS,
 					);
 					if (!drained) {
+						if (!isSocketSendable(ws)) break;
 						sendResumeGap("backpressure", decision.bytes);
 						break;
 					}
 					const deadline = Date.now() + PACE_TIMEOUT_MS;
 					for (const frame of frames) {
-						if ((ws as any).streamBackpressureCutover === true) break;
-						await paceAndSend(ws as any, frame.data, deadline);
+						const sent = await paceAndSend(ws as any, frame.data, deadline);
+						if (!sent) break;
 						replayed++;
+						replayedBytes += frame.bytes;
 					}
 					if (diagEnabled) {
-						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: decision.bytes, replayed, sendMs: performance.now() - diagStart });
+						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: replayedBytes, replayed, sendMs: performance.now() - diagStart });
 					}
 					break;
 				}
