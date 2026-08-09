@@ -961,13 +961,16 @@ export class ToolManager {
 	/**
 	 * Generate per-group detail docs markdown files in the state directory.
 	 * These are the full reference docs that the system prompt footer links to.
-	 * Call once at startup (or when tool definitions change).
+	 * Called at startup and rematerialized alongside prompt docs when definitions change.
 	 */
 	generateDetailDocs(stateDir: string): void {
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		this.materializeDetailDocs(stateDir, tools);
+	}
+
+	private materializeDetailDocs(stateDir: string, tools: BaseToolInfo[]): void {
 		const dir = path.join(stateDir, 'tool-docs');
 		fs.mkdirSync(dir, { recursive: true });
-
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 
 		// Group tools by groupDir
 		const grouped = new Map<string, Array<{ name: string; docs?: string; detail_docs?: string; description: string }>>();
@@ -987,7 +990,9 @@ export class ToolManager {
 				if (detail) parts.push(detail + '\n');
 				if (!docs && !detail) parts.push(tool.description + '\n');
 			}
-			fs.writeFileSync(path.join(dir, `${groupDir}.md`), parts.join('\n'));
+			const file = path.join(dir, `${groupDir}.md`);
+			const content = parts.join('\n');
+			if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== content) fs.writeFileSync(file, content);
 		}
 	}
 
@@ -1000,6 +1005,7 @@ export class ToolManager {
 	 */
 	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext): string {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		if (stateDir) this.materializeDetailDocs(stateDir, tools);
 
 		type Entry = { name: string; summary: string; params?: string[] };
 		const grouped = new Map<string, { groupDir: string; entries: Entry[] }>();

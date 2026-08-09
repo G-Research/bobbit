@@ -409,6 +409,8 @@ describe("focused tool contract refresh", () => {
 		const historicalAgentDir = path.join(configDir, "tools", "agent");
 		writeHistoricalAgentSnapshot(historicalAgentDir);
 		initPromptDirs(stateDir);
+		fs.mkdirSync(path.join(stateDir, "tool-docs"));
+		fs.writeFileSync(path.join(stateDir, "tool-docs", "agent.md"), "Use verbose and include_tool_results for broad raw reads.\n");
 
 		const toolManager = new ToolManager(configDir, builtinToolsDir);
 		const warmedDocs = toolManager.getToolDocsForPrompt(["bobbit_read", "read_session"]);
@@ -505,6 +507,12 @@ describe("focused tool contract refresh", () => {
 		assert.match(prompt, /bobbit_read\(operation/);
 		assert.match(prompt, /read_session\(operation, session_id/);
 		assert.doesNotMatch(prompt, /verbose|include_tool_results/);
+		const agentDocsPath = prompt.match(/^## Agent — see (.+agent\.md)$/m)?.[1];
+		assert.ok(agentDocsPath);
+		const agentDocs = fs.readFileSync(agentDocsPath, "utf8");
+		assert.doesNotMatch(agentDocs, /verbose|include_tool_results/);
+		assert.match(agentDocs, /operation: "list"/);
+		assert.match(agentDocs, /operation: "inspect".*message_index/s);
 
 		const bobbitTool = registered.get("bobbit_read");
 		const readSession = registered.get("read_session");
