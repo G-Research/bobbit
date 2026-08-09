@@ -34,12 +34,16 @@ export class ReviewPane extends LitElement {
   @property({ type: String }) sessionId = "";
 
   @state() private _overflowOpen = false;
+  @state() private _visibleFileCount = 5;
   @state() private _finalCommentsByReviewId: Map<string, string> = new Map();
   @state() private _validationError = "";
 
   private readonly _overflowMenuId = `review-file-overflow-${++overflowMenuSequence}`;
   private _restoreOverflowFocus = false;
   private _overflowListenersInstalled = false;
+  private _overflowResizeObserver: ResizeObserver | null = null;
+  private _observedTabBar: HTMLElement | null = null;
+  private _overflowMeasurementQueued = false;
 
   createRenderRoot() {
     return this;
@@ -62,6 +66,9 @@ export class ReviewPane extends LitElement {
     super.disconnectedCallback();
     window.removeEventListener("annotation-cache-ready", this._boundCacheReady);
     this._removeOverflowListeners();
+    this._overflowResizeObserver?.disconnect();
+    this._overflowResizeObserver = null;
+    this._observedTabBar = null;
   }
 
   protected updated(changed: Map<string, unknown>): void {
@@ -69,6 +76,7 @@ export class ReviewPane extends LitElement {
       this._validationError = "";
       if (this._overflowOpen) this._closeOverflow(false);
     }
+    this._syncOverflowMeasurement();
     if (changed.has("_overflowOpen")) {
       if (this._overflowOpen) this._openRenderedOverflow();
       else {
@@ -152,9 +160,17 @@ export class ReviewPane extends LitElement {
   }
 
   /** Exact seam used by primary workspace close confirmation. */
-  _unsentCommentCountForReview(reviewId: string): number {
-    const review = this._compatibilityReview();
-    return review?.reviewId === reviewId ? this._reviewUnsentCommentCount(review) : 0;
+  _unsentCommentCountForReview(reviewOrId: ReviewGroupModel | string): number {
+    const mountedReview = this._compatibilityReview();
+    const review = typeof reviewOrId === "string"
+      ? (mountedReview?.reviewId === reviewOrId ? mountedReview : null)
+      : reviewOrId;
+    return review ? this._reviewUnsentCommentCount(review) : Number.NaN;
+  }
+
+  /** Remove only one successfully closed review's in-memory final draft. */
+  _discardFinalCommentForReview(reviewId: string): void {
+    this._deleteFinalComment(reviewId);
   }
 
   /** Compatibility seam for legacy file-keyed workspace tabs. */
@@ -256,6 +272,81 @@ export class ReviewPane extends LitElement {
     else this._overflowOpen = true;
   }
 
+  private _syncOverflowMeasurement(): void {
+    const bar = this.querySelector<HTMLElement>(".review-tab-bar");
+    if (bar !== this._observedTabBar) {
+      this._overflowResizeObserver?.disconnect();
+      this._overflowResizeObserver = null;
+      this._observedTabBar = bar;
+      if (bar && typeof ResizeObserver !== "undefined") {
+        this._overflowResizeObserver = new ResizeObserver(() => this._queueOverflowMeasurement());
+        this._overflowResizeObserver.observe(bar);
+      }
+    }
+    if (bar) this._queueOverflowMeasurement();
+  }
+
+  private _queueOverflowMeasurement(): void {
+    if (this._overflowMeasurementQueued) return;
+    this._overflowMeasurementQueued = true;
+    queueMicrotask(() => {
+      this._overflowMeasurementQueued = false;
+      if (this.isConnected) this._measureVisibleFileCount();
+    });
+  }
+
+  private _measureVisibleFileCount(): void {
+    const review = this._compatibilityReview();
+    const bar = this._observedTabBar;
+    if (!review || !bar || review.files.length < 2) return;
+
+    const barWidth = bar.getBoundingClientRect().width || bar.clientWidth;
+    // DOM-only test environments have no layout engine. Preserve the historical
+    // five-item fallback there; real layout always follows the measured prefix.
+    if (!(barWidth > 0)) {
+      const fallback = Math.min(5, review.files.length);
+      if (fallback !== this._visibleFileCount) this._visibleFileCount = fallback;
+      return;
+    }
+
+    const style = getComputedStyle(bar);
+    const measuredPadding = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+    // Match the component's authored bounds even during the brief stylesheet
+    // loading race (and in CSS-free fixture shells).
+    const padding = Math.max(24, measuredPadding);
+    const gap = Math.max(2, Number.parseFloat(style.columnGap || style.gap) || 0);
+    const availableWidth = Math.max(0, barWidth - padding);
+    const measurements = [...bar.querySelectorAll<HTMLElement>(".review-tab-measure")];
+    const widths = review.files.map((file, index) => {
+      const measured = measurements[index]?.getBoundingClientRect().width || measurements[index]?.offsetWidth || 0;
+      const badgeWidth = this._annotationCountFor(review, file) > 0 ? 24 : 0;
+      const naturalWidth = measured || 24 + file.title.length * 7 + badgeWidth;
+      return Math.min(168, Math.max(128, naturalWidth));
+    });
+    const allTabsWidth = widths.reduce((total, width) => total + width, 0) + gap * Math.max(0, widths.length - 1);
+    let nextVisibleCount = review.files.length;
+
+    if (allTabsWidth > availableWidth) {
+      const moreMeasure = bar.querySelector<HTMLElement>(".review-tab-overflow-measure");
+      const measuredMoreWidth = moreMeasure?.getBoundingClientRect().width || moreMeasure?.offsetWidth || 0;
+      const moreWidth = Math.max(40, measuredMoreWidth);
+      let usedWidth = 0;
+      nextVisibleCount = 0;
+      for (const width of widths) {
+        const candidateTabsWidth = usedWidth + (nextVisibleCount > 0 ? gap : 0) + width;
+        const candidateTotal = candidateTabsWidth + gap + moreWidth;
+        if (candidateTotal > availableWidth) break;
+        usedWidth = candidateTabsWidth;
+        nextVisibleCount += 1;
+      }
+    }
+
+    if (nextVisibleCount !== this._visibleFileCount) {
+      if (nextVisibleCount >= review.files.length && this._overflowOpen) this._closeOverflow(false);
+      this._visibleFileCount = nextVisibleCount;
+    }
+  }
+
   private _closeOverflow(restoreFocus: boolean): void {
     if (!this._overflowOpen) return;
     this._restoreOverflowFocus = restoreFocus;
@@ -340,9 +431,8 @@ export class ReviewPane extends LitElement {
       for (const file of review.files) annotationCounts.set(file.fileId, this._annotationCountFor(review, file));
     }
     const files = review?.files || [];
-    const MAX_VISIBLE = 5;
-    const visibleFiles = files.slice(0, MAX_VISIBLE);
-    const overflowFiles = files.slice(MAX_VISIBLE);
+    const visibleFiles = files.slice(0, Math.min(this._visibleFileCount, files.length));
+    const overflowFiles = files.slice(visibleFiles.length);
 
     return html`
       <div class="review-pane">
@@ -375,6 +465,17 @@ export class ReviewPane extends LitElement {
                 aria-controls=${this._overflowMenuId}
               >…</button>
             ` : ""}
+            <div class="review-tab-measurements" aria-hidden="true">
+              ${files.map((file) => html`
+                <span class="review-tab-measure">
+                  <span class="review-tab-label">${file.title}</span>
+                  ${(annotationCounts.get(file.fileId) || 0) > 0
+                    ? html`<span class="review-tab-badge">${annotationCounts.get(file.fileId)}</span>`
+                    : ""}
+                </span>
+              `)}
+              <span class="review-tab-overflow-measure">…</span>
+            </div>
           </div>
           ${this._overflowOpen ? html`
             <div
