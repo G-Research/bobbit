@@ -1,17 +1,17 @@
 # AI Gateway routing
 
-Bobbit can use one AI Gateway as the model source for agent sessions, reviews, and title generation. The gateway remains the routing authority: Bobbit discovers each upstream provider's API and endpoint, translates that information into pi-ai model entries, and publishes the result to the active agent directory's `models.json`.
+Bobbit can use one AI Gateway as the model source for agent sessions, reviews, and title generation. For well-known discovery, the gateway is the metadata and routing authority: Bobbit validates its model declarations, translates documented protocol details into Pi entries, and publishes them to the active agent directory's `models.json`.
 
-This avoids guessing from model names. In particular, OpenAI reasoning models can use the Responses API, where reasoning and function tools are supported together, while Bedrock models retain Converse semantics.
+This avoids guessing capabilities from model names. In particular, OpenAI reasoning models can use the Responses API, where reasoning and function tools are supported together, while Bedrock models retain Converse semantics. Direct built-ins remain exact Pi rows, and user/custom models remain the exact configuration composed for their target realm; see the [metadata retirement decision](design/openai-model-additions-retirement.md).
 
 ## Configure an AI Gateway
 
 Open **Settings → Models → AI Gateway** and enter an absolute HTTP(S) gateway URL, such as `https://gateway.example/v1`.
 
 - **Test** performs discovery without saving or changing active routing.
-- **Enable Gateway** or **Update** discovers models, atomically replaces the generated `aigw` provider in `models.json`, and saves `aigw.url`.
+- **Enable Gateway** or **Update** discovers models, atomically inserts or refreshes Bobbit's marked `aigw` publication in `models.json`, and saves `aigw.url`.
 - **Refresh Models** repeats the saved configuration flow, including model discovery, default seeding, cache invalidation, and sandbox refresh.
-- **Disconnect** removes the generated provider and saved URL.
+- **Disconnect** removes only Bobbit's marked publication and clears the saved URL. An unmarked `providers.aigw` block is user-owned and remains unchanged.
 
 The equivalent REST endpoints are documented in [REST API](rest-api.md#ai-gateway). Agents with the administrative Bobbit tool can configure or remove the URL through `aigw_configure`.
 
@@ -40,7 +40,15 @@ Discovery is well-known-first:
 
 A remote config may not point to another unresolved `remote_config`. The initial document, optional remote document, and provider-host DNS admission share one bounded discovery deadline. Configure reuses that resolved result rather than fetching the well-known document twice.
 
-Authoritative filtering applies `disabled_providers`, each provider's `whitelist`, and URL validation. Bobbit does not repopulate filtered or invalid providers from `/v1/models`; doing so would silently override the gateway operator's policy.
+Authoritative filtering applies `disabled_providers`, each provider's `whitelist`, documented adapter validation, and URL validation. Bobbit does not repopulate filtered, incomplete, or invalid providers from `/v1/models`; doing so would silently override the gateway operator's policy.
+
+## Metadata authority
+
+A well-known row is selectable only when it supplies positive context and output limits, a boolean reasoning value, at least one supported input modality, a safe provider base URL, and a documented adapter. Bobbit copies those capability fields rather than overlaying model-family defaults. Rows that lack required authoritative data are omitted.
+
+Thinking maps contain only advertised variants. An advertised `none` variant maps `off` to the wire value `none`; Bobbit does not synthesize `off`, `xhigh`, or `max`. Supplied per-million-token costs are preserved, while absent or invalid prices are represented conservatively as zero. Compatibility flags describe tested adapter behavior, never an ID-family guess.
+
+The only remaining model-name inference boundary is the legacy `/v1/models` fallback. Well-known translation, direct Pi rows, composed custom rows, live state, and thinking clamping never call `inferLegacyAigwMeta`.
 
 ## Transient discovery outages
 
@@ -51,6 +59,8 @@ Retained rows preserve their published provider/model identity, API, endpoint, l
 Retention never masks a successful discovery result. If discovery succeeds and omits a previously published model, that omission is authoritative and the old row becomes unavailable. A missing, malformed, or URL-mismatched persisted provider also yields no retained AIGW rows.
 
 `GET /api/aigw/status` is deliberately a live-discovery view and therefore returns `models: []` on an outage. `/api/models` is the session-selection view and may still include the matching retained rows. The empty status response does not erase `models.json` or by itself mean that durable routing was disconnected.
+
+An unmarked `providers.aigw` block is different from this outage fallback: it is the user-owned target realm. When present and structurally valid, Pi's exact composition of that block is authoritative for selection instead of live Bobbit discovery. Bobbit does not bypass it with a previous discovery cache.
 
 ## Saved sessions after authoritative model removal
 
@@ -79,7 +89,7 @@ Discovery URLs are untrusted configuration and are constrained to prevent creden
 - The bearer token for the well-known request never crosses the configured origin. A same-origin remote may replace it with an explicitly declared `Authorization` header; a cross-origin remote receives only its explicitly declared headers.
 - Hop-by-hop, proxy, `Host`, `Content-Length`, and `User-Agent` headers are discarded. Bobbit supplies its own canonical user agent. Credentials, bodies, and remote headers are not logged.
 
-A rejected provider is omitted. Test/status discovery cannot change the active DNS guard set; it changes only after a successful `models.json` publication. Disconnect clears the active set. Operators using cross-origin provider endpoints should keep the Bobbit state directory writable and treat a DNS guard extension warning as a security-relevant configuration failure.
+A rejected provider is omitted. Test/status discovery cannot change the active DNS guard set; it changes only after a successful `models.json` publication. Disconnect recomputes the guard from any surviving user-owned AIGW block, or clears it when none remains. Operators using cross-origin provider endpoints should keep the Bobbit state directory writable and treat a DNS guard extension warning as a security-relevant configuration failure.
 
 ## Provider-specific routing
 
@@ -90,15 +100,15 @@ The well-known provider's `npm` adapter selects the pi-ai API. Each model retain
 | `@ai-sdk/openai` | `openai-responses` | `{baseURL}/responses` |
 | `@ai-sdk/amazon-bedrock` | `bedrock-converse-stream` | Bedrock Converse beneath the provider endpoint, commonly `/aws` |
 | `@ai-sdk/openai-compatible` | `openai-completions` | `{baseURL}/chat/completions` |
-| Unknown adapter | `openai-completions` | Conservative chat-completions fallback |
+| Unknown adapter | Omitted | No transport is guessed for an authoritative row |
 
 Per-provider base URLs matter because a gateway's multiplexed `/v1` root and provider subpaths can expose different APIs and model ID forms. Provider subpaths receive the bare wire ID, such as `gpt-5.6-sol`, rather than a multiplexed ID such as `openai/gpt-5.6-sol`.
 
-The well-known document also supplies reasoning, context/output limits, input modalities, thinking variants, and per-million-token costs. Bobbit persists these fields rather than replacing them with model-name heuristics.
+The well-known document also supplies reasoning, context/output limits, input modalities, thinking variants, and per-million-token costs. Bobbit persists the validated source values without family overlays, heuristic cache-price ratios, or unadvertised thinking tiers.
 
 ## Legacy fallback
 
-If well-known discovery is unavailable or invalid, Bobbit reads `/v1/models` and applies the legacy metadata rules with two routing safeguards:
+If no authoritative well-known provider document resolves, Bobbit reads `/v1/models` and applies `inferLegacyAigwMeta` with routing safeguards:
 
 - OpenAI-family reasoning IDs (`gpt-*` and `o1`–`o9`, excluding Claude-shaped IDs) use `openai-responses` at `{gatewayOrigin}/openai/v1` with a bare wire ID.
 - Claude IDs use `bedrock-converse-stream` at `{gatewayOrigin}/aws` with the upstream prefix removed.
@@ -136,11 +146,19 @@ The Settings default-model **Test** action calls `/api/models/test` and probes t
 
 A failed probe is reported for that route and is not retried against another API. `/api/aigw/test` is different: it validates discovery and returns the discovered models without saving configuration or testing inference.
 
-## Publication, caches, and containers
+## Publication ownership, caches, and containers
 
-A successful configure or refresh publishes `models.json` with temp-file-plus-rename replacement, preserving non-AIGW providers and user `modelOverrides`. It also invalidates the model registry cache and the session auto-selection cache, then notifies connected clients.
+New Bobbit publications carry this forward-only provider marker:
 
-Normal reads use short-lived caches: the model registry caches assembled models for five seconds, while session AIGW auto-selection caches discovery for one minute. Configure, refresh, and disconnect clear both immediately.
+```json
+"x-bobbit-managed": { "kind": "aigw-publication", "version": 1 }
+```
+
+If `providers.aigw` is absent, configure may insert a marked block. Refresh may update only an unambiguous marked block. An existing unmarked block is user-owned: configure fails with an ownership collision, and Bobbit neither marks nor rewrites it. Disconnect likewise removes only a marked block.
+
+Publication uses localized Pi-compatible JSONC edits followed by temp-file-plus-rename replacement. Comments, formatting outside edited values, unknown fields, non-AIGW providers, and user `modelOverrides` remain intact. Malformed JSONC, duplicate `providers`/`providers.aigw` paths, or duplicate managed fields are ambiguous and fail closed without changing any byte or saving the new gateway preference. When AIGW publication is not configured, startup does not normalize `models.json` at all.
+
+A successful publication invalidates the model registry and session auto-selection caches, then notifies connected clients. Normal reads use short-lived caches; configure, refresh, and disconnect clear them immediately.
 
 Docker file bind mounts retain the old inode after atomic replacement. Bobbit therefore recreates tracked project containers after each publication or removal. Publication generations serialize concurrent refreshes so a newer update cannot be lost behind an in-progress recreation; workspace and worktree volumes survive, and live sandboxed sessions use normal container recovery. Startup health checks also compare the mounted file's content with the active host file and recreate stale or pre-upgrade containers.
 
