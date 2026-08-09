@@ -25,6 +25,7 @@ import { fetchAppInfo, fetchProjects, gatewayFetch, retryLoadSessions, resumeGoa
 import { headerToast, showHeaderToast } from "./header-toast.js";
 export { showHeaderToast } from "./header-toast.js";
 import { getDocumentAnnotationCount } from "../ui/components/review/AnnotationStore.js";
+import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
 import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
@@ -2373,24 +2374,19 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const reviewPaneUnsentCountForGroup = (sessionId: string, reviewId: string): number => {
-		const pane = document.querySelector("review-pane") as (HTMLElement & {
-			_unsentCommentCountForReview?: (reviewId: string) => number;
-			_unsentCommentCountForDocument?: (fileId: string) => number;
-		}) | null;
-		if (pane && typeof pane._unsentCommentCountForReview === "function") {
-			const count = Number(pane._unsentCommentCountForReview(reviewId));
-			if (Number.isFinite(count)) return count;
-		}
-		const group = state.reviewGroups.get(reviewId);
+	type ReviewPaneCleanupSeam = HTMLElement & {
+		_unsentCommentCountForReview: (review: ReviewGroupModel) => number;
+		_discardFinalCommentForReview?: (reviewId: string) => void;
+	};
+	const mountedReviewPane = (): ReviewPaneCleanupSeam | null => document.querySelector("review-pane") as ReviewPaneCleanupSeam | null;
+	const reviewPaneUnsentCountForGroup = (sessionId: string, group: ReviewGroupModel | undefined, reviewId: string): number => {
+		const pane = mountedReviewPane();
+		if (pane && group) return pane._unsentCommentCountForReview(group);
 		if (!group) return getDocumentAnnotationCount(sessionId, reviewId);
-		return group.files.reduce((total, file) => {
-			if (pane && typeof pane._unsentCommentCountForDocument === "function") {
-				const count = Number(pane._unsentCommentCountForDocument(file.fileId));
-				if (Number.isFinite(count)) return total + count;
-			}
-			return total + getDocumentAnnotationCount(sessionId, file.fileId);
-		}, 0);
+		return group.files.reduce((total, file) => total + getDocumentAnnotationCount(sessionId, file.fileId), 0);
+	};
+	const discardReviewPaneFinalDraft = (reviewId: string): void => {
+		mountedReviewPane()?._discardFinalCommentForReview?.(reviewId);
 	};
 
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
@@ -2432,7 +2428,7 @@ export function doRenderApp(): void {
 			const reviewId = reviewIdFromPanelTab(tab);
 			const group = state.reviewGroups.get(reviewId);
 			const title = group?.title || reviewTitleFromPanelTab(tab) || reviewId;
-			const count = reviewPaneUnsentCountForGroup(sid, reviewId);
+			const count = reviewPaneUnsentCountForGroup(sid, group, reviewId);
 			const alreadyConfirmed = event?.type === "review-close-tab"
 				|| event?.type === "review-dismiss"
 				|| (event as CustomEvent | undefined)?.detail?.confirmed === true;
@@ -2440,7 +2436,8 @@ export function doRenderApp(): void {
 			if (group) {
 				void (async () => {
 					const { cleanupReviewGroup } = await loadReviewSources();
-					await cleanupReviewGroup(sid, reviewId);
+					const removed = await cleanupReviewGroup(sid, reviewId);
+					if (removed) discardReviewPaneFinalDraft(reviewId);
 					if (wasActive && nextCandidate?.kind === "review") selectVisibleReviewGroup(reviewIdFromPanelTab(nextCandidate));
 					renderApp();
 				})().catch((err) => showHeaderToast(err instanceof Error ? err.message : "Could not close review"));
@@ -2710,7 +2707,8 @@ export function doRenderApp(): void {
 					if (!group || !agent || typeof e.detail?.feedback !== "string") return;
 					agent.prompt(e.detail.feedback);
 					const { cleanupReviewGroup } = await loadReviewSources();
-					await cleanupReviewGroup(sid, group.reviewId);
+					const removed = await cleanupReviewGroup(sid, group.reviewId);
+					if (removed) discardReviewPaneFinalDraft(group.reviewId);
 				}}
 				@review-decision=${async (e: CustomEvent) => {
 					e.preventDefault();
@@ -2735,6 +2733,7 @@ export function doRenderApp(): void {
 								agent.prompt(feedback);
 							},
 						});
+						discardReviewPaneFinalDraft(group.reviewId);
 					} catch (err) {
 						showHeaderToast(err instanceof Error ? err.message : "Review decision failed");
 					}
