@@ -1,6 +1,6 @@
 # Design: `bobbit` gateway tool suite (three tiers)
 
-Status: **design** · Goal: Bobbit Gateway Tool · Author: coder-cbeb
+Status: **historical design** · Goal: Bobbit Gateway Tool · Author: coder-cbeb · Its `bobbit_read`/`read_session` verbosity policy is superseded; direct REST and unrelated admin/orchestrate behavior remain separate.
 
 ## 1. Overview & motivation
 
