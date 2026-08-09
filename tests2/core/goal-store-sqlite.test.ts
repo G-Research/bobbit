@@ -111,6 +111,75 @@ describe("GoalStore SQLite persistence", () => {
 		expect(reloaded.get("one")?.title).toBe("Changed");
 	});
 
+	it("preserves null workflow clears through runtime publication and authoritative reload", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(goal("runtime-null", {
+			workflowId: "feature",
+			workflow: {
+				id: "feature",
+				name: "Feature",
+				description: "Feature workflow",
+				gates: [],
+				createdAt: 1,
+				updatedAt: 2,
+			},
+		}));
+		await store.flush();
+
+		expect(store.update("runtime-null", { workflowId: null, workflow: null } as any)).toBe(true);
+		expect(store.get("runtime-null")).toMatchObject({ workflowId: null, workflow: null });
+		await store.flush();
+
+		const db = new Database(path.join(stateDir, "goals.sqlite"));
+		const payload = JSON.parse((db.prepare("SELECT payload FROM goal_records WHERE id = ?").get("runtime-null") as { payload: string }).payload);
+		expect(payload).toMatchObject({ workflowId: null, workflow: null });
+		db.close();
+
+		await closeTracked(store);
+		const reopened = openStore(stateDir);
+		expect(reopened.get("runtime-null")).toMatchObject({ workflowId: null, workflow: null });
+	});
+
+	it("migrates legacy null workflow fields exactly and reloads them from SQLite", async () => {
+		const stateDir = tempRoot();
+		const legacyFile = path.join(stateDir, "goals.json");
+		const legacyGoal = goal("legacy-null", { workflowId: null, workflow: null } as any);
+		const sourceBytes = Buffer.from(JSON.stringify([legacyGoal]));
+		fs.writeFileSync(legacyFile, sourceBytes);
+
+		const migrated = openStore(stateDir);
+		expect(migrated.get("legacy-null")).toEqual(legacyGoal);
+		expect(fs.readFileSync(`${legacyFile}.sqlite-retired`)).toEqual(sourceBytes);
+		const db = new Database(path.join(stateDir, "goals.sqlite"));
+		const payload = JSON.parse((db.prepare("SELECT payload FROM goal_records WHERE id = ?").get("legacy-null") as { payload: string }).payload);
+		expect(payload).toEqual(legacyGoal);
+		db.close();
+
+		await closeTracked(migrated);
+		const reopened = openStore(stateDir);
+		expect(reopened.get("legacy-null")).toEqual(legacyGoal);
+	});
+
+	it("continues to reject non-null malformed workflow fields", async () => {
+		const sourceDir = tempRoot();
+		const sourceFile = path.join(sourceDir, "goals.json");
+		const sourceBytes = Buffer.from(JSON.stringify([goal("invalid-source", { workflowId: 42 } as any)]));
+		fs.writeFileSync(sourceFile, sourceBytes);
+		expect(() => openStore(sourceDir)).toThrow(/workflowId must be a string or null/);
+		expect(fs.readFileSync(sourceFile)).toEqual(sourceBytes);
+
+		const runtimeDir = tempRoot();
+		const runtime = openStore(runtimeDir);
+		runtime.put(goal("invalid-runtime"));
+		await runtime.flush();
+		runtime.update("invalid-runtime", { workflow: "not-a-workflow" } as any);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		await expect(runtime.flush()).rejects.toThrow(/workflow: must be an object/);
+		runtime.update("invalid-runtime", { workflow: null } as any);
+		await runtime.flush();
+	});
+
 	it("validates, merges, verifies, and retires live and recovery JSON without resurrecting tombstones", async () => {
 		const stateDir = tempRoot();
 		const live = goal("live", { title: "Live wins", metadata: { extension: { nested: true } } });

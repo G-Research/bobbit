@@ -214,7 +214,7 @@ const SETUP_STATUSES = new Set(["ready", "preparing", "error"]);
 const MERGE_TARGETS = new Set(["master", "parent"]);
 const DIVERGENCE_POLICIES = new Set(["strict", "balanced", "autonomous"]);
 const STRING_FIELDS = [
-	"worktreePath", "branch", "repoPath", "projectId", "teamLeadSessionId", "workflowId", "setupError",
+	"worktreePath", "branch", "repoPath", "projectId", "teamLeadSessionId", "setupError",
 	"reattemptOf", "parentGoalId", "rootGoalId", "spawnedFromPlanId", "suggestedRole", "spawnedBySessionId",
 ] as const;
 const BOOLEAN_FIELDS = [
@@ -327,6 +327,9 @@ function validateGoal(
 		if (!Number.isFinite(value[field])) invalidGoal(label, `${field} must be finite`);
 	}
 	for (const field of STRING_FIELDS) if (value[field] !== undefined && typeof value[field] !== "string") invalidGoal(label, `${field} must be a string`);
+	if (value.workflowId !== undefined && value.workflowId !== null && typeof value.workflowId !== "string") {
+		invalidGoal(label, "workflowId must be a string or null");
+	}
 	for (const field of BOOLEAN_FIELDS) if (value[field] !== undefined && typeof value[field] !== "boolean") invalidGoal(label, `${field} must be boolean`);
 	for (const field of NUMBER_FIELDS) if (value[field] !== undefined && !Number.isFinite(value[field])) invalidGoal(label, `${field} must be finite`);
 	for (const field of STRING_ARRAY_FIELDS) if (value[field] !== undefined) validateStringArray(value[field], `${label} ${field}`);
@@ -336,7 +339,7 @@ function validateGoal(
 	if (value.metadata !== undefined && !isRecord(value.metadata)) invalidGoal(label, "metadata must be an object");
 	if (value.repoWorktrees !== undefined) validateStringRecord(value.repoWorktrees, `${label} repoWorktrees`);
 	if (value.inlineRoles !== undefined) validateInlineRoles(value.inlineRoles, `${label} inlineRoles`);
-	if (value.workflow !== undefined) validateWorkflow(value.workflow, `${label} workflow`);
+	if (value.workflow !== undefined && value.workflow !== null) validateWorkflow(value.workflow, `${label} workflow`);
 	if (validateSerialization) {
 		try {
 			if (JSON.stringify(value) === undefined) invalidGoal(label, "must be JSON serializable");
