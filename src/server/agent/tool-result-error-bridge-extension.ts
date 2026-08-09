@@ -37,6 +37,18 @@ function installUnknownFieldRefinements(schema, seen = new Set()) {
   if (schema.additionalProperties === false) {
     const refinements = Array.isArray(schema["~refine"]) ? schema["~refine"] : [];
     if (!refinements.some(refinement => refinement?.__bobbitUnknownFields === true)) {
+      // TypeBox discovers schema keys with Object.getOwnPropertyNames, while
+      // provider converters and JSON serialization consume enumerable keys.
+      // A hidden catch-all lets TypeBox reach the refinement without changing
+      // the provider-visible closed schema or declared patternProperties.
+      const patterns = isObject(schema.patternProperties) ? schema.patternProperties : {};
+      if (!Object.prototype.hasOwnProperty.call(patterns, "[^]*")) {
+        Object.defineProperty(patterns, "[^]*", { value: true, configurable: true });
+      }
+      if (!isObject(schema.patternProperties)) {
+        Object.defineProperty(schema, "patternProperties", { value: patterns, configurable: true });
+      }
+
       const refinement = {
         __bobbitUnknownFields: true,
         check: value => unknownFields(schema, value).length === 0,
@@ -44,16 +56,10 @@ function installUnknownFieldRefinements(schema, seen = new Set()) {
           .map(field => \`Unrecognized field: \${field}\`)
           .join("; "),
       };
-      const nextRefinements = [...refinements, refinement];
-      Object.defineProperty(nextRefinements, "toJSON", { value: () => undefined });
-      schema["~refine"] = nextRefinements;
-
-      // TypeBox only evaluates refinements after base-schema checks pass. Keep
-      // the provider-facing JSON Schema closed while letting the refinement
-      // own additional-property validation and its field-specific message.
-      const validationPassthrough = {};
-      Object.defineProperty(validationPassthrough, "toJSON", { value: () => false });
-      schema.additionalProperties = validationPassthrough;
+      Object.defineProperty(schema, "~refine", {
+        value: [...refinements, refinement],
+        configurable: true,
+      });
     }
   }
 

@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateToolArguments } from "@earendil-works/pi-ai";
+import { convertTools } from "@earendil-works/pi-ai/api/google-shared";
 import { Type } from "typebox";
 import { describe, it } from "vitest";
 import {
@@ -59,6 +60,14 @@ async function installSchemaBridge(parameters: unknown): Promise<void> {
 	await events.get("session_start")!({ type: "session_start", reason: "startup" });
 }
 
+function copyEnumerablePayload(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(copyEnumerablePayload);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, copyEnumerablePayload(entry)]));
+	}
+	return value;
+}
+
 describe("tool result error bridge extension", () => {
 	it("throws returned isError:true results so pi marks the tool result errored", async () => {
 		const activate = await loadGeneratedExtension();
@@ -93,9 +102,15 @@ describe("tool result error bridge extension", () => {
 		assert.deepEqual(await handlers.get("x")!({}), { content: [{ type: "text", text: "ok" }] });
 	});
 
-	it("names every unknown field through pi's real schema validator", async () => {
+	it("names every unknown field without changing provider schema payloads", async () => {
 		const parameters = Type.Object({ operation: Type.Literal("health") }, { additionalProperties: false });
 		const providerSchema = JSON.stringify(parameters);
+		const providerPayload = copyEnumerablePayload(parameters);
+		const googlePayload = convertTools([{
+			name: "bobbit_read",
+			description: "Read gateway state",
+			parameters,
+		}], true);
 		await installSchemaBridge(parameters);
 		const tool = {
 			name: "bobbit_read",
@@ -128,8 +143,61 @@ describe("tool result error bridge extension", () => {
 			},
 		);
 		assert.equal(JSON.stringify(parameters), providerSchema);
+		assert.deepEqual(copyEnumerablePayload(parameters), providerPayload);
+		assert.deepEqual(convertTools([{
+			name: "bobbit_read",
+			description: "Read gateway state",
+			parameters,
+		}], true), googlePayload);
 		assert.deepEqual(Object.keys(parameters.properties), ["operation"]);
+		assert.equal((parameters as any).additionalProperties, false);
 		assert.doesNotMatch(JSON.stringify(parameters), /~refine|bobbitUnknownFields/);
+	});
+
+	it("preserves declared pattern properties while naming truly unknown fields", async () => {
+		const parameters = Type.Object(
+			{ operation: Type.Literal("health") },
+			{
+				additionalProperties: false,
+				patternProperties: { "^x-": Type.String() },
+			},
+		);
+		const providerPayload = copyEnumerablePayload(parameters);
+		await installSchemaBridge(parameters);
+		const tool = { name: "bobbit_read", parameters };
+
+		assert.deepEqual(
+			validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "pattern-valid",
+				name: "bobbit_read",
+				arguments: { operation: "health", "x-label": "kept" },
+			}),
+			{ operation: "health", "x-label": "kept" },
+		);
+		assert.throws(
+			() => validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "pattern-invalid",
+				name: "bobbit_read",
+				arguments: { operation: "health", "x-label": 42 },
+			}),
+			(error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				assert.doesNotMatch(message, /Unrecognized field: x-label/);
+				return true;
+			},
+		);
+		assert.throws(
+			() => validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "unknown",
+				name: "bobbit_read",
+				arguments: { operation: "health", other: true },
+			}),
+			/Unrecognized field: other/,
+		);
+		assert.deepEqual(copyEnumerablePayload(parameters), providerPayload);
 	});
 
 	it("preserves normal validation messages for recognized fields", async () => {
