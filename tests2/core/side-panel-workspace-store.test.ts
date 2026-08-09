@@ -39,13 +39,13 @@ function previewTab(entry = "index.html", version?: number): SidePanelWorkspaceT
 	};
 }
 
-function reviewTab(documentId = "doc-1", title = "Review"): SidePanelWorkspaceTab {
+function reviewTab(reviewId = "review-1", title = "Review"): SidePanelWorkspaceTab {
 	return {
-		id: `review:${encodeURIComponent(documentId)}`,
+		id: `review:${encodeURIComponent(reviewId)}`,
 		kind: "review",
 		title,
 		label: title,
-		source: { type: "review", sessionId, documentId, title },
+		source: { type: "review", sessionId, reviewId, title },
 		updatedAt: 1,
 	};
 }
@@ -72,8 +72,8 @@ describe("side-panel workspace canonicalization", () => {
 		assert.equal(canonicalizeTab({ ...previewTab("index.html"), id: "preview:entry:index.html:v:0", source: { type: "preview", sessionId, entry: "index.html", historical: true, version: 0 } }, sessionId), null);
 	});
 
-	it("migrates legacy review-title tabs to deterministic document ids", () => {
-		const tab = canonicalizeTab({
+	it("migrates legacy review document/title tabs to canonical review ids", () => {
+		const titleOnly = canonicalizeTab({
 			id: "review:My%20Review",
 			kind: "review",
 			title: "My Review",
@@ -81,10 +81,37 @@ describe("side-panel workspace canonicalization", () => {
 			source: { type: "review", sessionId, title: "My Review" },
 			updatedAt: 1,
 		}, sessionId);
-		assert.ok(tab);
-		assert.match(tab.id, /^review:legacy-title-[0-9a-f]{16}$/);
-		assert.equal(tab.source.type, "review");
-		assert.match(tab.source.documentId, /^legacy-title-[0-9a-f]{16}$/);
+		assert.ok(titleOnly);
+		assert.match(titleOnly.id, /^review:legacy-title-[0-9a-f]{16}$/);
+		assert.equal(titleOnly.source.type, "review");
+		assert.match((titleOnly.source as any).reviewId, /^legacy-title-[0-9a-f]{16}$/);
+		assert.equal((titleOnly.source as any).documentId, undefined);
+
+		const document = canonicalizeTab({
+			id: "review:legacy-title",
+			kind: "review",
+			title: "Legacy document",
+			label: "Review",
+			source: { type: "review", sessionId, documentId: "document-1", title: "Legacy document" },
+			updatedAt: 1,
+		}, sessionId);
+		assert.ok(document);
+		assert.equal(document.id, "review:document-1");
+		assert.deepEqual(document.source, { type: "review", sessionId, reviewId: "document-1", title: "Legacy document" });
+	});
+
+	it("keeps duplicate review titles distinct by review id and rejects mismatched canonical ids", () => {
+		const workspace = canonicalizeWorkspace({
+			tabs: [reviewTab("review-first", "Findings"), reviewTab("review-second", "Findings")],
+			activeTabId: "review:review-second",
+		}, sessionId);
+		assert.deepEqual(workspace.tabs.map((tab) => tab.id), ["review:review-first", "review:review-second"]);
+		assert.equal(workspace.activeTabId, "review:review-second");
+
+		assert.equal(canonicalizeTab({
+			...reviewTab("review-first", "Findings"),
+			id: "review:review-second",
+		}, sessionId), null);
 	});
 
 	it("canonicalizes legacy pack ids to default instance and rejects unsafe params", () => {
@@ -186,8 +213,8 @@ describe("side-panel workspace mutations", () => {
 
 	it("chooses adjacent active tab on close", () => {
 		const tabs = [proposalTab(), previewTab(), reviewTab()];
-		assert.equal(nextActiveAfterClose(tabs, "preview:entry:index.html", "preview:entry:index.html"), "review:doc-1");
-		assert.equal(nextActiveAfterClose(tabs, "review:doc-1", "review:doc-1"), "preview:entry:index.html");
+		assert.equal(nextActiveAfterClose(tabs, "preview:entry:index.html", "preview:entry:index.html"), "review:review-1");
+		assert.equal(nextActiveAfterClose(tabs, "review:review-1", "review:review-1"), "preview:entry:index.html");
 		assert.equal(nextActiveAfterClose(tabs, "preview:entry:index.html", "proposal:goal"), "proposal:goal");
 	});
 
