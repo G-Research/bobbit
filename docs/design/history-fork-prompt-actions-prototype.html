@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>History fork prompt actions prototype</title>
+	<!--
+		DESIGN SPEC — Fork From History / prompt actions
+
+		Research anchors:
+		- src/ui/components/SidebarActionsPopover.ts: canonical 13px menu, 4px panel
+		  inset, 6px × 10px rows, 8px icon gap, 8px radius, 6px anchor gap,
+		  viewport clamping, roving focus, Escape/outside dismissal, and trailing
+		  .toggle-switch--sm behavior.
+		- src/ui/components/Messages.ts + src/ui/app.css: existing user prompt bubble,
+		  left alignment, chevron, attachment treatment, and optional author badge.
+		- src/app/session-actions.ts: Fork row and trailing "New worktree" control.
+		- docs/session-actions.md + docs/design/mobile-action-menus-ux.md: one canonical
+		  action model across desktop/mobile, persistent trigger, complete menu,
+		  touch targets, focus restoration, and responsive fixed positioning.
+
+		Placement decision:
+		The compact prompt-actions trigger sits immediately after the eligible prompt
+		bubble and is bottom-aligned. It does not cover text, links, chips, attachments,
+		or the optional author badge. The bubble reserves space for the trigger on narrow
+		viewports. This gives every eligible historic prompt the same always-visible
+		control on desktop and touch surfaces; there is no hover-only duplicate.
+
+		Eligibility shown in this prototype:
+		Only the first and second durable historic human prompt rows expose actions.
+		Assistant rows and the current in-flight prompt do not. Production eligibility
+		must additionally reject synthetic, optimistic, pending, non-user, malformed,
+		stale, and non-active-branch rows using server-authoritative entry IDs.
+
+		Shared primitive consistency:
+		The popover intentionally copies the current SidebarActionsPopover geometry,
+		typography, icon sizing, accent states, fixed positioning, focus restoration,
+		and compact toggle classes. It extends that primitive rather than creating a
+		lookalike: each item contributes ordered focus stops (row, optional help,
+		optional toggle). Arrow keys rove through those stops; Enter activates the row;
+		Space on the Fork row or toggle changes New worktree without forking.
+
+		Nested help decision:
+		(?) is a sibling focus stop, never nested in the Fork button. Pointer/touch events
+		stop before row activation and menu dismissal. Hover or focus previews the exact
+		tooltip; click/Enter/Space pins it for touch and keyboard. It remains associated
+		through aria-describedby.
+
+		Responsive behavior:
+		The menu uses position:fixed, right-aligns to the trigger, flips above when needed,
+		and stays 8px inside the viewport. The tooltip uses the same viewport clamp and
+		flips independently. Mobile uses identical contents and visible control styling;
+		only the invisible hit area grows to 44px.
+
+		Feedback states:
+		Copy closes the menu and uses the app-level transient toast language: “Prompt
+		copied” or “Couldn’t copy prompt”. Fork closes the menu, locks all prompt action
+		triggers during the mock request, and reports success/failure without altering the
+		source transcript. Prototype controls can force either failure state.
+
+		Implementation note:
+		Keep the original visible text as the copy source. The first sample deliberately
+		contains a slash skill and @path plus an attachment; copied text excludes the
+		attachment and must preserve the two line breaks and syntax exactly.
+	-->
+	<style>
+		* { box-sizing: border-box; }
+		html, body { height: 100%; }
+		body {
+			margin: 0;
+			background: var(--background, Canvas);
+			color: var(--foreground, CanvasText);
+			font-family: system-ui, sans-serif;
+			font-size: 14px;
+			overflow: hidden;
+		}
+		button, select { font: inherit; }
+		button { -webkit-tap-highlight-color: transparent; }
+		button:focus-visible, select:focus-visible, summary:focus-visible {
+			outline: 2px solid var(--ring, Highlight);
+			outline-offset: 2px;
+		}
+		.sr-only {
+			position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+			overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+		}
+		.icon { width: 16px; height: 16px; display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+		.icon--xs { width: 14px; height: 14px; }
+
+		.app-shell { height: 100%; display: grid; grid-template-rows: 48px minmax(0, 1fr) 52px; }
+		.session-header {
+			display: flex; align-items: center; gap: 10px; min-width: 0;
+			padding: 0 16px; border-bottom: 1px solid var(--border, ButtonBorder);
+			background: var(--background, Canvas); z-index: 2;
+		}
+		.back {
+			display: none; place-items: center; width: 40px; height: 40px; padding: 0;
+			border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground, GrayText);
+		}
+		.session-mark {
+			display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 auto;
+			border-radius: 7px; background: color-mix(in oklch, var(--primary, LinkText) 12%, var(--secondary, ButtonFace));
+			color: var(--primary, LinkText); font-weight: 800; font-size: 12px;
+		}
+		.session-title { min-width: 0; flex: 1; }
+		.session-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
+		.session-title span { display: block; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground, GrayText); font-size: 11px; }
+		.header-actions { display: flex; align-items: center; gap: 4px; }
+		.header-icon {
+			display: inline-flex; align-items: center; justify-content: center; height: 28px; padding: 0 8px;
+			border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground, GrayText);
+		}
+		.header-icon:hover { background: color-mix(in oklch, var(--secondary, ButtonFace) 80%, transparent); color: var(--foreground, CanvasText); }
+
+		.transcript {
+			overflow-y: auto; overscroll-behavior: contain; position: relative;
+			padding: 18px max(14px, calc((100vw - 920px) / 2)) 44px;
+			background: var(--background, Canvas);
+		}
+		.turn { margin: 0 0 14px; }
+		.prompt-row { display: flex; align-items: flex-end; gap: 4px; min-width: 0; margin: 2px 16px; }
+		.prompt-bubble-shell { display: inline-grid; grid-template-areas: "stack"; width: fit-content; min-width: 0; max-width: min(78%, 720px); }
+		.prompt-bubble-shell > * { grid-area: stack; }
+		.prompt-author-badge {
+			z-index: 2; align-self: start; justify-self: start; display: flex; align-items: center; gap: 5px;
+			width: max-content; max-width: calc(100% - 18px); height: 24px; margin-left: 10px;
+			padding: 1px 7px 1px 3px; border: 1px solid var(--border, ButtonBorder); border-radius: 6px;
+			background: var(--card, Canvas); box-shadow: 0 1px 4px color-mix(in oklch, var(--foreground, CanvasText) 8%, transparent);
+			color: var(--muted-foreground, GrayText); line-height: 1;
+		}
+		.author-initial { display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--border, ButtonBorder); border-radius: 4px; background: var(--secondary, ButtonFace); color: var(--secondary-foreground, CanvasText); font-size: 7px; font-weight: 850; }
+		.author-name { color: var(--foreground, CanvasText); font-size: 10px; font-weight: 670; }
+		.user-message {
+			position: relative; min-width: 0; max-width: 100%; padding: 9px 14px 9px 25px;
+			border: 0; border-radius: 6px;
+			background: linear-gradient(135deg, var(--user-msg-bg, var(--card, Canvas)), var(--user-msg-bg2, var(--secondary, ButtonFace)));
+			box-shadow: 0 1px 4px var(--user-msg-shadow, color-mix(in oklch, var(--foreground, CanvasText) 8%, transparent)), 0 2px 8px var(--user-msg-shadow2, color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent));
+			font-size: 14px; line-height: 1.55; overflow-wrap: anywhere;
+		}
+		.user-message::before { content: "❯"; position: absolute; left: 8px; top: 1.22em; color: var(--user-msg-accent, var(--primary, LinkText)); font-size: 12px; font-weight: 700; line-height: 1; }
+		.prompt-bubble-shell--labelled .user-message { margin-top: 14px; padding-top: 14px; }
+		.prompt-bubble-shell--labelled .user-message::before { top: 19px; }
+		.syntax { color: var(--primary, LinkText); font-weight: 600; }
+		.attachment {
+			display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; margin-top: 9px;
+			padding: 6px 8px; border: 1px solid var(--border, ButtonBorder); border-radius: 6px; background: color-mix(in oklch, var(--background, Canvas) 55%, transparent);
+			color: var(--muted-foreground, GrayText); font-size: 11px;
+		}
+		.attachment-thumb { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 4px; background: var(--secondary, ButtonFace); color: var(--primary, LinkText); }
+		.prompt-actions-wrap { position: relative; flex: 0 0 32px; width: 32px; height: 32px; }
+		.prompt-actions-trigger {
+			position: relative; display: inline-flex; align-items: center; justify-content: center;
+			width: 28px; height: 28px; margin: 2px; padding: 0; border: 0; border-radius: 6px;
+			background: transparent; color: var(--muted-foreground, GrayText); cursor: pointer;
+			transition: color 120ms ease, background 120ms ease, opacity 120ms ease;
+		}
+		.prompt-actions-trigger:hover, .prompt-actions-trigger[aria-expanded="true"] { background: color-mix(in oklch, var(--secondary, ButtonFace) 80%, transparent); color: var(--foreground, CanvasText); }
+		.prompt-actions-trigger:active { background: var(--secondary, ButtonFace); }
+		.prompt-actions-trigger:disabled { opacity: .45; cursor: wait; }
+		.prompt-actions-trigger.is-busy .menu-icon { display: none; }
+		.prompt-actions-trigger:not(.is-busy) .spinner { display: none; }
+		.spinner { width: 14px; height: 14px; border: 2px solid color-mix(in oklch, currentColor 25%, transparent); border-top-color: currentColor; border-radius: 50%; animation: spin .7s linear infinite; }
+		@keyframes spin { to { transform: rotate(360deg); } }
+
+		.assistant-row { max-width: min(82%, 760px); margin: 0 16px; padding: 4px 0; color: var(--foreground, CanvasText); font-size: 14px; line-height: 1.65; }
+		.assistant-meta { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; color: var(--muted-foreground, GrayText); font-size: 11px; }
+		.bobbit-dot { width: 16px; height: 16px; border-radius: 5px 5px 7px 7px; background: color-mix(in oklch, var(--primary, LinkText) 25%, var(--secondary, ButtonFace)); border: 1px solid color-mix(in oklch, var(--primary, LinkText) 32%, var(--border, ButtonBorder)); }
+		.inflight-pill { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0 0 16px; color: var(--muted-foreground, GrayText); font-size: 11px; }
+
+		.composer {
+			display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 16px;
+			border-top: 1px solid var(--border, ButtonBorder); background: var(--background, Canvas); z-index: 2;
+		}
+		.composer-field { width: min(760px, 100%); height: 36px; border: 1px solid var(--border, ButtonBorder); border-radius: 8px; background: var(--card, Canvas); color: var(--muted-foreground, GrayText); padding: 8px 12px; font-size: 12px; }
+
+		.popover-layer { position: fixed; z-index: 60; display: none; }
+		.popover-layer[data-open="true"] { display: block; }
+		.actions-menu {
+			display: flex; flex-direction: column; gap: 2px; width: max-content; min-width: 13em;
+			max-width: min(22em, calc(100vw - 16px)); padding: 4px; overflow: auto;
+			border: 1px solid var(--border, ButtonBorder); border-radius: 8px;
+			background: var(--popover, var(--background, Canvas)); color: var(--popover-foreground, var(--foreground, CanvasText));
+			box-shadow: 0 4px 12px color-mix(in oklch, var(--foreground, CanvasText) 15%, transparent);
+			font-size: 13px; outline: none; transform-origin: top right;
+			animation: menu-in 150ms cubic-bezier(.2,.8,.2,1);
+		}
+		.popover-layer[data-placement="top"] .actions-menu { transform-origin: bottom right; }
+		@keyframes menu-in { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
+		.menu-item-shell { display: flex; align-items: stretch; width: 100%; min-width: 0; border-radius: 4px; }
+		.menu-item-shell[data-highlight="true"], .menu-item-shell:hover { background: var(--accent, color-mix(in oklch, Highlight 12%, Canvas)); color: var(--accent-foreground, CanvasText); }
+		.menu-action, .help-control, .toggle-control {
+			border: 0; background: transparent; color: inherit; cursor: pointer;
+		}
+		.menu-action {
+			display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0;
+			padding: 6px 6px 6px 10px; border-radius: 4px; line-height: 1.2; text-align: left;
+		}
+		.menu-icon { display: inline-flex; align-items: center; justify-content: center; width: 1.2em; height: 1.2em; flex: 0 0 auto; }
+		.menu-label { min-width: 0; white-space: nowrap; }
+		.help-control {
+			align-self: center; display: inline-flex; align-items: center; justify-content: center;
+			width: 28px; height: 28px; flex: 0 0 28px; padding: 0; border-radius: 4px;
+			color: var(--muted-foreground, GrayText); font-size: 11px; font-weight: 650;
+		}
+		.help-control:hover, .help-control[data-active="true"] { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 7%, transparent); }
+		.toggle-control {
+			display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 6px 10px 6px 7px;
+			border-radius: 4px; color: var(--muted-foreground, GrayText); line-height: 1.2; white-space: nowrap;
+		}
+		.toggle-control:hover { color: var(--foreground, CanvasText); }
+		.toggle-switch {
+			appearance: none; position: relative; width: 22px; height: 13px; flex: 0 0 auto; margin: 0;
+			border: 0; border-radius: 7px; background: var(--border, ButtonBorder); cursor: pointer;
+			transition: background 200ms ease;
+		}
+		.toggle-switch::after { content: ""; position: absolute; top: 1.5px; left: 1.5px; width: 10px; height: 10px; border-radius: 50%; background: var(--muted-foreground, GrayText); transition: transform 200ms ease, background 200ms ease; }
+		.toggle-control[aria-checked="true"] .toggle-switch { background: var(--primary, LinkText); }
+		.toggle-control[aria-checked="true"] .toggle-switch::after { transform: translateX(9px); background: var(--primary-foreground, Canvas); }
+		.focus-stop:focus-visible { outline: 2px solid var(--ring, Highlight); outline-offset: -2px; }
+
+		.help-tooltip {
+			position: fixed; z-index: 80; display: none; width: min(292px, calc(100vw - 16px));
+			padding: 8px 10px; border: 1px solid var(--border, ButtonBorder); border-radius: 6px;
+			background: var(--popover, Canvas); color: var(--popover-foreground, CanvasText); box-shadow: 0 4px 12px color-mix(in oklch, var(--foreground, CanvasText) 15%, transparent);
+			font-size: 12px; line-height: 1.45; text-align: left;
+		}
+		.help-tooltip[data-open="true"] { display: block; animation: tip-in 100ms ease-out; }
+		@keyframes tip-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
+
+		.toast-stack { position: fixed; z-index: 100; left: 50%; bottom: 68px; transform: translateX(-50%); display: grid; gap: 6px; pointer-events: none; }
+		.toast {
+			display: none; align-items: center; gap: 7px; width: max-content; max-width: calc(100vw - 24px);
+			padding: 8px 14px; border: 1px solid var(--border, ButtonBorder); border-radius: 20px;
+			background: var(--card, Canvas); color: var(--foreground, CanvasText); box-shadow: 0 4px 12px color-mix(in oklch, var(--foreground, CanvasText) 15%, transparent);
+			font-size: 13px; white-space: nowrap;
+		}
+		.toast[data-open="true"] { display: inline-flex; animation: toast-in 160ms ease-out; }
+		.toast[data-kind="error"] { border-color: color-mix(in oklch, var(--negative, MarkText) 45%, var(--border, ButtonBorder)); }
+		.toast[data-kind="success"] .toast-icon { color: var(--positive, LinkText); }
+		.toast[data-kind="error"] .toast-icon { color: var(--negative, MarkText); }
+		@keyframes toast-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+		.prototype-controls { position: fixed; z-index: 40; right: 12px; bottom: 66px; width: min(268px, calc(100vw - 24px)); }
+		.prototype-controls details { border: 1px dashed var(--border, ButtonBorder); border-radius: 8px; background: color-mix(in oklch, var(--card, Canvas) 94%, transparent); box-shadow: 0 3px 10px color-mix(in oklch, var(--foreground, CanvasText) 8%, transparent); }
+		.prototype-controls summary { padding: 7px 10px; cursor: pointer; color: var(--muted-foreground, GrayText); font-size: 11px; font-weight: 650; }
+		.control-body { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; padding: 2px 10px 10px; font-size: 11px; }
+		.control-body label { color: var(--muted-foreground, GrayText); }
+		.control-body select { min-width: 94px; padding: 4px 6px; border: 1px solid var(--border, ButtonBorder); border-radius: 5px; background: var(--background, Canvas); color: var(--foreground, CanvasText); font-size: 11px; }
+
+		@media (max-width: 639px) {
+			.app-shell { grid-template-rows: 52px minmax(0, 1fr) 56px; }
+			.session-header { padding: 0 6px; gap: 4px; }
+			.back { display: grid; }
+			.session-mark { display: none; }
+			.header-icon { width: 40px; height: 40px; padding: 0; }
+			.header-icon:not(:last-child) { display: none; }
+			.transcript { padding: 12px 4px 36px; }
+			.prompt-row { margin-left: 8px; margin-right: 8px; gap: 2px; }
+			.prompt-bubble-shell { max-width: calc(100% - 42px); }
+			.user-message, .assistant-row { font-size: 15px; }
+			.assistant-row { max-width: calc(100% - 32px); margin-left: 16px; margin-right: 16px; }
+			.prompt-actions-wrap { width: 36px; height: 36px; flex-basis: 36px; }
+			.prompt-actions-trigger { width: 28px; height: 28px; margin: 4px; }
+			.prompt-actions-trigger::before { content: ""; position: absolute; inset: -8px; }
+			.actions-menu { max-width: calc(100vw - 16px); font-size: 13px; }
+			.menu-action { padding-top: 9px; padding-bottom: 9px; }
+			.help-control { width: 36px; height: 36px; flex-basis: 36px; }
+			.toggle-control { min-height: 42px; }
+			.prototype-controls { bottom: 70px; }
+			.toast-stack { bottom: 72px; }
+		}
+		@media (prefers-reduced-motion: reduce) {
+			*, *::before, *::after { scroll-behavior: auto !important; animation-duration: 1ms !important; transition-duration: 1ms !important; }
+		}
+	</style>
+</head>
+<body>
+	<div class="app-shell" id="appShell">
+		<header class="session-header">
+			<button class="back" type="button" aria-label="Back to sessions">
+				<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+			</button>
+			<div class="session-mark" aria-hidden="true">B</div>
+			<div class="session-title">
+				<strong>Fork From History</strong>
+				<span>goal/273cf6cd · UX design session</span>
+			</div>
+			<div class="header-actions" aria-label="Session controls">
+				<button class="header-icon" type="button" aria-label="Modify session" title="Modify session">
+					<svg class="icon icon--xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+				</button>
+				<button class="header-icon" type="button" aria-label="Session actions" title="Session actions">
+					<svg class="icon icon--xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+				</button>
+			</div>
+		</header>
+
+		<main class="transcript" id="transcript" aria-label="Session transcript">
+			<section class="turn" aria-label="Historic prompt and response">
+				<div class="prompt-row" data-entry-id="pi-entry-01" data-eligible="true">
+					<div class="prompt-bubble-shell prompt-bubble-shell--labelled">
+						<div class="prompt-author-badge" aria-label="Prompt by Jordan"><span class="author-initial" aria-hidden="true">U</span><span class="author-name">Jordan</span></div>
+						<div class="user-message" data-copy-text="/qa-test Verify the mobile session actions in @tests2/browser/session-actions.spec.ts.&#10;&#10;Please include keyboard and touch coverage.">
+							<span class="syntax">/qa-test</span> Verify the mobile session actions in <span class="syntax">@tests2/browser/session-actions.spec.ts</span>.<br><br>Please include keyboard and touch coverage.
+							<div class="attachment" aria-label="Attachment: mobile-menu.png">
+								<span class="attachment-thumb" aria-hidden="true"><svg class="icon icon--xs" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg></span>
+								<span>mobile-menu.png · 184 KB</span>
+							</div>
+						</div>
+					</div>
+					<div class="prompt-actions-wrap">
+						<button class="prompt-actions-trigger" type="button" aria-label="Actions for prompt: Verify the mobile session actions" aria-haspopup="menu" aria-expanded="false" title="Prompt actions">
+							<svg class="icon icon--xs menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span class="spinner" aria-hidden="true"></span>
+						</button>
+					</div>
+				</div>
+				<div class="assistant-row">
+					<div class="assistant-meta"><span class="bobbit-dot" aria-hidden="true"></span><span>Bobbit</span></div>
+					I’ll verify the mobile and desktop action surfaces, including keyboard focus, touch activation, and popover dismissal.
+				</div>
+			</section>
+
+			<section class="turn" aria-label="Historic prompt and response">
+				<div class="prompt-row" data-entry-id="pi-entry-08" data-eligible="true">
+					<div class="prompt-bubble-shell">
+						<div class="user-message" data-copy-text="Keep the source session live and reuse its current worktree.">Keep the source session live and reuse its current worktree.</div>
+					</div>
+					<div class="prompt-actions-wrap">
+						<button class="prompt-actions-trigger" type="button" aria-label="Actions for prompt: Keep the source session live" aria-haspopup="menu" aria-expanded="false" title="Prompt actions">
+							<svg class="icon icon--xs menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span class="spinner" aria-hidden="true"></span>
+						</button>
+					</div>
+				</div>
+				<div class="assistant-row">
+					<div class="assistant-meta"><span class="bobbit-dot" aria-hidden="true"></span><span>Bobbit</span></div>
+					Understood. The history fork will reuse the exact cwd and branch unless <strong>New worktree</strong> is explicitly enabled.
+				</div>
+			</section>
+
+			<section class="turn" aria-label="Current in-flight prompt">
+				<div class="prompt-row" data-entry-id="optimistic-current" data-eligible="false">
+					<div class="prompt-bubble-shell">
+						<div class="user-message">Now document the selected interaction details.</div>
+					</div>
+					<!-- Intentionally no actions: this is the current optimistic/in-flight row. -->
+				</div>
+				<div class="inflight-pill"><span class="spinner" aria-hidden="true"></span><span>Working…</span></div>
+			</section>
+		</main>
+
+		<footer class="composer" aria-label="Message composer">
+			<div class="composer-field" aria-disabled="true">Message Bobbit…</div>
+		</footer>
+	</div>
+
+	<div class="popover-layer" id="popoverLayer" data-open="false" data-placement="bottom">
+		<div class="actions-menu" id="actionsMenu" role="menu" aria-label="Prompt actions" tabindex="-1">
+			<div class="menu-item-shell" role="none" data-item="fork">
+				<button class="menu-action focus-stop" type="button" role="menuitem" tabindex="-1" data-stop="fork" title="Create a new session before this prompt">
+					<span class="menu-icon"><svg class="icon icon--xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="3" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="21" r="2"/><path d="M6 5v14M8 7h6a4 4 0 0 0 4-4v1"/></svg></span>
+					<span class="menu-label">Fork from history</span>
+				</button>
+				<button class="help-control focus-stop" id="forkHelp" type="button" role="menuitem" tabindex="-1" data-stop="help" aria-label="About Fork from history" aria-describedby="forkHelpTooltip" aria-expanded="false">(?)</button>
+				<button class="toggle-control focus-stop" id="worktreeToggle" type="button" role="menuitemcheckbox" tabindex="-1" data-stop="toggle" aria-checked="false" aria-label="New worktree (off) — reuse the source worktree" title="New worktree (off) — reuse the source worktree">
+					<span class="toggle-switch" aria-hidden="true"></span><span>New worktree</span>
+				</button>
+			</div>
+			<div class="menu-item-shell" role="none" data-item="copy">
+				<button class="menu-action focus-stop" type="button" role="menuitem" tabindex="-1" data-stop="copy" title="Copy the original prompt text">
+					<span class="menu-icon"><svg class="icon icon--xs" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></span>
+					<span class="menu-label">Copy prompt</span>
+				</button>
+			</div>
+		</div>
+	</div>
+
+	<div class="help-tooltip" id="forkHelpTooltip" role="tooltip">The new session will include the conversation up to, but not including, this prompt.</div>
+
+	<div class="toast-stack" aria-live="polite" aria-atomic="true">
+		<div class="toast" id="feedbackToast" data-open="false" data-kind="success" role="status">
+			<span class="toast-icon" id="toastIcon" aria-hidden="true">✓</span><span id="toastText"></span>
+		</div>
+	</div>
+
+	<aside class="prototype-controls" aria-label="Prototype controls">
+		<details>
+			<summary>Prototype controls</summary>
+			<div class="control-body">
+				<label for="copyOutcome">Copy prompt result</label>
+				<select id="copyOutcome"><option value="success">Success</option><option value="failure">Failure</option></select>
+				<label for="forkOutcome">Fork result</label>
+				<select id="forkOutcome"><option value="success">Success</option><option value="failure">Stale entry error</option></select>
+			</div>
+		</details>
+	</aside>
+
+	<script>
+		(() => {
+			const layer = document.getElementById('popoverLayer');
+			const menu = document.getElementById('actionsMenu');
+			const help = document.getElementById('forkHelp');
+			const tooltip = document.getElementById('forkHelpTooltip');
+			const toggle = document.getElementById('worktreeToggle');
+			const toast = document.getElementById('feedbackToast');
+			const toastText = document.getElementById('toastText');
+			const toastIcon = document.getElementById('toastIcon');
+			const copyOutcome = document.getElementById('copyOutcome');
+			const forkOutcome = document.getElementById('forkOutcome');
+			const triggers = [...document.querySelectorAll('.prompt-actions-trigger')];
+			const stops = [...menu.querySelectorAll('.focus-stop')];
+			let anchor = null;
+			let promptText = '';
+			let focusIndex = 0;
+			let newWorktree = false;
+			let helpPinned = false;
+			let toastTimer = 0;
+			let forkPending = false;
+
+			function clamp(value, min, max) { return Math.min(Math.max(value, min), max); }
+
+			function positionMenu() {
+				if (!anchor || layer.dataset.open !== 'true') return;
+				const rect = anchor.getBoundingClientRect();
+				const menuRect = menu.getBoundingClientRect();
+				const gap = 6;
+				const margin = 8;
+				const below = window.innerHeight - margin - (rect.bottom + gap);
+				const above = rect.top - margin - gap;
+				const placement = below < menuRect.height && above > below ? 'top' : 'bottom';
+				let top = placement === 'top' ? rect.top - gap - menuRect.height : rect.bottom + gap;
+				top = clamp(top, margin, Math.max(margin, window.innerHeight - margin - menuRect.height));
+				const left = clamp(rect.right - menuRect.width, margin, Math.max(margin, window.innerWidth - margin - menuRect.width));
+				layer.style.top = `${Math.round(top)}px`;
+				layer.style.left = `${Math.round(left)}px`;
+				layer.dataset.placement = placement;
+			}
+
+			function positionTooltip() {
+				if (tooltip.dataset.open !== 'true') return;
+				const rect = help.getBoundingClientRect();
+				const menuRect = menu.getBoundingClientRect();
+				const tipRect = tooltip.getBoundingClientRect();
+				const margin = 8;
+				const gap = 6;
+				let left = rect.left + rect.width / 2 - tipRect.width / 2;
+				left = clamp(left, margin, Math.max(margin, window.innerWidth - margin - tipRect.width));
+				const fitsBelow = menuRect.bottom + gap + tipRect.height <= window.innerHeight - margin;
+				let top = fitsBelow ? menuRect.bottom + gap : menuRect.top - gap - tipRect.height;
+				top = clamp(top, margin, Math.max(margin, window.innerHeight - margin - tipRect.height));
+				tooltip.style.left = `${Math.round(left)}px`;
+				tooltip.style.top = `${Math.round(top)}px`;
+			}
+
+			function setTooltip(open, pinned = helpPinned) {
+				helpPinned = pinned;
+				tooltip.dataset.open = open ? 'true' : 'false';
+				help.dataset.active = open ? 'true' : 'false';
+				help.setAttribute('aria-expanded', open ? 'true' : 'false');
+				if (open) requestAnimationFrame(positionTooltip);
+			}
+
+			function updateToggle() {
+				toggle.setAttribute('aria-checked', String(newWorktree));
+				const label = newWorktree
+					? 'New worktree (on) — fork into a fresh worktree'
+					: 'New worktree (off) — reuse the source worktree';
+				toggle.setAttribute('aria-label', label);
+				toggle.title = label;
+			}
+
+			function setFocused(index) {
+				focusIndex = (index + stops.length) % stops.length;
+				stops.forEach((stop, i) => { stop.tabIndex = i === focusIndex ? 0 : -1; });
+				menu.querySelectorAll('.menu-item-shell').forEach(shell => { shell.dataset.highlight = 'false'; });
+				stops[focusIndex].closest('.menu-item-shell').dataset.highlight = 'true';
+				stops[focusIndex].focus({ preventScroll: true });
+			}
+
+			function openMenu(trigger) {
+				if (forkPending) return;
+				if (anchor === trigger && layer.dataset.open === 'true') { closeMenu(true); return; }
+				if (anchor) anchor.setAttribute('aria-expanded', 'false');
+				anchor = trigger;
+				promptText = trigger.closest('.prompt-row').querySelector('[data-copy-text]').dataset.copyText;
+				newWorktree = false; // Requirement: reset OFF every time this prompt popover opens.
+				updateToggle();
+				setTooltip(false, false);
+				triggers.forEach(t => t.setAttribute('aria-expanded', String(t === trigger)));
+				layer.dataset.open = 'true';
+				focusIndex = 0;
+				stops.forEach((stop, i) => stop.tabIndex = i === 0 ? 0 : -1);
+				requestAnimationFrame(() => { positionMenu(); setFocused(0); });
+			}
+
+			function closeMenu(restoreFocus) {
+				if (layer.dataset.open !== 'true') return;
+				setTooltip(false, false);
+				layer.dataset.open = 'false';
+				if (anchor) anchor.setAttribute('aria-expanded', 'false');
+				const returnTarget = anchor;
+				anchor = null;
+				if (restoreFocus && returnTarget) returnTarget.focus({ preventScroll: true });
+			}
+
+			function showToast(message, kind = 'success', duration = 1900) {
+				clearTimeout(toastTimer);
+				toastText.textContent = message;
+				toast.dataset.kind = kind;
+				toastIcon.textContent = kind === 'error' ? '!' : '✓';
+				toast.dataset.open = 'true';
+				toastTimer = setTimeout(() => { toast.dataset.open = 'false'; }, duration);
+			}
+
+			async function writeClipboard(text) {
+				if (copyOutcome.value === 'failure') return false;
+				try {
+					if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
+				} catch (_) {}
+				let area;
+				try {
+					area = document.createElement('textarea'); area.value = text; area.readOnly = true;
+					area.style.position = 'fixed'; area.style.top = '-1000px'; document.body.appendChild(area);
+					area.select(); return document.execCommand('copy');
+				} catch (_) { return false; } finally { area?.remove(); }
+			}
+
+			async function copyPrompt() {
+				const text = promptText;
+				closeMenu(false);
+				const copied = await writeClipboard(text);
+				showToast(copied ? 'Prompt copied' : 'Couldn’t copy prompt', copied ? 'success' : 'error');
+			}
+
+			function setForkBusy(busy) {
+				forkPending = busy;
+				triggers.forEach(trigger => {
+					trigger.disabled = busy;
+					trigger.classList.toggle('is-busy', busy && trigger === anchor);
+					if (busy && trigger === anchor) trigger.setAttribute('aria-busy', 'true');
+					else trigger.removeAttribute('aria-busy');
+				});
+			}
+
+			function forkFromHistory() {
+				if (forkPending) return;
+				const usedNewWorktree = newWorktree;
+				const busyAnchor = anchor;
+				setForkBusy(true);
+				closeMenu(false);
+				setTimeout(() => {
+					setForkBusy(false);
+					if (busyAnchor) busyAnchor.classList.remove('is-busy');
+					if (forkOutcome.value === 'failure') {
+						showToast('Couldn’t fork: this prompt is no longer available', 'error', 3000);
+						busyAnchor?.focus({ preventScroll: true });
+					} else {
+						showToast(usedNewWorktree ? 'Fork created · New worktree' : 'Fork created · Current worktree reused', 'success', 2500);
+					}
+				}, 900);
+			}
+
+			triggers.forEach(trigger => trigger.addEventListener('click', event => {
+				event.preventDefault(); event.stopPropagation(); openMenu(trigger);
+			}));
+
+			menu.addEventListener('keydown', event => {
+				switch (event.key) {
+					case 'ArrowDown': event.preventDefault(); event.stopPropagation(); setFocused(focusIndex + 1); break;
+					case 'ArrowUp': event.preventDefault(); event.stopPropagation(); setFocused(focusIndex - 1); break;
+					case 'Home': event.preventDefault(); setFocused(0); break;
+					case 'End': event.preventDefault(); setFocused(stops.length - 1); break;
+					case 'Escape': event.preventDefault(); event.stopPropagation(); closeMenu(true); break;
+					case 'Tab': setTimeout(() => closeMenu(false), 0); break;
+					case ' ': if (document.activeElement?.dataset.stop === 'fork') { event.preventDefault(); newWorktree = !newWorktree; updateToggle(); } break;
+				}
+			});
+
+			menu.querySelector('[data-stop="fork"]').addEventListener('click', event => { event.stopPropagation(); forkFromHistory(); });
+			menu.querySelector('[data-stop="copy"]').addEventListener('click', event => { event.stopPropagation(); void copyPrompt(); });
+			toggle.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); newWorktree = !newWorktree; updateToggle(); });
+			help.addEventListener('mouseenter', () => setTooltip(true, helpPinned));
+			help.addEventListener('mouseleave', () => { if (!helpPinned && document.activeElement !== help) setTooltip(false, false); });
+			help.addEventListener('focus', () => setTooltip(true, helpPinned));
+			help.addEventListener('blur', () => { if (!helpPinned) setTooltip(false, false); });
+			help.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); setTooltip(!helpPinned, !helpPinned); });
+			help.addEventListener('keydown', event => {
+				if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); setTooltip(!helpPinned, !helpPinned); }
+			});
+
+			document.addEventListener('pointerdown', event => {
+				if (layer.dataset.open !== 'true') return;
+				if (layer.contains(event.target) || tooltip.contains(event.target) || anchor?.contains(event.target)) return;
+				closeMenu(true);
+			}, true);
+			window.addEventListener('resize', () => { positionMenu(); positionTooltip(); });
+			document.getElementById('transcript').addEventListener('scroll', () => { positionMenu(); positionTooltip(); }, { passive: true });
+		})();
+	</script>
+</body>
+</html>
