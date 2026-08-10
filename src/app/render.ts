@@ -1335,9 +1335,9 @@ function togglePanelTabOverflow(event: Event): void {
 	}
 	const rect = trigger.getBoundingClientRect();
 	const menuWidth = Math.min(260, Math.max(180, window.innerWidth - 16));
-	menu.style.width = `${menuWidth}px`;
-	menu.style.left = `${Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.right - menuWidth))}px`;
-	menu.style.top = `${Math.min(window.innerHeight - 8, rect.bottom + 4)}px`;
+	menu.style.setProperty("--panel-tab-menu-width", `${menuWidth}px`);
+	menu.style.setProperty("--panel-tab-menu-left", `${Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.right - menuWidth))}px`);
+	menu.style.setProperty("--panel-tab-menu-top", `${Math.min(window.innerHeight - 8, rect.bottom + 4)}px`);
 	menu.showPopover();
 	trigger.setAttribute("aria-expanded", "true");
 }
@@ -1346,6 +1346,11 @@ function syncPanelTabOverflowExpanded(event: Event): void {
 	const menu = event.currentTarget as HTMLElement | null;
 	const trigger = document.querySelector<HTMLButtonElement>(".panel-tab-overflow-trigger");
 	if (menu && trigger) trigger.setAttribute("aria-expanded", menu.matches(":popover-open") ? "true" : "false");
+}
+
+function dismissPanelTabOverflowFromBackdrop(event: MouseEvent): void {
+	if (event.target !== event.currentTarget) return;
+	(event.currentTarget as HTMLElement).hidePopover();
 }
 
 // Chrome-style axis lock: while the user drags a tab, SortableJS positions the
@@ -2753,18 +2758,20 @@ export function doRenderApp(): void {
 						` : ""}
 					</div>
 					${overflowTabs.length > 0 ? html`
-						<div id=${PANEL_TAB_OVERFLOW_MENU_ID} class="panel-tab-overflow-menu" role="menu" aria-label="More side-panel tabs" popover="auto" @toggle=${syncPanelTabOverflowExpanded}>
-							${overflowTabs.map((tab) => html`
-								<button type="button" role="menuitem" class="panel-tab-overflow-item" data-panel-tab-id=${tab.id} @click=${() => {
-									(document.getElementById(PANEL_TAB_OVERFLOW_MENU_ID) as HTMLElement | null)?.hidePopover();
-									(state as any).__lastSidePanelUserActiveSelection = { sessionId: workspaceSessionId(), tabId: tab.id, at: Date.now() };
-									setUnifiedMobileTab(tab);
-									renderApp();
-								}}>
-									<span class="panel-tab-overflow-label">${panelTabButtonLabel(tab)}</span>
-									${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
-								</button>
-							`)}
+						<div id=${PANEL_TAB_OVERFLOW_MENU_ID} class="panel-tab-overflow-menu" popover="auto" @toggle=${syncPanelTabOverflowExpanded} @click=${dismissPanelTabOverflowFromBackdrop}>
+							<div class="panel-tab-overflow-menu-card" role="menu" aria-label="More side-panel tabs">
+								${overflowTabs.map((tab) => html`
+									<button type="button" role="menuitem" class="panel-tab-overflow-item" data-panel-tab-id=${tab.id} @click=${() => {
+										(document.getElementById(PANEL_TAB_OVERFLOW_MENU_ID) as HTMLElement | null)?.hidePopover();
+										(state as any).__lastSidePanelUserActiveSelection = { sessionId: workspaceSessionId(), tabId: tab.id, at: Date.now() };
+										setUnifiedMobileTab(tab);
+										renderApp();
+									}}>
+										<span class="panel-tab-overflow-label">${panelTabButtonLabel(tab)}</span>
+										${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+									</button>
+								`)}
+							</div>
 						</div>
 					` : ""}
 					<div class="panel-tab-measurements" aria-hidden="true">
@@ -3175,31 +3182,33 @@ export function doRenderApp(): void {
 							` : ""}
 						</div>
 						${overflowTabs.length > 0 ? html`
-							<div id=${PANEL_TAB_OVERFLOW_MENU_ID} class="panel-tab-overflow-menu" role="menu" aria-label="More side-panel tabs" popover="auto" @toggle=${syncPanelTabOverflowExpanded}>
-								${overflowTabs.map((tab) => html`
-									<button
-										type="button"
-										role="menuitem"
-										class="panel-tab-overflow-item"
-										data-panel-tab-id=${tab.id}
-										@click=${() => {
-											(document.getElementById(PANEL_TAB_OVERFLOW_MENU_ID) as HTMLElement | null)?.hidePopover();
-											// The delegated pointerdown guard in main.ts only sees visible
-											// `.goal-tab-pill` elements. Overflow menu items need the same
-											// user-selection marker so an in-flight workspace payload cannot
-											// immediately pull focus back to the previously active tab.
-											(state as any).__lastSidePanelUserActiveSelection = {
-												sessionId: workspaceSessionId(),
-												tabId: tab.id,
-												at: Date.now(),
-											};
-											setUnifiedDesktopTab(tab);
-										}}
-									>
-										<span class="panel-tab-overflow-label">${panelTabButtonLabel(tab)}</span>
-										${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
-									</button>
-								`)}
+							<div id=${PANEL_TAB_OVERFLOW_MENU_ID} class="panel-tab-overflow-menu" popover="auto" @toggle=${syncPanelTabOverflowExpanded} @click=${dismissPanelTabOverflowFromBackdrop}>
+								<div class="panel-tab-overflow-menu-card" role="menu" aria-label="More side-panel tabs">
+									${overflowTabs.map((tab) => html`
+										<button
+											type="button"
+											role="menuitem"
+											class="panel-tab-overflow-item"
+											data-panel-tab-id=${tab.id}
+											@click=${() => {
+												(document.getElementById(PANEL_TAB_OVERFLOW_MENU_ID) as HTMLElement | null)?.hidePopover();
+												// The delegated pointerdown guard in main.ts only sees visible
+												// `.goal-tab-pill` elements. Overflow menu items need the same
+												// user-selection marker so an in-flight workspace payload cannot
+												// immediately pull focus back to the previously active tab.
+												(state as any).__lastSidePanelUserActiveSelection = {
+													sessionId: workspaceSessionId(),
+													tabId: tab.id,
+													at: Date.now(),
+												};
+												setUnifiedDesktopTab(tab);
+											}}
+										>
+											<span class="panel-tab-overflow-label">${panelTabButtonLabel(tab)}</span>
+											${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+										</button>
+									`)}
+								</div>
 							</div>
 						` : ""}
 						<div class="panel-tab-measurements" aria-hidden="true">

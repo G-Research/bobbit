@@ -247,9 +247,14 @@ test.describe("Side-panel tab contract", () => {
 		const menu = page.getByRole("menu", { name: "More side-panel tabs" });
 		await expect(menu).toBeVisible();
 		expect(await menu.evaluate((element) => ({
-			popover: element.hasAttribute("popover"),
+			popover: element.parentElement?.hasAttribute("popover") || false,
 			insideStrip: !!element.closest("[data-panel-tab-bar]"),
 		}))).toEqual({ popover: true, insideStrip: false });
+		await page.mouse.click(4, 760);
+		await expect(menu, "clicking the transparent area outside the menu card should dismiss it").toBeHidden();
+		await expect(more).toHaveAttribute("aria-expanded", "false");
+		await more.click();
+		await expect(menu).toBeVisible();
 		await page.keyboard.press("Escape");
 		const desktopSurfaces = await tabSurfaceColors(page);
 		expect(new Set(Object.values(desktopSurfaces)).size, `desktop selected, inactive, and strip surfaces should use three shades: ${JSON.stringify(desktopSurfaces)}`).toBe(3);
@@ -270,7 +275,12 @@ test.describe("Side-panel tab contract", () => {
 		const mobileBar = page.locator(".goal-tab-bar--mobile");
 		await expect(mobileBar).toBeVisible({ timeout: 10_000 });
 		await expect(mobileBar.locator('[data-panel-tab-kind="chat"]'), "mobile keeps Chat pinned beside desktop-style panel tabs").toBeVisible();
-		await expect(mobileBar.getByRole("button", { name: "More tabs" }), "mobile should use the same overflow menu instead of a compressed scrolling strip").toBeVisible();
+		const mobileMore = mobileBar.getByRole("button", { name: "More tabs" });
+		await expect(mobileMore, "mobile should use the same overflow menu instead of a compressed scrolling strip").toBeVisible();
+		await mobileMore.click();
+		await expect(page.getByRole("menu", { name: "More side-panel tabs" })).toBeVisible();
+		await page.mouse.click(4, 760);
+		await expect(page.getByRole("menu", { name: "More side-panel tabs" }), "mobile outside click should dismiss the overflow menu").toBeHidden();
 		const mobileOverflow = await mobileBar.evaluate((element) => element.scrollWidth - element.clientWidth);
 		expect(mobileOverflow, "mobile tab chrome should not create horizontal scrolling").toBeLessThanOrEqual(1);
 		const chatLabelGeometry = await mobileBar.locator('[data-panel-tab-kind="chat"] .goal-tab-pill-label').evaluate((label) => ({
