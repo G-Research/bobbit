@@ -1,13 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	cleanupReviewGroup,
 	openMarkdownReviewDocument,
 	openMarkdownReviewGroup,
+	persistReviewGroup,
 	upsertReviewGroup,
 } from "../../src/app/review-sources.js";
 import { setRenderApp, state, type ReviewGroupModel } from "../../src/app/state.js";
 import type { SidePanelWorkspace, SidePanelWorkspaceTab } from "../../src/app/side-panel-workspace.js";
+import {
+	addAnnotation,
+	clearReviewTombstone,
+	getAnnotations,
+	getReviewTombstone,
+} from "../../src/ui/components/review/AnnotationStore.js";
 
 const SESSION_ID = "review-group-model-session";
+const CLEANUP_SESSION_ID = "review-group-cleanup-session";
 
 function review(
 	reviewId: string,
@@ -60,6 +69,63 @@ function installWorkspacePersistenceFixture(): ReturnType<typeof vi.fn> {
 	return fetchMock;
 }
 
+function reviewTab(group: ReviewGroupModel): SidePanelWorkspaceTab {
+	return {
+		id: `review:${group.reviewId}`,
+		kind: "review",
+		title: `Review: ${group.title}`,
+		label: `Review: ${group.title}`,
+		source: {
+			type: "review",
+			sessionId: CLEANUP_SESSION_ID,
+			reviewId: group.reviewId,
+			documentId: group.reviewId,
+			title: group.title,
+		},
+		updatedAt: 1,
+	};
+}
+
+function installWorkspaceCleanupFixture(
+	initial: SidePanelWorkspace,
+	outcomes: Array<"conflict" | "success">,
+): { deleteAttempts: Array<{ tabId: string; ifMatch: string | null }>; workspace: () => SidePanelWorkspace } {
+	let workspace = initial;
+	const deleteAttempts: Array<{ tabId: string; ifMatch: string | null }> = [];
+	vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+		const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+		const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+		const match = url.pathname.match(/\/side-panel-workspace\/tabs\/([^/]+)$/);
+		if (method === "DELETE" && match) {
+			const headers = new Headers(input instanceof Request ? input.headers : undefined);
+			new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+			const tabId = decodeURIComponent(match[1]);
+			deleteAttempts.push({ tabId, ifMatch: headers.get("if-match") });
+			const outcome = outcomes.shift() || "success";
+			if (outcome === "conflict") {
+				workspace = { ...workspace, revision: workspace.revision + 1, updatedAt: workspace.updatedAt + 1 };
+				return Response.json({
+					error: "Stale side-panel workspace revision",
+					code: "STALE_REVISION",
+					workspace,
+				}, { status: 409 });
+			}
+			const tabs = workspace.tabs.filter((tab) => tab.id !== tabId);
+			workspace = {
+				...workspace,
+				revision: workspace.revision + 1,
+				tabs,
+				activeTabId: tabs.some((tab) => tab.id === workspace.activeTabId) ? workspace.activeTabId : tabs[0]?.id || "",
+				updatedAt: workspace.updatedAt + 1,
+			};
+			return Response.json({ workspace });
+		}
+		if (url.pathname.includes("/review/")) return new Response(null, { status: 204 });
+		throw new Error(`Unexpected request: ${method} ${url.pathname}`);
+	}));
+	return { deleteAttempts, workspace: () => workspace };
+}
+
 beforeEach(() => {
 	setRenderApp(() => {});
 	state.selectedSessionId = null;
@@ -80,8 +146,11 @@ beforeEach(() => {
 	localStorage.clear();
 });
 
-afterEach(() => {
+afterEach(async () => {
 	setRenderApp(() => {});
+	if (getReviewTombstone(CLEANUP_SESSION_ID, "cleanup-target")) {
+		await clearReviewTombstone(CLEANUP_SESSION_ID, "cleanup-target");
+	}
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
 });
@@ -201,5 +270,69 @@ describe("review group replacement identity", () => {
 			});
 		});
 		expect(state.reviewGroupsBySession[SESSION_ID].map((group) => group.reviewId)).toEqual(["canonical-review"]);
+	});
+});
+
+describe("review group workspace cleanup", () => {
+	function seedCleanup(outcomes: Array<"conflict" | "success">) {
+		const target: ReviewGroupModel = {
+			...review("cleanup-target", "Target review", [{ fileId: "target-file", title: "target.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		const sibling: ReviewGroupModel = {
+			...review("cleanup-sibling", "Sibling review", [{ fileId: "sibling-file", title: "sibling.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		persistReviewGroup(CLEANUP_SESSION_ID, target);
+		persistReviewGroup(CLEANUP_SESSION_ID, sibling);
+		const initial: SidePanelWorkspace = {
+			version: 1,
+			sessionId: CLEANUP_SESSION_ID,
+			revision: 4,
+			tabs: [reviewTab(target), reviewTab(sibling)],
+			activeTabId: reviewTab(target).id,
+			sizeMode: "split",
+			updatedAt: 4,
+		};
+		state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID] = initial;
+		state.lastWorkspaceRevisionBySession[CLEANUP_SESSION_ID] = initial.revision;
+		return { target, sibling, fixture: installWorkspaceCleanupFixture(initial, outcomes) };
+	}
+
+	it("retries an authoritative revision conflict and removes only the target primary tab", async () => {
+		const { target, sibling, fixture } = seedCleanup(["conflict", "success"]);
+		await addAnnotation(CLEANUP_SESSION_ID, target.files[0].fileId, { id: "target-comment", quote: "target", comment: "remove" });
+		await addAnnotation(CLEANUP_SESSION_ID, sibling.files[0].fileId, { id: "sibling-comment", quote: "sibling", comment: "keep" });
+
+		await expect(cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId)).resolves.toMatchObject({ reviewId: target.reviewId });
+
+		expect(fixture.deleteAttempts).toEqual([
+			{ tabId: reviewTab(target).id, ifMatch: null },
+			{ tabId: reviewTab(target).id, ifMatch: '"5"' },
+		]);
+		expect(fixture.workspace().tabs.map((tab) => tab.id)).toEqual([reviewTab(sibling).id]);
+		expect(state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID]?.tabs.map((tab) => tab.id)).toEqual([reviewTab(sibling).id]);
+		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([sibling.reviewId]);
+		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBe("closed");
+		expect(getAnnotations(CLEANUP_SESSION_ID, target.files[0].fileId)).toEqual([]);
+		expect(getAnnotations(CLEANUP_SESSION_ID, sibling.files[0].fileId)).toHaveLength(1);
+	});
+
+	it("rejects after a terminal retry conflict while retaining content cleanup and exact tombstone authority", async () => {
+		const { target, sibling, fixture } = seedCleanup(["conflict", "conflict"]);
+		await addAnnotation(CLEANUP_SESSION_ID, target.files[0].fileId, { id: "terminal-comment", quote: "target", comment: "remove" });
+
+		await expect(cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId)).rejects.toThrow(
+			"Review content was removed, but its workspace tab could not be closed",
+		);
+
+		expect(fixture.deleteAttempts).toEqual([
+			{ tabId: reviewTab(target).id, ifMatch: null },
+			{ tabId: reviewTab(target).id, ifMatch: '"5"' },
+		]);
+		expect(fixture.workspace().tabs.map((tab) => tab.id)).toEqual([reviewTab(target).id, reviewTab(sibling).id]);
+		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([sibling.reviewId]);
+		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBe("closed");
+		expect(getAnnotations(CLEANUP_SESSION_ID, target.files[0].fileId)).toEqual([]);
 	});
 });

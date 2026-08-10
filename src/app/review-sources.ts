@@ -797,11 +797,21 @@ export async function cleanupReviewGroup(
 	await flushPendingWrites();
 	const tabIds = new Set<string>([reviewWorkspaceTabId(group.reviewId)]);
 	for (const tab of getSidePanelWorkspace(sessionId).tabs) if (workspaceTabMatchesReview(tab, group)) tabIds.add(tab.id);
+	const staleTabIds: string[] = [];
+	let closeError: unknown;
 	for (const tabId of tabIds) {
-		try { await closeSidePanelTab(tabId, { sessionId }); }
-		catch { /* content cleanup remains authoritative */ }
+		try {
+			const workspace = await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
+			if (workspace.tabs.some((tab) => tab.id === tabId)) staleTabIds.push(tabId);
+		} catch (err) {
+			closeError ??= err;
+		}
 	}
 	if (isVisibleSession(sessionId)) renderApp();
+	if (staleTabIds.length > 0 || closeError) {
+		const detail = closeError instanceof Error && closeError.message ? ` ${closeError.message}` : "";
+		throw new Error(`Review content was removed, but its workspace tab could not be closed. Retry or reload to reconcile it.${detail}`);
+	}
 	return group;
 }
 
