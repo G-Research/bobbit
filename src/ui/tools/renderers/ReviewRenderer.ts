@@ -39,20 +39,39 @@ interface ReviewOpenPresentation {
 
 const BUTTON_CLASSES = "shrink-0 inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border border-border bg-transparent text-primary hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer focus-visible:outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]";
 
+function normalizedErrorCode(code: unknown): ReviewOpenErrorCode | undefined {
+	if (code === "REVIEW_PAYLOAD_UNAVAILABLE" || code === "REVIEW_REFERENCE_INVALID"
+		|| code === "REVIEW_PAYLOAD_TOO_LARGE" || code === "REVIEW_UNAUTHORIZED"
+		|| code === "REVIEW_PERSISTENCE_FAILED" || code === "REVIEW_WORKSPACE_CONFLICT"
+		|| code === "REVIEW_SESSION_UNAVAILABLE" || code === "REVIEW_CLIENT_OPEN_FAILED") return code;
+	if (code === "REVIEW_PAYLOAD_SESSION_UNAVAILABLE" || code === "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE") return "REVIEW_SESSION_UNAVAILABLE";
+	if (code === "REVIEW_PAYLOAD_INVALID" || code === "REVIEW_PAYLOAD_RESPONSE_INVALID") return "REVIEW_REFERENCE_INVALID";
+	if (code === "REVIEW_PAYLOAD_UPLOAD_FORBIDDEN") return "REVIEW_UNAUTHORIZED";
+	if (code === "REVIEW_PAYLOAD_PERSISTENCE_FAILED") return "REVIEW_PERSISTENCE_FAILED";
+	if (code === "REVIEW_PAYLOAD_WORKSPACE_CONFLICT") return "REVIEW_WORKSPACE_CONFLICT";
+	if (code === "REVIEW_OPEN_FAILED") return "REVIEW_CLIENT_OPEN_FAILED";
+	return undefined;
+}
+
 function safeToolErrorCode(result: ToolResultMessage<any> | undefined): ReviewOpenErrorCode | undefined {
 	if (!result?.isError || !Array.isArray(result.content)) return undefined;
 	for (const block of result.content) {
 		if (block?.type !== "text" || typeof (block as any).text !== "string") continue;
 		try {
 			const value = JSON.parse((block as any).text);
-			const code = value && typeof value === "object" ? (value as any).code : undefined;
-			if (code === "REVIEW_PAYLOAD_UNAVAILABLE" || code === "REVIEW_REFERENCE_INVALID"
-				|| code === "REVIEW_PAYLOAD_TOO_LARGE" || code === "REVIEW_UNAUTHORIZED"
-				|| code === "REVIEW_PERSISTENCE_FAILED" || code === "REVIEW_WORKSPACE_CONFLICT"
-				|| code === "REVIEW_SESSION_UNAVAILABLE" || code === "REVIEW_CLIENT_OPEN_FAILED") return code;
+			if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+			const error = (value as any).error;
+			const code = normalizedErrorCode((value as any).code)
+				?? normalizedErrorCode(error && typeof error === "object" && !Array.isArray(error) ? error.code : undefined);
+			if (code) return code;
 		} catch { /* ordinary tool error text is deliberately not rendered */ }
 	}
 	return undefined;
+}
+
+function receiptWasOpened(receipt: ReviewOpenReceipt): boolean {
+	const outcome = receipt.open;
+	return outcome?.ok === true || outcome?.status === "opened";
 }
 
 function errorMessage(code: ReviewOpenErrorCode | undefined): string {
@@ -112,7 +131,13 @@ function presentation(
 			code: "REVIEW_REFERENCE_INVALID",
 		};
 	}
-	if (!openState || openState.phase === "available") {
+	if (!openState) {
+		// A bounded receipt records whether this exact review opened when the tool
+		// completed. Historical rendering stays passive, but a previously opened
+		// and explicitly closed review should still advertise the recovery action.
+		return { buttonLabel: receiptWasOpened(receipt) ? "Re-open review" : "Open review", disabled: false, pending: false };
+	}
+	if (openState.phase === "available") {
 		return { buttonLabel: "Open review", disabled: false, pending: false };
 	}
 	if (openState.phase === "pending") {

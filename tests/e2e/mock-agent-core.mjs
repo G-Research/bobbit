@@ -594,6 +594,14 @@ export class MockAgentCore {
 			return { previewSnapshot: body };
 		}
 
+		// Durable large-review adapter. Unlike the legacy canned review triggers,
+		// this posts the canonical payload through the authenticated production API
+		// and emits the returned bounded receipt as the correlated tool result.
+		const durableLargeReview = text.match(/REVIEW_OPEN_DURABLE_LARGE_20(?:_DELAY:(\d+))?/);
+		if (durableLargeReview) {
+			return { durableLargeReview: { delayMs: durableLargeReview[1] ? Math.max(0, parseInt(durableLargeReview[1], 10)) : 0 } };
+		}
+
 		// Review-group browser triggers. Stable review/file identities make reload,
 		// background-session, close, and replay-suppression assertions deterministic.
 		const reviewGroupAction = (reviewId, title, files) => ({
@@ -1091,6 +1099,8 @@ export class MockAgentCore {
 			await this._handleTeamDelegateCard(toolAction.teamDelegateCard);
 		} else if (toolAction && toolAction.proposalBurst) {
 			await this._handleProposalBurst();
+		} else if (toolAction && toolAction.durableLargeReview) {
+			await this._handleDurableLargeReview(toolAction.durableLargeReview.delayMs);
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
 		} else if (toolAction && toolAction.previewArtifactFileCompactSnapshot) {
@@ -2727,6 +2737,97 @@ export class MockAgentCore {
 		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
+	async _handleDurableLargeReview(delayMs = 0) {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const toolId = `tool_large_review_${Date.now()}`;
+		const title = "Durable 20-file review";
+		const reviewId = "browser-large-review-20";
+		const totalBytes = 485 * 1024;
+		const bytesPerFile = totalBytes / 20;
+		const files = Array.from({ length: 20 }, (_, offset) => {
+			const index = offset + 1;
+			const suffix = String(index).padStart(2, "0");
+			const fileId = `browser-large-file-${suffix}`;
+			const fileTitle = index === 9 || index === 10 ? "Duplicate.md" : `Large file ${suffix}.md`;
+			const marker = `LARGE_REVIEW_MARKER_${suffix}`;
+			const prefix = `# Large file ${suffix}\n\nIdentity: ${fileId}\n\n${marker}\n\n`;
+			const markdown = prefix + "x".repeat(bytesPerFile - Buffer.byteLength(prefix, "utf8"));
+			return { fileId, title: fileTitle, markdown };
+		});
+		const input = {
+			title,
+			replace: true,
+			files: files.map(({ title: fileTitle, markdown }) => ({ title: fileTitle, markdown })),
+		};
+		this.emit({ type: "tool_execution_start", toolName: "review_open", toolId, input });
+		if (delayMs > 0) await this.tick(delayMs);
+
+		let output;
+		let isError = false;
+		try {
+			const response = sessionId ? await this._gatewayPost(
+				`/api/sessions/${encodeURIComponent(sessionId)}/review-payloads`,
+				{
+					toolCallId: toolId,
+					review: {
+						reviewId,
+						title,
+						files,
+						activeFileId: files[0].fileId,
+						replace: true,
+					},
+				},
+				{ "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" },
+			) : null;
+			if (!response || response.action !== "review_open" || response.version !== 2 || response.toolCallId !== toolId) {
+				isError = true;
+				output = JSON.stringify({
+					action: "review_open",
+					version: 2,
+					toolCallId: toolId,
+					error: { code: "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE", retryable: true, message: "Review content could not be prepared." },
+				});
+			} else {
+				output = JSON.stringify(response);
+			}
+		} catch {
+			isError = true;
+			output = JSON.stringify({
+				action: "review_open",
+				version: 2,
+				toolCallId: toolId,
+				error: { code: "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE", retryable: true, message: "Review content could not be prepared." },
+			});
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName: "review_open", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "review_open", isError });
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "review_open", arguments: input, input },
+				{ type: "text", text: "Done. Used review_open tool." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "review_open",
+			isError,
+			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+		// Keep the mock turn streaming until the browser has had an event-loop
+		// window to fetch and hydrate the artifact behind the bounded receipt.
+		// The real agent naturally spends longer after a 485 KiB tool call; without
+		// this adapter delay a status poll can observe idle before the client open
+		// coordinator has published its result.
+		await this.tick(1_000);
+	}
+
 	async _handleSingleTool(toolAction) {
 		// Honor an explicit stable toolId when provided (extension-host litmus), else
 		// the default per-call id. A stable id lets a test correlate the rendered
@@ -2832,8 +2933,8 @@ export class MockAgentCore {
 		}
 	}
 
-	/** Generic gateway POST helper used by seed / edit endpoints. */
-	_gatewayPost(pathname, body) {
+	/** Generic gateway POST helper used by seed, edit, and durable review fixtures. */
+	_gatewayPost(pathname, body, extraHeaders = {}) {
 		const creds = this._gatewayCreds();
 		if (!creds) return Promise.resolve(null);
 		const { gwUrl, token } = creds;
@@ -2847,6 +2948,7 @@ export class MockAgentCore {
 						"Authorization": `Bearer ${token}`,
 						"Content-Type": "application/json",
 						"Content-Length": Buffer.byteLength(payload),
+						...extraHeaders,
 					},
 					timeout: 5_000,
 				}, (res) => {
@@ -2899,6 +3001,11 @@ export class MockAgentCore {
 				// rather than interleave (which would double-assign
 				// currentAbortController and scramble event ordering).
 				const text = msg.message || "";
+				// Make the durable large-review fixture's busy transition observable
+				// before the prompt acknowledgement reaches browser polling helpers.
+				if (text.includes("REVIEW_OPEN_DURABLE_LARGE_20")) {
+					this.emit({ type: "session_status", status: "streaming" });
+				}
 				// Forward images so the echo can build image content blocks under the
 				// ECHO_IMAGE_BLOCK trigger (default text-only echo discarded them).
 				const images = Array.isArray(msg.images) ? msg.images : undefined;
@@ -2908,6 +3015,11 @@ export class MockAgentCore {
 					.catch(err => {
 						console.error("[mock-agent-core] Prompt error:", err);
 					});
+				// This fixture is parsed directly from the in-process transcript. Await
+				// its bounded real-API round trip so the prompt acknowledgement cannot
+				// race the journey's receipt lookup while ordinary mock prompts retain
+				// the production-like immediate acknowledgement.
+				if (text.includes("REVIEW_OPEN_DURABLE_LARGE_20")) await this._promptChain;
 				return { success: true };
 			}
 

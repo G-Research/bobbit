@@ -245,7 +245,8 @@ function sanitizeReceipt(
 		|| !validIdentity(value.reviewId, MAX_IDENTITY_BYTES)
 		|| (!expected.replace && value.reviewId !== expected.reviewId)
 		|| value.title !== expected.title
-		|| value.activeFileId !== expected.activeFileId
+		|| typeof value.activeFileId !== "string"
+		|| !validIdentity(value.activeFileId, MAX_IDENTITY_BYTES)
 		|| value.replace !== expected.replace
 		|| value.totalBytes !== expected.totalBytes
 		|| !Array.isArray(value.files)
@@ -253,17 +254,27 @@ function sanitizeReceipt(
 		return null;
 	}
 
+	// A replace:true upload is allowed to retain the authoritative review and
+	// duplicate-title file identities already present in the workspace. Validate
+	// the returned ordered metadata instead of requiring the extension's fresh
+	// provisional UUIDs, then emit those server-owned identities in the receipt.
+	const seenFileIds = new Set<string>();
 	const metadata: Array<{ fileId: string; title: string; bytes: number }> = [];
 	for (let index = 0; index < expected.files.length; index++) {
 		const received = value.files[index];
 		const file = expected.files[index];
 		if (!isRecord(received)
-			|| received.fileId !== file.fileId
+			|| typeof received.fileId !== "string"
+			|| !validIdentity(received.fileId, MAX_IDENTITY_BYTES)
+			|| seenFileIds.has(received.fileId)
+			|| (!expected.replace && received.fileId !== file.fileId)
 			|| received.title !== file.title
 			|| received.bytes !== file.bytes
 			|| hasOwn(received, "markdown")) return null;
-		metadata.push({ fileId: file.fileId, title: file.title, bytes: file.bytes });
+		seenFileIds.add(received.fileId);
+		metadata.push({ fileId: received.fileId, title: file.title, bytes: file.bytes });
 	}
+	if (!seenFileIds.has(value.activeFileId)) return null;
 
 	return {
 		action: "review_open",
@@ -272,7 +283,7 @@ function sanitizeReceipt(
 		payloadId: value.payloadId,
 		reviewId: value.reviewId,
 		title: expected.title,
-		activeFileId: expected.activeFileId,
+		activeFileId: value.activeFileId,
 		replace: expected.replace,
 		totalBytes: expected.totalBytes,
 		hash: value.hash,

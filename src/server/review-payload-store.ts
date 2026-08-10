@@ -6,7 +6,13 @@ import { bobbitStateDir } from "./bobbit-dir.js";
 export const MAX_REVIEW_MARKDOWN_BYTES = 10 * 1024 * 1024;
 export const MAX_REVIEW_PAYLOAD_FILES = 64;
 export const MAX_REVIEW_PAYLOAD_METADATA_BYTES = 256 * 1024;
-export const MAX_REVIEW_PAYLOAD_REQUEST_BYTES = MAX_REVIEW_MARKDOWN_BYTES + MAX_REVIEW_PAYLOAD_METADATA_BYTES;
+// JSON may expand one Markdown byte to six ASCII bytes (for example a control
+// character encoded as `\u0000`). Keep this review-only transport/storage cap
+// bounded while allowing every canonical payload at the exact 10 MiB Markdown
+// limit. The generic request-body and WebSocket limits remain unchanged.
+export const MAX_REVIEW_JSON_EXPANSION = 6;
+export const MAX_REVIEW_PAYLOAD_REQUEST_BYTES = MAX_REVIEW_MARKDOWN_BYTES * MAX_REVIEW_JSON_EXPANSION
+	+ MAX_REVIEW_PAYLOAD_METADATA_BYTES;
 const MAX_REVIEW_RECEIPT_METADATA_BYTES = 24 * 1024;
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
