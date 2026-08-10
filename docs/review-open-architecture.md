@@ -21,10 +21,10 @@ A new review crosses four boundaries:
    immutable artifact, and attempts the authoritative workspace open.
 3. The tool returns a bounded v2 receipt containing identity and file metadata,
    the content hash, and the automatic-open outcome. It never returns Markdown.
-4. The client correlates that receipt with the exact tool call. Automatic opens
-   and renderer clicks use the same coordinator to fetch the artifact, request
-   the authoritative open, validate the returned workspace, and then publish
-   the Markdown into the review model.
+4. The client correlates that receipt with the exact tool call. The shared
+   coordinator validates the automatic outcome and hydrates content only for an
+   existing authoritative workspace tab. Only an explicit renderer click asks
+   the server to open or reopen the review before hydration.
 
 The persisted artifact and workspace tab have different jobs. The artifact owns
 content bytes; the workspace owns open/closed state, tab order, active panel,
@@ -200,11 +200,12 @@ may leave a complete immutable payload by design; that payload is the retry
 source, not a partially opened review.
 
 Close/submit tombstones are passive-replay suppression, not open authority.
-Explicit automatic or manual opens do **not** erase tombstone storage. Instead,
-the committed exact primary tab authorizes the review while it exists. If an
-open fails, the prior tombstone remains byte-for-byte intact. If the primary is
-absent, transcript rendering, reload hydration, caches, and historical results
-continue to respect the tombstone and cannot recreate the review.
+Neither the upload-triggered open nor an explicit manual open erases tombstone
+storage. Instead, the committed exact primary tab authorizes the review while
+it exists. If an open fails, the prior tombstone remains byte-for-byte intact.
+If the primary is absent, transcript rendering, reload hydration, caches, and
+historical results continue to respect the tombstone and cannot recreate the
+review.
 
 Background opens mutate only the owning session's workspace and content cache.
 They may select the review inside that owner's workspace, but they never switch
@@ -214,11 +215,16 @@ authoritative.
 
 ## Automatic, manual, reload, and history behavior
 
-The server attempts the first workspace open during upload and records a
-structured `automaticOpen` success or failure in the receipt. The live client
-then uses the same exact-key coordinator used by renderer clicks. Coordinator
-state is keyed by `(sessionId, toolUseId, payloadId)` and deduplicates an open
-already in flight.
+The upload is the sole automatic workspace mutation and records its structured
+`automaticOpen` success or failure in the receipt. The live client passes the
+receipt through the same exact-key coordinator used by renderer clicks, but the
+automatic path never calls `/open`: it validates the recorded outcome, refreshes
+the authoritative workspace, and fetches and hydrates content only if the exact
+tab still exists. Only an explicit renderer click posts to `/open`, so it alone
+may reopen an absent review. Coordinator state is keyed by
+`(sessionId, toolUseId, payloadId)` and deduplicates work already in flight. A
+delayed receipt processed after close or submit therefore preserves workspace
+absence and the replay tombstone.
 
 The Review tool card is passive during render. It never opens a tab merely
 because a receipt appears in live or historical transcript content. It exposes:
@@ -237,9 +243,12 @@ allowlisted code, while untrusted server text is discarded. Persistence,
 workspace-conflict, unavailable-session, and client-open failures are retryable.
 Missing payload, invalid reference, over-limit content, and unauthorized access
 are terminal for that receipt and direct the user to rerun or reduce the review.
-A client render/hydration failure after a durable server commit remains
-retryable: retry refetches the authoritative workspace rather than inventing a
-client tab or rolling back server state.
+`REVIEW_PAYLOAD_QUOTA_EXCEEDED` is also terminal and non-retryable: the renderer
+disables the action as **Open unavailable** and safely advises starting a new
+session or removing saved reviews, without displaying raw server details. A
+client render/hydration failure after a durable server commit remains retryable:
+retry refetches the authoritative workspace rather than inventing a client tab
+or rolling back server state.
 
 On reload or reconnect, the client enumerates only complete artifact references
 already present in the authoritative workspace. It performs an exact GET and
