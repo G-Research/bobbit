@@ -169,16 +169,21 @@ export class ReviewAnnotationStore {
 		this.write(sessionId, data);
 	}
 
-	clearReviewTombstone(sessionId: string, reviewId: string): void {
+	clearReviewTombstone(
+		sessionId: string,
+		reviewId: string,
+		options: { clearLegacySubmitted?: boolean } = {},
+	): void {
 		const data = this.read(sessionId);
 		const submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
 		const closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
-		if (
-			submittedReviewIds.length === data.submittedReviewIds.length
-			&& closedReviewIds.length === data.closedReviewIds.length
-		) return;
+		const clearsExact = submittedReviewIds.length !== data.submittedReviewIds.length
+			|| closedReviewIds.length !== data.closedReviewIds.length;
+		const clearsLegacy = options.clearLegacySubmitted === true && data.submitted;
+		if (!clearsExact && !clearsLegacy) return;
 		data.submittedReviewIds = submittedReviewIds;
 		data.closedReviewIds = closedReviewIds;
+		if (options.clearLegacySubmitted) data.submitted = false;
 		this.write(sessionId, data);
 	}
 

@@ -17356,7 +17356,9 @@ async function handleApiRoute(
 		catch { json({ error: "Invalid reviewId" }, 400); return; }
 		const reviewId = pathReviewId ?? url.searchParams.get("reviewId") ?? body?.reviewId;
 		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
-		reviewAnnotationStore.clearReviewTombstone(sessionId, reviewId);
+		reviewAnnotationStore.clearReviewTombstone(sessionId, reviewId, {
+			clearLegacySubmitted: url.searchParams.get("clearLegacySubmitted") === "true" || body?.clearLegacySubmitted === true,
+		});
 		json({ ok: true });
 		return;
 	}

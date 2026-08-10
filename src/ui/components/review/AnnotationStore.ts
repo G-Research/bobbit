@@ -67,6 +67,8 @@ const _reviewTombstoneCache = new Map<string, Map<string, ReviewTombstoneState>>
 /** Tombstone mutations must win over an annotation GET already in flight. */
 let _tombstoneMutationVersion = 0;
 const _tombstoneMutationVersions = new Map<string, Map<string, number>>();
+/** Session-wide legacy submitted mutations must also win over an in-flight hydration. */
+const _legacySubmittedMutationVersions = new Map<string, number>();
 const _pendingTombstoneWrites = new Map<string, Set<Promise<void>>>();
 const _annotationHydrationGeneration = new Map<string, number>();
 
@@ -140,6 +142,11 @@ function _applyTombstoneMutationsAfter(
   return hydrated;
 }
 
+function _applyLegacySubmittedMutationAfter(sessionId: string, hydrated: boolean, afterVersion: number): boolean {
+  const mutationVersion = _legacySubmittedMutationVersions.get(sessionId) || 0;
+  return mutationVersion > afterVersion ? _submittedCache.get(sessionId) === true : hydrated;
+}
+
 /**
  * Hydrate the in-memory cache from the server for a given session.
  * Call once on session connect, before reading annotations or submitted state.
@@ -157,7 +164,7 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
       // Server doesn't have data yet or session not found — start empty, while
       // retaining a live exact mutation that landed during this request.
       _annotationCache.set(sessionId, new Map());
-      _submittedCache.set(sessionId, false);
+      _submittedCache.set(sessionId, _applyLegacySubmittedMutationAfter(sessionId, false, mutationVersionAtRequest));
       _reviewTombstoneCache.set(sessionId, _applyTombstoneMutationsAfter(sessionId, new Map(), mutationVersionAtRequest));
       return;
     }
@@ -171,7 +178,7 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
       }
     }
     _annotationCache.set(sessionId, sessionCache);
-    _submittedCache.set(sessionId, !!data.submitted);
+    _submittedCache.set(sessionId, _applyLegacySubmittedMutationAfter(sessionId, !!data.submitted, mutationVersionAtRequest));
     const tombstones = new Map<string, ReviewTombstoneState>();
     if (Array.isArray(data.submittedReviewIds)) {
       for (const reviewId of data.submittedReviewIds) {
@@ -196,7 +203,7 @@ export async function initAnnotationStore(sessionId: string): Promise<void> {
     // Network error — initialize empty caches for graceful degradation while
     // retaining a live exact mutation that landed during this request.
     _annotationCache.set(sessionId, new Map());
-    _submittedCache.set(sessionId, false);
+    _submittedCache.set(sessionId, _applyLegacySubmittedMutationAfter(sessionId, false, mutationVersionAtRequest));
     _reviewTombstoneCache.set(sessionId, _applyTombstoneMutationsAfter(sessionId, new Map(), mutationVersionAtRequest));
   }
 }
@@ -272,6 +279,11 @@ function _recordTombstoneMutation(sessionId: string, reviewId: string): void {
   versions.set(reviewId, _tombstoneMutationVersion);
 }
 
+function _recordLegacySubmittedMutation(sessionId: string): void {
+  _tombstoneMutationVersion += 1;
+  _legacySubmittedMutationVersions.set(sessionId, _tombstoneMutationVersion);
+}
+
 function _trackTombstoneWrite(sessionId: string, write: Promise<void>): Promise<void> {
   let pending = _pendingTombstoneWrites.get(sessionId);
   if (!pending) {
@@ -304,14 +316,23 @@ export function setReviewTombstone(
   ));
 }
 
-/** Clear only the exact review's tombstone when a fresh live open arrives. */
-export function clearReviewTombstone(sessionId: string, reviewId: string): Promise<void> {
+/** Clear an exact review tombstone, optionally retiring unowned legacy submitted state for a live open. */
+export function clearReviewTombstone(
+  sessionId: string,
+  reviewId: string,
+  options: { clearLegacySubmitted?: boolean } = {},
+): Promise<void> {
   _reviewTombstoneCache.get(sessionId)?.delete(reviewId);
   _recordTombstoneMutation(sessionId, reviewId);
+  if (options.clearLegacySubmitted) {
+    _submittedCache.set(sessionId, false);
+    _recordLegacySubmittedMutation(sessionId);
+  }
   // Deliberately unconditional: a background live open can arrive before this
   // browser hydrated the owner session's cache, while the server is tombstoned.
+  const query = options.clearLegacySubmitted ? "?clearLegacySubmitted=true" : "";
   return _trackTombstoneWrite(sessionId, _serverFetch(
-    `/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}`,
+    `/api/sessions/${encodeURIComponent(sessionId)}/review/tombstones/${encodeURIComponent(reviewId)}${query}`,
     { method: "DELETE" },
   ));
 }

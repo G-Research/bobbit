@@ -19,7 +19,7 @@ import {
 	clearAnnotations,
 	clearReviewTombstone,
 	flushPendingWrites,
-	getInlineCommentPayloadsForDocument,
+	getInlineCommentPayloads,
 	getReviewTombstones,
 	isReviewSubmitted,
 	setReviewTombstone,
@@ -42,7 +42,7 @@ export interface OpenReviewGroupOptions {
 	reviewId?: string;
 	activeFileId?: string;
 	replace?: boolean;
-	/** Explicit live opens clear this review's replay tombstone. */
+	/** Explicit live opens clear this review's tombstone and retire unowned legacy submitted state. */
 	live?: boolean;
 	sessionId?: string;
 	source?: ReviewSource;
@@ -434,7 +434,7 @@ export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupMod
 	writeSessionGroups(sessionId, nextGroups);
 	if (options.live) {
 		void enqueueReviewLifecycle(sessionId, stored.reviewId, async (isCurrent) => {
-			await clearReviewTombstone(sessionId, stored.reviewId);
+			await clearReviewTombstone(sessionId, stored.reviewId, { clearLegacySubmitted: true });
 			if (!isCurrent()) return;
 			await openReviewWorkspace(stored, sessionId);
 			if (!isCurrent()) return;
@@ -672,15 +672,19 @@ function workspaceTabMatchesReview(tab: any, group: ReviewGroupModel): boolean {
 	return (reviewTitleFromPanelTab(tab) || tab.title?.replace(/^Review:\s*/, "")) === group.title;
 }
 
+function documentsForGroup(group: ReviewGroupModel): Map<string, ReviewDocumentModel> {
+	return new Map(group.files.map((file) => [file.fileId, compatibilityDocument(group, file)]));
+}
+
+function unambiguousFileForComment(group: ReviewGroupModel, comment: ReviewInlineCommentPayload): ReviewFileModel | undefined {
+	if (comment.fileId) return group.files.find((candidate) => candidate.fileId === comment.fileId);
+	if (!comment.documentTitle) return group.files.length === 1 ? group.files[0] : undefined;
+	const matches = group.files.filter((candidate) => candidate.title === comment.documentTitle);
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
 function annotationCommentsForGroup(sessionId: string, group: ReviewGroupModel): ReviewInlineCommentPayload[] {
-	const comments: ReviewInlineCommentPayload[] = [];
-	for (const file of group.files) {
-		const doc = compatibilityDocument(group, file);
-		for (const comment of getInlineCommentPayloadsForDocument(sessionId, file.fileId, doc)) {
-			comments.push({ ...comment, fileId: file.fileId, documentTitle: file.title });
-		}
-	}
-	return comments;
+	return getInlineCommentPayloads(sessionId, documentsForGroup(group));
 }
 
 export function normalizeReviewDecisionPayload(input: ReviewDecisionPayload, sessionId: string, group: ReviewGroupModel): ReviewDecisionPayload {
@@ -690,18 +694,12 @@ export function normalizeReviewDecisionPayload(input: ReviewDecisionPayload, ses
 		inlineComments = annotationCommentsForGroup(sessionId, group);
 	} else {
 		const assigned = new Map<string, ReviewInlineCommentPayload[]>();
-		const unassigned: ReviewInlineCommentPayload[] = [];
 		for (const comment of provided) {
-			const file = comment.fileId
-				? group.files.find((candidate) => candidate.fileId === comment.fileId)
-				: group.files.find((candidate) => !comment.documentTitle || candidate.title === comment.documentTitle);
-			if (!file) { unassigned.push(comment); continue; }
+			const file = unambiguousFileForComment(group, comment);
+			if (!file) continue;
 			assigned.set(file.fileId, [...(assigned.get(file.fileId) || []), { ...comment, fileId: file.fileId, documentTitle: file.title }]);
 		}
 		inlineComments = group.files.flatMap((file) => assigned.get(file.fileId) || []);
-		if (group.files.length === 1) {
-			inlineComments.push(...unassigned.map((comment) => ({ ...comment, fileId: group.files[0].fileId, documentTitle: group.files[0].title })));
-		}
 	}
 	return {
 		decision: input.decision,
@@ -785,9 +783,9 @@ function composeDecisionFeedback(group: ReviewGroupModel, payload: ReviewDecisio
 	if (payload.inlineComments.length > 0) {
 		const grouped = new Map<string, ReviewInlineCommentPayload[]>();
 		for (const comment of payload.inlineComments) {
-			const file = comment.fileId ? group.files.find((candidate) => candidate.fileId === comment.fileId) : group.files.find((candidate) => candidate.title === comment.documentTitle);
-			const key = file?.fileId || comment.fileId || comment.documentTitle;
-			grouped.set(key, [...(grouped.get(key) || []), comment]);
+			const file = unambiguousFileForComment(group, comment);
+			if (!file) continue;
+			grouped.set(file.fileId, [...(grouped.get(file.fileId) || []), comment]);
 		}
 		const fileSections: string[] = [];
 		for (const file of group.files) {
