@@ -14,7 +14,6 @@ import {
 	previewTabVersionFromId,
 	proposalPanelTabId,
 	reviewDocumentIdFromPanelTab,
-	reviewPanelTabId,
 	reviewPanelTabIdFromReviewId,
 	reviewTitleFromPanelTab,
 	type PanelWorkspaceTab,
@@ -32,8 +31,8 @@ export interface SidePanelWorkspaceTab {
 	source:
 		| { type: "preview"; sessionId: string; entry: string; live?: boolean; historical?: boolean; version?: number; artifactId?: string; contentHash?: string; path?: string; url?: string; toolUseId?: string; blockIndex?: number }
 		| { type: "proposal"; sessionId: string; proposalType: SidePanelProposalType; rev?: number; historical?: boolean }
-		| { type: "review"; sessionId: string; reviewId: string; documentId?: string; title: string }
-		| { type: "review"; sessionId: string; reviewId?: undefined; documentId: string; title: string }
+		| { type: "review"; sessionId: string; reviewId: string; documentId?: string; title: string; toolCallId?: string; payloadId?: string; contentHash?: string }
+		| { type: "review"; sessionId: string; reviewId?: undefined; documentId: string; title: string; toolCallId?: undefined; payloadId?: undefined; contentHash?: undefined }
 		| { type: "inbox"; sessionId: string; staffId?: string }
 		| { type: "pack"; sessionId: string; packId: string; panelId: string; instanceKey: string; singleton?: boolean; params?: Record<string, unknown> };
 	state?: Record<string, unknown>;
@@ -215,11 +214,22 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 		if (sourceReviewId && routeReviewId !== sourceReviewId) return null;
 		const reviewId = sourceReviewId || legacyDocumentId;
 		if (!reviewId || !title) return null;
+		const toolCallId = stringValue(source.toolCallId).trim();
+		const payloadId = stringValue(source.payloadId).trim();
+		const contentHash = stringValue(source.contentHash).trim();
+		const artifactFieldCount = Number(!!toolCallId) + Number(!!payloadId) + Number(!!contentHash);
+		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
 		return {
 			...base,
 			id: reviewPanelTabIdFromReviewId(reviewId),
 			kind,
-			source: { type: "review", sessionId, reviewId, title },
+			source: {
+				type: "review",
+				sessionId,
+				reviewId,
+				title,
+				...(artifactFieldCount === 3 ? { toolCallId, payloadId, contentHash } : {}),
+			},
 		};
 	}
 	if (kind === "inbox") {
@@ -548,13 +558,25 @@ function sidePanelTabFromLegacyMirror(tab: PanelWorkspaceTab, sessionId: string)
 	}
 	if (tab.kind === "review") {
 		const title = reviewTitleFromPanelTab(tab) || tab.title.replace(/^Review:\s*/, "") || "Review";
-		const documentId = reviewDocumentIdFromPanelTab(tab) || title;
+		const reviewId = reviewDocumentIdFromPanelTab(tab) || title;
+		const source = asRecord(tab.source) || {};
+		const toolCallId = stringValue(source.toolCallId).trim();
+		const payloadId = stringValue(source.payloadId).trim();
+		const contentHash = stringValue(source.contentHash).trim();
+		const artifactFieldCount = Number(!!toolCallId) + Number(!!payloadId) + Number(!!contentHash);
+		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
 		return {
-			id: reviewPanelTabId(documentId),
+			id: reviewPanelTabIdFromReviewId(reviewId),
 			kind: "review",
 			title: `Review: ${title}`,
 			label: `Review: ${title}`,
-			source: { type: "review", sessionId, documentId, title },
+			source: {
+				type: "review",
+				sessionId,
+				reviewId,
+				title,
+				...(artifactFieldCount === 3 ? { toolCallId, payloadId, contentHash } : {}),
+			},
 			state: cloneJsonRecord(tab.state),
 			updatedAt,
 		};
