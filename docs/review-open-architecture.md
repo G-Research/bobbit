@@ -305,6 +305,7 @@ coordinator, and the Review renderer. Registered Test Suite v2 coverage lives in
 the review payload/receipt core tests, renderer/coordinator DOM tests,
 authenticated payload integration tests, and the large-review browser journey.
 
-Related docs: [Side-panel workspace](side-panel-workspace.md),
+Related docs: [Review payload artifact routes](rest-api.md#review-payload-artifacts),
+[Side-panel workspace](side-panel-workspace.md),
 [Review Pane Sign-Off](review-pane-signoff.md), and
 [Large-content truncation](internals.md#large-content-truncation).
