@@ -329,6 +329,86 @@ const LIST_SUMMARY_FIELDS = new Set([
 	"runningGateIds", "error", "code",
 ]);
 
+const GOAL_SUMMARY_FIELDS = [
+	"id", "title", "state", "projectId", "workflowId", "parentGoalId", "rootGoalId",
+	"paused", "archived", "archivedAt", "setupStatus", "setupError", "createdAt", "updatedAt",
+] as const;
+
+const GIT_STATUS_SCALAR_FIELDS = [
+	"branch", "primaryBranch", "isOnPrimary", "primaryRef", "hasUpstream",
+	"ahead", "behind", "aheadOfPrimary", "behindPrimary", "mergedIntoPrimary",
+	"insertionsVsPrimary", "deletionsVsPrimary", "clean", "summary", "unpushed",
+	"partial", "untrackedIncluded",
+] as const;
+
+const GIT_STATUS_FRESHNESS_FIELDS = [
+	"observedAt", "refreshedAt", "stale", "source", "ageMs",
+] as const;
+
+function projectGoalSummary(value: unknown): unknown {
+	if (!isRecord(value)) return sanitizeGeneric(value);
+	const out: Record<string, unknown> = {};
+	for (const field of GOAL_SUMMARY_FIELDS) {
+		let child = value[field];
+		if (field === "workflowId" && typeof child !== "string" && isRecord(value.workflow)) child = value.workflow.id;
+		if (child !== undefined) out[field] = sanitizeGeneric(child, field);
+	}
+	return out;
+}
+
+function projectGitStatusSummary(value: unknown): unknown {
+	if (!isRecord(value)) return sanitizeGeneric(value);
+	const aggregateSource = isRecord(value.aggregate) ? value.aggregate : value;
+	const aggregate: Record<string, unknown> = {};
+	for (const field of GIT_STATUS_SCALAR_FIELDS) {
+		const child = aggregateSource[field];
+		if (typeof child === "string" || typeof child === "number" || typeof child === "boolean") {
+			aggregate[field] = sanitizeGeneric(child, field);
+		}
+	}
+	if (Array.isArray(aggregateSource.status)) aggregate.changedFiles = aggregateSource.status.length;
+
+	const out: Record<string, unknown> = { aggregate };
+	for (const field of GIT_STATUS_FRESHNESS_FIELDS) {
+		const child = value[field];
+		if (child !== undefined) out[field] = sanitizeGeneric(child, field);
+	}
+	if (value.lastError !== undefined) out.lastError = sanitizeGeneric(value.lastError, "lastError");
+	return out;
+}
+
+function pickCompactFields(value: unknown, fields: ReadonlySet<string>): unknown {
+	if (!isRecord(value)) return sanitizeGeneric(value);
+	const out: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value)) {
+		if (fields.has(key)) out[key] = sanitizeGeneric(child, key);
+	}
+	return out;
+}
+
+const ARCHIVED_WORKTREE_SESSION_FIELDS = new Set([
+	"id", "sessionId", "title", "name", "projectId", "goalId", "status", "state", "count",
+]);
+const ARCHIVED_WORKTREE_GROUP_FIELDS = new Set([
+	"id", "key", "label", "name", "description", "count", "hasMore", "actionable", "status", "state",
+]);
+
+function projectArchivedSessionWorktrees(value: unknown): unknown {
+	if (!isRecord(value)) return sanitizeGeneric(value);
+	const out: Record<string, unknown> = {};
+	if (Array.isArray(value.items)) out.items = value.items.map((item) => sanitizeGeneric(item));
+	if (Array.isArray(value.sessions)) {
+		out.sessions = value.sessions.map((session) => pickCompactFields(session, ARCHIVED_WORKTREE_SESSION_FIELDS));
+	}
+	if (Array.isArray(value.groups)) {
+		out.groups = value.groups.map((group) => pickCompactFields(group, ARCHIVED_WORKTREE_GROUP_FIELDS));
+	}
+	for (const field of ["counts", "pagination", "generatedAt", "scannedAt", "checkedAt"] as const) {
+		if (value[field] !== undefined) out[field] = sanitizeGeneric(value[field], field);
+	}
+	return out;
+}
+
 function projectListEnvelope(
 	value: Record<string, unknown>,
 	collections: Readonly<Record<string, ProfileName>>,
@@ -393,7 +473,7 @@ export const BOBBIT_COMPACT_PROJECTIONS = {
 		get_workflow: { profile: "workflowDetail", mode: "detail" },
 		list_roles: { profile: "generic", mode: "list", collections: { roles: "role" } },
 		list_tools: { profile: "generic", mode: "list", collections: { tools: "tool" } },
-		list_gates: { profile: "generic", mode: "list", collections: { gates: "gate", "summary.gates": "gate" } },
+		list_gates: { profile: "generic", mode: "list", collections: { gates: "gate" } },
 		list_tasks: { profile: "generic", mode: "list", collections: { tasks: "task" } },
 		get_task: { profile: "task", mode: "detail" },
 		list_staff: { profile: "generic", mode: "list", collections: { staff: "staff" } },
@@ -441,9 +521,23 @@ export const BOBBIT_COMPACT_PROJECTIONS = {
 } as const satisfies Record<BobbitToolName, Record<string, ProjectionSpec>>;
 
 /** Apply the selected operation's compact projection. */
-export function projectBobbitResponse(tool: BobbitToolName, operation: string, data: unknown): unknown {
+export function projectBobbitResponse(
+	tool: BobbitToolName,
+	operation: string,
+	data: unknown,
+	params: Readonly<Record<string, unknown>> = {},
+): unknown {
 	const spec = (BOBBIT_COMPACT_PROJECTIONS[tool] as Record<string, ProjectionSpec>)[operation];
 	if (!spec) throw new Error(`missing compact projection for ${tool}.${operation}`);
+	if (tool === "bobbit_read" && operation === "get_goal" && params.view === "summary") {
+		return projectGoalSummary(data);
+	}
+	if (tool === "bobbit_read" && operation === "goal_git_status" && params.view === "summary") {
+		return projectGitStatusSummary(data);
+	}
+	if (tool === "bobbit_read" && operation === "maintenance_inspect" && params.probe === "archived_session_worktrees") {
+		return projectArchivedSessionWorktrees(data);
+	}
 	if (spec.profile === "identity") return data;
 
 	const mode = spec.mode ?? "compact";
