@@ -437,6 +437,18 @@ Structured proposal validation failures share this JSON shape across seed, edit,
 
 **Revision snapshots.** Every successful `seed` and `edit` write also writes an immutable per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>` (filename grammar `^(\d+)\.(md|yaml)$`; integer rev parsed back from filenames — no metadata file). The server stamps the resulting `rev` on every `proposal_update` WS event (single source of truth — the client overwrites `slot.rev` with the server value, never increments locally). Snapshot-write failures are non-fatal: the live draft is committed and the broadcast carries `rev: 0`, which the client treats as "snapshot system unavailable". Chat-card "Open proposal" buttons parse the `__proposal_rev_v1__:<n>` marker and, for older revisions, call the non-mutating `GET /snapshot` endpoint to populate read-only historical tabs. The mutating `restore` endpoint remains available for explicit rollback flows but is not used for ordinary history browsing. Full design: [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
 
+### Review payload artifacts
+
+These session-scoped routes persist canonical `review_open` Markdown outside the bounded tool result, then address it by exact identity. See [Durable review opening](review-open-architecture.md) for the receipt, persistence, workspace, and cleanup contract.
+
+| Method | Path | Authentication and identity contract |
+|---|---|---|
+| `POST` | `/api/sessions/:id/review-payloads` | Upload a canonical review for the exact owning session. Requires normal gateway authentication plus that session's `X-Bobbit-Session-Secret`; a sandbox credential may call only its own session collection route. The cumulative Markdown limit is 10 MiB in UTF-8 bytes across all files. |
+| `GET` | `/api/sessions/:id/review-payloads/:payloadId?toolCallId=:toolCallId&reviewId=:reviewId&hash=:hash` | Fetch only when the route owner and payload id plus the complete `toolCallId`, `reviewId`, and SHA-256 `hash` tuple match the stored artifact. This is a browser/admin surface; sandbox credentials cannot fetch Markdown. |
+| `POST` | `/api/sessions/:id/review-payloads/:payloadId/open` | Explicitly open or reopen the exact stored review through its owning session's workspace. This browser/admin-only route requires the body to repeat the exact `payloadId`, `toolCallId`, `reviewId`, and `hash`; sandbox credentials cannot mutate the workspace. |
+
+The 10 MiB bound applies only to cumulative review Markdown. The upload route has a narrowly larger JSON request allowance for escaping and bounded metadata; it does not raise generic API-body, WebSocket, transcript, event-buffer, or tool-result limits.
+
 ### Review Annotations
 
 Per-session review annotations are stored server-side so they survive browser close/reopen, server restart, and are visible from any connected client (on refresh). Annotations are stored in `.bobbit/state/review-annotations-{sessionId}.json`. The client `AnnotationStore` uses a cache-first pattern: reads are synchronous from an in-memory cache, writes update the cache immediately and send async server requests.
