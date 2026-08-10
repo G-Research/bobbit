@@ -262,12 +262,16 @@ function validateWorkflow(value: unknown, label: string): void {
 		if (gate.metadata !== undefined) validateStringRecord(gate.metadata, `${gateLabel} metadata`);
 		if (gate.verify !== undefined) {
 			if (!Array.isArray(gate.verify)) invalidGoal(gateLabel, "verify must be an array");
+				// Verify-step types have changed over time (for example the retired
+				// remote-state and integration-test types). A legacy goal stays valid as
+				// long as the step discriminator is a non-empty string — mirror the
+				// gate-store's tolerance so a retired type cannot brick the migration.
 			for (let stepIndex = 0; stepIndex < gate.verify.length; stepIndex++) {
 				const step = gate.verify[stepIndex];
 				const stepLabel = `${gateLabel} verify step at index ${stepIndex}`;
 				if (!isRecord(step) || typeof step.name !== "string"
-					|| !["command", "llm-review", "agent-qa", "subgoal", "human-signoff"].includes(String(step.type))) {
-					invalidGoal(stepLabel, "name and a supported type are required");
+					|| typeof step.type !== "string" || step.type.length === 0) {
+					invalidGoal(stepLabel, "name and a non-empty type are required");
 				}
 				for (const field of ["run", "prompt", "label", "optionalLabel", "role", "description", "failureGuidance", "component", "command"] as const) {
 					if (step[field] !== undefined && typeof step[field] !== "string") invalidGoal(stepLabel, `${field} must be a string`);

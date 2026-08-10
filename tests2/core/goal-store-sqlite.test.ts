@@ -161,6 +161,40 @@ describe("GoalStore SQLite persistence", () => {
 		expect(reopened.get("legacy-null")).toEqual(legacyGoal);
 	});
 
+	it("migrates a legacy verify step whose type was retired instead of failing the load", async () => {
+		const stateDir = tempRoot();
+		const legacyFile = path.join(stateDir, "goals.json");
+		// `remote-state` is a retired verify-step type still present in older
+		// goals.json (e.g. `{ type: "remote-state", operation: "publish-branch" }`).
+		// The migration must preserve it, not reject it against a current allow-list.
+		const legacyGoal = goal("legacy-retired-type", {
+			workflow: {
+				id: "wf-1",
+				name: "Legacy workflow",
+				description: "",
+				createdAt: 1,
+				updatedAt: 2,
+				gates: [{
+					id: "publish",
+					name: "Publish",
+					dependsOn: [],
+					verify: [{ name: "Branch pushed to remote", type: "remote-state", operation: "publish-branch" }],
+				}],
+			},
+		} as any);
+		fs.writeFileSync(legacyFile, JSON.stringify([legacyGoal]), "utf-8");
+
+		const migrated = openStore(stateDir);
+		const step = (migrated.get("legacy-retired-type")?.workflow as any)?.gates?.[0]?.verify?.[0];
+		expect(step?.type).toBe("remote-state");
+		expect(fs.existsSync(`${legacyFile}.sqlite-retired`)).toBe(true);
+
+		// The retired type is durable across a restart.
+		await closeTracked(migrated);
+		const reopened = openStore(stateDir);
+		expect(((reopened.get("legacy-retired-type")?.workflow as any)?.gates?.[0]?.verify?.[0])?.type).toBe("remote-state");
+	});
+
 	it("continues to reject non-null malformed workflow fields", async () => {
 		const sourceDir = tempRoot();
 		const sourceFile = path.join(sourceDir, "goals.json");
