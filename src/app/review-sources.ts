@@ -401,6 +401,28 @@ async function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): 
 	}
 }
 
+/** Reconcile a delayed explicit open only after its exact primary is authoritative. */
+function reconcileVisibleExplicitReviewOpen(
+	sessionId: string,
+	reviewId: string,
+	isCurrent: () => boolean,
+): void {
+	if (!isCurrent() || !isVisibleSession(sessionId)) return;
+	const current = safeReadPersisted(sessionId).find((group) => group.reviewId === reviewId);
+	if (!current) return;
+	const hasAuthoritativePrimary = getSidePanelWorkspace(sessionId).tabs.some((tab) =>
+		reviewIdentityFromWorkspaceTab(tab) === reviewId);
+	if (!hasAuthoritativePrimary || !isCurrent() || !isVisibleSession(sessionId)) return;
+
+	// Reuse the normal authority/tombstone filter. Unlike historical replay,
+	// this runs only after an explicit live open created the exact primary.
+	restorePersistedReviewDocuments(sessionId, { select: true });
+	if (!state.reviewGroups.has(reviewId)) return;
+	state.previewPanelActiveTab = "review";
+	state.previewPanelTab = "review";
+	renderApp();
+}
+
 export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupModel {
 	const sessionId = options.sessionId || activeSessionId() || "";
 	const source = sourceWithDefault(options.source, sessionId);
@@ -411,9 +433,12 @@ export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupMod
 		: nextGroups.find((group) => group.reviewId === incoming.reviewId) || nextGroups[nextGroups.length - 1];
 	writeSessionGroups(sessionId, nextGroups);
 	if (options.live) {
-		void enqueueReviewLifecycle(sessionId, stored.reviewId, async () => {
+		void enqueueReviewLifecycle(sessionId, stored.reviewId, async (isCurrent) => {
 			await clearReviewTombstone(sessionId, stored.reviewId);
+			if (!isCurrent()) return;
 			await openReviewWorkspace(stored, sessionId);
+			if (!isCurrent()) return;
+			reconcileVisibleExplicitReviewOpen(sessionId, stored.reviewId, isCurrent);
 		});
 	} else {
 		void openReviewWorkspace(stored, sessionId);
@@ -817,6 +842,71 @@ async function markReviewSubmittedExact(sessionId: string, reviewId: string): Pr
 	await setReviewTombstone(sessionId, reviewId, "submitted");
 }
 
+function reviewGroupMatchesSnapshot(current: ReviewGroupModel, captured: ReviewGroupModel): boolean {
+	if (current.reviewId !== captured.reviewId
+		|| current.title !== captured.title
+		|| current.files.length !== captured.files.length) return false;
+	return current.files.every((file, index) => {
+		const expected = captured.files[index];
+		return file.fileId === expected.fileId
+			&& file.title === expected.title
+			&& file.markdown === expected.markdown;
+	});
+}
+
+/** Remove only the group version for which a decision was actually submitted. */
+function removeCapturedReviewGroup(sessionId: string, captured: ReviewGroupModel): ReviewGroupModel | undefined {
+	const groups = sessionGroups(sessionId);
+	const index = groups.findIndex((group) => group.reviewId === captured.reviewId);
+	if (index < 0 || !reviewGroupMatchesSnapshot(groups[index], captured)) return undefined;
+	const removed = groups[index];
+	const next = groups.filter((_, candidateIndex) => candidateIndex !== index);
+	writeSessionGroups(sessionId, next);
+	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, next);
+	return removed;
+}
+
+/** Destructive cleanup body shared by close and already-queued decision intents. */
+async function finishReviewGroupCleanup(
+	sessionId: string,
+	group: ReviewGroupModel,
+	isCurrent: () => boolean,
+): Promise<ReviewGroupModel> {
+	if (!isCurrent()) return group;
+	const titleCounts = new Map<string, number>();
+	for (const file of group.files) titleCounts.set(file.title, (titleCounts.get(file.title) || 0) + 1);
+	const remainingTitles = new Set(sessionGroups(sessionId).flatMap((candidate) => candidate.files.map((file) => file.title)));
+	for (const file of group.files) {
+		clearAnnotations(sessionId, file.fileId);
+		// Legacy one-document annotations were title-keyed. Never clear an
+		// ambiguous bucket owned by another file or sibling review.
+		if (titleCounts.get(file.title) === 1 && !remainingTitles.has(file.title)) clearAnnotations(sessionId, file.title);
+	}
+	clearAnnotations(sessionId, group.reviewId);
+	await flushPendingWrites();
+	if (!isCurrent()) return group;
+
+	const tabIds = new Set<string>([reviewWorkspaceTabId(group.reviewId)]);
+	for (const tab of getSidePanelWorkspace(sessionId).tabs) if (workspaceTabMatchesReview(tab, group)) tabIds.add(tab.id);
+	const staleTabIds: string[] = [];
+	let closeError: unknown;
+	for (const tabId of tabIds) {
+		if (!isCurrent()) return group;
+		try {
+			const workspace = await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
+			if (workspace.tabs.some((tab) => tab.id === tabId)) staleTabIds.push(tabId);
+		} catch (err) {
+			closeError ??= err;
+		}
+	}
+	if (isVisibleSession(sessionId)) renderApp();
+	if ((staleTabIds.length > 0 || closeError) && isCurrent()) {
+		const detail = closeError instanceof Error && closeError.message ? ` ${closeError.message}` : "";
+		throw new Error(`Review content was removed, but its workspace tab could not be closed. Retry or reload to reconcile it.${detail}`);
+	}
+	return group;
+}
+
 export async function cleanupReviewGroup(
 	sessionId: string,
 	reviewId: string,
@@ -824,39 +914,14 @@ export async function cleanupReviewGroup(
 ): Promise<ReviewGroupModel | undefined> {
 	const group = removePersistedReviewGroup(sessionId, reviewId);
 	if (!group) return undefined;
-	const titleCounts = new Map<string, number>();
-	for (const file of group.files) titleCounts.set(file.title, (titleCounts.get(file.title) || 0) + 1);
-	const remainingTitles = new Set(sessionGroups(sessionId).flatMap((candidate) => candidate.files.map((file) => file.title)));
 	if (isVisibleSession(sessionId)) renderApp();
 
 	return enqueueReviewLifecycle(sessionId, reviewId, async (isCurrent) => {
-		if (options.tombstone !== false) await setReviewTombstone(sessionId, reviewId, options.tombstone || "closed");
-		for (const file of group.files) {
-			clearAnnotations(sessionId, file.fileId);
-			// Legacy one-document annotations were title-keyed. Never clear an
-			// ambiguous bucket owned by another file or sibling review.
-			if (titleCounts.get(file.title) === 1 && !remainingTitles.has(file.title)) clearAnnotations(sessionId, file.title);
+		if (options.tombstone !== false) {
+			await setReviewTombstone(sessionId, reviewId, options.tombstone || "closed");
+			if (!isCurrent()) return group;
 		}
-		clearAnnotations(sessionId, group.reviewId);
-		await flushPendingWrites();
-		const tabIds = new Set<string>([reviewWorkspaceTabId(group.reviewId)]);
-		for (const tab of getSidePanelWorkspace(sessionId).tabs) if (workspaceTabMatchesReview(tab, group)) tabIds.add(tab.id);
-		const staleTabIds: string[] = [];
-		let closeError: unknown;
-		for (const tabId of tabIds) {
-			try {
-				const workspace = await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
-				if (workspace.tabs.some((tab) => tab.id === tabId)) staleTabIds.push(tabId);
-			} catch (err) {
-				closeError ??= err;
-			}
-		}
-		if (isVisibleSession(sessionId)) renderApp();
-		if ((staleTabIds.length > 0 || closeError) && isCurrent()) {
-			const detail = closeError instanceof Error && closeError.message ? ` ${closeError.message}` : "";
-			throw new Error(`Review content was removed, but its workspace tab could not be closed. Retry or reload to reconcile it.${detail}`);
-		}
-		return group;
+		return finishReviewGroupCleanup(sessionId, group, isCurrent);
 	});
 }
 
@@ -866,14 +931,24 @@ export async function submitReviewGroupDecision(group: ReviewGroupModel, inputPa
 	if (payload.decision === "reject" && !payload.finalComment.trim() && payload.inlineComments.length === 0) throw new Error("Reject requires at least one comment.");
 	const source = sourceWithDefault(group.source, sessionId);
 	if (source.kind === "verification-signoff-pr") throw new Error("PR review source is not implemented yet.");
-	if (source.kind === "verification-signoff-markdown") {
-		await postSignoffDecision(source, group, payload);
-	} else {
-		if (!options.prompt) throw new Error("No active agent is available for this review.");
-		await options.prompt(composeMarkdownReviewDecisionFeedback(group, payload));
-		if (sessionId) await markReviewSubmittedExact(sessionId, group.reviewId);
-	}
-	await cleanupReviewGroup(sessionId, group.reviewId, { tombstone: false });
+
+	await enqueueReviewLifecycle(sessionId, group.reviewId, async (isCurrent) => {
+		if (source.kind === "verification-signoff-markdown") {
+			await postSignoffDecision(source, group, payload);
+		} else {
+			if (!options.prompt) throw new Error("No active agent is available for this review.");
+			await options.prompt(composeMarkdownReviewDecisionFeedback(group, payload));
+		}
+		if (!isCurrent()) return;
+		if (source.kind === "markdown-review" && sessionId) {
+			await markReviewSubmittedExact(sessionId, group.reviewId);
+			if (!isCurrent()) return;
+		}
+		const removed = removeCapturedReviewGroup(sessionId, group);
+		if (!removed) return;
+		if (isVisibleSession(sessionId)) renderApp();
+		await finishReviewGroupCleanup(sessionId, removed, isCurrent);
+	});
 }
 
 export const removeReviewGroup = cleanupReviewGroup;
