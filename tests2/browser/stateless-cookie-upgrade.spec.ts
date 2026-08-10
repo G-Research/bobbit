@@ -26,6 +26,17 @@ function pathname(response: Response): string {
 	return new URL(response.url()).pathname;
 }
 
+function previewArtifactPath(sessionId: string, artifactId: string): string {
+	return `/preview/${encodeURIComponent(sessionId)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(ENTRY)}`;
+}
+
+function isArtifactPreviewDocument(response: Response, sessionId: string): boolean {
+	const path = pathname(response);
+	return path.startsWith(`/preview/${encodeURIComponent(sessionId)}/_artifact/`)
+		&& path.endsWith(`/${encodeURIComponent(ENTRY)}`)
+		&& response.request().resourceType() === "document";
+}
+
 async function setCookieHeader(response: Response): Promise<string | null> {
 	return response.headerValue("set-cookie");
 }
@@ -153,9 +164,11 @@ test.describe("Stateless browser cookie upgrade", () => {
 			});
 			const mountText = await mount.text();
 			expect(mount.status, `mount preview failed: ${mountText}`).toBe(200);
-			expect(JSON.parse(mountText)).toEqual(expect.objectContaining({
+			const mountBody = JSON.parse(mountText) as { entry: string; contentHash: string; artifactId: string };
+			expect(mountBody).toEqual(expect.objectContaining({
 				entry: ENTRY,
 				contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+				artifactId: expect.any(String),
 			}));
 
 			await context.addCookies([{
@@ -179,7 +192,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 				{ timeout: 20_000 },
 			);
 			const iframePromise = page.waitForResponse(
-				response => pathname(response) === `/preview/${sessionId}/${ENTRY}`
+				response => pathname(response) === previewArtifactPath(sessionId!, mountBody.artifactId)
 					&& response.request().resourceType() === "document",
 				{ timeout: 20_000 },
 			);
@@ -231,7 +244,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			await expect(iframe, "preview iframe should expose an absolute cookie-authenticated gateway URL").toHaveAttribute("src", /^https?:\/\//);
 			const iframeUrl = new URL((await iframe.getAttribute("src"))!);
 			expect(iframeUrl.origin, "preview iframe must stay on the cookie-bearing browser origin").toBe(browserOrigin);
-			expect(iframeUrl.pathname).toBe(`/preview/${sessionId}/${ENTRY}`);
+			expect(iframeUrl.pathname).toBe(previewArtifactPath(sessionId, mountBody.artifactId));
 			expect([...iframeUrl.searchParams.keys()], "preview iframe should carry only the cache buster").toEqual(["mtime"]);
 			expect(iframeUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
 			expect(iframeUrl.hash).toBe("");
@@ -244,8 +257,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			// request performs this update, so the iframe can reach the new content
 			// only through the live preview-changed SSE event.
 			const sseIframePromise = page.waitForResponse(
-				response => pathname(response) === `/preview/${sessionId}/${ENTRY}`
-					&& response.request().resourceType() === "document",
+				response => isArtifactPreviewDocument(response, sessionId!),
 				{ timeout: 15_000 },
 			);
 			const sseMount = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
@@ -257,8 +269,9 @@ test.describe("Stateless browser cookie upgrade", () => {
 			});
 			const sseMountText = await sseMount.text();
 			expect(sseMount.status, `SSE preview update failed: ${sseMountText}`).toBe(200);
-			const sseMountBody = JSON.parse(sseMountText) as { contentHash?: string };
+			const sseMountBody = JSON.parse(sseMountText) as { contentHash?: string; artifactId?: string };
 			expect(sseMountBody.contentHash).toMatch(/^[a-f0-9]{64}$/);
+			expect(sseMountBody.artifactId).toBeTruthy();
 			const sseIframeResponse = await sseIframePromise;
 			expect(sseIframeResponse.status()).toBe(200);
 			await expectCookieAuthenticatedNavigation(sseIframeResponse);
@@ -272,7 +285,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			await expect(newTabLink, "preview popout should expose an absolute cookie-authenticated gateway URL").toHaveAttribute("href", /^https?:\/\//, { timeout: 15_000 });
 			const newTabUrl = new URL((await newTabLink.getAttribute("href"))!);
 			expect(newTabUrl.origin, "preview popout must stay on the cookie-bearing browser origin").toBe(browserOrigin);
-			expect(newTabUrl.pathname).toBe(`/preview/${sessionId}/${ENTRY}`);
+			expect(newTabUrl.pathname).toBe(previewArtifactPath(sessionId, sseMountBody.artifactId!));
 			expect(newTabUrl.search, "preview popout must not carry the iframe cache buster").toBe("");
 			expect(newTabUrl.hash).toBe("");
 			const popupPromise = page.waitForEvent("popup", { timeout: 15_000 });
@@ -302,7 +315,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 				{ timeout: 20_000 },
 			);
 			const reloadIframePromise = page.waitForResponse(
-				response => pathname(response) === `/preview/${sessionId}/${ENTRY}`
+				response => pathname(response) === previewArtifactPath(sessionId!, sseMountBody.artifactId!)
 					&& response.request().resourceType() === "document",
 				{ timeout: 20_000 },
 			);

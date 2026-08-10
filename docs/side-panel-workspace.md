@@ -61,6 +61,7 @@ Because those legacy files are superseded by pack artifact panels, they are excl
 `preview_open` still writes the per-session preview mount and streams updates via preview SSE. Workspace tab creation is separate:
 
 - explicit preview open/tool actions open or focus the current preview tab and persist render metadata such as `entry`, `mtime`, `contentHash`, `path`, `url`, and `artifactId` when available;
+- `live` describes the current tab's in-place update identity, not its transport: whenever that tab has an `artifactId`, iframe and popout navigation use the immutable artifact route so a later mount replacement cannot make an older filename transiently return `File not found`;
 - gateway restart restores the active preview iframe from that persisted workspace tab; the client does not need a fresh tool call or a mount bootstrap to recreate the tab;
 - historical card Open buttons explicitly open a versioned preview tab or focus an equivalent current tab when hashes match;
 - `GET /api/preview/mount` bootstrap, `preview-changed` SSE events, and mount metadata refreshes patch metadata only for already-open tabs;
@@ -148,6 +149,9 @@ The side-panel shell renders every tab kind with the same workspace chrome:
 
 - tab strip and close buttons;
 - active tab selection;
+- title-sized readable overflow: desktop and mobile tabs use their title-and-controls width up to the maximum instead of equal fixed slots; when the strip cannot keep longer titles readable, it moves excess tabs into a top-layer **More tabs** menu; mobile keeps Chat pinned while panel tabs overflow, and selecting an overflowed tab brings it into the visible window without changing canonical workspace order;
+- three tab-strip surface shades in every layout: muted strip background, an intermediate inactive-tab surface, and the content-background surface for the selected tab and its outward bottom curves;
+- active-tab actions share the tab-strip row: desktop retains its full panel/window controls, while mobile uses the trailing space for applicable controls such as preview refresh and pop-out instead of leaving it empty;
 - drag reorder;
 - fullscreen;
 - collapse and restore;
@@ -177,8 +181,8 @@ Keyboard shortcuts target the active side panel, regardless of kind, and use the
 
 Preview popout keeps the content-origin route:
 
-- live preview: `/preview/<sessionId>/<entry>`;
-- artifact preview: `/preview/<sessionId>/_artifact/<artifactId>/<entry>`.
+- preview without a persisted artifact: `/preview/<sessionId>/<entry>`;
+- any artifact-backed preview, including the current/live tab identity: `/preview/<sessionId>/_artifact/<artifactId>/<entry>`.
 
 All other panel kinds use the app deep link:
 
