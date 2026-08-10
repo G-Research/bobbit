@@ -40,25 +40,56 @@ export type SidePanelWorkspaceSource =
 		params?: Record<string, unknown>;
 	};
 
-/** Canonical review workspace identity. `documentId` and a missing `reviewId`
- * are accepted only while persisted legacy workspaces are canonicalized. */
+/** Durable, session-owned review payload identity. These fields are an atomic
+ * tuple: artifact-backed review sources must provide all three, while legacy
+ * inline review sources provide none of them. */
+export interface SidePanelReviewPayloadSource {
+	type: "review";
+	sessionId: string;
+	reviewId: string;
+	title: string;
+	toolCallId: string;
+	payloadId: string;
+	contentHash: string;
+	documentId?: never;
+	reviewTitle?: never;
+}
+
+/** Canonical inline review identity retained for existing and migrated tabs. */
+export interface SidePanelLegacyReviewSource {
+	type: "review";
+	sessionId: string;
+	reviewId: string;
+	title: string;
+	documentId?: string;
+	reviewTitle?: string;
+	toolCallId?: never;
+	payloadId?: never;
+	contentHash?: never;
+}
+
+/** Persisted pre-reviewId sources accepted only during legacy canonicalization. */
+export interface SidePanelMigratingReviewSource {
+	type: "review";
+	sessionId: string;
+	reviewId?: undefined;
+	documentId?: string;
+	title: string;
+	reviewTitle?: string;
+	toolCallId?: never;
+	payloadId?: never;
+	contentHash?: never;
+}
+
 export type SidePanelReviewSource =
-	| {
-		type: "review";
-		sessionId: string;
-		reviewId: string;
-		title: string;
-		documentId?: string;
-		reviewTitle?: string;
-	}
-	| {
-		type: "review";
-		sessionId: string;
-		reviewId?: undefined;
-		documentId?: string;
-		title: string;
-		reviewTitle?: string;
-	};
+	| SidePanelReviewPayloadSource
+	| SidePanelLegacyReviewSource
+	| SidePanelMigratingReviewSource;
+
+export interface SidePanelWorkspaceState extends Record<string, unknown> {
+	/** Exact selected file identity for a canonical review tab. */
+	activeFileId?: string;
+}
 
 export interface SidePanelWorkspaceTab {
 	id: string;
@@ -66,7 +97,7 @@ export interface SidePanelWorkspaceTab {
 	title: string;
 	label: string;
 	source: SidePanelWorkspaceSource;
-	state?: Record<string, unknown>;
+	state?: SidePanelWorkspaceState;
 	updatedAt: number;
 }
 

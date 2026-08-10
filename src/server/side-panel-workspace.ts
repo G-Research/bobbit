@@ -44,6 +44,8 @@ const MAX_TITLE = 160;
 const MAX_LABEL = 80;
 const MAX_ENTRY = 240;
 const MAX_REVIEW_ID = 240;
+const MAX_REVIEW_REFERENCE_ID = 160;
+const MAX_REVIEW_FILE_ID = 160;
 const MAX_PACK_PART = 120;
 const MAX_PARAMS_BYTES = 16 * 1024;
 const MAX_STATE_BYTES = 16 * 1024;
@@ -92,6 +94,16 @@ function hasNoControlChars(value: string): boolean {
 	return !/[\x00-\x1f\x7f]/.test(value);
 }
 
+function exactBoundedIdentity(value: unknown, maxBytes: number): string | null {
+	if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > maxBytes) return null;
+	if (value !== value.trim() || !hasNoControlChars(value)) return null;
+	return value;
+}
+
+function hasOwn(value: object, key: string): boolean {
+	return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function isRouteSafePart(value: string, max = MAX_PACK_PART): boolean {
 	return value.length > 0 && value.length <= max && hasNoControlChars(value) && !/[\\/]/.test(value);
 }
@@ -129,6 +141,16 @@ function cloneJsonObject(value: unknown, maxBytes = MAX_PARAMS_BYTES): Record<st
 
 function normalizeState(value: unknown): Record<string, unknown> | undefined {
 	return cloneJsonObject(value, MAX_STATE_BYTES);
+}
+
+function normalizeReviewState(value: unknown, requireActiveFileId: boolean): Record<string, unknown> | undefined {
+	const state = normalizeState(value);
+	if (!state) return undefined;
+	if (!hasOwn(state, "activeFileId")) return requireActiveFileId ? undefined : state;
+	const activeFileId = exactBoundedIdentity(state.activeFileId, MAX_REVIEW_FILE_ID);
+	if (!activeFileId) return undefined;
+	state.activeFileId = activeFileId;
+	return state;
 }
 
 function metadataFrom(raw: unknown): SidePanelWorkspaceMetadata | undefined {
@@ -237,10 +259,30 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 	}
 	if (!reviewId || reviewId.length > MAX_REVIEW_ID || !hasNoControlChars(reviewId)) return null;
 	const title = truncate(sourceTitle || asString(raw.title).replace(/^Review:\s*/, "").trim() || decoded, MAX_TITLE) || reviewId;
+
+	const payloadReferenceKeys = ["toolCallId", "payloadId", "contentHash"] as const;
+	const hasPayloadReference = payloadReferenceKeys.some((key) => hasOwn(source, key));
+	if (!hasPayloadReference) {
+		return {
+			id: `review:${encodeComponent(reviewId)}`,
+			kind: "review",
+			source: { type: "review", sessionId, reviewId, title },
+		};
+	}
+
+	// Payload addressing is one indivisible canonical identity tuple. Never
+	// truncate, synthesize, or partially retain it, and never combine it with a
+	// legacy identity: doing so could bind a workspace tab to content from
+	// another tool call or payload.
+	if (!sourceReviewId || hasOwn(source, "documentId") || hasOwn(source, "reviewTitle")) return null;
+	const toolCallId = exactBoundedIdentity(source.toolCallId, MAX_REVIEW_REFERENCE_ID);
+	const payloadId = exactBoundedIdentity(source.payloadId, MAX_REVIEW_REFERENCE_ID);
+	const contentHash = exactBoundedIdentity(source.contentHash, 64);
+	if (!toolCallId || !payloadId || !contentHash || !/^[a-f0-9]{64}$/.test(contentHash)) return null;
 	return {
 		id: `review:${encodeComponent(reviewId)}`,
 		kind: "review",
-		source: { type: "review", sessionId, reviewId, title },
+		source: { type: "review", sessionId, reviewId, title, toolCallId, payloadId, contentHash },
 	};
 }
 
@@ -316,8 +358,11 @@ export function canonicalizeTab(raw: unknown, sessionId: string, validators?: Si
 	if (canonicalKind !== kind) return null;
 	const title = titleFor(kind, canonical.source, asString(raw.title));
 	const label = labelFor(title, asString(raw.label));
-	const state = normalizeState(raw.state);
-	if (raw.state !== undefined && state === undefined) return null;
+	const payloadBackedReview = canonical.source.type === "review" && typeof canonical.source.payloadId === "string";
+	const state = kind === "review"
+		? normalizeReviewState(raw.state, payloadBackedReview)
+		: normalizeState(raw.state);
+	if ((raw.state !== undefined || payloadBackedReview) && state === undefined) return null;
 	return {
 		id: canonical.id,
 		kind,
