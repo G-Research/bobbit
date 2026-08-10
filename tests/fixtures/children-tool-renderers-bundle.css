@@ -87,6 +87,7 @@ body {
   color: var(--foreground, #1a1a1a);
 }
 .review-tab-bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -99,8 +100,9 @@ body {
 }
 .review-tab {
   display: inline-flex;
-  flex: 1 1 0;
-  min-width: 0;
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: 128px;
   max-width: 168px;
   align-items: center;
   justify-content: center;
@@ -175,9 +177,43 @@ body {
 }
 .review-tab-overflow-trigger {
   flex: 0 0 40px;
+  width: 40px;
+  min-width: 40px;
   max-width: 40px;
   font-weight: 700;
   letter-spacing: 1px;
+}
+.review-tab-measurements {
+  position: absolute;
+  inset: 0 auto auto 0;
+  display: flex;
+  gap: 2px;
+  visibility: hidden;
+  pointer-events: none;
+  contain: layout style;
+}
+.review-tab-measure,
+.review-tab-overflow-measure {
+  box-sizing: border-box;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: max-content;
+  min-width: 128px;
+  max-width: 168px;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-family: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.review-tab-overflow-measure {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
 }
 .review-tab-overflow {
   position: fixed;
