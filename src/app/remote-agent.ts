@@ -51,14 +51,14 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
-import { applySidePanelWorkspaceFromServer, closeSidePanelTab, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
 import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-minter-registry.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./mutation-approval-events.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
-import { isReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
@@ -840,12 +840,10 @@ export class RemoteAgent {
 		return this._sessionId;
 	}
 	/**
-	 * Remove stale review tabs after the owner session's annotation/tombstone
-	 * cache and workspace have hydrated. Exact tombstones close only their own
-	 * review; the session-wide submitted flag is retained solely for legacy data.
-	 *
-	 * This intentionally has no active-session guard: cached/background sessions
-	 * still own their keyed workspace and must not retain a tombstoned review tab.
+	 * Reconcile review content after the owner session's annotation/tombstone
+	 * cache and workspace have hydrated. Tombstones suppress passive recreation
+	 * only when the authoritative primary is absent; an existing exact primary
+	 * proves an explicit open committed and must survive reload/reconnect.
 	 */
 	async reconcileSubmittedReviewWorkspace(options: {
 		annotationStoreHydrated?: boolean;
@@ -854,28 +852,6 @@ export class RemoteAgent {
 		const sessionId = this._sessionId;
 		if (!sessionId) return;
 		if (!options.annotationStoreHydrated) await initAnnotationStore(sessionId);
-		const legacySubmitted = isReviewSubmitted(sessionId);
-		const reviewSources = options.reviewSources || await loadReviewSources();
-		if (typeof reviewSources.reconcileTombstonedReviewWorkspace === "function") {
-			await reviewSources.reconcileTombstonedReviewWorkspace(sessionId, {
-				includeLegacySubmitted: legacySubmitted,
-			});
-		} else if (legacySubmitted) {
-			// Compatibility for test/legacy lazy modules predating exact tombstones.
-			const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
-				.filter((tab) => tab.kind === "review" || tab.id.startsWith("review:"))
-				.map((tab) => tab.id);
-			if (reviewTabIds.length === 1) {
-				for (const tabId of reviewTabIds) {
-					try { await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true }); }
-					catch (err) { console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err); }
-				}
-			}
-		}
-		// Initial selection and reconnect invoke this again after authoritative
-		// workspace hydration. Tombstoned primaries are removed first; remaining
-		// exact artifact tabs may then restore content by GET without opening a
-		// workspace or clearing replay suppression.
 		await hydrateArtifactReviewsForWorkspace(sessionId);
 	}
 	private _isActiveSession(): boolean {
@@ -1039,7 +1015,7 @@ export class RemoteAgent {
 						resolve();
 						// Initial hydration is owned by connectToSession after ChatPanel
 						// binding. Reconnects still refresh the server workspace here and
-						// then replay submitted-review cleanup against the hydrated tabs.
+						// then hydrate review content against authoritative tabs.
 						if (!initial) {
 							void hydrateSidePanelWorkspace(this._sessionId)
 								.then(() => this.reconcileSubmittedReviewWorkspace());

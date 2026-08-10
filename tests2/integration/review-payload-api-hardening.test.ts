@@ -497,7 +497,7 @@ test.describe("review payload API hardening", () => {
 		expect(fs.existsSync(payloadOwnerDir)).toBe(false);
 	});
 
-	test("checked tombstone and workspace failures stay retryable without a partial tab", async ({ gateway }) => {
+	test("opens and retries without annotation writes while exact and sibling tombstones remain durable", async ({ gateway }) => {
 		const sessionId = await createSession();
 		cleanup.push(sessionId);
 		const secret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
@@ -510,23 +510,24 @@ test.describe("review payload API hardening", () => {
 			method: "PUT",
 			body: JSON.stringify({ state: "submitted", activeFileId: "sibling-file" }),
 		});
+		const annotationsBefore = fs.readFileSync(annotationPath, "utf8");
 
 		const originalWrite = fs.writeFileSync;
 		try {
 			fs.writeFileSync = ((path: fs.PathOrFileDescriptor, ...args: any[]) => {
-				if (String(path) === annotationPath) throw new Error("injected checked clear failure");
+				if (String(path) === annotationPath) throw new Error("injected annotation write failure");
 				return (originalWrite as any)(path, ...args);
 			}) as typeof fs.writeFileSync;
-			const failedClear = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
+			const uploaded = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
 				method: "POST",
 				headers: { "X-Bobbit-Session-Secret": secret },
-				body: JSON.stringify(reviewBody(["retryable clear"])),
+				body: JSON.stringify(reviewBody(["write-free open"])),
 			});
-			expect(failedClear.status).toBe(201);
-			const receipt = await failedClear.json();
-			expect(receipt.automaticOpen).toMatchObject({ ok: false, code: "REVIEW_PAYLOAD_PERSISTENCE_FAILED", retryable: true });
-			expect((await workspace(sessionId)).tabs).toEqual([]);
-			fs.writeFileSync = originalWrite;
+			expect(uploaded.status).toBe(201);
+			const receipt = await uploaded.json();
+			expect(receipt.automaticOpen).toMatchObject({ ok: true, status: "opened" });
+			expect((await workspace(sessionId)).tabs).toHaveLength(1);
+			expect(fs.readFileSync(annotationPath, "utf8")).toBe(annotationsBefore);
 			expect(await tombstones(sessionId)).toMatchObject({
 				closedReviewIds: ["review-api-id"],
 				submittedReviewIds: ["sibling-review"],
@@ -537,13 +538,13 @@ test.describe("review payload API hardening", () => {
 			});
 			expect(retry.status).toBe(200);
 			expect((await workspace(sessionId)).tabs).toHaveLength(1);
-			expect(await tombstones(sessionId)).toMatchObject({ closedReviewIds: [], submittedReviewIds: ["sibling-review"] });
+			expect(fs.readFileSync(annotationPath, "utf8")).toBe(annotationsBefore);
 		} finally {
 			fs.writeFileSync = originalWrite;
 		}
 	});
 
-	test("workspace failure restores the tombstone and restore-write failure is surfaced safely", async ({ gateway }) => {
+	test("workspace failure leaves tombstones byte-identical even when annotation writes are unavailable", async ({ gateway }) => {
 		const sessionId = await createSession();
 		cleanup.push(sessionId);
 		const secret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
@@ -556,6 +557,11 @@ test.describe("review payload API hardening", () => {
 			method: "PUT",
 			body: JSON.stringify({ state: "closed", activeFileId: "review-file-0" }),
 		});
+		await apiFetch(`/api/sessions/${sessionId}/review/tombstones/sibling-review`, {
+			method: "PUT",
+			body: JSON.stringify({ state: "submitted", activeFileId: "sibling-file" }),
+		});
+		const annotationsBefore = fs.readFileSync(annotationPath, "utf8");
 		store.update = (id: string, patch: any) => {
 			if (id === sessionId && patch?.sidePanelWorkspace) throw new Error("injected workspace failure");
 			return originalUpdate(id, patch);
@@ -569,22 +575,31 @@ test.describe("review payload API hardening", () => {
 			const firstReceipt = await workspaceFailed.json();
 			expect(firstReceipt.automaticOpen).toMatchObject({ ok: false, retryable: true });
 			expect(gateway.sessionManager.getPersistedSession(sessionId).sidePanelWorkspace?.tabs ?? []).toEqual([]);
-			expect(await tombstones(sessionId)).toMatchObject({ closedReviewIds: ["review-api-id"] });
+			expect(fs.readFileSync(annotationPath, "utf8")).toBe(annotationsBefore);
+			expect(await tombstones(sessionId)).toMatchObject({
+				closedReviewIds: ["review-api-id"],
+				submittedReviewIds: ["sibling-review"],
+			});
 
 			const originalWrite = fs.writeFileSync;
 			let annotationWrites = 0;
 			try {
 				fs.writeFileSync = ((path: fs.PathOrFileDescriptor, ...args: any[]) => {
-					if (String(path) === annotationPath && ++annotationWrites === 2) throw new Error("injected restore-write failure");
+					if (String(path) === annotationPath) {
+						annotationWrites += 1;
+						throw new Error("injected annotation write failure");
+					}
 					return (originalWrite as any)(path, ...args);
 				}) as typeof fs.writeFileSync;
-				const restoreFailed = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${firstReceipt.payloadId}/open`, {
+				const openFailed = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${firstReceipt.payloadId}/open`, {
 					method: "POST",
 					body: JSON.stringify({ toolCallId: firstReceipt.toolCallId, payloadId: firstReceipt.payloadId, reviewId: firstReceipt.reviewId, hash: firstReceipt.hash }),
 				});
-				expect(restoreFailed.status).toBe(500);
-				expect(await restoreFailed.json()).toMatchObject({ code: "REVIEW_PAYLOAD_PERSISTENCE_FAILED", retryable: true });
+				expect(openFailed.status).toBe(500);
+				expect(await openFailed.json()).toMatchObject({ code: "REVIEW_PAYLOAD_INTERNAL_ERROR", retryable: true });
+				expect(annotationWrites).toBe(0);
 				expect(gateway.sessionManager.getPersistedSession(sessionId).sidePanelWorkspace?.tabs ?? []).toEqual([]);
+				expect(fs.readFileSync(annotationPath, "utf8")).toBe(annotationsBefore);
 			} finally {
 				fs.writeFileSync = originalWrite;
 			}
@@ -594,7 +609,17 @@ test.describe("review payload API hardening", () => {
 				body: JSON.stringify({ toolCallId: firstReceipt.toolCallId, payloadId: firstReceipt.payloadId, reviewId: firstReceipt.reviewId, hash: firstReceipt.hash }),
 			});
 			expect(retry.status).toBe(200);
-			expect((await workspace(sessionId)).tabs).toHaveLength(1);
+			const durableWorkspace = await workspace(sessionId);
+			expect(durableWorkspace.tabs).toHaveLength(1);
+			expect(durableWorkspace.tabs[0]).toMatchObject({
+				id: "review:review-api-id",
+				state: { activeFileId: "review-file-0" },
+			});
+			expect(fs.readFileSync(annotationPath, "utf8")).toBe(annotationsBefore);
+			expect(await tombstones(sessionId)).toMatchObject({
+				closedReviewIds: ["review-api-id"],
+				submittedReviewIds: ["sibling-review"],
+			});
 		} finally {
 			store.update = originalUpdate;
 		}

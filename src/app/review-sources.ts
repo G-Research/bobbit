@@ -24,7 +24,6 @@ import {
 } from "./state.js";
 import {
 	clearAnnotations,
-	clearReviewTombstone,
 	flushPendingWrites,
 	getInlineCommentPayloads,
 	getReviewTombstones,
@@ -50,7 +49,7 @@ export interface OpenReviewGroupOptions {
 	reviewId?: string;
 	activeFileId?: string;
 	replace?: boolean;
-	/** Explicit live opens clear this review's tombstone and retire unowned legacy submitted state. */
+	/** Explicit live opens may reopen an exact tombstoned review through authoritative workspace presence. */
 	live?: boolean;
 	sessionId?: string;
 	source?: ReviewSource;
@@ -596,10 +595,9 @@ export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupMod
 	// commit destructive state after closing an older primary.
 	void enqueueReviewLifecycle(sessionId, stored.reviewId, async (isCurrent) => {
 		if (!isCurrent()) return;
-		if (options.live) {
-			await clearReviewTombstone(sessionId, stored.reviewId, { clearLegacySubmitted: true });
-			if (!isCurrent()) return;
-		}
+		// Explicit workspace presence, rather than a cross-store tombstone clear,
+		// authorizes this reopen. A failed open therefore leaves replay suppression
+		// byte-for-byte unchanged and the same content remains retryable.
 		await openReviewWorkspace(stored, sessionId);
 		if (!isCurrent()) return;
 		if (options.live) reconcileVisibleExplicitReviewOpen(sessionId, stored.reviewId, isCurrent);
@@ -692,56 +690,13 @@ function reviewIdentityFromWorkspaceTab(tab: any): string | undefined {
 	return normalizeIdentity(source?.reviewId) || normalizeIdentity(source?.documentId) || reviewDocumentIdFromPanelTab(tab);
 }
 
-const pendingTombstoneTabCloses = new Map<string, Promise<void>>();
-
-/**
- * Remove only workspace tabs covered by an exact hydrated tombstone. The
- * legacy session-wide flag remains a compatibility fallback for old data that
- * could represent only one review. All closes use the normal authoritative
- * mutation/retry path, including for background owner sessions.
- */
-export async function reconcileTombstonedReviewWorkspace(
-	sessionId: string,
-	options: { includeLegacySubmitted?: boolean } = {},
-): Promise<void> {
-	const tombstones = getReviewTombstones(sessionId);
-	const reviewTabs = getSidePanelWorkspace(sessionId).tabs.filter((tab) =>
-		tab.kind === "review" || tab.id.startsWith("review:"));
-	const closeLegacyReview = options.includeLegacySubmitted === true
-		&& tombstones.size === 0
-		&& reviewTabs.length === 1;
-	const targets = reviewTabs.flatMap((tab) => {
-		const reviewId = reviewIdentityFromWorkspaceTab(tab);
-		const exact = !!reviewId && tombstones.has(reviewId);
-		return exact || closeLegacyReview ? [{ tab, reviewId: exact ? reviewId : undefined }] : [];
-	});
-
-	for (const { tab, reviewId } of targets) {
-		const pendingKey = `${sessionId}\u0000${tab.id}`;
-		let pending = pendingTombstoneTabCloses.get(pendingKey);
-		if (!pending) {
-			pending = closeSidePanelTab(tab.id, { sessionId, retryConflictOnce: true })
-				.then(() => undefined, (err) => {
-					console.warn("[review-sources] tombstoned review workspace cleanup failed:", err);
-				})
-				.finally(() => pendingTombstoneTabCloses.delete(pendingKey));
-			pendingTombstoneTabCloses.set(pendingKey, pending);
-		}
-		await pending;
-
-		// A fresh explicit live open clears its exact tombstone synchronously.
-		// If it raced an already-dispatched stale close, issue the idempotent open
-		// again after that close settles so the new live request wins final order.
-		if (reviewId && !getReviewTombstones(sessionId).has(reviewId)) {
-			const reopened = sessionGroups(sessionId).find((group) => group.reviewId === reviewId);
-			if (reopened) openReviewWorkspace(reopened, sessionId);
-		}
-	}
-}
-
 export function restorePersistedReviewDocuments(sessionId: string, _options: { select?: boolean } = {}): void {
 	const workspace = getSidePanelWorkspace(sessionId);
 	const tabs = workspace.tabs.filter((tab) => tab.kind === "review");
+	// Before the first workspace response, an empty local mirror is not proof of
+	// authoritative absence. Preserve persisted candidates until the server view
+	// arrives so an exact tombstone cannot erase content for an already-open tab.
+	const workspaceKnown = tabs.length > 0 || typeof state.lastWorkspaceRevisionBySession[sessionId] === "number";
 	const openIds = new Set(tabs.map(reviewIdentityFromWorkspaceTab).filter((id): id is string => !!id));
 	const persisted = safeReadPersisted(sessionId);
 	const inMemoryArtifacts = (state.reviewGroupsBySession[sessionId] || []).filter((group) => {
@@ -758,15 +713,20 @@ export function restorePersistedReviewDocuments(sessionId: string, _options: { s
 	const legacySubmitted = isReviewSubmitted(sessionId)
 		&& tombstones.size === 0
 		&& candidates.length <= 1;
-	const eligible = legacySubmitted
-		? []
-		: candidates.filter((group) => !tombstones.has(group.reviewId));
-	if (eligible.length !== candidates.length) writeSessionGroups(sessionId, eligible);
-
 	const legacyTitles = new Set(tabs.map((tab) => reviewTitleFromPanelTab(tab as any) || tab.title.replace(/^Review:\s*/, "")).filter(Boolean));
-	const restored = eligible.filter((group) => openIds.has(group.reviewId) || (!openIds.size && legacyTitles.has(group.title)));
+	const hasAuthoritativePrimary = (group: ReviewGroupModel) =>
+		openIds.has(group.reviewId) || legacyTitles.has(group.title);
+	// Exact and legacy tombstones suppress only passive recreation of an absent
+	// primary. An existing authoritative tab proves an explicit open committed,
+	// so reload restores it without rewriting annotation storage.
+	const eligible = workspaceKnown
+		? candidates.filter((group) =>
+			hasAuthoritativePrimary(group) || (!legacySubmitted && !tombstones.has(group.reviewId)))
+		: candidates;
+	if (workspaceKnown && eligible.length !== candidates.length) writeSessionGroups(sessionId, eligible);
+
+	const restored = workspaceKnown ? eligible.filter(hasAuthoritativePrimary) : [];
 	state.reviewGroupsBySession = { ...state.reviewGroupsBySession, [sessionId]: eligible };
-	void reconcileTombstonedReviewWorkspace(sessionId, { includeLegacySubmitted: legacySubmitted });
 	if (!isVisibleSession(sessionId)) return;
 	const activeTab = tabs.find((tab) => tab.id === workspace.activeTabId);
 	const activeIdentity = reviewIdentityFromWorkspaceTab(activeTab) || restored.find((group) => reviewTitleFromPanelTab(activeTab as any) === group.title)?.reviewId;
@@ -1120,19 +1080,15 @@ async function commitReviewGroupCleanup(
 	if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) return undefined;
 	if (tombstone !== false) {
 		await setReviewTombstone(sessionId, group.reviewId, tombstone, group.activeFileId);
-		if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) {
-			// A live same-ID replacement clears this in its queued open phase. Also
-			// clear here for non-live/internal replacement callers.
-			await clearReviewTombstone(sessionId, group.reviewId);
-			return undefined;
-		}
+		// A newer explicit open may have committed while this write was pending.
+		// Its authoritative primary wins over this passive-replay marker, so do
+		// not perform a compensating annotation write that could clobber a later
+		// exact or sibling mutation.
+		if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) return undefined;
 	}
 
 	const removed = removeCapturedReviewGroup(sessionId, group);
-	if (!removed) {
-		if (tombstone !== false) await clearReviewTombstone(sessionId, group.reviewId);
-		return undefined;
-	}
+	if (!removed) return undefined;
 	const closingTitles = new Set(removed.files.map((file) => file.title));
 	const remainingTitles = new Set(sessionGroups(sessionId).flatMap((candidate) => candidate.files.map((file) => file.title)));
 	for (const file of removed.files) clearAnnotations(sessionId, file.fileId);
