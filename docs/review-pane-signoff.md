@@ -10,7 +10,7 @@ A review is the decision unit. It has a stable `reviewId`, an ordered non-empty 
 
 Each review owns exactly one closable primary side-panel workspace tab. Selecting that tab activates the review. The selected review's files are navigation-only secondary tabs inside the review pane; selecting one changes only `activeFileId`. Secondary tabs never have close controls, and a one-file review omits the secondary row. This hierarchy prevents one logical decision from becoming several unrelated workspace tabs and makes the primary close action an atomic close of the review, its files, and its comments.
 
-The server-backed side-panel workspace remains authoritative. A persisted review is hydrated only when its primary workspace tab is still present. Closing the primary tab therefore means absence until a new explicit live open, even if old tool output remains in chat history.
+The server-backed side-panel workspace remains authoritative. A persisted review is hydrated only when its primary workspace tab is still present. Closing the primary tab therefore creates authoritative absence from historical replay and ordinary hydration, even if old tool output remains in chat history. A later explicit workspace-opening intent can create or focus the primary again, but only an explicit live review-tool open clears replay suppression.
 
 ### `review_open` contract
 
@@ -151,7 +151,7 @@ On **Start Review**, the shared launcher:
    }
    ```
 
-The shared event handler models this legacy document event as a one-file review, opens or focuses its primary workspace tab, and selects it. Keeping all four launcher surfaces on this event contract ensures approve/reject decisions retain the exact goal, gate, signal, and step routing identifiers.
+The shared event handler models this legacy document event as a one-file review, opens or focuses its primary workspace tab, and selects it. This ordinary human sign-off launcher event is a non-live workspace open: it advances the review's exact `(sessionId, reviewId)` lifecycle generation and queues the primary open behind earlier close, decision, or open effects. Keeping all four launcher surfaces on this event contract ensures approve/reject decisions retain the exact goal, gate, signal, and step routing identifiers.
 
 A launch remains bound to the target and card that started it. If the target changes, the sign-off resolves, or the card disconnects while content is loading, the request is cancelled and its late result cannot open a stale review or surface an irrelevant error. This prevents recycled or removed cards from handing off content for an obsolete sign-off.
 
@@ -182,7 +182,7 @@ The routing remains shared:
 
 Decision submission is coalesced by the exact `(sessionId, reviewId)` key. The first accepted approve or reject owns the pending external effect; repeated or conflicting clicks share that promise and outcome while it is pending. Other review keys remain independent.
 
-The lifecycle checks for supersession before the agent prompt or sign-off request, then checks again before each destructive local effect. A close or explicit live reopen that becomes newer before the external effect suppresses the decision entirely. If replacement content arrives after the effect, exact snapshot matching prevents the old completion from tombstoning or removing the replacement.
+The lifecycle checks for supersession before the agent prompt or sign-off request, then checks again before each destructive local effect. A close or any workspace open for the same exact review—including a non-live human sign-off launch—that becomes newer before the external effect suppresses the decision entirely. If replacement content arrives after the effect, exact snapshot matching prevents the old completion from tombstoning or removing the replacement.
 
 The outcome reports the exact session, review, submitted state, and final comment accepted by the first decision. The UI discards a final-comment draft only when that outcome says submission and cleanup completed, no replacement with the same identity exists, and the current draft still equals the submitted draft. A failed or superseded decision, a replacement, or a draft edited while submission was pending therefore keeps its draft. An external routing failure leaves the review available for retry.
 
@@ -194,20 +194,20 @@ Review groups persist per owning session in browser storage; annotations and exa
 
 ### Exact lifecycle ordering
 
-Lifecycle effects are serialized by exact `(sessionId, reviewId)` key. A newer intent increments that key's generation, waits for the previous effect to settle, and can test whether it still owns the key before each irreversible step. A failure does not poison the queue, and unrelated reviews run independently. This ordering makes the latest explicit live intent authoritative without globally blocking review work.
+Lifecycle effects are serialized by exact `(sessionId, reviewId)` key. Every intent that opens a review's primary workspace tab—including an ordinary non-live human sign-off launcher event—advances and runs through the same sequence as close, dismiss, decision cleanup, and explicit live open. A newer intent increments that key's generation, waits for the previous effect to settle, and can test whether it still owns the key before each irreversible step. A failure does not poison the queue, and unrelated reviews run independently. This ordering makes the newest exact-key intent authoritative without globally blocking review work.
 
-An explicit live `review_open` first persists the complete group and selected file synchronously for its emitting session. Its ordered effect then:
+Every open first persists the complete group and selected file synchronously for its owning session. Its ordered effect stops if a newer exact-key intent has superseded it, then creates or focuses the exact primary tab in that owner's server-backed workspace. An explicit live `review_open` additionally:
 
-1. clears the target review's replay tombstone and the unowned legacy submitted flag;
-2. stops if a newer exact-key intent has superseded it;
-3. creates or focuses the exact primary tab in that owner's server-backed workspace; and
-4. at completion time, hydrates and selects the review only if that owner is now visible and the exact primary tab is authoritative.
+1. clears the target review's replay tombstone and the unowned legacy submitted flag before opening the primary; and
+2. at completion time, hydrates and selects the review only if that owner is now visible and the exact primary tab is authoritative.
 
-Completion-time hydration matters when the user switches sessions while the tombstone or workspace request is in flight: the newly visible owner receives the requested review without retargeting the operation. A background owner still receives a focused workspace tab, but the selected session, foreground review model, and foreground user-selection guard remain unchanged. A focused open clears a selection guard only when the guard belongs to the same owner session, so delayed foreground workspace responses cannot undo the user's foreground choice.
+A non-live sign-off launch performs neither explicit-live step: it does not clear an exact replay tombstone, retire unowned legacy submitted state, or run completion-time explicit-live hydration. This distinction keeps replay suppression durable while still ordering the launch's workspace mutation against cleanup.
 
-Close, dismiss, submission cleanup, and live reopen share the same exact-key sequence. Cleanup captures the review version, then closes every primary workspace tab that matches it, including its canonical exact-identity tab and any legacy-matching tab. Each close uses the authoritative workspace and retries one revision conflict once. Cleanup must confirm that all matching primaries are absent before it writes a `closed` or `submitted` tombstone, removes the persisted group, clears annotations, or discards the shared final draft.
+Completion-time explicit-live hydration matters when the user switches sessions while the tombstone or workspace request is in flight: the newly visible owner receives the requested review without retargeting the operation. Every queued workspace open remains scoped to its owner session. A background owner receives a focused workspace tab, but the selected session, foreground review model, and foreground user-selection guard remain unchanged. A focused open clears a selection guard only when the guard belongs to the same owner session, so delayed foreground workspace responses cannot undo the user's foreground choice.
 
-A terminal close error or a partial close conflict fails that barrier. Bobbit preserves the captured group, files, annotations, and final draft, writes no suppressing tombstone, and surfaces an actionable error telling the user to retry the close. A newer exact live reopen supersedes stale cleanup: the stale operation cannot commit destructive state, and the open reasserts its primary after any already-dispatched close settles. Sibling reviews use different exact keys, so their tabs and state remain independent.
+Cleanup captures the review version, then closes every primary workspace tab that matches it, including its canonical exact-identity tab and any legacy-matching tab. Each close uses the authoritative workspace and retries one revision conflict once. Cleanup must confirm that all matching primaries are absent before it writes a `closed` or `submitted` tombstone, removes the persisted group, clears annotations, or discards the shared final draft.
+
+A terminal close error or a partial close conflict fails that barrier. Bobbit preserves the captured group, files, annotations, and final draft, writes no suppressing tombstone, and surfaces an actionable error telling the user to retry the close. If a sign-off launch arrives while older cleanup is between authoritative tab close and destructive commit, the launch supersedes that cleanup. The stale cleanup leaves the current persisted content and annotations intact, writes no tombstone, and the queued sign-off open runs last to reassert and focus the primary. A still-newer cleanup can supersede that queued sign-off open normally. Sibling reviews use different exact keys, and session ownership is part of the key, so their tabs and state remain isolated.
 
 A live `review_close` follows the same owner rule. Its public form accepts an optional review title: every matching whole review and all its files close, while omitting the title closes all reviews in the calling session. Duplicate titles therefore close together; callers that need later selective close should use distinct titles. Internally, canonical results may be normalized to an exact `reviewId`, which takes precedence over title matching without exposing identity-based close as a public tool input. Either form is scoped to the owner session; when that owner is in the background, it never changes the foreground or any sibling session.
 
@@ -217,7 +217,7 @@ Historical tool-result replay is content history, not an instruction to mutate r
 
 Tombstones are per `(sessionId, reviewId)`, with separate `submitted` and `closed` states. A Markdown decision writes `submitted`; close, dismiss, and `review_close` write `closed`. Exact IDs prevent one completed review from suppressing a sibling or a duplicate-title review. The legacy session-wide submitted boolean is read only as a one-review migration fallback and is never written by grouped-review decisions.
 
-A fresh explicit live open is allowed to reopen its exact review. It clears that target's exact tombstone and retires the unowned session-wide legacy submitted boolean, including when annotation hydration was already in flight. Other exact tombstones remain intact, so migration cannot revive submitted or closed siblings. Historical replay clears neither form of suppression.
+A fresh explicit live review-tool open is allowed to durably reopen its exact review. It clears that target's exact tombstone and retires the unowned session-wide legacy submitted boolean, including when annotation hydration was already in flight, then runs completion-time explicit-live hydration. Other exact tombstones remain intact, so migration cannot revive submitted or closed siblings. Historical replay and ordinary non-live sign-off launches clear neither form of suppression.
 
 ### Cleanup boundary
 

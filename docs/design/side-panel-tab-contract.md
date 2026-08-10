@@ -304,16 +304,19 @@ sibling reviews intact. The public `review_close` tool remains title-based (or
 closes all reviews when its title is omitted); it does not expose a `reviewId`
 argument, so duplicate titles intentionally close together.
 
-Review groups are owned by their emitting session. A background live open may
+Review groups are owned by their emitting session. Every workspace open,
+including an ordinary non-live human sign-off launch, is serialized with close
+and decision cleanup by exact `(sessionId, reviewId)` key. A background open may
 create and focus that owner's primary tab without selecting the session or
 mutating the foreground review model. When the owner is later selected, its
 persisted group hydrates only while the exact `review:<encoded-reviewId>` tab is
 still authoritative. Closing or deciding a review creates authoritative absence:
-historical replay and content caches cannot recreate it; a new explicit live
-open is required. Legacy `documentId` and title-shaped sources are accepted only
-for migration and canonicalized to a stable group `reviewId`, never treated as
-new per-document workspace identity. See
-[Review Pane Sign-Off — Review hierarchy and identity](../review-pane-signoff.md#review-hierarchy-and-identity).
+historical replay and content caches cannot recreate it. Only a new explicit
+live review-tool open clears exact replay tombstones and legacy submitted
+suppression; a non-live sign-off launch does not. Legacy `documentId` and
+title-shaped sources are accepted only for migration and canonicalized to a
+stable group `reviewId`, never treated as new per-document workspace identity.
+See [Review Pane Sign-Off — Review hierarchy and identity](../review-pane-signoff.md#review-hierarchy-and-identity).
 
 **Pack tabs** use `pack:<packId>:<panelId>:<instanceKey>`. The PR walkthrough is
 a singleton pack panel; artifact-style pack panels can use distinct instance
