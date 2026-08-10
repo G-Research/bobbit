@@ -4,6 +4,8 @@ import {
 	openMarkdownReviewDocument,
 	openMarkdownReviewGroup,
 	persistReviewGroup,
+	readPersistedReviewGroups,
+	restorePersistedReviewDocuments,
 	upsertReviewGroup,
 } from "../../src/app/review-sources.js";
 import { setRenderApp, state, type ReviewGroupModel } from "../../src/app/state.js";
@@ -17,6 +19,13 @@ import {
 
 const SESSION_ID = "review-group-model-session";
 const CLEANUP_SESSION_ID = "review-group-cleanup-session";
+const FOREGROUND_SESSION_ID = "review-group-foreground-session";
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void } {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>((res) => { resolve = res; });
+	return { promise, resolve };
+}
 
 function review(
 	reviewId: string,
@@ -124,6 +133,66 @@ function installWorkspaceCleanupFixture(
 		throw new Error(`Unexpected request: ${method} ${url.pathname}`);
 	}));
 	return { deleteAttempts, workspace: () => workspace };
+}
+
+function installHeldLifecycleFixture(
+	initial: SidePanelWorkspace,
+	heldTabId: string,
+	deleteOutcomes: Array<"success" | "conflict"> = ["success"],
+) {
+	let workspace = initial;
+	const deleteStarted = deferred();
+	const releaseDelete = deferred();
+	const requests: Array<{ method: string; pathname: string; tabId?: string }> = [];
+	let held = true;
+	vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+		const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+		const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+		const tabMatch = url.pathname.match(/\/side-panel-workspace\/tabs\/([^/]+)$/);
+		const tabId = tabMatch ? decodeURIComponent(tabMatch[1]) : undefined;
+		requests.push({ method, pathname: url.pathname, tabId });
+		if (url.pathname.includes("/review/") && !url.pathname.includes("/side-panel-workspace")) {
+			return new Response(null, { status: 204 });
+		}
+		if (method === "DELETE" && tabId) {
+			if (tabId === heldTabId && held) {
+				held = false;
+				deleteStarted.resolve();
+				await releaseDelete.promise;
+			}
+			const outcome = deleteOutcomes.shift() || "success";
+			if (outcome === "conflict") {
+				workspace = { ...workspace, revision: workspace.revision + 1, updatedAt: workspace.updatedAt + 1 };
+				return Response.json({ error: "Stale side-panel workspace revision", code: "STALE_REVISION", workspace }, { status: 409 });
+			}
+			const tabs = workspace.tabs.filter((tab) => tab.id !== tabId);
+			workspace = {
+				...workspace,
+				revision: workspace.revision + 1,
+				tabs,
+				activeTabId: tabs.some((tab) => tab.id === workspace.activeTabId) ? workspace.activeTabId : tabs[0]?.id || "",
+				updatedAt: workspace.updatedAt + 1,
+			};
+			return Response.json({ workspace });
+		}
+		if (method === "POST" && url.pathname.endsWith("/side-panel-workspace/open")) {
+			const body = JSON.parse(String(init?.body || "{}")) as { tab?: SidePanelWorkspaceTab; focus?: boolean };
+			if (body.tab) {
+				const tabs = workspace.tabs.filter((tab) => tab.id !== body.tab!.id);
+				tabs.push(body.tab);
+				workspace = {
+					...workspace,
+					revision: workspace.revision + 1,
+					tabs,
+					activeTabId: body.focus === false ? workspace.activeTabId : body.tab.id,
+					updatedAt: workspace.updatedAt + 1,
+				};
+			}
+			return Response.json({ workspace });
+		}
+		throw new Error(`Unexpected request: ${method} ${url.pathname}`);
+	}));
+	return { deleteStarted: deleteStarted.promise, releaseDelete: () => releaseDelete.resolve(), requests, workspace: () => workspace };
 }
 
 beforeEach(() => {
@@ -334,5 +403,124 @@ describe("review group workspace cleanup", () => {
 		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([sibling.reviewId]);
 		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBe("closed");
 		expect(getAnnotations(CLEANUP_SESSION_ID, target.files[0].fileId)).toEqual([]);
+	});
+
+	it("serializes a fresh exact live open after a pending close while unrelated review keys remain independent", async () => {
+		const target: ReviewGroupModel = {
+			...review("cleanup-target", "Target review", [{ fileId: "target-file", title: "target.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		const sibling: ReviewGroupModel = {
+			...review("cleanup-sibling", "Sibling review", [{ fileId: "sibling-file", title: "sibling.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		persistReviewGroup(CLEANUP_SESSION_ID, target);
+		persistReviewGroup(CLEANUP_SESSION_ID, sibling);
+		const initial: SidePanelWorkspace = {
+			version: 1,
+			sessionId: CLEANUP_SESSION_ID,
+			revision: 8,
+			tabs: [reviewTab(target), reviewTab(sibling)],
+			activeTabId: reviewTab(target).id,
+			sizeMode: "split",
+			updatedAt: 8,
+		};
+		state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID] = initial;
+		state.lastWorkspaceRevisionBySession[CLEANUP_SESSION_ID] = initial.revision;
+		state.selectedSessionId = FOREGROUND_SESSION_ID;
+		const foreground = review("foreground-review", "Foreground", [{ fileId: "foreground-file", title: "foreground.md" }]);
+		state.reviewGroups = new Map([[foreground.reviewId, foreground]]);
+		state.reviewActiveReviewId = foreground.reviewId;
+		const fixture = installHeldLifecycleFixture(initial, reviewTab(target).id);
+
+		const cleanup = cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId);
+		await fixture.deleteStarted;
+		const reopened = openMarkdownReviewGroup({
+			sessionId: CLEANUP_SESSION_ID,
+			reviewId: target.reviewId,
+			title: target.title,
+			files: [{ fileId: "reopened-file", title: "target.md", markdown: "fresh" }],
+			live: true,
+		});
+		openMarkdownReviewGroup({
+			sessionId: CLEANUP_SESSION_ID,
+			reviewId: sibling.reviewId,
+			title: sibling.title,
+			files: [{ fileId: sibling.files[0].fileId, title: "sibling.md", markdown: "updated sibling" }],
+			live: true,
+		});
+
+		await vi.waitFor(() => expect(fixture.requests.some((request) =>
+			request.method === "POST" && request.pathname.endsWith("/side-panel-workspace/open"))).toBe(true));
+		expect(fixture.requests.filter((request) =>
+			request.method === "POST" && request.pathname.endsWith("/side-panel-workspace/open"))).toHaveLength(1);
+		expect(state.reviewGroups.get(foreground.reviewId)).toBe(foreground);
+		expect(state.reviewActiveReviewId).toBe(foreground.reviewId);
+
+		fixture.releaseDelete();
+		await expect(cleanup).resolves.toMatchObject({ reviewId: target.reviewId });
+		await vi.waitFor(() => expect(fixture.requests.filter((request) =>
+			request.method === "POST" && request.pathname.endsWith("/side-panel-workspace/open"))).toHaveLength(2));
+
+		expect(fixture.workspace().tabs.map((tab) => tab.id).sort()).toEqual([
+			reviewTab(sibling).id,
+			reviewTab(target).id,
+		].sort());
+		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([
+			sibling.reviewId,
+			reopened.reviewId,
+		]);
+		expect(readPersistedReviewGroups(CLEANUP_SESSION_ID).map((group) => group.reviewId)).toEqual([
+			sibling.reviewId,
+			reopened.reviewId,
+		]);
+		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBeUndefined();
+
+		restorePersistedReviewDocuments(CLEANUP_SESSION_ID);
+		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([
+			sibling.reviewId,
+			reopened.reviewId,
+		]);
+		expect(state.reviewGroups.get(foreground.reviewId)).toBe(foreground);
+	});
+
+	it("suppresses a stale terminal close conflict when an exact live reopen is already queued", async () => {
+		const target: ReviewGroupModel = {
+			...review("cleanup-target", "Target review", [{ fileId: "target-file", title: "target.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		persistReviewGroup(CLEANUP_SESSION_ID, target);
+		const initial: SidePanelWorkspace = {
+			version: 1,
+			sessionId: CLEANUP_SESSION_ID,
+			revision: 12,
+			tabs: [reviewTab(target)],
+			activeTabId: reviewTab(target).id,
+			sizeMode: "split",
+			updatedAt: 12,
+		};
+		state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID] = initial;
+		state.lastWorkspaceRevisionBySession[CLEANUP_SESSION_ID] = initial.revision;
+		const fixture = installHeldLifecycleFixture(initial, reviewTab(target).id, ["conflict", "conflict"]);
+
+		const cleanup = cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId);
+		await fixture.deleteStarted;
+		openMarkdownReviewGroup({
+			sessionId: CLEANUP_SESSION_ID,
+			reviewId: target.reviewId,
+			title: target.title,
+			files: [{ fileId: "fresh-file", title: "fresh.md", markdown: "fresh" }],
+			live: true,
+		});
+		fixture.releaseDelete();
+
+		await expect(cleanup).resolves.toMatchObject({ reviewId: target.reviewId });
+		await vi.waitFor(() => expect(fixture.requests.filter((request) =>
+			request.method === "DELETE" && request.tabId === reviewTab(target).id)).toHaveLength(2));
+		await vi.waitFor(() => expect(fixture.requests.some((request) =>
+			request.method === "POST" && request.pathname.endsWith("/side-panel-workspace/open"))).toBe(true));
+		expect(fixture.workspace().tabs.map((tab) => tab.id)).toEqual([reviewTab(target).id]);
+		expect(readPersistedReviewGroups(CLEANUP_SESSION_ID).map((group) => group.reviewId)).toEqual([target.reviewId]);
+		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBeUndefined();
 	});
 });

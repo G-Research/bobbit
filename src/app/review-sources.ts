@@ -75,6 +75,39 @@ interface PersistedReviewGroupsV2 {
 
 let generatedReviewIdentityCounter = 0;
 
+type ReviewLifecycleSequence = {
+	generation: number;
+	tail: Promise<void>;
+};
+
+/** Exact review lifecycle effects must settle in intent order without blocking siblings. */
+const reviewLifecycleSequences = new Map<string, ReviewLifecycleSequence>();
+
+function reviewLifecycleKey(sessionId: string, reviewId: string): string {
+	return `${sessionId}\u0000${reviewId}`;
+}
+
+function enqueueReviewLifecycle<T>(
+	sessionId: string,
+	reviewId: string,
+	operation: (isCurrent: () => boolean) => Promise<T>,
+): Promise<T> {
+	const key = reviewLifecycleKey(sessionId, reviewId);
+	const previous = reviewLifecycleSequences.get(key);
+	const generation = (previous?.generation || 0) + 1;
+	const result = (previous?.tail || Promise.resolve()).then(
+		() => operation(() => reviewLifecycleSequences.get(key)?.generation === generation),
+	);
+	// A failed intent must not prevent a later exact-key intent from running.
+	const tail = result.then(() => undefined, () => undefined);
+	const sequence = { generation, tail };
+	reviewLifecycleSequences.set(key, sequence);
+	void tail.then(() => {
+		if (reviewLifecycleSequences.get(key) === sequence) reviewLifecycleSequences.delete(key);
+	});
+	return result;
+}
+
 function storageKey(sessionId: string): string {
 	return `${REVIEW_CONTEXT_STORAGE_PREFIX}${sessionId}`;
 }
@@ -351,7 +384,7 @@ function reviewWorkspaceTabId(reviewId: string): string {
 	return `review:${encodeURIComponent(reviewId)}`;
 }
 
-function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): void {
+async function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): Promise<void> {
 	const tab = {
 		id: reviewWorkspaceTabId(group.reviewId),
 		kind: "review",
@@ -360,10 +393,12 @@ function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): void {
 		source: { type: "review", sessionId, reviewId: group.reviewId, documentId: group.reviewId, title: group.title },
 		updatedAt: Date.now(),
 	} as any;
-	void openSidePanelTab(tab, { focus: true }).catch(() => {
+	try {
+		await openSidePanelTab(tab, { focus: true });
+	} catch {
 		if (!isVisibleSession(sessionId)) return;
 		(selectReviewWorkspaceTab as any)(group.title, { sessionId, select: true, reviewId: group.reviewId, documentId: group.reviewId });
-	});
+	}
 }
 
 export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupModel {
@@ -375,8 +410,14 @@ export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupMod
 		? nextGroups.find((group) => group.title === incoming.title) || incoming
 		: nextGroups.find((group) => group.reviewId === incoming.reviewId) || nextGroups[nextGroups.length - 1];
 	writeSessionGroups(sessionId, nextGroups);
-	if (options.live) void clearReviewTombstone(sessionId, stored.reviewId);
-	openReviewWorkspace(stored, sessionId);
+	if (options.live) {
+		void enqueueReviewLifecycle(sessionId, stored.reviewId, async () => {
+			await clearReviewTombstone(sessionId, stored.reviewId);
+			await openReviewWorkspace(stored, sessionId);
+		});
+	} else {
+		void openReviewWorkspace(stored, sessionId);
+	}
 	if (isVisibleSession(sessionId)) {
 		hydrateVisibleReviewGroups(sessionId, nextGroups, stored.reviewId);
 		state.previewPanelActiveTab = "review";
@@ -783,36 +824,40 @@ export async function cleanupReviewGroup(
 ): Promise<ReviewGroupModel | undefined> {
 	const group = removePersistedReviewGroup(sessionId, reviewId);
 	if (!group) return undefined;
-	if (options.tombstone !== false) await setReviewTombstone(sessionId, reviewId, options.tombstone || "closed");
 	const titleCounts = new Map<string, number>();
 	for (const file of group.files) titleCounts.set(file.title, (titleCounts.get(file.title) || 0) + 1);
 	const remainingTitles = new Set(sessionGroups(sessionId).flatMap((candidate) => candidate.files.map((file) => file.title)));
-	for (const file of group.files) {
-		clearAnnotations(sessionId, file.fileId);
-		// Legacy one-document annotations were title-keyed. Never clear an
-		// ambiguous bucket owned by another file or sibling review.
-		if (titleCounts.get(file.title) === 1 && !remainingTitles.has(file.title)) clearAnnotations(sessionId, file.title);
-	}
-	clearAnnotations(sessionId, group.reviewId);
-	await flushPendingWrites();
-	const tabIds = new Set<string>([reviewWorkspaceTabId(group.reviewId)]);
-	for (const tab of getSidePanelWorkspace(sessionId).tabs) if (workspaceTabMatchesReview(tab, group)) tabIds.add(tab.id);
-	const staleTabIds: string[] = [];
-	let closeError: unknown;
-	for (const tabId of tabIds) {
-		try {
-			const workspace = await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
-			if (workspace.tabs.some((tab) => tab.id === tabId)) staleTabIds.push(tabId);
-		} catch (err) {
-			closeError ??= err;
-		}
-	}
 	if (isVisibleSession(sessionId)) renderApp();
-	if (staleTabIds.length > 0 || closeError) {
-		const detail = closeError instanceof Error && closeError.message ? ` ${closeError.message}` : "";
-		throw new Error(`Review content was removed, but its workspace tab could not be closed. Retry or reload to reconcile it.${detail}`);
-	}
-	return group;
+
+	return enqueueReviewLifecycle(sessionId, reviewId, async (isCurrent) => {
+		if (options.tombstone !== false) await setReviewTombstone(sessionId, reviewId, options.tombstone || "closed");
+		for (const file of group.files) {
+			clearAnnotations(sessionId, file.fileId);
+			// Legacy one-document annotations were title-keyed. Never clear an
+			// ambiguous bucket owned by another file or sibling review.
+			if (titleCounts.get(file.title) === 1 && !remainingTitles.has(file.title)) clearAnnotations(sessionId, file.title);
+		}
+		clearAnnotations(sessionId, group.reviewId);
+		await flushPendingWrites();
+		const tabIds = new Set<string>([reviewWorkspaceTabId(group.reviewId)]);
+		for (const tab of getSidePanelWorkspace(sessionId).tabs) if (workspaceTabMatchesReview(tab, group)) tabIds.add(tab.id);
+		const staleTabIds: string[] = [];
+		let closeError: unknown;
+		for (const tabId of tabIds) {
+			try {
+				const workspace = await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
+				if (workspace.tabs.some((tab) => tab.id === tabId)) staleTabIds.push(tabId);
+			} catch (err) {
+				closeError ??= err;
+			}
+		}
+		if (isVisibleSession(sessionId)) renderApp();
+		if ((staleTabIds.length > 0 || closeError) && isCurrent()) {
+			const detail = closeError instanceof Error && closeError.message ? ` ${closeError.message}` : "";
+			throw new Error(`Review content was removed, but its workspace tab could not be closed. Retry or reload to reconcile it.${detail}`);
+		}
+		return group;
+	});
 }
 
 export async function submitReviewGroupDecision(group: ReviewGroupModel, inputPayload: ReviewDecisionPayload, options: SubmitReviewDecisionOptions = {}): Promise<void> {
