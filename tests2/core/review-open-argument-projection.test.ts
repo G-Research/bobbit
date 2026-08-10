@@ -111,7 +111,80 @@ describe("review_open argument transport projection", () => {
 		assert.ok(Buffer.byteLength(JSON.stringify(input), "utf8") < LARGE_CONTENT_THRESHOLD);
 	});
 
-	it("leaves file-only reviews and unrelated tool Markdown untouched", () => {
+	it("projects oversized top-level metadata and file-only paths on live transport", () => {
+		const oversizedTitle = "é".repeat(200_000);
+		const oversizedPath = `docs/${"segment/".repeat(80_000)}review.md`;
+		const event = toolCall({ title: oversizedTitle, file: oversizedPath, replace: false });
+
+		const result = truncateLargeToolContent(event);
+		const projected = result.message.content[0].arguments;
+		const serialized = JSON.stringify(projected);
+
+		assert.equal(projected.replace, false);
+		assert.deepEqual(projected.title, {
+			_invalid: true,
+			_reason: "review_metadata_too_large",
+			_originalLength: oversizedTitle.length,
+			_originalBytes: Buffer.byteLength(oversizedTitle, "utf8"),
+		});
+		assert.equal(projected.file._invalid, true);
+		assert.equal(projected.file._reason, "review_metadata_too_large");
+		assert.doesNotMatch(serialized, /segment\/segment|éééé/);
+		assert.ok(Buffer.byteLength(serialized, "utf8") < LARGE_CONTENT_THRESHOLD);
+		assert.equal(event.message.content[0].arguments.title, oversizedTitle, "the source payload must not be mutated");
+	});
+
+	it("projects oversized nested titles and paths during persisted history hydration", () => {
+		const nestedTitle = "nested-title-".repeat(100_000);
+		const nestedPath = `reports/${"nested/".repeat(100_000)}review.md`;
+		const validFile = { title: "Kept", file: "docs/kept.md" };
+		const message = toolUse({
+			title: "History review",
+			files: [
+				validFile,
+				{ title: nestedTitle, markdown: "short" },
+				{ title: "Path", file: nestedPath },
+			],
+		});
+
+		const result = truncateLargeToolContentInMessages([message]) as any[];
+		const projected = result[0].content[0].input;
+		const serialized = JSON.stringify(projected);
+
+		assert.deepEqual(projected.files[0], validFile, "valid ordered metadata must remain exact");
+		assert.equal(projected.files[1].title._invalid, true);
+		assert.equal(projected.files[1].title._reason, "review_metadata_too_large");
+		assert.equal(projected.files[1].markdown, "short");
+		assert.equal(projected.files[2].file._invalid, true);
+		assert.doesNotMatch(serialized, /nested-title-nested-title|nested\/nested/);
+		assert.ok(Buffer.byteLength(serialized, "utf8") < LARGE_CONTENT_THRESHOLD);
+	});
+
+	it("collapses too-many file entries on both live and history transport", () => {
+		const entries = Array.from({ length: 65 }, (_, index) => ({
+			title: `File ${index + 1}`,
+			markdown: `body-${index}`,
+		}));
+		const liveEvent = toolCall({ title: "Too many", files: entries });
+		const historyMessage = toolUse({ title: "Too many", files: entries });
+
+		const live = truncateLargeToolContent(liveEvent).message.content[0].arguments;
+		const history = (truncateLargeToolContentInMessages([historyMessage]) as any[])[0].content[0].input;
+
+		for (const projected of [live, history]) {
+			assert.deepEqual(projected.files, {
+				_invalid: true,
+				_reason: "too_many_review_files",
+				_originalCount: 65,
+				_maximumCount: 64,
+			});
+			assert.doesNotMatch(JSON.stringify(projected), /body-64/);
+			assert.ok(Buffer.byteLength(JSON.stringify(projected), "utf8") < LARGE_CONTENT_THRESHOLD);
+		}
+		assert.equal(entries.length, 65, "the source array must not be mutated");
+	});
+
+	it("leaves bounded file-only reviews and unrelated tool Markdown untouched", () => {
 		const fileOnly = toolCall({ title: "File review", file: "docs/review.md" });
 		assert.strictEqual(truncateLargeToolContent(fileOnly, 1), fileOnly);
 
