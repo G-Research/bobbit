@@ -117,8 +117,31 @@ test.describe("review payload API hardening", () => {
 		const wrongReference = await apiFetch(
 			`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}?toolCallId=wrong`,
 		);
-		expect(wrongReference.status).toBe(409);
-		expect(await wrongReference.json()).toMatchObject({ ok: false, code: "REVIEW_PAYLOAD_REFERENCE_MISMATCH", retryable: false });
+		expect(wrongReference.status).toBe(400);
+		expect(await wrongReference.json()).toMatchObject({ ok: false, code: "REVIEW_PAYLOAD_INVALID", retryable: false });
+		for (const query of [
+			`toolCallId=${encodeURIComponent(receipt.toolCallId)}&reviewId=${encodeURIComponent(receipt.reviewId)}`,
+			`toolCallId=${encodeURIComponent(receipt.toolCallId)}&hash=${receipt.hash}`,
+			`reviewId=${encodeURIComponent(receipt.reviewId)}&hash=${receipt.hash}`,
+		]) {
+			const incomplete = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}?${query}`);
+			expect(incomplete.status).toBe(400);
+			expect(await incomplete.json()).toMatchObject({ ok: false, code: "REVIEW_PAYLOAD_INVALID" });
+		}
+
+		const tabId = `review:${encodeURIComponent(receipt.reviewId)}`;
+		const selected = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent(tabId)}`, {
+			method: "PATCH",
+			body: JSON.stringify({ state: { activeFileId: "review-file-12" } }),
+		});
+		expect(selected.status).toBe(200);
+
+		const incompleteOpen = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}/open`, {
+			method: "POST",
+			body: JSON.stringify({ toolCallId: receipt.toolCallId, reviewId: receipt.reviewId, hash: receipt.hash }),
+		});
+		expect(incompleteOpen.status).toBe(400);
+		expect(await incompleteOpen.json()).toMatchObject({ ok: false, code: "REVIEW_PAYLOAD_INVALID" });
 
 		const reopened = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}/open`, {
 			method: "POST",
@@ -134,7 +157,42 @@ test.describe("review payload API hardening", () => {
 
 		const workspace = await (await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace`)).json();
 		expect(workspace.tabs.map((tab: any) => tab.id)).toContain(`review:${encodeURIComponent(receipt.reviewId)}`);
-		expect(workspace.tabs.find((tab: any) => tab.id === `review:${encodeURIComponent(receipt.reviewId)}`).state.activeFileId).toBe("review-file-7");
+		expect(workspace.tabs.find((tab: any) => tab.id === `review:${encodeURIComponent(receipt.reviewId)}`).state.activeFileId).toBe("review-file-12");
+	});
+
+	test("denies same-project sandbox tokens access to victim review content and open", async ({ gateway }) => {
+		const attackerId = await createSession();
+		const victimId = await createSession();
+		cleanup.push(attackerId, victimId);
+		const victimSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(victimId);
+		const uploaded = await apiFetch(`/api/sessions/${victimId}/review-payloads`, {
+			method: "POST",
+			headers: { "X-Bobbit-Session-Secret": victimSecret },
+			body: JSON.stringify(reviewBody(["victim markdown"])),
+		});
+		expect(uploaded.status).toBe(201);
+		const receipt = await uploaded.json();
+		const projectId = String(gateway.sessionManager.getPersistedSession(victimId)?.projectId);
+		const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
+		gateway.sessionManager.sandboxTokenStore.addSession(projectId, attackerId);
+		gateway.sessionManager.sandboxTokenStore.addSession(projectId, victimId);
+		try {
+			const reference = `toolCallId=${encodeURIComponent(receipt.toolCallId)}&reviewId=${encodeURIComponent(receipt.reviewId)}&hash=${receipt.hash}`;
+			const read = await fetch(`${gateway.baseURL}/api/sessions/${victimId}/review-payloads/${receipt.payloadId}?${reference}`, {
+				headers: { Authorization: `Bearer ${sandboxToken}` },
+			});
+			expect(read.status).toBe(403);
+			expect(await read.text()).not.toContain("victim markdown");
+			const open = await fetch(`${gateway.baseURL}/api/sessions/${victimId}/review-payloads/${receipt.payloadId}/open`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${sandboxToken}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ toolCallId: receipt.toolCallId, reviewId: receipt.reviewId, hash: receipt.hash }),
+			});
+			expect(open.status).toBe(403);
+		} finally {
+			gateway.sessionManager.sandboxTokenStore.removeSession(projectId, attackerId);
+			gateway.sessionManager.sandboxTokenStore.removeSession(projectId, victimId);
+		}
 	});
 
 	test("requires the owning session secret for upload and rejects 10 MiB plus one byte", async ({ gateway }) => {
@@ -183,6 +241,52 @@ test.describe("review payload API hardening", () => {
 		await new Promise<void>((resolveClose) => raw.request.once("close", resolveClose));
 		expect(raw.request.destroyed).toBe(true);
 		expect(fs.existsSync(join(gateway.bobbitDir, "state", "review-payloads", sessionId))).toBe(false);
+	});
+
+	test("replace:true carries the current valid workspace selection through reconciliation", async ({ gateway }) => {
+		const sessionId = await createSession();
+		cleanup.push(sessionId);
+		const secret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const upload = async (review: Record<string, unknown>) => {
+			const response = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": secret },
+				body: JSON.stringify(reviewBody(["unused"], review)),
+			});
+			expect(response.status).toBe(201);
+			return response.json();
+		};
+		const first = await upload({
+			title: "Selection replacement",
+			files: [
+				{ fileId: "old-a", title: "a.md", markdown: "a1" },
+				{ fileId: "old-b", title: "b.md", markdown: "b1" },
+				{ fileId: "old-c", title: "c.md", markdown: "c1" },
+			],
+			activeFileId: "old-a",
+			replace: true,
+		});
+		const tabId = `review:${encodeURIComponent(first.reviewId)}`;
+		const selected = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/tabs/${encodeURIComponent(tabId)}`, {
+			method: "PATCH",
+			body: JSON.stringify({ state: { activeFileId: "old-b" } }),
+		});
+		expect(selected.status).toBe(200);
+		const replacement = await upload({
+			reviewId: "incoming-replacement-id",
+			title: "Selection replacement",
+			files: [
+				{ fileId: "new-c", title: "c.md", markdown: "c2" },
+				{ fileId: "new-a", title: "a.md", markdown: "a2" },
+				{ fileId: "new-b", title: "b.md", markdown: "b2" },
+			],
+			activeFileId: "new-c",
+			replace: true,
+		});
+		expect(replacement.reviewId).toBe(first.reviewId);
+		expect(replacement.activeFileId).toBe("old-b");
+		const after = await workspace(sessionId);
+		expect(after.tabs.find((tab: any) => tab.id === tabId)?.state.activeFileId).toBe("old-b");
 	});
 
 	test("serializes concurrent replace:true identity resolution and preserves replace:false controls", async ({ gateway }) => {

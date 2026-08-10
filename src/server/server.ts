@@ -5374,18 +5374,19 @@ async function handleApiRoute(
 		title: string,
 		incomingReviewId: string,
 		replace: boolean,
-	): Promise<{ reviewId: string; payload?: CanonicalReviewPayload }> => {
+	): Promise<{ reviewId: string; payload?: CanonicalReviewPayload; activeFileId?: string }> => {
 		if (!replace) return { reviewId: incomingReviewId };
 		const workspace = sessionManager.getPersistedSession(sessionId)?.sidePanelWorkspace;
 		for (const tab of workspace?.tabs ?? []) {
 			if (tab.kind !== "review" || tab.source.type !== "review" || tab.source.title !== title) continue;
 			const reviewId = typeof tab.source.reviewId === "string" && tab.source.reviewId ? tab.source.reviewId : incomingReviewId;
+			const activeFileId = typeof tab.state?.activeFileId === "string" ? tab.state.activeFileId : undefined;
 			const source = tab.source as unknown as Record<string, unknown>;
 			if (typeof source.payloadId === "string" && typeof source.toolCallId === "string" && typeof source.contentHash === "string") {
 				try {
 					const prior = await readReviewPayload(sessionId, source.payloadId);
 					if (prior.reviewId === reviewId && prior.toolCallId === source.toolCallId && prior.hash === source.contentHash) {
-						return { reviewId, payload: prior };
+						return { reviewId, payload: prior, activeFileId };
 					}
 				} catch { /* Preserve stable review identity even when old content expired. */ }
 			}
@@ -5431,7 +5432,13 @@ async function handleApiRoute(
 				source,
 				state: { activeFileId },
 				updatedAt: Date.now(),
-			}, { focus: true, placeAfterActive: true });
+			}, {
+				focus: true,
+				placeAfterActive: true,
+				// Resolve the current selection while holding the authoritative workspace
+				// lock so a manual Re-open cannot reset live file navigation.
+				preserveActiveFileIds: new Set(payload.files.map((file) => file.fileId)),
+			});
 			if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
 			return workspace;
 		} catch (error) {
