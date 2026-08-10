@@ -35,6 +35,7 @@ export { clearReviewTombstone, setReviewTombstone } from "../ui/components/revie
 
 const REVIEW_CONTEXT_STORAGE_PREFIX = "bobbit-review-contexts-v1:";
 const REVIEW_CONTEXT_VERSION = 2;
+const MAX_ARTIFACT_REVIEW_TITLE_BYTES = 320;
 
 export interface OpenReviewFileOptions {
 	title: string;
@@ -152,6 +153,11 @@ function normalizeIdentity(value: unknown): string | undefined {
 	return trimmed;
 }
 
+function exactArtifactTitle(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) return undefined;
+	return new TextEncoder().encode(value).byteLength <= MAX_ARTIFACT_REVIEW_TITLE_BYTES ? value : undefined;
+}
+
 function artifactReviewKey(sessionId: string, reviewId: string): string {
 	return `${sessionId}\u0000${reviewId}`;
 }
@@ -164,7 +170,7 @@ function exactArtifactReferenceFromTab(
 	const source = tab.source as Record<string, unknown>;
 	const sessionId = normalizeIdentity(source.sessionId);
 	const reviewId = normalizeIdentity(source.reviewId);
-	const title = typeof source.title === "string" && source.title.trim() ? source.title.trim() : undefined;
+	const title = exactArtifactTitle(source.title);
 	const toolCallId = normalizeIdentity(source.toolCallId);
 	const payloadId = normalizeIdentity(source.payloadId);
 	const contentHash = normalizeIdentity(source.contentHash);
@@ -471,10 +477,11 @@ function normalizeArtifactReviewGroup(raw: unknown, reference: ArtifactReviewRef
 		if (!rawFile || typeof rawFile !== "object" || Array.isArray(rawFile)) throw new Error("Review payload is malformed.");
 		const file = rawFile as Record<string, unknown>;
 		const fileId = normalizeIdentity(file.fileId);
-		if (!fileId || seen.has(fileId) || typeof file.title !== "string" || !file.title.trim()
+		const fileTitle = exactArtifactTitle(file.title);
+		if (!fileId || seen.has(fileId) || !fileTitle
 			|| typeof file.markdown !== "string") throw new Error("Review payload file identity is invalid.");
 		seen.add(fileId);
-		files.push({ fileId, title: file.title, markdown: file.markdown });
+		files.push({ fileId, title: fileTitle, markdown: file.markdown });
 	}
 	if (!seen.has(payloadActiveFileId) || !seen.has(reference.activeFileId)) {
 		throw new Error("Review payload active file is unavailable.");

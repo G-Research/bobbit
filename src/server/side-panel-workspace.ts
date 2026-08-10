@@ -46,6 +46,7 @@ const MAX_ENTRY = 240;
 const MAX_REVIEW_ID = 240;
 const MAX_REVIEW_REFERENCE_ID = 160;
 const MAX_REVIEW_FILE_ID = 160;
+const MAX_REVIEW_SOURCE_TITLE_BYTES = 320;
 const MAX_PACK_PART = 120;
 const MAX_PARAMS_BYTES = 16 * 1024;
 const MAX_STATE_BYTES = 16 * 1024;
@@ -97,6 +98,12 @@ function hasNoControlChars(value: string): boolean {
 function exactBoundedIdentity(value: unknown, maxBytes: number): string | null {
 	if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > maxBytes) return null;
 	if (value !== value.trim() || !hasNoControlChars(value)) return null;
+	return value;
+}
+
+function exactBoundedReviewTitle(value: unknown): string | null {
+	if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > MAX_REVIEW_SOURCE_TITLE_BYTES) return null;
+	if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)) return null;
 	return value;
 }
 
@@ -241,7 +248,8 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 
 	const sourceReviewId = asString(source.reviewId).trim();
 	const legacyDocumentId = asString(source.documentId).trim();
-	const sourceTitle = asString(source.title, asString(source.reviewTitle)).trim();
+	const rawSourceTitle = asString(source.title, asString(source.reviewTitle));
+	const legacySourceTitle = rawSourceTitle.trim();
 	let reviewId: string;
 	if (sourceReviewId) {
 		// Canonical callers must agree with the id route identity. Silently
@@ -255,14 +263,14 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 	} else {
 		// Old title-only tabs have no stable identity. Hash their display title
 		// once, then persist the canonical reviewId source on the workspace.
-		reviewId = `legacy-title-${createHash("sha256").update(sourceTitle || decoded).digest("hex").slice(0, 16)}`;
+		reviewId = `legacy-title-${createHash("sha256").update(legacySourceTitle || decoded).digest("hex").slice(0, 16)}`;
 	}
 	if (!reviewId || reviewId.length > MAX_REVIEW_ID || !hasNoControlChars(reviewId)) return null;
-	const title = truncate(sourceTitle || asString(raw.title).replace(/^Review:\s*/, "").trim() || decoded, MAX_TITLE) || reviewId;
 
 	const payloadReferenceKeys = ["toolCallId", "payloadId", "contentHash"] as const;
 	const hasPayloadReference = payloadReferenceKeys.some((key) => hasOwn(source, key));
 	if (!hasPayloadReference) {
+		const title = truncate(legacySourceTitle || asString(raw.title).replace(/^Review:\s*/, "").trim() || decoded, MAX_TITLE) || reviewId;
 		return {
 			id: `review:${encodeComponent(reviewId)}`,
 			kind: "review",
@@ -275,10 +283,11 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 	// legacy identity: doing so could bind a workspace tab to content from
 	// another tool call or payload.
 	if (!sourceReviewId || hasOwn(source, "documentId") || hasOwn(source, "reviewTitle")) return null;
+	const title = exactBoundedReviewTitle(source.title);
 	const toolCallId = exactBoundedIdentity(source.toolCallId, MAX_REVIEW_REFERENCE_ID);
 	const payloadId = exactBoundedIdentity(source.payloadId, MAX_REVIEW_REFERENCE_ID);
 	const contentHash = exactBoundedIdentity(source.contentHash, 64);
-	if (!toolCallId || !payloadId || !contentHash || !/^[a-f0-9]{64}$/.test(contentHash)) return null;
+	if (!title || !toolCallId || !payloadId || !contentHash || !/^[a-f0-9]{64}$/.test(contentHash)) return null;
 	return {
 		id: `review:${encodeComponent(reviewId)}`,
 		kind: "review",

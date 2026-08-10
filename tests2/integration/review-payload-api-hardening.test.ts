@@ -137,6 +137,50 @@ test.describe("review payload API hardening", () => {
 		expect(workspace.tabs.find((tab: any) => tab.id === `review:${encodeURIComponent(receipt.reviewId)}`).state.activeFileId).toBe("review-file-7");
 	});
 
+	test("preserves an accepted whitespace and >160-byte title through automatic open, reopen, and reload fetch", async ({ gateway }) => {
+		const sessionId = await createSession();
+		cleanup.push(sessionId);
+		const secret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const exactTitle = `  ${"é".repeat(150)}${"x".repeat(12)}  `;
+		expect(Buffer.byteLength(exactTitle, "utf8")).toBe(316);
+		expect(exactTitle.length).toBeGreaterThan(160);
+
+		const uploaded = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
+			method: "POST",
+			headers: { "X-Bobbit-Session-Secret": secret },
+			body: JSON.stringify(reviewBody(["reload body"], { title: exactTitle })),
+		});
+		expect(uploaded.status).toBe(201);
+		const receipt = await uploaded.json();
+		expect(receipt.title).toBe(exactTitle);
+		expect(receipt.automaticOpen).toMatchObject({ ok: true, status: "opened" });
+
+		let authoritative = await workspace(sessionId);
+		let tab = authoritative.tabs.find((candidate: any) => candidate.id === `review:${encodeURIComponent(receipt.reviewId)}`);
+		expect(tab.source.title).toBe(exactTitle);
+		expect(tab.title.length).toBeLessThanOrEqual(160);
+
+		const fetched = await apiFetch(
+			`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}?toolCallId=${encodeURIComponent(receipt.toolCallId)}&reviewId=${encodeURIComponent(receipt.reviewId)}&hash=${receipt.hash}`,
+		);
+		expect(fetched.status).toBe(200);
+		expect((await fetched.json()).title).toBe(exactTitle);
+
+		const reopened = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}/open`, {
+			method: "POST",
+			body: JSON.stringify({
+				toolCallId: receipt.toolCallId,
+				payloadId: receipt.payloadId,
+				reviewId: receipt.reviewId,
+				hash: receipt.hash,
+			}),
+		});
+		expect(reopened.status).toBe(200);
+		authoritative = await workspace(sessionId);
+		tab = authoritative.tabs.find((candidate: any) => candidate.id === `review:${encodeURIComponent(receipt.reviewId)}`);
+		expect(tab.source.title).toBe(exactTitle);
+	});
+
 	test("requires the owning session secret for upload and rejects 10 MiB plus one byte", async ({ gateway }) => {
 		const sessionId = await createSession();
 		cleanup.push(sessionId);

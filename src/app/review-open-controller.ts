@@ -5,6 +5,7 @@ import { renderApp } from "./state.js";
 
 export const REVIEW_PAYLOAD_MAX_BYTES = 10 * 1024 * 1024;
 export const REVIEW_PAYLOAD_MAX_FILES = 64;
+export const REVIEW_PAYLOAD_MAX_TITLE_BYTES = 320;
 
 export interface ReviewOpenReceiptFile {
 	fileId: string;
@@ -96,7 +97,7 @@ function boundedIdentity(value: unknown, maxBytes: number): string {
 
 function boundedTitle(value: unknown): string {
 	if (typeof value !== "string" || value.length === 0 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) return "";
-	return new TextEncoder().encode(value).byteLength <= 320 ? value : "";
+	return new TextEncoder().encode(value).byteLength <= REVIEW_PAYLOAD_MAX_TITLE_BYTES ? value : "";
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {
