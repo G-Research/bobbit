@@ -689,6 +689,12 @@ export class ToolMessage extends LitElement {
 	// would not re-run it (design §4a).
 	private _onRenderRequested = () => { this.requestUpdate(); };
 
+	// Review open outcomes also arrive after immutable tool props settle. The
+	// top-level render is coalesced, so explicitly repaint only review cards.
+	private _onReviewOpenState = () => {
+		if (this.toolCall.name === "review_open") this.requestUpdate();
+	};
+
 	// For the non-blocking ask_user_choices widget: when a new message arrives,
 	// the tool_use card may need to flip to Answered mode because the transcript
 	// now contains a matching `[ask_user_choices_response ...]` envelope.
@@ -745,6 +751,7 @@ export class ToolMessage extends LitElement {
 		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		document.addEventListener("bobbit-review-open-state", this._onReviewOpenState);
 		this.addEventListener("load-full-content", this._onLoadFullContent);
 	}
 
@@ -754,6 +761,7 @@ export class ToolMessage extends LitElement {
 		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		document.removeEventListener("bobbit-review-open-state", this._onReviewOpenState);
 		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 

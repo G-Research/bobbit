@@ -303,6 +303,7 @@ export function setReviewTombstone(
   sessionId: string,
   reviewId: string,
   state: ReviewTombstoneState,
+  activeFileId?: string,
 ): Promise<void> {
   _ensureTombstoneCache(sessionId).set(reviewId, state);
   _recordTombstoneMutation(sessionId, reviewId);
@@ -311,7 +312,7 @@ export function setReviewTombstone(
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state }),
+      body: JSON.stringify({ state, ...(activeFileId ? { activeFileId } : {}) }),
     },
   ));
 }

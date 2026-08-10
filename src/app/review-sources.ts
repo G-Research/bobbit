@@ -1107,7 +1107,7 @@ async function commitReviewGroupCleanup(
 ): Promise<ReviewGroupModel | undefined> {
 	if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) return undefined;
 	if (tombstone !== false) {
-		await setReviewTombstone(sessionId, group.reviewId, tombstone);
+		await setReviewTombstone(sessionId, group.reviewId, tombstone, group.activeFileId);
 		if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) {
 			// A live same-ID replacement clears this in its queued open phase. Also
 			// clear here for non-live/internal replacement callers.

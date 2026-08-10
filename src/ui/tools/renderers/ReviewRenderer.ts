@@ -223,11 +223,6 @@ export class ReviewOpenRenderer implements ToolRenderer<ReviewOpenParams, any> {
 			event.preventDefault();
 			event.stopPropagation();
 			if (view.disabled || !ownerSessionId || !toolUseId || !receipt) return;
-			const button = event.currentTarget as HTMLButtonElement;
-			button.disabled = true;
-			button.setAttribute("aria-busy", "true");
-			button.setAttribute("aria-label", `Opening review: ${accessibleTitle}`);
-			button.textContent = "Opening…";
 			registerReviewOpenReceipt(ownerSessionId, toolUseId, receipt);
 			await openReviewReceipt({
 				sessionId: ownerSessionId,

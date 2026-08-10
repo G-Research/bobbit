@@ -5405,6 +5405,10 @@ async function handleApiRoute(
 		// hydration cannot observe an opened tab with stale suppression. Restore it
 		// if the durable workspace commit fails.
 		const priorTombstone = reviewAnnotationStore?.getReviewTombstone(payload.sessionId, payload.reviewId);
+		const priorActiveFileId = reviewAnnotationStore?.getReviewActiveFile(payload.sessionId, payload.reviewId);
+		const activeFileId = priorActiveFileId && payload.files.some((file) => file.fileId === priorActiveFileId)
+			? priorActiveFileId
+			: payload.activeFileId;
 		reviewAnnotationStore?.clearReviewTombstone(payload.sessionId, payload.reviewId);
 		try {
 			const workspace = await openSidePanelWorkspaceTab({
@@ -5418,13 +5422,13 @@ async function handleApiRoute(
 				title: `Review: ${payload.title}`,
 				label: `Review: ${payload.title}`,
 				source,
-				state: { activeFileId: payload.activeFileId },
+				state: { activeFileId },
 				updatedAt: Date.now(),
 			}, { focus: true, placeAfterActive: true });
 			if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
 			return workspace;
 		} catch (error) {
-			if (priorTombstone) reviewAnnotationStore?.setReviewTombstone(payload.sessionId, payload.reviewId, priorTombstone);
+			if (priorTombstone) reviewAnnotationStore?.setReviewTombstone(payload.sessionId, payload.reviewId, priorTombstone, priorActiveFileId);
 			throw error;
 		}
 	};
@@ -17448,12 +17452,17 @@ async function handleApiRoute(
 		catch { json({ error: "Invalid reviewId" }, 400); return; }
 		const reviewId = pathReviewId ?? body?.reviewId;
 		const tombstoneState = body?.state;
+		const activeFileId = body?.activeFileId;
 		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
 		if (tombstoneState !== "submitted" && tombstoneState !== "closed") {
 			json({ error: "state must be submitted or closed" }, 400);
 			return;
 		}
-		reviewAnnotationStore.setReviewTombstone(sessionId, reviewId, tombstoneState);
+		if (activeFileId !== undefined && (typeof activeFileId !== "string" || !activeFileId.trim() || Buffer.byteLength(activeFileId, "utf8") > 300 || /[\x00-\x1f\x7f\\/]/.test(activeFileId))) {
+			json({ error: "activeFileId is invalid" }, 400);
+			return;
+		}
+		reviewAnnotationStore.setReviewTombstone(sessionId, reviewId, tombstoneState, activeFileId);
 		json({ ok: true });
 		return;
 	}
