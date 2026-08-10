@@ -768,7 +768,7 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/core/tool-result-error-bridge-extension.test.ts",
 		operations: frozen([
-			allowedExecutableOperation("dynamic-import", "`data:text/javascript,${encodeURIComponent(source)}`", "in-memory generated data URL module"),
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(filePath).href}?nonce=${Date.now()}-${Math.random()}`", "test-owned generated error bridge extension"),
 		]),
 	},
 	{
@@ -825,6 +825,14 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  * second read through an existing expression an intentional review event too.
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
+	{
+		consumer: "tests2/core/focused-tool-contract-refresh.test.ts",
+		allowReason: "test-owned generated system prompt and the tool detail document path it points to",
+		reads: frozen([
+			{ expression: "spawnedOptions.systemPromptPath", count: 1 },
+			{ expression: "agentDocsPath", count: 1 },
+		]),
+	},
 	{
 		consumer: "tests2/integration/extension-host-surface-token.test.ts",
 		declarations: frozen(["scan:server-typescript-source-guards"]),
