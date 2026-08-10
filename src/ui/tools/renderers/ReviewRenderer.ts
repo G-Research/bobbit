@@ -41,7 +41,7 @@ const BUTTON_CLASSES = "shrink-0 inline-flex items-center gap-1 text-xs px-2 py-
 
 function normalizedErrorCode(code: unknown): ReviewOpenErrorCode | undefined {
 	if (code === "REVIEW_PAYLOAD_UNAVAILABLE" || code === "REVIEW_REFERENCE_INVALID"
-		|| code === "REVIEW_PAYLOAD_TOO_LARGE" || code === "REVIEW_UNAUTHORIZED"
+		|| code === "REVIEW_PAYLOAD_TOO_LARGE" || code === "REVIEW_PAYLOAD_QUOTA_EXCEEDED" || code === "REVIEW_UNAUTHORIZED"
 		|| code === "REVIEW_PERSISTENCE_FAILED" || code === "REVIEW_WORKSPACE_CONFLICT"
 		|| code === "REVIEW_SESSION_UNAVAILABLE" || code === "REVIEW_CLIENT_OPEN_FAILED") return code;
 	if (code === "REVIEW_PAYLOAD_SESSION_UNAVAILABLE" || code === "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE") return "REVIEW_SESSION_UNAVAILABLE";
@@ -99,6 +99,8 @@ function errorMessage(code: ReviewOpenErrorCode | undefined): string {
 			return "Saved review data is incomplete. Run review_open again.";
 		case "REVIEW_PAYLOAD_TOO_LARGE":
 			return "Review exceeds the 10 MiB limit. Reduce it and run review_open again.";
+		case "REVIEW_PAYLOAD_QUOTA_EXCEEDED":
+			return "Review content storage is full for this session. Start a new session or remove saved reviews.";
 		case "REVIEW_UNAUTHORIZED":
 			return "This review can’t be opened from this card.";
 		case "REVIEW_PERSISTENCE_FAILED":
@@ -177,7 +179,7 @@ function presentation(
 		return { buttonLabel: receiptWasOpened(receipt) ? "Re-open review" : "Open review", disabled: false, pending: false };
 	}
 	if (openState.phase === "available") {
-		return { buttonLabel: "Open review", disabled: false, pending: false };
+		return { buttonLabel: receiptWasOpened(receipt) ? "Re-open review" : "Open review", disabled: false, pending: false };
 	}
 	if (openState.phase === "pending") {
 		return {

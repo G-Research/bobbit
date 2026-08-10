@@ -713,7 +713,10 @@ function mutationBody(extra: Record<string, unknown>, workspace: SidePanelWorksp
 	});
 }
 
-export async function hydrateSidePanelWorkspace(sessionId: string): Promise<SidePanelWorkspace> {
+export async function hydrateSidePanelWorkspace(
+	sessionId: string,
+	options: { throwOnError?: boolean } = {},
+): Promise<SidePanelWorkspace> {
 	mutationState.delete(panelWorkspaceSessionKey(sessionId));
 	if (!useServerWorkspaceApi()) {
 		const workspace = state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] || emptyWorkspace(sessionId);
@@ -735,6 +738,7 @@ export async function hydrateSidePanelWorkspace(sessionId: string): Promise<Side
 		return workspace;
 	} catch (err) {
 		console.warn("[side-panel] hydrate failed", err);
+		if (options.throwOnError) throw err;
 		const fallback = state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] || emptyWorkspace(sessionId);
 		state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] = fallback;
 		syncCompatibilityMirrors(fallback);

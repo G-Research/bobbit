@@ -43,6 +43,7 @@ export type ReviewOpenErrorCode =
 	| "REVIEW_PAYLOAD_UNAVAILABLE"
 	| "REVIEW_REFERENCE_INVALID"
 	| "REVIEW_PAYLOAD_TOO_LARGE"
+	| "REVIEW_PAYLOAD_QUOTA_EXCEEDED"
 	| "REVIEW_UNAUTHORIZED"
 	| "REVIEW_PERSISTENCE_FAILED"
 	| "REVIEW_WORKSPACE_CONFLICT"
@@ -127,7 +128,7 @@ export function reviewPayloadRoute(
 	return `/api/sessions/${encodeURIComponent(sessionId)}/review-payloads/${encodeURIComponent(payloadId)}?${params}`;
 }
 
-/** Central route contract shared by automatic opens and renderer retries. */
+/** Reference-only mutation used by an explicit renderer retry/reopen. */
 export function reviewPayloadOpenRoute(sessionId: string, payloadId: string, toolCallId: string): string {
 	return `/api/sessions/${encodeURIComponent(sessionId)}/review-payloads/${encodeURIComponent(payloadId)}/open?toolCallId=${encodeURIComponent(toolCallId)}`;
 }
@@ -223,6 +224,7 @@ function stateMessage(code: ReviewOpenErrorCode): string {
 		case "REVIEW_PAYLOAD_UNAVAILABLE": return "This review is no longer available.";
 		case "REVIEW_REFERENCE_INVALID": return "The review reference is invalid. Run the review tool again.";
 		case "REVIEW_PAYLOAD_TOO_LARGE": return "This review exceeds the 10 MiB limit.";
+		case "REVIEW_PAYLOAD_QUOTA_EXCEEDED": return "Review content storage is full for this session.";
 		case "REVIEW_UNAUTHORIZED": return "This review is unavailable for this session.";
 		case "REVIEW_PERSISTENCE_FAILED": return "The review could not be saved. Retry opening it.";
 		case "REVIEW_WORKSPACE_CONFLICT": return "The review workspace changed. Retry opening it.";
@@ -330,7 +332,7 @@ function allowlistedServerCode(value: unknown, status: number): ReviewOpenErrorC
 	const outcome = asRecord(raw?.outcome) ?? raw;
 	const code = outcome?.code;
 	if (code === "REVIEW_PAYLOAD_UNAVAILABLE" || code === "REVIEW_REFERENCE_INVALID" || code === "REVIEW_PAYLOAD_TOO_LARGE"
-		|| code === "REVIEW_UNAUTHORIZED" || code === "REVIEW_PERSISTENCE_FAILED" || code === "REVIEW_WORKSPACE_CONFLICT"
+		|| code === "REVIEW_PAYLOAD_QUOTA_EXCEEDED" || code === "REVIEW_UNAUTHORIZED" || code === "REVIEW_PERSISTENCE_FAILED" || code === "REVIEW_WORKSPACE_CONFLICT"
 		|| code === "REVIEW_SESSION_UNAVAILABLE" || code === "REVIEW_CLIENT_OPEN_FAILED") return code;
 	if (code === "REVIEW_PAYLOAD_SESSION_UNAVAILABLE") return "REVIEW_SESSION_UNAVAILABLE";
 	if (code === "REVIEW_PAYLOAD_NOT_FOUND") return "REVIEW_PAYLOAD_UNAVAILABLE";
@@ -391,6 +393,33 @@ export async function openReviewReceipt(request: ReviewOpenRequest): Promise<Rev
 	setState(key, { phase: "pending", receipt });
 	const operation = (async (): Promise<ReviewOpenState> => {
 		try {
+			let workspace: unknown;
+			if (request.intent === "automatic") {
+				// Upload already performed the authoritative open. A delayed receipt must
+				// never repeat that mutation: doing so could recreate a review after the
+				// user closed or submitted it. Honor the upload outcome, then read the
+				// latest workspace before loading any potentially large content.
+				const automaticOpen = receipt.open;
+				const automaticFailed = automaticOpen?.ok === false
+					|| automaticOpen?.status === "failed"
+					|| automaticOpen?.status === "error";
+				const automaticSucceeded = !automaticFailed
+					&& (automaticOpen?.ok === true || automaticOpen?.status === "opened");
+				if (!automaticSucceeded) {
+					const code = automaticFailed
+						? allowlistedServerCode(automaticOpen, 0)
+						: "REVIEW_REFERENCE_INVALID";
+					return setState(key, failure(code, receipt));
+				}
+				workspace = await hydrateSidePanelWorkspace(request.sessionId, { throwOnError: true });
+				if (!validateWorkspace(workspace, normalizedRequest)) {
+					// Authoritative absence is not an open failure. Keep the exact receipt as
+					// the explicit recovery path without recreating a tab or clearing its
+					// replay tombstone.
+					return setState(key, { phase: "available", receipt });
+				}
+			}
+
 			const payloadResponse = await gatewayFetch(reviewPayloadRoute(
 				request.sessionId,
 				receipt.payloadId,
@@ -405,36 +434,40 @@ export async function openReviewReceipt(request: ReviewOpenRequest): Promise<Rev
 				return setState(key, failure("REVIEW_REFERENCE_INVALID", receipt));
 			}
 
-			const openResponse = await gatewayFetch(reviewPayloadOpenRoute(request.sessionId, receipt.payloadId, request.toolUseId), {
-				method: "POST",
-				body: JSON.stringify(openReferenceBody(receipt)),
-			});
-			let openBody: unknown;
-			try { openBody = await openResponse.json(); } catch { openBody = undefined; }
-			if (!openResponse.ok) return setState(key, failure(allowlistedServerCode(openBody, openResponse.status), receipt));
-			const openRecord = asRecord(openBody);
-			const openOutcome = asRecord(openRecord?.outcome);
-			if (openRecord?.ok === false || openOutcome?.ok === false || openOutcome?.status === "failed" || openOutcome?.status === "error") {
-				return setState(key, failure(allowlistedServerCode(openBody, openResponse.status), receipt));
+			if (request.intent === "manual") {
+				const openResponse = await gatewayFetch(reviewPayloadOpenRoute(request.sessionId, receipt.payloadId, request.toolUseId), {
+					method: "POST",
+					body: JSON.stringify(openReferenceBody(receipt)),
+				});
+				let openBody: unknown;
+				try { openBody = await openResponse.json(); } catch { openBody = undefined; }
+				if (!openResponse.ok) return setState(key, failure(allowlistedServerCode(openBody, openResponse.status), receipt));
+				const openRecord = asRecord(openBody);
+				const openOutcome = asRecord(openRecord?.outcome);
+				if (openRecord?.ok === false || openOutcome?.ok === false || openOutcome?.status === "failed" || openOutcome?.status === "error") {
+					return setState(key, failure(allowlistedServerCode(openBody, openResponse.status), receipt));
+				}
+				// Older gateways may acknowledge the atomic open without echoing the
+				// workspace. Read it back rather than constructing a client tab from the
+				// receipt.
+				workspace = workspaceFromOpenResponse(openBody)
+					?? await hydrateSidePanelWorkspace(request.sessionId);
+				if (!validateWorkspace(workspace, normalizedRequest)) return setState(key, failure("REVIEW_CLIENT_OPEN_FAILED", receipt));
+				// Manual open has durably committed this authoritative workspace. Apply
+				// it before artifact hydration so content requires the exact tab tuple.
+				applySidePanelWorkspaceFromServer(workspace, { source: "rest" });
 			}
-			// Older gateways may acknowledge the atomic open without echoing the
-			// workspace. Read it back rather than constructing a client tab from the
-			// receipt.
-			const workspace = workspaceFromOpenResponse(openBody)
-				?? await hydrateSidePanelWorkspace(request.sessionId);
-			if (!validateWorkspace(workspace, normalizedRequest)) return setState(key, failure("REVIEW_CLIENT_OPEN_FAILED", receipt));
-			// The server has already committed this authoritative workspace. Apply its
-			// fully validated response before artifact hydration so the content handler
-			// can require the exact normalized tab reference instead of trusting the
-			// receipt or raw response independently. A later client hydration failure is
-			// retryable and does not pretend to roll back the durable server commit.
-			applySidePanelWorkspaceFromServer(workspace, { source: "rest" });
+
 			const reviewSources = await artifactReviewSources();
 			const reference = exactWorkspaceReference(
 				reviewSources.getArtifactReviewWorkspaceReferences(request.sessionId),
 				normalizedRequest,
 			);
-			if (!reference) return setState(key, failure("REVIEW_CLIENT_OPEN_FAILED", receipt));
+			if (!reference) {
+				return request.intent === "automatic"
+					? setState(key, { phase: "available", receipt })
+					: setState(key, failure("REVIEW_CLIENT_OPEN_FAILED", receipt));
+			}
 			reviewSources.commitArtifactReviewGroup(reference, payloadBody);
 			return setState(key, { phase: "success", receipt, openedAt: Date.now() });
 		} catch {
