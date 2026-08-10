@@ -6,8 +6,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Value } from "@sinclair/typebox/value";
-import { afterAll, beforeAll, describe, it } from "vitest";
-import reviewExtension from "../../defaults/tools/review/extension.ts";
+import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
+import reviewExtension, {
+	MAX_REVIEW_FILES,
+	MAX_REVIEW_MARKDOWN_BYTES,
+	MAX_REVIEW_TITLE_BYTES,
+} from "../../defaults/tools/review/extension.ts";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type RegisteredTool = {
@@ -15,9 +19,48 @@ type RegisteredTool = {
 	parameters: any;
 	execute: (toolCallId: string, params: any) => Promise<ToolResult>;
 };
+type Upload = {
+	url: string;
+	init: RequestInit;
+	body: {
+		toolCallId: string;
+		review: {
+			reviewId: string;
+			title: string;
+			files: Array<{ fileId: string; title: string; markdown: string }>;
+			activeFileId: string;
+			replace: boolean;
+		};
+	};
+};
 
 let reviewOpen: RegisteredTool;
 let fixtureDir: string;
+let uploads: Upload[] = [];
+let nextResponse: ((upload: Upload) => Response) | undefined;
+
+function defaultResponse(upload: Upload): Response {
+	const { toolCallId, review } = upload.body;
+	const files = review.files.map((file) => ({
+		fileId: file.fileId,
+		title: file.title,
+		bytes: Buffer.byteLength(file.markdown, "utf8"),
+	}));
+	return Response.json({
+		action: "review_open",
+		version: 2,
+		toolCallId,
+		payloadId: "payload_abcdefghijklmnop",
+		reviewId: review.reviewId,
+		title: review.title,
+		activeFileId: review.activeFileId,
+		replace: review.replace,
+		totalBytes: files.reduce((total, file) => total + file.bytes, 0),
+		hash: "a".repeat(64),
+		files,
+		automaticOpen: { ok: true, status: "opened" },
+	}, { status: 201 });
+}
 
 beforeAll(() => {
 	fixtureDir = mkdtempSync(path.join(tmpdir(), "bobbit-review-extension-"));
@@ -26,6 +69,17 @@ beforeAll(() => {
 	writeFileSync(path.join(fixtureDir, "binary.md"), Buffer.from([0x23, 0x20, 0x61, 0x00, 0x62]));
 	mkdirSync(path.join(fixtureDir, "folder.md"));
 	process.env.BOBBIT_CWD = fixtureDir;
+	process.env.BOBBIT_DIR = fixtureDir;
+	process.env.BOBBIT_GATEWAY_URL = "http://review.test";
+	process.env.BOBBIT_TOKEN = "gateway-token";
+	process.env.BOBBIT_SESSION_ID = "11111111-1111-4111-8111-111111111111";
+	process.env.BOBBIT_SESSION_SECRET = "own-session-secret";
+	globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+		const body = JSON.parse(String(init.body)) as Upload["body"];
+		const upload = { url: String(input), init, body };
+		uploads.push(upload);
+		return (nextResponse ?? defaultResponse)(upload);
+	}) as typeof fetch;
 
 	const tools = new Map<string, RegisteredTool>();
 	reviewExtension({
@@ -38,6 +92,11 @@ beforeAll(() => {
 	reviewOpen = tool;
 });
 
+beforeEach(() => {
+	uploads = [];
+	nextResponse = undefined;
+});
+
 afterAll(() => {
 	rmSync(fixtureDir, { recursive: true, force: true });
 });
@@ -48,50 +107,70 @@ function textOf(result: ToolResult): string {
 	return text;
 }
 
-async function execute(params: any): Promise<ToolResult> {
-	return reviewOpen.execute("review-open-contract-test", params);
+async function execute(params: any, toolCallId = "review-open-contract-test"): Promise<ToolResult> {
+	return reviewOpen.execute(toolCallId, params);
 }
 
-async function executeSuccess(params: any): Promise<any> {
-	const result = await execute(params);
-	const text = textOf(result);
-	assert.doesNotMatch(text, /^Error:/, `REVIEW_OPEN_FILES_CONTRACT: expected success, received ${text}`);
-	return JSON.parse(text);
+async function executeSuccess(params: any, toolCallId?: string): Promise<any> {
+	const result = await execute(params, toolCallId);
+	assert.notEqual(result.isError, true, `expected success, received ${textOf(result)}`);
+	return JSON.parse(textOf(result));
 }
 
-async function executeError(params: any): Promise<string> {
-	const text = textOf(await execute(params));
-	assert.match(text, /^Error:/, `REVIEW_OPEN_FILES_CONTRACT: expected a validation error, received ${text}`);
-	return text;
+async function executeError(params: any, toolCallId?: string): Promise<any> {
+	const result = await execute(params, toolCallId);
+	assert.equal(result.isError, true, `expected an error, received ${textOf(result)}`);
+	const parsed = JSON.parse(textOf(result));
+	assert.equal(parsed.action, "review_open");
+	assert.equal(parsed.version, 2);
+	assert.equal(typeof parsed.error?.code, "string");
+	assert.equal(typeof parsed.error?.retryable, "boolean");
+	assert.equal(typeof parsed.error?.message, "string");
+	return parsed;
 }
 
-function assertCanonicalReview(result: any, expected: {
+function assertCanonicalReceipt(result: any, expected: {
 	title: string;
 	replace: boolean;
 	files: Array<{ title: string; markdown: string }>;
 }): void {
 	assert.equal(result.action, "review_open");
+	assert.equal(result.version, 2);
+	assert.equal(typeof result.payloadId, "string");
 	assert.equal(typeof result.reviewId, "string");
-	assert.ok(result.reviewId.length > 0, "review identity must be non-empty");
 	assert.equal(result.title, expected.title);
 	assert.equal(result.replace, expected.replace);
-	assert.equal(result.markdown, undefined, "canonical grouped output must not retain top-level markdown");
-	assert.equal(result.file, undefined, "canonical grouped output must not retain top-level file");
+	assert.equal(result.markdown, undefined);
+	assert.equal(result.file, undefined);
 	assert.equal(result.files.length, expected.files.length);
 	assert.deepEqual(
-		result.files.map((file: any) => ({ title: file.title, markdown: file.markdown })),
-		expected.files,
+		result.files.map((file: any) => ({ title: file.title, bytes: file.bytes })),
+		expected.files.map((file) => ({ title: file.title, bytes: Buffer.byteLength(file.markdown, "utf8") })),
 	);
 	for (const file of result.files) {
 		assert.equal(typeof file.fileId, "string");
-		assert.ok(file.fileId.length > 0, "file identity must be non-empty");
+		assert.equal(file.markdown, undefined, "receipt metadata must not contain Markdown");
 	}
-	assert.equal(new Set(result.files.map((file: any) => file.fileId)).size, result.files.length,
-		"duplicate file titles must still receive distinct identities");
+	assert.equal(new Set(result.files.map((file: any) => file.fileId)).size, result.files.length);
+	assert.deepEqual(result.automaticOpen, { ok: true, status: "opened" });
+
+	const upload = uploads.at(-1);
+	assert.ok(upload, "successful review must upload canonical content");
+	assert.equal(upload.body.review.title, expected.title);
+	assert.equal(upload.body.review.replace, expected.replace);
+	assert.deepEqual(
+		upload.body.review.files.map((file) => ({ title: file.title, markdown: file.markdown })),
+		expected.files,
+	);
+	assert.deepEqual(
+		result.files.map((file: any) => file.fileId),
+		upload.body.review.files.map((file) => file.fileId),
+	);
+	assert.equal(result.activeFileId, upload.body.review.files[0].fileId);
 }
 
-describe("review_open multi-file contract", () => {
-	it("publishes a closed schema with exactly one top-level Markdown source mode", () => {
+describe("review_open durable receipt contract", () => {
+	it("publishes a closed schema with exactly one source mode and bounded file count", () => {
 		const schema = reviewOpen.parameters;
 		const valid = [
 			{ markdown: "" },
@@ -99,53 +178,37 @@ describe("review_open multi-file contract", () => {
 			{ title: "Bundle", replace: false, files: [{ markdown: "one" }] },
 			{ files: [{ title: "Inline", markdown: "one" }, { file: "notes.md" }] },
 		];
-		for (const params of valid) {
-			assert.equal(
-				Value.Check(schema, params),
-				true,
-				`REVIEW_OPEN_FILES_CONTRACT: schema should accept ${JSON.stringify(params)}`,
-			);
-		}
+		for (const params of valid) assert.equal(Value.Check(schema, params), true, JSON.stringify(params));
 
 		const invalid = [
 			{},
 			{ markdown: "inline", file: "architecture.md" },
 			{ files: [] },
+			{ files: Array.from({ length: MAX_REVIEW_FILES + 1 }, () => ({ markdown: "x" })) },
 			{ markdown: "inline", files: [{ markdown: "nested" }] },
-			{ file: "architecture.md", files: [{ markdown: "nested" }] },
 			{ files: [{}] },
 			{ files: [{ markdown: "nested", file: "notes.md" }] },
 			{ files: [{ markdown: 42 }] },
 			{ markdown: "inline", unexpected: true },
 		];
-		for (const params of invalid) {
-			assert.equal(
-				Value.Check(schema, params),
-				false,
-				`REVIEW_OPEN_FILES_CONTRACT: schema should reject ${JSON.stringify(params)}`,
-			);
-		}
+		for (const params of invalid) assert.equal(Value.Check(schema, params), false, JSON.stringify(params));
 	});
 
-	it("mirrors exclusivity and non-empty-array validation for direct execute callers", async () => {
+	it("mirrors schema validation for direct execute callers without uploading", async () => {
 		const invalid = [
 			{},
 			{ markdown: "inline", file: "architecture.md" },
 			{ files: [] },
-			{ markdown: "inline", files: [{ markdown: "nested" }] },
-			{ file: "architecture.md", files: [{ markdown: "nested" }] },
+			{ files: Array.from({ length: MAX_REVIEW_FILES + 1 }, () => ({ markdown: "x" })) },
 			{ files: [{}] },
 			{ files: [{ markdown: "nested", file: "notes.md" }] },
 			{ files: [{ markdown: 42 }] },
 		];
-		for (const params of invalid) {
-			const error = await executeError(params);
-			assert.match(error, /provided|exactly one|cannot|non-empty|invalid|must/i,
-				`runtime validation should explain ${JSON.stringify(params)}`);
-		}
+		for (const params of invalid) assert.equal((await executeError(params)).error.code, "REVIEW_PAYLOAD_INVALID");
+		assert.equal(uploads.length, 0, "invalid inputs must fail before persistence");
 	});
 
-	it("loads mixed inline and relative file entries atomically, preserving order and duplicate titles", async () => {
+	it("loads mixed inline and relative files atomically, preserving order and duplicate titles", async () => {
 		const result = await executeSuccess({
 			title: "System review",
 			files: [
@@ -155,7 +218,7 @@ describe("review_open multi-file contract", () => {
 				{ file: "notes.md" },
 			],
 		});
-		assertCanonicalReview(result, {
+		assertCanonicalReceipt(result, {
 			title: "System review",
 			replace: true,
 			files: [
@@ -167,99 +230,148 @@ describe("review_open multi-file contract", () => {
 		});
 	});
 
-	it("assigns deterministic review and file title defaults", async () => {
-		const result = await executeSuccess({
-			files: [
-				{ markdown: "first" },
-				{ file: "architecture.md" },
-				{ markdown: "third" },
-			],
-		});
-		assertCanonicalReview(result, {
+	it("assigns deterministic defaults and keeps legacy inline/file inputs", async () => {
+		const grouped = await executeSuccess({ files: [{ markdown: "first" }, { file: "architecture.md" }] });
+		assertCanonicalReceipt(grouped, {
 			title: "Review",
 			replace: true,
 			files: [
 				{ title: "File 1", markdown: "first" },
 				{ title: "architecture.md", markdown: "# Architecture\n" },
-				{ title: "File 3", markdown: "third" },
 			],
 		});
-	});
 
-	it("keeps legacy inline calls backward compatible, including empty Markdown", async () => {
-		const defaultReview = await executeSuccess({ markdown: "" });
-		assertCanonicalReview(defaultReview, {
-			title: "Review",
-			replace: true,
-			files: [{ title: "Review", markdown: "" }],
-		});
-
-		const titledReview = await executeSuccess({ title: "Release notes", markdown: "# Release", replace: false });
-		assertCanonicalReview(titledReview, {
+		const inline = await executeSuccess({ title: "Release notes", markdown: "", replace: false });
+		assertCanonicalReceipt(inline, {
 			title: "Release notes",
 			replace: false,
-			files: [{ title: "Release notes", markdown: "# Release" }],
+			files: [{ title: "Release notes", markdown: "" }],
 		});
-	});
 
-	it("keeps legacy file calls backward compatible with basename and explicit-title defaults", async () => {
-		const defaultReview = await executeSuccess({ file: "architecture.md" });
-		assertCanonicalReview(defaultReview, {
+		const file = await executeSuccess({ file: "architecture.md" });
+		assertCanonicalReceipt(file, {
 			title: "architecture.md",
 			replace: true,
 			files: [{ title: "architecture.md", markdown: "# Architecture\n" }],
 		});
-
-		const titledReview = await executeSuccess({ title: "Architecture", file: "architecture.md" });
-		assertCanonicalReview(titledReview, {
-			title: "Architecture",
-			replace: true,
-			files: [{ title: "Architecture", markdown: "# Architecture\n" }],
-		});
 	});
 
-	it("returns no partial review when any file entry cannot be loaded", async () => {
+	it("authenticates the exact owning-session upload and binds the receipt to the tool call", async () => {
+		const receipt = await executeSuccess({ markdown: "private body" }, "tool-call-exact");
+		assert.equal(receipt.toolCallId, "tool-call-exact");
+		assert.equal(uploads[0].body.toolCallId, "tool-call-exact");
+		assert.equal(uploads[0].url, "http://review.test/api/sessions/11111111-1111-4111-8111-111111111111/review-payloads");
+		const headers = new Headers(uploads[0].init.headers);
+		assert.equal(headers.get("authorization"), "Bearer gateway-token");
+		assert.equal(headers.get("x-bobbit-session-secret"), "own-session-secret");
+	});
+
+	it("accepts exactly 10 MiB using cumulative UTF-8 accounting and rejects one byte more atomically", async () => {
+		const exact = `${"x".repeat(MAX_REVIEW_MARKDOWN_BYTES - 2)}é`;
+		assert.equal(Buffer.byteLength(exact, "utf8"), MAX_REVIEW_MARKDOWN_BYTES);
+		const receipt = await executeSuccess({ files: [{ markdown: exact.slice(0, 1024) }, { markdown: exact.slice(1024) }] });
+		assert.equal(receipt.totalBytes, MAX_REVIEW_MARKDOWN_BYTES);
+		assert.equal(uploads.length, 1);
+
+		uploads = [];
+		const over = await executeError({ files: [{ markdown: exact }, { markdown: "x" }] });
+		assert.equal(over.error.code, "REVIEW_PAYLOAD_TOO_LARGE");
+		assert.equal(over.error.retryable, false);
+		assert.equal(uploads.length, 0, "over-limit reviews must not partially upload");
+	});
+
+	it("rejects oversized metadata and unsafe files before upload", async () => {
+		assert.equal(
+			(await executeError({ title: "é".repeat(Math.floor(MAX_REVIEW_TITLE_BYTES / 2) + 1), markdown: "x" })).error.code,
+			"REVIEW_PAYLOAD_INVALID",
+		);
+		assert.equal((await executeError({ files: [{ file: "missing.md" }] })).error.code, "REVIEW_PAYLOAD_INVALID");
+		assert.equal((await executeError({ files: [{ file: "folder.md" }] })).error.code, "REVIEW_PAYLOAD_INVALID");
+		assert.equal((await executeError({ files: [{ file: "binary.md" }] })).error.code, "REVIEW_PAYLOAD_INVALID");
+		assert.equal(uploads.length, 0);
+	});
+
+	it("returns no partial receipt when a later file cannot be loaded", async () => {
 		const error = await executeError({
-			files: [
-				{ title: "Loaded first", file: "architecture.md" },
-				{ title: "Missing second", file: "missing.md" },
-			],
+			files: [{ file: "architecture.md" }, { file: "missing.md" }],
 		});
-		assert.match(error, /missing\.md/);
-		assert.doesNotMatch(error, /\"action\"\s*:\s*\"review_open\"/,
-			"atomic failure must not emit a partial review payload");
+		assert.equal(error.error.code, "REVIEW_PAYLOAD_INVALID");
+		assert.equal(error.payloadId, undefined);
+		assert.equal(uploads.length, 0);
 	});
 
-	it("reuses safe file validation for nested entries", async () => {
-		assert.match(await executeError({ files: [{ file: "folder.md" }] }), /not a file/i);
-		assert.match(await executeError({ files: [{ file: "binary.md" }] }), /binary/i);
-	});
-
-	it("emits fresh replay identities and preserves replace:false for duplicate review titles", async () => {
-		const params = {
-			title: "Duplicate",
-			replace: false,
-			files: [
-				{ title: "Same", markdown: "first" },
-				{ title: "Same", markdown: "second" },
-			],
-		};
+	it("emits fresh identities and preserves replace:false", async () => {
+		const params = { title: "Duplicate", replace: false, files: [{ title: "Same", markdown: "first" }, { title: "Same", markdown: "second" }] };
 		const first = await executeSuccess(params);
 		const second = await executeSuccess(params);
-		assertCanonicalReview(first, {
-			title: "Duplicate",
-			replace: false,
-			files: [
-				{ title: "Same", markdown: "first" },
-				{ title: "Same", markdown: "second" },
-			],
+		assert.notEqual(first.reviewId, second.reviewId);
+		assert.equal(new Set([...first.files, ...second.files].map((file: any) => file.fileId)).size, 4);
+	});
+
+	it("accepts an authoritative replacement review identity from the server", async () => {
+		nextResponse = (upload) => {
+			const { toolCallId, review } = upload.body;
+			const files = review.files.map((file) => ({ fileId: file.fileId, title: file.title, bytes: Buffer.byteLength(file.markdown, "utf8") }));
+			return Response.json({
+				action: "review_open", version: 2, toolCallId,
+				payloadId: "payload_abcdefghijklmnop", reviewId: "existing-review-id",
+				title: review.title, activeFileId: review.activeFileId, replace: true,
+				totalBytes: files.reduce((sum, file) => sum + file.bytes, 0), hash: "b".repeat(64), files,
+				automaticOpen: { ok: true, status: "opened" },
+			}, { status: 201 });
+		};
+		const receipt = await executeSuccess({ title: "Existing", markdown: "body" });
+		assert.equal(receipt.reviewId, "existing-review-id");
+	});
+
+	it("sanitizes server failures and never reflects raw errors, paths, credentials, or stacks", async () => {
+		nextResponse = () => Response.json({
+			code: "UNKNOWN_RAW_CODE",
+			message: "C:\\secret\\payload.json token=credential",
+			stack: "private stack",
+		}, { status: 500 });
+		const failure = await executeError({ markdown: "secret markdown marker" });
+		assert.equal(failure.error.code, "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE");
+		const text = JSON.stringify(failure);
+		assert.doesNotMatch(text, /secret markdown marker|payload\.json|credential|private stack|UNKNOWN_RAW_CODE/);
+	});
+
+	it("fails closed on a malformed or mismatched success response", async () => {
+		nextResponse = () => Response.json({
+			action: "review_open",
+			version: 2,
+			toolCallId: "forged-tool-call",
+			payloadId: "payload_abcdefghijklmnop",
+			hash: "a".repeat(64),
+			files: [],
+		}, { status: 201 });
+		const failure = await executeError({ markdown: "body" });
+		assert.equal(failure.error.code, "REVIEW_PAYLOAD_RESPONSE_INVALID");
+		assert.equal(failure.error.retryable, true);
+	});
+
+	it("preserves a sanitized structured automatic-open failure in a retryable receipt", async () => {
+		nextResponse = (upload) => {
+			const { toolCallId, review } = upload.body;
+			const files = review.files.map((file) => ({ fileId: file.fileId, title: file.title, bytes: Buffer.byteLength(file.markdown, "utf8") }));
+			return Response.json({
+				action: "review_open", version: 2, toolCallId,
+				payloadId: "payload_abcdefghijklmnop", reviewId: review.reviewId,
+				title: review.title, activeFileId: review.activeFileId, replace: review.replace,
+				totalBytes: files.reduce((sum, file) => sum + file.bytes, 0), hash: "c".repeat(64), files,
+				automaticOpen: {
+					ok: false, status: "failed", code: "REVIEW_PAYLOAD_PERSISTENCE_FAILED", retryable: true,
+					message: "C:\\private\\workspace stack",
+				},
+			}, { status: 201 });
+		};
+		const receipt = await executeSuccess({ markdown: "body" });
+		assert.deepEqual(receipt.automaticOpen, {
+			ok: false,
+			status: "failed",
+			code: "REVIEW_PAYLOAD_PERSISTENCE_FAILED",
+			retryable: true,
+			message: "Review content could not be saved. Try opening the review again.",
 		});
-		assert.notEqual(first.reviewId, second.reviewId,
-			"separate tool results need distinct review identities for deterministic replay");
-		assert.deepEqual(
-			new Set([...first.files, ...second.files].map((file: any) => file.fileId)).size,
-			4,
-			"file identities must not collide across duplicate-title reviews",
-		);
 	});
 });

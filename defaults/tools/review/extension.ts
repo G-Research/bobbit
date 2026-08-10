@@ -1,9 +1,9 @@
 /**
- * Review extension — open and close markdown documents in the review pane.
+ * Review extension — open and close Markdown documents in the review pane.
  *
- * Registers `review_open` and `review_close` tools. Unlike preview_open,
- * these tools do NOT call gateway APIs — they return JSON in the tool result
- * for the client to parse and act on.
+ * `review_open` resolves the canonical review locally, then uploads it through
+ * the authenticated, session-owned review payload endpoint. Its tool result is
+ * a bounded v2 receipt and never contains Markdown.
  */
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -11,6 +11,18 @@ import { Type } from "@sinclair/typebox";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { apiCallDetailed, readGatewayCreds } from "../_shared/gateway.js";
+
+export const MAX_REVIEW_MARKDOWN_BYTES = 10 * 1024 * 1024;
+export const MAX_REVIEW_FILES = 64;
+// Keep the complete JSON receipt comfortably below generic 32 KiB egress truncation.
+export const MAX_REVIEW_METADATA_BYTES = 24 * 1024;
+export const MAX_REVIEW_TITLE_BYTES = 320;
+export const MAX_REVIEW_TOOL_CALL_ID_BYTES = 200;
+
+const MAX_IDENTITY_BYTES = 300;
+const INVALID_IDENTITY_CHARACTERS = /[\x00-\x1f\x7f\\/]/;
+const INVALID_TITLE_CHARACTERS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 
 const commonOpenProperties = {
 	title: Type.Optional(Type.String({ description: "Review title. Defaults to filename or 'Review'." })),
@@ -41,6 +53,7 @@ const reviewOpenSchema = Type.Union([
 		...commonOpenProperties,
 		files: Type.Array(reviewFileSchema, {
 			minItems: 1,
+			maxItems: MAX_REVIEW_FILES,
 			description: "Ordered Markdown files belonging to this review.",
 		}),
 	}, { additionalProperties: false }),
@@ -52,13 +65,20 @@ type ReviewOpenInput =
 	| { title?: string; replace?: boolean; file: string }
 	| { title?: string; replace?: boolean; files: ReviewFileInput[] };
 
+type CanonicalReviewFile = { fileId: string; title: string; markdown: string; bytes: number };
+type SafeFailure = { code: string; retryable: boolean; message: string };
+type OpenOutcome =
+	| { ok: true; status: "opened" }
+	| { ok: false; status: "failed"; code: string; retryable: boolean; message: string };
+
 const hasOwn = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+const utf8Bytes = (value: string): number => Buffer.byteLength(value, "utf8");
 
 function validateKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, context: string): string | null {
 	const unexpected = Object.keys(value).find((key) => !allowed.has(key));
-	return unexpected ? `${context} contains unexpected property '${unexpected}'.` : null;
+	return unexpected ? `${context} contains an unexpected property.` : null;
 }
 
 function validateReviewOpenInput(value: unknown): string | null {
@@ -70,42 +90,93 @@ function validateReviewOpenInput(value: unknown): string | null {
 	if (hasOwn(value, "replace") && typeof value.replace !== "boolean") return "'replace' must be a boolean.";
 
 	const sourceKeys = ["markdown", "file", "files"].filter((key) => hasOwn(value, key));
-	if (sourceKeys.length !== 1) {
-		return "Exactly one of 'markdown', 'file', or 'files' must be provided.";
-	}
-	if (sourceKeys[0] === "markdown") {
-		return typeof value.markdown === "string" ? null : "'markdown' must be a string.";
-	}
-	if (sourceKeys[0] === "file") {
-		return typeof value.file === "string" ? null : "'file' must be a string.";
-	}
-	if (!Array.isArray(value.files) || value.files.length === 0) {
-		return "'files' must be a non-empty array.";
-	}
+	if (sourceKeys.length !== 1) return "Exactly one of 'markdown', 'file', or 'files' must be provided.";
+	if (sourceKeys[0] === "markdown") return typeof value.markdown === "string" ? null : "'markdown' must be a string.";
+	if (sourceKeys[0] === "file") return typeof value.file === "string" ? null : "'file' must be a string.";
+	if (!Array.isArray(value.files) || value.files.length === 0) return "'files' must be a non-empty array.";
+	if (value.files.length > MAX_REVIEW_FILES) return `'files' cannot contain more than ${MAX_REVIEW_FILES} entries.`;
 	for (let index = 0; index < value.files.length; index++) {
 		const entry = value.files[index];
 		if (!isRecord(entry)) return `'files[${index}]' must be an object.`;
 		const entryError = validateKeys(entry, new Set(["title", "markdown", "file"]), `'files[${index}]'`);
 		if (entryError) return entryError;
-		if (hasOwn(entry, "title") && typeof entry.title !== "string") {
-			return `'files[${index}].title' must be a string.`;
-		}
+		if (hasOwn(entry, "title") && typeof entry.title !== "string") return `'files[${index}].title' must be a string.`;
 		const entrySources = ["markdown", "file"].filter((key) => hasOwn(entry, key));
-		if (entrySources.length !== 1) {
-			return `'files[${index}]' must provide exactly one of 'markdown' or 'file'.`;
-		}
-		if (typeof entry[entrySources[0]] !== "string") {
-			return `'files[${index}].${entrySources[0]}' must be a string.`;
-		}
+		if (entrySources.length !== 1) return `'files[${index}]' must provide exactly one of 'markdown' or 'file'.`;
+		if (typeof entry[entrySources[0]] !== "string") return `'files[${index}].${entrySources[0]}' must be a string.`;
 	}
 	return null;
 }
 
-function errorResult(message: string) {
-	return { content: [{ type: "text" as const, text: `Error: ${message}` }], details: undefined };
+const SAFE_FAILURES: Record<string, Omit<SafeFailure, "code">> = {
+	REVIEW_PAYLOAD_TOO_LARGE: {
+		retryable: false,
+		message: "Review content exceeds the 10 MiB UTF-8 limit. Reduce the review and try again.",
+	},
+	REVIEW_PAYLOAD_INVALID: {
+		retryable: false,
+		message: "Review content or metadata is invalid. Check the review files and titles.",
+	},
+	REVIEW_PAYLOAD_SESSION_UNAVAILABLE: {
+		retryable: true,
+		message: "The review session is unavailable. Reconnect and try again.",
+	},
+	REVIEW_PAYLOAD_UPLOAD_FORBIDDEN: {
+		retryable: false,
+		message: "This review cannot be opened from the current session.",
+	},
+	REVIEW_PAYLOAD_PERSISTENCE_FAILED: {
+		retryable: true,
+		message: "Review content could not be saved. Try opening the review again.",
+	},
+	REVIEW_PAYLOAD_WORKSPACE_CONFLICT: {
+		retryable: true,
+		message: "The review workspace changed while opening. Try again.",
+	},
+	REVIEW_PAYLOAD_RESPONSE_INVALID: {
+		retryable: true,
+		message: "The review service returned an invalid response. Try opening the review again.",
+	},
+	REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE: {
+		retryable: true,
+		message: "The review service is unavailable. Reconnect and try again.",
+	},
+	REVIEW_OPEN_FAILED: {
+		retryable: true,
+		message: "Review content was saved but the pane could not be opened. Try opening it again.",
+	},
+};
+
+function safeFailure(code: string): SafeFailure {
+	const safe = SAFE_FAILURES[code] ?? SAFE_FAILURES.REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE;
+	return { code: code in SAFE_FAILURES ? code : "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE", ...safe };
 }
 
-function readMarkdownFile(file: string): { markdown: string } | { error: string } {
+function errorResult(toolCallId: string, failure: SafeFailure) {
+	const boundedToolCallId = validIdentity(toolCallId, MAX_REVIEW_TOOL_CALL_ID_BYTES) ? toolCallId : null;
+	return {
+		content: [{
+			type: "text" as const,
+			text: JSON.stringify({ action: "review_open", version: 2, toolCallId: boundedToolCallId, error: failure }),
+		}],
+		details: undefined,
+		isError: true,
+	};
+}
+
+function invalidResult(toolCallId: string) {
+	return errorResult(toolCallId, safeFailure("REVIEW_PAYLOAD_INVALID"));
+}
+
+function validIdentity(value: string, maxBytes: number): boolean {
+	return value.length > 0 && utf8Bytes(value) <= maxBytes && !INVALID_IDENTITY_CHARACTERS.test(value);
+}
+
+function validTitle(value: string): boolean {
+	return value.length > 0 && utf8Bytes(value) <= MAX_REVIEW_TITLE_BYTES && !INVALID_TITLE_CHARACTERS.test(value);
+}
+
+function readMarkdownFile(file: string, remainingBytes: number): { markdown: string } | { error: SafeFailure } {
 	const cwd = process.env.BOBBIT_CWD || process.cwd();
 	const filePath = path.isAbsolute(file) ? file : path.resolve(cwd, file);
 
@@ -113,82 +184,218 @@ function readMarkdownFile(file: string): { markdown: string } | { error: string 
 	try {
 		stat = fs.statSync(filePath);
 	} catch {
-		return { error: `File not found: "${file}"` };
+		return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 	}
-	if (!stat.isFile()) return { error: `"${file}" is not a file.` };
+	if (!stat.isFile()) return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
+	if (stat.size > remainingBytes) return { error: safeFailure("REVIEW_PAYLOAD_TOO_LARGE") };
 
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(filePath, "r");
-		const buffer = Buffer.alloc(8192);
+		const buffer = Buffer.alloc(Math.min(8192, Math.max(1, stat.size)));
 		const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
 		for (let index = 0; index < bytesRead; index++) {
-			if (buffer[index] === 0) return { error: `"${file}" appears to be a binary file.` };
+			if (buffer[index] === 0) return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 		}
-	} catch (error) {
-		return { error: `Error reading file "${file}": ${error instanceof Error ? error.message : String(error)}` };
+	} catch {
+		return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 	} finally {
-		if (fd !== undefined) fs.closeSync(fd);
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* the following read reports a safe failure */ }
+		}
 	}
 
 	try {
 		return { markdown: fs.readFileSync(filePath, "utf-8") };
-	} catch (error) {
-		return { error: `Error reading file "${file}": ${error instanceof Error ? error.message : String(error)}` };
+	} catch {
+		return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 	}
 }
 
-const extension: ExtensionFactory = (pi) => {
-	// ── review_open ──
+function sanitizeOpenOutcome(value: unknown): OpenOutcome {
+	if (isRecord(value) && value.ok === true && value.status === "opened") return { ok: true, status: "opened" };
+	if (isRecord(value) && value.ok === false && value.status === "failed" && typeof value.code === "string") {
+		const failure = safeFailure(value.code);
+		return { ok: false, status: "failed", ...failure };
+	}
+	return { ok: false, status: "failed", ...safeFailure("REVIEW_OPEN_FAILED") };
+}
 
+function sanitizeReceipt(
+	value: unknown,
+	expected: {
+		toolCallId: string;
+		reviewId: string;
+		title: string;
+		files: CanonicalReviewFile[];
+		activeFileId: string;
+		replace: boolean;
+		totalBytes: number;
+	},
+): Record<string, unknown> | null {
+	if (!isRecord(value)
+		|| value.action !== "review_open"
+		|| value.version !== 2
+		|| value.toolCallId !== expected.toolCallId
+		|| typeof value.payloadId !== "string"
+		|| !/^[A-Za-z0-9_-]{20,64}$/.test(value.payloadId)
+		|| typeof value.hash !== "string"
+		|| !/^[a-f0-9]{64}$/.test(value.hash)
+		|| typeof value.reviewId !== "string"
+		|| !validIdentity(value.reviewId, MAX_IDENTITY_BYTES)
+		|| (!expected.replace && value.reviewId !== expected.reviewId)
+		|| value.title !== expected.title
+		|| value.activeFileId !== expected.activeFileId
+		|| value.replace !== expected.replace
+		|| value.totalBytes !== expected.totalBytes
+		|| !Array.isArray(value.files)
+		|| value.files.length !== expected.files.length) {
+		return null;
+	}
+
+	const metadata: Array<{ fileId: string; title: string; bytes: number }> = [];
+	for (let index = 0; index < expected.files.length; index++) {
+		const received = value.files[index];
+		const file = expected.files[index];
+		if (!isRecord(received)
+			|| received.fileId !== file.fileId
+			|| received.title !== file.title
+			|| received.bytes !== file.bytes
+			|| hasOwn(received, "markdown")) return null;
+		metadata.push({ fileId: file.fileId, title: file.title, bytes: file.bytes });
+	}
+
+	return {
+		action: "review_open",
+		version: 2,
+		toolCallId: expected.toolCallId,
+		payloadId: value.payloadId,
+		reviewId: value.reviewId,
+		title: expected.title,
+		activeFileId: expected.activeFileId,
+		replace: expected.replace,
+		totalBytes: expected.totalBytes,
+		hash: value.hash,
+		files: metadata,
+		automaticOpen: sanitizeOpenOutcome(value.automaticOpen),
+	};
+}
+
+function failureFromResponse(status: number, body: unknown): SafeFailure {
+	if (isRecord(body) && typeof body.code === "string") return safeFailure(body.code);
+	if (status === 413) return safeFailure("REVIEW_PAYLOAD_TOO_LARGE");
+	if (status === 400 || status === 422) return safeFailure("REVIEW_PAYLOAD_INVALID");
+	if (status === 401 || status === 403) return safeFailure("REVIEW_PAYLOAD_UPLOAD_FORBIDDEN");
+	if (status === 404) return safeFailure("REVIEW_PAYLOAD_SESSION_UNAVAILABLE");
+	return safeFailure("REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE");
+}
+
+const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "review_open",
 		label: "Review Open",
 		description: "Open one or more Markdown files as a single review for inline commenting.",
 		parameters: reviewOpenSchema,
 
-		async execute(_toolCallId, rawParams) {
+		async execute(toolCallId, rawParams) {
+			if (!validIdentity(toolCallId, MAX_REVIEW_TOOL_CALL_ID_BYTES)) return invalidResult(toolCallId);
 			const validationError = validateReviewOpenInput(rawParams);
-			if (validationError) return errorResult(validationError);
+			if (validationError) return invalidResult(toolCallId);
 			const params = rawParams as ReviewOpenInput;
 			const isMultiFile = "files" in params;
 			const inputs: ReviewFileInput[] = isMultiFile
 				? params.files
 				: ["markdown" in params ? { markdown: params.markdown } : { file: params.file }];
-			const defaultReviewTitle = !isMultiFile && "file" in params
-				? path.basename(params.file)
-				: "Review";
+			const defaultReviewTitle = !isMultiFile && "file" in params ? path.basename(params.file) : "Review";
 			const title = params.title ?? defaultReviewTitle;
-			const files: Array<{ fileId: string; title: string; markdown: string }> = [];
+			if (!validTitle(title)) return invalidResult(toolCallId);
 
+			const reviewId = randomUUID();
+			const files: CanonicalReviewFile[] = [];
+			let totalBytes = 0;
 			for (let index = 0; index < inputs.length; index++) {
 				const input = inputs[index];
+				const fileTitle = isMultiFile
+					? input.title ?? ("file" in input ? path.basename(input.file) : `File ${index + 1}`)
+					: title;
+				if (!validTitle(fileTitle)) return invalidResult(toolCallId);
+
 				let markdown: string;
 				if ("markdown" in input) {
 					markdown = input.markdown;
 				} else {
-					const loaded = readMarkdownFile(input.file);
-					if ("error" in loaded) return errorResult(loaded.error);
+					const loaded = readMarkdownFile(input.file, MAX_REVIEW_MARKDOWN_BYTES - totalBytes);
+					if ("error" in loaded) return errorResult(toolCallId, loaded.error);
 					markdown = loaded.markdown;
 				}
-				const fileTitle = isMultiFile
-					? input.title ?? ("file" in input ? path.basename(input.file) : `File ${index + 1}`)
-					: title;
-				files.push({ fileId: randomUUID(), title: fileTitle, markdown });
+				const bytes = utf8Bytes(markdown);
+				totalBytes += bytes;
+				if (totalBytes > MAX_REVIEW_MARKDOWN_BYTES) {
+					return errorResult(toolCallId, safeFailure("REVIEW_PAYLOAD_TOO_LARGE"));
+				}
+				files.push({ fileId: randomUUID(), title: fileTitle, markdown, bytes });
 			}
 
-			const result = {
-				action: "review_open",
-				reviewId: randomUUID(),
+			const activeFileId = files[0].fileId;
+			const replace = params.replace !== false;
+			const metadataBytes = utf8Bytes(JSON.stringify({
+				toolCallId,
+				reviewId,
+				title,
+				activeFileId,
+				replace,
+				files: files.map(({ fileId, title: fileTitle, bytes }) => ({ fileId, title: fileTitle, bytes })),
+			}));
+			if (metadataBytes > MAX_REVIEW_METADATA_BYTES) return invalidResult(toolCallId);
+
+			const sessionId = process.env.BOBBIT_SESSION_ID;
+			const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
+			const creds = readGatewayCreds();
+			if (!sessionId || !sessionSecret || "error" in creds) {
+				return errorResult(toolCallId, safeFailure("REVIEW_PAYLOAD_SESSION_UNAVAILABLE"));
+			}
+
+			let response;
+			try {
+				response = await apiCallDetailed(
+					creds,
+					"POST",
+					`/api/sessions/${encodeURIComponent(sessionId)}/review-payloads`,
+					{
+						toolCallId,
+						review: {
+							reviewId,
+							title,
+							files: files.map(({ fileId, title: fileTitle, markdown }) => ({ fileId, title: fileTitle, markdown })),
+							activeFileId,
+							replace,
+						},
+					},
+					{
+						extraHeaders: { "X-Bobbit-Session-Secret": sessionSecret },
+						// A lost response must not silently replay this persistence mutation.
+						// The bounded error receipt leaves an explicit user retry available.
+						retries: 0,
+					},
+				);
+			} catch {
+				return errorResult(toolCallId, safeFailure("REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE"));
+			}
+			if (!response.ok) return errorResult(toolCallId, failureFromResponse(response.status, response.body));
+
+			const receipt = sanitizeReceipt(response.body, {
+				toolCallId,
+				reviewId,
 				title,
 				files,
-				replace: params.replace !== false,
-			};
-			return { content: [{ type: "text", text: JSON.stringify(result) }], details: undefined };
+				activeFileId,
+				replace,
+				totalBytes,
+			});
+			if (!receipt) return errorResult(toolCallId, safeFailure("REVIEW_PAYLOAD_RESPONSE_INVALID"));
+			return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], details: undefined };
 		},
 	});
-
-	// ── review_close ──
 
 	pi.registerTool({
 		name: "review_close",
@@ -199,12 +406,10 @@ const extension: ExtensionFactory = (pi) => {
 		}),
 
 		async execute(_toolCallId, params) {
-			const result = {
-				action: "review_close",
-				title: params.title || null,
+			return {
+				content: [{ type: "text", text: JSON.stringify({ action: "review_close", title: params.title || null }) }],
+				details: undefined,
 			};
-
-			return { content: [{ type: "text", text: JSON.stringify(result) }], details: undefined };
 		},
 	});
 };
