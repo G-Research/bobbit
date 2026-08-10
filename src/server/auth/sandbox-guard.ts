@@ -17,6 +17,9 @@ function isOwnSessionToolEndpoint(subpath: string, method: string): boolean {
 	if (method === "GET" && subpath === "/google-code-assist/token") return true;
 	if (method === "POST" && subpath === "/tool-grant-request") return true;
 	if (method === "POST" && subpath === "/activate-skill") return true;
+	if (method === "POST" && subpath === "/review-payloads") return true;
+	if (method === "GET" && /^\/review-payloads\/[^/]+$/.test(subpath)) return true;
+	if (method === "POST" && /^\/review-payloads\/[^/]+\/open$/.test(subpath)) return true;
 	if (method === "GET" && subpath === "/transcript") return true;
 	if (method === "POST" && subpath === "/prompt") return true;
 	if (method === "GET" && subpath === "/proposals") return true;

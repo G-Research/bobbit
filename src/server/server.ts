@@ -108,6 +108,15 @@ import {
 	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
+import { handleReviewPayloadRoute } from "./review-payload-routes.js";
+import {
+	MAX_REVIEW_PAYLOAD_REQUEST_BYTES,
+	readReviewPayload,
+	removeReviewPayloads,
+	ReviewPayloadError,
+	sweepReviewPayloads,
+	type CanonicalReviewPayload,
+} from "./review-payload-store.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -3692,12 +3701,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Content-Length over the cap is refused with a definitive 413;
 			// chunked/streamed bodies without a length are bounded by the
 			// streaming cap inside readBody().
-			if (bodyLimitExceeded(req.headers["content-length"])) {
+			const reviewPayloadUpload = req.method === "POST"
+				&& /^\/api\/sessions\/[^/]+\/review-payloads$/.test(url.pathname);
+			const requestBodyLimit = reviewPayloadUpload ? MAX_REVIEW_PAYLOAD_REQUEST_BYTES : MAX_REQUEST_BODY_BYTES;
+			if (bodyLimitExceeded(req.headers["content-length"], requestBodyLimit)) {
 				res.writeHead(413, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({
+				res.end(JSON.stringify(reviewPayloadUpload ? {
+					ok: false,
+					status: "failed",
+					code: "REVIEW_PAYLOAD_TOO_LARGE",
+					retryable: false,
+					message: "Review upload exceeds the bounded request limit",
+					limit: requestBodyLimit,
+				} : {
 					error: "Request body too large",
 					code: "BODY_TOO_LARGE",
-					limit: MAX_REQUEST_BODY_BYTES,
+					limit: requestBodyLimit,
 				}));
 				return;
 			}
@@ -4215,6 +4234,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// only awaits the listener contract and must not duplicate this log.
 				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
 			}
+			try {
+				await removeReviewPayloads(sessionId);
+			} catch (err) {
+				console.error(`[review-payloads] remove failed for ${sessionId}:`, err);
+			}
 		}
 	});
 
@@ -4593,6 +4617,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
 			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			await bootPhase("review-payload-recovery", async () => {
+				try {
+					const knownSessionIds = [...projectContextManager.all()]
+						.flatMap((context) => context.sessionStore.getAll().map((session) => session.id));
+					await sweepReviewPayloads(knownSessionIds);
+				} catch (err) {
+					console.warn("[review-payloads] startup recovery failed (non-fatal):", err);
+				}
+			});
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
@@ -5331,6 +5364,74 @@ async function handleApiRoute(
 		readBody,
 		broadcastToSession: _broadcastToSession,
 		packContributionRegistry,
+	})) return;
+
+	const resolveExistingReviewPayload = async (
+		sessionId: string,
+		title: string,
+		incomingReviewId: string,
+		replace: boolean,
+	): Promise<{ reviewId: string; payload?: CanonicalReviewPayload }> => {
+		if (!replace) return { reviewId: incomingReviewId };
+		const workspace = sessionManager.getPersistedSession(sessionId)?.sidePanelWorkspace;
+		for (const tab of workspace?.tabs ?? []) {
+			if (tab.kind !== "review" || tab.source.type !== "review" || tab.source.title !== title) continue;
+			const reviewId = typeof tab.source.reviewId === "string" && tab.source.reviewId ? tab.source.reviewId : incomingReviewId;
+			const source = tab.source as unknown as Record<string, unknown>;
+			if (typeof source.payloadId === "string" && typeof source.toolCallId === "string" && typeof source.contentHash === "string") {
+				try {
+					const prior = await readReviewPayload(sessionId, source.payloadId);
+					if (prior.reviewId === reviewId && prior.toolCallId === source.toolCallId && prior.hash === source.contentHash) {
+						return { reviewId, payload: prior };
+					}
+				} catch { /* Preserve stable review identity even when old content expired. */ }
+			}
+			return { reviewId };
+		}
+		return { reviewId: incomingReviewId };
+	};
+	const openReviewPayload = async (payload: CanonicalReviewPayload): Promise<void> => {
+		const source = {
+			type: "review",
+			sessionId: payload.sessionId,
+			reviewId: payload.reviewId,
+			title: payload.title,
+			toolCallId: payload.toolCallId,
+			toolUseId: payload.toolCallId,
+			payloadId: payload.payloadId,
+			contentHash: payload.hash,
+		};
+		// Clear only the exact replay tombstone before the workspace broadcast so
+		// hydration cannot observe an opened tab with stale suppression. Restore it
+		// if the durable workspace commit fails.
+		const priorTombstone = reviewAnnotationStore?.getReviewTombstone(payload.sessionId, payload.reviewId);
+		reviewAnnotationStore?.clearReviewTombstone(payload.sessionId, payload.reviewId);
+		try {
+			const workspace = await openSidePanelWorkspaceTab({
+				sessionManager,
+				readBody,
+				broadcastToSession: _broadcastToSession,
+				packContributionRegistry,
+			}, payload.sessionId, {
+				id: `review:${encodeURIComponent(payload.reviewId)}`,
+				kind: "review",
+				title: `Review: ${payload.title}`,
+				label: `Review: ${payload.title}`,
+				source,
+				state: { activeFileId: payload.activeFileId },
+				updatedAt: Date.now(),
+			}, { focus: true, placeAfterActive: true });
+			if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+		} catch (error) {
+			if (priorTombstone) reviewAnnotationStore?.setReviewTombstone(payload.sessionId, payload.reviewId, priorTombstone);
+			throw error;
+		}
+	};
+	if (await handleReviewPayloadRoute(url, req, res, {
+		sessionManager,
+		readBody,
+		openReview: openReviewPayload,
+		resolveExistingReview: resolveExistingReviewPayload,
 	})) return;
 
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
