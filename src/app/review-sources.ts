@@ -442,17 +442,19 @@ export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupMod
 		? nextGroups.find((group) => group.title === incoming.title) || incoming
 		: nextGroups.find((group) => group.reviewId === incoming.reviewId) || nextGroups[nextGroups.length - 1];
 	writeSessionGroups(sessionId, nextGroups);
-	if (options.live) {
-		void enqueueReviewLifecycle(sessionId, stored.reviewId, async (isCurrent) => {
+	// Every primary open advances exact-key generation immediately. Sign-off
+	// launchers are non-live, but must still supersede cleanup before it can
+	// commit destructive state after closing an older primary.
+	void enqueueReviewLifecycle(sessionId, stored.reviewId, async (isCurrent) => {
+		if (!isCurrent()) return;
+		if (options.live) {
 			await clearReviewTombstone(sessionId, stored.reviewId, { clearLegacySubmitted: true });
 			if (!isCurrent()) return;
-			await openReviewWorkspace(stored, sessionId);
-			if (!isCurrent()) return;
-			reconcileVisibleExplicitReviewOpen(sessionId, stored.reviewId, isCurrent);
-		});
-	} else {
-		void openReviewWorkspace(stored, sessionId);
-	}
+		}
+		await openReviewWorkspace(stored, sessionId);
+		if (!isCurrent()) return;
+		if (options.live) reconcileVisibleExplicitReviewOpen(sessionId, stored.reviewId, isCurrent);
+	});
 	if (isVisibleSession(sessionId)) {
 		hydrateVisibleReviewGroups(sessionId, nextGroups, stored.reviewId);
 		state.previewPanelActiveTab = "review";
