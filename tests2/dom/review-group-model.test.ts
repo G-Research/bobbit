@@ -696,7 +696,7 @@ describe("review group decision lifecycle", () => {
 		const tombstoneBodies = fetchCalls()
 			.filter((call) => call.method === "PUT" && call.pathname.includes("/review/tombstones/"))
 			.map((call) => JSON.parse(call.body));
-		expect(tombstoneBodies).toEqual([{ state: "closed" }]);
+		expect(tombstoneBodies).toEqual([{ state: "closed", activeFileId: target.activeFileId }]);
 		await clearReviewTombstone(sessionId, target.reviewId);
 	});
 

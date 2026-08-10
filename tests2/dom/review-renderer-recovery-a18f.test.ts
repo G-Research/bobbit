@@ -116,14 +116,16 @@ describe("ReviewOpenRenderer recovery action", () => {
 		expect(controller.openReviewReceipt).not.toHaveBeenCalled();
 	});
 
-	it("opens only through the controller with captured owner identity", async () => {
-		const host = mount({ result: result() });
+	it("routes opening through the controller and renders pending after the subscribed rerender", async () => {
+		let host = mount({ result: result() });
 		const action = button(host);
 		action.click();
-		expect(action.disabled).toBe(true);
-		expect(action.getAttribute("aria-busy")).toBe("true");
-		expect(action.textContent).toBe("Opening…");
-		action.click();
+
+		// The renderer is declarative: the click does not imperatively mutate its
+		// stale DOM. The coordinator publishes state and the subscribed tool card
+		// rerenders with the accessible pending presentation.
+		expect(action.disabled).toBe(false);
+		expect(action.getAttribute("aria-busy")).toBe("false");
 		await vi.waitFor(() => expect(controller.openReviewReceipt).toHaveBeenCalledOnce());
 		expect(controller.registerReviewOpenReceipt).toHaveBeenCalledWith(SESSION_ID, TOOL_ID, receipt);
 		expect(controller.openReviewReceipt).toHaveBeenCalledWith({
@@ -132,6 +134,14 @@ describe("ReviewOpenRenderer recovery action", () => {
 			receipt,
 			intent: "manual",
 		});
+
+		controller.state = { phase: "pending", receipt };
+		host.remove();
+		host = mount({ result: result() });
+		const pendingAction = button(host);
+		expect(pendingAction.disabled).toBe(true);
+		expect(pendingAction.getAttribute("aria-busy")).toBe("true");
+		expect(pendingAction.textContent).toContain("Opening…");
 	});
 
 	it("renders pending, confirmed success, retryable failure, and terminal failure accessibly", () => {
