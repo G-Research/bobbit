@@ -69,6 +69,7 @@ void ensureSearchBox();
 // shell elements upgrade synchronously on first render.
 import {
 	discardReviewFinalComment,
+	reviewFinalComment,
 	reviewFinalCommentCount,
 } from "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
@@ -2730,7 +2731,8 @@ export function doRenderApp(): void {
 							showHeaderToast("Could not submit review decision");
 							return;
 						}
-						await submitReviewGroupDecision(group, payload, {
+						const submittedDraft = reviewFinalComment(paneSessionId, group.reviewId);
+						const outcome = await submitReviewGroupDecision(group, payload, {
 							sessionId: paneSessionId,
 							prompt: async (feedback) => {
 								const agent = state.remoteAgent;
@@ -2738,7 +2740,13 @@ export function doRenderApp(): void {
 								agent.prompt(feedback);
 							},
 						});
-						discardReviewPaneFinalDraft(paneSessionId, group.reviewId);
+						const replacementExists = state.reviewGroupsBySession[paneSessionId]
+							?.some((candidate) => candidate.reviewId === outcome.reviewId) === true;
+						if (outcome.submitted
+							&& !replacementExists
+							&& reviewFinalComment(paneSessionId, outcome.reviewId) === submittedDraft) {
+							discardReviewPaneFinalDraft(paneSessionId, outcome.reviewId);
+						}
 					} catch (err) {
 						showHeaderToast(err instanceof Error ? err.message : "Review decision failed");
 					}

@@ -68,6 +68,14 @@ export interface SubmitReviewDecisionOptions {
 	prompt?: (feedback: string) => void | Promise<void>;
 }
 
+export interface ReviewDecisionSubmissionOutcome {
+	submitted: boolean;
+	sessionId: string;
+	reviewId: string;
+	/** Exact review-level draft delivered by the accepted submission. */
+	finalComment: string;
+}
+
 interface PersistedReviewGroupsV2 {
 	version: 2;
 	groups: ReviewGroupModel[];
@@ -82,6 +90,8 @@ type ReviewLifecycleSequence = {
 
 /** Exact review lifecycle effects must settle in intent order without blocking siblings. */
 const reviewLifecycleSequences = new Map<string, ReviewLifecycleSequence>();
+/** One accepted external decision effect may be pending for an exact review key. */
+const pendingReviewDecisions = new Map<string, Promise<ReviewDecisionSubmissionOutcome>>();
 
 function reviewLifecycleKey(sessionId: string, reviewId: string): string {
 	return `${sessionId}\u0000${reviewId}`;
@@ -922,37 +932,85 @@ export async function cleanupReviewGroup(
 	});
 }
 
-export async function submitReviewGroupDecision(group: ReviewGroupModel, inputPayload: ReviewDecisionPayload, options: SubmitReviewDecisionOptions = {}): Promise<void> {
+export function submitReviewGroupDecision(
+	group: ReviewGroupModel,
+	inputPayload: ReviewDecisionPayload,
+	options: SubmitReviewDecisionOptions = {},
+): Promise<ReviewDecisionSubmissionOutcome> {
 	const sessionId = options.sessionId || (group.source.kind === "markdown-review" ? group.source.sessionId : activeSessionId()) || "";
-	const payload = normalizeReviewDecisionPayload(inputPayload, sessionId, group);
-	if (payload.decision === "reject" && !payload.finalComment.trim() && payload.inlineComments.length === 0) throw new Error("Reject requires at least one comment.");
-	const source = sourceWithDefault(group.source, sessionId);
-	if (source.kind === "verification-signoff-pr") throw new Error("PR review source is not implemented yet.");
+	const key = reviewLifecycleKey(sessionId, group.reviewId);
+	const pending = pendingReviewDecisions.get(key);
+	// The first accepted exact-key decision owns its external effect. Repeated or
+	// conflicting clicks await that same result rather than enqueueing a newer
+	// lifecycle generation which could send a second prompt/sign-off.
+	if (pending) return pending;
 
-	await enqueueReviewLifecycle(sessionId, group.reviewId, async (isCurrent) => {
+	let payload: ReviewDecisionPayload;
+	let source: ReviewSource;
+	try {
+		payload = normalizeReviewDecisionPayload(inputPayload, sessionId, group);
+		if (payload.decision === "reject" && !payload.finalComment.trim() && payload.inlineComments.length === 0) throw new Error("Reject requires at least one comment.");
+		source = sourceWithDefault(group.source, sessionId);
+		if (source.kind === "verification-signoff-pr") throw new Error("PR review source is not implemented yet.");
+	} catch (error) {
+		return Promise.reject(error);
+	}
+
+	const outcome = (submitted: boolean): ReviewDecisionSubmissionOutcome => ({
+		submitted,
+		sessionId,
+		reviewId: group.reviewId,
+		finalComment: payload.finalComment,
+	});
+	const decision = enqueueReviewLifecycle(sessionId, group.reviewId, async (isCurrent) => {
+		// A close or explicit live reopen may supersede this queued intent before
+		// it starts. Never send its irreversible external effect in that case.
+		if (!isCurrent()) return outcome(false);
 		if (source.kind === "verification-signoff-markdown") {
 			await postSignoffDecision(source, group, payload);
 		} else {
 			if (!options.prompt) throw new Error("No active agent is available for this review.");
 			await options.prompt(composeMarkdownReviewDecisionFeedback(group, payload));
 		}
-		if (!isCurrent()) return;
+		if (!isCurrent()) return outcome(false);
+
+		// Do not tombstone a replacement or a review version which no longer
+		// matches the exact content whose feedback was externally delivered.
+		const current = sessionGroups(sessionId).find((candidate) => candidate.reviewId === group.reviewId);
+		if (!current || !reviewGroupMatchesSnapshot(current, group)) return outcome(false);
 		if (source.kind === "markdown-review" && sessionId) {
 			await markReviewSubmittedExact(sessionId, group.reviewId);
-			if (!isCurrent()) return;
+			if (!isCurrent()) return outcome(false);
 		}
 		const removed = removeCapturedReviewGroup(sessionId, group);
-		if (!removed) return;
+		if (!removed) return outcome(false);
 		if (isVisibleSession(sessionId)) renderApp();
 		await finishReviewGroupCleanup(sessionId, removed, isCurrent);
+		if (!isCurrent()) return outcome(false);
+		return outcome(true);
 	});
+
+	// Install synchronously, before the queued lifecycle operation can yield to
+	// an external prompt/sign-off. Identity guards prevent an older completion
+	// from deleting a later pending decision for the same exact key.
+	pendingReviewDecisions.set(key, decision);
+	void decision.finally(() => {
+		if (pendingReviewDecisions.get(key) === decision) pendingReviewDecisions.delete(key);
+	}).catch(() => {
+		// The original decision promise remains the caller-visible rejection.
+	});
+	return decision;
 }
 
 export const removeReviewGroup = cleanupReviewGroup;
 export const restorePersistedReviewGroups = restorePersistedReviewDocuments;
 export const clearPersistedReviewGroups = clearPersistedReviewDocuments;
 
-export async function submitReviewDecision(doc: ReviewDocumentModel, inputPayload: ReviewDecisionPayload, options: SubmitReviewDecisionOptions = {}): Promise<void> {
+export function submitReviewDecision(
+	doc: ReviewDocumentModel,
+	inputPayload: ReviewDecisionPayload,
+	options: SubmitReviewDecisionOptions = {},
+): Promise<ReviewDecisionSubmissionOutcome> {
 	const sessionId = options.sessionId || activeSessionId() || "";
 	const group = (doc.reviewId ? sessionGroups(sessionId).find((candidate) => candidate.reviewId === doc.reviewId) : undefined) || legacyGroupForDocument(sessionId, doc);
 	return submitReviewGroupDecision(group, inputPayload, options);
