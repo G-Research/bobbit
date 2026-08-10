@@ -197,7 +197,7 @@ An explicit live `review_open` always mutates its emitting session:
 
 For a background owner, steps 1–3 still happen, but the selected session and foreground `state.review*` model remain unchanged. Switching to that owner later hydrates its already-open reviews and stored `activeFileId`; reload and reconnect use the same persistence plus workspace authority. Ownership is captured before lazy module loading, so a session switch during an in-flight open cannot retarget the result.
 
-A live `review_close` follows the same owner rule. Exact `reviewId` wins; the legacy title form closes matching reviews only within that session, and an omitted target closes that owner's reviews. It never closes a same-title review in the foreground session.
+A live `review_close` follows the same owner rule. Its public form accepts an optional review title: every matching whole review and all its files close, while omitting the title closes all reviews in the calling session. Duplicate titles therefore close together; callers that need later selective close should use distinct titles. Internally, canonical results may be normalized to an exact `reviewId`, which takes precedence over title matching without exposing identity-based close as a public tool input. Either form is scoped to the owner session; when that owner is in the background, it never changes the foreground or any sibling session.
 
 ### Authoritative absence and exact tombstones
 

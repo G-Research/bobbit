@@ -193,9 +193,9 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "review_close",
 		label: "Review Close",
-		description: "Close a review document tab or all review tabs.",
+		description: "Close matching Markdown reviews or all reviews.",
 		parameters: Type.Object({
-			title: Type.Optional(Type.String({ description: "Specific tab. Omit to close all." })),
+			title: Type.Optional(Type.String({ description: "Match title: close each whole review and all files; omit for all caller reviews." })),
 		}),
 
 		async execute(_toolCallId, params) {
