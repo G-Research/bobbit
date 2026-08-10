@@ -80,7 +80,7 @@ A hidden, synthetic project with id `system` is registered at server startup by 
 
 **Hidden flag.** `hidden: true` causes `GET /api/projects` to filter the project out, so it never reaches the client's `state.projects`. UI surfaces (sidebar grouping, project pickers, settings scope rows) therefore behave as if it doesn't exist and show Headquarters as the server scope instead. Internal lookups by id still resolve normally; lookups by `rootPath` or `cwd` (`findByPath`, `findByCwd`) skip hidden projects so the install dir cannot accidentally match the system anchor.
 
-**StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.json` / `sessions.json` with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
+**StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.sqlite` / `sessions.json` with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
 
 **Iteration contract: `visible()` vs `all()`.** `ProjectContextManager` exposes two iterators. `all()` returns **every** context including the hidden system project — use this for callers that legitimately need it (`getContextForSession`, `findStoreForStaff`, MCP discovery, system-scope tool authoring resolution). `visible()` skips `hidden: true` contexts — use this for worktree sweepers, worktree-pool init, goal-manager pool-resolver wiring, unified worktree maintenance, and the `/api/sessions` + `/api/goals` listing aggregations that back the UI. The cross-project aggregation methods on the manager (`getAllLiveGoals`, `getAllLiveSessions`, `getAllGoals`, `getAllSessions`, `searchAll`) filter hidden internally for the same reason. Iterating hidden via `all()` for worktree/pool flows was the root cause of `pool/_pool-*` branches being allocated in unrelated host repos when the bobbit state dir was nested inside one (pinned by `tests/system-project-pool-leak.test.ts`).
 
@@ -94,9 +94,9 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
 <normal-project-root>/.bobbit/
   config/          # Normal project config
   state/
-    goals.json     # Goals for THIS project
+    goals.sqlite   # Goals for THIS project, one JSON-payload row per goal
     sessions.json  # Sessions for THIS project
-    tasks.json     # Tasks for THIS project's goals
+    tasks.sqlite   # Tasks for THIS project's goals, one JSON-payload row per task
     team-state.json # Team state
     gates.sqlite   # Gate state and signals, one row per gate
     staff.json     # Staff agents
@@ -110,7 +110,8 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
   # NOTE: live secrets (token, tls/, sandbox-agent-auth/) live under
   # serverSecretsDir() OUTSIDE any project root, not here.
   colors.json       # Session colors
-  goals.json        # Headquarters goals
+  goals.sqlite      # Headquarters goals
+  tasks.sqlite      # Headquarters tasks
   sessions.json     # Headquarters sessions
   staff.json        # Headquarters staff
   system-project/   # Hidden internal system-project anchor
@@ -132,7 +133,7 @@ Directories usually derive from the project's `rootPath`:
 
 For Headquarters, `ProjectContext` uses `bobbitStateDir()` and `bobbitConfigDir()` instead. The context also reuses the standalone server `ProjectConfigStore`, so `/api/project-config` and `/api/projects/headquarters/config` cannot stale-read or clobber each other.
 
-`ProjectContext.open()` initializes the search index and wires mutation hooks so goal/session changes are automatically indexed. `ProjectContext.close()` flushes the session store and closes the search index.
+`ProjectContext.open()` initializes the search index and wires mutation hooks so goal/session changes are automatically indexed. `ProjectContext.close()` is an idempotent barrier: it stops mutation sources, waits for reset recovery, closes the goal, task, and gate SQLite stores alongside the session drain, and then closes remaining durable resources. Every sibling close is attempted before errors are reported, so one failure cannot strand another native handle during Windows directory cleanup.
 
 ### ProjectContextManager
 
@@ -193,9 +194,9 @@ On first startup after upgrading to per-project state, `migrateToPerProjectState
 
 1. Reads central `goals.json`, `sessions.json`, `tasks.json`, `team-state.json`, `gates.json`, `staff.json`
 2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
-3. Merges into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
+3. Merges legacy JSON buckets into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
 4. Staff agents without a `projectId` are anchored to the migration target project (`projectRegistry.getByPath(serverCwd)` if registered, else `projects[0]`). This is **migration-only** behavior - it runs once, is guarded by `.migrated-to-per-project`, and does not imply a runtime default. The block comment on `migrateToPerProjectState()` explains why this anchor is safe and why it must not be reused elsewhere.
-5. Renames central files with `.pre-migration` suffix (not deleted). Gate recovery is then owned by each `GateStore`: it transactionally merges the backup into authoritative `gates.sqlite` and retires the source collision-safely, while the generic recovery pass handles the remaining JSON stores.
+5. Renames central files with `.pre-migration` suffix (not deleted). `GoalStore`, `TaskStore`, and `GateStore` then own their corresponding JSON and recovery sources: each validates and transactionally imports into its separate SQLite authority before collision-safe retirement. The generic recovery pass excludes those three stores so it cannot recreate JSON that SQLite would ignore.
 6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
 
 The migration is idempotent and handles missing files gracefully (fresh installs have nothing to migrate). Any legacy central or per-project `search.db` is deleted on first startup under the new code - FlexSearch indexes rebuild automatically on first access (see [Semantic search](#semantic-search)).
@@ -3385,9 +3386,9 @@ Each registered project has its own state directory. All store data is scoped to
 
 | File / Directory | Owner | Purpose |
 |---|---|---|
-| `goals.json` | `GoalStore` | Goal definitions |
+| `goals.sqlite` | `GoalStore` | One transactional SQLite row per goal containing the flexible JSON payload. Startup automatically imports validated `goals.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
 | `sessions.json` | `SessionStore` | Session metadata |
-| `tasks.json` | `TaskStore` | Task state |
+| `tasks.sqlite` | `TaskStore` | One transactional SQLite row per task containing the flexible JSON payload. Startup automatically imports validated `tasks.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
 | `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then moves sources to collision-safe backups using atomic no-replace links before source unlink. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |

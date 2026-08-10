@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1143,
   "buckets": {
-    "daily": 64,
+    "daily": 65,
     "v2-browser": 216,
     "v2-core": 514,
     "v2-dom": 145,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 49,
+    "relocate": 50,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -68,6 +68,33 @@
     {
       "path": "tests2/core/gate-store-sqlite.test.ts",
       "reason": "Real-file SQLite coverage for automatic startup migration, exact restart restoration, authoritative pre-migration recovery, atomic no-replace retirement races and bounded final-flush retry, validation/import rollback, and native-handle cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/goal-store-sqlite.test.ts",
+      "reason": "Real-filesystem GoalStore SQLite coverage for migration, payload and identity preservation, transactional mutation and rollback, recovery and tombstones, collision-safe retirement, close semantics, JSON/memfs compatibility, and native-handle release.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/task-store-sqlite.test.ts",
+      "reason": "Real-filesystem TaskStore SQLite coverage for migration, payload and identity preservation, transactional mutation and rollback, recovery filtering, collision-safe retirement, close semantics, JSON/memfs compatibility, and native-handle release.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/goal-task-store-lifecycle.test.ts",
+      "reason": "ProjectContext and ProjectContextManager lifecycle coverage proving GoalStore and TaskStore handles close on normal shutdown, constructor failure, concurrent close, and Windows-safe project cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -5103,6 +5130,13 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "file": "tests/e2e/goal-task-sqlite-upgrade-restart.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real per-project legacy GoalStore and TaskStore upgrade, collision-safe retirement, supported-API mutation/deletion, graceful gateway restart, native SQLite identity inspection, and Windows handle-release fidelity."
     },
     {
       "file": "tests/e2e/goal-workflow-api.spec.ts",

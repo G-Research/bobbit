@@ -2180,6 +2180,9 @@ export class SessionManager {
 	orphanedTranscriptsCount = 0;
 	/** @internal Non-PCM test path only. */
 	private _testGoalManager: GoalManager | null = null;
+	/** Stores owned by the non-PCM test fallback and closed by shutdown(). */
+	private _testGoalStore: GoalStore | null = null;
+	private _testTaskStore: TaskStore | null = null;
 	/** @internal Non-PCM test path only. */
 	private _testTaskManager: TaskManager | null = null;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
@@ -2739,8 +2742,19 @@ export class SessionManager {
 			this._testBgProcessStore = new BgProcessStore(stateDir, this.clock);
 			this._testCostTracker = new CostTracker(stateDir);
 			this._testSearchIndex = new SearchService({ stateDir, projectId: "__test__" });
-			this._testGoalManager = new GoalManager(new GoalStore(stateDir), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock, remotePolicy: this.remoteGitPolicy, worktreeSetupRuntime: this.worktreeSetupRuntime });
-			this._testTaskManager = new TaskManager(new TaskStore(stateDir));
+			const goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
+			let taskStore: TaskStore | undefined;
+			try {
+				taskStore = new TaskStore(stateDir, undefined, { persistence: "json" });
+				this._testGoalStore = goalStore;
+				this._testTaskStore = taskStore;
+				this._testGoalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock, remotePolicy: this.remoteGitPolicy, worktreeSetupRuntime: this.worktreeSetupRuntime });
+				this._testTaskManager = new TaskManager(taskStore);
+			} catch (error) {
+				taskStore?.dispose();
+				goalStore.dispose();
+				throw error;
+			}
 			// Empty-but-real PR status store for in-process E2E harnesses that
 			// construct SessionManager without a full ProjectContextManager but
 			// may still hit re-attempt code paths.
@@ -13565,6 +13579,18 @@ export class SessionManager {
 			}
 		} catch (err) {
 			console.error("[search] Failed to close search index:", err);
+		}
+
+		if (!this.projectContextManager) {
+			const stores = [this._testGoalStore, this._testTaskStore].filter(
+				(store): store is GoalStore | TaskStore => store !== null,
+			);
+			const results = await Promise.allSettled(stores.map((store) => store.close()));
+			for (const result of results) {
+				if (result.status === "rejected") {
+					console.error("[session-manager] Failed to close test fallback store:", result.reason);
+				}
+			}
 		}
 	}
 }

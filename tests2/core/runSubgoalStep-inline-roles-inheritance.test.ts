@@ -59,7 +59,7 @@ describe("runSubgoalStep: child inherits parent.inlineRoles (integration via cre
 			gates: [{ id: "g", name: "G", dependsOn: [] }],
 			createdAt: 0, updatedAt: 0,
 		}]);
-		const goalStore = new GoalStore(stateDir);
+		const goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const gm = new GoalManager(goalStore, wfStore);
 
 		const inlineRole: Role = {
@@ -109,7 +109,7 @@ describe("runSubgoalStep: child inherits parent.inlineRoles (integration via cre
 			gates: [{ id: "g", name: "G", dependsOn: [] }],
 			createdAt: 0, updatedAt: 0,
 		}]);
-		const goalStore = new GoalStore(stateDir);
+		const goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const gm = new GoalManager(goalStore, wfStore);
 
 		const parent = await gm.createGoal("Parent", tmpRoot, {
@@ -142,7 +142,7 @@ describe("runSubgoalStep: child inherits parent.inlineRoles (integration via cre
 			gates: [{ id: "g", name: "G", dependsOn: [] }],
 			createdAt: 0, updatedAt: 0,
 		}]);
-		const goalStore = new GoalStore(stateDir);
+		const goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const gm = new GoalManager(goalStore, wfStore);
 
 		const parent = await gm.createGoal("Parent", tmpRoot, {
