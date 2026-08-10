@@ -43,7 +43,7 @@ const MAX_ID = 300;
 const MAX_TITLE = 160;
 const MAX_LABEL = 80;
 const MAX_ENTRY = 240;
-const MAX_DOC_ID = 240;
+const MAX_REVIEW_ID = 240;
 const MAX_PACK_PART = 120;
 const MAX_PARAMS_BYTES = 16 * 1024;
 const MAX_STATE_BYTES = 16 * 1024;
@@ -216,17 +216,32 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 	const decoded = decodeComponent(encoded);
 	if (!decoded) return null;
 	if (!source || source.type !== "review" || !sourceSessionMatches(source, sessionId)) return null;
-	let documentId = typeof source.documentId === "string" && source.documentId.trim() ? source.documentId.trim() : decoded;
-	let canonicalId = `review:${encodeComponent(documentId)}`;
-	const rawTitle = asString(source.title, asString((source as Record<string, unknown>).reviewTitle, decoded)).trim() || decoded;
-	// Legacy title-based review tabs had no durable document id; migrate them to a deterministic id.
-	if (!("documentId" in source) && !id.startsWith("review:legacy-title-")) {
-		documentId = `legacy-title-${createHash("sha256").update(rawTitle).digest("hex").slice(0, 16)}`;
-		canonicalId = `review:${documentId}`;
+
+	const sourceReviewId = asString(source.reviewId).trim();
+	const legacyDocumentId = asString(source.documentId).trim();
+	const sourceTitle = asString(source.title, asString(source.reviewTitle)).trim();
+	let reviewId: string;
+	if (sourceReviewId) {
+		// Canonical callers must agree with the id route identity. Silently
+		// rewriting a mismatched id could overwrite or focus another review.
+		if (decoded !== sourceReviewId) return null;
+		reviewId = sourceReviewId;
+	} else if (legacyDocumentId) {
+		reviewId = legacyDocumentId;
+	} else if (decoded.startsWith("legacy-title-") || decoded.startsWith("legacy-title:")) {
+		reviewId = decoded;
+	} else {
+		// Old title-only tabs have no stable identity. Hash their display title
+		// once, then persist the canonical reviewId source on the workspace.
+		reviewId = `legacy-title-${createHash("sha256").update(sourceTitle || decoded).digest("hex").slice(0, 16)}`;
 	}
-	if (!documentId || documentId.length > MAX_DOC_ID || !hasNoControlChars(documentId)) return null;
-	const title = truncate(rawTitle, MAX_TITLE) || documentId;
-	return { id: canonicalId, kind: "review", source: { type: "review", sessionId, documentId, title } };
+	if (!reviewId || reviewId.length > MAX_REVIEW_ID || !hasNoControlChars(reviewId)) return null;
+	const title = truncate(sourceTitle || asString(raw.title).replace(/^Review:\s*/, "").trim() || decoded, MAX_TITLE) || reviewId;
+	return {
+		id: `review:${encodeComponent(reviewId)}`,
+		kind: "review",
+		source: { type: "review", sessionId, reviewId, title },
+	};
 }
 
 function canonicalizeInbox(raw: Record<string, unknown>, id: string, sessionId: string): { id: string; kind: "inbox"; source: SidePanelWorkspaceSource } | null {

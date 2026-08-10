@@ -13,11 +13,27 @@ export interface ReviewAnnotation {
 	isCode?: boolean;
 }
 
-interface ReviewAnnotationData {
-	annotations: Record<string, ReviewAnnotation[]>; // keyed by docTitle
+export type ReviewTombstoneState = "submitted" | "closed";
+
+export interface ReviewAnnotationData {
+	annotations: Record<string, ReviewAnnotation[]>; // keyed by document identity (legacy data uses docTitle)
+	/** Legacy session-wide flag. New callers should use per-review tombstones. */
 	submitted: boolean;
+	submittedReviewIds: string[];
+	closedReviewIds: string[];
 }
 
+const emptyData = (): ReviewAnnotationData => ({
+	annotations: {},
+	submitted: false,
+	submittedReviewIds: [],
+	closedReviewIds: [],
+});
+
+function stringIds(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return [...new Set(value.filter((id): id is string => typeof id === "string" && id.trim().length > 0))];
+}
 
 /**
  * Server-side store for review annotations. One JSON file per session.
@@ -37,15 +53,19 @@ export class ReviewAnnotationStore {
 				const raw = JSON.parse(this.fs.readFileSync(fp, "utf-8"));
 				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 					return {
-						annotations: raw.annotations ?? {},
-						submitted: !!raw.submitted,
+						annotations: raw.annotations && typeof raw.annotations === "object" && !Array.isArray(raw.annotations)
+							? raw.annotations
+							: {},
+						submitted: raw.submitted === true,
+						submittedReviewIds: stringIds(raw.submittedReviewIds),
+						closedReviewIds: stringIds(raw.closedReviewIds),
 					};
 				}
 			}
 		} catch (err) {
 			console.error("[review-annotation-store] Failed to read:", err);
 		}
-		return { annotations: {}, submitted: false };
+		return emptyData();
 	}
 
 	private write(sessionId: string, data: ReviewAnnotationData): void {
@@ -101,21 +121,82 @@ export class ReviewAnnotationStore {
 		this.write(sessionId, data);
 	}
 
+	/** Legacy session-wide submitted API. Per-review tombstones are not modified. */
 	setSubmitted(sessionId: string, value: boolean): void {
 		const data = this.read(sessionId);
 		data.submitted = value;
 		this.write(sessionId, data);
 	}
 
+	/** Legacy session-wide submitted API. */
 	isSubmitted(sessionId: string): boolean {
 		return this.read(sessionId).submitted;
 	}
 
+	getReviewTombstones(sessionId: string): Pick<ReviewAnnotationData, "submittedReviewIds" | "closedReviewIds"> & { legacySubmitted: boolean } {
+		const data = this.read(sessionId);
+		return {
+			submittedReviewIds: data.submittedReviewIds,
+			closedReviewIds: data.closedReviewIds,
+			legacySubmitted: data.submitted,
+		};
+	}
+
 	/**
-	 * Overwrite the entire state for a session (used by bulk save / sendBeacon).
+	 * Read an exact review tombstone. A legacy `submitted: true` file is claimed
+	 * by the first exact review lookup and durably migrated. Legacy data could
+	 * only represent one review, so assigning it once avoids suppressing every
+	 * review in a new multi-review session.
 	 */
-	writeAll(sessionId: string, annotations: Record<string, ReviewAnnotation[]>, submitted: boolean): void {
-		this.write(sessionId, { annotations, submitted });
+	getReviewTombstone(sessionId: string, reviewId: string): ReviewTombstoneState | undefined {
+		const data = this.read(sessionId);
+		if (data.submittedReviewIds.includes(reviewId)) return "submitted";
+		if (data.closedReviewIds.includes(reviewId)) return "closed";
+		if (!data.submitted) return undefined;
+
+		data.submitted = false;
+		data.submittedReviewIds.push(reviewId);
+		this.write(sessionId, data);
+		return "submitted";
+	}
+
+	setReviewTombstone(sessionId: string, reviewId: string, state: ReviewTombstoneState): void {
+		const data = this.read(sessionId);
+		data.submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
+		data.closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
+		if (state === "submitted") data.submittedReviewIds.push(reviewId);
+		else data.closedReviewIds.push(reviewId);
+		this.write(sessionId, data);
+	}
+
+	clearReviewTombstone(
+		sessionId: string,
+		reviewId: string,
+		options: { clearLegacySubmitted?: boolean } = {},
+	): void {
+		const data = this.read(sessionId);
+		const submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
+		const closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
+		const clearsExact = submittedReviewIds.length !== data.submittedReviewIds.length
+			|| closedReviewIds.length !== data.closedReviewIds.length;
+		const clearsLegacy = options.clearLegacySubmitted === true && data.submitted;
+		if (!clearsExact && !clearsLegacy) return;
+		data.submittedReviewIds = submittedReviewIds;
+		data.closedReviewIds = closedReviewIds;
+		if (options.clearLegacySubmitted) data.submitted = false;
+		this.write(sessionId, data);
+	}
+
+	/**
+	 * Overwrite annotations for a session (used by bulk save / sendBeacon).
+	 * Tombstones are always merged from the latest disk state, never accepted
+	 * from the bulk payload, so an unload beacon cannot resurrect a review.
+	 */
+	writeAll(sessionId: string, annotations: Record<string, ReviewAnnotation[]>, submitted?: boolean): void {
+		const data = this.read(sessionId);
+		data.annotations = annotations;
+		if (typeof submitted === "boolean") data.submitted = submitted;
+		this.write(sessionId, data);
 	}
 
 	deleteFile(sessionId: string): void {

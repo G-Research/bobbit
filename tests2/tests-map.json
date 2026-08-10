@@ -2,12 +2,12 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1143,
+  "censusTotal": 1139,
   "buckets": {
     "daily": 65,
     "v2-browser": 216,
-    "v2-core": 514,
-    "v2-dom": 145,
+    "v2-core": 512,
+    "v2-dom": 144,
     "v2-integration": 202
   },
   "methods": {
@@ -20,6 +20,60 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/review-extension.test.ts",
+      "reason": "Core regression coverage for the review_open multi-file schema and runtime contract, including exclusive source modes, atomic inline/file loading, title defaults, duplicate identities, and legacy single-document compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/review-group-model.test.ts",
+      "reason": "Focused DOM regression coverage for stable review replacement identity, duplicate-title and file-occurrence reconciliation, replace:false replay idempotence, legacy one-file normalization, and canonical primary workspace persistence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/review-pane-groups.test.ts",
+      "reason": "DOM regression coverage for review-group secondary navigation, one-file simplification, review-wide feedback, and accessible unclipped overflow menu behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/side-panel-workspace-review-normalize.test.ts",
+      "reason": "Client normalization regression coverage for canonical reviewId workspace tabs, legacy documentId migration, and route identity validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/fixtures/review-groups.spec.ts",
+      "reason": "Deterministic Chromium fixture coverage for two grouped-review primaries, review-local navigation-only secondary files, top-layer overflow, close containment, sibling survival, and review-level decisions.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/review-groups.journey.spec.ts",
+      "reason": "Gateway-backed grouped-review journey covering multi-file workspace hierarchy, overflow and narrow geometry, review-wide feedback cleanup, background-session open/close isolation, reload hydration, and replay suppression.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
     {
       "path": "tests2/core/focused-tool-contract-refresh.test.ts",
       "reason": "Focused ownership-boundary regression proving a warmed process-wide tool scan cannot leave refreshed or reattached sessions advertising a stale nested-YAML prompt contract that disagrees with the current runtime validation schema.",
@@ -68,33 +122,6 @@
     {
       "path": "tests2/core/gate-store-sqlite.test.ts",
       "reason": "Real-file SQLite coverage for automatic startup migration, exact restart restoration, authoritative pre-migration recovery, atomic no-replace retirement races and bounded final-flush retry, validation/import rollback, and native-handle cleanup.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/goal-store-sqlite.test.ts",
-      "reason": "Real-filesystem GoalStore SQLite coverage for migration, payload and identity preservation, transactional mutation and rollback, recovery and tombstones, collision-safe retirement, close semantics, JSON/memfs compatibility, and native-handle release.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/task-store-sqlite.test.ts",
-      "reason": "Real-filesystem TaskStore SQLite coverage for migration, payload and identity preservation, transactional mutation and rollback, recovery filtering, collision-safe retirement, close semantics, JSON/memfs compatibility, and native-handle release.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/goal-task-store-lifecycle.test.ts",
-      "reason": "ProjectContext and ProjectContextManager lifecycle coverage proving GoalStore and TaskStore handles close on normal shutdown, constructor failure, concurrent close, and Windows-safe project cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2707,6 +2734,33 @@
     {
       "path": "tests2/core/dev-vite-supervisor.test.ts",
       "reason": "Development-runtime regression coverage proving an unexpected Vite exit is restarted with bounded backoff and every supported dev launcher uses the supervisor.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/goal-store-sqlite.test.ts",
+      "reason": "Real-filesystem GoalStore SQLite coverage for migration, payload and identity preservation, transactional mutation and rollback, recovery and tombstones, collision-safe retirement, close semantics, JSON/memfs compatibility, and native-handle release.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/task-store-sqlite.test.ts",
+      "reason": "Real-filesystem TaskStore SQLite coverage for migration, payload and identity preservation, transactional mutation and rollback, recovery filtering, collision-safe retirement, close semantics, JSON/memfs compatibility, and native-handle release.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/goal-task-store-lifecycle.test.ts",
+      "reason": "ProjectContext and ProjectContextManager lifecycle coverage proving GoalStore and TaskStore handles close on normal shutdown, constructor failure, concurrent close, and Windows-safe project cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

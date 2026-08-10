@@ -24,7 +24,8 @@ import {
 import { fetchAppInfo, fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending, type AppInfo } from "./api.js";
 import { headerToast, showHeaderToast } from "./header-toast.js";
 export { showHeaderToast } from "./header-toast.js";
-import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import { getDocumentAnnotationCount, getReviewAnnotationCount } from "../ui/components/review/AnnotationStore.js";
+import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
 import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
@@ -66,7 +67,11 @@ void ensureSearchBox();
 // lazy-loads <review-document> + <annotation-popover> + the
 // @recogito/text-annotator chain. Keep this import static so the
 // shell elements upgrade synchronously on first render.
-import "../ui/components/review/ReviewPane.js";
+import {
+	discardReviewFinalComment,
+	reviewFinalComment,
+	reviewFinalCommentCount,
+} from "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
@@ -93,7 +98,7 @@ import {
 	previewTabVersion,
 	previewVersionRecordFor,
 	reviewDocumentIdFromPanelTab,
-	reviewPanelTabId,
+	reviewIdFromPanelTab,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
 	setPanelTabsForSession,
@@ -1532,6 +1537,27 @@ function reviewDocumentKeyFromPanelTab(tab: PanelWorkspaceTab | undefined | null
 	return reviewTitleFromPanelTab(tab) || documentId;
 }
 
+function reviewDocumentsForGroup(group: ReviewGroupModel) {
+	return new Map(group.files.map((file) => [file.fileId, {
+		title: file.title,
+		markdown: file.markdown,
+		source: group.source,
+		documentId: file.fileId,
+		fileId: file.fileId,
+		reviewId: group.reviewId,
+	}]));
+}
+
+function selectVisibleReviewGroup(reviewId: string): boolean {
+	const group = state.reviewGroups.get(reviewId);
+	if (!group) return false;
+	state.reviewActiveReviewId = group.reviewId;
+	state.reviewDocuments = reviewDocumentsForGroup(group);
+	state.reviewActiveTab = group.activeFileId;
+	state.reviewPanelOpen = true;
+	return true;
+}
+
 export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
@@ -1548,7 +1574,8 @@ export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 		restoreHistoricalPreviewTab(tab);
 	}
 	if (tab.kind === "review") {
-		state.reviewActiveTab = reviewDocumentKeyFromPanelTab(tab);
+		const reviewId = reviewIdFromPanelTab(tab);
+		if (!selectVisibleReviewGroup(reviewId)) state.reviewActiveTab = reviewDocumentKeyFromPanelTab(tab);
 	}
 }
 
@@ -1596,6 +1623,7 @@ export function unifiedPanelTabs(): UnifiedPanelTab[] {
 		activeProposalTypes: activeProposalTypes(),
 		assistantProposalType: currentAssistantProposalType(),
 		reviewTitles: [...state.reviewDocuments.keys()],
+		reviewGroups: [...state.reviewGroups.values()],
 		reviewPanelOpen: state.reviewPanelOpen,
 		inboxPanelOpen: state.inboxPanelOpen,
 		inboxHasPending: state.inboxEntries.some((e) => e.state === "pending"),
@@ -1606,17 +1634,16 @@ export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	return tabs;
 }
 
-function findReviewPanelTabByTitle(title: string): UnifiedPanelTab | undefined {
-	const doc = state.reviewDocuments.get(title);
-	const candidateIds = [doc?.documentId, title]
-		.filter((value): value is string => typeof value === "string" && value.length > 0)
-		.map((documentId) => reviewPanelTabId(documentId));
+function findReviewPanelTab(identity: string): UnifiedPanelTab | undefined {
 	const tabs = unifiedPanelTabs();
-	for (const id of candidateIds) {
-		const tab = findPanelTab(tabs, id);
-		if (tab?.kind === "review") return tab;
+	const direct = tabs.find((tab) => tab.kind === "review" && reviewIdFromPanelTab(tab) === identity);
+	if (direct) return direct;
+	for (const group of state.reviewGroups.values()) {
+		if (group.reviewId !== identity && group.title !== identity && !group.files.some((file) => file.fileId === identity)) continue;
+		const tab = tabs.find((candidate) => candidate.kind === "review" && reviewIdFromPanelTab(candidate) === group.reviewId);
+		if (tab) return tab;
 	}
-	return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === title);
+	return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === identity);
 }
 
 function unifiedPanelContentTabs(): UnifiedContentTab[] {
@@ -2355,13 +2382,14 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const reviewPaneUnsentCountForDocument = (sessionId: string, title: string): number => {
-		const pane = document.querySelector("review-pane") as (HTMLElement & { _unsentCommentCountForDocument?: (title: string) => number }) | null;
-		if (pane && typeof pane._unsentCommentCountForDocument === "function") {
-			const count = Number(pane._unsentCommentCountForDocument(title));
-			if (Number.isFinite(count)) return count;
-		}
-		return getDocumentAnnotationCount(sessionId, title);
+	const reviewPaneUnsentCountForGroup = (sessionId: string, group: ReviewGroupModel | undefined, reviewId: string): number => {
+		const annotationCount = group
+			? getReviewAnnotationCount(sessionId, group)
+			: getDocumentAnnotationCount(sessionId, reviewId);
+		return annotationCount + reviewFinalCommentCount(sessionId, reviewId);
+	};
+	const discardReviewPaneFinalDraft = (sessionId: string, reviewId: string): void => {
+		discardReviewFinalComment(sessionId, reviewId);
 	};
 
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
@@ -2400,18 +2428,23 @@ export function doRenderApp(): void {
 			return;
 		}
 		if (tab.kind === "review") {
-			const title = reviewTitleFromPanelTab(tab);
-			const key = reviewDocumentKeyFromPanelTab(tab);
-			if (key) {
-				const sid = activeSessionId() || "";
-				if (event?.type !== "review-close-tab") {
-					const count = reviewPaneUnsentCountForDocument(sid, key);
-					if (count > 0 && !confirm(`Close "${title || key}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`)) return;
-				}
-				if (state.reviewActiveTab === key) {
-					const nextReview = nextCandidate?.kind === "review" ? reviewDocumentKeyFromPanelTab(nextCandidate) : "";
-					if (nextReview) state.reviewActiveTab = nextReview;
-				}
+			const reviewId = reviewIdFromPanelTab(tab);
+			const group = state.reviewGroups.get(reviewId);
+			const title = group?.title || reviewTitleFromPanelTab(tab) || reviewId;
+			const count = reviewPaneUnsentCountForGroup(sid, group, reviewId);
+			const alreadyConfirmed = event?.type === "review-close-tab"
+				|| event?.type === "review-dismiss"
+				|| (event as CustomEvent | undefined)?.detail?.confirmed === true;
+			if (!alreadyConfirmed && count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be discarded.`)) return;
+			if (group) {
+				void (async () => {
+					const { cleanupReviewGroup } = await loadReviewSources();
+					const removed = await cleanupReviewGroup(sid, reviewId);
+					if (removed) discardReviewPaneFinalDraft(sid, reviewId);
+					if (wasActive && nextCandidate?.kind === "review") selectVisibleReviewGroup(reviewIdFromPanelTab(nextCandidate));
+					renderApp();
+				})().catch((err) => showHeaderToast(err instanceof Error ? err.message : "Could not close review"));
+				return;
 			}
 		}
 		if (tab.kind === "inbox") {
@@ -2476,10 +2509,9 @@ export function doRenderApp(): void {
 		// should be highlighted — the pinned chat pill owns the active state.
 		const mobileChatActive = !isDesktop() && mobileSelectedPaneIndex === 0;
 		const tabIsActive = !mobileChatActive && activeId === tab.id;
+		const selectTab = () => { setUnifiedMobileTab(tab); renderApp(); };
 		return html`
 		<div
-			role="button"
-			tabindex="0"
 			class="goal-tab-pill ${tabIsActive ? "goal-tab-pill--active" : ""} ${draggable ? "goal-tab-pill--draggable" : "goal-tab-pill--pinned"} ${draggingPanelTabId === tab.id ? "goal-tab-pill--dragging" : ""}"
 			title=${tooltip}
 			data-panel-tab-id=${tab.id}
@@ -2487,18 +2519,21 @@ export function doRenderApp(): void {
 			data-panel-tab-title=${dataTitle}
 			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
 			data-testid="side-panel-tab"
-			@mousedown=${(e: MouseEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
-			@pointerup=${(e: PointerEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
-			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
-			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobileTab(tab); renderApp(); } }}
-		>${testId ? html`<span class="goal-tab-pill-label" data-testid=${testId}>${label}</span>` : html`<span class="goal-tab-pill-label">${label}</span>`}${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
+			@click=${(event: MouseEvent) => { if (!(event.target as Element | null)?.closest?.("button")) selectTab(); }}
+		>
+			<button class="goal-tab-select" type="button" aria-label=${`Open ${label}`} @click=${selectTab}>
+				${testId ? html`<span class="goal-tab-pill-label" data-testid=${testId}>${label}</span>` : html`<span class="goal-tab-pill-label">${label}</span>`}
+				${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+			</button>
+			${closable ? html`<button
 				class="goal-tab-close"
-				role="button"
+				type="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
 				data-testid="side-panel-close"
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
-			>${icon(X, "xs")}</span>` : ""}</div>
+			>${icon(X, "xs")}</button>` : ""}
+		</div>
 	`;
 	};
 
@@ -2645,119 +2680,92 @@ export function doRenderApp(): void {
 
 	/** Unified preview panel with tab header + content dispatch.
 	 *  Used on desktop for non-assistant sessions that have preview or goal proposal. */
-	const reviewPaneContent = () => html`
+	const reviewPaneContent = (reviewId: string) => {
+		const renderedGroup = state.reviewGroups.get(reviewId);
+		const renderedDocuments = renderedGroup
+			? reviewDocumentsForGroup(renderedGroup)
+			: reviewId === state.reviewActiveReviewId ? state.reviewDocuments : new Map();
+		const renderedActiveFileId = renderedGroup?.activeFileId
+			|| (reviewId === state.reviewActiveReviewId ? state.reviewActiveTab : "");
+		const paneSessionId = activeSessionId() || "";
+		return html`
 		<div class="flex-1 min-h-0 overflow-auto">
 			<review-pane
-				.documents=${state.reviewDocuments}
-				.activeTab=${state.reviewActiveTab}
-				.sessionId=${activeSessionId() || ""}
-				@review-tab-change=${(e: CustomEvent) => {
-					const title = e.detail.title as string;
-					state.reviewActiveTab = title;
-					const tab = findReviewPanelTabByTitle(title);
-					if (tab) setUnifiedActiveTab(tab);
-					renderApp();
+				.documents=${renderedDocuments}
+				.activeTab=${renderedActiveFileId}
+				.review=${renderedGroup}
+				.sessionId=${paneSessionId}
+				@review-file-change=${async (e: CustomEvent) => {
+					const targetReviewId = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : reviewId;
+					// documentId/title support is limited to legacy single-document callers;
+					// grouped ReviewPane events always identify the secondary file by fileId.
+					const fileId = typeof e.detail?.fileId === "string" ? e.detail.fileId
+						: typeof e.detail?.documentId === "string" ? e.detail.documentId
+						: typeof e.detail?.title === "string" ? e.detail.title : "";
+					if (!targetReviewId || !fileId) return;
+					const { setReviewActiveFile } = await loadReviewSources();
+					setReviewActiveFile(paneSessionId, targetReviewId, fileId);
 				}}
 				@review-submit=${async (e: CustomEvent) => {
+					// Compatibility path for older review panes. Current panes cancel this
+					// bridge and route the same decision through review-decision below.
+					const group = state.reviewGroups.get(reviewId) || renderedGroup;
 					const agent = state.remoteAgent;
-					if (agent) {
-						agent.prompt(e.detail.feedback);
-						const sid = activeSessionId() || "";
-						const reviewTabIds = [...new Set([
-							...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
-							...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
-						])];
-						const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
-						setPanelTabsForSession(state, sid, remainingLegacyTabs);
-						setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
-						const { clearPersistedReviewDocuments } = await loadReviewSources();
-						clearAllAnnotations(sid);
-						clearPersistedReviewDocuments(sid);
-						markReviewSubmitted(sid);
-						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
-							method: "PUT",
-							body: JSON.stringify({ submitted: true }),
-						}).catch(() => undefined);
-						await flushPendingWrites();
-						state.reviewDocuments = new Map();
-						state.reviewPanelOpen = false;
-						state.reviewActiveTab = "";
-						for (const tabId of reviewTabIds) {
-							try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
-							catch { /* best-effort */ }
-						}
-						renderApp();
-					}
+					if (!group || !agent || typeof e.detail?.feedback !== "string") return;
+					agent.prompt(e.detail.feedback);
+					const { cleanupReviewGroup } = await loadReviewSources();
+					const removed = await cleanupReviewGroup(paneSessionId, group.reviewId);
+					if (removed) discardReviewPaneFinalDraft(paneSessionId, group.reviewId);
 				}}
 				@review-decision=${async (e: CustomEvent) => {
 					e.preventDefault();
-					const sid = activeSessionId() || "";
 					try {
 						const {
 							reviewDecisionPayloadFromDetail,
-							reviewDocumentFromDecisionDetail,
-							submitReviewDecision,
+							reviewGroupFromDecisionDetail,
+							submitReviewGroupDecision,
 						} = await loadReviewSources();
-						const doc = reviewDocumentFromDecisionDetail(e.detail);
-						const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
-						if (!doc || !payload) {
+						const group = reviewGroupFromDecisionDetail(e.detail);
+						const payload = group ? reviewDecisionPayloadFromDetail(e.detail, paneSessionId, undefined, group) : undefined;
+						if (!group || !payload) {
 							showHeaderToast("Could not submit review decision");
 							return;
 						}
-						await submitReviewDecision(doc, payload, {
-							sessionId: sid,
+						const submittedDraft = reviewFinalComment(paneSessionId, group.reviewId);
+						const outcome = await submitReviewGroupDecision(group, payload, {
+							sessionId: paneSessionId,
 							prompt: async (feedback) => {
 								const agent = state.remoteAgent;
 								if (!agent) throw new Error("No active agent is available for this review.");
 								agent.prompt(feedback);
 							},
 						});
+						const replacementExists = state.reviewGroupsBySession[paneSessionId]
+							?.some((candidate) => candidate.reviewId === outcome.reviewId) === true;
+						if (outcome.submitted
+							&& !replacementExists
+							&& reviewFinalComment(paneSessionId, outcome.reviewId) === submittedDraft) {
+							discardReviewPaneFinalDraft(paneSessionId, outcome.reviewId);
+						}
 					} catch (err) {
 						showHeaderToast(err instanceof Error ? err.message : "Review decision failed");
 					}
 				}}
 				@review-close-tab=${(e: CustomEvent) => {
-					const title = e.detail.title as string;
-					const tab = findReviewPanelTabByTitle(title);
+					const identity = typeof e.detail?.reviewId === "string" ? e.detail.reviewId
+						: typeof e.detail?.title === "string" ? e.detail.title : reviewId;
+					const tab = findReviewPanelTab(identity);
 					if (tab) closeUnifiedPanelTab(tab, e);
-					else {
-						const keys = [...state.reviewDocuments.keys()].filter((key) => key !== title);
-						if (state.reviewActiveTab === title) state.reviewActiveTab = keys[0] || title;
-						renderApp();
-					}
 				}}
-				@review-dismiss=${async () => {
-					const sid = activeSessionId() || "";
-					const reviewTabIds = [...new Set([
-						...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
-						...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
-					])];
-					const hasMarkdownReview = [...state.reviewDocuments.values()].some((doc) => !doc.source || doc.source.kind === "markdown-review");
-					const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
-					setPanelTabsForSession(state, sid, remainingLegacyTabs);
-					setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
-					const { clearPersistedReviewDocuments } = await loadReviewSources();
-					clearAllAnnotations(sid);
-					clearPersistedReviewDocuments(sid);
-					if (hasMarkdownReview) {
-						markReviewSubmitted(sid);
-						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
-							method: "PUT",
-							body: JSON.stringify({ submitted: true }),
-						}).catch(() => undefined);
-					}
-					state.reviewDocuments = new Map();
-					state.reviewPanelOpen = false;
-					state.reviewActiveTab = "";
-					for (const tabId of reviewTabIds) {
-						try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
-						catch { /* best-effort */ }
-					}
-					renderApp();
+				@review-dismiss=${(e: CustomEvent) => {
+					const identity = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : reviewId;
+					const tab = findReviewPanelTab(identity);
+					if (tab) closeUnifiedPanelTab(tab, e);
 				}}
 			></review-pane>
 		</div>
 	`;
+	};
 
 	const sidePanelChromeButtonClass = "text-muted-foreground hover:text-foreground";
 	const sidePanelChromeButtonStyle = "background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;";
@@ -2907,11 +2915,7 @@ export function doRenderApp(): void {
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
-			const reviewKey = reviewDocumentKeyFromPanelTab(tab);
-			if (reviewKey && state.reviewActiveTab !== reviewKey) {
-				state.reviewActiveTab = reviewKey;
-			}
-			return reviewPaneContent();
+			return reviewPaneContent(reviewIdFromPanelTab(tab));
 		}
 		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {

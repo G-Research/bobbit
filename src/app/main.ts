@@ -34,7 +34,7 @@ import {
 import { fetchProjects, gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { revealSidebarTargetForRoute } from "./sidebar-reveal.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
+import { authenticateGateway, backToSessions, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { selectProposalWorkspaceTab } from "./preview-panel.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
@@ -364,11 +364,10 @@ async function handleHashChange(): Promise<void> {
 				revealSidebarTargetForRoute(route);
 				return;
 			}
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
+			// Keep the outgoing session connection owned until connectToSession runs.
+			// Its synchronous select phase transfers the exact panel/agent pair into
+			// the session cache; disconnecting here would drop live background events
+			// emitted after the route switch but before the user returns.
 			state.goalDashboardId = null;
 			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 			if (checkRes.ok) {
@@ -376,10 +375,11 @@ async function handleHashChange(): Promise<void> {
 				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 				revealSidebarTargetForRoute(route);
 			} else {
-				setHashRoute("landing");
-				state.appView = "authenticated";
-				renderApp();
-				await refreshSessions();
+				// The outgoing agent stayed active until the target lookup resolved so a
+				// valid switch could transfer it into the background cache. A missing
+				// target has no connectToSession select phase, so release that foreground
+				// ownership explicitly before showing the landing page.
+				backToSessions();
 			}
 		} else if (route.view === "goal-dashboard" && route.goalId) {
 			// Preserve prior UI state so a missing goal can keep the current view.

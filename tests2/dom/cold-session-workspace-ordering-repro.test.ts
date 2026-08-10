@@ -42,9 +42,13 @@ import { stopPreviewSubscription } from "../../src/app/preview-panel.js";
 import { stopInboxSubscription } from "../../src/app/inbox-panel.js";
 import {
 	clearReviewSubmitted,
+	clearReviewTombstone,
+	getReviewTombstone,
 	isReviewSubmitted,
 	markReviewSubmitted,
+	setReviewTombstone,
 } from "../../src/ui/components/review/AnnotationStore.js";
+import * as reviewSources from "../../src/app/review-sources.js";
 
 const SESSION_A = "cold-session-a";
 const SESSION_B = "cold-session-b";
@@ -234,6 +238,25 @@ async function fetchFixture(input: RequestInfo | URL, init?: RequestInit): Promi
 	const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
 	const sessionId = sessionIdFromPath(url.pathname);
 	timeline.push({ kind: "rest", path: `${url.pathname}${url.search}`, method, ...(sessionId ? { sessionId } : {}) });
+
+	const openTabMatch = url.pathname.endsWith("/side-panel-workspace/open");
+	if (openTabMatch && sessionId && method === "POST") {
+		const current = authoritativeWorkspace(sessionId);
+		const body = typeof init?.body === "string" ? JSON.parse(init.body) as { tab?: any; focus?: boolean } : {};
+		const incoming = body.tab;
+		const tabs = incoming
+			? [...current.tabs.filter((tab) => tab.id !== incoming.id), incoming]
+			: current.tabs;
+		const next = {
+			...current,
+			revision: current.revision + 1,
+			tabs,
+			activeTabId: body.focus !== false && incoming ? incoming.id : current.activeTabId,
+			updatedAt: current.updatedAt + 1,
+		};
+		authoritativeWorkspaces.set(sessionId, next);
+		return Response.json(cloneWorkspace(next));
+	}
 
 	const deleteTabMatch = url.pathname.match(/\/side-panel-workspace\/tabs\/([^/]+)$/);
 	if (deleteTabMatch && sessionId && method === "DELETE") {
@@ -891,6 +914,95 @@ describe("cold session transcript/workspace ordering", () => {
 			await Promise.allSettled([connectA, ...(connectB ? [connectB] : [])]);
 		}
 	});
+
+	it.each(["submitted", "closed"] as const)(
+		"suppresses only an exact %s review tombstone, reconciles its stale tab, and permits a fresh live reopen",
+		async (tombstoneState) => {
+			const reviewA = {
+				reviewId: "exact-review-a",
+				title: "Exact review A",
+				files: [{ fileId: "exact-a-file", title: "A.md", markdown: "# A" }],
+				activeFileId: "exact-a-file",
+				source: { kind: "markdown-review" as const, sessionId: SESSION_A },
+			};
+			const reviewB = {
+				reviewId: "exact-review-b",
+				title: "Exact review B",
+				files: [{ fileId: "exact-b-file", title: "B.md", markdown: "# B" }],
+				activeFileId: "exact-b-file",
+				source: { kind: "markdown-review" as const, sessionId: SESSION_A },
+			};
+			const reviewTab = (review: typeof reviewA) => ({
+				id: `review:${encodeURIComponent(review.reviewId)}`,
+				kind: "review" as const,
+				title: `Review: ${review.title}`,
+				label: `Review: ${review.title}`,
+				source: {
+					type: "review" as const,
+					sessionId: SESSION_A,
+					reviewId: review.reviewId,
+					documentId: review.reviewId,
+					title: review.title,
+				},
+				updatedAt: 10,
+			});
+
+			state.reviewGroupsBySession = {};
+			reviewSources.persistReviewGroup(SESSION_A, reviewA);
+			reviewSources.persistReviewGroup(SESSION_A, reviewB);
+			const seeded = workspaceFor(SESSION_A);
+			authoritativeWorkspaces.set(SESSION_A, {
+				...seeded,
+				tabs: [reviewTab(reviewA), reviewTab(reviewB)],
+				activeTabId: reviewTab(reviewA).id,
+			});
+			await setReviewTombstone(SESSION_A, reviewA.reviewId, tombstoneState);
+			vi.mocked(reviewSourcesLazy.loadReviewSources).mockResolvedValue(reviewSources);
+			gateFor(SESSION_A).release();
+
+			try {
+				await connectToSession(SESSION_A, true);
+				await waitFor(
+					() => !state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.some((tab) => tab.id === reviewTab(reviewA).id),
+					`EXACT_REVIEW_${tombstoneState.toUpperCase()}_RECONCILIATION_REGRESSION: stale A tab survived hydration`,
+				);
+
+				expect(getReviewTombstone(SESSION_A, reviewA.reviewId)).toBe(tombstoneState);
+				expect(state.reviewGroups.has(reviewA.reviewId)).toBe(false);
+				expect(state.reviewGroups.has(reviewB.reviewId)).toBe(true);
+				expect(state.reviewGroupsBySession[SESSION_A]?.map((review) => review.reviewId)).toEqual([reviewB.reviewId]);
+				expect(state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.map((tab) => tab.id)).toEqual([reviewTab(reviewB).id]);
+				expect(authoritativeWorkspace(SESSION_A).tabs.map((tab) => tab.id)).toEqual([reviewTab(reviewB).id]);
+
+				reviewSources.openMarkdownReviewGroup({
+					sessionId: SESSION_A,
+					reviewId: reviewA.reviewId,
+					title: reviewA.title,
+					files: reviewA.files,
+					live: true,
+				});
+				await waitFor(
+					() => state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.some((tab) => tab.id === reviewTab(reviewA).id) === true,
+					`EXACT_REVIEW_${tombstoneState.toUpperCase()}_LIVE_REOPEN_REGRESSION: fresh A did not stay open`,
+				);
+
+				expect(getReviewTombstone(SESSION_A, reviewA.reviewId)).toBeUndefined();
+				expect(state.reviewGroups.has(reviewA.reviewId)).toBe(true);
+				expect(state.reviewGroups.has(reviewB.reviewId)).toBe(true);
+				expect(state.reviewGroupsBySession[SESSION_A]?.map((review) => review.reviewId)).toEqual([
+					reviewB.reviewId,
+					reviewA.reviewId,
+				]);
+				expect(state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.map((tab) => tab.id).sort()).toEqual([
+					reviewTab(reviewA).id,
+					reviewTab(reviewB).id,
+				].sort());
+			} finally {
+				await clearReviewTombstone(SESSION_A, reviewA.reviewId);
+				reviewSources.clearPersistedReviewDocuments(SESSION_A);
+			}
+		},
+	);
 
 	it("does not reopen a submitted review tab when delayed workspace hydration settles", async () => {
 		await markReviewSubmitted(SESSION_A);

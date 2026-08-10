@@ -45,7 +45,6 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 		: "edit";
 }
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
-import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
@@ -58,7 +57,7 @@ import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest
 import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-minter-registry.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./mutation-approval-events.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
-import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { isReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
@@ -238,15 +237,6 @@ function mergeToolPayloads(...payloads: Array<Record<string, unknown> | null | u
 	return merged;
 }
 
-function isReviewWorkspaceSelectionActive(title?: string): boolean {
-	const s = state as any;
-	const activeId = typeof s.activePanelTabId === "string" ? s.activePanelTabId
-		: typeof s.panelWorkspace?.activeTabId === "string" ? s.panelWorkspace.activeTabId
-		: "";
-	if (activeId) return activeId.startsWith("review:") || (!!title && activeId === `review:${encodeURIComponent(title)}`);
-	return s.previewPanelTab === "review" || s.previewPanelActiveTab === "review";
-}
-
 function normalizeProposalToolCallInputs(message: any, inputByToolId?: (id: string) => unknown): any {
 	if (!message || !Array.isArray(message.content)) return message;
 	let changed = false;
@@ -274,6 +264,83 @@ function normalizeProposalToolCallInputs(message: any, inputByToolId?: (id: stri
 function toolEventId(event: any): string | undefined {
 	const id = event?.toolCallId ?? event?.toolId;
 	return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+type ReviewToolName = "review_open" | "review_close";
+type PendingReviewToolCall = { toolName: ReviewToolName; recordedAt: number };
+type CorrelatedReviewResult = { toolCallId: string; payloads: Record<string, unknown>[] };
+
+const REVIEW_TOOL_CALL_TTL_MS = 15 * 60_000;
+const REVIEW_TOOL_CALL_MAX_PENDING = 128;
+
+function reviewToolName(value: unknown): ReviewToolName | null {
+	return value === "review_open" || value === "review_close" ? value : null;
+}
+
+function reviewResultCorrelationId(value: Record<string, unknown>): string {
+	const id = value.toolCallId ?? value.tool_use_id;
+	return typeof id === "string" && id.length > 0 ? id : "";
+}
+
+function isTypedToolResult(value: Record<string, unknown>): boolean {
+	return value.role === "toolResult"
+		|| value.role === "tool_result"
+		|| value.type === "toolResult"
+		|| value.type === "tool_result";
+}
+
+/**
+ * Extract review payloads only from protocol-typed tool-result envelopes.
+ * A message-level result owns its content; otherwise direct nested
+ * `tool_result` blocks own theirs. We deliberately do not recursively search
+ * arbitrary objects, because unrelated tool output may itself contain data
+ * that resembles a result block.
+ */
+function correlatedReviewResults(message: unknown): CorrelatedReviewResult[] {
+	if (!message || typeof message !== "object" || Array.isArray(message)) return [];
+	const msg = message as Record<string, unknown>;
+	const envelopes: Record<string, unknown>[] = [];
+	if (isTypedToolResult(msg)) {
+		envelopes.push(msg);
+	} else if (Array.isArray(msg.content)) {
+		for (const block of msg.content) {
+			if (block && typeof block === "object" && !Array.isArray(block) && isTypedToolResult(block as Record<string, unknown>)) {
+				envelopes.push(block as Record<string, unknown>);
+			}
+		}
+	}
+
+	return envelopes.flatMap((envelope) => {
+		const toolCallId = reviewResultCorrelationId(envelope);
+		if (!toolCallId) return [];
+		const payloads: Record<string, unknown>[] = [];
+		const collectPayloads = (value: unknown): void => {
+			if (typeof value === "string") {
+				try {
+					const parsed = JSON.parse(value.trim());
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && reviewToolName((parsed as any).action)) {
+						payloads.push(parsed as Record<string, unknown>);
+					}
+				} catch { /* ordinary result text is not a review control payload */ }
+				return;
+			}
+			if (Array.isArray(value)) {
+				for (const item of value) collectPayloads(item);
+				return;
+			}
+			if (!value || typeof value !== "object") return;
+			const block = value as Record<string, unknown>;
+			if (reviewToolName(block.action)) {
+				payloads.push(block);
+			} else if (block.type === "text") {
+				collectPayloads(block.text);
+			}
+		};
+		collectPayloads(envelope.content);
+		collectPayloads(envelope.output);
+		collectPayloads(envelope.result);
+		return [{ toolCallId, payloads }];
+	});
 }
 
 function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
@@ -348,6 +415,9 @@ export class RemoteAgent {
 	private _sessionId = "";
 	private _toolCallInputsById = new Map<string, unknown>();
 	private _proposalToolCallsById = new Map<string, { type: ProposalType; input: Record<string, unknown> }>();
+	/** Single-use provenance for live review controls. Kept past
+	 * `tool_execution_end` because the persisted result message may follow it. */
+	private _pendingReviewToolCalls = new Map<string, PendingReviewToolCall>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
 	// Client-side outbox for user-intent frames issued while the WS is not OPEN
@@ -769,34 +839,38 @@ export class RemoteAgent {
 		return this._sessionId;
 	}
 	/**
-	 * Remove review tabs restored from the server after this session's review
-	 * was already submitted. Initial/reconnect workspace hydration can finish
-	 * after transcript replay performed the same cleanup against an empty local
-	 * workspace, so callers replay it at the workspace-apply boundary.
+	 * Remove stale review tabs after the owner session's annotation/tombstone
+	 * cache and workspace have hydrated. Exact tombstones close only their own
+	 * review; the session-wide submitted flag is retained solely for legacy data.
 	 *
 	 * This intentionally has no active-session guard: cached/background sessions
-	 * still own their keyed workspace and must not retain a submitted review tab.
+	 * still own their keyed workspace and must not retain a tombstoned review tab.
 	 */
-	async reconcileSubmittedReviewWorkspace(): Promise<void> {
+	async reconcileSubmittedReviewWorkspace(options: {
+		annotationStoreHydrated?: boolean;
+		reviewSources?: any;
+	} = {}): Promise<void> {
 		const sessionId = this._sessionId;
-		if (!sessionId || !isReviewSubmitted(sessionId)) return;
-		const isReviewTab = (tab: { id?: string; kind?: string }): boolean =>
-			tab.kind === "review" || tab.id?.startsWith("review:") === true;
-		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
-			.filter(isReviewTab)
-			.map((tab) => tab.id);
-		if (reviewTabIds.length === 0) return;
+		if (!sessionId) return;
+		if (!options.annotationStoreHydrated) await initAnnotationStore(sessionId);
+		const legacySubmitted = isReviewSubmitted(sessionId);
+		const reviewSources = options.reviewSources || await loadReviewSources();
+		if (typeof reviewSources.reconcileTombstonedReviewWorkspace === "function") {
+			await reviewSources.reconcileTombstonedReviewWorkspace(sessionId, {
+				includeLegacySubmitted: legacySubmitted,
+			});
+			return;
+		}
 
-		// Keep every deletion on the normal mutation path. A confirmed compatible
-		// 204 settles the optimistic close, while a 409 workspace remains
-		// authoritative and may be retried once at its newer revision. Refetches,
-		// network failures, and rollbacks are never locally filtered afterward.
+		// Compatibility for test/legacy lazy modules predating exact tombstones.
+		if (!legacySubmitted) return;
+		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
+			.filter((tab) => tab.kind === "review" || tab.id.startsWith("review:"))
+			.map((tab) => tab.id);
+		if (reviewTabIds.length !== 1) return;
 		for (const tabId of reviewTabIds) {
-			try {
-				await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
-			} catch (err) {
-				console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err);
-			}
+			try { await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true }); }
+			catch (err) { console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err); }
 		}
 	}
 	private _isActiveSession(): boolean {
@@ -1070,6 +1144,25 @@ export class RemoteAgent {
 		this.onConnectionStatusChange?.(status);
 	}
 
+	private _prunePendingReviewToolCalls(now = Date.now()): void {
+		for (const [id, pending] of this._pendingReviewToolCalls) {
+			if (now - pending.recordedAt > REVIEW_TOOL_CALL_TTL_MS) this._pendingReviewToolCalls.delete(id);
+		}
+		while (this._pendingReviewToolCalls.size > REVIEW_TOOL_CALL_MAX_PENDING) {
+			const oldestId = this._pendingReviewToolCalls.keys().next().value as string | undefined;
+			if (!oldestId) break;
+			this._pendingReviewToolCalls.delete(oldestId);
+		}
+	}
+
+	private _rememberReviewToolCall(id: string, toolName: ReviewToolName): void {
+		this._prunePendingReviewToolCalls();
+		// Refresh insertion order if a provider reuses an ID for a new start.
+		this._pendingReviewToolCalls.delete(id);
+		this._pendingReviewToolCalls.set(id, { toolName, recordedAt: Date.now() });
+		this._prunePendingReviewToolCalls();
+	}
+
 	private _scheduleReconnect(): void {
 		if (this._intentionalDisconnect || this._reconnectTimer) return;
 
@@ -1090,6 +1183,7 @@ export class RemoteAgent {
 
 	disconnect(): void {
 		this._intentionalDisconnect = true;
+		this._pendingReviewToolCalls.clear();
 		if (this._reconnectTimer) {
 			clearTimeout(this._reconnectTimer);
 			this._reconnectTimer = null;
@@ -1384,6 +1478,7 @@ export class RemoteAgent {
 		this._lastStatusVersion = -1;
 		this._isAborting = false;
 		this._state.pendingToolCalls = new Set();
+		this._pendingReviewToolCalls.clear();
 		this._state.error = undefined;
 		this._state.turnStartTime = null;
 		this._state.providerAuthRequired = null;
@@ -1932,29 +2027,21 @@ export class RemoteAgent {
 					} else {
 						this._scanLoadedProposalMessages();
 					}
-					// Rebuild review pane state from message history (same persistence as preview pane).
-					// Annotation hydration is session-scoped and can continue for a cached
-					// background agent. The review pane itself is global, so only the still-
-					// active session may clear, rebuild, or restore it.
+					// Review content is durable per session. Transcript replay is deliberately
+					// content-only: an old review_open/review_close result must never recreate
+					// a primary tab whose authoritative workspace entry is absent.
 					const reviewSessionId = this._sessionId;
 					await initAnnotationStore(reviewSessionId);
 					if (this._isActiveSession()) {
+						state.reviewGroups = new Map();
+						state.reviewActiveReviewId = "";
 						state.reviewDocuments = new Map();
 						state.reviewActiveTab = "";
 						state.reviewPanelOpen = false;
-						if (!isReviewSubmitted(reviewSessionId)) {
-							for (const m of this._state.messages) {
-								await this._checkReviewToolResult(m);
-								if (!this._isActiveSession()) break;
-							}
-						} else {
-							await this.reconcileSubmittedReviewWorkspace();
-						}
+						const reviewSources = await loadReviewSources();
 						if (this._isActiveSession()) {
-							const reviewSources = await loadReviewSources();
-							if (this._isActiveSession()) {
-								reviewSources.restorePersistedReviewDocuments(reviewSessionId, { select: true });
-							}
+							await this.reconcileSubmittedReviewWorkspace({ annotationStoreHydrated: true, reviewSources });
+							if (this._isActiveSession()) reviewSources.restorePersistedReviewDocuments(reviewSessionId, { select: true });
 						}
 					}
 					// Re-add compacting placeholder if compaction is still in progress
@@ -2332,6 +2419,7 @@ export class RemoteAgent {
 				const removedId = (msg as any).sessionId as string | undefined;
 				const reason = (msg as any).reason as string | undefined;
 				if (!removedId) break;
+				if (removedId === this._sessionId) this._pendingReviewToolCalls.clear();
 				this.onSessionRemoved?.(removedId, reason ?? "archived");
 				break;
 			}
@@ -2665,133 +2753,61 @@ export class RemoteAgent {
 	}
 
 	/**
-	 * Check if a message contains review tool results (from the review_open/review_close
-	 * extension) and update the review pane state accordingly. Scans message text content
-	 * for JSON payloads with action "review_open" or "review_close".
-	 *
-	 * Active-session guard: `state.review*` is global, but every connected session
-	 * (including cached/background ones whose RemoteAgent is kept alive in
-	 * `sessionCache` — see session-manager.ts::selectSession) routes its
-	 * `message_end` events through here. Without this gate, a `review_open`
-	 * emitted by a background session would mutate the globally-shared review
-	 * state and land on whichever session the user is currently viewing.
-	 *
-	 * We compare `_sessionId` against `state.selectedSessionId` (set
-	 * synchronously in `selectSession()` before `connectToSession()` runs),
-	 * not `state.remoteAgent`, because the latter is assigned only AFTER
-	 * `remote.connect()` returns — and the initial `auth_ok` handler replays
-	 * message history through this method during connect, so a
-	 * `state.remoteAgent`-based check would no-op the initial review-pane
-	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
+	 * Route live review tool results to the emitting session. Persisted review
+	 * groups and the server workspace are session-keyed, while visible review
+	 * state remains selected-session-only. Historical results are ignored: the
+	 * authoritative workspace plus durable group store perform hydration without
+	 * resurrecting a closed or submitted review.
 	 */
 	private async _checkReviewToolResult(msg: any, isLive = false): Promise<void> {
 		const sessionId = this._sessionId;
-		const isActiveSession = (): boolean => this._isActiveSession();
-		if (!isActiveSession()) return;
+		if (!sessionId || !isLive) return;
 
-		// Extract review tool-result payloads. Production providers are not fully
-		// consistent here: the review extension usually returns a JSON text block,
-		// but direct/tool-protocol paths can carry the same envelope as a structured
-		// object or nested under a tool_result block. Only inspect result-like
-		// content/output fields; do not treat tool-call input as an opened review.
-		const payloads: any[] = [];
-		const collectReviewPayloads = (value: unknown): void => {
-			if (typeof value === "string") {
-				const trimmed = value.trim();
-				if (!trimmed.startsWith('{"action":"review_')) return;
-				try { payloads.push(JSON.parse(trimmed)); } catch { /* ignore non-JSON text */ }
-				return;
-			}
-			if (Array.isArray(value)) {
-				for (const item of value) collectReviewPayloads(item);
-				return;
-			}
-			if (!value || typeof value !== "object") return;
-			const block = value as Record<string, unknown>;
-			if (typeof block.action === "string" && block.action.startsWith("review_")) {
-				payloads.push(block);
-				return;
-			}
-			if (block.type === "text") collectReviewPayloads(block.text);
-			else if (block.type === "tool_result" || block.type === "toolResult" || block.role === "toolResult") {
-				collectReviewPayloads(block.content);
-				collectReviewPayloads(block.output);
-				collectReviewPayloads(block.result);
-			} else if (typeof block.content === "string") {
-				collectReviewPayloads(block.content);
-			}
-		};
-		collectReviewPayloads(msg.content);
-		collectReviewPayloads((msg as any).output);
-		collectReviewPayloads((msg as any).result);
+		this._prunePendingReviewToolCalls();
+		for (const result of correlatedReviewResults(msg)) {
+			const pending = this._pendingReviewToolCalls.get(result.toolCallId);
+			if (!pending) continue;
+			// A review tool emits one control envelope. Multiple review actions are
+			// ambiguous and fail closed rather than selecting a convenient match.
+			if (result.payloads.length !== 1) continue;
+			const data = result.payloads[0];
+			if (data.action !== pending.toolName) continue;
 
-		for (const data of payloads) {
-			if (!isActiveSession()) return;
-			if (data.action === "review_open" && data.title && data.markdown) {
-				if (sessionId) {
-					const title = String(data.title);
-					const hasOpenWorkspaceTab = getSidePanelWorkspace(sessionId).tabs.some((tab) => {
-						if (tab.kind !== "review") return false;
-						const source = tab.source as Record<string, unknown> | undefined;
-						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
-						return tabTitle === title;
-					});
-					if (!hasOpenWorkspaceTab && !isLive) return;
-				}
-				// If the user already submitted this review, suppress reopening it on
-				// REPLAY paths (snapshot loop / non-live message_end). The submitted
-				// flag is per-session and persisted server-side; without this gate, a
-				// page reload would re-open a panel the user explicitly submitted.
-				// On a LIVE event (the agent emits a fresh review_open after a prior
-				// submit) we DO want to reopen — fall through and clear the flag.
-				// RP-09.
-				if (!isLive && sessionId && isReviewSubmitted(sessionId)) return;
-				const replace = data.replace !== false;
+			if (pending.toolName === "review_open") {
+				const files = Array.isArray(data.files)
+					? data.files.filter((file: unknown) => !!file && typeof file === "object" && typeof (file as any).markdown === "string")
+					: typeof data.markdown === "string"
+						? [{
+							fileId: typeof data.fileId === "string" ? data.fileId : typeof data.documentId === "string" ? data.documentId : undefined,
+							title: typeof data.title === "string" && data.title.trim() ? data.title : "Review",
+							markdown: data.markdown,
+						}]
+						: [];
+				if (files.length === 0) continue;
+				// Consume before the first await so concurrent/replayed delivery cannot
+				// authorize the same control twice.
+				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
-				if (!isActiveSession()) return;
-				// New review opened on a LIVE event — clear any prior submitted flag
-				// so the panel can reopen on subsequent reconnects. Skip on replay
-				// (the fire-and-forget PUT would race with concurrent server-side
-				// setSubmitted(true) and clobber it on reload). RP-09.
-				if (isLive && sessionId) clearReviewSubmitted(sessionId);
-				if (!isActiveSession()) return;
-				reviewSources.openMarkdownReviewDocument({
-					title: data.title,
-					markdown: data.markdown,
-					replace,
+				reviewSources.openMarkdownReviewGroup({
+					title: typeof data.title === "string" && data.title.trim() ? data.title : "Review",
+					reviewId: typeof data.reviewId === "string" ? data.reviewId : typeof data.documentId === "string" ? data.documentId : undefined,
+					files,
+					activeFileId: typeof data.activeFileId === "string" ? data.activeFileId : undefined,
+					replace: data.replace !== false,
+					live: true,
 					sessionId,
 				});
-			} else if (data.action === "review_close") {
-				const closingTitle = typeof data.title === "string" ? data.title : undefined;
+			} else {
+				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
-				if (!isActiveSession()) return;
-				const shouldReselect = isReviewWorkspaceSelectionActive(closingTitle);
-				state.reviewDocuments = new Map(state.reviewDocuments);
-				if (closingTitle) {
-					state.reviewDocuments.delete(closingTitle);
-					clearAnnotations(sessionId, closingTitle);
-					reviewSources.removePersistedReviewDocument(sessionId, closingTitle);
-					if (state.reviewActiveTab === closingTitle) {
-						const keys = [...state.reviewDocuments.keys()];
-						state.reviewActiveTab = keys[0] || "";
-					}
-					closeReviewWorkspaceTabs([closingTitle], { sessionId, select: false });
-				} else {
-					state.reviewDocuments = new Map();
-					state.reviewActiveTab = "";
-					clearAllAnnotations(sessionId);
-					reviewSources.clearPersistedReviewDocuments(sessionId);
-					closeReviewWorkspaceTabs(undefined, { sessionId, select: false });
-				}
-				state.reviewPanelOpen = state.reviewDocuments.size > 0;
-				if (shouldReselect) {
-					if (state.reviewPanelOpen && state.reviewActiveTab) {
-						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId, select: true });
-					} else {
-						selectSensiblePanelWorkspaceTab({ sessionId, select: true });
-					}
-				}
-				renderApp();
+				const knownGroups = state.reviewGroupsBySession[sessionId]
+					|| reviewSources.readPersistedReviewGroups(sessionId);
+				const reviewId = typeof data.reviewId === "string" ? data.reviewId : "";
+				const title = typeof data.title === "string" ? data.title : "";
+				const targets = reviewId
+					? knownGroups.filter((group) => group.reviewId === reviewId)
+					: title ? knownGroups.filter((group) => group.title === title) : knownGroups;
+				for (const group of targets) await reviewSources.cleanupReviewGroup(sessionId, group.reviewId);
 			}
 		}
 	}
@@ -3002,11 +3018,13 @@ export class RemoteAgent {
 				// boundary so a replacement agent's self-contained first update is not
 				// incorrectly applied to stale pre-crash content.
 				this._previousRawAssistantStreamMessage = undefined;
+				this._pendingReviewToolCalls.clear();
 				break;
 
 			case "agent_end": {
 				this._previousRawAssistantStreamMessage = undefined;
 				this.streamingMessageId = undefined;
+				this._pendingReviewToolCalls.clear();
 				// Status is owned by `session_status` (server). agent_end is a
 				// signal: streaming-message cleanup + per-tag flag clear + beep + badge.
 				this._state.streamingMessage = null;
@@ -3239,6 +3257,8 @@ export class RemoteAgent {
 					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
 					if (input) this._toolCallInputsById.set(id, input);
 					const toolName = typeof event.toolName === "string" ? event.toolName : "";
+					const exactReviewToolName = reviewToolName(toolName);
+					if (exactReviewToolName) this._rememberReviewToolCall(id, exactReviewToolName);
 					const proposalType = toolName.startsWith("propose_") ? toolName.replace("propose_", "") : "";
 					if (input && isProposalType(proposalType)) this._proposalToolCallsById.set(id, { type: proposalType, input: { ...input } });
 				}
