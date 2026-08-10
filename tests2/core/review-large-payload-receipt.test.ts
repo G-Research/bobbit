@@ -6,6 +6,8 @@ import { describe, it } from "vitest";
 import reviewExtension from "../../defaults/tools/review/extension.ts";
 import { getGateway } from "../harness/gateway.js";
 import { createScope } from "../harness/scope.js";
+import { configureAigwRuntimeFlags } from "../../src/server/agent/aigw-manager.js";
+import { invalidateModelCache } from "../../src/server/agent/model-registry.js";
 import {
 	LARGE_CONTENT_THRESHOLD,
 	truncateLargeToolContent,
@@ -64,17 +66,17 @@ describe("review_open large-payload egress contract", () => {
 
 		const gateway = await getGateway();
 		const scope = createScope(gateway);
-		const session = await scope.createSession({});
 		const previousGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
 		const previousToken = process.env.BOBBIT_TOKEN;
 		const previousSessionId = process.env.BOBBIT_SESSION_ID;
 		const previousSessionSecret = process.env.BOBBIT_SESSION_SECRET;
-		process.env.BOBBIT_GATEWAY_URL = gateway.baseURL;
-		process.env.BOBBIT_TOKEN = gateway.token;
-		process.env.BOBBIT_SESSION_ID = session.id;
-		process.env.BOBBIT_SESSION_SECRET = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(session.id);
 
 		try {
+			const session = await scope.createSession({});
+			process.env.BOBBIT_GATEWAY_URL = gateway.baseURL;
+			process.env.BOBBIT_TOKEN = gateway.token;
+			process.env.BOBBIT_SESSION_ID = session.id;
+			process.env.BOBBIT_SESSION_SECRET = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(session.id);
 			const result = await registeredReviewOpen().execute(toolCallId, {
 				title: "Large review receipt regression",
 				files,
@@ -153,7 +155,16 @@ describe("review_open large-payload egress contract", () => {
 			else process.env.BOBBIT_SESSION_ID = previousSessionId;
 			if (previousSessionSecret === undefined) delete process.env.BOBBIT_SESSION_SECRET;
 			else process.env.BOBBIT_SESSION_SECRET = previousSessionSecret;
-			await scope.cleanup();
+			try {
+				await scope.cleanup();
+			} finally {
+				// getGateway() intentionally disables well-known discovery for gateway boot,
+				// but that module-global flag shares this isolate:false Vitest fork with
+				// later AIGW unit files. Restore ordinary loopback discovery after this
+				// review fixture while retaining the harness network fences.
+				configureAigwRuntimeFlags({ skipAigwDiscovery: false });
+				invalidateModelCache();
+			}
 		}
 	});
 });
