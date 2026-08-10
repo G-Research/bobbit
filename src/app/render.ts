@@ -2704,7 +2704,7 @@ export function doRenderApp(): void {
 						: typeof e.detail?.title === "string" ? e.detail.title : "";
 					if (!targetReviewId || !fileId) return;
 					const { setReviewActiveFile } = await loadReviewSources();
-					setReviewActiveFile(paneSessionId, targetReviewId, fileId);
+					await setReviewActiveFile(paneSessionId, targetReviewId, fileId);
 				}}
 				@review-submit=${async (e: CustomEvent) => {
 					// Compatibility path for older review panes. Current panes cancel this

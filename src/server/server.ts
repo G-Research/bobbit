@@ -108,6 +108,16 @@ import {
 	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
+import { reviewArtifactTabId } from "../shared/review-artifact-identity.js";
+import { createReviewPayloadSessionCoordinator, handleReviewPayloadRoute, type ReviewPayloadSessionCoordinator } from "./review-payload-routes.js";
+import {
+	MAX_REVIEW_PAYLOAD_REQUEST_BYTES,
+	readReviewPayload,
+	removeReviewPayloads,
+	ReviewPayloadError,
+	sweepReviewPayloads,
+	type CanonicalReviewPayload,
+} from "./review-payload-store.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -2522,6 +2532,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
+	const reviewPayloadOperations = createReviewPayloadSessionCoordinator();
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
@@ -3692,12 +3703,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Content-Length over the cap is refused with a definitive 413;
 			// chunked/streamed bodies without a length are bounded by the
 			// streaming cap inside readBody().
-			if (bodyLimitExceeded(req.headers["content-length"])) {
+			const reviewPayloadUpload = req.method === "POST"
+				&& /^\/api\/sessions\/[^/]+\/review-payloads$/.test(url.pathname);
+			const requestBodyLimit = reviewPayloadUpload ? MAX_REVIEW_PAYLOAD_REQUEST_BYTES : MAX_REQUEST_BODY_BYTES;
+			if (bodyLimitExceeded(req.headers["content-length"], requestBodyLimit)) {
 				res.writeHead(413, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({
+				res.end(JSON.stringify(reviewPayloadUpload ? {
+					ok: false,
+					status: "failed",
+					code: "REVIEW_PAYLOAD_TOO_LARGE",
+					retryable: false,
+					message: "Review upload exceeds the bounded request limit",
+					limit: requestBodyLimit,
+				} : {
 					error: "Request body too large",
 					code: "BODY_TOO_LARGE",
-					limit: MAX_REQUEST_BODY_BYTES,
+					limit: requestBodyLimit,
 				}));
 				return;
 			}
@@ -3798,7 +3819,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4208,12 +4229,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		if (info.reason === "purged") {
 			purgeAuthorSidecar(sessionId);
-			try {
-				await previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
-			} catch (err) {
+			// Install both permanent fences before awaiting either cleanup. This keeps
+			// a stalled request from entering review persistence during preview purge.
+			const reviewPayloadCleanup = reviewPayloadOperations.purge(sessionId, () => removeReviewPayloads(sessionId));
+			const previewCleanup = previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
+			const [previewResult, reviewPayloadResult] = await Promise.allSettled([previewCleanup, reviewPayloadCleanup]);
+			if (previewResult.status === "rejected") {
 				// This listener owns preview-artifact cleanup errors; SessionManager
 				// only awaits the listener contract and must not duplicate this log.
-				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
+				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, previewResult.reason);
+			}
+			if (reviewPayloadResult.status === "rejected") {
+				console.error(`[review-payloads] remove failed for ${sessionId}:`, reviewPayloadResult.reason);
 			}
 		}
 	});
@@ -4593,6 +4620,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
 			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			await bootPhase("review-payload-recovery", async () => {
+				try {
+					const knownSessionIds = [...projectContextManager.all()]
+						.flatMap((context) => context.sessionStore.getAll().map((session) => session.id));
+					await sweepReviewPayloads(knownSessionIds);
+				} catch (err) {
+					console.warn("[review-payloads] startup recovery failed (non-fatal):", err);
+				}
+			});
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
@@ -5127,6 +5163,7 @@ async function handleApiRoute(
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
+	reviewPayloadOperations: ReviewPayloadSessionCoordinator = createReviewPayloadSessionCoordinator(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
 ) {
@@ -5331,6 +5368,84 @@ async function handleApiRoute(
 		readBody,
 		broadcastToSession: _broadcastToSession,
 		packContributionRegistry,
+	})) return;
+
+	const resolveExistingReviewPayload = async (
+		sessionId: string,
+		title: string,
+		incomingReviewId: string,
+		replace: boolean,
+	): Promise<{ reviewId: string; payload?: CanonicalReviewPayload; activeFileId?: string }> => {
+		if (!replace) return { reviewId: incomingReviewId };
+		const workspace = sessionManager.getPersistedSession(sessionId)?.sidePanelWorkspace;
+		for (const tab of workspace?.tabs ?? []) {
+			if (tab.kind !== "review" || tab.source.type !== "review" || tab.source.title !== title) continue;
+			const reviewId = typeof tab.source.reviewId === "string" && tab.source.reviewId ? tab.source.reviewId : incomingReviewId;
+			const activeFileId = typeof tab.state?.activeFileId === "string" ? tab.state.activeFileId : undefined;
+			const source = tab.source as unknown as Record<string, unknown>;
+			if (typeof source.payloadId === "string" && typeof source.toolCallId === "string" && typeof source.contentHash === "string") {
+				try {
+					const prior = await readReviewPayload(sessionId, source.payloadId);
+					if (prior.reviewId === reviewId && prior.toolCallId === source.toolCallId && prior.hash === source.contentHash) {
+						return { reviewId, payload: prior, activeFileId };
+					}
+				} catch { /* Preserve stable review identity even when old content expired. */ }
+			}
+			return { reviewId };
+		}
+		return { reviewId: incomingReviewId };
+	};
+	const openReviewPayload = async (payload: CanonicalReviewPayload) => {
+		const source = {
+			type: "review",
+			sessionId: payload.sessionId,
+			reviewId: payload.reviewId,
+			title: payload.title,
+			toolCallId: payload.toolCallId,
+			toolUseId: payload.toolCallId,
+			payloadId: payload.payloadId,
+			contentHash: payload.hash,
+		};
+		// Tombstones suppress passive replay only when this authoritative primary is
+		// absent. An explicit open publishes the primary without editing annotation
+		// storage, so a workspace failure cannot erase close/submit suppression.
+		// The saved file selection is a read-only hint for a closed review; a live
+		// workspace selection still wins under the workspace lock below.
+		const tombstonedActiveFileId = reviewAnnotationStore?.getReviewActiveFile(payload.sessionId, payload.reviewId);
+		const activeFileId = tombstonedActiveFileId && payload.files.some((file) => file.fileId === tombstonedActiveFileId)
+			? tombstonedActiveFileId
+			: payload.activeFileId;
+		const tabId = reviewArtifactTabId(payload.reviewId);
+		if (!tabId) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Review identity is invalid");
+		const workspace = await openSidePanelWorkspaceTab({
+			sessionManager,
+			readBody,
+			broadcastToSession: _broadcastToSession,
+			packContributionRegistry,
+		}, payload.sessionId, {
+			id: tabId,
+			kind: "review",
+			title: `Review: ${payload.title}`,
+			label: `Review: ${payload.title}`,
+			source,
+			state: { activeFileId },
+			updatedAt: Date.now(),
+		}, {
+			focus: true,
+			placeAfterActive: true,
+			// Resolve the current selection while holding the authoritative workspace
+			// lock so a manual Re-open cannot reset live file navigation.
+			preserveActiveFileIds: new Set(payload.files.map((file) => file.fileId)),
+		});
+		if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+		return workspace;
+	};
+	if (await handleReviewPayloadRoute(url, req, res, {
+		sessionManager,
+		readBody,
+		openReview: openReviewPayload,
+		operations: reviewPayloadOperations,
+		resolveExistingReview: resolveExistingReviewPayload,
 	})) return;
 
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
@@ -17346,12 +17461,17 @@ async function handleApiRoute(
 		catch { json({ error: "Invalid reviewId" }, 400); return; }
 		const reviewId = pathReviewId ?? body?.reviewId;
 		const tombstoneState = body?.state;
+		const activeFileId = body?.activeFileId;
 		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
 		if (tombstoneState !== "submitted" && tombstoneState !== "closed") {
 			json({ error: "state must be submitted or closed" }, 400);
 			return;
 		}
-		reviewAnnotationStore.setReviewTombstone(sessionId, reviewId, tombstoneState);
+		if (activeFileId !== undefined && (typeof activeFileId !== "string" || !activeFileId.trim() || Buffer.byteLength(activeFileId, "utf8") > 300 || /[\x00-\x1f\x7f\\/]/.test(activeFileId))) {
+			json({ error: "activeFileId is invalid" }, 400);
+			return;
+		}
+		reviewAnnotationStore.setReviewTombstone(sessionId, reviewId, tombstoneState, activeFileId);
 		json({ ok: true });
 		return;
 	}

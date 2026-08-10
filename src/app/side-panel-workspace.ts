@@ -1,5 +1,6 @@
 import { gatewayFetch, gatewayNativeTransportSupport, gatewayUrl, previewRouteFromStoredValue } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { isReviewArtifactIdentity, isReviewArtifactPayloadId, reviewArtifactTabId } from "../shared/review-artifact-identity.js";
 import { activeSessionId, renderApp, state } from "./state.js";
 import {
 	INBOX_PANEL_TAB_ID,
@@ -14,7 +15,6 @@ import {
 	previewTabVersionFromId,
 	proposalPanelTabId,
 	reviewDocumentIdFromPanelTab,
-	reviewPanelTabId,
 	reviewPanelTabIdFromReviewId,
 	reviewTitleFromPanelTab,
 	type PanelWorkspaceTab,
@@ -32,8 +32,8 @@ export interface SidePanelWorkspaceTab {
 	source:
 		| { type: "preview"; sessionId: string; entry: string; live?: boolean; historical?: boolean; version?: number; artifactId?: string; contentHash?: string; path?: string; url?: string; toolUseId?: string; blockIndex?: number }
 		| { type: "proposal"; sessionId: string; proposalType: SidePanelProposalType; rev?: number; historical?: boolean }
-		| { type: "review"; sessionId: string; reviewId: string; documentId?: string; title: string }
-		| { type: "review"; sessionId: string; reviewId?: undefined; documentId: string; title: string }
+		| { type: "review"; sessionId: string; reviewId: string; documentId?: string; title: string; toolCallId?: string; payloadId?: string; contentHash?: string }
+		| { type: "review"; sessionId: string; reviewId?: undefined; documentId: string; title: string; toolCallId?: undefined; payloadId?: undefined; contentHash?: undefined }
 		| { type: "inbox"; sessionId: string; staffId?: string }
 		| { type: "pack"; sessionId: string; packId: string; panelId: string; instanceKey: string; singleton?: boolean; params?: Record<string, unknown> };
 	state?: Record<string, unknown>;
@@ -209,17 +209,39 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 	if (kind === "review") {
 		if (!id.startsWith("review:")) return null;
 		const routeReviewId = decodeComponent(id.slice("review:".length));
-		const sourceReviewId = stringValue(source.reviewId).trim();
+		const rawToolCallId = source.toolCallId;
+		const rawPayloadId = source.payloadId;
+		const rawContentHash = source.contentHash;
+		const artifactFieldCount = ["toolCallId", "payloadId", "contentHash"]
+			.filter((key) => Object.prototype.hasOwnProperty.call(source, key)).length;
+		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
+		const artifactBacked = artifactFieldCount === 3;
+		const rawSourceReviewId = stringValue(source.reviewId);
+		const sourceReviewId = artifactBacked ? rawSourceReviewId : rawSourceReviewId.trim();
 		const legacyDocumentId = stringValue(source.documentId).trim();
 		const title = stringValue(source.title) || stringValue(source.reviewTitle) || base.title.replace(/^Review:\s*/, "");
 		if (sourceReviewId && routeReviewId !== sourceReviewId) return null;
 		const reviewId = sourceReviewId || legacyDocumentId;
 		if (!reviewId || !title) return null;
+		if (artifactBacked) {
+			if (!isReviewArtifactIdentity(reviewId, "reviewId")
+				|| !isReviewArtifactIdentity(rawToolCallId, "toolCallId")
+				|| !isReviewArtifactPayloadId(rawPayloadId)
+				|| typeof rawContentHash !== "string" || !/^[a-f0-9]{64}$/.test(rawContentHash)
+				|| id !== reviewArtifactTabId(reviewId)
+				|| !isReviewArtifactIdentity(base.state?.activeFileId, "fileId")) return null;
+		}
 		return {
 			...base,
-			id: reviewPanelTabIdFromReviewId(reviewId),
+			id: artifactBacked ? reviewArtifactTabId(reviewId)! : reviewPanelTabIdFromReviewId(reviewId),
 			kind,
-			source: { type: "review", sessionId, reviewId, title },
+			source: {
+				type: "review",
+				sessionId,
+				reviewId,
+				title,
+				...(artifactBacked ? { toolCallId: rawToolCallId as string, payloadId: rawPayloadId as string, contentHash: rawContentHash as string } : {}),
+			},
 		};
 	}
 	if (kind === "inbox") {
@@ -548,13 +570,25 @@ function sidePanelTabFromLegacyMirror(tab: PanelWorkspaceTab, sessionId: string)
 	}
 	if (tab.kind === "review") {
 		const title = reviewTitleFromPanelTab(tab) || tab.title.replace(/^Review:\s*/, "") || "Review";
-		const documentId = reviewDocumentIdFromPanelTab(tab) || title;
+		const reviewId = reviewDocumentIdFromPanelTab(tab) || title;
+		const source = asRecord(tab.source) || {};
+		const toolCallId = stringValue(source.toolCallId).trim();
+		const payloadId = stringValue(source.payloadId).trim();
+		const contentHash = stringValue(source.contentHash).trim();
+		const artifactFieldCount = Number(!!toolCallId) + Number(!!payloadId) + Number(!!contentHash);
+		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
 		return {
-			id: reviewPanelTabId(documentId),
+			id: reviewPanelTabIdFromReviewId(reviewId),
 			kind: "review",
 			title: `Review: ${title}`,
 			label: `Review: ${title}`,
-			source: { type: "review", sessionId, documentId, title },
+			source: {
+				type: "review",
+				sessionId,
+				reviewId,
+				title,
+				...(artifactFieldCount === 3 ? { toolCallId, payloadId, contentHash } : {}),
+			},
 			state: cloneJsonRecord(tab.state),
 			updatedAt,
 		};
@@ -679,7 +713,10 @@ function mutationBody(extra: Record<string, unknown>, workspace: SidePanelWorksp
 	});
 }
 
-export async function hydrateSidePanelWorkspace(sessionId: string): Promise<SidePanelWorkspace> {
+export async function hydrateSidePanelWorkspace(
+	sessionId: string,
+	options: { throwOnError?: boolean } = {},
+): Promise<SidePanelWorkspace> {
 	mutationState.delete(panelWorkspaceSessionKey(sessionId));
 	if (!useServerWorkspaceApi()) {
 		const workspace = state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] || emptyWorkspace(sessionId);
@@ -701,6 +738,7 @@ export async function hydrateSidePanelWorkspace(sessionId: string): Promise<Side
 		return workspace;
 	} catch (err) {
 		console.warn("[side-panel] hydrate failed", err);
+		if (options.throwOnError) throw err;
 		const fallback = state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] || emptyWorkspace(sessionId);
 		state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] = fallback;
 		syncCompatibilityMirrors(fallback);

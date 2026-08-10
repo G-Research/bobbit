@@ -30,7 +30,7 @@ export interface PanelWorkspaceTab {
 			[key: string]: unknown;
 		}
 		| { type: "proposal"; proposalType: ProposalType; sessionId?: string; rev?: number; historical?: boolean; [key: string]: unknown }
-		| { type: "review"; reviewId?: string; documentId?: string; title?: string; reviewTitle?: string; sessionId?: string }
+		| { type: "review"; reviewId?: string; documentId?: string; title?: string; reviewTitle?: string; sessionId?: string; toolCallId?: string; payloadId?: string; contentHash?: string }
 		| { type: "inbox"; sessionId?: string }
 		| {
 			/** A pack-contributed side panel (pack schema V1 §8.1). `{packId, panelId,
@@ -812,6 +812,10 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 			|| (looksLikeReviewDocumentId(decoded) ? decoded : legacyReviewDocumentIdFromTitle(sourceTitle || decoded));
 		const title = sourceTitle || (!looksLikeReviewDocumentId(decoded) ? decoded : rawTab.title.replace(/^Review:\s*/, "") || "Review");
 		if (!canonicalReviewId && title && reviewId) rememberReviewDocumentIdentity(title, reviewId);
+		const toolCallId = typeof source.toolCallId === "string" && source.toolCallId ? source.toolCallId : undefined;
+		const payloadId = typeof source.payloadId === "string" && source.payloadId ? source.payloadId : undefined;
+		const contentHash = typeof source.contentHash === "string" && source.contentHash ? source.contentHash : undefined;
+		const artifactFieldCount = Number(!!toolCallId) + Number(!!payloadId) + Number(!!contentHash);
 		return {
 			...rawTab,
 			id: reviewPanelTabIdFromReviewId(reviewId),
@@ -824,6 +828,7 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 				reviewId,
 				title,
 				...(typeof source.sessionId === "string" ? { sessionId: source.sessionId } : {}),
+				...(artifactFieldCount === 3 ? { toolCallId, payloadId, contentHash } : {}),
 			},
 		};
 	}

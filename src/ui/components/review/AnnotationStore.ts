@@ -303,6 +303,7 @@ export function setReviewTombstone(
   sessionId: string,
   reviewId: string,
   state: ReviewTombstoneState,
+  activeFileId?: string,
 ): Promise<void> {
   _ensureTombstoneCache(sessionId).set(reviewId, state);
   _recordTombstoneMutation(sessionId, reviewId);
@@ -311,12 +312,12 @@ export function setReviewTombstone(
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state }),
+      body: JSON.stringify({ state, ...(activeFileId ? { activeFileId } : {}) }),
     },
   ));
 }
 
-/** Clear an exact review tombstone, optionally retiring unowned legacy submitted state for a live open. */
+/** Explicitly clear an exact review tombstone; normal review opens do not call this. */
 export function clearReviewTombstone(
   sessionId: string,
   reviewId: string,

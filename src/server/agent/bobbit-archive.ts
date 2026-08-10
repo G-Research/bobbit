@@ -53,6 +53,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	// Per-session scratch — relevant while the server is running
 	"state/preview/",             // src/server/preview/mount.ts
 	"state/preview-artifacts/",   // src/server/preview/artifacts.ts
+	"state/review-payloads/",     // src/server/review-payload-store.ts
 	"state/tool-guard/",          // src/server/agent/tool-activation.ts
 	"state/tool-result-error-bridge/", // src/server/agent/tool-result-error-bridge-extension.ts
 	"state/provider-bridge/",     // src/server/agent/provider-bridge-extension.ts

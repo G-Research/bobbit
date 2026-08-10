@@ -1,9 +1,16 @@
 import { refreshGateStatusForGoal } from "./api.js";
+import { isReviewArtifactIdentity, isReviewArtifactPayloadId, reviewArtifactTabId } from "../shared/review-artifact-identity.js";
 import { dispatchHumanSignoffResolved } from "./gate-status-events.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { legacyReviewDocumentIdFromTitle, reviewDocumentIdFromPanelTab, reviewTitleFromPanelTab } from "./panel-workspace.js";
 import { selectReviewWorkspaceTab } from "./preview-panel.js";
-import { closeSidePanelTab, getSidePanelWorkspace, openSidePanelTab } from "./side-panel-workspace.js";
+import {
+	closeSidePanelTab,
+	getSidePanelWorkspace,
+	openSidePanelTab,
+	updateSidePanelTab,
+	type SidePanelWorkspaceTab,
+} from "./side-panel-workspace.js";
 import {
 	activeSessionId,
 	renderApp,
@@ -17,7 +24,6 @@ import {
 } from "./state.js";
 import {
 	clearAnnotations,
-	clearReviewTombstone,
 	flushPendingWrites,
 	getInlineCommentPayloads,
 	getReviewTombstones,
@@ -29,6 +35,7 @@ export { clearReviewTombstone, setReviewTombstone } from "../ui/components/revie
 
 const REVIEW_CONTEXT_STORAGE_PREFIX = "bobbit-review-contexts-v1:";
 const REVIEW_CONTEXT_VERSION = 2;
+const MAX_ARTIFACT_REVIEW_TITLE_BYTES = 320;
 
 export interface OpenReviewFileOptions {
 	title: string;
@@ -42,7 +49,7 @@ export interface OpenReviewGroupOptions {
 	reviewId?: string;
 	activeFileId?: string;
 	replace?: boolean;
-	/** Explicit live opens clear this review's tombstone and retire unowned legacy submitted state. */
+	/** Explicit live opens may reopen an exact tombstoned review through authoritative workspace presence. */
 	live?: boolean;
 	sessionId?: string;
 	source?: ReviewSource;
@@ -61,6 +68,17 @@ export interface OpenMarkdownReviewDocumentOptions {
 
 export interface OpenReviewDocumentOptions extends OpenMarkdownReviewDocumentOptions {
 	source?: ReviewSource;
+}
+
+/** Immutable review payload identity persisted on an authoritative workspace tab. */
+export interface ArtifactReviewReference {
+	sessionId: string;
+	reviewId: string;
+	title: string;
+	toolCallId: string;
+	payloadId: string;
+	contentHash: string;
+	activeFileId: string;
 }
 
 export interface SubmitReviewDecisionOptions {
@@ -92,6 +110,8 @@ type ReviewLifecycleSequence = {
 const reviewLifecycleSequences = new Map<string, ReviewLifecycleSequence>();
 /** One accepted external decision effect may be pending for an exact review key. */
 const pendingReviewDecisions = new Map<string, Promise<ReviewDecisionSubmissionOutcome>>();
+/** Artifact-backed Markdown lives only in memory; the workspace reference is durable. */
+const artifactReviewReferences = new Map<string, ArtifactReviewReference>();
 
 function reviewLifecycleKey(sessionId: string, reviewId: string): string {
 	return `${sessionId}\u0000${reviewId}`;
@@ -131,6 +151,52 @@ function normalizeIdentity(value: unknown): string | undefined {
 	const trimmed = value.trim();
 	if (!trimmed || trimmed.length > 160 || /[\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
 	return trimmed;
+}
+
+function exactArtifactTitle(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) return undefined;
+	return new TextEncoder().encode(value).byteLength <= MAX_ARTIFACT_REVIEW_TITLE_BYTES ? value : undefined;
+}
+
+function artifactReviewKey(sessionId: string, reviewId: string): string {
+	return `${sessionId}\u0000${reviewId}`;
+}
+
+function exactArtifactReferenceFromTab(
+	tab: SidePanelWorkspaceTab | undefined,
+	expectedSessionId: string,
+): ArtifactReviewReference | undefined {
+	if (!tab || tab.kind !== "review" || tab.source.type !== "review") return undefined;
+	const source = tab.source as Record<string, unknown>;
+	const sessionId = normalizeIdentity(source.sessionId);
+	const reviewId = isReviewArtifactIdentity(source.reviewId, "reviewId") ? source.reviewId : undefined;
+	const title = exactArtifactTitle(source.title);
+	const toolCallId = isReviewArtifactIdentity(source.toolCallId, "toolCallId") ? source.toolCallId : undefined;
+	const payloadId = isReviewArtifactPayloadId(source.payloadId) ? source.payloadId : undefined;
+	const contentHash = typeof source.contentHash === "string" && /^[a-f0-9]{64}$/.test(source.contentHash) ? source.contentHash : undefined;
+	const activeFileId = isReviewArtifactIdentity(tab.state?.activeFileId, "fileId") ? tab.state.activeFileId : undefined;
+	if (!sessionId || sessionId !== expectedSessionId || !reviewId || !title
+		|| !toolCallId || !payloadId || !contentHash || !activeFileId) return undefined;
+	if (tab.id !== reviewArtifactTabId(reviewId)) return undefined;
+	return { sessionId, reviewId, title, toolCallId, payloadId, contentHash, activeFileId };
+}
+
+function artifactReferenceMatches(a: ArtifactReviewReference, b: ArtifactReviewReference): boolean {
+	return a.sessionId === b.sessionId
+		&& a.reviewId === b.reviewId
+		&& a.title === b.title
+		&& a.toolCallId === b.toolCallId
+		&& a.payloadId === b.payloadId
+		&& a.contentHash === b.contentHash
+		&& a.activeFileId === b.activeFileId;
+}
+
+/** Return only complete, exact artifact references from the owner's authoritative workspace. */
+export function getArtifactReviewWorkspaceReferences(sessionId: string): ArtifactReviewReference[] {
+	if (!normalizeIdentity(sessionId)) return [];
+	return getSidePanelWorkspace(sessionId).tabs
+		.map((tab) => exactArtifactReferenceFromTab(tab, sessionId))
+		.filter((reference): reference is ArtifactReviewReference => !!reference);
 }
 
 function newIdentity(kind: "review" | "file", sessionId: string): string {
@@ -264,7 +330,10 @@ function safeReadPersisted(sessionId: string): ReviewGroupModel[] {
 	}
 }
 
-function shouldPersistReviewGroup(group: ReviewGroupModel): boolean {
+function shouldPersistReviewGroup(sessionId: string, group: ReviewGroupModel): boolean {
+	// Artifact payloads are durable on the server and can be up to 10 MiB. Never
+	// duplicate their Markdown into quota-limited localStorage.
+	if (artifactReviewReferences.has(artifactReviewKey(sessionId, group.reviewId))) return false;
 	return group.source.kind === "markdown-review"
 		|| group.source.kind === "verification-signoff-markdown"
 		|| group.source.kind === "verification-signoff-pr";
@@ -274,7 +343,7 @@ function safeWritePersisted(sessionId: string, groups: ReviewGroupModel[]): void
 	if (!sessionId || typeof localStorage === "undefined") return;
 	try {
 		const key = storageKey(sessionId);
-		const persistable = groups.filter(shouldPersistReviewGroup);
+		const persistable = groups.filter((group) => shouldPersistReviewGroup(sessionId, group));
 		if (persistable.length === 0) localStorage.removeItem(key);
 		else localStorage.setItem(key, JSON.stringify({ version: REVIEW_CONTEXT_VERSION, groups: persistable } satisfies PersistedReviewGroupsV2));
 	} catch { /* localStorage may be unavailable/full */ }
@@ -394,6 +463,83 @@ function reviewWorkspaceTabId(reviewId: string): string {
 	return `review:${encodeURIComponent(reviewId)}`;
 }
 
+function normalizeArtifactReviewGroup(raw: unknown, reference: ArtifactReviewReference): ReviewGroupModel {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Review payload is malformed.");
+	const record = raw as Record<string, unknown>;
+	const payloadActiveFileId = isReviewArtifactIdentity(record.activeFileId, "fileId") ? record.activeFileId : undefined;
+	if (record.reviewId !== reference.reviewId || record.title !== reference.title
+		|| !payloadActiveFileId || !Array.isArray(record.files) || record.files.length === 0) {
+		throw new Error("Review payload identity does not match its workspace reference.");
+	}
+	const seen = new Set<string>();
+	const files: ReviewFileModel[] = [];
+	for (const rawFile of record.files) {
+		if (!rawFile || typeof rawFile !== "object" || Array.isArray(rawFile)) throw new Error("Review payload is malformed.");
+		const file = rawFile as Record<string, unknown>;
+		const fileId = isReviewArtifactIdentity(file.fileId, "fileId") ? file.fileId : undefined;
+		const fileTitle = exactArtifactTitle(file.title);
+		if (!fileId || seen.has(fileId) || !fileTitle
+			|| typeof file.markdown !== "string") throw new Error("Review payload file identity is invalid.");
+		seen.add(fileId);
+		files.push({ fileId, title: fileTitle, markdown: file.markdown });
+	}
+	if (!seen.has(payloadActiveFileId) || !seen.has(reference.activeFileId)) {
+		throw new Error("Review payload active file is unavailable.");
+	}
+	const rawSource = raw && typeof record.source === "object" && !Array.isArray(record.source)
+		? record.source as Record<string, unknown>
+		: undefined;
+	if (rawSource && (rawSource.kind !== "markdown-review" || rawSource.sessionId !== reference.sessionId)) {
+		throw new Error("Review payload owner does not match its workspace reference.");
+	}
+	return {
+		reviewId: reference.reviewId,
+		title: reference.title,
+		files,
+		activeFileId: reference.activeFileId,
+		source: { kind: "markdown-review", sessionId: reference.sessionId },
+	};
+}
+
+/**
+ * Atomically publish a coordinator-validated payload into client review state.
+ * The exact artifact workspace tab must already be authoritative; this function
+ * never creates a tab or clears replay suppression during passive hydration.
+ */
+export function commitArtifactReviewGroup(reference: ArtifactReviewReference, rawGroup: unknown): ReviewGroupModel {
+	const workspace = getSidePanelWorkspace(reference.sessionId);
+	const tab = workspace.tabs.find((candidate) => candidate.id === reviewWorkspaceTabId(reference.reviewId));
+	const authoritative = exactArtifactReferenceFromTab(tab, reference.sessionId);
+	if (!authoritative || !artifactReferenceMatches(authoritative, reference)) {
+		throw new Error("Review workspace reference is unavailable or changed.");
+	}
+	const group = normalizeArtifactReviewGroup(rawGroup, authoritative);
+	const workspaceReviewIds = workspace.tabs
+		.map((candidate) => reviewIdentityFromWorkspaceTab(candidate))
+		.filter((identity): identity is string => !!identity);
+	const openIds = new Set(workspaceReviewIds);
+	const current = sessionGroups(reference.sessionId);
+	const byId = new Map(current.filter((candidate) => openIds.has(candidate.reviewId))
+		.map((candidate) => [candidate.reviewId, candidate]));
+	byId.set(group.reviewId, group);
+	const next = workspaceReviewIds.map((reviewId) => byId.get(reviewId))
+		.filter((candidate): candidate is ReviewGroupModel => !!candidate);
+
+	artifactReviewReferences.set(artifactReviewKey(reference.sessionId, reference.reviewId), authoritative);
+	writeSessionGroups(reference.sessionId, next);
+	if (isVisibleSession(reference.sessionId)) {
+		const activeTab = workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId);
+		const activeReviewId = reviewIdentityFromWorkspaceTab(activeTab);
+		hydrateVisibleReviewGroups(reference.sessionId, next, activeReviewId || group.reviewId);
+		if (activeReviewId) {
+			state.previewPanelActiveTab = "review";
+			state.previewPanelTab = "review";
+		}
+		renderApp();
+	}
+	return group;
+}
+
 async function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): Promise<void> {
 	const tab = {
 		id: reviewWorkspaceTabId(group.reviewId),
@@ -401,6 +547,7 @@ async function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): 
 		title: `Review: ${group.title}`,
 		label: `Review: ${group.title}`,
 		source: { type: "review", sessionId, reviewId: group.reviewId, documentId: group.reviewId, title: group.title },
+		state: { activeFileId: group.activeFileId },
 		updatedAt: Date.now(),
 	} as any;
 	try {
@@ -441,16 +588,16 @@ export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupMod
 	const stored = options.replace !== false
 		? nextGroups.find((group) => group.title === incoming.title) || incoming
 		: nextGroups.find((group) => group.reviewId === incoming.reviewId) || nextGroups[nextGroups.length - 1];
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, stored.reviewId));
 	writeSessionGroups(sessionId, nextGroups);
 	// Every primary open advances exact-key generation immediately. Sign-off
 	// launchers are non-live, but must still supersede cleanup before it can
 	// commit destructive state after closing an older primary.
 	void enqueueReviewLifecycle(sessionId, stored.reviewId, async (isCurrent) => {
 		if (!isCurrent()) return;
-		if (options.live) {
-			await clearReviewTombstone(sessionId, stored.reviewId, { clearLegacySubmitted: true });
-			if (!isCurrent()) return;
-		}
+		// Explicit workspace presence, rather than a cross-store tombstone clear,
+		// authorizes this reopen. A failed open therefore leaves replay suppression
+		// byte-for-byte unchanged and the same content remains retryable.
 		await openReviewWorkspace(stored, sessionId);
 		if (!isCurrent()) return;
 		if (options.live) reconcileVisibleExplicitReviewOpen(sessionId, stored.reviewId, isCurrent);
@@ -536,74 +683,50 @@ export function openReviewDocumentFromEvent(detail: unknown, sessionId = activeS
 function reviewIdentityFromWorkspaceTab(tab: any): string | undefined {
 	if (!tab || tab.kind !== "review") return undefined;
 	const source = tab.source && typeof tab.source === "object" ? tab.source as Record<string, unknown> : undefined;
+	const artifactBacked = typeof source?.toolCallId === "string"
+		|| typeof source?.payloadId === "string"
+		|| typeof source?.contentHash === "string";
+	if (artifactBacked) return isReviewArtifactIdentity(source?.reviewId, "reviewId") ? source.reviewId : undefined;
 	return normalizeIdentity(source?.reviewId) || normalizeIdentity(source?.documentId) || reviewDocumentIdFromPanelTab(tab);
 }
 
-const pendingTombstoneTabCloses = new Map<string, Promise<void>>();
-
-/**
- * Remove only workspace tabs covered by an exact hydrated tombstone. The
- * legacy session-wide flag remains a compatibility fallback for old data that
- * could represent only one review. All closes use the normal authoritative
- * mutation/retry path, including for background owner sessions.
- */
-export async function reconcileTombstonedReviewWorkspace(
-	sessionId: string,
-	options: { includeLegacySubmitted?: boolean } = {},
-): Promise<void> {
-	const tombstones = getReviewTombstones(sessionId);
-	const reviewTabs = getSidePanelWorkspace(sessionId).tabs.filter((tab) =>
-		tab.kind === "review" || tab.id.startsWith("review:"));
-	const closeLegacyReview = options.includeLegacySubmitted === true
-		&& tombstones.size === 0
-		&& reviewTabs.length === 1;
-	const targets = reviewTabs.flatMap((tab) => {
-		const reviewId = reviewIdentityFromWorkspaceTab(tab);
-		const exact = !!reviewId && tombstones.has(reviewId);
-		return exact || closeLegacyReview ? [{ tab, reviewId: exact ? reviewId : undefined }] : [];
-	});
-
-	for (const { tab, reviewId } of targets) {
-		const pendingKey = `${sessionId}\u0000${tab.id}`;
-		let pending = pendingTombstoneTabCloses.get(pendingKey);
-		if (!pending) {
-			pending = closeSidePanelTab(tab.id, { sessionId, retryConflictOnce: true })
-				.then(() => undefined, (err) => {
-					console.warn("[review-sources] tombstoned review workspace cleanup failed:", err);
-				})
-				.finally(() => pendingTombstoneTabCloses.delete(pendingKey));
-			pendingTombstoneTabCloses.set(pendingKey, pending);
-		}
-		await pending;
-
-		// A fresh explicit live open clears its exact tombstone synchronously.
-		// If it raced an already-dispatched stale close, issue the idempotent open
-		// again after that close settles so the new live request wins final order.
-		if (reviewId && !getReviewTombstones(sessionId).has(reviewId)) {
-			const reopened = sessionGroups(sessionId).find((group) => group.reviewId === reviewId);
-			if (reopened) openReviewWorkspace(reopened, sessionId);
-		}
-	}
-}
-
 export function restorePersistedReviewDocuments(sessionId: string, _options: { select?: boolean } = {}): void {
-	const persisted = readPersistedReviewGroups(sessionId);
+	const workspace = getSidePanelWorkspace(sessionId);
+	const tabs = workspace.tabs.filter((tab) => tab.kind === "review");
+	// Before the first workspace response, an empty local mirror is not proof of
+	// authoritative absence. Preserve persisted candidates until the server view
+	// arrives so an exact tombstone cannot erase content for an already-open tab.
+	const workspaceKnown = tabs.length > 0 || typeof state.lastWorkspaceRevisionBySession[sessionId] === "number";
+	const openIds = new Set(tabs.map(reviewIdentityFromWorkspaceTab).filter((id): id is string => !!id));
+	const persisted = safeReadPersisted(sessionId);
+	const inMemoryArtifacts = (state.reviewGroupsBySession[sessionId] || []).filter((group) => {
+		const reference = artifactReviewReferences.get(artifactReviewKey(sessionId, group.reviewId));
+		if (!reference) return false;
+		const tab = tabs.find((candidate) => candidate.id === reviewWorkspaceTabId(group.reviewId));
+		const authoritative = exactArtifactReferenceFromTab(tab, sessionId);
+		return !!authoritative && artifactReferenceMatches(authoritative, reference);
+	});
+	const candidatesById = new Map(persisted.map((group) => [group.reviewId, group]));
+	for (const group of inMemoryArtifacts) candidatesById.set(group.reviewId, group);
+	const candidates = [...candidatesById.values()];
 	const tombstones = getReviewTombstones(sessionId);
 	const legacySubmitted = isReviewSubmitted(sessionId)
 		&& tombstones.size === 0
-		&& persisted.length <= 1;
-	const eligible = legacySubmitted
-		? []
-		: persisted.filter((group) => !tombstones.has(group.reviewId));
-	if (eligible.length !== persisted.length) writeSessionGroups(sessionId, eligible);
-
-	const workspace = getSidePanelWorkspace(sessionId);
-	const tabs = workspace.tabs.filter((tab) => tab.kind === "review");
-	const openIds = new Set(tabs.map(reviewIdentityFromWorkspaceTab).filter((id): id is string => !!id));
+		&& candidates.length <= 1;
 	const legacyTitles = new Set(tabs.map((tab) => reviewTitleFromPanelTab(tab as any) || tab.title.replace(/^Review:\s*/, "")).filter(Boolean));
-	const restored = eligible.filter((group) => openIds.has(group.reviewId) || (!openIds.size && legacyTitles.has(group.title)));
+	const hasAuthoritativePrimary = (group: ReviewGroupModel) =>
+		openIds.has(group.reviewId) || legacyTitles.has(group.title);
+	// Exact and legacy tombstones suppress only passive recreation of an absent
+	// primary. An existing authoritative tab proves an explicit open committed,
+	// so reload restores it without rewriting annotation storage.
+	const eligible = workspaceKnown
+		? candidates.filter((group) =>
+			hasAuthoritativePrimary(group) || (!legacySubmitted && !tombstones.has(group.reviewId)))
+		: candidates;
+	if (workspaceKnown && eligible.length !== candidates.length) writeSessionGroups(sessionId, eligible);
+
+	const restored = workspaceKnown ? eligible.filter(hasAuthoritativePrimary) : [];
 	state.reviewGroupsBySession = { ...state.reviewGroupsBySession, [sessionId]: eligible };
-	void reconcileTombstonedReviewWorkspace(sessionId, { includeLegacySubmitted: legacySubmitted });
 	if (!isVisibleSession(sessionId)) return;
 	const activeTab = tabs.find((tab) => tab.id === workspace.activeTabId);
 	const activeIdentity = reviewIdentityFromWorkspaceTab(activeTab) || restored.find((group) => reviewTitleFromPanelTab(activeTab as any) === group.title)?.reviewId;
@@ -615,6 +738,7 @@ export function persistReviewGroup(sessionId: string, group: ReviewGroupModel): 
 	const groups = sessionGroups(sessionId);
 	const index = groups.findIndex((candidate) => candidate.reviewId === group.reviewId);
 	const next = index < 0 ? [...groups, group] : groups.map((candidate, candidateIndex) => candidateIndex === index ? group : candidate);
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, group.reviewId));
 	writeSessionGroups(sessionId, next);
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, next, group.reviewId);
 }
@@ -637,12 +761,35 @@ export function setActiveReviewGroup(sessionId: string, reviewId: string): boole
 	return true;
 }
 
-export function setReviewActiveFile(sessionId: string, reviewId: string, fileId: string): boolean {
+export async function setReviewActiveFile(sessionId: string, reviewId: string, fileId: string): Promise<boolean> {
 	const groups = sessionGroups(sessionId);
 	const index = groups.findIndex((group) => group.reviewId === reviewId);
 	if (index < 0 || !groups[index].files.some((file) => file.fileId === fileId)) return false;
+	const tabId = reviewWorkspaceTabId(reviewId);
+	let workspace = getSidePanelWorkspace(sessionId);
+	let tab = workspace.tabs.find((candidate) => candidate.id === tabId && candidate.kind === "review");
+	const artifactReference = artifactReviewReferences.get(artifactReviewKey(sessionId, reviewId));
+	if (artifactReference && !tab) return false;
+	if (tab) {
+		const patch = { state: { ...(tab.state || {}), activeFileId: fileId } };
+		try {
+			workspace = await updateSidePanelTab(tabId, patch, { sessionId });
+			tab = workspace.tabs.find((candidate) => candidate.id === tabId && candidate.kind === "review");
+			if (tab?.state?.activeFileId !== fileId) {
+				workspace = await updateSidePanelTab(tabId, patch, { sessionId });
+				tab = workspace.tabs.find((candidate) => candidate.id === tabId && candidate.kind === "review");
+			}
+			if (!tab || tab.state?.activeFileId !== fileId) return false;
+		} catch {
+			return false;
+		}
+	}
+
 	const next = [...groups];
 	next[index] = { ...groups[index], activeFileId: fileId };
+	if (artifactReference) {
+		artifactReviewReferences.set(artifactReviewKey(sessionId, reviewId), { ...artifactReference, activeFileId: fileId });
+	}
 	writeSessionGroups(sessionId, next);
 	if (isVisibleSession(sessionId)) {
 		hydrateVisibleReviewGroups(sessionId, next, reviewId);
@@ -657,6 +804,7 @@ export function removePersistedReviewGroup(sessionId: string, reviewId: string):
 	if (!removed) return undefined;
 	const next = groups.filter((group) => group.reviewId !== reviewId);
 	writeSessionGroups(sessionId, next);
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, reviewId));
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, next);
 	return removed;
 }
@@ -669,10 +817,14 @@ export function removePersistedReviewDocument(sessionId: string, identity: strin
 	if (removedIds.size === 0) return;
 	const next = groups.filter((group) => !removedIds.has(group.reviewId));
 	writeSessionGroups(sessionId, next);
+	for (const reviewId of removedIds) artifactReviewReferences.delete(artifactReviewKey(sessionId, reviewId));
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, next);
 }
 
 export function clearPersistedReviewDocuments(sessionId: string): void {
+	for (const [key, reference] of artifactReviewReferences) {
+		if (reference.sessionId === sessionId) artifactReviewReferences.delete(key);
+	}
 	writeSessionGroups(sessionId, []);
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, []);
 }
@@ -877,6 +1029,7 @@ function removeCapturedReviewGroup(sessionId: string, captured: ReviewGroupModel
 	if (index < 0 || !reviewGroupMatchesSnapshot(groups[index], captured)) return undefined;
 	const removed = groups[index];
 	writeSessionGroups(sessionId, groups.filter((_, candidateIndex) => candidateIndex !== index));
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, removed.reviewId));
 	return removed;
 }
 
@@ -926,20 +1079,16 @@ async function commitReviewGroupCleanup(
 ): Promise<ReviewGroupModel | undefined> {
 	if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) return undefined;
 	if (tombstone !== false) {
-		await setReviewTombstone(sessionId, group.reviewId, tombstone);
-		if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) {
-			// A live same-ID replacement clears this in its queued open phase. Also
-			// clear here for non-live/internal replacement callers.
-			await clearReviewTombstone(sessionId, group.reviewId);
-			return undefined;
-		}
+		await setReviewTombstone(sessionId, group.reviewId, tombstone, group.activeFileId);
+		// A newer explicit open may have committed while this write was pending.
+		// Its authoritative primary wins over this passive-replay marker, so do
+		// not perform a compensating annotation write that could clobber a later
+		// exact or sibling mutation.
+		if (!isCurrent() || !currentCapturedReviewGroup(sessionId, group)) return undefined;
 	}
 
 	const removed = removeCapturedReviewGroup(sessionId, group);
-	if (!removed) {
-		if (tombstone !== false) await clearReviewTombstone(sessionId, group.reviewId);
-		return undefined;
-	}
+	if (!removed) return undefined;
 	const closingTitles = new Set(removed.files.map((file) => file.title));
 	const remainingTitles = new Set(sessionGroups(sessionId).flatMap((candidate) => candidate.files.map((file) => file.title)));
 	for (const file of removed.files) clearAnnotations(sessionId, file.fileId);

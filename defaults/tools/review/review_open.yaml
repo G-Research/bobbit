@@ -7,7 +7,7 @@ provider:
   extension: extension.ts
 group: Review
 docs: |-
-  Pass `markdown` or `file` for a one-file review, or a non-empty `files[]` array for a multi-file review. A review owns one primary workspace tab; its files are secondary navigation tabs.
+  Pass `markdown` or `file` for a one-file review, or a non-empty `files[]` array for a multi-file review. A review owns one primary workspace tab; its files are secondary navigation tabs. Review Markdown is stored in the owning session and the tool result contains only a bounded reopenable receipt.
 detail_docs: |-
   ## Parameters
   | Name | Type | Required | Description |
@@ -19,6 +19,10 @@ detail_docs: |-
   | replace | boolean | No | Replace an existing same-title review (default: true) |
 
   Supply exactly one top-level source mode: `markdown`, `file`, or `files`. File-entry titles default to an explicit title, the file basename, or `File N`, in that order.
+
+  A review may contain up to 64 files and up to 10 MiB cumulative Markdown, counted as UTF-8 bytes. Exactly 10 MiB is accepted; larger reviews fail without opening or partially saving a review. Review and file titles must be non-empty and at most 320 UTF-8 bytes.
+
+  Successful calls persist the canonical Markdown in the authenticated owning session. The visible tool result is a bounded receipt that can re-open the exact review after reload or reconnect; it never embeds the Markdown bodies.
 
   ## Examples
   ```

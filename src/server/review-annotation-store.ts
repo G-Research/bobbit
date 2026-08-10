@@ -21,6 +21,7 @@ export interface ReviewAnnotationData {
 	submitted: boolean;
 	submittedReviewIds: string[];
 	closedReviewIds: string[];
+	activeFileIds: Record<string, string>;
 }
 
 const emptyData = (): ReviewAnnotationData => ({
@@ -28,11 +29,18 @@ const emptyData = (): ReviewAnnotationData => ({
 	submitted: false,
 	submittedReviewIds: [],
 	closedReviewIds: [],
+	activeFileIds: {},
 });
 
 function stringIds(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return [...new Set(value.filter((id): id is string => typeof id === "string" && id.trim().length > 0))];
+}
+
+function activeFileIds(value: unknown): Record<string, string> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] =>
+		entry[0].trim().length > 0 && typeof entry[1] === "string" && entry[1].trim().length > 0));
 }
 
 /**
@@ -46,32 +54,43 @@ export class ReviewAnnotationStore {
 		return path.join(this.stateDir, `review-annotations-${sessionId}.json`);
 	}
 
+	private parse(raw: unknown): ReviewAnnotationData {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid review annotation data");
+		const value = raw as Record<string, unknown>;
+		return {
+			annotations: value.annotations && typeof value.annotations === "object" && !Array.isArray(value.annotations)
+				? value.annotations as Record<string, ReviewAnnotation[]>
+				: {},
+			submitted: value.submitted === true,
+			submittedReviewIds: stringIds(value.submittedReviewIds),
+			closedReviewIds: stringIds(value.closedReviewIds),
+			activeFileIds: activeFileIds(value.activeFileIds),
+		};
+	}
+
+	private readChecked(sessionId: string): ReviewAnnotationData {
+		const fp = this.filePath(sessionId);
+		if (!this.fs.existsSync(fp)) return emptyData();
+		return this.parse(JSON.parse(this.fs.readFileSync(fp, "utf-8")));
+	}
+
 	private read(sessionId: string): ReviewAnnotationData {
 		try {
-			const fp = this.filePath(sessionId);
-			if (this.fs.existsSync(fp)) {
-				const raw = JSON.parse(this.fs.readFileSync(fp, "utf-8"));
-				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-					return {
-						annotations: raw.annotations && typeof raw.annotations === "object" && !Array.isArray(raw.annotations)
-							? raw.annotations
-							: {},
-						submitted: raw.submitted === true,
-						submittedReviewIds: stringIds(raw.submittedReviewIds),
-						closedReviewIds: stringIds(raw.closedReviewIds),
-					};
-				}
-			}
+			return this.readChecked(sessionId);
 		} catch (err) {
 			console.error("[review-annotation-store] Failed to read:", err);
+			return emptyData();
 		}
-		return emptyData();
+	}
+
+	private writeChecked(sessionId: string, data: ReviewAnnotationData): void {
+		if (!this.fs.existsSync(this.stateDir)) this.fs.mkdirSync(this.stateDir, { recursive: true });
+		this.fs.writeFileSync(this.filePath(sessionId), JSON.stringify(data, null, 2), "utf-8");
 	}
 
 	private write(sessionId: string, data: ReviewAnnotationData): void {
 		try {
-			if (!this.fs.existsSync(this.stateDir)) this.fs.mkdirSync(this.stateDir, { recursive: true });
-			this.fs.writeFileSync(this.filePath(sessionId), JSON.stringify(data, null, 2), "utf-8");
+			this.writeChecked(sessionId, data);
 		} catch (err) {
 			console.error("[review-annotation-store] Failed to write:", err);
 		}
@@ -160,13 +179,19 @@ export class ReviewAnnotationStore {
 		return "submitted";
 	}
 
-	setReviewTombstone(sessionId: string, reviewId: string, state: ReviewTombstoneState): void {
+	setReviewTombstone(sessionId: string, reviewId: string, state: ReviewTombstoneState, activeFileId?: string): void {
 		const data = this.read(sessionId);
 		data.submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
 		data.closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
 		if (state === "submitted") data.submittedReviewIds.push(reviewId);
 		else data.closedReviewIds.push(reviewId);
+		if (activeFileId) data.activeFileIds[reviewId] = activeFileId;
+		else delete data.activeFileIds[reviewId];
 		this.write(sessionId, data);
+	}
+
+	getReviewActiveFile(sessionId: string, reviewId: string): string | undefined {
+		return this.read(sessionId).activeFileIds[reviewId];
 	}
 
 	clearReviewTombstone(
@@ -180,9 +205,11 @@ export class ReviewAnnotationStore {
 		const clearsExact = submittedReviewIds.length !== data.submittedReviewIds.length
 			|| closedReviewIds.length !== data.closedReviewIds.length;
 		const clearsLegacy = options.clearLegacySubmitted === true && data.submitted;
-		if (!clearsExact && !clearsLegacy) return;
+		const clearsActiveFile = Object.prototype.hasOwnProperty.call(data.activeFileIds, reviewId);
+		if (!clearsExact && !clearsLegacy && !clearsActiveFile) return;
 		data.submittedReviewIds = submittedReviewIds;
 		data.closedReviewIds = closedReviewIds;
+		delete data.activeFileIds[reviewId];
 		if (options.clearLegacySubmitted) data.submitted = false;
 		this.write(sessionId, data);
 	}

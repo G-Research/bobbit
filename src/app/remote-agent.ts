@@ -46,18 +46,19 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 }
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
+import { hydrateArtifactReviewsForWorkspace, openReviewReceipt, parseReviewOpenReceipt, registerReviewOpenReceipt } from "./review-open-controller.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
-import { applySidePanelWorkspaceFromServer, closeSidePanelTab, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
 import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-minter-registry.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./mutation-approval-events.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
-import { isReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
@@ -839,12 +840,10 @@ export class RemoteAgent {
 		return this._sessionId;
 	}
 	/**
-	 * Remove stale review tabs after the owner session's annotation/tombstone
-	 * cache and workspace have hydrated. Exact tombstones close only their own
-	 * review; the session-wide submitted flag is retained solely for legacy data.
-	 *
-	 * This intentionally has no active-session guard: cached/background sessions
-	 * still own their keyed workspace and must not retain a tombstoned review tab.
+	 * Reconcile review content after the owner session's annotation/tombstone
+	 * cache and workspace have hydrated. Tombstones suppress passive recreation
+	 * only when the authoritative primary is absent; an existing exact primary
+	 * proves an explicit open committed and must survive reload/reconnect.
 	 */
 	async reconcileSubmittedReviewWorkspace(options: {
 		annotationStoreHydrated?: boolean;
@@ -853,25 +852,7 @@ export class RemoteAgent {
 		const sessionId = this._sessionId;
 		if (!sessionId) return;
 		if (!options.annotationStoreHydrated) await initAnnotationStore(sessionId);
-		const legacySubmitted = isReviewSubmitted(sessionId);
-		const reviewSources = options.reviewSources || await loadReviewSources();
-		if (typeof reviewSources.reconcileTombstonedReviewWorkspace === "function") {
-			await reviewSources.reconcileTombstonedReviewWorkspace(sessionId, {
-				includeLegacySubmitted: legacySubmitted,
-			});
-			return;
-		}
-
-		// Compatibility for test/legacy lazy modules predating exact tombstones.
-		if (!legacySubmitted) return;
-		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
-			.filter((tab) => tab.kind === "review" || tab.id.startsWith("review:"))
-			.map((tab) => tab.id);
-		if (reviewTabIds.length !== 1) return;
-		for (const tabId of reviewTabIds) {
-			try { await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true }); }
-			catch (err) { console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err); }
-		}
+		await hydrateArtifactReviewsForWorkspace(sessionId);
 	}
 	private _isActiveSession(): boolean {
 		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;
@@ -1034,7 +1015,7 @@ export class RemoteAgent {
 						resolve();
 						// Initial hydration is owned by connectToSession after ChatPanel
 						// binding. Reconnects still refresh the server workspace here and
-						// then replay submitted-review cleanup against the hydrated tabs.
+						// then hydrate review content against authoritative tabs.
 						if (!initial) {
 							void hydrateSidePanelWorkspace(this._sessionId)
 								.then(() => this.reconcileSubmittedReviewWorkspace());
@@ -2774,6 +2755,32 @@ export class RemoteAgent {
 			if (data.action !== pending.toolName) continue;
 
 			if (pending.toolName === "review_open") {
+				const receipt = parseReviewOpenReceipt(data, result.toolCallId);
+				if (receipt) {
+					// Consume before the first await so concurrent/replayed delivery cannot
+					// authorize the same receipt twice. The coordinator retains its outcome
+					// under the exact session/tool-use/payload identity for the originating
+					// renderer and deduplicates an explicit retry while this open is pending.
+					this._pendingReviewToolCalls.delete(result.toolCallId);
+					registerReviewOpenReceipt(sessionId, result.toolCallId, receipt);
+					await openReviewReceipt({
+						sessionId,
+						toolUseId: result.toolCallId,
+						receipt,
+						intent: "automatic",
+					});
+					continue;
+				}
+				if (data.version === 2) {
+					// A malformed v2 receipt must not downgrade into the inline legacy
+					// path, even if it happens to carry Markdown-shaped fields.
+					this._pendingReviewToolCalls.delete(result.toolCallId);
+					continue;
+				}
+
+				// Read-only compatibility for trusted live v1 controls. Historical
+				// transcript rendering never reaches this method, so inline Markdown
+				// cannot passively recreate an authoritatively absent review.
 				const files = Array.isArray(data.files)
 					? data.files.filter((file: unknown) => !!file && typeof file === "object" && typeof (file as any).markdown === "string")
 					: typeof data.markdown === "string"
@@ -2784,8 +2791,6 @@ export class RemoteAgent {
 						}]
 						: [];
 				if (files.length === 0) continue;
-				// Consume before the first await so concurrent/replayed delivery cannot
-				// authorize the same control twice.
 				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
 				reviewSources.openMarkdownReviewGroup({

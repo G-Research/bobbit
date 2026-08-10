@@ -21,12 +21,93 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/review-large-payload-receipt.test.ts",
+      "reason": "Core reproducing regression coverage proving a real 20-file review above 32 KiB emits a bounded payload-free v2 receipt that survives live and history truncation with exact identity, byte metadata, and an actionable automatic-open outcome.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/review-extension.test.ts",
       "reason": "Core regression coverage for the review_open multi-file schema and runtime contract, including exclusive source modes, atomic inline/file loading, title defaults, duplicate identities, and legacy single-document compatibility.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/review-open-argument-projection.test.ts",
+      "reason": "Core coverage proving large nested review_open Markdown is projected out of generic live and history transport while ordered identity metadata and UTF-8 accounting remain intact.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/review-payload-store-hardening.test.ts",
+      "reason": "Core coverage for canonical review payload byte limits, identity validation, atomic immutable persistence, authenticated reference integrity, and cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/review-artifact-hydration-coder-8a8b.test.ts",
+      "reason": "DOM coverage for artifact-backed review hydration, authoritative workspace identity, active-file restoration, and localStorage exclusion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/review-open-coordinator-correlation.test.ts",
+      "reason": "DOM coverage for exact receipt correlation, deduplicated automatic and manual opens, safe outcomes, owner-session guards, and passive reload hydration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/review-renderer-recovery-a18f.test.ts",
+      "reason": "DOM coverage for accessible Review renderer open, reopen, pending, disabled, success, sanitized error, and retry states.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/review-payload-api-hardening.test.ts",
+      "reason": "Integration coverage for authenticated large review persistence, exact identity fetch and reopen, ownership isolation, limits, and authoritative workspace mutation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/fixtures/large-review-payload-contract.spec.ts",
+      "reason": "Browser fixture contract for the deterministic 20-file 485 KiB review payload, exact duplicate-title identities, and bounded receipt metadata.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/large-review-reopen.journey.spec.ts",
+      "reason": "Browser journey covering automatic large-review open, navigation, reload restoration, close suppression, keyboard reopen, sanitized failure retry, siblings, and background ownership.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
       }
     },
     {

@@ -936,6 +936,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/review-payload-api-hardening.test.ts",
+		allowReason: "isolated integration gateway review-annotation state",
+		reads: frozen([
+			{ expression: "annotationPath", count: 7 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/sandbox-security.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
