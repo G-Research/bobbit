@@ -143,6 +143,45 @@ describe("side-panel workspace canonicalization", () => {
 		assert.deepEqual({ ...tab.state }, { activeFileId: "file-2", scrollTop: 14 });
 	});
 
+	it("preserves byte-exact payload titles while bounding their display labels", () => {
+		const exactTitle = `  ${"é".repeat(150)}${"x".repeat(12)}  `;
+		assert.equal(Buffer.byteLength(exactTitle, "utf8"), 316);
+		assert.ok(exactTitle.length > 160);
+		const base = reviewTab("payload-title-review", exactTitle);
+		const tab = canonicalizeTab({
+			...base,
+			title: `Review: ${exactTitle}`,
+			label: `Review: ${exactTitle}`,
+			source: {
+				...base.source,
+				title: exactTitle,
+				toolCallId: "tool-call-title",
+				payloadId: "payload-title",
+				contentHash: "d".repeat(64),
+			},
+			state: { activeFileId: "file-title" },
+		}, sessionId);
+
+		assert.ok(tab);
+		assert.equal((tab.source as any).title, exactTitle);
+		assert.equal(tab.title.length, 160);
+		assert.notEqual(tab.title, exactTitle);
+
+		const candidate = (title: string) => canonicalizeTab({
+			...base,
+			source: {
+				...base.source,
+				title,
+				toolCallId: "tool-call-title",
+				payloadId: "payload-title",
+				contentHash: "d".repeat(64),
+			},
+			state: { activeFileId: "file-title" },
+		}, sessionId);
+		assert.equal(candidate("é".repeat(161)), null);
+		assert.equal(candidate("bad\u0000title"), null);
+	});
+
 	it("rejects partial, malformed, or unbounded review payload identities atomically", () => {
 		const base = reviewTab("payload-review", "Payload review");
 		const validSource = {

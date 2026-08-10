@@ -20,37 +20,45 @@ const reference: ArtifactReviewReference = {
 	activeFileId: "file-b",
 };
 
-function artifactTab(activeFileId = reference.activeFileId) {
+function artifactTabFor(value: ArtifactReviewReference, activeFileId = value.activeFileId) {
 	return {
-		id: `review:${encodeURIComponent(reference.reviewId)}`,
+		id: `review:${encodeURIComponent(value.reviewId)}`,
 		kind: "review" as const,
-		title: `Review: ${reference.title}`,
-		label: `Review: ${reference.title}`,
+		title: `Review: ${value.title}`,
+		label: `Review: ${value.title}`,
 		source: {
 			type: "review" as const,
-			sessionId: SESSION_ID,
-			reviewId: reference.reviewId,
-			title: reference.title,
-			toolCallId: reference.toolCallId,
-			payloadId: reference.payloadId,
-			contentHash: reference.contentHash,
+			sessionId: value.sessionId,
+			reviewId: value.reviewId,
+			title: value.title,
+			toolCallId: value.toolCallId,
+			payloadId: value.payloadId,
+			contentHash: value.contentHash,
 		},
 		state: { activeFileId },
 		updatedAt: 1,
 	};
 }
 
-function payload(): ReviewGroupModel {
+function artifactTab(activeFileId = reference.activeFileId) {
+	return artifactTabFor(reference, activeFileId);
+}
+
+function payloadFor(value: ArtifactReviewReference, titles = ["A.md", "B.md"]): ReviewGroupModel {
 	return {
-		reviewId: reference.reviewId,
-		title: reference.title,
+		reviewId: value.reviewId,
+		title: value.title,
 		files: [
-			{ fileId: "file-a", title: "A.md", markdown: "# A\n\nlarge body" },
-			{ fileId: "file-b", title: "B.md", markdown: "# B\n\nlarge body" },
+			{ fileId: "file-a", title: titles[0]!, markdown: "# A\n\nlarge body" },
+			{ fileId: "file-b", title: titles[1]!, markdown: "# B\n\nlarge body" },
 		],
-		activeFileId: reference.activeFileId,
-		source: { kind: "markdown-review", sessionId: SESSION_ID },
+		activeFileId: value.activeFileId,
+		source: { kind: "markdown-review", sessionId: value.sessionId },
 	};
+}
+
+function payload(): ReviewGroupModel {
+	return payloadFor(reference);
 }
 
 function applyWorkspace(tabs: any[] = [artifactTab()], activeTabId = artifactTab().id): void {
@@ -118,6 +126,26 @@ describe("artifact-backed review hydration", () => {
 		const stored = localStorage.getItem(`bobbit-review-contexts-v1:${SESSION_ID}`) || "";
 		expect(stored).toContain("keep sibling");
 		expect(stored).not.toContain("large body");
+	});
+
+	it("preserves accepted whitespace and >160-character artifact titles through open and reload", () => {
+		const exactTitle = `  ${"é".repeat(150)}${"x".repeat(12)}  `;
+		const exactFileTitle = ` ${"界".repeat(90)}${"y".repeat(30)} `;
+		const exactReference = { ...reference, title: exactTitle };
+		const exactPayload = payloadFor(exactReference, [exactFileTitle, "  "]);
+		applyWorkspace([artifactTabFor(exactReference)], artifactTabFor(exactReference).id);
+
+		const [openedReference] = getArtifactReviewWorkspaceReferences(SESSION_ID);
+		expect(openedReference.title).toBe(exactTitle);
+		const opened = commitArtifactReviewGroup(openedReference, exactPayload);
+		expect(opened.title).toBe(exactTitle);
+		expect(opened.files.map((file) => file.title)).toEqual([exactFileTitle, "  "]);
+
+		state.reviewGroupsBySession[SESSION_ID] = [];
+		const [reloadReference] = getArtifactReviewWorkspaceReferences(SESSION_ID);
+		const reloaded = commitArtifactReviewGroup(reloadReference, exactPayload);
+		expect(reloaded.title).toBe(exactTitle);
+		expect(reloaded.files.map((file) => file.title)).toEqual([exactFileTitle, "  "]);
 	});
 
 	it("rejects stale or mismatched references before changing review state", () => {

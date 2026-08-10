@@ -59,7 +59,7 @@ function receipt(overrides: Partial<ReviewOpenReceipt> = {}): ReviewOpenReceipt 
 	};
 }
 
-function payload(sessionId = SESSION_ID) {
+function payload(sessionId = SESSION_ID, title = "Large review", fileTitles = ["First", "Second"]) {
 	return {
 		action: "review_open",
 		version: 2,
@@ -69,17 +69,17 @@ function payload(sessionId = SESSION_ID) {
 		hash: HASH,
 		totalBytes: 8,
 		reviewId: "review-1",
-		title: "Large review",
+		title,
 		files: [
-			{ fileId: "file-a", title: "First", markdown: "one", bytes: 3 },
-			{ fileId: "file-b", title: "Second", markdown: "three", bytes: 5 },
+			{ fileId: "file-a", title: fileTitles[0]!, markdown: "one", bytes: 3 },
+			{ fileId: "file-b", title: fileTitles[1]!, markdown: "three", bytes: 5 },
 		],
 		activeFileId: "file-b",
 		replace: true,
 	};
 }
 
-function workspace(sessionId = SESSION_ID) {
+function workspace(sessionId = SESSION_ID, title = "Large review") {
 	return {
 		version: 1,
 		sessionId,
@@ -90,13 +90,13 @@ function workspace(sessionId = SESSION_ID) {
 		tabs: [{
 			id: "review:review-1",
 			kind: "review",
-			title: "Review: Large review",
-			label: "Review: Large review",
+			title: `Review: ${title}`,
+			label: `Review: ${title}`,
 			source: {
 				type: "review",
 				sessionId,
 				reviewId: "review-1",
-				title: "Large review",
+				title,
 				toolCallId: TOOL_ID,
 				payloadId: "payload-1",
 				contentHash: HASH,
@@ -201,6 +201,59 @@ describe("review open receipt coordination", () => {
 			activeTabId: "review:review-1",
 		}), { source: "rest" });
 		expect(phases).toEqual(["pending", "success"]);
+	});
+
+	it("opens accepted whitespace and >160-character titles without changing exact identity", async () => {
+		const exactTitle = `  ${"é".repeat(150)}${"x".repeat(12)}  `;
+		const exactFileTitle = ` ${"界".repeat(90)}${"y".repeat(30)} `;
+		const exactReceipt = receipt({
+			title: exactTitle,
+			files: [
+				{ fileId: "file-a", title: exactFileTitle, bytes: 3 },
+				{ fileId: "file-b", title: "  ", bytes: 5 },
+			],
+		});
+		boundary.getArtifactReferences.mockImplementation((sessionId: string) => [{
+			sessionId,
+			reviewId: "review-1",
+			title: exactTitle,
+			toolCallId: TOOL_ID,
+			payloadId: "payload-1",
+			contentHash: HASH,
+			activeFileId: "file-b",
+		}]);
+		boundary.gatewayFetch
+			.mockResolvedValueOnce(response(payload(SESSION_ID, exactTitle, [exactFileTitle, "  "])))
+			.mockResolvedValueOnce(response({ ok: true, workspace: workspace(SESSION_ID, exactTitle) }));
+
+		const parsed = parseReviewOpenReceipt(exactReceipt, TOOL_ID);
+		expect(parsed?.title).toBe(exactTitle);
+		expect(parsed?.files.map((file) => file.title)).toEqual([exactFileTitle, "  "]);
+		const outcome = await openReviewReceipt({
+			sessionId: SESSION_ID,
+			toolUseId: TOOL_ID,
+			receipt: parsed!,
+			intent: "automatic",
+		});
+
+		expect(outcome.phase).toBe("success");
+		expect(boundary.commitArtifactGroup).toHaveBeenCalledWith(
+			expect.objectContaining({ title: exactTitle }),
+			expect.objectContaining({ title: exactTitle, files: [
+				expect.objectContaining({ title: exactFileTitle }),
+				expect.objectContaining({ title: "  " }),
+			] }),
+		);
+
+		boundary.gatewayFetch.mockClear();
+		boundary.commitArtifactGroup.mockClear();
+		boundary.gatewayFetch.mockResolvedValueOnce(response(payload(SESSION_ID, exactTitle, [exactFileTitle, "  "])));
+		await hydrateArtifactReviewsForWorkspace(SESSION_ID);
+		expect(boundary.gatewayFetch).toHaveBeenCalledOnce();
+		expect(boundary.commitArtifactGroup).toHaveBeenCalledWith(
+			expect.objectContaining({ title: exactTitle }),
+			expect.objectContaining({ title: exactTitle }),
+		);
 	});
 
 	it("maps server failures to safe retry state and keeps the same receipt reusable", async () => {
