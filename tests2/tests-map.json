@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/focused-tool-contract-refresh.test.ts",
+      "reason": "Focused ownership-boundary regression proving a warmed process-wide tool scan cannot leave refreshed or reattached sessions advertising a stale nested-YAML prompt contract that disagrees with the current runtime validation schema.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/assistant-stream-delta.test.ts",
       "reason": "Prototype coverage proving Pi cumulative assistant message updates can round-trip through compact text, thinking, and tool-call deltas while materially reducing serialized transport bytes.",
       "execution": {
@@ -959,7 +968,7 @@
     },
     {
       "path": "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
-      "reason": "Focused AIGW target-realm regression proving unmarked user rows override reachable discovery and malformed realms fail closed while managed publication retains matching outage metadata.",
+      "reason": "Focused AIGW catalog regression proving transient discovery failures retain only matching persisted routing metadata while successful discovery omissions remain authoritative.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1445,7 +1454,7 @@
     },
     {
       "path": "tests2/core/bobbit-tool-verbosity.test.ts",
-      "reason": "Acceptance coverage for compact-by-default Bobbit projections, bounded verbose reads, structured no-fetch limit guidance, unchanged costs, nonpaged verbose mutations/admin calls, and projection-catalogue drift.",
+      "reason": "Acceptance coverage for focused bobbit_read discovery/detail projections, rejection of removed expansion fields, unchanged cost detail, unaffected nonpaged mutation/admin response behavior, and projection-catalogue drift.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
