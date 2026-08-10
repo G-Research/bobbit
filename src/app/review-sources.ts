@@ -3,7 +3,13 @@ import { dispatchHumanSignoffResolved } from "./gate-status-events.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { legacyReviewDocumentIdFromTitle, reviewDocumentIdFromPanelTab, reviewTitleFromPanelTab } from "./panel-workspace.js";
 import { selectReviewWorkspaceTab } from "./preview-panel.js";
-import { closeSidePanelTab, getSidePanelWorkspace, openSidePanelTab } from "./side-panel-workspace.js";
+import {
+	closeSidePanelTab,
+	getSidePanelWorkspace,
+	openSidePanelTab,
+	updateSidePanelTab,
+	type SidePanelWorkspaceTab,
+} from "./side-panel-workspace.js";
 import {
 	activeSessionId,
 	renderApp,
@@ -63,6 +69,17 @@ export interface OpenReviewDocumentOptions extends OpenMarkdownReviewDocumentOpt
 	source?: ReviewSource;
 }
 
+/** Immutable review payload identity persisted on an authoritative workspace tab. */
+export interface ArtifactReviewReference {
+	sessionId: string;
+	reviewId: string;
+	title: string;
+	toolCallId: string;
+	payloadId: string;
+	contentHash: string;
+	activeFileId: string;
+}
+
 export interface SubmitReviewDecisionOptions {
 	sessionId?: string;
 	prompt?: (feedback: string) => void | Promise<void>;
@@ -92,6 +109,8 @@ type ReviewLifecycleSequence = {
 const reviewLifecycleSequences = new Map<string, ReviewLifecycleSequence>();
 /** One accepted external decision effect may be pending for an exact review key. */
 const pendingReviewDecisions = new Map<string, Promise<ReviewDecisionSubmissionOutcome>>();
+/** Artifact-backed Markdown lives only in memory; the workspace reference is durable. */
+const artifactReviewReferences = new Map<string, ArtifactReviewReference>();
 
 function reviewLifecycleKey(sessionId: string, reviewId: string): string {
 	return `${sessionId}\u0000${reviewId}`;
@@ -131,6 +150,47 @@ function normalizeIdentity(value: unknown): string | undefined {
 	const trimmed = value.trim();
 	if (!trimmed || trimmed.length > 160 || /[\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
 	return trimmed;
+}
+
+function artifactReviewKey(sessionId: string, reviewId: string): string {
+	return `${sessionId}\u0000${reviewId}`;
+}
+
+function exactArtifactReferenceFromTab(
+	tab: SidePanelWorkspaceTab | undefined,
+	expectedSessionId: string,
+): ArtifactReviewReference | undefined {
+	if (!tab || tab.kind !== "review" || tab.source.type !== "review") return undefined;
+	const source = tab.source as Record<string, unknown>;
+	const sessionId = normalizeIdentity(source.sessionId);
+	const reviewId = normalizeIdentity(source.reviewId);
+	const title = typeof source.title === "string" && source.title.trim() ? source.title.trim() : undefined;
+	const toolCallId = normalizeIdentity(source.toolCallId);
+	const payloadId = normalizeIdentity(source.payloadId);
+	const contentHash = normalizeIdentity(source.contentHash);
+	const activeFileId = normalizeIdentity(tab.state?.activeFileId);
+	if (!sessionId || sessionId !== expectedSessionId || !reviewId || !title
+		|| !toolCallId || !payloadId || !contentHash || !activeFileId) return undefined;
+	if (tab.id !== reviewWorkspaceTabId(reviewId)) return undefined;
+	return { sessionId, reviewId, title, toolCallId, payloadId, contentHash, activeFileId };
+}
+
+function artifactReferenceMatches(a: ArtifactReviewReference, b: ArtifactReviewReference): boolean {
+	return a.sessionId === b.sessionId
+		&& a.reviewId === b.reviewId
+		&& a.title === b.title
+		&& a.toolCallId === b.toolCallId
+		&& a.payloadId === b.payloadId
+		&& a.contentHash === b.contentHash
+		&& a.activeFileId === b.activeFileId;
+}
+
+/** Return only complete, exact artifact references from the owner's authoritative workspace. */
+export function getArtifactReviewWorkspaceReferences(sessionId: string): ArtifactReviewReference[] {
+	if (!normalizeIdentity(sessionId)) return [];
+	return getSidePanelWorkspace(sessionId).tabs
+		.map((tab) => exactArtifactReferenceFromTab(tab, sessionId))
+		.filter((reference): reference is ArtifactReviewReference => !!reference);
 }
 
 function newIdentity(kind: "review" | "file", sessionId: string): string {
@@ -264,7 +324,10 @@ function safeReadPersisted(sessionId: string): ReviewGroupModel[] {
 	}
 }
 
-function shouldPersistReviewGroup(group: ReviewGroupModel): boolean {
+function shouldPersistReviewGroup(sessionId: string, group: ReviewGroupModel): boolean {
+	// Artifact payloads are durable on the server and can be up to 10 MiB. Never
+	// duplicate their Markdown into quota-limited localStorage.
+	if (artifactReviewReferences.has(artifactReviewKey(sessionId, group.reviewId))) return false;
 	return group.source.kind === "markdown-review"
 		|| group.source.kind === "verification-signoff-markdown"
 		|| group.source.kind === "verification-signoff-pr";
@@ -274,7 +337,7 @@ function safeWritePersisted(sessionId: string, groups: ReviewGroupModel[]): void
 	if (!sessionId || typeof localStorage === "undefined") return;
 	try {
 		const key = storageKey(sessionId);
-		const persistable = groups.filter(shouldPersistReviewGroup);
+		const persistable = groups.filter((group) => shouldPersistReviewGroup(sessionId, group));
 		if (persistable.length === 0) localStorage.removeItem(key);
 		else localStorage.setItem(key, JSON.stringify({ version: REVIEW_CONTEXT_VERSION, groups: persistable } satisfies PersistedReviewGroupsV2));
 	} catch { /* localStorage may be unavailable/full */ }
@@ -394,6 +457,82 @@ function reviewWorkspaceTabId(reviewId: string): string {
 	return `review:${encodeURIComponent(reviewId)}`;
 }
 
+function normalizeArtifactReviewGroup(raw: unknown, reference: ArtifactReviewReference): ReviewGroupModel {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Review payload is malformed.");
+	const record = raw as Record<string, unknown>;
+	const payloadActiveFileId = normalizeIdentity(record.activeFileId);
+	if (record.reviewId !== reference.reviewId || record.title !== reference.title
+		|| !payloadActiveFileId || !Array.isArray(record.files) || record.files.length === 0) {
+		throw new Error("Review payload identity does not match its workspace reference.");
+	}
+	const seen = new Set<string>();
+	const files: ReviewFileModel[] = [];
+	for (const rawFile of record.files) {
+		if (!rawFile || typeof rawFile !== "object" || Array.isArray(rawFile)) throw new Error("Review payload is malformed.");
+		const file = rawFile as Record<string, unknown>;
+		const fileId = normalizeIdentity(file.fileId);
+		if (!fileId || seen.has(fileId) || typeof file.title !== "string" || !file.title.trim()
+			|| typeof file.markdown !== "string") throw new Error("Review payload file identity is invalid.");
+		seen.add(fileId);
+		files.push({ fileId, title: file.title, markdown: file.markdown });
+	}
+	if (!seen.has(payloadActiveFileId) || !seen.has(reference.activeFileId)) {
+		throw new Error("Review payload active file is unavailable.");
+	}
+	const rawSource = raw && typeof record.source === "object" && !Array.isArray(record.source)
+		? record.source as Record<string, unknown>
+		: undefined;
+	if (rawSource && (rawSource.kind !== "markdown-review" || rawSource.sessionId !== reference.sessionId)) {
+		throw new Error("Review payload owner does not match its workspace reference.");
+	}
+	return {
+		reviewId: reference.reviewId,
+		title: reference.title,
+		files,
+		activeFileId: reference.activeFileId,
+		source: { kind: "markdown-review", sessionId: reference.sessionId },
+	};
+}
+
+/**
+ * Atomically publish a coordinator-validated payload into client review state.
+ * The exact artifact workspace tab must already be authoritative; this function
+ * never creates a tab or clears replay suppression during passive hydration.
+ */
+export function commitArtifactReviewGroup(reference: ArtifactReviewReference, rawGroup: unknown): ReviewGroupModel {
+	const workspace = getSidePanelWorkspace(reference.sessionId);
+	const tab = workspace.tabs.find((candidate) => candidate.id === reviewWorkspaceTabId(reference.reviewId));
+	const authoritative = exactArtifactReferenceFromTab(tab, reference.sessionId);
+	if (!authoritative || !artifactReferenceMatches(authoritative, reference)) {
+		throw new Error("Review workspace reference is unavailable or changed.");
+	}
+	const group = normalizeArtifactReviewGroup(rawGroup, authoritative);
+	const workspaceReviewIds = workspace.tabs
+		.map((candidate) => reviewIdentityFromWorkspaceTab(candidate))
+		.filter((identity): identity is string => !!identity);
+	const openIds = new Set(workspaceReviewIds);
+	const current = sessionGroups(reference.sessionId);
+	const byId = new Map(current.filter((candidate) => openIds.has(candidate.reviewId))
+		.map((candidate) => [candidate.reviewId, candidate]));
+	byId.set(group.reviewId, group);
+	const next = workspaceReviewIds.map((reviewId) => byId.get(reviewId))
+		.filter((candidate): candidate is ReviewGroupModel => !!candidate);
+
+	artifactReviewReferences.set(artifactReviewKey(reference.sessionId, reference.reviewId), authoritative);
+	writeSessionGroups(reference.sessionId, next);
+	if (isVisibleSession(reference.sessionId)) {
+		const activeTab = workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId);
+		const activeReviewId = reviewIdentityFromWorkspaceTab(activeTab);
+		hydrateVisibleReviewGroups(reference.sessionId, next, activeReviewId || group.reviewId);
+		if (activeReviewId) {
+			state.previewPanelActiveTab = "review";
+			state.previewPanelTab = "review";
+		}
+		renderApp();
+	}
+	return group;
+}
+
 async function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): Promise<void> {
 	const tab = {
 		id: reviewWorkspaceTabId(group.reviewId),
@@ -401,6 +540,7 @@ async function openReviewWorkspace(group: ReviewGroupModel, sessionId: string): 
 		title: `Review: ${group.title}`,
 		label: `Review: ${group.title}`,
 		source: { type: "review", sessionId, reviewId: group.reviewId, documentId: group.reviewId, title: group.title },
+		state: { activeFileId: group.activeFileId },
 		updatedAt: Date.now(),
 	} as any;
 	try {
@@ -441,6 +581,7 @@ export function openReviewGroup(options: OpenReviewGroupOptions): ReviewGroupMod
 	const stored = options.replace !== false
 		? nextGroups.find((group) => group.title === incoming.title) || incoming
 		: nextGroups.find((group) => group.reviewId === incoming.reviewId) || nextGroups[nextGroups.length - 1];
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, stored.reviewId));
 	writeSessionGroups(sessionId, nextGroups);
 	// Every primary open advances exact-key generation immediately. Sign-off
 	// launchers are non-live, but must still supersede cleanup before it can
@@ -587,19 +728,29 @@ export async function reconcileTombstonedReviewWorkspace(
 }
 
 export function restorePersistedReviewDocuments(sessionId: string, _options: { select?: boolean } = {}): void {
-	const persisted = readPersistedReviewGroups(sessionId);
-	const tombstones = getReviewTombstones(sessionId);
-	const legacySubmitted = isReviewSubmitted(sessionId)
-		&& tombstones.size === 0
-		&& persisted.length <= 1;
-	const eligible = legacySubmitted
-		? []
-		: persisted.filter((group) => !tombstones.has(group.reviewId));
-	if (eligible.length !== persisted.length) writeSessionGroups(sessionId, eligible);
-
 	const workspace = getSidePanelWorkspace(sessionId);
 	const tabs = workspace.tabs.filter((tab) => tab.kind === "review");
 	const openIds = new Set(tabs.map(reviewIdentityFromWorkspaceTab).filter((id): id is string => !!id));
+	const persisted = safeReadPersisted(sessionId);
+	const inMemoryArtifacts = (state.reviewGroupsBySession[sessionId] || []).filter((group) => {
+		const reference = artifactReviewReferences.get(artifactReviewKey(sessionId, group.reviewId));
+		if (!reference) return false;
+		const tab = tabs.find((candidate) => candidate.id === reviewWorkspaceTabId(group.reviewId));
+		const authoritative = exactArtifactReferenceFromTab(tab, sessionId);
+		return !!authoritative && artifactReferenceMatches(authoritative, reference);
+	});
+	const candidatesById = new Map(persisted.map((group) => [group.reviewId, group]));
+	for (const group of inMemoryArtifacts) candidatesById.set(group.reviewId, group);
+	const candidates = [...candidatesById.values()];
+	const tombstones = getReviewTombstones(sessionId);
+	const legacySubmitted = isReviewSubmitted(sessionId)
+		&& tombstones.size === 0
+		&& candidates.length <= 1;
+	const eligible = legacySubmitted
+		? []
+		: candidates.filter((group) => !tombstones.has(group.reviewId));
+	if (eligible.length !== candidates.length) writeSessionGroups(sessionId, eligible);
+
 	const legacyTitles = new Set(tabs.map((tab) => reviewTitleFromPanelTab(tab as any) || tab.title.replace(/^Review:\s*/, "")).filter(Boolean));
 	const restored = eligible.filter((group) => openIds.has(group.reviewId) || (!openIds.size && legacyTitles.has(group.title)));
 	state.reviewGroupsBySession = { ...state.reviewGroupsBySession, [sessionId]: eligible };
@@ -615,6 +766,7 @@ export function persistReviewGroup(sessionId: string, group: ReviewGroupModel): 
 	const groups = sessionGroups(sessionId);
 	const index = groups.findIndex((candidate) => candidate.reviewId === group.reviewId);
 	const next = index < 0 ? [...groups, group] : groups.map((candidate, candidateIndex) => candidateIndex === index ? group : candidate);
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, group.reviewId));
 	writeSessionGroups(sessionId, next);
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, next, group.reviewId);
 }
@@ -637,12 +789,35 @@ export function setActiveReviewGroup(sessionId: string, reviewId: string): boole
 	return true;
 }
 
-export function setReviewActiveFile(sessionId: string, reviewId: string, fileId: string): boolean {
+export async function setReviewActiveFile(sessionId: string, reviewId: string, fileId: string): Promise<boolean> {
 	const groups = sessionGroups(sessionId);
 	const index = groups.findIndex((group) => group.reviewId === reviewId);
 	if (index < 0 || !groups[index].files.some((file) => file.fileId === fileId)) return false;
+	const tabId = reviewWorkspaceTabId(reviewId);
+	let workspace = getSidePanelWorkspace(sessionId);
+	let tab = workspace.tabs.find((candidate) => candidate.id === tabId && candidate.kind === "review");
+	const artifactReference = artifactReviewReferences.get(artifactReviewKey(sessionId, reviewId));
+	if (artifactReference && !tab) return false;
+	if (tab) {
+		const patch = { state: { ...(tab.state || {}), activeFileId: fileId } };
+		try {
+			workspace = await updateSidePanelTab(tabId, patch, { sessionId });
+			tab = workspace.tabs.find((candidate) => candidate.id === tabId && candidate.kind === "review");
+			if (tab?.state?.activeFileId !== fileId) {
+				workspace = await updateSidePanelTab(tabId, patch, { sessionId });
+				tab = workspace.tabs.find((candidate) => candidate.id === tabId && candidate.kind === "review");
+			}
+			if (!tab || tab.state?.activeFileId !== fileId) return false;
+		} catch {
+			return false;
+		}
+	}
+
 	const next = [...groups];
 	next[index] = { ...groups[index], activeFileId: fileId };
+	if (artifactReference) {
+		artifactReviewReferences.set(artifactReviewKey(sessionId, reviewId), { ...artifactReference, activeFileId: fileId });
+	}
 	writeSessionGroups(sessionId, next);
 	if (isVisibleSession(sessionId)) {
 		hydrateVisibleReviewGroups(sessionId, next, reviewId);
@@ -657,6 +832,7 @@ export function removePersistedReviewGroup(sessionId: string, reviewId: string):
 	if (!removed) return undefined;
 	const next = groups.filter((group) => group.reviewId !== reviewId);
 	writeSessionGroups(sessionId, next);
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, reviewId));
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, next);
 	return removed;
 }
@@ -669,10 +845,14 @@ export function removePersistedReviewDocument(sessionId: string, identity: strin
 	if (removedIds.size === 0) return;
 	const next = groups.filter((group) => !removedIds.has(group.reviewId));
 	writeSessionGroups(sessionId, next);
+	for (const reviewId of removedIds) artifactReviewReferences.delete(artifactReviewKey(sessionId, reviewId));
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, next);
 }
 
 export function clearPersistedReviewDocuments(sessionId: string): void {
+	for (const [key, reference] of artifactReviewReferences) {
+		if (reference.sessionId === sessionId) artifactReviewReferences.delete(key);
+	}
 	writeSessionGroups(sessionId, []);
 	if (isVisibleSession(sessionId)) hydrateVisibleReviewGroups(sessionId, []);
 }
@@ -877,6 +1057,7 @@ function removeCapturedReviewGroup(sessionId: string, captured: ReviewGroupModel
 	if (index < 0 || !reviewGroupMatchesSnapshot(groups[index], captured)) return undefined;
 	const removed = groups[index];
 	writeSessionGroups(sessionId, groups.filter((_, candidateIndex) => candidateIndex !== index));
+	artifactReviewReferences.delete(artifactReviewKey(sessionId, removed.reviewId));
 	return removed;
 }
 
