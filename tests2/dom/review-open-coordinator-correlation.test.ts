@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const boundary = vi.hoisted(() => ({
 	gatewayFetch: vi.fn(),
 	applyWorkspace: vi.fn(),
+	hydrateWorkspace: vi.fn(),
 	getArtifactReferences: vi.fn(),
 	commitArtifactGroup: vi.fn(),
 }));
@@ -16,10 +17,11 @@ vi.mock("../../src/app/review-sources-lazy.js", () => ({
 }));
 vi.mock("../../src/app/side-panel-workspace.js", () => ({
 	applySidePanelWorkspaceFromServer: boundary.applyWorkspace,
-	hydrateSidePanelWorkspace: vi.fn(),
+	hydrateSidePanelWorkspace: boundary.hydrateWorkspace,
 }));
 
 import { RemoteAgent } from "../../src/app/remote-agent.js";
+import { state } from "../../src/app/state.js";
 import {
 	getReviewOpenState,
 	hydrateArtifactReviewsForWorkspace,
@@ -79,32 +81,59 @@ function payload(sessionId = SESSION_ID, title = "Large review", fileTitles = ["
 	};
 }
 
-function workspace(sessionId = SESSION_ID, title = "Large review") {
+function siblingTab(sessionId = SESSION_ID) {
+	return {
+		id: "review:sibling-review",
+		kind: "review",
+		title: "Review: Sibling review",
+		label: "Review: Sibling review",
+		source: {
+			type: "review",
+			sessionId,
+			reviewId: "sibling-review",
+			title: "Sibling review",
+		},
+		state: { activeFileId: "sibling-file" },
+		updatedAt: Date.now(),
+	};
+}
+
+function workspace(sessionId = SESSION_ID, title = "Large review", includePrimary = true) {
+	const sibling = siblingTab(sessionId);
+	const primary = {
+		id: "review:review-1",
+		kind: "review",
+		title: `Review: ${title}`,
+		label: `Review: ${title}`,
+		source: {
+			type: "review",
+			sessionId,
+			reviewId: "review-1",
+			title,
+			toolCallId: TOOL_ID,
+			payloadId: "payload-1",
+			contentHash: HASH,
+		},
+		state: { activeFileId: "file-b" },
+		updatedAt: Date.now(),
+	};
 	return {
 		version: 1,
 		sessionId,
-		revision: 4,
-		activeTabId: "review:review-1",
+		revision: includePrimary ? 4 : 5,
+		activeTabId: includePrimary ? primary.id : sibling.id,
 		sizeMode: "split",
 		updatedAt: Date.now(),
-		tabs: [{
-			id: "review:review-1",
-			kind: "review",
-			title: `Review: ${title}`,
-			label: `Review: ${title}`,
-			source: {
-				type: "review",
-				sessionId,
-				reviewId: "review-1",
-				title,
-				toolCallId: TOOL_ID,
-				payloadId: "payload-1",
-				contentHash: HASH,
-			},
-			state: { activeFileId: "file-b" },
-			updatedAt: Date.now(),
-		}],
+		tabs: includePrimary ? [sibling, primary] : [sibling],
 	};
+}
+
+type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
+
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((done) => { resolve = done; });
+	return { promise, resolve };
 }
 
 function response(body: unknown, status = 200): Response {
@@ -116,8 +145,11 @@ function response(body: unknown, status = 200): Response {
 
 beforeEach(() => {
 	resetReviewOpenCoordinatorForTests();
+	state.selectedSessionId = null;
 	boundary.gatewayFetch.mockReset();
 	boundary.applyWorkspace.mockReset();
+	boundary.hydrateWorkspace.mockReset();
+	boundary.hydrateWorkspace.mockResolvedValue(workspace());
 	boundary.commitArtifactGroup.mockReset();
 	boundary.getArtifactReferences.mockReset();
 	boundary.getArtifactReferences.mockImplementation((sessionId: string) => [{
@@ -129,6 +161,10 @@ beforeEach(() => {
 		contentHash: HASH,
 		activeFileId: "file-b",
 	}]);
+});
+
+afterEach(() => {
+	state.selectedSessionId = null;
 });
 
 describe("review open receipt coordination", () => {
@@ -186,15 +222,10 @@ describe("review open receipt coordination", () => {
 		expect(boundary.applyWorkspace).not.toHaveBeenCalled();
 	});
 
-	it("deduplicates a pending automatic/manual open and publishes success under exact correlation", async () => {
-		let releasePayload!: () => void;
-		const payloadReady = new Promise<void>((resolve) => { releasePayload = resolve; });
-		boundary.gatewayFetch
-			.mockImplementationOnce(async () => {
-				await payloadReady;
-				return response(payload());
-			})
-			.mockResolvedValueOnce(response({ ok: true, workspace: workspace() }));
+	it("deduplicates pending automatic/manual processing without repeating the authoritative open", async () => {
+		const workspaceReady = deferred<ReturnType<typeof workspace>>();
+		boundary.hydrateWorkspace.mockReturnValueOnce(workspaceReady.promise);
+		boundary.gatewayFetch.mockResolvedValueOnce(response(payload()));
 		const phases: string[] = [];
 		subscribeReviewOpenStates((next) => phases.push(next.phase));
 		const parsed = parseReviewOpenReceipt(receipt(), TOOL_ID)!;
@@ -202,24 +233,100 @@ describe("review open receipt coordination", () => {
 		const automatic = openReviewReceipt({ sessionId: SESSION_ID, toolUseId: TOOL_ID, receipt: parsed, intent: "automatic" });
 		const manual = openReviewReceipt({ sessionId: SESSION_ID, toolUseId: TOOL_ID, receipt: parsed, intent: "manual" });
 		expect(getReviewOpenState(SESSION_ID, TOOL_ID, "payload-1")?.phase).toBe("pending");
-		releasePayload();
+		workspaceReady.resolve(workspace());
 		const [first, second] = await Promise.all([automatic, manual]);
 
 		expect(first.phase).toBe("success");
 		expect(second).toBe(first);
-		expect(boundary.gatewayFetch).toHaveBeenCalledTimes(2);
+		expect(boundary.hydrateWorkspace).toHaveBeenCalledOnce();
+		expect(boundary.gatewayFetch).toHaveBeenCalledOnce();
 		expect(boundary.gatewayFetch.mock.calls[0][0]).toBe(reviewPayloadRoute(SESSION_ID, "payload-1", TOOL_ID, "review-1", HASH));
-		expect(boundary.gatewayFetch.mock.calls[1][0]).toBe(reviewPayloadOpenRoute(SESSION_ID, "payload-1", TOOL_ID));
+		expect(boundary.gatewayFetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 		expect(boundary.commitArtifactGroup).toHaveBeenCalledWith(
 			expect.objectContaining({ sessionId: SESSION_ID, toolCallId: TOOL_ID, payloadId: "payload-1" }),
 			expect.objectContaining({ reviewId: "review-1", activeFileId: "file-b" }),
 		);
-		expect(boundary.applyWorkspace).toHaveBeenCalledWith(expect.objectContaining({
-			sessionId: SESSION_ID,
-			activeTabId: "review:review-1",
-		}), { source: "rest" });
+		expect(boundary.applyWorkspace).not.toHaveBeenCalled();
 		expect(phases).toEqual(["pending", "success"]);
 	});
+
+	it.each(["closed", "submitted"] as const)(
+		"does not resurrect a review %s before delayed automatic receipt processing; only manual recovery POSTs",
+		async (suppression) => {
+			const owner = "background-owner";
+			state.selectedSessionId = "foreground-session";
+			const tombstones = new Map<string, "closed" | "submitted">();
+			const workspaceRead = deferred<void>();
+			let authoritativeWorkspace = workspace(owner);
+			boundary.hydrateWorkspace.mockImplementationOnce(async () => {
+				await workspaceRead.promise;
+				return authoritativeWorkspace;
+			});
+			boundary.getArtifactReferences.mockImplementation((sessionId: string) => [{
+				sessionId,
+				reviewId: "review-1",
+				title: "Large review",
+				toolCallId: TOOL_ID,
+				payloadId: "payload-1",
+				contentHash: HASH,
+				activeFileId: "file-b",
+			}]);
+			const parsed = parseReviewOpenReceipt(receipt(), TOOL_ID)!;
+
+			// Upload has already committed the exact primary. Close/submission then
+			// wins while delayed result processing waits for the latest workspace.
+			const automatic = openReviewReceipt({
+				sessionId: owner,
+				toolUseId: TOOL_ID,
+				receipt: parsed,
+				intent: "automatic",
+			});
+			await vi.waitFor(() => expect(boundary.hydrateWorkspace).toHaveBeenCalledOnce());
+			expect(authoritativeWorkspace.tabs.map((tab) => tab.id)).toContain("review:review-1");
+			tombstones.set("review-1", suppression);
+			authoritativeWorkspace = workspace(owner, "Large review", false);
+			workspaceRead.resolve();
+			const automaticOutcome = await automatic;
+
+			expect(automaticOutcome).toEqual({ phase: "available", receipt: parsed });
+			expect(authoritativeWorkspace.tabs.map((tab) => tab.id)).toEqual(["review:sibling-review"]);
+			expect(authoritativeWorkspace.activeTabId).toBe("review:sibling-review");
+			expect(tombstones.get("review-1")).toBe(suppression);
+			expect(state.selectedSessionId).toBe("foreground-session");
+			expect(boundary.gatewayFetch).not.toHaveBeenCalled();
+			expect(boundary.commitArtifactGroup).not.toHaveBeenCalled();
+			expect(boundary.applyWorkspace).not.toHaveBeenCalled();
+
+			const reopenedWorkspace = workspace(owner);
+			boundary.gatewayFetch
+				.mockResolvedValueOnce(response(payload(owner)))
+				.mockImplementationOnce(async (_url, init) => {
+					if (init?.method === "POST") tombstones.delete("review-1");
+					return response({ ok: true, workspace: reopenedWorkspace });
+				});
+			const manualOutcome = await openReviewReceipt({
+				sessionId: owner,
+				toolUseId: TOOL_ID,
+				receipt: parsed,
+				intent: "manual",
+			});
+
+			expect(manualOutcome.phase).toBe("success");
+			expect(boundary.gatewayFetch.mock.calls[0][0]).toBe(
+				reviewPayloadRoute(owner, "payload-1", TOOL_ID, "review-1", HASH),
+			);
+			const postCalls = boundary.gatewayFetch.mock.calls.filter(([, init]) => init?.method === "POST");
+			expect(postCalls).toHaveLength(1);
+			expect(postCalls[0]![0]).toBe(reviewPayloadOpenRoute(owner, "payload-1", TOOL_ID));
+			expect(reopenedWorkspace.tabs.map((tab) => tab.id)).toEqual([
+				"review:sibling-review",
+				"review:review-1",
+			]);
+			expect(boundary.applyWorkspace).toHaveBeenCalledWith(reopenedWorkspace, { source: "rest" });
+			expect(tombstones.has("review-1")).toBe(false);
+			expect(state.selectedSessionId).toBe("foreground-session");
+		},
+	);
 
 	it("opens accepted whitespace and >160-character titles without changing exact identity", async () => {
 		const exactTitle = `  ${"é".repeat(150)}${"x".repeat(12)}  `;
@@ -240,9 +347,8 @@ describe("review open receipt coordination", () => {
 			contentHash: HASH,
 			activeFileId: "file-b",
 		}]);
-		boundary.gatewayFetch
-			.mockResolvedValueOnce(response(payload(SESSION_ID, exactTitle, [exactFileTitle, "  "])))
-			.mockResolvedValueOnce(response({ ok: true, workspace: workspace(SESSION_ID, exactTitle) }));
+		boundary.hydrateWorkspace.mockResolvedValueOnce(workspace(SESSION_ID, exactTitle));
+		boundary.gatewayFetch.mockResolvedValueOnce(response(payload(SESSION_ID, exactTitle, [exactFileTitle, "  "])));
 
 		const parsed = parseReviewOpenReceipt(exactReceipt, TOOL_ID);
 		expect(parsed?.title).toBe(exactTitle);
@@ -298,9 +404,9 @@ describe("review open receipt coordination", () => {
 		expect(boundary.applyWorkspace).toHaveBeenCalledOnce();
 	});
 
-	it("fails closed before client mutation when canonical or workspace identity differs", async () => {
+	it("fails closed before client mutation when canonical or manually opened workspace identity differs", async () => {
 		const wrongWorkspace = workspace();
-		(wrongWorkspace.tabs[0].source as any).payloadId = "sibling-payload";
+		(wrongWorkspace.tabs[1].source as any).payloadId = "sibling-payload";
 		boundary.gatewayFetch
 			.mockResolvedValueOnce(response(payload()))
 			.mockResolvedValueOnce(response({ ok: true, workspace: wrongWorkspace }));
@@ -308,7 +414,7 @@ describe("review open receipt coordination", () => {
 			sessionId: SESSION_ID,
 			toolUseId: TOOL_ID,
 			receipt: parseReviewOpenReceipt(receipt(), TOOL_ID)!,
-			intent: "automatic",
+			intent: "manual",
 		});
 		expect(outcome).toEqual(expect.objectContaining({
 			phase: "error",
@@ -319,11 +425,10 @@ describe("review open receipt coordination", () => {
 		expect(boundary.applyWorkspace).not.toHaveBeenCalled();
 	});
 
-	it("keeps a background owner on its own route and workspace", async () => {
+	it("keeps automatic background hydration on its owner without a second open or foreground apply", async () => {
 		const owner = "background-session";
-		boundary.gatewayFetch
-			.mockResolvedValueOnce(response(payload(owner)))
-			.mockResolvedValueOnce(response({ ok: true, workspace: workspace(owner) }));
+		boundary.hydrateWorkspace.mockResolvedValueOnce(workspace(owner));
+		boundary.gatewayFetch.mockResolvedValueOnce(response(payload(owner)));
 		const outcome = await openReviewReceipt({
 			sessionId: owner,
 			toolUseId: TOOL_ID,
@@ -331,8 +436,11 @@ describe("review open receipt coordination", () => {
 			intent: "automatic",
 		});
 		expect(outcome.phase).toBe("success");
+		expect(boundary.hydrateWorkspace).toHaveBeenCalledWith(owner, { throwOnError: true });
+		expect(boundary.gatewayFetch).toHaveBeenCalledOnce();
 		expect(boundary.gatewayFetch.mock.calls[0][0]).toContain("/background-session/review-payloads/");
-		expect(boundary.applyWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sessionId: owner }), { source: "rest" });
+		expect(boundary.gatewayFetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+		expect(boundary.applyWorkspace).not.toHaveBeenCalled();
 	});
 
 	it("hydrates reload content only from an authoritative reference and never POSTs", async () => {
@@ -354,10 +462,8 @@ describe("review open receipt coordination", () => {
 		expect(boundary.commitArtifactGroup).not.toHaveBeenCalled();
 	});
 
-	it("accepts v2 automatic opens only with fresh live RemoteAgent provenance", async () => {
-		boundary.gatewayFetch
-			.mockResolvedValueOnce(response(payload()))
-			.mockResolvedValueOnce(response({ ok: true, workspace: workspace() }));
+	it("accepts v2 automatic hydration only with fresh live RemoteAgent provenance", async () => {
+		boundary.gatewayFetch.mockResolvedValueOnce(response(payload()));
 		const agent = new RemoteAgent();
 		(agent as any)._sessionId = SESSION_ID;
 		(agent as any).handleAgentEvent({ type: "tool_execution_start", toolCallId: TOOL_ID, toolName: "review_open" });
@@ -370,7 +476,9 @@ describe("review open receipt coordination", () => {
 
 		await (agent as any)._checkReviewToolResult(result, true);
 		expect(getReviewOpenState(SESSION_ID, TOOL_ID, "payload-1")?.phase).toBe("success");
-		expect(boundary.applyWorkspace).toHaveBeenCalledOnce();
+		expect(boundary.gatewayFetch).toHaveBeenCalledOnce();
+		expect(boundary.gatewayFetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+		expect(boundary.applyWorkspace).not.toHaveBeenCalled();
 
 		boundary.gatewayFetch.mockClear();
 		boundary.applyWorkspace.mockClear();

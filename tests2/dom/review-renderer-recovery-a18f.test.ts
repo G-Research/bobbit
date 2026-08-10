@@ -192,6 +192,43 @@ describe("ReviewOpenRenderer recovery action", () => {
 		expect(host.textContent).not.toContain("secret");
 	});
 
+	it("renders malicious quota failures as fixed terminal copy with no recovery callback", async () => {
+		const maliciousQuota = result({
+			isError: true,
+			content: [{
+				type: "text",
+				text: JSON.stringify({
+					code: "REVIEW_PAYLOAD_QUOTA_EXCEEDED",
+					message: "C:\\private\\reviews\\payload.md bearer-secret",
+					stack: "Error: quota at /srv/private/reviews.ts:42",
+					retryable: true,
+				}),
+			}],
+		});
+		const host = mount({ result: maliciousQuota });
+		const action = button(host);
+		const status = host.querySelector('[data-testid="review-open-status"]');
+
+		expect(action.disabled).toBe(true);
+		expect(action.textContent).toContain("Open unavailable");
+		expect(status?.getAttribute("role")).toBe("status");
+		expect(status?.textContent).toContain("Review content storage is full for this session. Start a new session or remove saved reviews.");
+		expect(status?.textContent).toContain("REVIEW_PAYLOAD_QUOTA_EXCEEDED");
+		expect(host.textContent).not.toContain("private");
+		expect(host.textContent).not.toContain("bearer-secret");
+		expect(host.textContent).not.toContain("reviews.ts");
+		expect(host.textContent).not.toContain("retryable");
+
+		const parseCallsAfterRender = controller.reviewOpenReceiptFromToolResult.mock.calls.length;
+		action.click();
+		action.focus();
+		action.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		await Promise.resolve();
+		expect(controller.reviewOpenReceiptFromToolResult).toHaveBeenCalledTimes(parseCallsAfterRender);
+		expect(controller.registerReviewOpenReceipt).not.toHaveBeenCalled();
+		expect(controller.openReviewReceipt).not.toHaveBeenCalled();
+	});
+
 	it("sanitizes over-limit tool errors and disables malformed or ownerless controls", () => {
 		const overLimit = result({
 			isError: true,
