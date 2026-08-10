@@ -18,6 +18,27 @@ import "./review-pane.css";
 
 let overflowMenuSequence = 0;
 
+// Final comments are review-level drafts. Keep them outside individual pane
+// instances so eager mobile panes and desktop/mobile remounts share one exact
+// owner keyed by session + review identity.
+const finalCommentsByReview = new Map<string, string>();
+
+function finalCommentKey(sessionId: string, reviewId: string): string {
+  return `${sessionId}\u0000${reviewId}`;
+}
+
+export function reviewFinalComment(sessionId: string, reviewId: string): string {
+  return finalCommentsByReview.get(finalCommentKey(sessionId, reviewId)) || "";
+}
+
+export function reviewFinalCommentCount(sessionId: string, reviewId: string): number {
+  return reviewFinalComment(sessionId, reviewId).trim() ? 1 : 0;
+}
+
+export function discardReviewFinalComment(sessionId: string, reviewId: string): void {
+  finalCommentsByReview.delete(finalCommentKey(sessionId, reviewId));
+}
+
 /**
  * <review-pane> renders one selected review. The app workspace owns primary
  * review tabs; this component only renders the review's navigation-only files.
@@ -35,7 +56,6 @@ export class ReviewPane extends LitElement {
 
   @state() private _overflowOpen = false;
   @state() private _visibleFileCount = 5;
-  @state() private _finalCommentsByReviewId: Map<string, string> = new Map();
   @state() private _validationError = "";
 
   private readonly _overflowMenuId = `review-file-overflow-${++overflowMenuSequence}`;
@@ -137,21 +157,19 @@ export class ReviewPane extends LitElement {
   }
 
   private _finalCommentFor(reviewId: string): string {
-    return this._finalCommentsByReviewId.get(reviewId) || "";
+    return reviewFinalComment(this.sessionId, reviewId);
   }
 
   private _setFinalComment(reviewId: string, comment: string): void {
-    const next = new Map(this._finalCommentsByReviewId);
-    if (comment) next.set(reviewId, comment);
-    else next.delete(reviewId);
-    this._finalCommentsByReviewId = next;
+    const key = finalCommentKey(this.sessionId, reviewId);
+    if (comment) finalCommentsByReview.set(key, comment);
+    else finalCommentsByReview.delete(key);
+    this.requestUpdate();
   }
 
   private _deleteFinalComment(reviewId: string): void {
-    if (!this._finalCommentsByReviewId.has(reviewId)) return;
-    const next = new Map(this._finalCommentsByReviewId);
-    next.delete(reviewId);
-    this._finalCommentsByReviewId = next;
+    discardReviewFinalComment(this.sessionId, reviewId);
+    this.requestUpdate();
   }
 
   private _reviewUnsentCommentCount(review: ReviewGroupModel): number {

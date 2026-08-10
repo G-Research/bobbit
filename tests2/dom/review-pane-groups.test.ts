@@ -12,14 +12,13 @@ import {
 import {
 	clearPersistedReviewDocuments,
 	hydrateVisibleReviewGroups,
-	openMarkdownReviewGroup,
 	persistReviewGroup,
 	readPersistedReviewGroups,
 } from "../../src/app/review-sources.js";
 import { applySidePanelWorkspaceFromServer } from "../../src/app/side-panel-workspace.js";
 import { doRenderApp } from "../../src/app/render.js";
 import { setRenderApp, state } from "../../src/app/state.js";
-import "../../src/ui/components/review/ReviewPane.js";
+import { reviewFinalComment } from "../../src/ui/components/review/ReviewPane.js";
 
 const REGRESSION = "REVIEW_GROUP_PRIMARY_TAB";
 
@@ -113,6 +112,17 @@ async function waitFor(assertion: () => void): Promise<void> {
 	throw lastError;
 }
 
+function setViewportWidth(width: number): void {
+	Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+	window.dispatchEvent(new Event("resize"));
+}
+
+function mountedPaneForReview(reviewId: string): DesiredReviewPane | undefined {
+	return Array.from(document.querySelectorAll("review-pane"))
+		.map((pane) => pane as unknown as DesiredReviewPane)
+		.find((pane) => pane.review?.reviewId === reviewId);
+}
+
 function reviewWorkspaceTab(review: DesiredReviewGroup) {
 	return {
 		id: `review:${encodeURIComponent(review.reviewId)}`,
@@ -140,6 +150,7 @@ beforeEach(() => {
 
 afterEach(async () => {
 	setRenderApp(() => {});
+	setViewportWidth(1024);
 	document.body.innerHTML = "";
 	await Promise.all(Array.from(sessionsToClear, (sessionId) => clearAllAnnotations(sessionId)));
 	sessionsToClear.clear();
@@ -424,7 +435,7 @@ describe("ReviewPane review groups", () => {
 		expect(controlledMenu(trigger!), `${REGRESSION}: selected overflow menu must no longer be visible`).toBeNull();
 	});
 
-	it("closes an inactive primary review with its aggregate comments while preserving the selected sibling", async () => {
+	it("keeps eager mobile review panes pure and closes an inactive review with its exact draft", async () => {
 		const sessionId = "session-primary-close";
 		const reviewA = group("primary-close-a", 2, sessionId);
 		const reviewB = group("primary-close-b", 2, sessionId);
@@ -498,10 +509,16 @@ describe("ReviewPane review groups", () => {
 			comment: "Keep B note",
 		});
 
+		setViewportWidth(360);
 		setRenderApp(doRenderApp);
 		doRenderApp();
-		await waitFor(() => expect(document.querySelectorAll('[data-panel-tab-kind="review"]')).toHaveLength(2));
-		let pane = document.querySelector("review-pane") as DesiredReviewPane;
+		await waitFor(() => {
+			expect(document.querySelectorAll('[data-panel-tab-kind="review"]')).toHaveLength(2);
+			expect(document.querySelectorAll("review-pane")).toHaveLength(2);
+		});
+		expect(state.reviewActiveReviewId, `${REGRESSION}: eager mobile pane rendering must not change primary selection`).toBe(reviewB.reviewId);
+		let pane = mountedPaneForReview(reviewB.reviewId)!;
+		expect(pane, `${REGRESSION}: each mobile slider panel must render its own review`).toBeDefined();
 		await pane.updateComplete;
 		const draft = pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")!;
 		draft.value = "Keep B final draft";
@@ -525,7 +542,7 @@ describe("ReviewPane review groups", () => {
 
 		tab(reviewB.reviewId).querySelector<HTMLButtonElement>(".goal-tab-select")!.click();
 		await waitFor(() => expect(state.reviewActiveReviewId).toBe(reviewB.reviewId));
-		pane = document.querySelector("review-pane") as DesiredReviewPane;
+		pane = mountedPaneForReview(reviewB.reviewId)!;
 		await pane.updateComplete;
 		expect(pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")?.value).toBe("Keep B final draft");
 		tab(reviewA.reviewId).querySelector<HTMLButtonElement>(".goal-tab-select")!.click();
@@ -542,17 +559,7 @@ describe("ReviewPane review groups", () => {
 		expect(getDocumentAnnotationCount(sessionId, reviewB.files[1]!.fileId)).toBe(0);
 		expect(readPersistedReviewGroups(sessionId).map((review) => review.reviewId)).toEqual([reviewA.reviewId]);
 
-		openMarkdownReviewGroup({
-			sessionId,
-			reviewId: reviewB.reviewId,
-			title: reviewB.title,
-			files: reviewB.files,
-			live: true,
-		});
-		await waitFor(() => expect(state.reviewActiveReviewId).toBe(reviewB.reviewId));
-		pane = document.querySelector("review-pane") as DesiredReviewPane;
-		await pane.updateComplete;
-		expect(pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")?.value).toBe("");
+		expect(reviewFinalComment(sessionId, reviewB.reviewId), `${REGRESSION}: confirmed close must discard only B's final draft`).toBe("");
 		expect(state.reviewGroups.has(reviewA.reviewId)).toBe(true);
 
 		setRenderApp(() => {});

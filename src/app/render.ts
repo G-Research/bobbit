@@ -24,7 +24,7 @@ import {
 import { fetchAppInfo, fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending, type AppInfo } from "./api.js";
 import { headerToast, showHeaderToast } from "./header-toast.js";
 export { showHeaderToast } from "./header-toast.js";
-import { getDocumentAnnotationCount } from "../ui/components/review/AnnotationStore.js";
+import { getDocumentAnnotationCount, getReviewAnnotationCount } from "../ui/components/review/AnnotationStore.js";
 import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
@@ -67,7 +67,10 @@ void ensureSearchBox();
 // lazy-loads <review-document> + <annotation-popover> + the
 // @recogito/text-annotator chain. Keep this import static so the
 // shell elements upgrade synchronously on first render.
-import "../ui/components/review/ReviewPane.js";
+import {
+	discardReviewFinalComment,
+	reviewFinalCommentCount,
+} from "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
@@ -1533,11 +1536,8 @@ function reviewDocumentKeyFromPanelTab(tab: PanelWorkspaceTab | undefined | null
 	return reviewTitleFromPanelTab(tab) || documentId;
 }
 
-function selectVisibleReviewGroup(reviewId: string): boolean {
-	const group = state.reviewGroups.get(reviewId);
-	if (!group) return false;
-	state.reviewActiveReviewId = group.reviewId;
-	state.reviewDocuments = new Map(group.files.map((file) => [file.fileId, {
+function reviewDocumentsForGroup(group: ReviewGroupModel) {
+	return new Map(group.files.map((file) => [file.fileId, {
 		title: file.title,
 		markdown: file.markdown,
 		source: group.source,
@@ -1545,6 +1545,13 @@ function selectVisibleReviewGroup(reviewId: string): boolean {
 		fileId: file.fileId,
 		reviewId: group.reviewId,
 	}]));
+}
+
+function selectVisibleReviewGroup(reviewId: string): boolean {
+	const group = state.reviewGroups.get(reviewId);
+	if (!group) return false;
+	state.reviewActiveReviewId = group.reviewId;
+	state.reviewDocuments = reviewDocumentsForGroup(group);
 	state.reviewActiveTab = group.activeFileId;
 	state.reviewPanelOpen = true;
 	return true;
@@ -2374,19 +2381,14 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	type ReviewPaneCleanupSeam = HTMLElement & {
-		_unsentCommentCountForReview: (review: ReviewGroupModel) => number;
-		_discardFinalCommentForReview?: (reviewId: string) => void;
-	};
-	const mountedReviewPane = (): ReviewPaneCleanupSeam | null => document.querySelector("review-pane") as ReviewPaneCleanupSeam | null;
 	const reviewPaneUnsentCountForGroup = (sessionId: string, group: ReviewGroupModel | undefined, reviewId: string): number => {
-		const pane = mountedReviewPane();
-		if (pane && group) return pane._unsentCommentCountForReview(group);
-		if (!group) return getDocumentAnnotationCount(sessionId, reviewId);
-		return group.files.reduce((total, file) => total + getDocumentAnnotationCount(sessionId, file.fileId), 0);
+		const annotationCount = group
+			? getReviewAnnotationCount(sessionId, group)
+			: getDocumentAnnotationCount(sessionId, reviewId);
+		return annotationCount + reviewFinalCommentCount(sessionId, reviewId);
 	};
-	const discardReviewPaneFinalDraft = (reviewId: string): void => {
-		mountedReviewPane()?._discardFinalCommentForReview?.(reviewId);
+	const discardReviewPaneFinalDraft = (sessionId: string, reviewId: string): void => {
+		discardReviewFinalComment(sessionId, reviewId);
 	};
 
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
@@ -2437,7 +2439,7 @@ export function doRenderApp(): void {
 				void (async () => {
 					const { cleanupReviewGroup } = await loadReviewSources();
 					const removed = await cleanupReviewGroup(sid, reviewId);
-					if (removed) discardReviewPaneFinalDraft(reviewId);
+					if (removed) discardReviewPaneFinalDraft(sid, reviewId);
 					if (wasActive && nextCandidate?.kind === "review") selectVisibleReviewGroup(reviewIdFromPanelTab(nextCandidate));
 					renderApp();
 				})().catch((err) => showHeaderToast(err instanceof Error ? err.message : "Could not close review"));
@@ -2677,42 +2679,45 @@ export function doRenderApp(): void {
 
 	/** Unified preview panel with tab header + content dispatch.
 	 *  Used on desktop for non-assistant sessions that have preview or goal proposal. */
-	const reviewPaneContent = () => {
-		const activeGroup = state.reviewGroups.get(state.reviewActiveReviewId);
+	const reviewPaneContent = (reviewId: string) => {
+		const renderedGroup = state.reviewGroups.get(reviewId);
+		const renderedDocuments = renderedGroup
+			? reviewDocumentsForGroup(renderedGroup)
+			: reviewId === state.reviewActiveReviewId ? state.reviewDocuments : new Map();
+		const renderedActiveFileId = renderedGroup?.activeFileId
+			|| (reviewId === state.reviewActiveReviewId ? state.reviewActiveTab : "");
+		const paneSessionId = activeSessionId() || "";
 		return html`
 		<div class="flex-1 min-h-0 overflow-auto">
 			<review-pane
-				.documents=${state.reviewDocuments}
-				.activeTab=${state.reviewActiveTab}
-				.review=${activeGroup}
-				.sessionId=${activeSessionId() || ""}
+				.documents=${renderedDocuments}
+				.activeTab=${renderedActiveFileId}
+				.review=${renderedGroup}
+				.sessionId=${paneSessionId}
 				@review-file-change=${async (e: CustomEvent) => {
-					const sid = activeSessionId() || "";
-					const reviewId = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : state.reviewActiveReviewId;
+					const targetReviewId = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : reviewId;
 					// documentId/title support is limited to legacy single-document callers;
 					// grouped ReviewPane events always identify the secondary file by fileId.
 					const fileId = typeof e.detail?.fileId === "string" ? e.detail.fileId
 						: typeof e.detail?.documentId === "string" ? e.detail.documentId
 						: typeof e.detail?.title === "string" ? e.detail.title : "";
-					if (!reviewId || !fileId) return;
+					if (!targetReviewId || !fileId) return;
 					const { setReviewActiveFile } = await loadReviewSources();
-					setReviewActiveFile(sid, reviewId, fileId);
+					setReviewActiveFile(paneSessionId, targetReviewId, fileId);
 				}}
 				@review-submit=${async (e: CustomEvent) => {
 					// Compatibility path for older review panes. Current panes cancel this
 					// bridge and route the same decision through review-decision below.
-					const sid = activeSessionId() || "";
-					const group = state.reviewGroups.get(state.reviewActiveReviewId);
+					const group = state.reviewGroups.get(reviewId) || renderedGroup;
 					const agent = state.remoteAgent;
 					if (!group || !agent || typeof e.detail?.feedback !== "string") return;
 					agent.prompt(e.detail.feedback);
 					const { cleanupReviewGroup } = await loadReviewSources();
-					const removed = await cleanupReviewGroup(sid, group.reviewId);
-					if (removed) discardReviewPaneFinalDraft(group.reviewId);
+					const removed = await cleanupReviewGroup(paneSessionId, group.reviewId);
+					if (removed) discardReviewPaneFinalDraft(paneSessionId, group.reviewId);
 				}}
 				@review-decision=${async (e: CustomEvent) => {
 					e.preventDefault();
-					const sid = activeSessionId() || "";
 					try {
 						const {
 							reviewDecisionPayloadFromDetail,
@@ -2720,32 +2725,32 @@ export function doRenderApp(): void {
 							submitReviewGroupDecision,
 						} = await loadReviewSources();
 						const group = reviewGroupFromDecisionDetail(e.detail);
-						const payload = group ? reviewDecisionPayloadFromDetail(e.detail, sid, undefined, group) : undefined;
+						const payload = group ? reviewDecisionPayloadFromDetail(e.detail, paneSessionId, undefined, group) : undefined;
 						if (!group || !payload) {
 							showHeaderToast("Could not submit review decision");
 							return;
 						}
 						await submitReviewGroupDecision(group, payload, {
-							sessionId: sid,
+							sessionId: paneSessionId,
 							prompt: async (feedback) => {
 								const agent = state.remoteAgent;
 								if (!agent) throw new Error("No active agent is available for this review.");
 								agent.prompt(feedback);
 							},
 						});
-						discardReviewPaneFinalDraft(group.reviewId);
+						discardReviewPaneFinalDraft(paneSessionId, group.reviewId);
 					} catch (err) {
 						showHeaderToast(err instanceof Error ? err.message : "Review decision failed");
 					}
 				}}
 				@review-close-tab=${(e: CustomEvent) => {
 					const identity = typeof e.detail?.reviewId === "string" ? e.detail.reviewId
-						: typeof e.detail?.title === "string" ? e.detail.title : state.reviewActiveReviewId;
+						: typeof e.detail?.title === "string" ? e.detail.title : reviewId;
 					const tab = findReviewPanelTab(identity);
 					if (tab) closeUnifiedPanelTab(tab, e);
 				}}
 				@review-dismiss=${(e: CustomEvent) => {
-					const identity = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : state.reviewActiveReviewId;
+					const identity = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : reviewId;
 					const tab = findReviewPanelTab(identity);
 					if (tab) closeUnifiedPanelTab(tab, e);
 				}}
@@ -2902,9 +2907,7 @@ export function doRenderApp(): void {
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
-			const reviewId = reviewIdFromPanelTab(tab);
-			if (reviewId && state.reviewActiveReviewId !== reviewId) selectVisibleReviewGroup(reviewId);
-			return reviewPaneContent();
+			return reviewPaneContent(reviewIdFromPanelTab(tab));
 		}
 		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {

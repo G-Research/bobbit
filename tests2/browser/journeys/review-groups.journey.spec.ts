@@ -182,6 +182,74 @@ test.describe("Journey: grouped Markdown reviews", () => {
 		}
 	});
 
+	test("mobile primary selection and unsent confirmation stay scoped to the exact review", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		try {
+			await page.setViewportSize({ width: 360, height: 740 });
+			await Promise.all([openApp(page), waitForSessionStatus(sessionId, "idle")]);
+			await navigateToSession(page, sessionId);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await sendAndWait(page, sessionId, "REVIEW_GROUPS_TWO");
+
+			const alphaTab = primaryReviewTab(page, "Alpha Review");
+			const overflowTitle = "Overflow Review With A Very Long Primary Workspace Tab Title That Must Truncate";
+			const overflowTab = primaryReviewTab(page, overflowTitle);
+			await expect(page.locator(REVIEW_TABS)).toHaveCount(2, { timeout: 20_000 });
+
+			await alphaTab.click();
+			const alphaTabId = await alphaTab.getAttribute("data-panel-tab-id");
+			const alphaPane = page.locator(`.side-panel-pane[data-panel-tab-id="${alphaTabId}"] review-pane`);
+			await expect(alphaPane.locator(".review-tab-bar").getByRole("tab", { name: "Overview.md", exact: true })).toBeVisible();
+			await expect(alphaPane.locator(".review-tab-bar").getByRole("tab", { name: "Details.md", exact: true })).toBeVisible();
+			await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.reviewActiveReviewId), {
+				message: `${REGRESSION}: eager mobile panes must not override Alpha primary selection`,
+			}).toBe("alpha-review");
+
+			await overflowTab.click();
+			const overflowTabId = await overflowTab.getAttribute("data-panel-tab-id");
+			const overflowPane = page.locator(`.side-panel-pane[data-panel-tab-id="${overflowTabId}"] review-pane`);
+			await expect(overflowPane.locator(".review-tab-bar").getByRole("tab", { name: "Section 1.md", exact: true })).toBeVisible();
+			await expect(overflowPane.locator(".review-tab-bar").getByRole("tab", { name: "Overview.md", exact: true })).toHaveCount(0);
+			await overflowPane.locator(".review-final-comment-input").fill("Keep only the overflow review draft");
+
+			// Crossing the responsive breakpoint remounts the pane; the review-level
+			// draft must remain available when the narrow slider returns.
+			await page.setViewportSize({ width: 900, height: 740 });
+			await expect(page.locator("review-pane").first().locator(".review-final-comment-input")).toHaveValue("Keep only the overflow review draft");
+			await page.setViewportSize({ width: 360, height: 740 });
+			await expect(overflowPane.locator(".review-final-comment-input")).toHaveValue("Keep only the overflow review draft");
+
+			await alphaTab.click();
+			await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.reviewActiveReviewId)).toBe("alpha-review");
+			let cancelMessage = "";
+			page.once("dialog", async (dialog) => {
+				cancelMessage = dialog.message();
+				await dialog.dismiss();
+			});
+			await overflowTab.locator(".goal-tab-close, [data-testid='side-panel-close']").click();
+			expect(cancelMessage).toContain(`Close "${overflowTitle}"? 1 unsent comment will be discarded.`);
+			await expect(overflowTab, `${REGRESSION}: cancel must preserve the exact review`).toBeVisible();
+			await expect(alphaTab, `${REGRESSION}: cancel must preserve the selected sibling`).toBeVisible();
+
+			await overflowTab.click();
+			await expect(overflowPane.locator(".review-final-comment-input"), `${REGRESSION}: cancel must preserve the exact draft`).toHaveValue("Keep only the overflow review draft");
+			await alphaTab.click();
+			let confirmMessage = "";
+			page.once("dialog", async (dialog) => {
+				confirmMessage = dialog.message();
+				await dialog.accept();
+			});
+			await overflowTab.locator(".goal-tab-close, [data-testid='side-panel-close']").click();
+			expect(confirmMessage).toContain(`Close "${overflowTitle}"? 1 unsent comment will be discarded.`);
+			await expect(overflowTab, `${REGRESSION}: confirmed close removes only its review`).toHaveCount(0, { timeout: 15_000 });
+			await expect(alphaTab, `${REGRESSION}: confirmed close leaves the sibling review`).toBeVisible();
+			await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.reviewActiveReviewId)).toBe("alpha-review");
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("failed session lookup releases foreground ownership before delayed review delivery", async ({ page }) => {
 		test.setTimeout(60_000);
 		const ownerId = await createSession();
