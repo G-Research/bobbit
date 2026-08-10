@@ -131,7 +131,7 @@ describe("Headquarters no-worktree runtime", () => {
 	it("forces Headquarters goals to ready no-worktree state even inside a git repo", async () => {
 		const repo = makeRepoMarker("goal-hq");
 		const git = makeGitRepoRunner(repo);
-		const goalStore = new GoalStore(makeTmpDir("hq-goal-store-"));
+		const goalStore = new GoalStore(makeTmpDir("hq-goal-store-"), undefined, { persistence: "json" });
 		const goalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: git.runner });
 
 		const goal = await goalManager.createGoal("HQ requested worktree", repo, {
@@ -151,7 +151,7 @@ describe("Headquarters no-worktree runtime", () => {
 	it("keeps normal project goal worktree preparation unchanged", async () => {
 		const repo = makeRepoMarker("goal-normal");
 		const git = makeGitRepoRunner(repo);
-		const goalStore = new GoalStore(makeTmpDir("normal-goal-store-"));
+		const goalStore = new GoalStore(makeTmpDir("normal-goal-store-"), undefined, { persistence: "json" });
 		const goalManager = new GoalManager(goalStore, undefined, undefined, { commandRunner: git.runner });
 
 		const goal = await goalManager.createGoal("Normal requested worktree", repo, {
@@ -233,7 +233,11 @@ describe("Headquarters no-worktree runtime", () => {
 	it("creates Headquarters staff without a worktree even when requested", async () => {
 		const registry = new ProjectRegistry(stateDir);
 		registry.ensureHeadquartersProject(headquartersRoot, { stateDir, configDir });
-		const pcm = new ProjectContextManager(registry);
+		const pcm = new ProjectContextManager(registry, {
+			goalPersistence: "json",
+			taskPersistence: "json",
+			gatePersistence: "json",
+		});
 		const staffManager = new StaffManager(pcm);
 		const createSessionCalls: any[] = [];
 		const fakeSessionManager = {
@@ -246,26 +250,33 @@ describe("Headquarters no-worktree runtime", () => {
 			persistSessionMetadata: vi.fn(async () => {}),
 		};
 
-		const staff = await staffManager.createStaff(
-			"HQ staff",
-			"Server workspace staff",
-			"Help with server settings.",
-			headquartersRoot,
-			fakeSessionManager as any,
-			{ projectId: HEADQUARTERS_PROJECT_ID, worktree: true },
-		);
+		try {
+			const staff = await staffManager.createStaff(
+				"HQ staff",
+				"Server workspace staff",
+				"Help with server settings.",
+				headquartersRoot,
+				fakeSessionManager as any,
+				{ projectId: HEADQUARTERS_PROJECT_ID, worktree: true },
+			);
 
-		assert.equal(staff.projectId, HEADQUARTERS_PROJECT_ID);
-		assert.equal(staff.cwd, headquartersRoot);
-		assert.equal(staff.worktreePath, undefined);
-		assert.equal(staff.branch, undefined);
-		assert.equal(staff.repoPath, undefined);
-		assert.equal(createSessionCalls.length, 1);
-		assert.equal(createSessionCalls[0].cwd, headquartersRoot);
-		assert.equal(createSessionCalls[0].opts.projectId, HEADQUARTERS_PROJECT_ID);
-		assert.equal(createSessionCalls[0].opts.sandboxBranch, undefined);
+			assert.equal(staff.projectId, HEADQUARTERS_PROJECT_ID);
+			assert.equal(staff.cwd, headquartersRoot);
+			assert.equal(staff.worktreePath, undefined);
+			assert.equal(staff.branch, undefined);
+			assert.equal(staff.repoPath, undefined);
+			assert.equal(createSessionCalls.length, 1);
+			assert.equal(createSessionCalls[0].cwd, headquartersRoot);
+			assert.equal(createSessionCalls[0].opts.projectId, HEADQUARTERS_PROJECT_ID);
+			assert.equal(createSessionCalls[0].opts.sandboxBranch, undefined);
 
-		const hq = registry.get(HEADQUARTERS_PROJECT_ID);
-		assert.equal(hq?.name, HEADQUARTERS_PROJECT_NAME);
+			const hq = registry.get(HEADQUARTERS_PROJECT_ID);
+			assert.equal(hq?.name, HEADQUARTERS_PROJECT_NAME);
+		} finally {
+			await pcm.closeAll();
+		}
+
+		assert.equal(fs.existsSync(path.join(stateDir, "goals.sqlite")), false);
+		assert.equal(fs.existsSync(path.join(stateDir, "tasks.sqlite")), false);
 	});
 });

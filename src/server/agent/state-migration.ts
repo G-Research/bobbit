@@ -1824,8 +1824,6 @@ export function recoverPreMigrationData(stateDir: string): void {
 
 	const filesToRecover = [
 		{ name: "sessions.json", idField: "id" },
-		{ name: "goals.json", idField: "id" },
-		{ name: "tasks.json", idField: "id" },
 		{ name: "staff.json", idField: "id" },
 		{ name: "team-state.json", idField: "goalId" },
 	];
@@ -1867,9 +1865,9 @@ export function recoverPreMigrationData(stateDir: string): void {
 		}
 	}
 
-	// GateStore exclusively owns gates.json and gates.json.pre-migration so
-	// recovered records enter the authoritative SQLite transaction instead of
-	// being written to a JSON file that a completed database would ignore.
+	// GoalStore, TaskStore, and GateStore exclusively own their live and
+	// `.pre-migration` sources. Generic recovery must not recreate JSON files
+	// that their authoritative SQLite databases would ignore.
 
 	if (totalRecovered > 0) {
 		console.log(`[migration-recovery] Total recovered: ${totalRecovered} entries`);
