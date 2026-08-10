@@ -1,5 +1,6 @@
 import { gatewayFetch, gatewayNativeTransportSupport, gatewayUrl, previewRouteFromStoredValue } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { isReviewArtifactIdentity, isReviewArtifactPayloadId, reviewArtifactTabId } from "../shared/review-artifact-identity.js";
 import { activeSessionId, renderApp, state } from "./state.js";
 import {
 	INBOX_PANEL_TAB_ID,
@@ -208,27 +209,38 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 	if (kind === "review") {
 		if (!id.startsWith("review:")) return null;
 		const routeReviewId = decodeComponent(id.slice("review:".length));
-		const sourceReviewId = stringValue(source.reviewId).trim();
+		const rawToolCallId = source.toolCallId;
+		const rawPayloadId = source.payloadId;
+		const rawContentHash = source.contentHash;
+		const artifactFieldCount = ["toolCallId", "payloadId", "contentHash"]
+			.filter((key) => Object.prototype.hasOwnProperty.call(source, key)).length;
+		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
+		const artifactBacked = artifactFieldCount === 3;
+		const rawSourceReviewId = stringValue(source.reviewId);
+		const sourceReviewId = artifactBacked ? rawSourceReviewId : rawSourceReviewId.trim();
 		const legacyDocumentId = stringValue(source.documentId).trim();
 		const title = stringValue(source.title) || stringValue(source.reviewTitle) || base.title.replace(/^Review:\s*/, "");
 		if (sourceReviewId && routeReviewId !== sourceReviewId) return null;
 		const reviewId = sourceReviewId || legacyDocumentId;
 		if (!reviewId || !title) return null;
-		const toolCallId = stringValue(source.toolCallId).trim();
-		const payloadId = stringValue(source.payloadId).trim();
-		const contentHash = stringValue(source.contentHash).trim();
-		const artifactFieldCount = Number(!!toolCallId) + Number(!!payloadId) + Number(!!contentHash);
-		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
+		if (artifactBacked) {
+			if (!isReviewArtifactIdentity(reviewId, "reviewId")
+				|| !isReviewArtifactIdentity(rawToolCallId, "toolCallId")
+				|| !isReviewArtifactPayloadId(rawPayloadId)
+				|| typeof rawContentHash !== "string" || !/^[a-f0-9]{64}$/.test(rawContentHash)
+				|| id !== reviewArtifactTabId(reviewId)
+				|| !isReviewArtifactIdentity(base.state?.activeFileId, "fileId")) return null;
+		}
 		return {
 			...base,
-			id: reviewPanelTabIdFromReviewId(reviewId),
+			id: artifactBacked ? reviewArtifactTabId(reviewId)! : reviewPanelTabIdFromReviewId(reviewId),
 			kind,
 			source: {
 				type: "review",
 				sessionId,
 				reviewId,
 				title,
-				...(artifactFieldCount === 3 ? { toolCallId, payloadId, contentHash } : {}),
+				...(artifactBacked ? { toolCallId: rawToolCallId as string, payloadId: rawPayloadId as string, contentHash: rawContentHash as string } : {}),
 			},
 		};
 	}

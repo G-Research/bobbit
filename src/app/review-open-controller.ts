@@ -2,6 +2,7 @@ import { gatewayFetch } from "./gateway-fetch.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { renderApp } from "./state.js";
+import { isReviewArtifactIdentity, isReviewArtifactPayloadId, reviewArtifactTabId } from "../shared/review-artifact-identity.js";
 
 export const REVIEW_PAYLOAD_MAX_BYTES = 10 * 1024 * 1024;
 export const REVIEW_PAYLOAD_MAX_FILES = 64;
@@ -134,14 +135,14 @@ export function reviewPayloadOpenRoute(sessionId: string, payloadId: string, too
 export function parseReviewOpenReceipt(value: unknown, expectedToolUseId?: string): ReviewOpenReceipt | null {
 	const raw = asRecord(value);
 	if (!raw || raw.action !== "review_open" || raw.version !== 2) return null;
-	const toolCallId = boundedIdentity(raw.toolCallId, 200);
-	const payloadId = boundedIdentity(raw.payloadId, 64);
-	const reviewId = boundedIdentity(raw.reviewId, 300);
+	const toolCallId = isReviewArtifactIdentity(raw.toolCallId, "toolCallId") ? raw.toolCallId : "";
+	const payloadId = isReviewArtifactPayloadId(raw.payloadId) ? raw.payloadId : "";
+	const reviewId = isReviewArtifactIdentity(raw.reviewId, "reviewId") ? raw.reviewId : "";
 	const title = boundedTitle(raw.title);
 	const contentHashValue = raw.contentHash ?? raw.hash;
 	const contentHash = typeof contentHashValue === "string" ? contentHashValue.trim().toLowerCase() : "";
 	const totalBytes = nonNegativeInteger(raw.totalBytes);
-	const activeFileId = boundedIdentity(raw.activeFileId, 200);
+	const activeFileId = isReviewArtifactIdentity(raw.activeFileId, "fileId") ? raw.activeFileId : "";
 	if (!toolCallId || (expectedToolUseId && toolCallId !== expectedToolUseId) || !payloadId || !reviewId || !title
 		|| !CONTENT_HASH_RE.test(contentHash) || totalBytes === undefined || totalBytes > REVIEW_PAYLOAD_MAX_BYTES || !activeFileId) return null;
 	if (!Array.isArray(raw.files) || raw.files.length < 1 || raw.files.length > REVIEW_PAYLOAD_MAX_FILES) return null;
@@ -151,7 +152,7 @@ export function parseReviewOpenReceipt(value: unknown, expectedToolUseId?: strin
 	for (const item of raw.files) {
 		const file = asRecord(item);
 		if (!file || "markdown" in file || "content" in file) return null;
-		const fileId = boundedIdentity(file.fileId, 200);
+		const fileId = isReviewArtifactIdentity(file.fileId, "fileId") ? file.fileId : "";
 		const fileTitle = boundedTitle(file.title);
 		const bytes = nonNegativeInteger(file.bytes ?? file.markdownBytes);
 		if (!fileId || seen.has(fileId) || !fileTitle || bytes === undefined || bytes > REVIEW_PAYLOAD_MAX_BYTES) return null;
@@ -188,7 +189,8 @@ export function reviewOpenReceiptFromToolResult(result: unknown, expectedToolUse
 	const typed = envelope.role === "toolResult" || envelope.role === "tool_result"
 		|| envelope.type === "toolResult" || envelope.type === "tool_result";
 	if (!typed || (envelope.toolName !== undefined && envelope.toolName !== "review_open")) return null;
-	const envelopeId = boundedIdentity(envelope.toolCallId ?? envelope.tool_use_id, 200);
+	const envelopeIdentity = envelope.toolCallId ?? envelope.tool_use_id;
+	const envelopeId = isReviewArtifactIdentity(envelopeIdentity, "toolCallId") ? envelopeIdentity : "";
 	if (!envelopeId || envelopeId !== expectedToolUseId) return null;
 	const candidates: ReviewOpenReceipt[] = [];
 	const visit = (value: unknown): void => {
@@ -307,7 +309,8 @@ function workspaceFromOpenResponse(value: unknown): unknown {
 function validateWorkspace(value: unknown, request: ReviewOpenRequest): boolean {
 	const workspace = asRecord(value);
 	if (!workspace || workspace.sessionId !== request.sessionId || !Array.isArray(workspace.tabs)) return false;
-	const expectedId = `review:${encodeURIComponent(request.receipt.reviewId)}`;
+	const expectedId = reviewArtifactTabId(request.receipt.reviewId);
+	if (!expectedId) return false;
 	const tab = workspace.tabs.find((candidate) => asRecord(candidate)?.id === expectedId);
 	const record = asRecord(tab);
 	const source = asRecord(record?.source);

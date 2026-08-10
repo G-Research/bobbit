@@ -148,6 +148,45 @@ describe("artifact-backed review hydration", () => {
 		expect(reloaded.files.map((file) => file.title)).toEqual([exactFileTitle, "  "]);
 	});
 
+	it("hydrates exact multibyte identity maxima and drops +1 without lossy normalization", () => {
+		const reviewId = "界".repeat(100); // 300 UTF-8 bytes
+		const toolCallId = `${"界".repeat(66)}é`; // 200 UTF-8 bytes
+		const fileId = `${"🙂".repeat(49)}界x`; // 200 UTF-8 bytes
+		const exactReference: ArtifactReviewReference = {
+			...reference,
+			reviewId,
+			toolCallId,
+			activeFileId: fileId,
+		};
+		const exactPayload: ReviewGroupModel = {
+			reviewId,
+			title: exactReference.title,
+			files: [{ fileId, title: "Exact.md", markdown: "exact" }],
+			activeFileId: fileId,
+			source: { kind: "markdown-review", sessionId: SESSION_ID },
+		};
+		const exactTab = artifactTabFor(exactReference, fileId);
+		applyWorkspace([exactTab], exactTab.id);
+
+		const [hydrationReference] = getArtifactReviewWorkspaceReferences(SESSION_ID);
+		expect(hydrationReference).toMatchObject({ reviewId, toolCallId, activeFileId: fileId });
+		const hydrated = commitArtifactReviewGroup(hydrationReference, exactPayload);
+		expect(hydrated.reviewId).toBe(reviewId);
+		expect(hydrated.files[0].fileId).toBe(fileId);
+		expect(state.sidePanelWorkspaceBySession[SESSION_ID].tabs[0].id)
+			.toBe(`review:${encodeURIComponent(reviewId)}`);
+
+		for (const invalid of [
+			{ ...exactReference, reviewId: `${reviewId}x` },
+			{ ...exactReference, toolCallId: `${toolCallId}x` },
+			{ ...exactReference, activeFileId: `${fileId}x` },
+		]) {
+			const invalidTab = artifactTabFor(invalid, invalid.activeFileId);
+			applyWorkspace([invalidTab], invalidTab.id);
+			expect(getArtifactReviewWorkspaceReferences(SESSION_ID)).toEqual([]);
+		}
+	});
+
 	it("rejects stale or mismatched references before changing review state", () => {
 		applyWorkspace();
 		const before = structuredClone(state.reviewGroupsBySession);

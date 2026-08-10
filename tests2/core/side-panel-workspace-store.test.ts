@@ -182,6 +182,44 @@ describe("side-panel workspace canonicalization", () => {
 		assert.equal(candidate("bad\u0000title"), null);
 	});
 
+	it("preserves multibyte artifact identities at their shared UTF-8 limits and rejects +1", () => {
+		const reviewId = "界".repeat(100); // 300 UTF-8 bytes, 900 encoded route characters.
+		const toolCallId = `${"界".repeat(66)}é`; // 200 UTF-8 bytes.
+		const fileId = `${"🙂".repeat(49)}界x`; // 200 UTF-8 bytes.
+		const id = `review:${encodeURIComponent(reviewId)}`;
+		const candidate = (overrides: { reviewId?: string; toolCallId?: string; fileId?: string } = {}) => {
+			const exactReviewId = overrides.reviewId ?? reviewId;
+			const exactFileId = overrides.fileId ?? fileId;
+			return canonicalizeTab({
+				id: `review:${encodeURIComponent(exactReviewId)}`,
+				kind: "review",
+				title: "Review: Identity limits",
+				label: "Identity limits",
+				source: {
+					type: "review",
+					sessionId,
+					reviewId: exactReviewId,
+					title: "Identity limits",
+					toolCallId: overrides.toolCallId ?? toolCallId,
+					payloadId: "payload-identity",
+					contentHash: "e".repeat(64),
+				},
+				state: { activeFileId: exactFileId },
+				updatedAt: 1,
+			}, sessionId);
+		};
+
+		const exact = candidate();
+		assert.ok(exact);
+		assert.equal(exact.id, id);
+		assert.equal((exact.source as any).reviewId, reviewId);
+		assert.equal((exact.source as any).toolCallId, toolCallId);
+		assert.equal(exact.state?.activeFileId, fileId);
+		assert.equal(candidate({ reviewId: `${reviewId}x` }), null);
+		assert.equal(candidate({ toolCallId: `${toolCallId}x` }), null);
+		assert.equal(candidate({ fileId: `${fileId}x` }), null);
+	});
+
 	it("rejects partial, malformed, or unbounded review payload identities atomically", () => {
 		const base = reviewTab("payload-review", "Payload review");
 		const validSource = {
@@ -197,16 +235,18 @@ describe("side-panel workspace canonicalization", () => {
 		assert.equal(candidate({ ...validSource, documentId: "legacy-document" }), null);
 		assert.equal(candidate({ ...validSource, reviewTitle: "Legacy title" }), null);
 		assert.equal(candidate({ ...validSource, reviewId: undefined }), null);
-		assert.equal(candidate({ ...validSource, toolCallId: " tool-call-1" }), null);
+		assert.equal((candidate({ ...validSource, toolCallId: " tool-call-1" })?.source as any)?.toolCallId, " tool-call-1");
 		assert.equal(candidate({ ...validSource, payloadId: "x".repeat(161) }), null);
 		assert.equal(candidate({ ...validSource, payloadId: "é".repeat(81) }), null);
 		assert.equal(candidate({ ...validSource, contentHash: "B".repeat(64) }), null);
 		assert.equal(candidate({ ...validSource, contentHash: "b".repeat(63) }), null);
 		assert.equal(canonicalizeTab({ ...base, source: validSource }, sessionId), null);
 		assert.equal(candidate(validSource, {}), null);
-		assert.equal(candidate(validSource, { activeFileId: " file-1" }), null);
-		assert.equal(candidate(validSource, { activeFileId: "x".repeat(161) }), null);
-		assert.equal(candidate(validSource, { activeFileId: "é".repeat(81) }), null);
+		assert.equal(candidate(validSource, { activeFileId: " file-1" })?.state?.activeFileId, " file-1");
+		assert.ok(candidate(validSource, { activeFileId: "x".repeat(200) }));
+		assert.equal(candidate(validSource, { activeFileId: "x".repeat(201) }), null);
+		assert.ok(candidate(validSource, { activeFileId: "é".repeat(100) }));
+		assert.equal(candidate(validSource, { activeFileId: `${"é".repeat(100)}x` }), null);
 	});
 
 	it("preserves legacy review state while validating an explicitly stored active file", () => {
