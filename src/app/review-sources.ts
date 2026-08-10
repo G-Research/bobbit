@@ -1,4 +1,5 @@
 import { refreshGateStatusForGoal } from "./api.js";
+import { isReviewArtifactIdentity, isReviewArtifactPayloadId, reviewArtifactTabId } from "../shared/review-artifact-identity.js";
 import { dispatchHumanSignoffResolved } from "./gate-status-events.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { legacyReviewDocumentIdFromTitle, reviewDocumentIdFromPanelTab, reviewTitleFromPanelTab } from "./panel-workspace.js";
@@ -168,15 +169,15 @@ function exactArtifactReferenceFromTab(
 	if (!tab || tab.kind !== "review" || tab.source.type !== "review") return undefined;
 	const source = tab.source as Record<string, unknown>;
 	const sessionId = normalizeIdentity(source.sessionId);
-	const reviewId = normalizeIdentity(source.reviewId);
+	const reviewId = isReviewArtifactIdentity(source.reviewId, "reviewId") ? source.reviewId : undefined;
 	const title = exactArtifactTitle(source.title);
-	const toolCallId = normalizeIdentity(source.toolCallId);
-	const payloadId = normalizeIdentity(source.payloadId);
-	const contentHash = normalizeIdentity(source.contentHash);
-	const activeFileId = normalizeIdentity(tab.state?.activeFileId);
+	const toolCallId = isReviewArtifactIdentity(source.toolCallId, "toolCallId") ? source.toolCallId : undefined;
+	const payloadId = isReviewArtifactPayloadId(source.payloadId) ? source.payloadId : undefined;
+	const contentHash = typeof source.contentHash === "string" && /^[a-f0-9]{64}$/.test(source.contentHash) ? source.contentHash : undefined;
+	const activeFileId = isReviewArtifactIdentity(tab.state?.activeFileId, "fileId") ? tab.state.activeFileId : undefined;
 	if (!sessionId || sessionId !== expectedSessionId || !reviewId || !title
 		|| !toolCallId || !payloadId || !contentHash || !activeFileId) return undefined;
-	if (tab.id !== reviewWorkspaceTabId(reviewId)) return undefined;
+	if (tab.id !== reviewArtifactTabId(reviewId)) return undefined;
 	return { sessionId, reviewId, title, toolCallId, payloadId, contentHash, activeFileId };
 }
 
@@ -465,7 +466,7 @@ function reviewWorkspaceTabId(reviewId: string): string {
 function normalizeArtifactReviewGroup(raw: unknown, reference: ArtifactReviewReference): ReviewGroupModel {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Review payload is malformed.");
 	const record = raw as Record<string, unknown>;
-	const payloadActiveFileId = normalizeIdentity(record.activeFileId);
+	const payloadActiveFileId = isReviewArtifactIdentity(record.activeFileId, "fileId") ? record.activeFileId : undefined;
 	if (record.reviewId !== reference.reviewId || record.title !== reference.title
 		|| !payloadActiveFileId || !Array.isArray(record.files) || record.files.length === 0) {
 		throw new Error("Review payload identity does not match its workspace reference.");
@@ -475,7 +476,7 @@ function normalizeArtifactReviewGroup(raw: unknown, reference: ArtifactReviewRef
 	for (const rawFile of record.files) {
 		if (!rawFile || typeof rawFile !== "object" || Array.isArray(rawFile)) throw new Error("Review payload is malformed.");
 		const file = rawFile as Record<string, unknown>;
-		const fileId = normalizeIdentity(file.fileId);
+		const fileId = isReviewArtifactIdentity(file.fileId, "fileId") ? file.fileId : undefined;
 		const fileTitle = exactArtifactTitle(file.title);
 		if (!fileId || seen.has(fileId) || !fileTitle
 			|| typeof file.markdown !== "string") throw new Error("Review payload file identity is invalid.");
@@ -682,6 +683,10 @@ export function openReviewDocumentFromEvent(detail: unknown, sessionId = activeS
 function reviewIdentityFromWorkspaceTab(tab: any): string | undefined {
 	if (!tab || tab.kind !== "review") return undefined;
 	const source = tab.source && typeof tab.source === "object" ? tab.source as Record<string, unknown> : undefined;
+	const artifactBacked = typeof source?.toolCallId === "string"
+		|| typeof source?.payloadId === "string"
+		|| typeof source?.contentHash === "string";
+	if (artifactBacked) return isReviewArtifactIdentity(source?.reviewId, "reviewId") ? source.reviewId : undefined;
 	return normalizeIdentity(source?.reviewId) || normalizeIdentity(source?.documentId) || reviewDocumentIdFromPanelTab(tab);
 }
 

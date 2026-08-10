@@ -1,6 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+	isReviewArtifactIdentity,
+	type ReviewArtifactIdentityKind,
+} from "../shared/review-artifact-identity.js";
 import { bobbitStateDir } from "./bobbit-dir.js";
 
 export const MAX_REVIEW_MARKDOWN_BYTES = 10 * 1024 * 1024;
@@ -20,9 +24,6 @@ const MAX_REVIEW_RECEIPT_METADATA_BYTES = 24 * 1024;
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const VALID_PAYLOAD_ID = /^[A-Za-z0-9_-]{20,64}$/;
-const MAX_TOOL_CALL_ID_BYTES = 200;
-const MAX_REVIEW_ID_BYTES = 300;
-const MAX_FILE_ID_BYTES = 200;
 const MAX_TITLE_BYTES = 320;
 const PAYLOAD_FILE = "payload.json";
 
@@ -111,8 +112,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return proto === Object.prototype || proto === null;
 }
 
-function boundedIdentity(value: unknown, name: string, maxBytes: number): string {
-	if (typeof value !== "string" || value.length === 0 || utf8Bytes(value) > maxBytes || /[\x00-\x1f\x7f]/.test(value)) {
+function artifactIdentity(value: unknown, name: string, kind: ReviewArtifactIdentityKind): string {
+	if (!isReviewArtifactIdentity(value, kind)) {
 		throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", `Invalid ${name}`);
 	}
 	return value;
@@ -161,10 +162,10 @@ function coerceUploadBody(sessionId: string, raw: unknown, reviewIdOverride?: st
 	const allowedReview = new Set(["reviewId", "title", "files", "activeFileId", "replace"]);
 	if (Object.keys(review).some((key) => !allowedReview.has(key))) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Invalid review fields");
 
-	const toolCallId = boundedIdentity(raw.toolCallId, "tool call identity", MAX_TOOL_CALL_ID_BYTES);
-	const reviewId = reviewIdOverride ?? boundedIdentity(review.reviewId, "review identity", MAX_REVIEW_ID_BYTES);
-	if (reviewIdOverride) boundedIdentity(review.reviewId, "review identity", MAX_REVIEW_ID_BYTES);
-	boundedIdentity(reviewId, "review identity", MAX_REVIEW_ID_BYTES);
+	const toolCallId = artifactIdentity(raw.toolCallId, "tool call identity", "toolCallId");
+	const reviewId = reviewIdOverride ?? artifactIdentity(review.reviewId, "review identity", "reviewId");
+	if (reviewIdOverride) artifactIdentity(review.reviewId, "review identity", "reviewId");
+	artifactIdentity(reviewId, "review identity", "reviewId");
 	const title = boundedTitle(review.title, "review title");
 	if (!Array.isArray(review.files) || review.files.length === 0 || review.files.length > MAX_REVIEW_PAYLOAD_FILES) {
 		throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", `Review must contain 1-${MAX_REVIEW_PAYLOAD_FILES} files`);
@@ -177,7 +178,7 @@ function coerceUploadBody(sessionId: string, raw: unknown, reviewIdOverride?: st
 		if (!isPlainObject(entry) || Object.keys(entry).some((key) => !new Set(["fileId", "title", "markdown"]).has(key))) {
 			throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", `Invalid review file ${index + 1}`);
 		}
-		const fileId = boundedIdentity(entry.fileId, `file ${index + 1} identity`, MAX_FILE_ID_BYTES);
+		const fileId = artifactIdentity(entry.fileId, `file ${index + 1} identity`, "fileId");
 		if (seen.has(fileId)) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Duplicate review file identity");
 		seen.add(fileId);
 		const fileTitle = boundedTitle(entry.title, `file ${index + 1} title`);
@@ -189,7 +190,7 @@ function coerceUploadBody(sessionId: string, raw: unknown, reviewIdOverride?: st
 		}
 		return { fileId, title: fileTitle, markdown: entry.markdown, bytes };
 	});
-	const activeFileId = boundedIdentity(review.activeFileId, "active file identity", MAX_FILE_ID_BYTES);
+	const activeFileId = artifactIdentity(review.activeFileId, "active file identity", "fileId");
 	if (!seen.has(activeFileId)) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Active file is not part of the review");
 
 	const metadataBytes = utf8Bytes(JSON.stringify({ toolCallId, reviewId, title, activeFileId, replace: review.replace, files: files.map(({ fileId, title, bytes }) => ({ fileId, title, bytes })) }));

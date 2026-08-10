@@ -97,6 +97,37 @@ describe("durable review payload store", () => {
 		expect(JSON.stringify(receipt)).not.toContain("é");
 	});
 
+	it("persists exact multibyte identity maxima and rejects +1 before creating an artifact", async () => {
+		const root = await isolatedRoot();
+		const reviewId = "界".repeat(100); // 300 bytes
+		const toolCallId = `${"界".repeat(66)}é`; // 200 bytes
+		const fileId = `${"🙂".repeat(49)}界x`; // 200 bytes
+		const exact = {
+			toolCallId,
+			review: {
+				reviewId,
+				title: "Identity limits",
+				files: [{ fileId, title: "Exact", markdown: "body" }],
+				activeFileId: fileId,
+				replace: false,
+			},
+		};
+		const persisted = await persistReviewPayload(sessionId, exact);
+		const restored = await readReviewPayload(sessionId, persisted.payloadId);
+		expect(restored).toMatchObject({ toolCallId, reviewId, activeFileId: fileId });
+		expect(restored.files[0].fileId).toBe(fileId);
+
+		for (const invalid of [
+			{ ...exact, toolCallId: `${toolCallId}x` },
+			{ ...exact, review: { ...exact.review, reviewId: `${reviewId}x` } },
+			{ ...exact, review: { ...exact.review, files: [{ ...exact.review.files[0], fileId: `${fileId}x` }], activeFileId: `${fileId}x` } },
+		]) {
+			await expect(persistReviewPayload(sessionId, invalid)).rejects.toMatchObject({ code: "REVIEW_PAYLOAD_INVALID" });
+		}
+		expect((await readdir(root)).filter((entry) => entry.startsWith(".tmp-"))).toEqual([]);
+		expect((await readdir(join(root, sessionId))).filter((entry) => !entry.startsWith(".tmp-"))).toEqual([persisted.payloadId]);
+	});
+
 	it("rejects duplicate identities and mismatched references without changing an installed payload", async () => {
 		await isolatedRoot();
 		await expect(persistReviewPayload(sessionId, {

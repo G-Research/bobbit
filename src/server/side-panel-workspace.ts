@@ -9,6 +9,12 @@ import type {
 	SidePanelWorkspaceTab,
 } from "../shared/side-panel-workspace.js";
 import { isSidePanelKind, isSidePanelProposalType, isSidePanelSizeMode } from "../shared/side-panel-workspace.js";
+import {
+	isReviewArtifactIdentity,
+	isReviewArtifactPayloadId,
+	reviewArtifactTabId,
+	REVIEW_ARTIFACT_TAB_ID_MAX_LENGTH,
+} from "../shared/review-artifact-identity.js";
 
 export interface PackPanelValidationInfo {
 	instanceMode?: "singleton" | "parameterized";
@@ -43,9 +49,7 @@ const MAX_ID = 300;
 const MAX_TITLE = 160;
 const MAX_LABEL = 80;
 const MAX_ENTRY = 240;
-const MAX_REVIEW_ID = 240;
-const MAX_REVIEW_REFERENCE_ID = 160;
-const MAX_REVIEW_FILE_ID = 160;
+const MAX_LEGACY_REVIEW_ID = 240;
 const MAX_REVIEW_SOURCE_TITLE_BYTES = 320;
 const MAX_PACK_PART = 120;
 const MAX_PARAMS_BYTES = 16 * 1024;
@@ -150,11 +154,13 @@ function normalizeState(value: unknown): Record<string, unknown> | undefined {
 	return cloneJsonObject(value, MAX_STATE_BYTES);
 }
 
-function normalizeReviewState(value: unknown, requireActiveFileId: boolean): Record<string, unknown> | undefined {
+function normalizeReviewState(value: unknown, requireArtifactFileId: boolean): Record<string, unknown> | undefined {
 	const state = normalizeState(value);
 	if (!state) return undefined;
-	if (!hasOwn(state, "activeFileId")) return requireActiveFileId ? undefined : state;
-	const activeFileId = exactBoundedIdentity(state.activeFileId, MAX_REVIEW_FILE_ID);
+	if (!hasOwn(state, "activeFileId")) return requireArtifactFileId ? undefined : state;
+	const activeFileId = requireArtifactFileId
+		? (isReviewArtifactIdentity(state.activeFileId, "fileId") ? state.activeFileId : null)
+		: exactBoundedIdentity(state.activeFileId, 160);
 	if (!activeFileId) return undefined;
 	state.activeFileId = activeFileId;
 	return state;
@@ -246,7 +252,10 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 	if (!decoded) return null;
 	if (!source || source.type !== "review" || !sourceSessionMatches(source, sessionId)) return null;
 
-	const sourceReviewId = asString(source.reviewId).trim();
+	const payloadReferenceKeys = ["toolCallId", "payloadId", "contentHash"] as const;
+	const hasPayloadReference = payloadReferenceKeys.some((key) => hasOwn(source, key));
+	const rawReviewId = asString(source.reviewId);
+	const sourceReviewId = hasPayloadReference ? rawReviewId : rawReviewId.trim();
 	const legacyDocumentId = asString(source.documentId).trim();
 	const rawSourceTitle = asString(source.title, asString(source.reviewTitle));
 	const legacySourceTitle = rawSourceTitle.trim();
@@ -265,10 +274,8 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 		// once, then persist the canonical reviewId source on the workspace.
 		reviewId = `legacy-title-${createHash("sha256").update(legacySourceTitle || decoded).digest("hex").slice(0, 16)}`;
 	}
-	if (!reviewId || reviewId.length > MAX_REVIEW_ID || !hasNoControlChars(reviewId)) return null;
-
-	const payloadReferenceKeys = ["toolCallId", "payloadId", "contentHash"] as const;
-	const hasPayloadReference = payloadReferenceKeys.some((key) => hasOwn(source, key));
+	const artifactTabId = hasPayloadReference ? reviewArtifactTabId(reviewId) : null;
+	if (hasPayloadReference ? artifactTabId !== id : (!reviewId || reviewId.length > MAX_LEGACY_REVIEW_ID || !hasNoControlChars(reviewId))) return null;
 	if (!hasPayloadReference) {
 		const title = truncate(legacySourceTitle || asString(raw.title).replace(/^Review:\s*/, "").trim() || decoded, MAX_TITLE) || reviewId;
 		return {
@@ -284,12 +291,13 @@ function canonicalizeReview(raw: Record<string, unknown>, id: string, sessionId:
 	// another tool call or payload.
 	if (!sourceReviewId || hasOwn(source, "documentId") || hasOwn(source, "reviewTitle")) return null;
 	const title = exactBoundedReviewTitle(source.title);
-	const toolCallId = exactBoundedIdentity(source.toolCallId, MAX_REVIEW_REFERENCE_ID);
-	const payloadId = exactBoundedIdentity(source.payloadId, MAX_REVIEW_REFERENCE_ID);
+	const toolCallId = isReviewArtifactIdentity(source.toolCallId, "toolCallId") ? source.toolCallId : null;
+	const payloadId = isReviewArtifactPayloadId(source.payloadId) ? source.payloadId : null;
 	const contentHash = exactBoundedIdentity(source.contentHash, 64);
-	if (!title || !toolCallId || !payloadId || !contentHash || !/^[a-f0-9]{64}$/.test(contentHash)) return null;
+	if (!title || !toolCallId || !payloadId || !contentHash
+		|| !/^[a-f0-9]{64}$/.test(contentHash) || !artifactTabId) return null;
 	return {
-		id: `review:${encodeComponent(reviewId)}`,
+		id: artifactTabId,
 		kind: "review",
 		source: { type: "review", sessionId, reviewId, title, toolCallId, payloadId, contentHash },
 	};
@@ -355,7 +363,8 @@ export function canonicalizeTab(raw: unknown, sessionId: string, validators?: Si
 	if (!isObject(raw)) return null;
 	const id = asString(raw.id).trim();
 	const kind = raw.kind;
-	if (!id || id.length > MAX_ID || !hasNoControlChars(id) || !isSidePanelKind(kind)) return null;
+	const maxIdLength = kind === "review" ? REVIEW_ARTIFACT_TAB_ID_MAX_LENGTH : MAX_ID;
+	if (!id || id.length > maxIdLength || !hasNoControlChars(id) || !isSidePanelKind(kind)) return null;
 	let canonical: { id: string; kind?: SidePanelKind; source: SidePanelWorkspaceSource } | null = null;
 	if (kind === "preview") canonical = canonicalizePreview(raw, id, sessionId);
 	else if (kind === "proposal") canonical = canonicalizeProposal(raw, id, sessionId);

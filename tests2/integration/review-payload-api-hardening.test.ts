@@ -160,6 +160,67 @@ test.describe("review payload API hardening", () => {
 		expect(workspace.tabs.find((tab: any) => tab.id === `review:${encodeURIComponent(receipt.reviewId)}`).state.activeFileId).toBe("review-file-12");
 	});
 
+	test("opens and rehydrates exact multibyte identity maxima while rejecting +1 atomically", async ({ gateway }) => {
+		const sessionId = await createSession();
+		cleanup.push(sessionId);
+		const secret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const reviewId = "界".repeat(100);
+		const toolCallId = `${"界".repeat(66)}é`;
+		const fileId = `${"🙂".repeat(49)}界x`;
+		const body = {
+			toolCallId,
+			review: {
+				reviewId,
+				title: "Identity limits",
+				files: [{ fileId, title: "Exact.md", markdown: "exact body" }],
+				activeFileId: fileId,
+				replace: false,
+			},
+		};
+		const upload = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
+			method: "POST",
+			headers: { "X-Bobbit-Session-Secret": secret },
+			body: JSON.stringify(body),
+		});
+		expect(upload.status).toBe(201);
+		const receipt = await upload.json();
+		expect(receipt).toMatchObject({ toolCallId, reviewId, activeFileId: fileId });
+		const tabId = `review:${encodeURIComponent(reviewId)}`;
+		let authoritative = await workspace(sessionId);
+		expect(authoritative.tabs.find((tab: any) => tab.id === tabId)).toMatchObject({
+			source: { reviewId, toolCallId },
+			state: { activeFileId: fileId },
+		});
+
+		const fetched = await apiFetch(
+			`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}?toolCallId=${encodeURIComponent(toolCallId)}&reviewId=${encodeURIComponent(reviewId)}&hash=${receipt.hash}`,
+		);
+		expect(fetched.status).toBe(200);
+		expect(await fetched.json()).toMatchObject({ toolCallId, reviewId, activeFileId: fileId, files: [{ fileId }] });
+		const reopened = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}/open`, {
+			method: "POST",
+			body: JSON.stringify({ toolCallId, payloadId: receipt.payloadId, reviewId, hash: receipt.hash }),
+		});
+		expect(reopened.status).toBe(200);
+
+		for (const invalid of [
+			{ ...body, toolCallId: `${toolCallId}x` },
+			{ ...body, review: { ...body.review, reviewId: `${reviewId}x` } },
+			{ ...body, review: { ...body.review, files: [{ ...body.review.files[0], fileId: `${fileId}x` }], activeFileId: `${fileId}x` } },
+		]) {
+			const rejected = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": secret },
+				body: JSON.stringify(invalid),
+			});
+			expect(rejected.status).toBe(400);
+			expect(await rejected.json()).toMatchObject({ code: "REVIEW_PAYLOAD_INVALID", retryable: false });
+		}
+		authoritative = await workspace(sessionId);
+		expect(authoritative.tabs).toHaveLength(1);
+		expect(authoritative.tabs[0].id).toBe(tabId);
+	});
+
 	test("denies same-project sandbox tokens access to victim review content and open", async ({ gateway }) => {
 		const attackerId = await createSession();
 		const victimId = await createSession();
