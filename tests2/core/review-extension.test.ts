@@ -423,6 +423,23 @@ describe("review_open durable receipt contract", () => {
 		assert.equal(receipt.reviewId, "existing-review-id");
 	});
 
+	it("preserves the allowlisted non-retryable session quota failure", async () => {
+		nextResponse = () => Response.json({
+			code: "REVIEW_PAYLOAD_QUOTA_EXCEEDED",
+			message: "C:\\secret\\payload.json token=credential",
+			stack: "private stack",
+			retryable: true,
+		}, { status: 507 });
+		const failure = await executeError({ markdown: "secret markdown marker" });
+		assert.deepEqual(failure.error, {
+			code: "REVIEW_PAYLOAD_QUOTA_EXCEEDED",
+			message: "Review content storage is full for this session",
+			retryable: false,
+		});
+		const text = JSON.stringify(failure);
+		assert.doesNotMatch(text, /secret markdown marker|payload\.json|credential|private stack/);
+	});
+
 	it("sanitizes server failures and never reflects raw errors, paths, credentials, or stacks", async () => {
 		nextResponse = () => Response.json({
 			code: "UNKNOWN_RAW_CODE",

@@ -132,6 +132,10 @@ const SAFE_FAILURES: Record<string, Omit<SafeFailure, "code">> = {
 		retryable: false,
 		message: "Review content exceeds the 10 MiB UTF-8 limit. Reduce the review and try again.",
 	},
+	REVIEW_PAYLOAD_QUOTA_EXCEEDED: {
+		retryable: false,
+		message: "Review content storage is full for this session",
+	},
 	REVIEW_PAYLOAD_INVALID: {
 		retryable: false,
 		message: "Review content or metadata is invalid. Check the review files and titles.",
