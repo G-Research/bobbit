@@ -10,6 +10,7 @@ import {
 	submitReviewGroupDecision,
 	upsertReviewGroup,
 } from "../../src/app/review-sources.js";
+import { GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE } from "../../src/app/gate-status-events.js";
 import { setRenderApp, state, type ReviewGroupModel } from "../../src/app/state.js";
 import type { SidePanelWorkspace, SidePanelWorkspaceTab } from "../../src/app/side-panel-workspace.js";
 import {
@@ -148,6 +149,7 @@ function installHeldLifecycleFixture(
 	let workspace = initial;
 	const deleteStarted = deferred();
 	const releaseDelete = deferred();
+	const openStarted = deferred();
 	const requests: Array<{ method: string; pathname: string; tabId?: string }> = [];
 	let held = true;
 	vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -181,6 +183,7 @@ function installHeldLifecycleFixture(
 			return Response.json({ workspace });
 		}
 		if (method === "POST" && url.pathname.endsWith("/side-panel-workspace/open")) {
+			openStarted.resolve();
 			const body = JSON.parse(String(init?.body || "{}")) as { tab?: SidePanelWorkspaceTab; focus?: boolean };
 			if (body.tab) {
 				const tabs = workspace.tabs.filter((tab) => tab.id !== body.tab!.id);
@@ -197,7 +200,13 @@ function installHeldLifecycleFixture(
 		}
 		throw new Error(`Unexpected request: ${method} ${url.pathname}`);
 	}));
-	return { deleteStarted: deleteStarted.promise, releaseDelete: () => releaseDelete.resolve(), requests, workspace: () => workspace };
+	return {
+		deleteStarted: deleteStarted.promise,
+		releaseDelete: () => releaseDelete.resolve(),
+		openStarted: openStarted.promise,
+		requests,
+		workspace: () => workspace,
+	};
 }
 
 beforeEach(() => {
@@ -217,6 +226,7 @@ beforeEach(() => {
 	state.panelTabs = [];
 	state.panelWorkspaceActiveBySession = {};
 	state.activePanelTabId = "chat";
+	state.goals = [];
 	localStorage.clear();
 });
 
@@ -444,6 +454,238 @@ describe("review group decision identity migration", () => {
 		await submitReviewGroupDecision(group, normalized, { sessionId, prompt });
 		const feedback = String(prompt.mock.calls[0][0]);
 		expect(feedback.indexOf("first note")).toBeLessThan(feedback.indexOf("second note"));
+	});
+});
+
+describe("review group decision lifecycle", () => {
+	function lifecycleGroup(sessionId: string, reviewId: string, markdown = "captured"): ReviewGroupModel {
+		return {
+			...review(reviewId, `Decision ${reviewId}`, [{ fileId: `${reviewId}-file`, title: `${reviewId}.md`, markdown }]),
+			source: { kind: "markdown-review", sessionId },
+		};
+	}
+
+	function lifecycleWorkspace(sessionId: string, groups: ReviewGroupModel[]): SidePanelWorkspace {
+		const tabs = groups.map((group) => ({
+			...reviewTab(group),
+			source: { ...reviewTab(group).source, sessionId },
+		}));
+		return {
+			version: 1,
+			sessionId,
+			revision: 3,
+			tabs,
+			activeTabId: tabs[0]?.id || "",
+			sizeMode: "split",
+			updatedAt: 3,
+		};
+	}
+
+	function fetchCalls(): Array<{ method: string; pathname: string; body: string }> {
+		return vi.mocked(fetch).mock.calls.map(([input, init]) => {
+			const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+			return {
+				method: (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase(),
+				pathname: url.pathname,
+				body: typeof init?.body === "string" ? init.body : "",
+			};
+		});
+	}
+
+	it("coalesces simultaneous exact-key decisions into one prompt, tombstone, removal, and cleanup", async () => {
+		const sessionId = "decision-coalesced";
+		const target = lifecycleGroup(sessionId, "coalesced-review");
+		persistReviewGroup(sessionId, target);
+		const initial = lifecycleWorkspace(sessionId, [target]);
+		state.sidePanelWorkspaceBySession[sessionId] = initial;
+		installHeldLifecycleFixture(initial, "never-held");
+		const promptGate = deferred();
+		const prompt = vi.fn(() => promptGate.promise);
+		const approve = { decision: "approve" as const, finalComment: "accepted", inlineComments: [], feedback: "" };
+
+		const first = submitReviewGroupDecision(target, approve, { sessionId, prompt });
+		const second = submitReviewGroupDecision(target, {
+			decision: "reject",
+			finalComment: "ignored duplicate click",
+			inlineComments: [],
+			feedback: "",
+		}, { sessionId, prompt });
+
+		expect(second).toBe(first);
+		expect(prompt).not.toHaveBeenCalled();
+		await Promise.resolve();
+		expect(prompt).toHaveBeenCalledOnce();
+		promptGate.resolve();
+		const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+
+		expect(secondOutcome).toBe(firstOutcome);
+		expect(firstOutcome).toEqual({ submitted: true, sessionId, reviewId: target.reviewId, finalComment: "accepted" });
+		expect(readPersistedReviewGroups(sessionId)).toEqual([]);
+		expect(getReviewTombstone(sessionId, target.reviewId)).toBe("submitted");
+		const calls = fetchCalls();
+		expect(calls.filter((call) => call.method === "PUT" && call.pathname.includes("/review/tombstones/"))).toHaveLength(1);
+		expect(calls.filter((call) => call.method === "DELETE" && call.pathname.endsWith(`/side-panel-workspace/tabs/${encodeURIComponent(reviewTab(target).id)}`))).toHaveLength(1);
+		const clearedBuckets = calls
+			.filter((call) => call.method === "DELETE" && call.pathname.endsWith("/review/annotations"))
+			.map((call) => JSON.parse(call.body).docTitle)
+			.sort();
+		expect(clearedBuckets).toEqual([target.files[0].fileId, target.files[0].title, target.reviewId].sort());
+		await clearReviewTombstone(sessionId, target.reviewId);
+	});
+
+	it("runs different exact review keys independently", async () => {
+		const sessionId = "decision-independent";
+		const firstGroup = lifecycleGroup(sessionId, "independent-first");
+		const secondGroup = lifecycleGroup(sessionId, "independent-second");
+		persistReviewGroup(sessionId, firstGroup);
+		persistReviewGroup(sessionId, secondGroup);
+		const initial = lifecycleWorkspace(sessionId, [firstGroup, secondGroup]);
+		state.sidePanelWorkspaceBySession[sessionId] = initial;
+		installHeldLifecycleFixture(initial, "never-held");
+		const firstGate = deferred();
+		const secondGate = deferred();
+		const firstPrompt = vi.fn(() => firstGate.promise);
+		const secondPrompt = vi.fn(() => secondGate.promise);
+		const payload = { decision: "approve" as const, finalComment: "", inlineComments: [], feedback: "" };
+
+		let firstSettled = false;
+		const firstDecision = submitReviewGroupDecision(firstGroup, payload, { sessionId, prompt: firstPrompt });
+		void firstDecision.then(() => { firstSettled = true; });
+		const secondDecision = submitReviewGroupDecision(secondGroup, payload, { sessionId, prompt: secondPrompt });
+		await Promise.resolve();
+
+		expect(firstDecision).not.toBe(secondDecision);
+		expect(firstPrompt).toHaveBeenCalledOnce();
+		expect(secondPrompt).toHaveBeenCalledOnce();
+		secondGate.resolve();
+		await expect(secondDecision).resolves.toMatchObject({ submitted: true, reviewId: secondGroup.reviewId });
+		expect(firstSettled).toBe(false);
+		firstGate.resolve();
+		await expect(firstDecision).resolves.toMatchObject({ submitted: true, reviewId: firstGroup.reviewId });
+		expect(readPersistedReviewGroups(sessionId)).toEqual([]);
+		expect(getReviewTombstone(sessionId, firstGroup.reviewId)).toBe("submitted");
+		expect(getReviewTombstone(sessionId, secondGroup.reviewId)).toBe("submitted");
+		await Promise.all([
+			clearReviewTombstone(sessionId, firstGroup.reviewId),
+			clearReviewTombstone(sessionId, secondGroup.reviewId),
+		]);
+	});
+
+	it("cancels a queued decision when synchronous cleanup claims the exact key first", async () => {
+		const sessionId = "decision-cleanup-wins";
+		const target = lifecycleGroup(sessionId, "cleanup-wins");
+		persistReviewGroup(sessionId, target);
+		const initial = lifecycleWorkspace(sessionId, [target]);
+		state.sidePanelWorkspaceBySession[sessionId] = initial;
+		installHeldLifecycleFixture(initial, "never-held");
+		const prompt = vi.fn();
+
+		const decision = submitReviewGroupDecision(target, {
+			decision: "approve",
+			finalComment: "must not send",
+			inlineComments: [],
+			feedback: "",
+		}, { sessionId, prompt });
+		const cleanup = cleanupReviewGroup(sessionId, target.reviewId);
+		const [outcome, removed] = await Promise.all([decision, cleanup]);
+
+		expect(outcome).toMatchObject({ submitted: false, reviewId: target.reviewId });
+		expect(removed).toMatchObject({ reviewId: target.reviewId });
+		expect(prompt).not.toHaveBeenCalled();
+		expect(getReviewTombstone(sessionId, target.reviewId)).toBe("closed");
+		const tombstoneBodies = fetchCalls()
+			.filter((call) => call.method === "PUT" && call.pathname.includes("/review/tombstones/"))
+			.map((call) => JSON.parse(call.body));
+		expect(tombstoneBodies).toEqual([{ state: "closed" }]);
+		await clearReviewTombstone(sessionId, target.reviewId);
+	});
+
+	it("lets an immediate exact live replacement suppress the old decision without touching replacement state", async () => {
+		const sessionId = "decision-live-replacement";
+		const captured = lifecycleGroup(sessionId, "replacement-review", "old markdown");
+		persistReviewGroup(sessionId, captured);
+		const initial = lifecycleWorkspace(sessionId, [captured]);
+		state.sidePanelWorkspaceBySession[sessionId] = initial;
+		const fixture = installHeldLifecycleFixture(initial, "never-held");
+		const prompt = vi.fn();
+
+		const decision = submitReviewGroupDecision(captured, {
+			decision: "approve",
+			finalComment: "stale decision",
+			inlineComments: [],
+			feedback: "",
+		}, { sessionId, prompt });
+		const replacement = openMarkdownReviewGroup({
+			sessionId,
+			reviewId: captured.reviewId,
+			title: captured.title,
+			files: [{ fileId: captured.files[0].fileId, title: captured.files[0].title, markdown: "replacement markdown" }],
+			live: true,
+		});
+
+		await expect(decision).resolves.toMatchObject({ submitted: false, reviewId: captured.reviewId });
+		await fixture.openStarted;
+		expect(prompt).not.toHaveBeenCalled();
+		expect(readPersistedReviewGroups(sessionId)).toEqual([replacement]);
+		expect(readPersistedReviewGroups(sessionId)[0].files[0].markdown).toBe("replacement markdown");
+		expect(getReviewTombstone(sessionId, captured.reviewId)).toBeUndefined();
+		expect(fixture.requests.some((request) => request.method === "DELETE" && request.tabId === reviewTab(captured).id)).toBe(false);
+		expect(fetchCalls().filter((call) => call.method === "DELETE" && call.pathname.endsWith("/review/annotations"))).toEqual([]);
+	});
+
+	it("coalesces workflow verification sign-off routing and never falls through to an agent prompt", async () => {
+		const sessionId = "decision-signoff";
+		const target: ReviewGroupModel = {
+			...lifecycleGroup(sessionId, "signoff-review"),
+			source: {
+				kind: "verification-signoff-markdown",
+				goalId: "goal-signoff",
+				gateId: "gate-signoff",
+				signalId: "signal-signoff",
+				stepName: "human-review",
+			},
+		};
+		persistReviewGroup(sessionId, target);
+		const initial = lifecycleWorkspace(sessionId, [target]);
+		state.sidePanelWorkspaceBySession[sessionId] = initial;
+		const signoffStarted = deferred();
+		const releaseSignoff = deferred<Response>();
+		const requests: Array<{ method: string; pathname: string; body: string }> = [];
+		vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+			const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+			requests.push({ method, pathname: url.pathname, body: typeof init?.body === "string" ? init.body : "" });
+			if (method === "POST" && url.pathname.endsWith("/signoff")) {
+				signoffStarted.resolve();
+				return releaseSignoff.promise;
+			}
+			return new Response(null, { status: 204 });
+		}));
+		const prompt = vi.fn();
+		const resolved = vi.fn();
+		window.addEventListener(GATE_STATUS_CLIENT_EVENT, resolved);
+		const payload = { decision: "approve" as const, finalComment: "Ship it", inlineComments: [], feedback: "" };
+
+		const first = submitReviewGroupDecision(target, payload, { sessionId, prompt });
+		const second = submitReviewGroupDecision(target, payload, { sessionId, prompt });
+		expect(second).toBe(first);
+		await signoffStarted.promise;
+		expect(requests.filter((request) => request.method === "POST" && request.pathname.endsWith("/signoff"))).toHaveLength(1);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(resolved).not.toHaveBeenCalled();
+		releaseSignoff.resolve(Response.json({ ok: true }));
+		await expect(first).resolves.toMatchObject({ submitted: true, reviewId: target.reviewId });
+
+		expect(resolved).toHaveBeenCalledOnce();
+		expect((resolved.mock.calls[0][0] as CustomEvent).detail).toMatchObject({
+			type: HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE,
+			goalId: "goal-signoff",
+			gateId: "gate-signoff",
+			signalId: "signal-signoff",
+			decision: "pass",
+		});
+		expect(getReviewTombstone(sessionId, target.reviewId)).toBeUndefined();
+		window.removeEventListener(GATE_STATUS_CLIENT_EVENT, resolved);
 	});
 });
 

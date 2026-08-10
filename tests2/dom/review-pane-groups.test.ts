@@ -15,10 +15,15 @@ import {
 	persistReviewGroup,
 	readPersistedReviewGroups,
 } from "../../src/app/review-sources.js";
+import * as reviewSourcesModule from "../../src/app/review-sources.js";
+import * as reviewSourcesLazy from "../../src/app/review-sources-lazy.js";
 import { applySidePanelWorkspaceFromServer } from "../../src/app/side-panel-workspace.js";
 import { doRenderApp } from "../../src/app/render.js";
 import { setRenderApp, state } from "../../src/app/state.js";
-import { reviewFinalComment } from "../../src/ui/components/review/ReviewPane.js";
+import {
+	discardReviewFinalComment,
+	reviewFinalComment,
+} from "../../src/ui/components/review/ReviewPane.js";
 
 const REGRESSION = "REVIEW_GROUP_PRIMARY_TAB";
 
@@ -43,6 +48,21 @@ type DesiredReviewPane = HTMLElement & {
 };
 
 const sessionsToClear = new Set<string>();
+const finalDraftsToClear = new Set<string>();
+
+function deferred<T>(): {
+	promise: Promise<T>;
+	resolve: (value: T | PromiseLike<T>) => void;
+	reject: (reason?: unknown) => void;
+} {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
 
 function group(
 	reviewId = "review-1",
@@ -140,6 +160,69 @@ function reviewWorkspaceTab(review: DesiredReviewGroup) {
 	};
 }
 
+async function mountAppReviewForDecision(
+	review: DesiredReviewGroup,
+	submitReviewGroupDecision: ReturnType<typeof vi.fn>,
+): Promise<DesiredReviewPane> {
+	const sessionId = review.source.sessionId;
+	sessionsToClear.add(sessionId);
+	finalDraftsToClear.add(`${sessionId}\u0000${review.reviewId}`);
+	(window as any).happyDOM?.setURL?.(`http://localhost/#/session/${sessionId}`);
+	document.body.innerHTML = '<div id="app"></div>';
+	state.appView = "authenticated";
+	state.connectionStatus = "connected";
+	state.gatewaySessions = [{
+		id: sessionId,
+		title: "Review decision fixture",
+		cwd: "/fixture",
+		status: "idle",
+		createdAt: 1,
+		lastActivity: 1,
+		clientCount: 1,
+	} as any];
+	state.projects = [];
+	state.goals = [];
+	state.selectedSessionId = null;
+	state.remoteAgent = { gatewaySessionId: sessionId, state: {}, prompt: vi.fn() } as any;
+	state.chatPanel = document.createElement("div") as any;
+	state.reviewGroupsBySession = {};
+	persistReviewGroup(sessionId, review as any);
+	state.selectedSessionId = sessionId;
+	hydrateVisibleReviewGroups(sessionId, [review] as any, review.reviewId);
+	applySidePanelWorkspaceFromServer({
+		version: 1,
+		sessionId,
+		revision: 1,
+		tabs: [reviewWorkspaceTab(review)],
+		activeTabId: `review:${encodeURIComponent(review.reviewId)}`,
+		sizeMode: "split",
+		updatedAt: 1,
+	}, { source: "hydrate", skipRender: true, force: true });
+	vi.spyOn(reviewSourcesLazy, "loadReviewSources").mockResolvedValue({
+		...reviewSourcesModule,
+		submitReviewGroupDecision,
+	} as typeof reviewSourcesModule);
+	setViewportWidth(360);
+	setRenderApp(doRenderApp);
+	doRenderApp();
+	const pane = mountedPaneForReview(review.reviewId);
+	expect(pane, `${REGRESSION}: the decision fixture must render its review pane`).toBeDefined();
+	await pane!.updateComplete;
+	return pane!;
+}
+
+async function enterFinalDraft(pane: DesiredReviewPane, value: string): Promise<void> {
+	const textarea = pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")!;
+	textarea.value = value;
+	textarea.dispatchEvent(new Event("input", { bubbles: true }));
+	await settle(pane);
+}
+
+async function flushDecisionHandler(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+}
+
 beforeEach(() => {
 	vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", {
 		status: 200,
@@ -154,6 +237,11 @@ afterEach(async () => {
 	document.body.innerHTML = "";
 	await Promise.all(Array.from(sessionsToClear, (sessionId) => clearAllAnnotations(sessionId)));
 	sessionsToClear.clear();
+	for (const key of finalDraftsToClear) {
+		const separator = key.indexOf("\u0000");
+		discardReviewFinalComment(key.slice(0, separator), key.slice(separator + 1));
+	}
+	finalDraftsToClear.clear();
 	state.reviewGroupsBySession = {};
 	state.reviewGroups = new Map();
 	state.reviewActiveReviewId = "";
@@ -351,6 +439,76 @@ describe("ReviewPane review groups", () => {
 			decision?.detail.payload.feedback.match(/One final review note/g),
 			`${REGRESSION}: review-level final feedback must be emitted exactly once`,
 		).toHaveLength(1);
+	});
+
+	it("keeps a newer same-ID shared final draft when a stale decision completes as a no-op", async () => {
+		const review = group("draft-stale-completion", 1, "session-draft-stale-completion");
+		const submission = deferred<reviewSourcesModule.ReviewDecisionSubmissionOutcome>();
+		const submit = vi.fn((..._args: Parameters<typeof reviewSourcesModule.submitReviewGroupDecision>) => submission.promise);
+		const pane = await mountAppReviewForDecision(review, submit);
+		await enterFinalDraft(pane, "captured draft");
+
+		pane.querySelector<HTMLButtonElement>(".review-approve-btn")!.click();
+		await flushDecisionHandler();
+		expect(submit).toHaveBeenCalledOnce();
+		expect(submit.mock.calls[0][1]).toMatchObject({ finalComment: "captured draft" });
+
+		const replacement = {
+			...review,
+			files: review.files.map((file) => ({ ...file, markdown: "replacement content" })),
+		};
+		state.reviewGroupsBySession[review.source.sessionId] = [replacement as any];
+		state.reviewGroups.set(review.reviewId, replacement as any);
+		await enterFinalDraft(pane, "new replacement draft");
+		submission.resolve({
+			submitted: false,
+			sessionId: review.source.sessionId,
+			reviewId: review.reviewId,
+			finalComment: "captured draft",
+		});
+		await flushDecisionHandler();
+
+		expect(reviewFinalComment(review.source.sessionId, review.reviewId)).toBe("new replacement draft");
+		expect(state.reviewGroups.get(review.reviewId)).toBe(replacement);
+	});
+
+	it("discards the captured final draft only after exact successful completion", async () => {
+		const review = group("draft-exact-success", 1, "session-draft-exact-success");
+		const submission = deferred<reviewSourcesModule.ReviewDecisionSubmissionOutcome>();
+		const submit = vi.fn((..._args: Parameters<typeof reviewSourcesModule.submitReviewGroupDecision>) => submission.promise);
+		const pane = await mountAppReviewForDecision(review, submit);
+		await enterFinalDraft(pane, "submitted exact draft");
+
+		pane.querySelector<HTMLButtonElement>(".review-approve-btn")!.click();
+		await flushDecisionHandler();
+		expect(submit).toHaveBeenCalledOnce();
+		state.reviewGroupsBySession[review.source.sessionId] = [];
+		state.reviewGroups.delete(review.reviewId);
+		submission.resolve({
+			submitted: true,
+			sessionId: review.source.sessionId,
+			reviewId: review.reviewId,
+			finalComment: "submitted exact draft",
+		});
+		await flushDecisionHandler();
+
+		expect(reviewFinalComment(review.source.sessionId, review.reviewId)).toBe("");
+	});
+
+	it("retains the captured final draft when decision submission fails", async () => {
+		const review = group("draft-failed", 1, "session-draft-failed");
+		const submission = deferred<reviewSourcesModule.ReviewDecisionSubmissionOutcome>();
+		const submit = vi.fn((..._args: Parameters<typeof reviewSourcesModule.submitReviewGroupDecision>) => submission.promise);
+		const pane = await mountAppReviewForDecision(review, submit);
+		await enterFinalDraft(pane, "retry this draft");
+
+		pane.querySelector<HTMLButtonElement>(".review-approve-btn")!.click();
+		await flushDecisionHandler();
+		expect(submit).toHaveBeenCalledOnce();
+		submission.reject(new Error("submission failed"));
+		await flushDecisionHandler();
+
+		expect(reviewFinalComment(review.source.sessionId, review.reviewId)).toBe("retry this draft");
 	});
 
 	it.each([2, 3, 4, 5])("uses measured constrained width to overflow %i long file titles", async (fileCount) => {
