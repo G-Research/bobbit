@@ -13,6 +13,9 @@ export const MAX_REVIEW_PAYLOAD_METADATA_BYTES = 256 * 1024;
 export const MAX_REVIEW_JSON_EXPANSION = 6;
 export const MAX_REVIEW_PAYLOAD_REQUEST_BYTES = MAX_REVIEW_MARKDOWN_BYTES * MAX_REVIEW_JSON_EXPANSION
 	+ MAX_REVIEW_PAYLOAD_METADATA_BYTES;
+/** Historical payloads are never evicted; later uploads fail once either cap is reached. */
+export const MAX_REVIEW_PAYLOADS_PER_SESSION = 64;
+export const MAX_REVIEW_PAYLOAD_SESSION_STORAGE_BYTES = 256 * 1024 * 1024;
 const MAX_REVIEW_RECEIPT_METADATA_BYTES = 24 * 1024;
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -224,9 +227,68 @@ function createPayloadId(): string {
 	return randomBytes(18).toString("base64url");
 }
 
-export async function persistReviewPayload(sessionId: string, raw: unknown, reviewIdOverride?: string): Promise<CanonicalReviewPayload> {
+export interface ReviewPayloadPersistenceOptions {
+	/** Must be called while the owning ReviewPayloadSessionCoordinator is held. */
+	enforceSessionQuota?: boolean;
+	/** Narrow injection seam for bounded quota tests. */
+	quota?: { maxCount: number; maxBytes: number };
+}
+
+async function sessionStorageUsage(ownerDir: string): Promise<{ count: number; bytes: number }> {
+	let children: fs.Dirent[];
+	try {
+		children = await fs.promises.readdir(ownerDir, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { count: 0, bytes: 0 };
+		throw new ReviewPayloadError(500, "REVIEW_PAYLOAD_PERSISTENCE_FAILED", "Review content storage could not be inspected", true);
+	}
+	let count = 0;
+	let bytes = 0;
+	for (const child of children) {
+		if (child.name.startsWith(".tmp-") || !child.isDirectory() || child.isSymbolicLink()) continue;
+		try {
+			const stat = await fs.promises.lstat(path.join(ownerDir, child.name, PAYLOAD_FILE));
+			if (!stat.isFile() || stat.isSymbolicLink()) continue;
+			count += 1;
+			bytes += stat.size;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+			throw new ReviewPayloadError(500, "REVIEW_PAYLOAD_PERSISTENCE_FAILED", "Review content storage could not be inspected", true);
+		}
+	}
+	return { count, bytes };
+}
+
+function quotaError(): ReviewPayloadError {
+	return new ReviewPayloadError(507, "REVIEW_PAYLOAD_QUOTA_EXCEEDED", "Review content storage is full for this session");
+}
+
+export async function persistReviewPayload(
+	sessionId: string,
+	raw: unknown,
+	reviewIdOverride?: string,
+	options: ReviewPayloadPersistenceOptions = {},
+): Promise<CanonicalReviewPayload> {
 	const base = coerceUploadBody(sessionId, raw, reviewIdOverride);
 	const ownerDir = sessionDir(sessionId);
+	const hash = payloadHash(base);
+	let payloadId = createPayloadId();
+	let createdAt = Date.now();
+	let payload: CanonicalReviewPayload = { ...base, payloadId, hash, createdAt };
+	let serialized = JSON.stringify(payload);
+
+	if (options.enforceSessionQuota) {
+		const quota = options.quota ?? {
+			maxCount: MAX_REVIEW_PAYLOADS_PER_SESSION,
+			maxBytes: MAX_REVIEW_PAYLOAD_SESSION_STORAGE_BYTES,
+		};
+		const usage = await sessionStorageUsage(ownerDir);
+		const prospectiveBytes = utf8Bytes(serialized);
+		if (usage.count + 1 > quota.maxCount || usage.bytes + prospectiveBytes > quota.maxBytes) throw quotaError();
+	}
+
+	// Admission is complete before the owner or temp directory is created. Route
+	// callers hold the per-session coordinator across this entire write.
 	try {
 		await fs.promises.mkdir(ownerDir, { recursive: true });
 	} catch {
@@ -234,21 +296,23 @@ export async function persistReviewPayload(sessionId: string, raw: unknown, revi
 	}
 
 	for (let attempt = 0; attempt < 5; attempt++) {
-		const payloadId = createPayloadId();
-		const createdAt = Date.now();
-		const hash = payloadHash(base);
-		const payload: CanonicalReviewPayload = { ...base, payloadId, hash, createdAt };
 		const finalDir = payloadDir(sessionId, payloadId);
 		const tmpDir = path.join(ownerDir, `.tmp-${payloadId}-${process.pid}-${Date.now()}-${attempt}`);
 		try {
 			await fs.promises.mkdir(tmpDir, { recursive: false, mode: 0o700 });
-			await fs.promises.writeFile(path.join(tmpDir, PAYLOAD_FILE), JSON.stringify(payload), { encoding: "utf8", flag: "wx", mode: 0o600 });
+			await fs.promises.writeFile(path.join(tmpDir, PAYLOAD_FILE), serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
 			await fs.promises.rename(tmpDir, finalDir);
 			return payload;
 		} catch (error) {
 			await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
 			const code = (error as NodeJS.ErrnoException)?.code;
-			if (code === "EEXIST" || code === "ENOTEMPTY") continue;
+			if (code === "EEXIST" || code === "ENOTEMPTY") {
+				payloadId = createPayloadId();
+				createdAt = Date.now();
+				payload = { ...base, payloadId, hash, createdAt };
+				serialized = JSON.stringify(payload);
+				continue;
+			}
 			throw new ReviewPayloadError(500, "REVIEW_PAYLOAD_PERSISTENCE_FAILED", "Review content could not be saved", true);
 		}
 	}

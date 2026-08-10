@@ -11,10 +11,63 @@ import {
 	type ReviewPayloadOpenOutcome,
 } from "./review-payload-store.js";
 
+type ReviewPayloadSessionOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+
+export interface ReviewPayloadSessionCoordinator {
+	/** Serialize review route mutations unless purge permanently fenced the owner. */
+	run: ReviewPayloadSessionOperation;
+	/** Permanently fence new work, wait for accepted work, then remove owner state. */
+	purge: ReviewPayloadSessionOperation;
+}
+
+/**
+ * Coordinate every review-payload mutation for one session. The queue is
+ * deliberately separate from SidePanelWorkspaceLocks: an operation may call
+ * the workspace mutation API without recursively acquiring the same lock.
+ */
+export function createReviewPayloadSessionCoordinator(): ReviewPayloadSessionCoordinator {
+	const tails = new Map<string, Promise<void>>();
+	const purgedSessions = new Set<string>();
+
+	const enqueue: ReviewPayloadSessionOperation = async (sessionId, operation) => {
+		const previous = tails.get(sessionId) ?? Promise.resolve();
+		let release!: () => void;
+		const current = new Promise<void>((resolve) => { release = resolve; });
+		tails.set(sessionId, current);
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+			if (tails.get(sessionId) === current) tails.delete(sessionId);
+		}
+	};
+
+	const run: ReviewPayloadSessionOperation = (sessionId, operation) => {
+		if (purgedSessions.has(sessionId)) {
+			return Promise.reject(new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable"));
+		}
+		return enqueue(sessionId, async () => {
+			if (purgedSessions.has(sessionId)) {
+				throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+			}
+			return operation();
+		});
+	};
+
+	const purge: ReviewPayloadSessionOperation = (sessionId, operation) => {
+		purgedSessions.add(sessionId);
+		return enqueue(sessionId, operation);
+	};
+
+	return { run, purge };
+}
+
 export interface ReviewPayloadRouteDeps {
 	sessionManager: SessionManager;
 	readBody: (req: http.IncomingMessage, maxBytes?: number) => Promise<any>;
 	openReview: (payload: CanonicalReviewPayload) => Promise<unknown>;
+	operations: ReviewPayloadSessionCoordinator;
 	resolveExistingReview?: (
 		sessionId: string,
 		title: string,
@@ -71,36 +124,38 @@ function requireOwningSessionSecret(req: http.IncomingMessage, deps: ReviewPaylo
 	}
 }
 
-/** Review-specific JSON reader. Unlike the generic reader it reports chunked overflow as 413. */
-async function readLimitedJson(req: http.IncomingMessage, maxBytes: number): Promise<LimitedBodyResult> {
+/** Review-specific JSON reader. Chunked overflow settles before `end` and stops input. */
+export async function readLimitedReviewJson(req: http.IncomingMessage, maxBytes: number): Promise<LimitedBodyResult> {
 	return new Promise((resolve) => {
 		const chunks: Buffer[] = [];
 		let total = 0;
-		let tooLarge = false;
 		let settled = false;
 		const finish = (result: LimitedBodyResult): void => {
 			if (settled) return;
 			settled = true;
 			resolve(result);
 		};
-		req.on("data", (chunk: Buffer | string) => {
+		const onData = (chunk: Buffer | string): void => {
 			if (settled) return;
 			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 			total += bytes.byteLength;
 			if (total > maxBytes) {
-				tooLarge = true;
 				chunks.length = 0;
+				req.removeListener("data", onData);
+				try { req.pause(); } catch { /* best-effort until the 413 is flushed */ }
+				finish({ ok: false, tooLarge: true });
 				return;
 			}
-			if (!tooLarge) chunks.push(bytes);
-		});
+			chunks.push(bytes);
+		};
+		req.on("data", onData);
 		req.on("end", () => {
-			if (tooLarge) { finish({ ok: false, tooLarge: true }); return; }
+			if (settled) return;
 			try { finish({ ok: true, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); }
 			catch { finish({ ok: false, tooLarge: false }); }
 		});
-		req.on("error", () => finish({ ok: false, tooLarge }));
-		req.on("aborted", () => finish({ ok: false, tooLarge }));
+		req.on("error", () => finish({ ok: false, tooLarge: false }));
+		req.on("aborted", () => finish({ ok: false, tooLarge: false }));
 	});
 }
 
@@ -161,26 +216,38 @@ export async function handleReviewPayloadRoute(
 		try {
 			if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
 			requireOwningSessionSecret(req, deps, sessionId);
-			const result = await readLimitedJson(req, MAX_REVIEW_PAYLOAD_REQUEST_BYTES);
-			if (!result.ok) {
-				throw result.tooLarge
-					? new ReviewPayloadError(413, "REVIEW_PAYLOAD_TOO_LARGE", "Review upload exceeds the bounded request limit")
-					: new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Invalid review payload");
+			const result = await readLimitedReviewJson(req, MAX_REVIEW_PAYLOAD_REQUEST_BYTES);
+			if (!result.ok && result.tooLarge) {
+				// Do not wait for a terminal chunk from an attacker. Pause immediately,
+				// flush the structured response, then close the unread connection.
+				res.setHeader("Connection", "close");
+				res.once("finish", () => { try { req.destroy(); } catch { /* best-effort */ } });
+				writeError(res, new ReviewPayloadError(413, "REVIEW_PAYLOAD_TOO_LARGE", "Review upload exceeds the bounded request limit"));
+				return true;
 			}
+			if (!result.ok) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Invalid review payload");
 			const identity = uploadReviewIdentity(result.body);
-			const existing = identity && deps.resolveExistingReview
-				? await deps.resolveExistingReview(sessionId, identity.title, identity.reviewId, identity.replace)
-				: undefined;
-			const reconciledBody = reconcileReplacementFiles(result.body, existing?.payload);
-			const payload = await persistReviewPayload(sessionId, reconciledBody, existing?.reviewId);
-			let automaticOpen: ReviewPayloadOpenOutcome;
-			try {
-				await deps.openReview(payload);
-				automaticOpen = { ok: true, status: "opened" };
-			} catch (error) {
-				automaticOpen = openFailure(error);
-			}
-			json(res, 201, reviewPayloadReceipt(payload, automaticOpen));
+			const receipt = await deps.operations.run(sessionId, async () => {
+				if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+				const existing = identity && deps.resolveExistingReview
+					? await deps.resolveExistingReview(sessionId, identity.title, identity.reviewId, identity.replace)
+					: undefined;
+				const reconciledBody = reconcileReplacementFiles(result.body, existing?.payload);
+				// Replacement lookup can perform artifact I/O. Recheck immediately before
+				// admitting durable bytes so a queued purge cannot be raced.
+				if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+				const payload = await persistReviewPayload(sessionId, reconciledBody, existing?.reviewId, { enforceSessionQuota: true });
+				let automaticOpen: ReviewPayloadOpenOutcome;
+				try {
+					if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+					await deps.openReview(payload);
+					automaticOpen = { ok: true, status: "opened" };
+				} catch (error) {
+					automaticOpen = openFailure(error);
+				}
+				return reviewPayloadReceipt(payload, automaticOpen);
+			});
+			json(res, 201, receipt);
 		} catch (error) {
 			writeError(res, error);
 		}
@@ -220,13 +287,17 @@ export async function handleReviewPayloadRoute(
 			if (reference.payloadId !== undefined && reference.payloadId !== payloadId) {
 				throw new ReviewPayloadError(409, "REVIEW_PAYLOAD_REFERENCE_MISMATCH", "Review content reference does not match");
 			}
-			const payload = await readReviewPayload(sessionId, payloadId);
-			assertReviewPayloadReference(payload, { toolCallId: reference.toolCallId, reviewId: reference.reviewId, hash: reference.hash });
-			if (reference.reviewId === undefined || reference.hash === undefined) {
-				throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
-			}
-			const workspace = await deps.openReview(payload);
-			json(res, 200, { ok: true, status: "opened", reviewId: payload.reviewId, payloadId: payload.payloadId, workspace });
+			const opened = await deps.operations.run(sessionId, async () => {
+				if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+				const payload = await readReviewPayload(sessionId, payloadId);
+				assertReviewPayloadReference(payload, { toolCallId: reference.toolCallId, reviewId: reference.reviewId, hash: reference.hash });
+				if (reference.reviewId === undefined || reference.hash === undefined) {
+					throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
+				}
+				const workspace = await deps.openReview(payload);
+				return { payload, workspace };
+			});
+			json(res, 200, { ok: true, status: "opened", reviewId: opened.payload.reviewId, payloadId: opened.payload.payloadId, workspace: opened.workspace });
 		} catch (error) {
 			writeError(res, error);
 		}

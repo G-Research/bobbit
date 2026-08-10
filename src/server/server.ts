@@ -108,7 +108,7 @@ import {
 	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
-import { handleReviewPayloadRoute } from "./review-payload-routes.js";
+import { createReviewPayloadSessionCoordinator, handleReviewPayloadRoute, type ReviewPayloadSessionCoordinator } from "./review-payload-routes.js";
 import {
 	MAX_REVIEW_PAYLOAD_REQUEST_BYTES,
 	readReviewPayload,
@@ -582,7 +582,7 @@ import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
-import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
+import { ReviewAnnotationStore, type ReviewAnnotation, type ReviewTombstoneSnapshot } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
@@ -2531,6 +2531,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
+	const reviewPayloadOperations = createReviewPayloadSessionCoordinator();
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
@@ -3817,7 +3818,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4227,17 +4228,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		if (info.reason === "purged") {
 			purgeAuthorSidecar(sessionId);
-			try {
-				await previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
-			} catch (err) {
+			// Install both permanent fences before awaiting either cleanup. This keeps
+			// a stalled request from entering review persistence during preview purge.
+			const reviewPayloadCleanup = reviewPayloadOperations.purge(sessionId, () => removeReviewPayloads(sessionId));
+			const previewCleanup = previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
+			const [previewResult, reviewPayloadResult] = await Promise.allSettled([previewCleanup, reviewPayloadCleanup]);
+			if (previewResult.status === "rejected") {
 				// This listener owns preview-artifact cleanup errors; SessionManager
 				// only awaits the listener contract and must not duplicate this log.
-				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
+				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, previewResult.reason);
 			}
-			try {
-				await removeReviewPayloads(sessionId);
-			} catch (err) {
-				console.error(`[review-payloads] remove failed for ${sessionId}:`, err);
+			if (reviewPayloadResult.status === "rejected") {
+				console.error(`[review-payloads] remove failed for ${sessionId}:`, reviewPayloadResult.reason);
 			}
 		}
 	});
@@ -5160,6 +5162,7 @@ async function handleApiRoute(
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
+	reviewPayloadOperations: ReviewPayloadSessionCoordinator = createReviewPayloadSessionCoordinator(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
 ) {
@@ -5402,14 +5405,18 @@ async function handleApiRoute(
 			contentHash: payload.hash,
 		};
 		// Clear only the exact replay tombstone before the workspace broadcast so
-		// hydration cannot observe an opened tab with stale suppression. Restore it
-		// if the durable workspace commit fails.
-		const priorTombstone = reviewAnnotationStore?.getReviewTombstone(payload.sessionId, payload.reviewId);
-		const priorActiveFileId = reviewAnnotationStore?.getReviewActiveFile(payload.sessionId, payload.reviewId);
-		const activeFileId = priorActiveFileId && payload.files.some((file) => file.fileId === priorActiveFileId)
-			? priorActiveFileId
+		// hydration cannot observe an opened tab with stale suppression. This path
+		// must observe durable clear/restore failures rather than reporting success.
+		let tombstoneSnapshot: ReviewTombstoneSnapshot;
+		try {
+			if (!reviewAnnotationStore) throw new Error("Review annotation store unavailable");
+			tombstoneSnapshot = reviewAnnotationStore.clearReviewTombstoneChecked(payload.sessionId, payload.reviewId);
+		} catch {
+			throw new ReviewPayloadError(500, "REVIEW_PAYLOAD_PERSISTENCE_FAILED", "Review state could not be saved", true);
+		}
+		const activeFileId = tombstoneSnapshot.activeFileId && payload.files.some((file) => file.fileId === tombstoneSnapshot.activeFileId)
+			? tombstoneSnapshot.activeFileId
 			: payload.activeFileId;
-		reviewAnnotationStore?.clearReviewTombstone(payload.sessionId, payload.reviewId);
 		try {
 			const workspace = await openSidePanelWorkspaceTab({
 				sessionManager,
@@ -5428,7 +5435,12 @@ async function handleApiRoute(
 			if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
 			return workspace;
 		} catch (error) {
-			if (priorTombstone) reviewAnnotationStore?.setReviewTombstone(payload.sessionId, payload.reviewId, priorTombstone, priorActiveFileId);
+			try {
+				if (!reviewAnnotationStore) throw new Error("Review annotation store unavailable");
+				reviewAnnotationStore.restoreReviewTombstoneChecked(payload.sessionId, payload.reviewId, tombstoneSnapshot);
+			} catch {
+				throw new ReviewPayloadError(500, "REVIEW_PAYLOAD_PERSISTENCE_FAILED", "Review state could not be restored", true);
+			}
 			throw error;
 		}
 	};
@@ -5436,6 +5448,7 @@ async function handleApiRoute(
 		sessionManager,
 		readBody,
 		openReview: openReviewPayload,
+		operations: reviewPayloadOperations,
 		resolveExistingReview: resolveExistingReviewPayload,
 	})) return;
 
