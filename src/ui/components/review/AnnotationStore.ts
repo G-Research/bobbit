@@ -317,7 +317,7 @@ export function setReviewTombstone(
   ));
 }
 
-/** Clear an exact review tombstone, optionally retiring unowned legacy submitted state for a live open. */
+/** Explicitly clear an exact review tombstone; normal review opens do not call this. */
 export function clearReviewTombstone(
   sessionId: string,
   reviewId: string,

@@ -582,7 +582,7 @@ import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
-import { ReviewAnnotationStore, type ReviewAnnotation, type ReviewTombstoneSnapshot } from "./review-annotation-store.js";
+import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
@@ -5405,51 +5405,37 @@ async function handleApiRoute(
 			payloadId: payload.payloadId,
 			contentHash: payload.hash,
 		};
-		// Clear only the exact replay tombstone before the workspace broadcast so
-		// hydration cannot observe an opened tab with stale suppression. This path
-		// must observe durable clear/restore failures rather than reporting success.
-		let tombstoneSnapshot: ReviewTombstoneSnapshot;
-		try {
-			if (!reviewAnnotationStore) throw new Error("Review annotation store unavailable");
-			tombstoneSnapshot = reviewAnnotationStore.clearReviewTombstoneChecked(payload.sessionId, payload.reviewId);
-		} catch {
-			throw new ReviewPayloadError(500, "REVIEW_PAYLOAD_PERSISTENCE_FAILED", "Review state could not be saved", true);
-		}
-		const activeFileId = tombstoneSnapshot.activeFileId && payload.files.some((file) => file.fileId === tombstoneSnapshot.activeFileId)
-			? tombstoneSnapshot.activeFileId
+		// Tombstones suppress passive replay only when this authoritative primary is
+		// absent. An explicit open publishes the primary without editing annotation
+		// storage, so a workspace failure cannot erase close/submit suppression.
+		// The saved file selection is a read-only hint for a closed review; a live
+		// workspace selection still wins under the workspace lock below.
+		const tombstonedActiveFileId = reviewAnnotationStore?.getReviewActiveFile(payload.sessionId, payload.reviewId);
+		const activeFileId = tombstonedActiveFileId && payload.files.some((file) => file.fileId === tombstonedActiveFileId)
+			? tombstonedActiveFileId
 			: payload.activeFileId;
-		try {
-			const workspace = await openSidePanelWorkspaceTab({
-				sessionManager,
-				readBody,
-				broadcastToSession: _broadcastToSession,
-				packContributionRegistry,
-			}, payload.sessionId, {
-				id: `review:${encodeURIComponent(payload.reviewId)}`,
-				kind: "review",
-				title: `Review: ${payload.title}`,
-				label: `Review: ${payload.title}`,
-				source,
-				state: { activeFileId },
-				updatedAt: Date.now(),
-			}, {
-				focus: true,
-				placeAfterActive: true,
-				// Resolve the current selection while holding the authoritative workspace
-				// lock so a manual Re-open cannot reset live file navigation.
-				preserveActiveFileIds: new Set(payload.files.map((file) => file.fileId)),
-			});
-			if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
-			return workspace;
-		} catch (error) {
-			try {
-				if (!reviewAnnotationStore) throw new Error("Review annotation store unavailable");
-				reviewAnnotationStore.restoreReviewTombstoneChecked(payload.sessionId, payload.reviewId, tombstoneSnapshot);
-			} catch {
-				throw new ReviewPayloadError(500, "REVIEW_PAYLOAD_PERSISTENCE_FAILED", "Review state could not be restored", true);
-			}
-			throw error;
-		}
+		const workspace = await openSidePanelWorkspaceTab({
+			sessionManager,
+			readBody,
+			broadcastToSession: _broadcastToSession,
+			packContributionRegistry,
+		}, payload.sessionId, {
+			id: `review:${encodeURIComponent(payload.reviewId)}`,
+			kind: "review",
+			title: `Review: ${payload.title}`,
+			label: `Review: ${payload.title}`,
+			source,
+			state: { activeFileId },
+			updatedAt: Date.now(),
+		}, {
+			focus: true,
+			placeAfterActive: true,
+			// Resolve the current selection while holding the authoritative workspace
+			// lock so a manual Re-open cannot reset live file navigation.
+			preserveActiveFileIds: new Set(payload.files.map((file) => file.fileId)),
+		});
+		if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+		return workspace;
 	};
 	if (await handleReviewPayloadRoute(url, req, res, {
 		sessionManager,

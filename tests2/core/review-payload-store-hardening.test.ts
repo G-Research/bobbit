@@ -225,51 +225,21 @@ describe("durable review payload store", () => {
 });
 
 
-describe("checked review tombstone transactions", () => {
-	it("fails a checked clear without mutating tombstones and succeeds on retry before workspace creation", () => {
+describe("read-only review tombstone reopen hints", () => {
+	it("reads the saved active file without mutating exact or sibling tombstones when writes are unavailable", () => {
 		const memfs = createMemFs();
-		const stateDir = resolve("/memfs/review-checked-clear");
+		const stateDir = resolve("/memfs/review-read-only-reopen");
 		const store = new ReviewAnnotationStore(stateDir, memfs);
 		store.setReviewTombstone(sessionId, "target", "closed", "file-active");
 		store.setReviewTombstone(sessionId, "sibling", "submitted", "sibling-file");
-		const workspace: string[] = [];
 		const originalWrite = memfs.writeFileSync.bind(memfs);
 		memfs.writeFileSync = (() => { throw new Error("injected persistence failure"); }) as typeof memfs.writeFileSync;
 
-		expect(() => store.clearReviewTombstoneChecked(sessionId, "target")).toThrow("injected persistence failure");
-		memfs.writeFileSync = originalWrite as typeof memfs.writeFileSync;
-		expect(workspace).toEqual([]);
+		expect(store.getReviewActiveFile(sessionId, "target")).toBe("file-active");
 		expect(store.getReviewTombstone(sessionId, "target")).toBe("closed");
 		expect(store.getReviewTombstone(sessionId, "sibling")).toBe("submitted");
-		expect(store.clearReviewTombstoneChecked(sessionId, "target")).toMatchObject({
-			state: "closed",
-			activeFileId: "file-active",
-			changed: true,
-		});
-	});
+		expect(store.getReviewActiveFile(sessionId, "sibling")).toBe("sibling-file");
 
-	it("restores the exact tombstone after workspace failure and surfaces a restore-write failure", () => {
-		const memfs = createMemFs();
-		const stateDir = resolve("/memfs/review-checked-restore");
-		const store = new ReviewAnnotationStore(stateDir, memfs);
-		store.setReviewTombstone(sessionId, "target", "submitted", "file-active");
-		store.setReviewTombstone(sessionId, "sibling", "closed", "sibling-file");
-
-		const snapshot = store.clearReviewTombstoneChecked(sessionId, "target");
-		// The authoritative workspace mutation failed, so no tab was committed.
-		const workspace: string[] = [];
-		store.restoreReviewTombstoneChecked(sessionId, "target", snapshot);
-		expect(workspace).toEqual([]);
-		expect(store.getReviewTombstone(sessionId, "target")).toBe("submitted");
-		expect(store.getReviewActiveFile(sessionId, "target")).toBe("file-active");
-		expect(store.getReviewTombstone(sessionId, "sibling")).toBe("closed");
-
-		const secondSnapshot = store.clearReviewTombstoneChecked(sessionId, "target");
-		const originalWrite = memfs.writeFileSync.bind(memfs);
-		memfs.writeFileSync = (() => { throw new Error("injected restore failure"); }) as typeof memfs.writeFileSync;
-		expect(() => store.restoreReviewTombstoneChecked(sessionId, "target", secondSnapshot)).toThrow("injected restore failure");
 		memfs.writeFileSync = originalWrite as typeof memfs.writeFileSync;
-		expect(workspace).toEqual([]);
-		expect(store.getReviewTombstone(sessionId, "sibling")).toBe("closed");
 	});
 });

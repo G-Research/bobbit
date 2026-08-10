@@ -23,6 +23,7 @@ import {
 	getReviewTombstone,
 	initAnnotationStore,
 	isReviewSubmitted,
+	setReviewTombstone,
 } from "../../src/ui/components/review/AnnotationStore.js";
 
 const SESSION_ID = "review-group-model-session";
@@ -789,8 +790,38 @@ describe("review group decision lifecycle", () => {
 	});
 });
 
-describe("legacy submitted live-open migration", () => {
-	it("keeps an explicit live group and primary tab through fresh annotation hydration and restore", async () => {
+describe("passive replay suppression authority", () => {
+	it("suppresses an exact tombstoned review only after authoritative workspace absence is known", async () => {
+		const sessionId = "exact-tombstone-absent";
+		const group: ReviewGroupModel = {
+			...review("absent-review", "Absent review", [{ fileId: "absent-file", title: "absent.md" }]),
+			source: { kind: "markdown-review", sessionId },
+		};
+		persistReviewGroup(sessionId, group);
+		state.sidePanelWorkspaceBySession[sessionId] = {
+			version: 1,
+			sessionId,
+			revision: 3,
+			tabs: [],
+			activeTabId: "",
+			sizeMode: "split",
+			updatedAt: 3,
+		};
+		state.lastWorkspaceRevisionBySession[sessionId] = 3;
+		vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+		await setReviewTombstone(sessionId, group.reviewId, "closed", group.activeFileId);
+
+		restorePersistedReviewDocuments(sessionId);
+
+		expect(readPersistedReviewGroups(sessionId)).toEqual([]);
+		expect(state.reviewGroupsBySession[sessionId]).toEqual([]);
+		expect(getReviewTombstone(sessionId, group.reviewId)).toBe("closed");
+		await clearReviewTombstone(sessionId, group.reviewId);
+	});
+});
+
+describe("legacy submitted authoritative reopen", () => {
+	it("keeps an explicit primary through fresh annotation hydration without clearing legacy suppression", async () => {
 		const sessionId = "legacy-submitted-live-open";
 		let legacySubmitted = true;
 		let workspace: SidePanelWorkspace = {
@@ -843,8 +874,8 @@ describe("legacy submitted live-open migration", () => {
 		});
 		await vi.waitFor(() => expect(state.sidePanelWorkspaceBySession[sessionId]?.tabs.some((tab) =>
 			tab.id === "review:fresh-review")).toBe(true));
-		expect(requests).toContain(`DELETE /api/sessions/${sessionId}/review/tombstones/fresh-review?clearLegacySubmitted=true`);
-		expect(legacySubmitted).toBe(false);
+		expect(requests.some((request) => request.includes("/review/tombstones/"))).toBe(false);
+		expect(legacySubmitted).toBe(true);
 
 		state.reviewGroupsBySession = {};
 		state.reviewGroups = new Map();
@@ -852,7 +883,7 @@ describe("legacy submitted live-open migration", () => {
 		await initAnnotationStore(sessionId);
 		restorePersistedReviewDocuments(sessionId);
 
-		expect(isReviewSubmitted(sessionId)).toBe(false);
+		expect(isReviewSubmitted(sessionId)).toBe(true);
 		expect(readPersistedReviewGroups(sessionId).map((candidate) => candidate.reviewId)).toEqual([group.reviewId]);
 		expect(state.reviewGroupsBySession[sessionId]?.map((candidate) => candidate.reviewId)).toEqual([group.reviewId]);
 		expect(state.sidePanelWorkspaceBySession[sessionId]?.tabs.map((tab) => tab.id)).toContain("review:fresh-review");

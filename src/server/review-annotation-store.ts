@@ -15,12 +15,6 @@ export interface ReviewAnnotation {
 
 export type ReviewTombstoneState = "submitted" | "closed";
 
-export interface ReviewTombstoneSnapshot {
-	state?: ReviewTombstoneState;
-	activeFileId?: string;
-	changed: boolean;
-}
-
 export interface ReviewAnnotationData {
 	annotations: Record<string, ReviewAnnotation[]>; // keyed by document identity (legacy data uses docTitle)
 	/** Legacy session-wide flag. New callers should use per-review tombstones. */
@@ -218,43 +212,6 @@ export class ReviewAnnotationStore {
 		delete data.activeFileIds[reviewId];
 		if (options.clearLegacySubmitted) data.submitted = false;
 		this.write(sessionId, data);
-	}
-
-	/**
-	 * Durably clear the exact open suppression state or throw. Legacy submitted
-	 * state is claimed by this exact review, matching getReviewTombstone().
-	 */
-	clearReviewTombstoneChecked(sessionId: string, reviewId: string): ReviewTombstoneSnapshot {
-		const data = this.readChecked(sessionId);
-		const state: ReviewTombstoneState | undefined = data.submittedReviewIds.includes(reviewId)
-			? "submitted"
-			: data.closedReviewIds.includes(reviewId)
-				? "closed"
-				: data.submitted ? "submitted" : undefined;
-		const activeFileId = data.activeFileIds[reviewId];
-		const submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
-		const closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
-		const changed = state !== undefined || activeFileId !== undefined;
-		if (!changed) return { state, activeFileId, changed: false };
-		data.submitted = state === "submitted" && data.submitted ? false : data.submitted;
-		data.submittedReviewIds = submittedReviewIds;
-		data.closedReviewIds = closedReviewIds;
-		delete data.activeFileIds[reviewId];
-		this.writeChecked(sessionId, data);
-		return { state, activeFileId, changed: true };
-	}
-
-	/** Restore only this review's captured suppression state, preserving siblings. */
-	restoreReviewTombstoneChecked(sessionId: string, reviewId: string, snapshot: ReviewTombstoneSnapshot): void {
-		if (!snapshot.changed) return;
-		const data = this.readChecked(sessionId);
-		data.submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
-		data.closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
-		if (snapshot.state === "submitted") data.submittedReviewIds.push(reviewId);
-		else if (snapshot.state === "closed") data.closedReviewIds.push(reviewId);
-		if (snapshot.activeFileId) data.activeFileIds[reviewId] = snapshot.activeFileId;
-		else delete data.activeFileIds[reviewId];
-		this.writeChecked(sessionId, data);
 	}
 
 	/**
