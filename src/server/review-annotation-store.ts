@@ -21,6 +21,7 @@ export interface ReviewAnnotationData {
 	submitted: boolean;
 	submittedReviewIds: string[];
 	closedReviewIds: string[];
+	activeFileIds: Record<string, string>;
 }
 
 const emptyData = (): ReviewAnnotationData => ({
@@ -28,11 +29,18 @@ const emptyData = (): ReviewAnnotationData => ({
 	submitted: false,
 	submittedReviewIds: [],
 	closedReviewIds: [],
+	activeFileIds: {},
 });
 
 function stringIds(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return [...new Set(value.filter((id): id is string => typeof id === "string" && id.trim().length > 0))];
+}
+
+function activeFileIds(value: unknown): Record<string, string> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] =>
+		entry[0].trim().length > 0 && typeof entry[1] === "string" && entry[1].trim().length > 0));
 }
 
 /**
@@ -59,6 +67,7 @@ export class ReviewAnnotationStore {
 						submitted: raw.submitted === true,
 						submittedReviewIds: stringIds(raw.submittedReviewIds),
 						closedReviewIds: stringIds(raw.closedReviewIds),
+						activeFileIds: activeFileIds(raw.activeFileIds),
 					};
 				}
 			}
@@ -160,13 +169,19 @@ export class ReviewAnnotationStore {
 		return "submitted";
 	}
 
-	setReviewTombstone(sessionId: string, reviewId: string, state: ReviewTombstoneState): void {
+	setReviewTombstone(sessionId: string, reviewId: string, state: ReviewTombstoneState, activeFileId?: string): void {
 		const data = this.read(sessionId);
 		data.submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
 		data.closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
 		if (state === "submitted") data.submittedReviewIds.push(reviewId);
 		else data.closedReviewIds.push(reviewId);
+		if (activeFileId) data.activeFileIds[reviewId] = activeFileId;
+		else delete data.activeFileIds[reviewId];
 		this.write(sessionId, data);
+	}
+
+	getReviewActiveFile(sessionId: string, reviewId: string): string | undefined {
+		return this.read(sessionId).activeFileIds[reviewId];
 	}
 
 	clearReviewTombstone(
@@ -180,9 +195,11 @@ export class ReviewAnnotationStore {
 		const clearsExact = submittedReviewIds.length !== data.submittedReviewIds.length
 			|| closedReviewIds.length !== data.closedReviewIds.length;
 		const clearsLegacy = options.clearLegacySubmitted === true && data.submitted;
-		if (!clearsExact && !clearsLegacy) return;
+		const clearsActiveFile = Object.prototype.hasOwnProperty.call(data.activeFileIds, reviewId);
+		if (!clearsExact && !clearsLegacy && !clearsActiveFile) return;
 		data.submittedReviewIds = submittedReviewIds;
 		data.closedReviewIds = closedReviewIds;
+		delete data.activeFileIds[reviewId];
 		if (options.clearLegacySubmitted) data.submitted = false;
 		this.write(sessionId, data);
 	}

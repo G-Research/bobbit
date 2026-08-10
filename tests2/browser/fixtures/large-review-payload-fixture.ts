@@ -104,8 +104,12 @@ export function largeReviewPrimaryTab(page: Page) {
 	return page.locator(`.goal-tab-pill[data-panel-tab-kind="review"][data-panel-tab-id="${LARGE_REVIEW_TAB_ID}"]`);
 }
 
+export function largeReviewPane(page: Page) {
+	return page.locator(`.side-panel-pane[data-panel-tab-id="${LARGE_REVIEW_TAB_ID}"] review-pane, .side-panel-workspace review-pane`).last();
+}
+
 export function selectedReviewModel(page: Page): Promise<any> {
-	return page.locator(`.side-panel-pane[data-panel-tab-id="${LARGE_REVIEW_TAB_ID}"] review-pane`).evaluate((pane: any) => ({
+	return largeReviewPane(page).evaluate((pane: any) => ({
 		reviewId: pane.review?.reviewId,
 		title: pane.review?.title,
 		activeFileId: pane.review?.activeFileId,
@@ -122,17 +126,27 @@ export function workspaceReviewSource(page: Page, sessionId: string): Promise<an
 	}, { owner: sessionId, tabId: LARGE_REVIEW_TAB_ID });
 }
 
-export function parseLargeReviewReceipt(gateway: any, sessionId: string): ReviewReceiptV2Fixture {
+function findLargeReviewReceipt(gateway: any, sessionId: string): ReviewReceiptV2Fixture | undefined {
 	const agent = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
-	if (!Array.isArray(agent?.conversationMessages)) throw new Error("large review journey requires the in-process mock agent transcript");
+	if (!Array.isArray(agent?.conversationMessages)) return undefined;
 	const calls = agent.conversationMessages.flatMap((message: any) => Array.isArray(message?.content) ? message.content : [])
 		.filter((block: any) => block?.type === "toolCall" && block?.name === "review_open" && block?.arguments?.title === LARGE_REVIEW_TITLE);
 	const call = calls.at(-1);
-	if (!call?.id) throw new Error(`mock trigger ${LARGE_REVIEW_TRIGGER} did not emit the expected review_open call`);
+	if (!call?.id) return undefined;
 	const result = agent.conversationMessages.findLast((message: any) => message?.role === "toolResult" && message?.toolCallId === call.id);
 	const text = result?.content?.find((block: any) => block?.type === "text")?.text;
-	if (typeof text !== "string") throw new Error("large review tool result did not contain a text receipt");
+	if (typeof text !== "string") return undefined;
 	return JSON.parse(text) as ReviewReceiptV2Fixture;
+}
+
+export async function waitForLargeReviewReceipt(gateway: any, sessionId: string, timeoutMs = 30_000): Promise<ReviewReceiptV2Fixture> {
+	const deadline = Date.now() + timeoutMs;
+	do {
+		const receipt = findLargeReviewReceipt(gateway, sessionId);
+		if (receipt) return receipt;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	} while (Date.now() < deadline);
+	throw new Error(`mock trigger ${LARGE_REVIEW_TRIGGER} did not produce its correlated review_open receipt within ${timeoutMs}ms`);
 }
 
 export function assertBoundedReceipt(receipt: ReviewReceiptV2Fixture, files = largeReviewFiles()): void {
