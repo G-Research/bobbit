@@ -18,10 +18,14 @@ export const MAX_REVIEW_FILES = 64;
 // Keep the complete JSON receipt comfortably below generic 32 KiB egress truncation.
 export const MAX_REVIEW_METADATA_BYTES = 24 * 1024;
 export const MAX_REVIEW_TITLE_BYTES = 320;
+// Deployment-boundary mirror of src/shared/review-artifact-identity.ts. The
+// extension is copied outside the compiled source tree, so core tests pin these
+// values and semantics against the shared browser/server contract.
 export const MAX_REVIEW_TOOL_CALL_ID_BYTES = 200;
+export const MAX_REVIEW_ID_BYTES = 300;
+export const MAX_REVIEW_FILE_ID_BYTES = 200;
 
-const MAX_IDENTITY_BYTES = 300;
-const INVALID_IDENTITY_CHARACTERS = /[\x00-\x1f\x7f\\/]/;
+const INVALID_IDENTITY_CHARACTERS = /[\x00-\x1f\x7f]/;
 const INVALID_TITLE_CHARACTERS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 
 const commonOpenProperties = {
@@ -184,7 +188,16 @@ function invalidResult(toolCallId: string) {
 }
 
 function validIdentity(value: string, maxBytes: number): boolean {
-	return value.length > 0 && utf8Bytes(value) <= maxBytes && !INVALID_IDENTITY_CHARACTERS.test(value);
+	if (value.length === 0 || utf8Bytes(value) > maxBytes || INVALID_IDENTITY_CHARACTERS.test(value)) return false;
+	for (let index = 0; index < value.length; index += 1) {
+		const unit = value.charCodeAt(index);
+		if (unit >= 0xd800 && unit <= 0xdbff) {
+			const next = value.charCodeAt(index + 1);
+			if (next < 0xdc00 || next > 0xdfff) return false;
+			index += 1;
+		} else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+	}
+	return true;
 }
 
 function validTitle(value: string): boolean {
@@ -275,11 +288,11 @@ function sanitizeReceipt(
 		|| typeof value.hash !== "string"
 		|| !/^[a-f0-9]{64}$/.test(value.hash)
 		|| typeof value.reviewId !== "string"
-		|| !validIdentity(value.reviewId, MAX_IDENTITY_BYTES)
+		|| !validIdentity(value.reviewId, MAX_REVIEW_ID_BYTES)
 		|| (!expected.replace && value.reviewId !== expected.reviewId)
 		|| value.title !== expected.title
 		|| typeof value.activeFileId !== "string"
-		|| !validIdentity(value.activeFileId, MAX_IDENTITY_BYTES)
+		|| !validIdentity(value.activeFileId, MAX_REVIEW_FILE_ID_BYTES)
 		|| value.replace !== expected.replace
 		|| value.totalBytes !== expected.totalBytes
 		|| !Array.isArray(value.files)
@@ -298,7 +311,7 @@ function sanitizeReceipt(
 		const file = expected.files[index];
 		if (!isRecord(received)
 			|| typeof received.fileId !== "string"
-			|| !validIdentity(received.fileId, MAX_IDENTITY_BYTES)
+			|| !validIdentity(received.fileId, MAX_REVIEW_FILE_ID_BYTES)
 			|| seenFileIds.has(received.fileId)
 			|| (!expected.replace && received.fileId !== file.fileId)
 			|| received.title !== file.title

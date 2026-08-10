@@ -149,6 +149,24 @@ describe("review open receipt coordination", () => {
 			activeFileId: "file-a",
 		})).toBeNull();
 		expect(parseReviewOpenReceipt({ ...receipt(), totalBytes: 10 * 1024 * 1024 + 1 })).toBeNull();
+
+		const reviewId = "界".repeat(100);
+		const toolCallId = `${"界".repeat(66)}é`;
+		const fileId = `${"🙂".repeat(49)}界x`;
+		const exact = parseReviewOpenReceipt(receipt({
+			toolCallId,
+			reviewId,
+			files: [{ fileId, title: "Exact", bytes: 8 }],
+			activeFileId: fileId,
+		}), toolCallId);
+		expect(exact).toMatchObject({ toolCallId, reviewId, activeFileId: fileId });
+		expect(parseReviewOpenReceipt({ ...exact, reviewId: `${reviewId}x` }, toolCallId)).toBeNull();
+		expect(parseReviewOpenReceipt({ ...exact, toolCallId: `${toolCallId}x` }, `${toolCallId}x`)).toBeNull();
+		expect(parseReviewOpenReceipt({
+			...exact,
+			files: [{ ...exact!.files[0], fileId: `${fileId}x` }],
+			activeFileId: `${fileId}x`,
+		}, toolCallId)).toBeNull();
 	});
 
 	it("extracts one exactly correlated receipt without treating passive render as an open", () => {

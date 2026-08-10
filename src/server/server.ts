@@ -108,6 +108,7 @@ import {
 	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
+import { reviewArtifactTabId } from "../shared/review-artifact-identity.js";
 import { createReviewPayloadSessionCoordinator, handleReviewPayloadRoute, type ReviewPayloadSessionCoordinator } from "./review-payload-routes.js";
 import {
 	MAX_REVIEW_PAYLOAD_REQUEST_BYTES,
@@ -5419,13 +5420,15 @@ async function handleApiRoute(
 			? tombstoneSnapshot.activeFileId
 			: payload.activeFileId;
 		try {
+			const tabId = reviewArtifactTabId(payload.reviewId);
+			if (!tabId) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Review identity is invalid");
 			const workspace = await openSidePanelWorkspaceTab({
 				sessionManager,
 				readBody,
 				broadcastToSession: _broadcastToSession,
 				packContributionRegistry,
 			}, payload.sessionId, {
-				id: `review:${encodeURIComponent(payload.reviewId)}`,
+				id: tabId,
 				kind: "review",
 				title: `Review: ${payload.title}`,
 				label: `Review: ${payload.title}`,

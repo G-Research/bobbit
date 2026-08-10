@@ -12,8 +12,16 @@ import reviewExtension, {
 	MAX_REVIEW_FILES,
 	MAX_REVIEW_MARKDOWN_BYTES,
 	MAX_REVIEW_TITLE_BYTES,
+	MAX_REVIEW_TOOL_CALL_ID_BYTES,
+	MAX_REVIEW_ID_BYTES,
+	MAX_REVIEW_FILE_ID_BYTES,
 	type ReviewFileIo,
 } from "../../defaults/tools/review/extension.ts";
+import {
+	REVIEW_ARTIFACT_FILE_ID_MAX_BYTES,
+	REVIEW_ARTIFACT_REVIEW_ID_MAX_BYTES,
+	REVIEW_ARTIFACT_TOOL_CALL_ID_MAX_BYTES,
+} from "../../src/shared/review-artifact-identity.js";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 type RegisteredTool = {
@@ -189,6 +197,21 @@ function assertCanonicalReceipt(result: any, expected: {
 }
 
 describe("review_open durable receipt contract", () => {
+	it("pins the copied extension identity contract and applies UTF-8 max/+1 before upload", async () => {
+		assert.equal(MAX_REVIEW_TOOL_CALL_ID_BYTES, REVIEW_ARTIFACT_TOOL_CALL_ID_MAX_BYTES);
+		assert.equal(MAX_REVIEW_ID_BYTES, REVIEW_ARTIFACT_REVIEW_ID_MAX_BYTES);
+		assert.equal(MAX_REVIEW_FILE_ID_BYTES, REVIEW_ARTIFACT_FILE_ID_MAX_BYTES);
+		const exactToolCallId = `${"界".repeat(66)}é`;
+		assert.equal(Buffer.byteLength(exactToolCallId, "utf8"), REVIEW_ARTIFACT_TOOL_CALL_ID_MAX_BYTES);
+		await executeSuccess({ markdown: "exact identity" }, exactToolCallId);
+		assert.equal(uploads.at(-1)?.body.toolCallId, exactToolCallId);
+
+		uploads = [];
+		const failure = await execute({ markdown: "must not persist" }, `${exactToolCallId}x`);
+		assert.equal(JSON.parse(textOf(failure)).error.code, "REVIEW_PAYLOAD_INVALID");
+		assert.equal(uploads.length, 0);
+	});
+
 	it("publishes a closed schema with exactly one source mode and bounded file count", () => {
 		const schema = reviewOpen.parameters;
 		const valid = [
