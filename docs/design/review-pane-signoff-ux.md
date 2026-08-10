@@ -79,7 +79,7 @@ Approval with no comments should still produce a concise positive signal for arb
 
 The widget is a launcher, not a reading surface.
 
-When the user clicks **View content** on a pending sign-off:
+When the user clicks **Start Review** on a pending sign-off:
 
 1. Fetch the submitted gate signal content.
 2. Open or focus a one-file review titled with goal, gate, and sign-off step context.

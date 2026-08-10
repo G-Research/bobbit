@@ -180,22 +180,30 @@ The routing remains shared:
 - `verification-signoff-markdown` decisions post the same composed feedback to the exact goal, gate, signal, and step; an uncommented approval may omit feedback; and
 - the reserved PR source still rejects submission because that route is not implemented.
 
-A successful route closes only the decided review. Route failure leaves the review available for retry.
+Decision submission is coalesced by the exact `(sessionId, reviewId)` key. The first accepted approve or reject owns the pending external effect; repeated or conflicting clicks return that same promise and outcome, so one review-wide feedback message or sign-off request is sent at most once. Other review keys remain independent.
+
+The lifecycle checks for supersession before the agent prompt or sign-off request, then checks again before each destructive local effect. A close or explicit live reopen that becomes newer before the external effect suppresses the decision entirely. If replacement content arrives after the effect, exact snapshot matching prevents the old completion from tombstoning or removing the replacement.
+
+The outcome reports the exact session, review, submitted state, and final comment accepted by the first decision. The UI discards a final-comment draft only when that outcome says submission completed, no replacement with the same identity exists, and the current draft still equals the submitted draft. A failed or superseded decision, a replacement, or a draft edited while submission was pending therefore keeps its draft. A successful route closes only the decided review; an external routing failure leaves it available for retry.
 
 ## Persistence, session ownership, replay, and cleanup
 
 Review groups persist per owning session in browser storage; annotations and exact replay tombstones persist through the server-backed review annotation store. The owner key is never inferred from whichever session happens to be visible when an asynchronous tool result finishes. This separation lets sessions continue producing durable reviews in the background without navigating the user away or overwriting the foreground review model.
 
-### Live owner-session events
+### Exact lifecycle ordering
 
-An explicit live `review_open` always mutates its emitting session:
+Lifecycle effects are serialized by exact `(sessionId, reviewId)` key. A newer intent increments that key's generation, waits for the previous effect to settle, and can test whether it still owns the key before each irreversible step. A failure does not poison the queue, and unrelated reviews run independently. This ordering makes the latest explicit live intent authoritative without globally blocking review work.
 
-1. Persist the complete group and selected file for that owner.
-2. Create or focus exactly one primary review tab in that owner's server-backed side-panel workspace.
-3. Clear only that review identity's replay tombstone.
-4. Hydrate and select the review immediately only when the owner is the visible session.
+An explicit live `review_open` first persists the complete group and selected file synchronously for its emitting session. Its ordered effect then:
 
-For a background owner, steps 1–3 still happen, but the selected session and foreground `state.review*` model remain unchanged. Switching to that owner later hydrates its already-open reviews and stored `activeFileId`; reload and reconnect use the same persistence plus workspace authority. Ownership is captured before lazy module loading, so a session switch during an in-flight open cannot retarget the result.
+1. clears the target review's replay tombstone and the unowned legacy submitted flag;
+2. stops if a newer exact-key intent has superseded it;
+3. creates or focuses the exact primary tab in that owner's server-backed workspace; and
+4. at completion time, hydrates and selects the review only if that owner is now visible and the exact primary tab is authoritative.
+
+Completion-time hydration matters when the user switches sessions while the tombstone or workspace request is in flight: the newly visible owner receives the requested review without retargeting the operation. A background owner still receives a focused workspace tab, but the selected session, foreground review model, and foreground user-selection guard remain unchanged. A focused open clears a selection guard only when the guard belongs to the same owner session, so delayed foreground workspace responses cannot undo the user's foreground choice.
+
+Close, dismiss, submission cleanup, and live reopen share the same exact-key sequence. Workspace close retries one revision conflict once, using the newer authoritative revision only when the tab still exists. If a live reopen supersedes an in-flight close, stale cleanup stops and the explicit open reasserts the primary after any already-dispatched close settles; the last live intent therefore wins. If an unsuperseded cleanup still cannot close the primary after reconciliation, it rejects with an actionable retry-or-reload error instead of reporting silent success. The review content may already be removed at that point, while an obsolete failure from a superseded intent is suppressed.
 
 A live `review_close` follows the same owner rule. Its public form accepts an optional review title: every matching whole review and all its files close, while omitting the title closes all reviews in the calling session. Duplicate titles therefore close together; callers that need later selective close should use distinct titles. Internally, canonical results may be normalized to an exact `reviewId`, which takes precedence over title matching without exposing identity-based close as a public tool input. Either form is scoped to the owner session; when that owner is in the background, it never changes the foreground or any sibling session.
 
@@ -203,22 +211,26 @@ A live `review_close` follows the same owner rule. Its public form accepts an op
 
 Historical tool-result replay is content history, not an instruction to mutate review or workspace state. Hydration restores only persisted groups whose authoritative primary tabs remain open and whose exact identities are not tombstoned. This prevents reload or reconnect from resurrecting a submitted, dismissed, tool-closed, or primary-tab-closed review.
 
-Tombstones are per `(sessionId, reviewId)`, with separate `submitted` and `closed` states. A Markdown decision writes `submitted`; close, dismiss, and `review_close` write `closed`. Exact IDs prevent one completed review from suppressing a sibling or a duplicate-title review. The legacy session-wide submitted flag is read only as a one-review migration fallback and is not written by grouped-review decisions.
+Tombstones are per `(sessionId, reviewId)`, with separate `submitted` and `closed` states. A Markdown decision writes `submitted`; close, dismiss, and `review_close` write `closed`. Exact IDs prevent one completed review from suppressing a sibling or a duplicate-title review. The legacy session-wide submitted boolean is read only as a one-review migration fallback and is never written by grouped-review decisions.
 
-A fresh explicit live open is allowed to reopen a review. It clears only the canonical surviving review identity's tombstone before opening the primary workspace tab; historical replay never clears it. The workspace reconciliation path also reasserts that open after an already-dispatched stale close settles, so live reopen wins the race.
+A fresh explicit live open is allowed to reopen its exact review. It clears that target's exact tombstone and retires the unowned session-wide legacy submitted boolean, including when annotation hydration was already in flight. Other exact tombstones remain intact, so migration cannot revive submitted or closed siblings. Historical replay clears neither form of suppression.
 
 ### Cleanup boundary
 
-Closing or dismissing a primary asks once before discarding the aggregate inline comments plus that review's non-empty final draft. Cancelling preserves the review, annotations, active file, and draft. Confirming cleanup, or successfully submitting a decision:
+Inline annotations are owned by stable file identity. A title-keyed annotation from the legacy one-document model is considered only when that title identifies exactly one file in the review; a duplicate-title match is rejected as ambiguous rather than assigned to the first file. Exact and migrated annotations are deduplicated before review-wide feedback is composed. Cleanup removes a legacy title bucket only after no sibling review owns that title, including when the closing review itself repeats it.
+
+Final comments have one shared in-memory owner per `(sessionId, reviewId)`, outside any individual pane instance. Desktop and eager mobile panes, responsive remounts, and primary-tab switches therefore see the same exact draft without letting one review overwrite another. The draft remains intentionally reload-ephemeral.
+
+Closing or dismissing a primary asks once before discarding the target review's aggregate inline comments plus non-empty final draft. The count and confirmation are resolved from the tab's exact owner even when another primary is selected. Cancelling preserves that review, annotations, active file, and draft. Confirming cleanup, or successfully submitting a decision:
 
 - removes only that review group from owner-session persistence and the visible model;
 - closes only primary workspace tabs that resolve to that review identity;
 - clears annotations keyed by each current stable file ID and by the review ID;
-- clears a legacy title-keyed annotation bucket only when the title is unambiguous and unused by a sibling review;
+- clears an unowned legacy title-keyed annotation bucket;
 - flushes pending annotation writes; and
-- discards only that review's in-memory final-comment draft.
+- discards only that exact review's in-memory final-comment draft.
 
-Other reviews, their workspace tabs, active files, annotations, and drafts remain intact. Verification sign-off success also refreshes the relevant gate status. Final-comment drafts are intentionally pane-local rather than reload-persistent, so submit before leaving the page when the final comment is the only rejection feedback.
+Other reviews, their workspace tabs, active files, annotations, and drafts remain intact. Verification sign-off success also refreshes the relevant gate status. Submit before leaving the page when the final comment is the only rejection feedback.
 
 ## Responsive tabs and accessibility
 
@@ -229,6 +241,14 @@ The overflow menu is a sibling of the clipped row and uses the native Popover AP
 Primary workspace tabs use a shrinking, ellipsized label next to a fixed-size close target inside an overflow-contained pill. The close target therefore stays visually and interactively inside long-title tabs at narrow widths instead of being pushed beyond the tab geometry.
 
 ## Security and Markdown rendering
+
+### Authenticated review controls
+
+Live `review_open` and `review_close` results are control messages, not ordinary chat content. The session adapter records single-use provenance when the matching review tool execution starts: exact tool-call ID, exact review action, and a bounded timestamp. Provenance survives `tool_execution_end` because the persisted result can arrive afterward, but stale entries expire.
+
+A control is accepted only from a protocol-typed tool-result envelope, correlated to that recorded call ID, containing exactly one review action that matches the recorded tool. Authorization is consumed before the first asynchronous mutation, so concurrent delivery or replay cannot reuse it. Missing, unrelated, stale, mismatched, multiply actionable, historical, or ordinary text output fails closed. This boundary prevents JSON resembling `review_close` in another tool's output from mutating either foreground or background review state.
+
+### Markdown content
 
 Review Markdown is untrusted because it can come from agents, gate submissions, or future external sources. The renderer uses an isolated Marked instance whose raw-HTML token renderer escapes only tokens the Markdown parser classified as HTML. This token-aware boundary replaces regex protection: Marked's normal code renderers escape inline, fenced, indented, nested-list, and blockquote code exactly once, so a genuine `<` remains the literal glyph instead of becoming visible `&lt;` text. Raw HTML outside code remains inert text.
 
@@ -247,10 +267,11 @@ Review-source browser payloads are normalized before opening, and only supported
 | Concern | Primary implementation | Focused coverage |
 |---|---|---|
 | Tool schema, validation, file loading, and canonical payload | `defaults/tools/review/extension.ts` and the review tool definition under `defaults/tools/review/` | `tests2/core/review-extension.test.ts` |
-| Group persistence, identity reconciliation, owner-session hydration, decisions, tombstones, and cleanup | `src/app/review-sources.ts`, with live tool-result ownership in `src/app/remote-agent.ts` | `tests2/dom/review-group-model.test.ts`, `tests2/dom/review-tool-active-guard.test.ts`, and grouped review DOM tests |
-| Primary workspace authority and review/file selection | side-panel workspace, preview-panel, and app render modules under `src/app/` | side-panel workspace normalization tests and grouped review DOM/browser coverage |
-| Secondary tabs, measured overflow, accessibility, and decision UI | review components and styles under `src/ui/components/review/` | `tests2/dom/review-pane-groups.test.ts` and the grouped review browser fixture |
-| Annotation persistence and exact tombstones | client and server review annotation stores | grouped review lifecycle tests and review annotation API integration tests |
+| Group persistence, exact-key lifecycle ordering, decision coalescing, tombstones, and cleanup | `src/app/review-sources.ts` | `tests2/dom/review-group-model.test.ts` |
+| Live control provenance and owner-session isolation | `src/app/remote-agent.ts` | `tests2/dom/review-tool-active-guard.test.ts` |
+| Primary workspace authority, background focus guards, and review/file selection | side-panel workspace and app render modules under `src/app/` | `tests2/dom/side-panel-workspace-review-normalize.test.ts` and grouped review DOM/browser coverage |
+| Secondary tabs, shared draft ownership, measured overflow, accessibility, and decision UI | review components and styles under `src/ui/components/review/` | `tests2/dom/review-pane-groups.test.ts` and the grouped review browser fixture |
+| Annotation migration, persistence, and exact tombstones | client and server review annotation stores | grouped review lifecycle tests and review annotation API integration tests |
 | Token-aware HTML handling and sanitizer policy | `src/ui/components/review/ReviewDocument.ts` | `tests2/dom/review-document-sanitize.test.ts` |
 | End-to-end multi-review and background-session lifecycle | shared review surface plus gateway/session workspace paths | `tests2/browser/journeys/review-groups.journey.spec.ts` |
 
