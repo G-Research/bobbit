@@ -179,7 +179,7 @@ describe("bobbit_read — bounded gate pages", () => {
 		["summary view", "summary"],
 		["full view", "full"],
 	] as const)("honors limit=1 for %s and retains canonical paging plus legacy gate fields", async (_label, view) => {
-		const calls = stubFetch(gateEndpointFixture);
+		const calls = stubFetch((url) => gateEndpointFixture(url));
 		const params: Record<string, unknown> = { operation: "list_gates", goalId: "goal-gates", limit: 1 };
 		if (view !== undefined) params.view = view;
 
@@ -207,7 +207,7 @@ describe("bobbit_read — bounded gate pages", () => {
 	});
 
 	it("supports non-overlapping offset continuation through a terminal page", async () => {
-		const calls = stubFetch(gateEndpointFixture);
+		const calls = stubFetch((url) => gateEndpointFixture(url));
 		const first = await read({ operation: "list_gates", goalId: "goal-gates", limit: 1 });
 		const second = await read({ operation: "list_gates", goalId: "goal-gates", limit: 1, offset: first.pagination.nextOffset });
 		const terminal = await read({ operation: "list_gates", goalId: "goal-gates", limit: 1, offset: second.pagination.nextOffset });
@@ -223,7 +223,7 @@ describe("bobbit_read — bounded gate pages", () => {
 	});
 
 	it.each(["cursor", "after"] as const)("translates numeric %s continuation into REST offset paging", async (cursorParam) => {
-		const calls = stubFetch(gateEndpointFixture);
+		const calls = stubFetch((url) => gateEndpointFixture(url));
 		const first = await read({ operation: "list_gates", goalId: "goal-gates", limit: 1 });
 		const second = await read({
 			operation: "list_gates",
@@ -258,7 +258,7 @@ describe("bobbit_read — bounded gate pages", () => {
 	});
 
 	it("gives cursor precedence over after and offset", async () => {
-		const calls = stubFetch(gateEndpointFixture);
+		const calls = stubFetch((url) => gateEndpointFixture(url));
 
 		const data = await read({
 			operation: "list_gates",
