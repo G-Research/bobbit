@@ -15,6 +15,12 @@ export interface ReviewAnnotation {
 
 export type ReviewTombstoneState = "submitted" | "closed";
 
+export interface ReviewTombstoneSnapshot {
+	state?: ReviewTombstoneState;
+	activeFileId?: string;
+	changed: boolean;
+}
+
 export interface ReviewAnnotationData {
 	annotations: Record<string, ReviewAnnotation[]>; // keyed by document identity (legacy data uses docTitle)
 	/** Legacy session-wide flag. New callers should use per-review tombstones. */
@@ -54,33 +60,43 @@ export class ReviewAnnotationStore {
 		return path.join(this.stateDir, `review-annotations-${sessionId}.json`);
 	}
 
+	private parse(raw: unknown): ReviewAnnotationData {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid review annotation data");
+		const value = raw as Record<string, unknown>;
+		return {
+			annotations: value.annotations && typeof value.annotations === "object" && !Array.isArray(value.annotations)
+				? value.annotations as Record<string, ReviewAnnotation[]>
+				: {},
+			submitted: value.submitted === true,
+			submittedReviewIds: stringIds(value.submittedReviewIds),
+			closedReviewIds: stringIds(value.closedReviewIds),
+			activeFileIds: activeFileIds(value.activeFileIds),
+		};
+	}
+
+	private readChecked(sessionId: string): ReviewAnnotationData {
+		const fp = this.filePath(sessionId);
+		if (!this.fs.existsSync(fp)) return emptyData();
+		return this.parse(JSON.parse(this.fs.readFileSync(fp, "utf-8")));
+	}
+
 	private read(sessionId: string): ReviewAnnotationData {
 		try {
-			const fp = this.filePath(sessionId);
-			if (this.fs.existsSync(fp)) {
-				const raw = JSON.parse(this.fs.readFileSync(fp, "utf-8"));
-				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-					return {
-						annotations: raw.annotations && typeof raw.annotations === "object" && !Array.isArray(raw.annotations)
-							? raw.annotations
-							: {},
-						submitted: raw.submitted === true,
-						submittedReviewIds: stringIds(raw.submittedReviewIds),
-						closedReviewIds: stringIds(raw.closedReviewIds),
-						activeFileIds: activeFileIds(raw.activeFileIds),
-					};
-				}
-			}
+			return this.readChecked(sessionId);
 		} catch (err) {
 			console.error("[review-annotation-store] Failed to read:", err);
+			return emptyData();
 		}
-		return emptyData();
+	}
+
+	private writeChecked(sessionId: string, data: ReviewAnnotationData): void {
+		if (!this.fs.existsSync(this.stateDir)) this.fs.mkdirSync(this.stateDir, { recursive: true });
+		this.fs.writeFileSync(this.filePath(sessionId), JSON.stringify(data, null, 2), "utf-8");
 	}
 
 	private write(sessionId: string, data: ReviewAnnotationData): void {
 		try {
-			if (!this.fs.existsSync(this.stateDir)) this.fs.mkdirSync(this.stateDir, { recursive: true });
-			this.fs.writeFileSync(this.filePath(sessionId), JSON.stringify(data, null, 2), "utf-8");
+			this.writeChecked(sessionId, data);
 		} catch (err) {
 			console.error("[review-annotation-store] Failed to write:", err);
 		}
@@ -202,6 +218,43 @@ export class ReviewAnnotationStore {
 		delete data.activeFileIds[reviewId];
 		if (options.clearLegacySubmitted) data.submitted = false;
 		this.write(sessionId, data);
+	}
+
+	/**
+	 * Durably clear the exact open suppression state or throw. Legacy submitted
+	 * state is claimed by this exact review, matching getReviewTombstone().
+	 */
+	clearReviewTombstoneChecked(sessionId: string, reviewId: string): ReviewTombstoneSnapshot {
+		const data = this.readChecked(sessionId);
+		const state: ReviewTombstoneState | undefined = data.submittedReviewIds.includes(reviewId)
+			? "submitted"
+			: data.closedReviewIds.includes(reviewId)
+				? "closed"
+				: data.submitted ? "submitted" : undefined;
+		const activeFileId = data.activeFileIds[reviewId];
+		const submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
+		const closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
+		const changed = state !== undefined || activeFileId !== undefined;
+		if (!changed) return { state, activeFileId, changed: false };
+		data.submitted = state === "submitted" && data.submitted ? false : data.submitted;
+		data.submittedReviewIds = submittedReviewIds;
+		data.closedReviewIds = closedReviewIds;
+		delete data.activeFileIds[reviewId];
+		this.writeChecked(sessionId, data);
+		return { state, activeFileId, changed: true };
+	}
+
+	/** Restore only this review's captured suppression state, preserving siblings. */
+	restoreReviewTombstoneChecked(sessionId: string, reviewId: string, snapshot: ReviewTombstoneSnapshot): void {
+		if (!snapshot.changed) return;
+		const data = this.readChecked(sessionId);
+		data.submittedReviewIds = data.submittedReviewIds.filter((id) => id !== reviewId);
+		data.closedReviewIds = data.closedReviewIds.filter((id) => id !== reviewId);
+		if (snapshot.state === "submitted") data.submittedReviewIds.push(reviewId);
+		else if (snapshot.state === "closed") data.closedReviewIds.push(reviewId);
+		if (snapshot.activeFileId) data.activeFileIds[reviewId] = snapshot.activeFileId;
+		else delete data.activeFileIds[reviewId];
+		this.writeChecked(sessionId, data);
 	}
 
 	/**
