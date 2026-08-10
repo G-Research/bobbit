@@ -73,7 +73,7 @@ export interface ReviewPayloadRouteDeps {
 		title: string,
 		incomingReviewId: string,
 		replace: boolean,
-	) => Promise<{ reviewId: string; payload?: CanonicalReviewPayload }>;
+	) => Promise<{ reviewId: string; payload?: CanonicalReviewPayload; activeFileId?: string }>;
 }
 
 type LimitedBodyResult = { ok: true; body: unknown } | { ok: false; tooLarge: boolean };
@@ -169,7 +169,7 @@ function uploadReviewIdentity(raw: unknown): { title: string; reviewId: string; 
 		: null;
 }
 
-function reconcileReplacementFiles(raw: unknown, existing: CanonicalReviewPayload | undefined): unknown {
+function reconcileReplacementFiles(raw: unknown, existing: CanonicalReviewPayload | undefined, authoritativeActiveFileId?: string): unknown {
 	if (!existing || !raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
 	const root = raw as Record<string, unknown>;
 	if (!root.review || typeof root.review !== "object" || Array.isArray(root.review)) return raw;
@@ -192,7 +192,9 @@ function reconcileReplacementFiles(raw: unknown, existing: CanonicalReviewPayloa
 	const retainedIds = new Set(reconciled.flatMap((file) => file && typeof file === "object" && !Array.isArray(file) && typeof (file as Record<string, unknown>).fileId === "string"
 		? [(file as Record<string, unknown>).fileId as string]
 		: []));
-	let activeFileId = retainedIds.has(existing.activeFileId) ? existing.activeFileId : undefined;
+	let activeFileId = authoritativeActiveFileId && retainedIds.has(authoritativeActiveFileId)
+		? authoritativeActiveFileId
+		: retainedIds.has(existing.activeFileId) ? existing.activeFileId : undefined;
 	if (!activeFileId) {
 		const incomingActiveIndex = review.files.findIndex((file) => file && typeof file === "object" && !Array.isArray(file) && (file as Record<string, unknown>).fileId === incomingActiveId);
 		const active = incomingActiveIndex >= 0 ? reconciled[incomingActiveIndex] : undefined;
@@ -232,7 +234,7 @@ export async function handleReviewPayloadRoute(
 				const existing = identity && deps.resolveExistingReview
 					? await deps.resolveExistingReview(sessionId, identity.title, identity.reviewId, identity.replace)
 					: undefined;
-				const reconciledBody = reconcileReplacementFiles(result.body, existing?.payload);
+				const reconciledBody = reconcileReplacementFiles(result.body, existing?.payload, existing?.activeFileId);
 				// Replacement lookup can perform artifact I/O. Recheck immediately before
 				// admitting durable bytes so a queued purge cannot be raced.
 				if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
@@ -261,12 +263,16 @@ export async function handleReviewPayloadRoute(
 		if (!sessionId || !payloadId) { writeError(res, new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Invalid review content reference")); return true; }
 		try {
 			if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+			const reference = {
+				toolCallId: url.searchParams.get("toolCallId"),
+				reviewId: url.searchParams.get("reviewId"),
+				hash: url.searchParams.get("hash"),
+			};
+			if (!reference.toolCallId || !reference.reviewId || !reference.hash) {
+				throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
+			}
 			const payload = await readReviewPayload(sessionId, payloadId);
-			assertReviewPayloadReference(payload, {
-				toolCallId: url.searchParams.get("toolCallId") ?? undefined,
-				reviewId: url.searchParams.has("reviewId") ? url.searchParams.get("reviewId") : undefined,
-				hash: url.searchParams.has("hash") ? url.searchParams.get("hash") : undefined,
-			});
+			assertReviewPayloadReference(payload, reference);
 			json(res, 200, payload);
 		} catch (error) {
 			writeError(res, error);
@@ -284,16 +290,21 @@ export async function handleReviewPayloadRoute(
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object" || Array.isArray(body)) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Invalid review open request");
 			const reference = body as Record<string, unknown>;
-			if (reference.payloadId !== undefined && reference.payloadId !== payloadId) {
+			if (typeof reference.payloadId !== "string" || !reference.payloadId) {
+				throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
+			}
+			if (reference.payloadId !== payloadId) {
 				throw new ReviewPayloadError(409, "REVIEW_PAYLOAD_REFERENCE_MISMATCH", "Review content reference does not match");
+			}
+			if (typeof reference.toolCallId !== "string" || !reference.toolCallId
+				|| typeof reference.reviewId !== "string" || !reference.reviewId
+				|| typeof reference.hash !== "string" || !reference.hash) {
+				throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
 			}
 			const opened = await deps.operations.run(sessionId, async () => {
 				if (!hasSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
 				const payload = await readReviewPayload(sessionId, payloadId);
 				assertReviewPayloadReference(payload, { toolCallId: reference.toolCallId, reviewId: reference.reviewId, hash: reference.hash });
-				if (reference.reviewId === undefined || reference.hash === undefined) {
-					throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
-				}
 				const workspace = await deps.openReview(payload);
 				return { payload, workspace };
 			});

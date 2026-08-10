@@ -367,10 +367,13 @@ export async function readReviewPayload(sessionId: string, payloadId: string): P
 	}
 }
 
-export function assertReviewPayloadReference(payload: CanonicalReviewPayload, reference: { toolCallId?: unknown; reviewId?: unknown; hash?: unknown }): void {
-	if (reference.toolCallId !== payload.toolCallId
-		|| (reference.reviewId !== undefined && reference.reviewId !== payload.reviewId)
-		|| (reference.hash !== undefined && reference.hash !== payload.hash)) {
+export function assertReviewPayloadReference(payload: CanonicalReviewPayload, reference: { toolCallId: unknown; reviewId: unknown; hash: unknown }): void {
+	if (typeof reference.toolCallId !== "string" || !reference.toolCallId
+		|| typeof reference.reviewId !== "string" || !reference.reviewId
+		|| typeof reference.hash !== "string" || !reference.hash
+		|| reference.toolCallId !== payload.toolCallId
+		|| reference.reviewId !== payload.reviewId
+		|| reference.hash !== payload.hash) {
 		throw new ReviewPayloadError(409, "REVIEW_PAYLOAD_REFERENCE_MISMATCH", "Review content reference does not match", false);
 	}
 }
