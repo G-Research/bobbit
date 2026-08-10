@@ -71,6 +71,21 @@ type OpenOutcome =
 	| { ok: true; status: "opened" }
 	| { ok: false; status: "failed"; code: string; retryable: boolean; message: string };
 
+export type ReviewFileIo = {
+	openSync(filePath: string, flags: "r"): number;
+	fstatSync(fd: number): Pick<fs.Stats, "size" | "isFile">;
+	readSync(fd: number, buffer: Buffer, offset: number, length: number, position: null): number;
+	closeSync(fd: number): void;
+};
+
+const REVIEW_FILE_READ_CHUNK_BYTES = 64 * 1024;
+const NODE_REVIEW_FILE_IO: ReviewFileIo = {
+	openSync: (filePath, flags) => fs.openSync(filePath, flags),
+	fstatSync: (fd) => fs.fstatSync(fd),
+	readSync: (fd, buffer, offset, length, position) => fs.readSync(fd, buffer, offset, length, position),
+	closeSync: (fd) => fs.closeSync(fd),
+};
+
 const hasOwn = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -176,39 +191,57 @@ function validTitle(value: string): boolean {
 	return value.length > 0 && utf8Bytes(value) <= MAX_REVIEW_TITLE_BYTES && !INVALID_TITLE_CHARACTERS.test(value);
 }
 
-function readMarkdownFile(file: string, remainingBytes: number): { markdown: string } | { error: SafeFailure } {
+function readMarkdownFile(
+	file: string,
+	remainingBytes: number,
+	fileIo: ReviewFileIo,
+): { markdown: string } | { error: SafeFailure } {
 	const cwd = process.env.BOBBIT_CWD || process.cwd();
 	const filePath = path.isAbsolute(file) ? file : path.resolve(cwd, file);
-
-	let stat: fs.Stats;
-	try {
-		stat = fs.statSync(filePath);
-	} catch {
+	if (!Number.isSafeInteger(remainingBytes) || remainingBytes < 0) {
 		return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 	}
-	if (!stat.isFile()) return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
-	if (stat.size > remainingBytes) return { error: safeFailure("REVIEW_PAYLOAD_TOO_LARGE") };
 
 	let fd: number | undefined;
 	try {
-		fd = fs.openSync(filePath, "r");
-		const buffer = Buffer.alloc(Math.min(8192, Math.max(1, stat.size)));
-		const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
-		for (let index = 0; index < bytesRead; index++) {
-			if (buffer[index] === 0) return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
+		fd = fileIo.openSync(filePath, "r");
+		const stat = fileIo.fstatSync(fd);
+		if (!stat.isFile()) return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
+		if (!Number.isSafeInteger(stat.size) || stat.size < 0) {
+			return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 		}
+		if (stat.size > remainingBytes) return { error: safeFailure("REVIEW_PAYLOAD_TOO_LARGE") };
+
+		// Read from this descriptor only. The extra byte detects a file that grows
+		// after fstat without ever requesting or retaining an unbounded body.
+		const buffer = Buffer.alloc(Math.min(REVIEW_FILE_READ_CHUNK_BYTES, remainingBytes + 1));
+		const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+		const markdownParts: string[] = [];
+		let totalBytesRead = 0;
+		while (true) {
+			const readLimit = Math.min(buffer.length, remainingBytes + 1 - totalBytesRead);
+			const bytesRead = fileIo.readSync(fd, buffer, 0, readLimit, null);
+			if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > readLimit) {
+				return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
+			}
+			if (bytesRead === 0) break;
+			totalBytesRead += bytesRead;
+			if (totalBytesRead > remainingBytes) {
+				return { error: safeFailure("REVIEW_PAYLOAD_TOO_LARGE") };
+			}
+			const chunk = buffer.subarray(0, bytesRead);
+			if (chunk.includes(0)) return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
+			markdownParts.push(decoder.decode(chunk, { stream: true }));
+		}
+		markdownParts.push(decoder.decode());
+		return { markdown: markdownParts.join("") };
 	} catch {
+		// Includes fatal UTF-8 decoding errors and all descriptor I/O failures.
 		return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 	} finally {
 		if (fd !== undefined) {
-			try { fs.closeSync(fd); } catch { /* the following read reports a safe failure */ }
+			try { fileIo.closeSync(fd); } catch { /* content has already resolved to a safe result */ }
 		}
-	}
-
-	try {
-		return { markdown: fs.readFileSync(filePath, "utf-8") };
-	} catch {
-		return { error: safeFailure("REVIEW_PAYLOAD_INVALID") };
 	}
 }
 
@@ -301,7 +334,9 @@ function failureFromResponse(status: number, body: unknown): SafeFailure {
 	return safeFailure("REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE");
 }
 
-const extension: ExtensionFactory = (pi) => {
+type ReviewExtensionApi = Parameters<ExtensionFactory>[0];
+
+function registerReviewTools(pi: ReviewExtensionApi, fileIo: ReviewFileIo): void {
 	pi.registerTool({
 		name: "review_open",
 		label: "Review Open",
@@ -335,7 +370,7 @@ const extension: ExtensionFactory = (pi) => {
 				if ("markdown" in input) {
 					markdown = input.markdown;
 				} else {
-					const loaded = readMarkdownFile(input.file, MAX_REVIEW_MARKDOWN_BYTES - totalBytes);
+					const loaded = readMarkdownFile(input.file, MAX_REVIEW_MARKDOWN_BYTES - totalBytes, fileIo);
 					if ("error" in loaded) return errorResult(toolCallId, loaded.error);
 					markdown = loaded.markdown;
 				}
@@ -423,6 +458,14 @@ const extension: ExtensionFactory = (pi) => {
 			};
 		},
 	});
-};
+}
 
+export function createReviewExtension(
+	dependencies: { fileIo?: ReviewFileIo } = {},
+): ExtensionFactory {
+	const fileIo = dependencies.fileIo ?? NODE_REVIEW_FILE_IO;
+	return (pi) => registerReviewTools(pi, fileIo);
+}
+
+const extension = createReviewExtension();
 export default extension;

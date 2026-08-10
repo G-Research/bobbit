@@ -8,9 +8,11 @@ import path from "node:path";
 import { Value } from "@sinclair/typebox/value";
 import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
 import reviewExtension, {
+	createReviewExtension,
 	MAX_REVIEW_FILES,
 	MAX_REVIEW_MARKDOWN_BYTES,
 	MAX_REVIEW_TITLE_BYTES,
+	type ReviewFileIo,
 } from "../../defaults/tools/review/extension.ts";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
@@ -67,6 +69,7 @@ beforeAll(() => {
 	writeFileSync(path.join(fixtureDir, "architecture.md"), "# Architecture\n", "utf8");
 	writeFileSync(path.join(fixtureDir, "notes.md"), "# Notes\n", "utf8");
 	writeFileSync(path.join(fixtureDir, "binary.md"), Buffer.from([0x23, 0x20, 0x61, 0x00, 0x62]));
+	writeFileSync(path.join(fixtureDir, "malformed-utf8.md"), Buffer.from([0x23, 0x20, 0xc3, 0x28]));
 	mkdirSync(path.join(fixtureDir, "folder.md"));
 	process.env.BOBBIT_CWD = fixtureDir;
 	process.env.BOBBIT_DIR = fixtureDir;
@@ -119,6 +122,10 @@ async function executeSuccess(params: any, toolCallId?: string): Promise<any> {
 
 async function executeError(params: any, toolCallId?: string): Promise<any> {
 	const result = await execute(params, toolCallId);
+	return parseError(result);
+}
+
+function parseError(result: ToolResult): any {
 	assert.equal(result.isError, true, `expected an error, received ${textOf(result)}`);
 	const parsed = JSON.parse(textOf(result));
 	assert.equal(parsed.action, "review_open");
@@ -127,6 +134,18 @@ async function executeError(params: any, toolCallId?: string): Promise<any> {
 	assert.equal(typeof parsed.error?.retryable, "boolean");
 	assert.equal(typeof parsed.error?.message, "string");
 	return parsed;
+}
+
+function registerReviewOpen(fileIo: ReviewFileIo): RegisteredTool {
+	const tools = new Map<string, RegisteredTool>();
+	createReviewExtension({ fileIo })({
+		registerTool(tool: RegisteredTool) {
+			tools.set(tool.name, tool);
+		},
+	} as any);
+	const tool = tools.get("review_open");
+	assert.ok(tool, "injected review_open should be registered");
+	return tool;
 }
 
 function assertCanonicalReceipt(result: any, expected: {
@@ -266,10 +285,12 @@ describe("review_open durable receipt contract", () => {
 		assert.equal(headers.get("x-bobbit-session-secret"), "own-session-secret");
 	});
 
-	it("accepts exactly 10 MiB using cumulative UTF-8 accounting and rejects one byte more atomically", async () => {
-		const exact = `${"x".repeat(MAX_REVIEW_MARKDOWN_BYTES - 2)}é`;
+	it("accepts an exact 10 MiB file using fatal chunked UTF-8 decoding and rejects one byte more atomically", async () => {
+		const chunkBytes = 64 * 1024;
+		const exact = `${"x".repeat(chunkBytes - 1)}é${"x".repeat(MAX_REVIEW_MARKDOWN_BYTES - chunkBytes - 1)}`;
 		assert.equal(Buffer.byteLength(exact, "utf8"), MAX_REVIEW_MARKDOWN_BYTES);
-		const receipt = await executeSuccess({ files: [{ markdown: exact.slice(0, 1024) }, { markdown: exact.slice(1024) }] });
+		writeFileSync(path.join(fixtureDir, "exact-limit.md"), exact, "utf8");
+		const receipt = await executeSuccess({ file: "exact-limit.md" });
 		assert.equal(receipt.totalBytes, MAX_REVIEW_MARKDOWN_BYTES);
 		assert.equal(uploads.length, 1);
 
@@ -280,6 +301,39 @@ describe("review_open durable receipt contract", () => {
 		assert.equal(uploads.length, 0, "over-limit reviews must not partially upload");
 	});
 
+	it("caps a descriptor read at the remaining budget plus one when the file grows after fstat", async () => {
+		const growth = Buffer.from("abcde");
+		let produced = 0;
+		let closed = false;
+		const requestedRanges: Array<{ start: number; end: number }> = [];
+		const fileIo: ReviewFileIo = {
+			openSync: () => 73,
+			fstatSync: () => ({ size: 4, isFile: () => true }),
+			readSync: (_fd, buffer, offset, length) => {
+				requestedRanges.push({ start: produced, end: produced + length });
+				const bytesRead = Math.min(length, produced === 0 ? 4 : growth.length - produced);
+				growth.copy(buffer, offset, produced, produced + bytesRead);
+				produced += bytesRead;
+				return bytesRead;
+			},
+			closeSync: () => { closed = true; },
+		};
+		const injectedOpen = registerReviewOpen(fileIo);
+		const result = await injectedOpen.execute("growing-file", {
+			files: [
+				{ markdown: "x".repeat(MAX_REVIEW_MARKDOWN_BYTES - 4) },
+				{ file: "growing.md" },
+			],
+		});
+		const failure = parseError(result);
+		assert.equal(failure.error.code, "REVIEW_PAYLOAD_TOO_LARGE");
+		assert.equal(produced, 5, "the reader should stop on the single over-budget byte");
+		assert.deepEqual(requestedRanges, [{ start: 0, end: 5 }, { start: 4, end: 5 }]);
+		assert.ok(requestedRanges.every(({ end }) => end <= 5), "reads must stay within remaining bytes plus one");
+		assert.equal(closed, true, "the descriptor must close after a limit failure");
+		assert.equal(uploads.length, 0, "a growing over-limit review must fail before upload");
+	});
+
 	it("rejects oversized metadata and unsafe files before upload", async () => {
 		assert.equal(
 			(await executeError({ title: "é".repeat(Math.floor(MAX_REVIEW_TITLE_BYTES / 2) + 1), markdown: "x" })).error.code,
@@ -288,6 +342,7 @@ describe("review_open durable receipt contract", () => {
 		assert.equal((await executeError({ files: [{ file: "missing.md" }] })).error.code, "REVIEW_PAYLOAD_INVALID");
 		assert.equal((await executeError({ files: [{ file: "folder.md" }] })).error.code, "REVIEW_PAYLOAD_INVALID");
 		assert.equal((await executeError({ files: [{ file: "binary.md" }] })).error.code, "REVIEW_PAYLOAD_INVALID");
+		assert.equal((await executeError({ files: [{ file: "malformed-utf8.md" }] })).error.code, "REVIEW_PAYLOAD_INVALID");
 		assert.equal(uploads.length, 0);
 	});
 
