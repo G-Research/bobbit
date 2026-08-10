@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	cleanupReviewGroup,
+	normalizeReviewDecisionPayload,
 	openMarkdownReviewDocument,
 	openMarkdownReviewGroup,
 	persistReviewGroup,
 	readPersistedReviewGroups,
 	restorePersistedReviewDocuments,
+	submitReviewGroupDecision,
 	upsertReviewGroup,
 } from "../../src/app/review-sources.js";
 import { setRenderApp, state, type ReviewGroupModel } from "../../src/app/state.js";
@@ -16,6 +18,8 @@ import {
 	getAnnotations,
 	getAnnotationsForDocument,
 	getReviewTombstone,
+	initAnnotationStore,
+	isReviewSubmitted,
 } from "../../src/ui/components/review/AnnotationStore.js";
 
 const SESSION_ID = "review-group-model-session";
@@ -340,6 +344,176 @@ describe("review group replacement identity", () => {
 			});
 		});
 		expect(state.reviewGroupsBySession[SESSION_ID].map((group) => group.reviewId)).toEqual(["canonical-review"]);
+	});
+});
+
+describe("review group decision identity migration", () => {
+	function decisionGroup(sessionId: string, files: Array<{ fileId: string; title: string }>): ReviewGroupModel {
+		return {
+			...review(`review-${sessionId}`, "Migration review", files),
+			source: { kind: "markdown-review", sessionId },
+		};
+	}
+
+	function installReviewPersistenceNoop(): void {
+		vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+	}
+
+	it("does not duplicate or assign an ambiguous legacy title bucket, including in submitted feedback", async () => {
+		const sessionId = "decision-duplicate-legacy";
+		const group = decisionGroup(sessionId, [
+			{ fileId: "same-first", title: "same.md" },
+			{ fileId: "same-second", title: "same.md" },
+		]);
+		installReviewPersistenceNoop();
+		await addAnnotation(sessionId, "same.md", { id: "hidden-legacy", quote: "hidden", comment: "must not submit" });
+
+		const input = { decision: "approve" as const, finalComment: "Looks good", inlineComments: [], feedback: "" };
+		const normalized = normalizeReviewDecisionPayload(input, sessionId, group);
+		expect(normalized.inlineComments).toEqual([]);
+
+		const prompt = vi.fn();
+		await submitReviewGroupDecision(group, input, { sessionId, prompt });
+		expect(prompt).toHaveBeenCalledOnce();
+		expect(prompt.mock.calls[0][0]).toBe("## Review Approved\n\n## Final comment\n\nLooks good");
+	});
+
+	it("migrates a unique legacy title bucket exactly once to its stable file ID", async () => {
+		const sessionId = "decision-unique-legacy";
+		const group = decisionGroup(sessionId, [
+			{ fileId: "unique-file", title: "unique.md" },
+			{ fileId: "other-file", title: "other.md" },
+		]);
+		installReviewPersistenceNoop();
+		await addAnnotation(sessionId, "unique.md", { id: "legacy-unique", quote: "unique quote", comment: "unique note" });
+
+		const input = { decision: "approve" as const, finalComment: "", inlineComments: [], feedback: "" };
+		const normalized = normalizeReviewDecisionPayload(input, sessionId, group);
+		expect(normalized.inlineComments).toEqual([expect.objectContaining({
+			fileId: "unique-file",
+			documentTitle: "unique.md",
+			comment: "unique note",
+		})]);
+
+		const prompt = vi.fn();
+		await submitReviewGroupDecision(group, input, { sessionId, prompt });
+		const feedback = String(prompt.mock.calls[0][0]);
+		expect(feedback.match(/unique note/g)).toHaveLength(1);
+		expect(feedback).toContain('### "unique.md"');
+	});
+
+	it("drops an ambiguous title-only payload instead of binding it to the first duplicate", () => {
+		const sessionId = "decision-ambiguous-title";
+		const group = decisionGroup(sessionId, [
+			{ fileId: "same-first", title: "same.md" },
+			{ fileId: "same-second", title: "same.md" },
+		]);
+		const normalized = normalizeReviewDecisionPayload({
+			decision: "approve",
+			finalComment: "",
+			feedback: "",
+			inlineComments: [{ documentTitle: "same.md", quote: "ambiguous", comment: "wrong first match" }],
+		}, sessionId, group);
+
+		expect(normalized.inlineComments).toEqual([]);
+	});
+
+	it("keeps exact file-ID comments deterministic in review file order despite duplicate titles", async () => {
+		const sessionId = "decision-exact-order";
+		const group = decisionGroup(sessionId, [
+			{ fileId: "same-first", title: "same.md" },
+			{ fileId: "same-second", title: "same.md" },
+		]);
+		const normalized = normalizeReviewDecisionPayload({
+			decision: "approve",
+			finalComment: "",
+			feedback: "",
+			inlineComments: [
+				{ fileId: "same-second", documentTitle: "same.md", quote: "second", comment: "second note" },
+				{ fileId: "same-first", documentTitle: "same.md", quote: "first", comment: "first note" },
+			],
+		}, sessionId, group);
+
+		expect(normalized.inlineComments.map((comment) => [comment.fileId, comment.comment])).toEqual([
+			["same-first", "first note"],
+			["same-second", "second note"],
+		]);
+
+		installReviewPersistenceNoop();
+		const prompt = vi.fn();
+		await submitReviewGroupDecision(group, normalized, { sessionId, prompt });
+		const feedback = String(prompt.mock.calls[0][0]);
+		expect(feedback.indexOf("first note")).toBeLessThan(feedback.indexOf("second note"));
+	});
+});
+
+describe("legacy submitted live-open migration", () => {
+	it("keeps an explicit live group and primary tab through fresh annotation hydration and restore", async () => {
+		const sessionId = "legacy-submitted-live-open";
+		let legacySubmitted = true;
+		let workspace: SidePanelWorkspace = {
+			version: 1,
+			sessionId,
+			revision: 0,
+			tabs: [],
+			activeTabId: "",
+			sizeMode: "split",
+			updatedAt: 1,
+		};
+		const requests: string[] = [];
+		vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+			const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+			requests.push(`${method} ${url.pathname}${url.search}`);
+			if (method === "GET" && url.pathname.endsWith("/review/annotations")) {
+				return Response.json({ annotations: {}, submitted: legacySubmitted, submittedReviewIds: [], closedReviewIds: [] });
+			}
+			if (method === "DELETE" && url.pathname.includes("/review/tombstones/")) {
+				if (url.searchParams.get("clearLegacySubmitted") === "true") legacySubmitted = false;
+				return Response.json({ ok: true });
+			}
+			if (method === "POST" && url.pathname.endsWith("/side-panel-workspace/open")) {
+				const body = JSON.parse(String(init?.body || "{}")) as { tab?: SidePanelWorkspaceTab };
+				if (body.tab) {
+					workspace = {
+						...workspace,
+						revision: workspace.revision + 1,
+						tabs: [...workspace.tabs.filter((tab) => tab.id !== body.tab!.id), body.tab],
+						activeTabId: body.tab.id,
+						updatedAt: workspace.updatedAt + 1,
+					};
+				}
+				return Response.json({ workspace });
+			}
+			throw new Error(`Unexpected request: ${method} ${url.pathname}`);
+		}));
+		state.selectedSessionId = sessionId;
+		state.sidePanelWorkspaceBySession[sessionId] = workspace;
+
+		await initAnnotationStore(sessionId);
+		expect(isReviewSubmitted(sessionId)).toBe(true);
+		const group = openMarkdownReviewGroup({
+			sessionId,
+			reviewId: "fresh-review",
+			title: "Fresh review",
+			files: [{ fileId: "fresh-file", title: "fresh.md", markdown: "# Fresh" }],
+			live: true,
+		});
+		await vi.waitFor(() => expect(state.sidePanelWorkspaceBySession[sessionId]?.tabs.some((tab) =>
+			tab.id === "review:fresh-review")).toBe(true));
+		expect(requests).toContain(`DELETE /api/sessions/${sessionId}/review/tombstones/fresh-review?clearLegacySubmitted=true`);
+		expect(legacySubmitted).toBe(false);
+
+		state.reviewGroupsBySession = {};
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
+		await initAnnotationStore(sessionId);
+		restorePersistedReviewDocuments(sessionId);
+
+		expect(isReviewSubmitted(sessionId)).toBe(false);
+		expect(readPersistedReviewGroups(sessionId).map((candidate) => candidate.reviewId)).toEqual([group.reviewId]);
+		expect(state.reviewGroupsBySession[sessionId]?.map((candidate) => candidate.reviewId)).toEqual([group.reviewId]);
+		expect(state.sidePanelWorkspaceBySession[sessionId]?.tabs.map((tab) => tab.id)).toContain("review:fresh-review");
 	});
 });
 

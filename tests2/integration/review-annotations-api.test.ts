@@ -308,6 +308,59 @@ test.describe("Review Annotations API", () => {
 		}
 	});
 
+	test("scoped live-open clear retires only legacy submitted state and its exact target", async () => {
+		const sid = await createSession();
+		try {
+			await apiFetch(`/api/sessions/${sid}/review/submitted`, {
+				method: "PUT",
+				body: JSON.stringify({ submitted: true }),
+			});
+			await apiFetch(`/api/sessions/${sid}/review/tombstones/reopen-target`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "submitted" }),
+			});
+			await apiFetch(`/api/sessions/${sid}/review/tombstones/unrelated-submitted`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "submitted" }),
+			});
+			await apiFetch(`/api/sessions/${sid}/review/tombstones/unrelated-closed`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "closed" }),
+			});
+
+			const scoped = await apiFetch(
+				`/api/sessions/${sid}/review/tombstones/reopen-target?clearLegacySubmitted=true`,
+				{ method: "DELETE" },
+			);
+			expect(scoped.status).toBe(200);
+			const afterScoped = await (await apiFetch(`/api/sessions/${sid}/review/tombstones`)).json();
+			expect(afterScoped).toEqual({
+				submittedReviewIds: ["unrelated-submitted"],
+				closedReviewIds: ["unrelated-closed"],
+				legacySubmitted: false,
+			});
+
+			await apiFetch(`/api/sessions/${sid}/review/submitted`, {
+				method: "PUT",
+				body: JSON.stringify({ submitted: true }),
+			});
+			await apiFetch(`/api/sessions/${sid}/review/tombstones/ordinary-target`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "submitted" }),
+			});
+			const ordinary = await apiFetch(`/api/sessions/${sid}/review/tombstones/ordinary-target`, { method: "DELETE" });
+			expect(ordinary.status).toBe(200);
+			const afterOrdinary = await (await apiFetch(`/api/sessions/${sid}/review/tombstones`)).json();
+			expect(afterOrdinary).toEqual({
+				submittedReviewIds: ["unrelated-submitted"],
+				closedReviewIds: ["unrelated-closed"],
+				legacySubmitted: true,
+			});
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
 	test("bulk annotation save cannot clobber per-review tombstones", async () => {
 		const sid = await createSession();
 		try {
