@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1139,
+  "censusTotal": 1140,
   "buckets": {
     "daily": 65,
     "v2-browser": 216,
-    "v2-core": 512,
+    "v2-core": 513,
     "v2-dom": 144,
     "v2-integration": 202
   },
@@ -16,10 +16,19 @@
     "legacy-pending": 153,
     "port": 2,
     "relocate": 50,
-    "rewrite": 145,
+    "rewrite": 146,
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/review-large-payload-receipt.test.ts",
+      "reason": "Core reproducing regression coverage proving a real 20-file review above 32 KiB emits a bounded payload-free v2 receipt that survives live and history truncation with exact identity, byte metadata, and an actionable automatic-open outcome.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
     {
       "path": "tests2/core/review-extension.test.ts",
       "reason": "Core regression coverage for the review_open multi-file schema and runtime contract, including exclusive source modes, atomic inline/file loading, title defaults, duplicate identities, and legacy single-document compatibility.",
