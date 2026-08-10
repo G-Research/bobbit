@@ -34,6 +34,12 @@ const PREVIEW_SNAPSHOT_MARKERS = [
 
 const VERIFICATION_RESULT_LARGE_FIELDS = ["summary", "report_html"] as const;
 
+interface ProjectedReviewMarkdown {
+	_truncated: true;
+	_originalLength: number;
+	_originalBytes: number;
+}
+
 /** Return the matched marker prefix, or undefined if none matches. */
 function matchMarker(text: string): string | undefined {
 	for (const m of PREVIEW_SNAPSHOT_MARKERS) {
@@ -110,12 +116,63 @@ function isVerificationResultTool(block: any): boolean {
 	return block?.name === "verification_result";
 }
 
+function isReviewOpenTool(block: any): boolean {
+	return block?.name === "review_open";
+}
+
+function projectedReviewMarkdown(markdown: string): ProjectedReviewMarkdown {
+	return {
+		_truncated: true,
+		_originalLength: markdown.length,
+		_originalBytes: Buffer.byteLength(markdown, "utf8"),
+	};
+}
+
+/**
+ * Inline review Markdown can be split across many individually-small files.
+ * Project the whole inline set once its cumulative UTF-8 size crosses the
+ * normal transport threshold, while retaining review and file metadata.
+ */
+function projectLargeReviewMarkdown(payload: any, threshold: number): any {
+	const topLevelMarkdown = typeof payload.markdown === "string" ? payload.markdown : undefined;
+	const files = Array.isArray(payload.files) ? payload.files : undefined;
+	let totalBytes = topLevelMarkdown === undefined ? 0 : Buffer.byteLength(topLevelMarkdown, "utf8");
+
+	if (files) {
+		for (const file of files) {
+			if (file && typeof file === "object" && typeof file.markdown === "string") {
+				totalBytes += Buffer.byteLength(file.markdown, "utf8");
+			}
+		}
+	}
+	if (totalBytes <= threshold) return payload;
+
+	let next = payload;
+	if (topLevelMarkdown !== undefined) {
+		next = { ...next, markdown: projectedReviewMarkdown(topLevelMarkdown) };
+	}
+	if (files) {
+		let filesChanged = false;
+		const nextFiles = files.map((file: any) => {
+			if (!file || typeof file !== "object" || typeof file.markdown !== "string") return file;
+			filesChanged = true;
+			return { ...file, markdown: projectedReviewMarkdown(file.markdown) };
+		});
+		if (filesChanged) {
+			if (next === payload) next = { ...payload };
+			next.files = nextFiles;
+		}
+	}
+	return next;
+}
+
 function truncateToolPayload(payload: any, block: any, threshold: number): any {
 	if (!payload || typeof payload !== "object") return payload;
-	let next = payload;
+	let next = isReviewOpenTool(block) ? projectLargeReviewMarkdown(payload, threshold) : payload;
 
 	if (isLargeString(payload.content, threshold)) {
-		next = { ...next, content: truncatedStringDescriptor(payload.content) };
+		if (next === payload) next = { ...payload };
+		next.content = truncatedStringDescriptor(payload.content);
 	}
 
 	if (isVerificationResultTool(block)) {
