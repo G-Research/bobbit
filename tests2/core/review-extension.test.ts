@@ -346,6 +346,27 @@ describe("review_open durable receipt contract", () => {
 		assert.equal(uploads.length, 0);
 	});
 
+	it("returns bounded safe failures for metadata rejected after tool-call transport", async () => {
+		const oversizedTitle = "title-".repeat(200_000);
+		const oversizedPath = `missing/${"segment/".repeat(150_000)}review.md`;
+		const cases = [
+			{ title: oversizedTitle, markdown: "short" },
+			{ files: [{ title: oversizedTitle, markdown: "short" }] },
+			{ file: oversizedPath },
+			{ files: Array.from({ length: MAX_REVIEW_FILES + 1 }, () => ({ markdown: "short" })) },
+		];
+
+		for (const params of cases) {
+			const failure = await executeError(params);
+			assert.equal(failure.error.code, "REVIEW_PAYLOAD_INVALID");
+			assert.equal(failure.error.retryable, false);
+			const serialized = JSON.stringify(failure);
+			assert.ok(Buffer.byteLength(serialized, "utf8") < 1024);
+			assert.doesNotMatch(serialized, /title-title-title|segment\/segment/);
+		}
+		assert.equal(uploads.length, 0, "invalid metadata must never reach persistence");
+	});
+
 	it("returns no partial receipt when a later file cannot be loaded", async () => {
 		const error = await executeError({
 			files: [{ file: "architecture.md" }, { file: "missing.md" }],
