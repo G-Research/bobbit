@@ -180,11 +180,13 @@ The routing remains shared:
 - `verification-signoff-markdown` decisions post the same composed feedback to the exact goal, gate, signal, and step; an uncommented approval may omit feedback; and
 - the reserved PR source still rejects submission because that route is not implemented.
 
-Decision submission is coalesced by the exact `(sessionId, reviewId)` key. The first accepted approve or reject owns the pending external effect; repeated or conflicting clicks return that same promise and outcome, so one review-wide feedback message or sign-off request is sent at most once. Other review keys remain independent.
+Decision submission is coalesced by the exact `(sessionId, reviewId)` key. The first accepted approve or reject owns the pending external effect; repeated or conflicting clicks share that promise and outcome while it is pending. Other review keys remain independent.
 
 The lifecycle checks for supersession before the agent prompt or sign-off request, then checks again before each destructive local effect. A close or explicit live reopen that becomes newer before the external effect suppresses the decision entirely. If replacement content arrives after the effect, exact snapshot matching prevents the old completion from tombstoning or removing the replacement.
 
-The outcome reports the exact session, review, submitted state, and final comment accepted by the first decision. The UI discards a final-comment draft only when that outcome says submission completed, no replacement with the same identity exists, and the current draft still equals the submitted draft. A failed or superseded decision, a replacement, or a draft edited while submission was pending therefore keeps its draft. A successful route closes only the decided review; an external routing failure leaves it available for retry.
+The outcome reports the exact session, review, submitted state, and final comment accepted by the first decision. The UI discards a final-comment draft only when that outcome says submission and cleanup completed, no replacement with the same identity exists, and the current draft still equals the submitted draft. A failed or superseded decision, a replacement, or a draft edited while submission was pending therefore keeps its draft. An external routing failure leaves the review available for retry.
+
+External feedback is delivered before the primary workspace tabs are closed. A terminal infrastructure failure during that later close can therefore occur after the recipient accepted the feedback. Bobbit preserves the group, files, annotations, and final draft and reports the decision as incomplete, but a manual retry may deliver the same feedback again. In-flight concurrent submissions remain coalesced; that coalescing is not a durable exactly-once guarantee across an infrastructure failure. Retrying favors completing review cleanup at the cost of possible duplicate feedback, while not retrying leaves the review open for manual reconciliation.
 
 ## Persistence, session ownership, replay, and cleanup
 
@@ -203,7 +205,9 @@ An explicit live `review_open` first persists the complete group and selected fi
 
 Completion-time hydration matters when the user switches sessions while the tombstone or workspace request is in flight: the newly visible owner receives the requested review without retargeting the operation. A background owner still receives a focused workspace tab, but the selected session, foreground review model, and foreground user-selection guard remain unchanged. A focused open clears a selection guard only when the guard belongs to the same owner session, so delayed foreground workspace responses cannot undo the user's foreground choice.
 
-Close, dismiss, submission cleanup, and live reopen share the same exact-key sequence. Workspace close retries one revision conflict once, using the newer authoritative revision only when the tab still exists. If a live reopen supersedes an in-flight close, stale cleanup stops and the explicit open reasserts the primary after any already-dispatched close settles; the last live intent therefore wins. If an unsuperseded cleanup still cannot close the primary after reconciliation, it rejects with an actionable retry-or-reload error instead of reporting silent success. The review content may already be removed at that point, while an obsolete failure from a superseded intent is suppressed.
+Close, dismiss, submission cleanup, and live reopen share the same exact-key sequence. Cleanup captures the review version, then closes every primary workspace tab that matches it, including its canonical exact-identity tab and any legacy-matching tab. Each close uses the authoritative workspace and retries one revision conflict once. Cleanup must confirm that all matching primaries are absent before it writes a `closed` or `submitted` tombstone, removes the persisted group, clears annotations, or discards the shared final draft.
+
+A terminal close error or a partial close conflict fails that barrier. Bobbit preserves the captured group, files, annotations, and final draft, writes no suppressing tombstone, and surfaces an actionable error telling the user to retry the close. A newer exact live reopen supersedes stale cleanup: the stale operation cannot commit destructive state, and the open reasserts its primary after any already-dispatched close settles. Sibling reviews use different exact keys, so their tabs and state remain independent.
 
 A live `review_close` follows the same owner rule. Its public form accepts an optional review title: every matching whole review and all its files close, while omitting the title closes all reviews in the calling session. Duplicate titles therefore close together; callers that need later selective close should use distinct titles. Internally, canonical results may be normalized to an exact `reviewId`, which takes precedence over title matching without exposing identity-based close as a public tool input. Either form is scoped to the owner session; when that owner is in the background, it never changes the foreground or any sibling session.
 
@@ -221,14 +225,17 @@ Inline annotations are owned by stable file identity. A title-keyed annotation f
 
 Final comments have one shared in-memory owner per `(sessionId, reviewId)`, outside any individual pane instance. Desktop and eager mobile panes, responsive remounts, and primary-tab switches therefore see the same exact draft without letting one review overwrite another. The draft remains intentionally reload-ephemeral.
 
-Closing or dismissing a primary asks once before discarding the target review's aggregate inline comments plus non-empty final draft. The count and confirmation are resolved from the tab's exact owner even when another primary is selected. Cancelling preserves that review, annotations, active file, and draft. Confirming cleanup, or successfully submitting a decision:
+Closing or dismissing a primary asks once before discarding the target review's aggregate inline comments plus non-empty final draft. The count and confirmation are resolved from the tab's exact owner even when another primary is selected. Cancelling preserves that review, annotations, active file, and draft. After confirmation, or after external decision feedback succeeds, cleanup proceeds atomically across the workspace/data boundary:
 
-- removes only that review group from owner-session persistence and the visible model;
-- closes only primary workspace tabs that resolve to that review identity;
-- clears annotations keyed by each current stable file ID and by the review ID;
-- clears an unowned legacy title-keyed annotation bucket;
-- flushes pending annotation writes; and
-- discards only that exact review's in-memory final-comment draft.
+1. close every exact or legacy-matching primary workspace tab with the authoritative one-shot conflict retry;
+2. confirm that no matching primary remains;
+3. write the applicable `closed` or `submitted` tombstone;
+4. remove only that review group from owner-session persistence and the visible model;
+5. clear annotations keyed by each current stable file ID and by the review ID, plus an unowned legacy title-keyed bucket;
+6. flush pending annotation writes; and
+7. discard only that exact review's in-memory final-comment draft.
+
+Steps 3–7 do not commit unless the workspace-absence check succeeds. A failed or partial close therefore retains the review data and draft for an actionable retry instead of suppressing replay or leaving an open primary without its content.
 
 Other reviews, their workspace tabs, active files, annotations, and drafts remain intact. Verification sign-off success also refreshes the relevant gate status. Submit before leaving the page when the final comment is the only rejection feedback.
 

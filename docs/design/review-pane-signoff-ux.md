@@ -98,6 +98,6 @@ Only add a signal suffix when needed to disambiguate repeated submissions.
 
 ## Persistence and closure
 
-A review opened from the widget should survive reload/navigation until the user submits a decision or closes its primary workspace tab. Closing without submitting should warn once when any file has an inline comment or the review has a non-empty final draft.
+A review opened from the widget should survive reload/navigation until its decision cleanup completes or its primary workspace tab is successfully closed. Closing without submitting should warn once when any file has an inline comment or the review has a non-empty final draft.
 
-After successful submission, remove only that review's persisted group and primary tab, and clear annotations by its stable review/file identities. Duplicate titles and sibling reviews must remain intact. See the main reference for the exact tombstone and cleanup rules.
+After feedback succeeds, first close and confirm absence of every primary workspace tab for that review. Only then remove its persisted group, clear annotations by stable review/file identity, discard its final draft, and write the applicable tombstone. If workspace close fails, preserve that state and show a retry error; a decision retry may repeat feedback that was already delivered. Duplicate titles and sibling reviews must remain intact. See the main reference for the exact tombstone and cleanup rules.
