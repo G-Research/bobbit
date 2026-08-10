@@ -46,6 +46,7 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 }
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
+import { hydrateArtifactReviewsForWorkspace, openReviewReceipt, parseReviewOpenReceipt, registerReviewOpenReceipt } from "./review-open-controller.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
@@ -859,19 +860,23 @@ export class RemoteAgent {
 			await reviewSources.reconcileTombstonedReviewWorkspace(sessionId, {
 				includeLegacySubmitted: legacySubmitted,
 			});
-			return;
+		} else if (legacySubmitted) {
+			// Compatibility for test/legacy lazy modules predating exact tombstones.
+			const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
+				.filter((tab) => tab.kind === "review" || tab.id.startsWith("review:"))
+				.map((tab) => tab.id);
+			if (reviewTabIds.length === 1) {
+				for (const tabId of reviewTabIds) {
+					try { await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true }); }
+					catch (err) { console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err); }
+				}
+			}
 		}
-
-		// Compatibility for test/legacy lazy modules predating exact tombstones.
-		if (!legacySubmitted) return;
-		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
-			.filter((tab) => tab.kind === "review" || tab.id.startsWith("review:"))
-			.map((tab) => tab.id);
-		if (reviewTabIds.length !== 1) return;
-		for (const tabId of reviewTabIds) {
-			try { await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true }); }
-			catch (err) { console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err); }
-		}
+		// Initial selection and reconnect invoke this again after authoritative
+		// workspace hydration. Tombstoned primaries are removed first; remaining
+		// exact artifact tabs may then restore content by GET without opening a
+		// workspace or clearing replay suppression.
+		await hydrateArtifactReviewsForWorkspace(sessionId);
 	}
 	private _isActiveSession(): boolean {
 		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;
@@ -2774,6 +2779,32 @@ export class RemoteAgent {
 			if (data.action !== pending.toolName) continue;
 
 			if (pending.toolName === "review_open") {
+				const receipt = parseReviewOpenReceipt(data, result.toolCallId);
+				if (receipt) {
+					// Consume before the first await so concurrent/replayed delivery cannot
+					// authorize the same receipt twice. The coordinator retains its outcome
+					// under the exact session/tool-use/payload identity for the originating
+					// renderer and deduplicates an explicit retry while this open is pending.
+					this._pendingReviewToolCalls.delete(result.toolCallId);
+					registerReviewOpenReceipt(sessionId, result.toolCallId, receipt);
+					await openReviewReceipt({
+						sessionId,
+						toolUseId: result.toolCallId,
+						receipt,
+						intent: "automatic",
+					});
+					continue;
+				}
+				if (data.version === 2) {
+					// A malformed v2 receipt must not downgrade into the inline legacy
+					// path, even if it happens to carry Markdown-shaped fields.
+					this._pendingReviewToolCalls.delete(result.toolCallId);
+					continue;
+				}
+
+				// Read-only compatibility for trusted live v1 controls. Historical
+				// transcript rendering never reaches this method, so inline Markdown
+				// cannot passively recreate an authoritatively absent review.
 				const files = Array.isArray(data.files)
 					? data.files.filter((file: unknown) => !!file && typeof file === "object" && typeof (file as any).markdown === "string")
 					: typeof data.markdown === "string"
@@ -2784,8 +2815,6 @@ export class RemoteAgent {
 						}]
 						: [];
 				if (files.length === 0) continue;
-				// Consume before the first await so concurrent/replayed delivery cannot
-				// authorize the same control twice.
 				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
 				reviewSources.openMarkdownReviewGroup({
