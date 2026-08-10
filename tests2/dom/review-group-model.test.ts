@@ -15,6 +15,7 @@ import { setRenderApp, state, type ReviewGroupModel } from "../../src/app/state.
 import type { SidePanelWorkspace, SidePanelWorkspaceTab } from "../../src/app/side-panel-workspace.js";
 import {
 	addAnnotation,
+	clearAnnotations,
 	clearReviewTombstone,
 	getAnnotations,
 	getAnnotationsForDocument,
@@ -104,9 +105,10 @@ function reviewTab(group: ReviewGroupModel): SidePanelWorkspaceTab {
 function installWorkspaceCleanupFixture(
 	initial: SidePanelWorkspace,
 	outcomes: Array<"conflict" | "success">,
-): { deleteAttempts: Array<{ tabId: string; ifMatch: string | null }>; workspace: () => SidePanelWorkspace } {
+): { deleteAttempts: Array<{ tabId: string; ifMatch: string | null }>; events: string[]; workspace: () => SidePanelWorkspace } {
 	let workspace = initial;
 	const deleteAttempts: Array<{ tabId: string; ifMatch: string | null }> = [];
+	const events: string[] = [];
 	vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
 		const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
@@ -117,6 +119,7 @@ function installWorkspaceCleanupFixture(
 			const tabId = decodeURIComponent(match[1]);
 			deleteAttempts.push({ tabId, ifMatch: headers.get("if-match") });
 			const outcome = outcomes.shift() || "success";
+			events.push(`workspace:${outcome}:${tabId}`);
 			if (outcome === "conflict") {
 				workspace = { ...workspace, revision: workspace.revision + 1, updatedAt: workspace.updatedAt + 1 };
 				return Response.json({
@@ -135,10 +138,13 @@ function installWorkspaceCleanupFixture(
 			};
 			return Response.json({ workspace });
 		}
-		if (url.pathname.includes("/review/")) return new Response(null, { status: 204 });
+		if (url.pathname.includes("/review/")) {
+			events.push(`review:${method}`);
+			return new Response(null, { status: 204 });
+		}
 		throw new Error(`Unexpected request: ${method} ${url.pathname}`);
 	}));
-	return { deleteAttempts, workspace: () => workspace };
+	return { deleteAttempts, events, workspace: () => workspace };
 }
 
 function installHeldLifecycleFixture(
@@ -234,6 +240,13 @@ afterEach(async () => {
 	setRenderApp(() => {});
 	if (getReviewTombstone(CLEANUP_SESSION_ID, "cleanup-target")) {
 		await clearReviewTombstone(CLEANUP_SESSION_ID, "cleanup-target");
+	}
+	if (vi.isMockFunction(globalThis.fetch)) {
+		await Promise.all([
+			clearAnnotations(CLEANUP_SESSION_ID, "target-file"),
+			clearAnnotations(CLEANUP_SESSION_ID, "target.md"),
+			clearAnnotations(CLEANUP_SESSION_ID, "cleanup-target"),
+		]);
 	}
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
@@ -531,6 +544,36 @@ describe("review group decision lifecycle", () => {
 			.sort();
 		expect(clearedBuckets).toEqual([target.files[0].fileId, target.files[0].title, target.reviewId].sort());
 		await clearReviewTombstone(sessionId, target.reviewId);
+	});
+
+	it("coalesces a decision whose terminal workspace conflict preserves its draft source, annotations, and replay eligibility", async () => {
+		const sessionId = "decision-terminal-conflict";
+		const target = lifecycleGroup(sessionId, "terminal-decision");
+		persistReviewGroup(sessionId, target);
+		const initial = lifecycleWorkspace(sessionId, [target]);
+		state.sidePanelWorkspaceBySession[sessionId] = initial;
+		state.lastWorkspaceRevisionBySession[sessionId] = initial.revision;
+		const fixture = installWorkspaceCleanupFixture(initial, ["conflict", "conflict"]);
+		await addAnnotation(sessionId, target.files[0].fileId, { id: "decision-file", quote: "file", comment: "keep file" });
+		await addAnnotation(sessionId, target.files[0].title, { id: "decision-title", quote: "title", comment: "keep title" });
+		await addAnnotation(sessionId, target.reviewId, { id: "decision-review", quote: "review", comment: "keep review" });
+		const prompt = vi.fn();
+		const payload = { decision: "reject" as const, finalComment: "retain this draft", inlineComments: [], feedback: "" };
+
+		const first = submitReviewGroupDecision(target, payload, { sessionId, prompt });
+		const second = submitReviewGroupDecision(target, payload, { sessionId, prompt });
+		expect(second).toBe(first);
+		await expect(first).rejects.toThrow("Review content was preserved");
+		await expect(second).rejects.toThrow("Review content was preserved");
+
+		expect(prompt).toHaveBeenCalledOnce();
+		expect(prompt.mock.calls[0][0]).toContain("retain this draft");
+		expect(fixture.workspace().tabs.map((tab) => tab.id)).toEqual([reviewTab(target).id]);
+		expect(readPersistedReviewGroups(sessionId)).toEqual([target]);
+		expect(getReviewTombstone(sessionId, target.reviewId)).toBeUndefined();
+		expect(getAnnotations(sessionId, target.files[0].fileId)).toHaveLength(1);
+		expect(getAnnotations(sessionId, target.files[0].title)).toHaveLength(1);
+		expect(getAnnotations(sessionId, target.reviewId)).toHaveLength(1);
 	});
 
 	it("runs different exact review keys independently", async () => {
@@ -874,6 +917,11 @@ describe("review group workspace cleanup", () => {
 			{ tabId: reviewTab(target).id, ifMatch: null },
 			{ tabId: reviewTab(target).id, ifMatch: '"5"' },
 		]);
+		expect(fixture.events.filter((event) => event.startsWith("workspace:") || event === "review:PUT")).toEqual([
+			`workspace:conflict:${reviewTab(target).id}`,
+			`workspace:success:${reviewTab(target).id}`,
+			"review:PUT",
+		]);
 		expect(fixture.workspace().tabs.map((tab) => tab.id)).toEqual([reviewTab(sibling).id]);
 		expect(state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID]?.tabs.map((tab) => tab.id)).toEqual([reviewTab(sibling).id]);
 		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([sibling.reviewId]);
@@ -882,12 +930,14 @@ describe("review group workspace cleanup", () => {
 		expect(getAnnotations(CLEANUP_SESSION_ID, sibling.files[0].fileId)).toHaveLength(1);
 	});
 
-	it("rejects after a terminal retry conflict while retaining content cleanup and exact tombstone authority", async () => {
+	it("rejects after a terminal retry conflict while preserving the group, every annotation bucket, and tombstone eligibility", async () => {
 		const { target, sibling, fixture } = seedCleanup(["conflict", "conflict"]);
-		await addAnnotation(CLEANUP_SESSION_ID, target.files[0].fileId, { id: "terminal-comment", quote: "target", comment: "remove" });
+		await addAnnotation(CLEANUP_SESSION_ID, target.files[0].fileId, { id: "terminal-file", quote: "target", comment: "keep file" });
+		await addAnnotation(CLEANUP_SESSION_ID, target.files[0].title, { id: "terminal-title", quote: "legacy", comment: "keep title" });
+		await addAnnotation(CLEANUP_SESSION_ID, target.reviewId, { id: "terminal-review", quote: "review", comment: "keep review" });
 
 		await expect(cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId)).rejects.toThrow(
-			"Review content was removed, but its workspace tab could not be closed",
+			"Review workspace tab could not be closed. Review content was preserved",
 		);
 
 		expect(fixture.deleteAttempts).toEqual([
@@ -895,9 +945,55 @@ describe("review group workspace cleanup", () => {
 			{ tabId: reviewTab(target).id, ifMatch: '"5"' },
 		]);
 		expect(fixture.workspace().tabs.map((tab) => tab.id)).toEqual([reviewTab(target).id, reviewTab(sibling).id]);
-		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([sibling.reviewId]);
-		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBe("closed");
-		expect(getAnnotations(CLEANUP_SESSION_ID, target.files[0].fileId)).toEqual([]);
+		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([target.reviewId, sibling.reviewId]);
+		expect(readPersistedReviewGroups(CLEANUP_SESSION_ID).map((group) => group.reviewId)).toEqual([target.reviewId, sibling.reviewId]);
+		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBeUndefined();
+		expect(getAnnotations(CLEANUP_SESSION_ID, target.files[0].fileId)).toHaveLength(1);
+		expect(getAnnotations(CLEANUP_SESSION_ID, target.files[0].title)).toHaveLength(1);
+		expect(getAnnotations(CLEANUP_SESSION_ID, target.reviewId)).toHaveLength(1);
+	});
+
+	it("retains target content when one of multiple canonical and legacy primaries fails to close", async () => {
+		const target: ReviewGroupModel = {
+			...review("partial-target", "Partial target", [{ fileId: "partial-file", title: "partial.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		const sibling: ReviewGroupModel = {
+			...review("partial-sibling", "Partial sibling", [{ fileId: "sibling-file", title: "sibling.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		persistReviewGroup(CLEANUP_SESSION_ID, target);
+		persistReviewGroup(CLEANUP_SESSION_ID, sibling);
+		const legacyTab: SidePanelWorkspaceTab = {
+			...reviewTab(target),
+			id: `review:${target.files[0].fileId}`,
+			source: {
+				type: "review",
+				sessionId: CLEANUP_SESSION_ID,
+				documentId: target.files[0].fileId,
+				title: target.files[0].title,
+			},
+		};
+		const initial: SidePanelWorkspace = {
+			version: 1,
+			sessionId: CLEANUP_SESSION_ID,
+			revision: 4,
+			tabs: [reviewTab(target), legacyTab, reviewTab(sibling)],
+			activeTabId: reviewTab(target).id,
+			sizeMode: "split",
+			updatedAt: 4,
+		};
+		state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID] = initial;
+		state.lastWorkspaceRevisionBySession[CLEANUP_SESSION_ID] = initial.revision;
+		const fixture = installWorkspaceCleanupFixture(initial, ["success", "conflict", "conflict"]);
+		await addAnnotation(CLEANUP_SESSION_ID, target.files[0].fileId, { id: "partial-comment", quote: "partial", comment: "keep" });
+
+		await expect(cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId)).rejects.toThrow("Review content was preserved");
+
+		expect(fixture.workspace().tabs.map((tab) => tab.id)).toEqual([legacyTab.id, reviewTab(sibling).id]);
+		expect(readPersistedReviewGroups(CLEANUP_SESSION_ID)).toEqual([target, sibling]);
+		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBeUndefined();
+		expect(getAnnotations(CLEANUP_SESSION_ID, target.files[0].fileId)).toHaveLength(1);
 	});
 
 	it("serializes a fresh exact live open after a pending close while unrelated review keys remain independent", async () => {
@@ -953,7 +1049,7 @@ describe("review group workspace cleanup", () => {
 		expect(state.reviewActiveReviewId).toBe(foreground.reviewId);
 
 		fixture.releaseDelete();
-		await expect(cleanup).resolves.toMatchObject({ reviewId: target.reviewId });
+		await expect(cleanup).resolves.toBeUndefined();
 		await vi.waitFor(() => expect(fixture.requests.filter((request) =>
 			request.method === "POST" && request.pathname.endsWith("/side-panel-workspace/open"))).toHaveLength(2));
 
@@ -962,19 +1058,19 @@ describe("review group workspace cleanup", () => {
 			reviewTab(target).id,
 		].sort());
 		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([
-			sibling.reviewId,
 			reopened.reviewId,
+			sibling.reviewId,
 		]);
 		expect(readPersistedReviewGroups(CLEANUP_SESSION_ID).map((group) => group.reviewId)).toEqual([
-			sibling.reviewId,
 			reopened.reviewId,
+			sibling.reviewId,
 		]);
 		expect(getReviewTombstone(CLEANUP_SESSION_ID, target.reviewId)).toBeUndefined();
 
 		restorePersistedReviewDocuments(CLEANUP_SESSION_ID);
 		expect(state.reviewGroupsBySession[CLEANUP_SESSION_ID]?.map((group) => group.reviewId)).toEqual([
-			sibling.reviewId,
 			reopened.reviewId,
+			sibling.reviewId,
 		]);
 		expect(state.reviewGroups.get(foreground.reviewId)).toBe(foreground);
 	});
@@ -1009,7 +1105,7 @@ describe("review group workspace cleanup", () => {
 		});
 		fixture.releaseDelete();
 
-		await expect(cleanup).resolves.toMatchObject({ reviewId: target.reviewId });
+		await expect(cleanup).resolves.toBeUndefined();
 		await vi.waitFor(() => expect(fixture.requests.filter((request) =>
 			request.method === "DELETE" && request.tabId === reviewTab(target).id)).toHaveLength(2));
 		await vi.waitFor(() => expect(fixture.requests.some((request) =>

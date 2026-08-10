@@ -403,6 +403,21 @@ describe("ReviewPane review groups", () => {
 		});
 	});
 
+	it("keeps a confirmed dismiss draft until authoritative cleanup succeeds", async () => {
+		const review = group("dismiss-draft", 1);
+		finalDraftsToClear.add(`${review.source.sessionId}\u0000${review.reviewId}`);
+		const pane = await mountReview(review);
+		const textarea = pane.querySelector<HTMLTextAreaElement>(".review-final-comment-input")!;
+		textarea.value = "retry after close failure";
+		textarea.dispatchEvent(new Event("input", { bubbles: true }));
+		vi.spyOn(window, "confirm").mockReturnValue(true);
+
+		pane.querySelector<HTMLButtonElement>(".review-dismiss-btn")!.click();
+		await settle(pane);
+
+		expect(reviewFinalComment(review.source.sessionId, review.reviewId)).toBe("retry after close failure");
+	});
+
 	it("keeps one review-level final draft while switching files and submits it once", async () => {
 		let review = group("draft", 2);
 		const pane = await mountReview(review);

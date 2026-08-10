@@ -276,7 +276,8 @@ export class ReviewPane extends LitElement {
     const unsentCommentCount = this._reviewUnsentCommentCount(review);
     if (unsentCommentCount > 0
       && !confirm(`Dismiss "${review.title}"? ${unsentCommentCount} unsent comment${unsentCommentCount !== 1 ? "s" : ""} will be lost.`)) return;
-    this._deleteFinalComment(review.reviewId);
+    // The app discards this draft only after authoritative workspace cleanup.
+    // A terminal close failure must leave it available for a manual retry.
     this.dispatchEvent(new CustomEvent("review-dismiss", {
       detail: { review, reviewId: review.reviewId, sessionId: this.sessionId, unsentCommentCount },
       bubbles: true,
