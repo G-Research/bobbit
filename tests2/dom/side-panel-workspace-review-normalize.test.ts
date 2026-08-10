@@ -1,23 +1,48 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { applySidePanelWorkspaceFromServer } from "../../src/app/side-panel-workspace.js";
+import {
+	applySidePanelWorkspaceFromServer,
+	openSidePanelTab,
+	type SidePanelWorkspaceTab,
+} from "../../src/app/side-panel-workspace.js";
 import { state } from "../../src/app/state.js";
 
 const SESSION_ID = "review-normalize-session";
 
 function workspace(tab: Record<string, unknown>, revision = 1): Record<string, unknown> {
+	return workspaceWithTabs(SESSION_ID, [tab], String(tab.id), revision);
+}
+
+function workspaceWithTabs(
+	sessionId: string,
+	tabs: unknown[],
+	activeTabId: string,
+	revision = 1,
+): Record<string, unknown> {
 	return {
 		version: 1,
-		sessionId: SESSION_ID,
+		sessionId,
 		revision,
-		tabs: [tab],
-		activeTabId: tab.id,
+		tabs,
+		activeTabId,
 		sizeMode: "split",
 		updatedAt: revision,
 	};
 }
 
+function reviewTab(sessionId: string, reviewId: string, title: string): SidePanelWorkspaceTab {
+	return {
+		id: `review:${encodeURIComponent(reviewId)}`,
+		kind: "review",
+		title: `Review: ${title}`,
+		label: `Review: ${title}`,
+		source: { type: "review", sessionId, reviewId, title },
+		updatedAt: 1,
+	};
+}
+
 beforeEach(() => {
+	(window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL("file:///side-panel-workspace-review-normalize");
 	state.sidePanelWorkspaceBySession = {};
 	state.lastWorkspaceRevisionBySession = {};
 	state.panelTabsBySession = {};
@@ -114,5 +139,59 @@ describe("client review workspace normalization", () => {
 
 		expect(normalized.tabs).toEqual([]);
 		expect(normalized.activeTabId).toBe("");
+	});
+
+	it("keeps the foreground selection guard across a focused background open", async () => {
+		const foregroundSession = "session-a";
+		const backgroundSession = "session-b";
+		const userTab = reviewTab(foregroundSession, "user-selection", "User selection");
+		const olderTab = reviewTab(foregroundSession, "older-selection", "Older selection");
+		state.selectedSessionId = foregroundSession;
+		applySidePanelWorkspaceFromServer(
+			workspaceWithTabs(foregroundSession, [userTab, olderTab], userTab.id),
+			{ skipRender: true, force: true },
+		);
+		(state as any).__lastSidePanelUserActiveSelection = {
+			sessionId: foregroundSession,
+			tabId: userTab.id,
+			at: Date.now(),
+		};
+
+		const backgroundTab = reviewTab(backgroundSession, "background-review", "Background review");
+		await openSidePanelTab(backgroundTab, { focus: true, skipRender: true });
+
+		expect((state as any).__lastSidePanelUserActiveSelection).toMatchObject({
+			sessionId: foregroundSession,
+			tabId: userTab.id,
+		});
+		expect(state.sidePanelWorkspaceBySession[backgroundSession]?.activeTabId).toBe(backgroundTab.id);
+		expect(state.selectedSessionId).toBe(foregroundSession);
+
+		const delayed = applySidePanelWorkspaceFromServer(
+			workspaceWithTabs(foregroundSession, [userTab, olderTab], olderTab.id, 2),
+			{ skipRender: true, force: true },
+		);
+		expect(delayed.activeTabId).toBe(userTab.id);
+		expect(state.activePanelTabId).toBe(userTab.id);
+	});
+
+	it("clears the selection guard for a focused open in the same session", async () => {
+		const userTab = reviewTab(SESSION_ID, "user-selection", "User selection");
+		applySidePanelWorkspaceFromServer(
+			workspaceWithTabs(SESSION_ID, [userTab], userTab.id),
+			{ skipRender: true, force: true },
+		);
+		(state as any).__lastSidePanelUserActiveSelection = {
+			sessionId: SESSION_ID,
+			tabId: userTab.id,
+			at: Date.now(),
+		};
+
+		const authoritativeTab = reviewTab(SESSION_ID, "authoritative-open", "Authoritative open");
+		const opened = await openSidePanelTab(authoritativeTab, { focus: true, skipRender: true });
+
+		expect((state as any).__lastSidePanelUserActiveSelection).toBeUndefined();
+		expect(opened.activeTabId).toBe(authoritativeTab.id);
+		expect(state.activePanelTabId).toBe(authoritativeTab.id);
 	});
 });

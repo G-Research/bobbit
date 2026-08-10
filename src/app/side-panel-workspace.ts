@@ -718,10 +718,11 @@ export async function openSidePanelTab(tab: SidePanelWorkspaceTab, options: Open
 	const sessionId = tab.source.sessionId;
 	const base = mutationBaseWorkspace(sessionId);
 	const focus = options.focus !== false;
-	if (focus) {
-		// Explicit open/update events are authoritative focus changes. A recently
-		// captured tab click may still be guarding against stale WS/REST payloads;
-		// clear it so it cannot pull focus back to the old tab.
+	const localSelection = (state as any).__lastSidePanelUserActiveSelection as { sessionId?: string } | undefined;
+	if (focus && localSelection?.sessionId === panelWorkspaceSessionKey(sessionId)) {
+		// Explicit open/update events are authoritative focus changes within their
+		// owning session. Keep another session's guard so a background open cannot
+		// let a delayed foreground payload pull focus back to an older tab.
 		delete (state as any).__lastSidePanelUserActiveSelection;
 	}
 	const optimistic = upsertTab(base, tab, focus, options.placeAfterActive !== false);
