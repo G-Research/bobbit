@@ -19,6 +19,7 @@ const NON_ROUTE_REQ_CALLEES = new Set([
 	"proxyRequest",
 	"readBody",
 	"readLimitedJson",
+	"readLimitedReviewJson",
 	"requireOwningSessionSecret",
 	"revisionFromRequest",
 	"verifyCallerSession",
