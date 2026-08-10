@@ -93,7 +93,44 @@ relative import.
 
 ## Focused read output
 
-`bobbit_read` lists compact discovery fields, then uses matching `get_*` operations for exact detail; direct REST/UI and the admin/orchestrate tiers keep separate response policies.
+`bobbit_read` bounds agent-facing responses so discovery and status checks do not consume context with large or repeated payloads. These projections do not change direct REST/UI responses or the admin/orchestrate tiers.
+
+### Goal and Git status summaries
+
+`get_goal` with `view: "summary"` returns only this identity/status allowlist when fields are present:
+
+- `id`, `title`, `state`, `projectId`, `workflowId`
+- `parentGoalId`, `rootGoalId`
+- `paused`, `archived`, `archivedAt`
+- `setupStatus`, `setupError`
+- `createdAt`, `updatedAt`
+
+`workflowId` may be derived from the goal's workflow snapshot. The summary omits `spec`, workflow details, paths, configuration, provider data, and branch/merge internals. This exhaustive allowlist also keeps future unclassified detail fields out of summaries. With `view` omitted, `view: "full"`, or another non-summary value, the established detail projection remains available and `spec` is not truncated.
+
+`goal_git_status` with `view: "summary"` returns one `aggregate` object. It contains available scalar status fields — `branch`, `primaryBranch`, `isOnPrimary`, `primaryRef`, `hasUpstream`, `ahead`, `behind`, `aheadOfPrimary`, `behindPrimary`, `mergedIntoPrimary`, `insertionsVsPrimary`, `deletionsVsPrimary`, `clean`, `summary`, `unpushed`, `partial`, and `untrackedIncluded` — plus `changedFiles`, the aggregate status-entry count. Top-level freshness fields (`observedAt`, `refreshedAt`, `stale`, `source`, `ageMs`) and compact `lastError` remain when available. Per-file `status` and repeated root, `repos`, and `data` aliases are omitted. Omitted and non-summary views, including `view: "full"`, retain the legacy projection and its compatibility aliases.
+
+### Gate paging
+
+`list_gates` paging is independent of `view`. Summary, omitted, and full views all honor `limit`, `offset`, `cursor`, and `after`; calls without paging controls use the standard bounded list defaults. `view` controls per-gate field detail, not page cardinality.
+
+The root `gates` array is the sole paged gate collection. The `summary` object retains compact progress counts but no longer repeats gates under `summary.gates`. `total` describes the full authorized, goal-scoped collection before slicing.
+
+The gate endpoint uses offsets, so the tool treats each non-negative integer `cursor` or `after` as an absolute REST offset. Precedence is `cursor`, then `after`, then `offset`:
+
+- Offset pages return `nextOffset` and an equivalent `nextCursor` when `hasMore` is true.
+- Cursor pages report `mode: "cursor"` and the consumed `cursor`, then return only `nextCursor` when more rows remain.
+- Terminal pages report `hasMore: false` and omit both continuation markers.
+
+### Intentional agent response-contract changes
+
+These changes apply only to compact `bobbit_read` output:
+
+- `list_gates` is always bounded, exposes gates only at root `gates`, and removes `summary.gates`.
+- `goal_git_status(view: "summary")` removes repeated aliases and per-file status in favor of one scalar aggregate.
+- `maintenance_inspect(probe: "worktrees")` pages the canonical root `items` array while retaining aggregate counts and timestamps.
+- `maintenance_inspect(probe: "archived_session_worktrees")` also pages root `items`. Its compact response suppresses nested session worktree arrays and other worktree aliases while retaining compact session/group identity and count metadata.
+
+Direct REST responses are unchanged. `goal_commits(limit: N)` now forwards `N` to the REST endpoint, so callers can bound commit history at its source.
 
 ## Operation catalogue
 
@@ -105,9 +142,10 @@ mappings, methods, and body keys see each tool's `detail_docs`.
 
 All operations are GETs with no side effects. List-style operations are bounded
 by default (`limit=50`, `offset=0`, max `200`) and return a `pagination` object.
-`list_sessions`, `list_goals`, and `search` use REST pagination; other list
-operations page the already-filtered gateway response in the tool. REST-paged
-responses are annotated, not re-sliced.
+`list_sessions`, `list_goals`, `search`, and `list_gates` forward paging to REST;
+other list operations page the already-filtered gateway response in the tool.
+REST-paged responses are annotated rather than re-sliced, while `list_gates`
+also enforces the requested bound if an older endpoint returns an unsliced array.
 
 **Archived entities are hidden by default.** Every list/search read returns
 live rows only unless the caller explicitly opts in. This keeps stale, archived
@@ -137,9 +175,11 @@ opt-in.
 
 - `health`, `connection_info` — gateway liveness + network info.
 - `list_goals` (`archived=true` to include archived goals, `q`), `get_goal` —
-  enumerate / fetch goals.
+  enumerate / fetch goals; use `get_goal(view: "summary")` for bounded identity
+  and status metadata without the goal spec.
 - `goal_cost`, `goal_git_status`, `goal_commits`, `goal_pr_status` — per-goal
-  cost, git, commit, and PR details.
+  cost, git, commit, and PR details. Git status has a deduplicated summary view,
+  and `goal_commits` forwards `limit` to REST.
 - `list_sessions` (`include=archived` to include archived sessions, `q`,
   `projectId`), `get_session`, `session_cost` — enumerate / fetch sessions and
   their cost.
@@ -150,11 +190,12 @@ opt-in.
   requires `projectId`; `get_workflow` accepts it as a scope filter).
 - `list_roles`, `list_tools` — resolved roles and the tool catalogue.
 - `list_gates`, `list_tasks` (by arbitrary `goalId`), `get_task` — cross-goal
-  gate/task boards.
+  gate/task boards. Gate pages use root `gates` as their canonical collection
+  in every view.
 - `list_staff`, `list_mcp_servers` — staff agents and MCP servers.
 - `maintenance_inspect` (`probe=`) — the GET-only maintenance probes (orphaned
   worktrees/sessions, expired archives, orphaned index rows, worktree/sandbox
-  pools, search stats).
+  pools, search stats). Worktree inventory probes page canonical root `items`.
 
 ### `bobbit_orchestrate` — runtime state mutations
 
