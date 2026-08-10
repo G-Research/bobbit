@@ -331,10 +331,13 @@ function allowlistedServerCode(value: unknown, status: number): ReviewOpenErrorC
 	if (code === "REVIEW_PAYLOAD_SESSION_UNAVAILABLE") return "REVIEW_SESSION_UNAVAILABLE";
 	if (code === "REVIEW_PAYLOAD_NOT_FOUND") return "REVIEW_PAYLOAD_UNAVAILABLE";
 	if (code === "REVIEW_PAYLOAD_INVALID" || code === "REVIEW_PAYLOAD_INVALID_REFERENCE"
-		|| code === "REVIEW_PAYLOAD_REFERENCE_MISMATCH") return "REVIEW_REFERENCE_INVALID";
+		|| code === "REVIEW_PAYLOAD_REFERENCE_MISMATCH" || code === "REVIEW_PAYLOAD_RESPONSE_INVALID") return "REVIEW_REFERENCE_INVALID";
 	if (code === "REVIEW_PAYLOAD_PERSISTENCE_FAILED" || code === "REVIEW_PAYLOAD_READ_FAILED"
 		|| code === "REVIEW_PAYLOAD_INTERNAL_ERROR") return "REVIEW_PERSISTENCE_FAILED";
+	if (code === "REVIEW_PAYLOAD_WORKSPACE_CONFLICT") return "REVIEW_WORKSPACE_CONFLICT";
 	if (code === "REVIEW_PAYLOAD_UPLOAD_FORBIDDEN") return "REVIEW_UNAUTHORIZED";
+	if (code === "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE") return "REVIEW_SESSION_UNAVAILABLE";
+	if (code === "REVIEW_OPEN_FAILED") return "REVIEW_CLIENT_OPEN_FAILED";
 	if (status === 401 || status === 403) return "REVIEW_UNAUTHORIZED";
 	if (status === 404 || status === 410) return "REVIEW_PAYLOAD_UNAVAILABLE";
 	if (status === 409 || status === 412) return "REVIEW_WORKSPACE_CONFLICT";
@@ -410,9 +413,9 @@ export async function openReviewReceipt(request: ReviewOpenRequest): Promise<Rev
 			if (openRecord?.ok === false || openOutcome?.ok === false || openOutcome?.status === "failed" || openOutcome?.status === "error") {
 				return setState(key, failure(allowlistedServerCode(openBody, openResponse.status), receipt));
 			}
-			// Current gateways may acknowledge the atomic open without echoing the
-			// workspace. In that compatibility shape, read back the authoritative
-			// owner workspace rather than constructing a client tab from the receipt.
+			// Older gateways may acknowledge the atomic open without echoing the
+			// workspace. Read it back rather than constructing a client tab from the
+			// receipt.
 			const workspace = workspaceFromOpenResponse(openBody)
 				?? await hydrateSidePanelWorkspace(request.sessionId);
 			if (!validateWorkspace(workspace, normalizedRequest)) return setState(key, failure("REVIEW_CLIENT_OPEN_FAILED", receipt));

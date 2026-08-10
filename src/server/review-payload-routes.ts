@@ -14,7 +14,7 @@ import {
 export interface ReviewPayloadRouteDeps {
 	sessionManager: SessionManager;
 	readBody: (req: http.IncomingMessage, maxBytes?: number) => Promise<any>;
-	openReview: (payload: CanonicalReviewPayload) => Promise<void>;
+	openReview: (payload: CanonicalReviewPayload) => Promise<unknown>;
 	resolveExistingReview?: (
 		sessionId: string,
 		title: string,
@@ -225,8 +225,8 @@ export async function handleReviewPayloadRoute(
 			if (reference.reviewId === undefined || reference.hash === undefined) {
 				throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
 			}
-			await deps.openReview(payload);
-			json(res, 200, { ok: true, status: "opened", reviewId: payload.reviewId, payloadId: payload.payloadId });
+			const workspace = await deps.openReview(payload);
+			json(res, 200, { ok: true, status: "opened", reviewId: payload.reviewId, payloadId: payload.payloadId, workspace });
 		} catch (error) {
 			writeError(res, error);
 		}

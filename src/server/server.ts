@@ -5390,7 +5390,7 @@ async function handleApiRoute(
 		}
 		return { reviewId: incomingReviewId };
 	};
-	const openReviewPayload = async (payload: CanonicalReviewPayload): Promise<void> => {
+	const openReviewPayload = async (payload: CanonicalReviewPayload) => {
 		const source = {
 			type: "review",
 			sessionId: payload.sessionId,
@@ -5422,6 +5422,7 @@ async function handleApiRoute(
 				updatedAt: Date.now(),
 			}, { focus: true, placeAfterActive: true });
 			if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+			return workspace;
 		} catch (error) {
 			if (priorTombstone) reviewAnnotationStore?.setReviewTombstone(payload.sessionId, payload.reviewId, priorTombstone);
 			throw error;
