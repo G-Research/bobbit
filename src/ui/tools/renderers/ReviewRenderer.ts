@@ -45,12 +45,29 @@ function normalizedErrorCode(code: unknown): ReviewOpenErrorCode | undefined {
 		|| code === "REVIEW_PERSISTENCE_FAILED" || code === "REVIEW_WORKSPACE_CONFLICT"
 		|| code === "REVIEW_SESSION_UNAVAILABLE" || code === "REVIEW_CLIENT_OPEN_FAILED") return code;
 	if (code === "REVIEW_PAYLOAD_SESSION_UNAVAILABLE" || code === "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE") return "REVIEW_SESSION_UNAVAILABLE";
-	if (code === "REVIEW_PAYLOAD_INVALID" || code === "REVIEW_PAYLOAD_RESPONSE_INVALID") return "REVIEW_REFERENCE_INVALID";
+	if (code === "REVIEW_PAYLOAD_NOT_FOUND") return "REVIEW_PAYLOAD_UNAVAILABLE";
+	if (code === "REVIEW_PAYLOAD_INVALID" || code === "REVIEW_PAYLOAD_INVALID_REFERENCE"
+		|| code === "REVIEW_PAYLOAD_REFERENCE_MISMATCH" || code === "REVIEW_PAYLOAD_RESPONSE_INVALID") return "REVIEW_REFERENCE_INVALID";
 	if (code === "REVIEW_PAYLOAD_UPLOAD_FORBIDDEN") return "REVIEW_UNAUTHORIZED";
-	if (code === "REVIEW_PAYLOAD_PERSISTENCE_FAILED") return "REVIEW_PERSISTENCE_FAILED";
+	if (code === "REVIEW_PAYLOAD_PERSISTENCE_FAILED" || code === "REVIEW_PAYLOAD_READ_FAILED"
+		|| code === "REVIEW_PAYLOAD_INTERNAL_ERROR") return "REVIEW_PERSISTENCE_FAILED";
 	if (code === "REVIEW_PAYLOAD_WORKSPACE_CONFLICT") return "REVIEW_WORKSPACE_CONFLICT";
 	if (code === "REVIEW_OPEN_FAILED") return "REVIEW_CLIENT_OPEN_FAILED";
 	return undefined;
+}
+
+function retryableErrorCode(code: ReviewOpenErrorCode): boolean {
+	return code === "REVIEW_PERSISTENCE_FAILED"
+		|| code === "REVIEW_WORKSPACE_CONFLICT"
+		|| code === "REVIEW_SESSION_UNAVAILABLE"
+		|| code === "REVIEW_CLIENT_OPEN_FAILED";
+}
+
+function receiptOpenFailure(receipt: ReviewOpenReceipt): { code: ReviewOpenErrorCode; retryable: boolean } | undefined {
+	const outcome = receipt.open;
+	if (!outcome || (outcome.ok !== false && outcome.status !== "failed" && outcome.status !== "error")) return undefined;
+	const code = normalizedErrorCode(outcome.code);
+	return code ? { code, retryable: retryableErrorCode(code) } : undefined;
 }
 
 function safeToolErrorCode(result: ToolResultMessage<any> | undefined): ReviewOpenErrorCode | undefined {
@@ -132,9 +149,31 @@ function presentation(
 		};
 	}
 	if (!openState) {
-		// A bounded receipt records whether this exact review opened when the tool
-		// completed. Historical rendering stays passive, but a previously opened
-		// and explicitly closed review should still advertise the recovery action.
+		// The coordinator is intentionally memory-only, so historical hydration
+		// falls back to the receipt's bounded automatic outcome. This is a pure
+		// presentation mapping: it never opens a review or clears a tombstone, and
+		// raw receipt messages never cross the renderer boundary.
+		const persistedFailure = receiptOpenFailure(receipt);
+		if (persistedFailure?.retryable) {
+			return {
+				buttonLabel: "Retry open",
+				disabled: false,
+				pending: false,
+				error: errorMessage(persistedFailure.code),
+				code: persistedFailure.code,
+			};
+		}
+		if (persistedFailure) {
+			return {
+				buttonLabel: "Open unavailable",
+				disabled: true,
+				pending: false,
+				status: errorMessage(persistedFailure.code),
+				code: persistedFailure.code,
+			};
+		}
+		// A previously opened and explicitly closed review still advertises the
+		// exact manual recovery action without passively recreating it.
 		return { buttonLabel: receiptWasOpened(receipt) ? "Re-open review" : "Open review", disabled: false, pending: false };
 	}
 	if (openState.phase === "available") {
