@@ -154,8 +154,8 @@ between multiple preview tabs without re-mounting on every click. The
 active tab's `artifactId` is read off the panel-tab itself, not mirrored
 into global state, so SSE / bootstrap updates of `state.previewPanelEntry`
 can never desync the iframe `src` from the visible tab. The live mount
-slot remains the source for tabs without an `artifactId` (assistant /
-live preview).
+slot remains only as the fallback for tabs without an `artifactId`; a current
+or assistant-owned tab with an artifact still uses the stable artifact route.
 
 ### Reopen-tab decision flow
 
@@ -214,8 +214,9 @@ small metadata to render after restart:
 On gateway restart, `sidePanelWorkspace` is loaded with the session. When the
 browser reloads or returns to the session, the side-panel shell renders the
 active preview tab and the iframe derives `entry`, `mtime`, and `artifactId` from
-that tab before transient preview mirrors are repopulated. Live tabs point at
-`/preview/<sid>/<entry>?mtime=<n>`; artifact-backed historical tabs point at
+that tab before transient preview mirrors are repopulated. Tabs without an
+artifact point at `/preview/<sid>/<entry>?mtime=<n>`; every artifact-backed tab,
+including the current/live identity, points at
 `/preview/<sid>/_artifact/<artifactId>/<entry>?mtime=<n>`.
 
 Bootstrap (`GET /api/preview/mount`) and `preview-changed` SSE metadata may later

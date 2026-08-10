@@ -5,8 +5,8 @@ import {
 	INBOX_PANEL_TAB_ID,
 	assistantProposalType,
 	buildPanelWorkspaceTabs,
-	isLivePreviewTab,
 	panelWorkspaceSessionKey,
+	previewArtifactIdFromTab,
 	previewContentHashFromTab,
 	previewEntryLabel,
 	previewTabDisplayTitle,
@@ -353,9 +353,8 @@ function hydrateActivePreviewMirror(workspace: SidePanelWorkspace, legacyTabs: P
 	);
 	if (!entry) return;
 	const contentHash = previewContentHashFromTab(activeTab);
-	const artifactId = stringValue(tabState.artifactId) || stringValue(source.artifactId);
+	const artifactId = previewArtifactIdFromTab(activeTab);
 	const mtime = finiteNumber(tabState.mtime) ?? finiteNumber(source.mtime);
-	const isLiveTab = isLivePreviewTab(activeTab);
 
 	state.isPreviewSession = true;
 	state.previewPanelEntry = entry;
@@ -364,7 +363,7 @@ function hydrateActivePreviewMirror(workspace: SidePanelWorkspace, legacyTabs: P
 	if (mtime != null) state.previewPanelMtime = mtime;
 	else if (!state.previewPanelMtime) state.previewPanelMtime = now();
 	if (contentHash) (state as any).previewPanelContentHash = contentHash;
-	state.previewPanelArtifactId = !isLiveTab && artifactId ? artifactId : "";
+	state.previewPanelArtifactId = artifactId;
 	(state as any).previewPanelMountedTabId = activeTab.id;
 }
 

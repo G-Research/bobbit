@@ -21,6 +21,7 @@ import {
 	normalizeSidePanelTabs,
 	packPanelRefFromTabId,
 	packPanelTabId,
+	previewArtifactIdFromTab,
 	previewContentHashFromTab,
 	previewEntryLabel,
 	previewEntryTabId,
@@ -452,6 +453,12 @@ describe("panel workspace side-pane tab contract", () => {
 });
 
 describe("panel workspace preview tab compatibility", () => {
+	it("uses immutable artifact identity for current and historical preview tabs", () => {
+		assert.equal(previewArtifactIdFromTab(previewTab(previewEntryTabId("live.html"), { live: true, artifactId: "artifact-live" })), "artifact-live");
+		assert.equal(previewArtifactIdFromTab(previewTab(previewVersionedTabId("old.html", 1), { artifactId: "artifact-source" }, { artifactId: "artifact-state" })), "artifact-state");
+		assert.equal(previewArtifactIdFromTab(previewTab(previewEntryTabId("fallback.html"), { live: true })), "");
+	});
+
 	it("distinguishes current preview tabs from historical preview tool-card tabs", () => {
 		assert.equal(isLivePreviewTab(previewTab("preview")), true);
 		assert.equal(isLivePreviewTab(previewTab("preview:live")), true);

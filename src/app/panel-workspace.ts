@@ -254,13 +254,23 @@ export function isPinnedPanelTab(_tab: PanelWorkspaceTab | undefined | null): bo
 	return false;
 }
 
+/** Return the immutable artifact backing a preview tab, regardless of whether
+ * the tab is the current/live identity. "Live" controls update semantics; once
+ * an artifact exists, its stable route is always safer than the mutable mount. */
+export function previewArtifactIdFromTab(tab: PanelWorkspaceTab | undefined | null): string {
+	if (!tab || tab.kind !== "preview") return "";
+	const source = tab.source as Record<string, unknown> | undefined;
+	const tabState = tab.state as Record<string, unknown> | undefined;
+	const stateArtifactId = typeof tabState?.artifactId === "string" ? tabState.artifactId.trim() : "";
+	const sourceArtifactId = typeof source?.artifactId === "string" ? source.artifactId.trim() : "";
+	return stateArtifactId || sourceArtifactId;
+}
+
 export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
 	if (!tab || tab.kind !== "preview") return false;
 	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) return true;
 	const source = tab.source as Record<string, unknown> | undefined;
-	const tabState = tab.state as Record<string, unknown> | undefined;
-	const hasArtifact = typeof source?.artifactId === "string" && source.artifactId
-		|| typeof tabState?.artifactId === "string" && tabState.artifactId;
+	const hasArtifact = previewArtifactIdFromTab(tab);
 	const hasLiveSource = source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
 	// Current filename tabs are live when the preview event explicitly marks them
 	// live, even if the server also attached an immutable artifact for historical
