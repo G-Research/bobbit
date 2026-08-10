@@ -143,22 +143,51 @@ function toolProposalMessage(blockId: string) {
 function deliverAgentEvent(a: RemoteAgent, type: string, message?: any): void {
 	(a as any).handleAgentEvent({ type, ...(message ? { message } : {}) });
 }
+function deliverToolLifecycleEvent(
+	a: RemoteAgent,
+	type: "tool_execution_start" | "tool_execution_end",
+	toolCallId: string,
+	toolName: string,
+): void {
+	(a as any).handleAgentEvent({ type, toolCallId, toolName });
+}
+
+let reviewToolCallSequence = 0;
 async function deliverReviewToolResult(
 	a: RemoteAgent,
 	action: string,
 	payload: any,
 	isLive = true,
 	shape = "json-text",
-): Promise<void> {
+	options: {
+		toolCallId?: string;
+		toolName?: string;
+		start?: boolean;
+		endBeforeResult?: boolean;
+	} = {},
+): Promise<string> {
+	const toolCallId = options.toolCallId ?? `review-call-${++reviewToolCallSequence}`;
+	const toolName = options.toolName ?? action;
+	if (options.start !== false) deliverToolLifecycleEvent(a, "tool_execution_start", toolCallId, toolName);
+	if (options.endBeforeResult) deliverToolLifecycleEvent(a, "tool_execution_end", toolCallId, toolName);
+
 	const envelope = { action, ...payload };
 	const json = JSON.stringify(envelope);
-	const content = shape === "structured"
+	const resultContent = shape === "structured"
 		? [{ type: "text", text: "(tool ack)" }, envelope]
-		: shape === "nested-tool-result"
-			? [{ type: "tool_result", content: [{ type: "text", text: "(tool ack)" }, envelope] }]
-			: [{ type: "text", text: "(tool ack)" }, { type: "text", text: json }];
-	const msg = { role: "toolResult", content };
+		: [{ type: "text", text: "(tool ack)" }, { type: "text", text: json }];
+	const msg = shape === "nested-tool-result"
+		? {
+			role: "user",
+			content: [{
+				type: "tool_result",
+				tool_use_id: toolCallId,
+				content: resultContent,
+			}],
+		}
+		: { role: "toolResult", toolCallId, toolName, content: resultContent };
 	await (a as any)._checkReviewToolResult(msg, isLive);
+	return toolCallId;
 }
 
 beforeEach(() => {
@@ -182,6 +211,7 @@ beforeEach(() => {
 	reviewSourceMocks.loadReviewSources.mockReset();
 	reviewSourceMocks.loadReviewSources.mockResolvedValue(mockReviewSourcesModule);
 	persistedReviewOpens.clear();
+	reviewToolCallSequence = 0;
 	reviewSourceMocks.openMarkdownReview.mockReset();
 	reviewSourceMocks.openMarkdownReview.mockImplementation((options: any) => {
 		const sessionId = String(options.sessionId || "");
@@ -331,7 +361,7 @@ describe("review tool session ownership", () => {
 		expect(getReviewState()).toEqual({ open: false, activeTab: "", docCount: 0, docTitles: [] });
 	});
 
-	it("active session's inline review_open also handles structured tool-result payloads", async () => {
+	it("active session's inline review_open also handles structured nested tool-result payloads", async () => {
 		const active = makeAgent("active-session");
 		setActive(active);
 		clearReviewState();
@@ -346,6 +376,22 @@ describe("review tool session ownership", () => {
 		expect(result.activeTab).toBe("Structured inline markdown-file-1");
 		expect(result.docCount).toBe(1);
 		expect(result.docTitles).toEqual(["Structured inline markdown-file-1"]);
+	});
+
+	it("retains review provenance when the result arrives after tool_execution_end", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+
+		await deliverReviewToolResult(active, "review_open", {
+			reviewId: "after-end-review",
+			title: "After end",
+			files: [{ fileId: "after-end-file", title: "File", markdown: "# After end" }],
+		}, true, "structured", { endBeforeResult: true });
+
+		expect(reviewSourceMocks.openMarkdownReview).toHaveBeenCalledWith(expect.objectContaining({
+			reviewId: "after-end-review",
+			sessionId: "active-session",
+		}));
 	});
 
 	it("historical replay cannot recreate an absent review primary", async () => {
@@ -448,6 +494,151 @@ describe("review tool session ownership", () => {
 		expect(persistedReviewOpens.get("background-session")?.[0]).toEqual(expect.objectContaining({
 			activeFileId: "selected-file",
 		}));
+	});
+});
+
+describe("review tool result provenance", () => {
+	function seedOwnedReview(sessionId: string, reviewId = "protected-review") {
+		const group = {
+			reviewId,
+			title: "Protected review",
+			files: [{ fileId: `${reviewId}-file`, title: "Notes", markdown: "# Keep me" }],
+		};
+		persistedReviewOpens.set(sessionId, [group]);
+		state.reviewGroupsBySession[sessionId] = [group] as any;
+		return group;
+	}
+
+	function expectNoDestructiveReviewCalls(): void {
+		expect(reviewSourceMocks.openMarkdownReview).not.toHaveBeenCalled();
+		expect(reviewSourceMocks.cleanupReviewGroup).not.toHaveBeenCalled();
+		expect(reviewSourceMocks.removePersistedReviewDocument).not.toHaveBeenCalled();
+		expect(reviewSourceMocks.clearPersistedReviewDocuments).not.toHaveBeenCalled();
+		expect(annotationStoreMocks.clearAnnotations).not.toHaveBeenCalled();
+		expect(annotationStoreMocks.clearAllAnnotations).not.toHaveBeenCalled();
+		expect(annotationStoreMocks.clearReviewSubmitted).not.toHaveBeenCalled();
+	}
+
+	it("rejects close JSON from unrelated read and bash tool results in selected and background sessions", async () => {
+		const selected = makeAgent("selected-session");
+		const background = makeAgent("background-session");
+		setActive(selected);
+		seedReviewState("Visible review");
+		const foregroundBefore = getReviewState();
+		const selectedGroup = seedOwnedReview("selected-session", "selected-protected");
+		const backgroundGroup = seedOwnedReview("background-session", "background-protected");
+		const closeJson = JSON.stringify({ action: "review_close" });
+
+		for (const [agent, toolCallId, toolName] of [
+			[selected, "read-call", "read"],
+			[background, "bash-call", "bash"],
+		] as const) {
+			deliverToolLifecycleEvent(agent, "tool_execution_start", toolCallId, toolName);
+			await (agent as any)._checkReviewToolResult({
+				role: "toolResult",
+				toolCallId,
+				toolName,
+				content: [{ type: "text", text: closeJson }],
+			}, true);
+		}
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("selected-session")).toEqual([selectedGroup]);
+		expect(persistedReviewOpens.get("background-session")).toEqual([backgroundGroup]);
+		expect(getReviewState()).toEqual(foregroundBefore);
+	});
+
+	it("rejects ordinary user/result text even when a review call is pending", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+		const toolCallId = "pending-review-close";
+		deliverToolLifecycleEvent(active, "tool_execution_start", toolCallId, "review_close");
+		const text = JSON.stringify({ action: "review_close" });
+
+		await (active as any)._checkReviewToolResult({
+			role: "user",
+			content: [{ type: "text", text }],
+		}, true);
+		await (active as any)._checkReviewToolResult({
+			role: "result",
+			toolCallId,
+			content: [{ type: "text", text }],
+		}, true);
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
+	});
+
+	it("rejects missing and unrecognized correlation IDs", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+		deliverToolLifecycleEvent(active, "tool_execution_start", "known-review-close", "review_close");
+		const content = [{ type: "text", text: JSON.stringify({ action: "review_close" }) }];
+
+		await (active as any)._checkReviewToolResult({ role: "toolResult", content }, true);
+		await (active as any)._checkReviewToolResult({
+			role: "toolResult",
+			toolCallId: "unknown-review-close",
+			content,
+		}, true);
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
+	});
+
+	it("rejects an action that does not match the recorded review tool name", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+
+		await deliverReviewToolResult(active, "review_close", {}, true, "json-text", {
+			toolCallId: "mismatched-review-call",
+			toolName: "review_open",
+		});
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
+	});
+
+	it("consumes valid review provenance so duplicate result replay is non-mutating", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		seedOwnedReview("active-session");
+		const toolCallId = "single-use-review-close";
+
+		await deliverReviewToolResult(active, "review_close", {
+			reviewId: "protected-review",
+		}, true, "structured", { toolCallId });
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledOnce();
+
+		// Restore the same group so a forged second authorization would be visible.
+		seedOwnedReview("active-session");
+		await deliverReviewToolResult(active, "review_close", {
+			reviewId: "protected-review",
+		}, true, "structured", { toolCallId, start: false });
+
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledOnce();
+		expect(persistedReviewOpens.get("active-session")).toHaveLength(1);
+	});
+
+	it("expires stale review call IDs before accepting their results", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+		const toolCallId = "stale-review-close";
+		deliverToolLifecycleEvent(active, "tool_execution_start", toolCallId, "review_close");
+		const pending = (active as any)._pendingReviewToolCalls.get(toolCallId);
+		pending.recordedAt = Date.now() - 16 * 60_000;
+
+		await deliverReviewToolResult(active, "review_close", {}, true, "json-text", {
+			toolCallId,
+			start: false,
+		});
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
 	});
 });
 

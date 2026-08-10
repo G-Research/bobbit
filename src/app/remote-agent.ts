@@ -266,6 +266,83 @@ function toolEventId(event: any): string | undefined {
 	return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
+type ReviewToolName = "review_open" | "review_close";
+type PendingReviewToolCall = { toolName: ReviewToolName; recordedAt: number };
+type CorrelatedReviewResult = { toolCallId: string; payloads: Record<string, unknown>[] };
+
+const REVIEW_TOOL_CALL_TTL_MS = 15 * 60_000;
+const REVIEW_TOOL_CALL_MAX_PENDING = 128;
+
+function reviewToolName(value: unknown): ReviewToolName | null {
+	return value === "review_open" || value === "review_close" ? value : null;
+}
+
+function reviewResultCorrelationId(value: Record<string, unknown>): string {
+	const id = value.toolCallId ?? value.tool_use_id;
+	return typeof id === "string" && id.length > 0 ? id : "";
+}
+
+function isTypedToolResult(value: Record<string, unknown>): boolean {
+	return value.role === "toolResult"
+		|| value.role === "tool_result"
+		|| value.type === "toolResult"
+		|| value.type === "tool_result";
+}
+
+/**
+ * Extract review payloads only from protocol-typed tool-result envelopes.
+ * A message-level result owns its content; otherwise direct nested
+ * `tool_result` blocks own theirs. We deliberately do not recursively search
+ * arbitrary objects, because unrelated tool output may itself contain data
+ * that resembles a result block.
+ */
+function correlatedReviewResults(message: unknown): CorrelatedReviewResult[] {
+	if (!message || typeof message !== "object" || Array.isArray(message)) return [];
+	const msg = message as Record<string, unknown>;
+	const envelopes: Record<string, unknown>[] = [];
+	if (isTypedToolResult(msg)) {
+		envelopes.push(msg);
+	} else if (Array.isArray(msg.content)) {
+		for (const block of msg.content) {
+			if (block && typeof block === "object" && !Array.isArray(block) && isTypedToolResult(block as Record<string, unknown>)) {
+				envelopes.push(block as Record<string, unknown>);
+			}
+		}
+	}
+
+	return envelopes.flatMap((envelope) => {
+		const toolCallId = reviewResultCorrelationId(envelope);
+		if (!toolCallId) return [];
+		const payloads: Record<string, unknown>[] = [];
+		const collectPayloads = (value: unknown): void => {
+			if (typeof value === "string") {
+				try {
+					const parsed = JSON.parse(value.trim());
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && reviewToolName((parsed as any).action)) {
+						payloads.push(parsed as Record<string, unknown>);
+					}
+				} catch { /* ordinary result text is not a review control payload */ }
+				return;
+			}
+			if (Array.isArray(value)) {
+				for (const item of value) collectPayloads(item);
+				return;
+			}
+			if (!value || typeof value !== "object") return;
+			const block = value as Record<string, unknown>;
+			if (reviewToolName(block.action)) {
+				payloads.push(block);
+			} else if (block.type === "text") {
+				collectPayloads(block.text);
+			}
+		};
+		collectPayloads(envelope.content);
+		collectPayloads(envelope.output);
+		collectPayloads(envelope.result);
+		return [{ toolCallId, payloads }];
+	});
+}
+
 function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
 	if (!a || !b) return false;
 	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
@@ -338,6 +415,9 @@ export class RemoteAgent {
 	private _sessionId = "";
 	private _toolCallInputsById = new Map<string, unknown>();
 	private _proposalToolCallsById = new Map<string, { type: ProposalType; input: Record<string, unknown> }>();
+	/** Single-use provenance for live review controls. Kept past
+	 * `tool_execution_end` because the persisted result message may follow it. */
+	private _pendingReviewToolCalls = new Map<string, PendingReviewToolCall>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
 	// Client-side outbox for user-intent frames issued while the WS is not OPEN
@@ -1064,6 +1144,25 @@ export class RemoteAgent {
 		this.onConnectionStatusChange?.(status);
 	}
 
+	private _prunePendingReviewToolCalls(now = Date.now()): void {
+		for (const [id, pending] of this._pendingReviewToolCalls) {
+			if (now - pending.recordedAt > REVIEW_TOOL_CALL_TTL_MS) this._pendingReviewToolCalls.delete(id);
+		}
+		while (this._pendingReviewToolCalls.size > REVIEW_TOOL_CALL_MAX_PENDING) {
+			const oldestId = this._pendingReviewToolCalls.keys().next().value as string | undefined;
+			if (!oldestId) break;
+			this._pendingReviewToolCalls.delete(oldestId);
+		}
+	}
+
+	private _rememberReviewToolCall(id: string, toolName: ReviewToolName): void {
+		this._prunePendingReviewToolCalls();
+		// Refresh insertion order if a provider reuses an ID for a new start.
+		this._pendingReviewToolCalls.delete(id);
+		this._pendingReviewToolCalls.set(id, { toolName, recordedAt: Date.now() });
+		this._prunePendingReviewToolCalls();
+	}
+
 	private _scheduleReconnect(): void {
 		if (this._intentionalDisconnect || this._reconnectTimer) return;
 
@@ -1084,6 +1183,7 @@ export class RemoteAgent {
 
 	disconnect(): void {
 		this._intentionalDisconnect = true;
+		this._pendingReviewToolCalls.clear();
 		if (this._reconnectTimer) {
 			clearTimeout(this._reconnectTimer);
 			this._reconnectTimer = null;
@@ -1378,6 +1478,7 @@ export class RemoteAgent {
 		this._lastStatusVersion = -1;
 		this._isAborting = false;
 		this._state.pendingToolCalls = new Set();
+		this._pendingReviewToolCalls.clear();
 		this._state.error = undefined;
 		this._state.turnStartTime = null;
 		this._state.providerAuthRequired = null;
@@ -2318,6 +2419,7 @@ export class RemoteAgent {
 				const removedId = (msg as any).sessionId as string | undefined;
 				const reason = (msg as any).reason as string | undefined;
 				if (!removedId) break;
+				if (removedId === this._sessionId) this._pendingReviewToolCalls.clear();
 				this.onSessionRemoved?.(removedId, reason ?? "archived");
 				break;
 			}
@@ -2659,51 +2761,19 @@ export class RemoteAgent {
 	 */
 	private async _checkReviewToolResult(msg: any, isLive = false): Promise<void> {
 		const sessionId = this._sessionId;
-		if (!sessionId) return;
+		if (!sessionId || !isLive) return;
 
-		// Extract review tool-result payloads. Production providers are not fully
-		// consistent here: the review extension usually returns a JSON text block,
-		// but direct/tool-protocol paths can carry the same envelope as a structured
-		// object or nested under a tool_result block. Only inspect result-like
-		// content/output fields; do not treat tool-call input as an opened review.
-		const payloads: any[] = [];
-		const collectReviewPayloads = (value: unknown): void => {
-			if (typeof value === "string") {
-				const trimmed = value.trim();
-				if (!trimmed.startsWith('{"action":"review_')) return;
-				try { payloads.push(JSON.parse(trimmed)); } catch { /* ignore non-JSON text */ }
-				return;
-			}
-			if (Array.isArray(value)) {
-				for (const item of value) collectReviewPayloads(item);
-				return;
-			}
-			if (!value || typeof value !== "object") return;
-			const block = value as Record<string, unknown>;
-			if (typeof block.action === "string" && block.action.startsWith("review_")) {
-				payloads.push(block);
-				return;
-			}
-			if (block.type === "text") collectReviewPayloads(block.text);
-			else if (block.type === "tool_result" || block.type === "toolResult" || block.role === "toolResult") {
-				collectReviewPayloads(block.content);
-				collectReviewPayloads(block.output);
-				collectReviewPayloads(block.result);
-			} else if (typeof block.content === "string") {
-				collectReviewPayloads(block.content);
-			}
-		};
-		collectReviewPayloads(msg.content);
-		collectReviewPayloads((msg as any).output);
-		collectReviewPayloads((msg as any).result);
+		this._prunePendingReviewToolCalls();
+		for (const result of correlatedReviewResults(msg)) {
+			const pending = this._pendingReviewToolCalls.get(result.toolCallId);
+			if (!pending) continue;
+			// A review tool emits one control envelope. Multiple review actions are
+			// ambiguous and fail closed rather than selecting a convenient match.
+			if (result.payloads.length !== 1) continue;
+			const data = result.payloads[0];
+			if (data.action !== pending.toolName) continue;
 
-		// Explicit live opens/closes are the only events allowed to mutate durable
-		// review/workspace state. Snapshot replay hydrates via persistence below the
-		// workspace authority boundary instead.
-		if (!isLive) return;
-
-		for (const data of payloads) {
-			if (data.action === "review_open") {
+			if (pending.toolName === "review_open") {
 				const files = Array.isArray(data.files)
 					? data.files.filter((file: unknown) => !!file && typeof file === "object" && typeof (file as any).markdown === "string")
 					: typeof data.markdown === "string"
@@ -2714,6 +2784,9 @@ export class RemoteAgent {
 						}]
 						: [];
 				if (files.length === 0) continue;
+				// Consume before the first await so concurrent/replayed delivery cannot
+				// authorize the same control twice.
+				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
 				reviewSources.openMarkdownReviewGroup({
 					title: typeof data.title === "string" && data.title.trim() ? data.title : "Review",
@@ -2724,7 +2797,8 @@ export class RemoteAgent {
 					live: true,
 					sessionId,
 				});
-			} else if (data.action === "review_close") {
+			} else {
+				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
 				const knownGroups = state.reviewGroupsBySession[sessionId]
 					|| reviewSources.readPersistedReviewGroups(sessionId);
@@ -2944,11 +3018,13 @@ export class RemoteAgent {
 				// boundary so a replacement agent's self-contained first update is not
 				// incorrectly applied to stale pre-crash content.
 				this._previousRawAssistantStreamMessage = undefined;
+				this._pendingReviewToolCalls.clear();
 				break;
 
 			case "agent_end": {
 				this._previousRawAssistantStreamMessage = undefined;
 				this.streamingMessageId = undefined;
+				this._pendingReviewToolCalls.clear();
 				// Status is owned by `session_status` (server). agent_end is a
 				// signal: streaming-message cleanup + per-tag flag clear + beep + badge.
 				this._state.streamingMessage = null;
@@ -3181,6 +3257,8 @@ export class RemoteAgent {
 					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
 					if (input) this._toolCallInputsById.set(id, input);
 					const toolName = typeof event.toolName === "string" ? event.toolName : "";
+					const exactReviewToolName = reviewToolName(toolName);
+					if (exactReviewToolName) this._rememberReviewToolCall(id, exactReviewToolName);
 					const proposalType = toolName.startsWith("propose_") ? toolName.replace("propose_", "") : "";
 					if (input && isProposalType(proposalType)) this._proposalToolCallsById.set(id, { type: proposalType, input: { ...input } });
 				}
