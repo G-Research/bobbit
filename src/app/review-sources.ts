@@ -873,14 +873,13 @@ async function finishReviewGroupCleanup(
 	isCurrent: () => boolean,
 ): Promise<ReviewGroupModel> {
 	if (!isCurrent()) return group;
-	const titleCounts = new Map<string, number>();
-	for (const file of group.files) titleCounts.set(file.title, (titleCounts.get(file.title) || 0) + 1);
+	const closingTitles = new Set(group.files.map((file) => file.title));
 	const remainingTitles = new Set(sessionGroups(sessionId).flatMap((candidate) => candidate.files.map((file) => file.title)));
-	for (const file of group.files) {
-		clearAnnotations(sessionId, file.fileId);
-		// Legacy one-document annotations were title-keyed. Never clear an
-		// ambiguous bucket owned by another file or sibling review.
-		if (titleCounts.get(file.title) === 1 && !remainingTitles.has(file.title)) clearAnnotations(sessionId, file.title);
+	for (const file of group.files) clearAnnotations(sessionId, file.fileId);
+	// Legacy one-document annotations were title-keyed. Clear each bucket once
+	// after the group is removed, unless a sibling review still owns that title.
+	for (const title of closingTitles) {
+		if (!remainingTitles.has(title)) clearAnnotations(sessionId, title);
 	}
 	clearAnnotations(sessionId, group.reviewId);
 	await flushPendingWrites();

@@ -14,6 +14,7 @@ import {
 	addAnnotation,
 	clearReviewTombstone,
 	getAnnotations,
+	getAnnotationsForDocument,
 	getReviewTombstone,
 } from "../../src/ui/components/review/AnnotationStore.js";
 
@@ -367,6 +368,84 @@ describe("review group workspace cleanup", () => {
 		state.lastWorkspaceRevisionBySession[CLEANUP_SESSION_ID] = initial.revision;
 		return { target, sibling, fixture: installWorkspaceCleanupFixture(initial, outcomes) };
 	}
+
+	it("clears a legacy title bucket once when the closing review repeats the file title", async () => {
+		const target: ReviewGroupModel = {
+			...review("cleanup-target", "Duplicate files", [
+				{ fileId: "duplicate-first", title: "same.md" },
+				{ fileId: "duplicate-second", title: "same.md" },
+			]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		persistReviewGroup(CLEANUP_SESSION_ID, target);
+		const initial: SidePanelWorkspace = {
+			version: 1,
+			sessionId: CLEANUP_SESSION_ID,
+			revision: 4,
+			tabs: [reviewTab(target)],
+			activeTabId: reviewTab(target).id,
+			sizeMode: "split",
+			updatedAt: 4,
+		};
+		state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID] = initial;
+		state.lastWorkspaceRevisionBySession[CLEANUP_SESSION_ID] = initial.revision;
+		installWorkspaceCleanupFixture(initial, ["success"]);
+		await addAnnotation(CLEANUP_SESSION_ID, "same.md", { id: "legacy-comment", quote: "legacy", comment: "remove" });
+		await addAnnotation(CLEANUP_SESSION_ID, "duplicate-first", { id: "first-comment", quote: "first", comment: "remove" });
+		await addAnnotation(CLEANUP_SESSION_ID, "duplicate-second", { id: "second-comment", quote: "second", comment: "remove" });
+
+		await cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId);
+
+		expect(getAnnotations(CLEANUP_SESSION_ID, "same.md")).toEqual([]);
+		expect(getAnnotations(CLEANUP_SESSION_ID, "duplicate-first")).toEqual([]);
+		expect(getAnnotations(CLEANUP_SESSION_ID, "duplicate-second")).toEqual([]);
+		expect(getAnnotationsForDocument(CLEANUP_SESSION_ID, "future-file", {
+			documentId: "future-file",
+			title: "same.md",
+			markdown: "fresh",
+		})).toEqual([]);
+	});
+
+	it("keeps a legacy title bucket while a sibling review still owns that title", async () => {
+		const target: ReviewGroupModel = {
+			...review("cleanup-target", "Duplicate files", [
+				{ fileId: "duplicate-first", title: "same.md" },
+				{ fileId: "duplicate-second", title: "same.md" },
+			]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		const sibling: ReviewGroupModel = {
+			...review("cleanup-sibling-same-title", "Sibling", [{ fileId: "sibling-same-file", title: "same.md" }]),
+			source: { kind: "markdown-review", sessionId: CLEANUP_SESSION_ID },
+		};
+		persistReviewGroup(CLEANUP_SESSION_ID, target);
+		persistReviewGroup(CLEANUP_SESSION_ID, sibling);
+		const initial: SidePanelWorkspace = {
+			version: 1,
+			sessionId: CLEANUP_SESSION_ID,
+			revision: 4,
+			tabs: [reviewTab(target), reviewTab(sibling)],
+			activeTabId: reviewTab(target).id,
+			sizeMode: "split",
+			updatedAt: 4,
+		};
+		state.sidePanelWorkspaceBySession[CLEANUP_SESSION_ID] = initial;
+		state.lastWorkspaceRevisionBySession[CLEANUP_SESSION_ID] = initial.revision;
+		installWorkspaceCleanupFixture(initial, ["success", "success"]);
+		await addAnnotation(CLEANUP_SESSION_ID, "same.md", { id: "legacy-comment", quote: "legacy", comment: "keep" });
+
+		await cleanupReviewGroup(CLEANUP_SESSION_ID, target.reviewId);
+
+		expect(getAnnotations(CLEANUP_SESSION_ID, "same.md")).toHaveLength(1);
+		expect(getAnnotationsForDocument(CLEANUP_SESSION_ID, sibling.files[0].fileId, {
+			documentId: sibling.files[0].fileId,
+			title: sibling.files[0].title,
+			markdown: sibling.files[0].markdown,
+		})).toMatchObject([{ id: "legacy-comment", comment: "keep" }]);
+
+		await cleanupReviewGroup(CLEANUP_SESSION_ID, sibling.reviewId);
+		await clearReviewTombstone(CLEANUP_SESSION_ID, sibling.reviewId);
+	});
 
 	it("retries an authoritative revision conflict and removes only the target primary tab", async () => {
 		const { target, sibling, fixture } = seedCleanup(["conflict", "success"]);
