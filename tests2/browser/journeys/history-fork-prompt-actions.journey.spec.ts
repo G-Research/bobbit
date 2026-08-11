@@ -7,7 +7,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import {
 	apiFetch,
@@ -68,6 +68,10 @@ function promptTrigger(page: Page, marker?: string): Locator {
 
 function popover(page: Page): Locator {
 	return page.locator("sidebar-actions-popover").filter({ has: page.getByRole("menu") }).last();
+}
+
+async function clipboardText(page: Page): Promise<string> {
+	return page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n"));
 }
 
 function forkRow(page: Page): Locator {
@@ -179,6 +183,14 @@ function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
+function pathsEqual(left: string, right: string): boolean {
+	const resolvedLeft = resolve(left);
+	const resolvedRight = resolve(right);
+	return process.platform === "win32"
+		? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+		: resolvedLeft === resolvedRight;
+}
+
 test.describe("Journey: Fork from history prompt actions", () => {
 	test.use({ permissions: ["clipboard-read", "clipboard-write"], hasTouch: true });
 
@@ -224,7 +236,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 
 			await openPromptActions(page);
 			await popover(page).getByRole("menuitem", { name: "Copy prompt" }).click();
-			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(SELECTED);
+			await expect.poll(() => clipboardText(page)).toBe(SELECTED);
 			await expect(page.getByText("Prompt copied", { exact: true })).toBeVisible();
 
 			// Mobile uses the same overflow and menu. Clicking the help stop models
@@ -237,7 +249,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			await expect(page.getByRole("tooltip")).toHaveText(TOOLTIP);
 			await expect(popover(page).getByRole("menu")).toBeVisible();
 			await popover(page).getByRole("menuitem", { name: "Copy prompt" }).click();
-			await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(SELECTED);
+			await expect.poll(() => clipboardText(page)).toBe(SELECTED);
 			await openPromptActions(page);
 
 			// The toggle starts off, changes without firing, and resets off on reopen.
@@ -362,7 +374,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 		} finally {
 			if (forkId) await deleteSession(forkId).catch(() => {});
 			if (sourceId) await deleteSession(sourceId).catch(() => {});
-			if (forkCwd && existsSync(forkCwd)) {
+			if (forkCwd && !pathsEqual(forkCwd, root) && existsSync(forkCwd)) {
 				try { git(root, "worktree", "remove", "--force", forkCwd); } catch { rmSync(forkCwd, { recursive: true, force: true }); }
 			}
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
