@@ -136,7 +136,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 |---|---|---|
 | `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
-| `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live session. Body `{ newWorktree?: boolean, entryId?: string }`: omit `entryId` to clone the whole source JSONL, or supply a durable Pi prompt cursor to clone the active branch strictly before that prompt. See [Fork session endpoint](#fork-session-endpoint). |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
@@ -298,37 +298,93 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+`POST /api/sessions/:id/fork` creates a writable live session that rehydrates through `switch_session` from a server-built clone of the source Pi transcript. The route supports two modes so whole-session and prompt-history forks share source eligibility, context assembly, worktree provisioning, cleanup, and response behavior.
 
-Request body (optional):
+#### Request
 
-```json
-{ "newWorktree": true }
-```
-
-- `newWorktree: true` (default when omitted) — create a fresh worktree/branch off the project repo (a plain project-root session when the project isn't a git repo).
-- `newWorktree: false` — reuse the source session's existing worktree directly. The fork's `cwd` is set to the source's `worktreePath` and **no** new worktree is created; the two live sessions intentionally share the worktree/branch. The fork does not register worktree metadata, so terminating either session never tears down the shared tree. When the source has no worktree, the fork reuses the project-root cwd.
-
-Success returns `201`:
-
-```json
-{
-  "id": "new-session-id",
-  "cwd": "/repo-or-worktree",
-  "status": "idle",
-  "projectId": "project-id",
-  "goalId": "goal-id",
-  "title": "Fork: Source title"
+```ts
+interface ForkSessionRequest {
+  newWorktree?: boolean;
+  entryId?: string;
 }
 ```
 
-`goalId` is omitted when not applicable. The new session title is `Fork: <source title>` (`markGenerated`, so the first prompt's auto-titler won't overwrite it).
+| Request | Transcript boundary | Worktree default |
+|---|---|---|
+| `{}` or `{ newWorktree }` | Copy the whole source transcript file. | Omission means `newWorktree: true`, preserving the session-level **Fork** contract. |
+| `{ entryId, newWorktree }` | Clone the active branch strictly before the named prompt. | The prompt UI always sends the boolean and opens with `false`; direct API callers that omit it still get the endpoint default of `true`. |
 
-The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
+`newWorktree`, when present, must be boolean. A history `entryId` must be a trimmed, non-empty string of at most 256 UTF-16 code units. Unknown request fields are ignored, but the server never accepts a browser message array, rendered index, prompt text, or client-computed branch as the boundary.
 
-Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty source transcript returns `404`; a cross-realm clone returns `422`.
+#### History boundary and cursor eligibility
 
-See [Sidebar Actions Menu](sidebar-actions-menu.md#fork-session-endpoint) for the user-facing behavior.
+A prompt action exposes `entryId` only when the row is a settled server-origin user prompt with Bobbit's transcript-confirmed Pi cursor provenance. This client check keeps actions off assistant, tool-result-only, synthetic, optimistic, pending, archived, non-interactive, child/team, and current in-flight rows. It is only an affordance check: the server independently resolves the id in one immutable read of the source JSONL and requires that it name an ordinary accountable user prompt on Pi's current parent-linked active branch.
+
+The destination contains the exact raw session header followed by the selected prompt's active ancestors in parent order. Retained model changes, assistant/tool records, compaction records, timestamps, line endings, and unknown additive Pi fields remain lossless. The selected prompt, its response, every later active entry, and inactive-branch records are physically absent. Selecting the first prompt therefore produces a transcript containing only the session header. The route never prefills, resends, or appends the selected prompt.
+
+The immutable read is also the concurrency boundary: entries appended afterward cannot enter the destination. One unterminated final append fragment may be ignored; a malformed complete record or structurally ambiguous tree fails closed. The source transcript is never opened for write.
+
+#### Worktree modes and ownership
+
+- `newWorktree: false` reuses the source session's exact live `cwd`, including a nested directory within its worktree, and therefore shares the same filesystem state and branch. A history fork is persisted as a writable borrowed-worktree session without worktree/repository/branch teardown coordinates. It does not register, claim, reset, clean, stash, adopt, repair, or remove that tree. The source remains its sole lifecycle owner, including for sandbox worktrees, so terminating or recovering the borrower cannot tear down or recreate the shared tree.
+- `newWorktree: true` uses the established session-level Fork lifecycle. A Git-backed project gets a fresh owned `session/...` branch/worktree and the response waits for setup to finish; a non-Git project uses the established project-root behavior. Sandbox provisioning follows the same fresh-fork path rather than a history-specific lifecycle.
+
+Both modes pass prior runtime cwd values only as provenance for rebasing top-level Pi runtime metadata during `switch_session`. User and assistant content mentioning an old path is not rewritten.
+
+#### Preserved context and filtered state
+
+Both fork modes preserve the source context that still applies: project; goal, task, and reattempt-goal association; assistant type; staff identity/environment or role/accessory configuration; sandbox realm; allowed tools; selected/effective model and thinking level; and generated `Fork: <source title>` naming. A valid fork may transition an associated todo goal through the existing shared behavior, but cursor validation completes first.
+
+Whole-session forks retain their established full-JSONL and best-effort cache-copy behavior. History forks instead apply the cut consistently to destination state:
+
+- proposal drafts and their history are copied because they are session-level;
+- author bindings are copied only when confirmed by the retained transcript;
+- slash-skill/file-mention and compaction sidecars are copied only when their proven Pi entry or checkpoint survives the cut;
+- positional tool-content cache directories are not copied because their indexes may refer to discarded rows; retained tool content remains in the JSONL;
+- live prompt queues, in-flight steer state, EventBuffer snapshots, and other source-only runtime state are not copied.
+
+A filtered sidecar copy failure fails the request instead of returning a destination with stale references. Launch failures purge the destination transcript, session record, proposals, caches, and copied sidecars. Cleanup never mutates the source or a borrowed worktree.
+
+#### Source immutability, single-flight, and navigation
+
+The source process, session record, transcript bytes, sidecars, cwd/branch, prompt queue, running project state, connected clients, and session-list entry remain unchanged. The server reserves each exact `(sourceId, entryId, newWorktree)` history request while it runs; an identical concurrent request receives `HISTORY_FORK_IN_PROGRESS`, while different boundaries remain independent. The reservation is released on success and failure.
+
+The browser also disables prompt actions while session creation is pending. On a successful `201`, the initiating client refreshes the session list, connects to the returned id as an existing session, refetches cloned history when ready, and navigates there. Other clients may observe the new session through normal session-list invalidation, but they are not navigated away from the source. A request, launch, or connection failure stays on the source route and uses the existing visible connection-error surface.
+
+#### Success response
+
+Success returns `201`:
+
+```ts
+interface ForkSessionResponse {
+  id: string;
+  cwd: string;
+  status: string;
+  projectId: string;
+  goalId?: string;
+  title: string;
+}
+```
+
+`goalId` is omitted when not applicable. The title is `Fork: <source title>` and is marked generated so first-prompt auto-titling does not replace it.
+
+#### Errors
+
+History validation uses the standard `{ error, code }` response shape:
+
+| Status | Code | `error` |
+|---|---|---|
+| `400` | `HISTORY_FORK_CURSOR_INVALID` | `Invalid history fork entry id` |
+| `409` | `HISTORY_FORK_CURSOR_NOT_FOUND` | `This prompt is no longer available` |
+| `409` | `HISTORY_FORK_CURSOR_INACTIVE` | `This prompt is no longer on the active conversation branch` |
+| `422` | `HISTORY_FORK_CURSOR_NOT_USER` | `History forks must start before a user prompt` |
+| `409` | `HISTORY_FORK_CURSOR_IN_FLIGHT` | `The current prompt cannot be forked until the turn finishes` |
+| `409` | `HISTORY_FORK_TRANSCRIPT_INVALID` | `The session transcript changed or is not valid for history forking` |
+| `409` | `HISTORY_FORK_IN_PROGRESS` | `A fork from this prompt is already being created` |
+
+An invalid `newWorktree` value returns `400 { "error": "Invalid newWorktree flag" }` without a code. Existing route failures remain unchanged: missing persisted source or transcript is `404`; an unregistered project or missing goal is `410`; archived, terminated/non-live, delegate, child, read-only, non-interactive, team, or cross-realm sources are `422`; clone, filtered-sidecar, worktree-setup, and launch failures are `500` with a descriptive `error`.
+
+See [Unified Session Actions — Historic prompt actions](session-actions.md#historic-prompt-actions) for the user-facing controls and [History Fork Prompt Actions](design/history-fork-prompt-actions.md) for the design rationale.
 
 ### Background processes
 
