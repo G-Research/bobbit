@@ -14326,6 +14326,10 @@ async function handleApiRoute(
 							staffId: ps.staffId,
 							allowedTools: ps.allowedTools,
 						};
+						// A fresh Git fork must not return the temporary project-root cwd
+						// from the preparing SessionInfo. Reuse and non-Git fresh forks
+						// retain their established lifecycle.
+						if (worktreeOpts) createOpts.awaitWorktreeSetup = true;
 						if (newWorktree && ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
 							createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
 						}

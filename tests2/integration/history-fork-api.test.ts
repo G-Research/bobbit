@@ -117,14 +117,6 @@ async function responseJson(response: Response): Promise<any> {
 	return response.clone().json().catch(async () => ({ error: await response.clone().text() }));
 }
 
-async function waitForRealCondition(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error(`condition did not settle within ${timeoutMs}ms`);
-		await new Promise(resolve => setTimeout(resolve, 25));
-	}
-}
-
 function statePath(gateway: any, kind: string, sessionId: string, extension = ""): string {
 	return path.join(gateway.bobbitDir, "state", kind, `${sessionId}${extension}`);
 }
@@ -400,11 +392,25 @@ test.describe("history fork API", () => {
 		});
 		gateway.sessionManager.getSession(sourceId).cwd = liveCwd;
 
-		const response = await historyFork(gateway, sourceId, "selected-user", false);
+		const manager = gateway.sessionManager;
+		const originalCreateSession = manager.createSession;
+		let capturedOptions: any;
+		manager.createSession = async (...args: any[]) => {
+			capturedOptions = args[4];
+			return originalCreateSession.apply(manager, args);
+		};
+		let response: Response;
+		try {
+			response = await historyFork(gateway, sourceId, "selected-user", false);
+		} finally {
+			manager.createSession = originalCreateSession;
+		}
 		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
 		const fork = await response.json();
 		sessions.add(fork.id);
 		const forkPersisted = gateway.sessionManager.getPersistedSession(fork.id);
+		expect(capturedOptions.worktreeOpts).toBeUndefined();
+		expect(capturedOptions.awaitWorktreeSetup).toBeUndefined();
 		expect(fork.cwd).toBe(liveCwd);
 		expect(forkPersisted.cwd).toBe(liveCwd);
 		expect(forkPersisted.worktreePath).toBeUndefined();
@@ -428,19 +434,78 @@ test.describe("history fork API", () => {
 		const sourceId = await createTrackedSessionWithoutWorktree(projectRoot, project.id);
 		seedTranscript(gateway, sourceId, ordinaryHistory());
 
-		const response = await historyFork(gateway, sourceId, "selected-user", true);
+		const manager = gateway.sessionManager;
+		const originalCreateSession = manager.createSession;
+		let capturedOptions: any;
+		manager.createSession = async (...args: any[]) => {
+			capturedOptions = args[4];
+			return originalCreateSession.apply(manager, args);
+		};
+		let response: Response;
+		try {
+			response = await historyFork(gateway, sourceId, "selected-user", true);
+		} finally {
+			manager.createSession = originalCreateSession;
+		}
 		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
 		const fork = await response.json();
 		sessions.add(fork.id);
-		await waitForRealCondition(() => gateway.sessionManager.getSession(fork.id)?.status === "idle");
 		const forkPersisted = gateway.sessionManager.getPersistedSession(fork.id);
 
+		expect(path.resolve(capturedOptions.worktreeOpts.repoPath)).toBe(path.resolve(projectRoot));
+		expect(capturedOptions.awaitWorktreeSetup).toBe(true);
+		expect(fork.status).toBe("idle");
+		expect(path.resolve(fork.cwd)).not.toBe(path.resolve(projectRoot));
+		expect(path.resolve(fork.cwd)).toBe(path.resolve(forkPersisted.cwd));
 		expect(path.resolve(forkPersisted.cwd)).not.toBe(path.resolve(projectRoot));
 		expect(path.resolve(forkPersisted.worktreePath)).toBe(path.resolve(forkPersisted.cwd));
 		expect(forkPersisted.repoPath && path.resolve(forkPersisted.repoPath)).toBe(path.resolve(projectRoot));
 		expect(forkPersisted.branch).toMatch(/^session\//);
 		expect(fs.existsSync(path.join(forkPersisted.cwd, ".git"))).toBe(true);
 		expect(fs.readFileSync(forkPersisted.agentSessionFile, "utf8")).not.toContain("selected prompt");
+	});
+
+	test("awaited fresh worktree setup failures return an error and purge the destination", async ({ gateway }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `history-fork-failure-${randomUUID()}`);
+		copyGitTemplate(projectRoot);
+		const project = await registerProject({
+			name: `history-fork-failure-${randomUUID()}`,
+			rootPath: projectRoot,
+			seedWorkflows: false,
+		});
+		const sourceId = await createTrackedSessionWithoutWorktree(projectRoot, project.id);
+		seedTranscript(gateway, sourceId, ordinaryHistory());
+
+		const manager = gateway.sessionManager;
+		const originalCreateSession = manager.createSession;
+		let capturedOptions: any;
+		manager.createSession = async (...args: any[]) => {
+			capturedOptions = { ...args[4], worktreeOpts: { ...args[4]?.worktreeOpts } };
+			args[4] = {
+				...args[4],
+				worktreeOpts: { repoPath: path.join(projectRoot, "missing-repo") },
+				bypassWorktreePool: true,
+			};
+			return originalCreateSession.apply(manager, args);
+		};
+		let response: Response;
+		try {
+			response = await historyFork(gateway, sourceId, "selected-user", true);
+		} finally {
+			manager.createSession = originalCreateSession;
+		}
+
+		expect(path.resolve(capturedOptions.worktreeOpts.repoPath)).toBe(path.resolve(projectRoot));
+		expect(capturedOptions.awaitWorktreeSetup).toBe(true);
+		expect(response.status).toBe(500);
+		expect((await responseJson(response)).error).toContain("failed to fork session");
+		expect(gateway.sessionManager.getSession(capturedOptions.sessionId)).toBeUndefined();
+		expect(gateway.sessionManager.getPersistedSession(capturedOptions.sessionId)).toBeUndefined();
+		expect(fs.existsSync(capturedOptions.preExistingAgentSessionFile)).toBe(false);
+		expect(fs.existsSync(authorPath(gateway, capturedOptions.sessionId))).toBe(false);
+		expect(fs.existsSync(statePath(gateway, "skill-sidecar", capturedOptions.sessionId, ".jsonl"))).toBe(false);
+		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", capturedOptions.sessionId, ".jsonl"))).toBe(false);
+		expect(fs.existsSync(statePath(gateway, "proposal-drafts", capturedOptions.sessionId))).toBe(false);
 	});
 
 	test("deduplicates concurrent requests, releases reservations and purges failed artifacts", async ({ gateway }) => {
