@@ -545,7 +545,8 @@ test.describe("history fork API", () => {
 		fs.writeFileSync(sentinel, "preserve working state", "utf8");
 
 		const sourceId = await createTrackedSession(liveCwd);
-		seedTranscript(gateway, sourceId, ordinaryHistory());
+		const sourceTranscript = seedTranscript(gateway, sourceId, ordinaryHistory());
+		const sourceBytes = fs.readFileSync(sourceTranscript.file);
 		const sourcePersisted = gateway.sessionManager.getPersistedSession(sourceId);
 		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, {
 			cwd: liveCwd,
@@ -554,6 +555,12 @@ test.describe("history fork API", () => {
 			branch: "feature/shared-source",
 		});
 		gateway.sessionManager.getSession(sourceId).cwd = liveCwd;
+		const sourceCoordinates = {
+			cwd: liveCwd,
+			worktreePath: sourceWorktree,
+			repoPath: nonGitCwd(),
+			branch: "feature/shared-source",
+		};
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
@@ -574,8 +581,10 @@ test.describe("history fork API", () => {
 		const forkPersisted = gateway.sessionManager.getPersistedSession(fork.id);
 		expect(capturedOptions.worktreeOpts).toBeUndefined();
 		expect(capturedOptions.awaitWorktreeSetup).toBeUndefined();
+		expect(capturedOptions.borrowsWorktree).toBe(true);
 		expect(fork.cwd).toBe(liveCwd);
 		expect(forkPersisted.cwd).toBe(liveCwd);
+		expect(forkPersisted.borrowsWorktree).toBe(true);
 		expect(forkPersisted.worktreePath).toBeUndefined();
 		expect(forkPersisted.repoPath).toBeUndefined();
 		expect(forkPersisted.branch).toBeUndefined();
@@ -583,7 +592,9 @@ test.describe("history fork API", () => {
 		await gateway.sessionManager.terminateSession(fork.id);
 		expect(fs.readFileSync(sentinel, "utf8")).toBe("preserve working state");
 		expect(fs.existsSync(sourceWorktree)).toBe(true);
+		expect(fs.readFileSync(sourceTranscript.file).equals(sourceBytes), "source JSONL bytes remain unchanged").toBe(true);
 		expect(gateway.sessionManager.getSession(sourceId), "terminating fork does not stop source").toBeTruthy();
+		expect(gateway.sessionManager.getPersistedSession(sourceId)).toMatchObject(sourceCoordinates);
 	});
 
 	test("new-worktree mode uses the established fresh branch lifecycle and preserves reattempt context", async ({ gateway }) => {
