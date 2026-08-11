@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
+      "reason": "Core lifecycle regression coverage proving borrowed sandbox worktree ownership survives persistence/reload, suppresses verification and teardown, preserves source bytes and unregistered coordinates, while an owning control still verifies and removes its exact registered worktree.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/review-large-payload-receipt.test.ts",
       "reason": "Core reproducing regression coverage proving a real 20-file review above 32 KiB emits a bounded payload-free v2 receipt that survives live and history truncation with exact identity, byte metadata, and an actionable automatic-open outcome.",
       "execution": {

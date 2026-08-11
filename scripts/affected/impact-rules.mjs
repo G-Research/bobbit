@@ -832,6 +832,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	{
+		consumer: "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
+		allowReason: "test-owned persisted sandbox transcript used to prove byte preservation across reload and termination",
+		reads: frozen([
+			{ expression: "fixture.restored.agentSessionFile", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/core/focused-tool-contract-refresh.test.ts",
 		allowReason: "test-owned generated system prompt and the tool detail document path it points to",
 		reads: frozen([
@@ -1039,6 +1046,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(proposalFork, \"goal.md\")", count: 1 },
 			{ expression: "path.join(proposalFork, \"goal.history\", \"0001.md\")", count: 1 },
 			{ expression: "sentinel", count: 1 },
+			{ expression: "sourceTranscript.file", count: 2 },
 		]),
 	},
 	{
