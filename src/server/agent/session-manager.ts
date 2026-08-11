@@ -1,7 +1,13 @@
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { realClock, realCommandRunner } from "../gateway-deps.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
-import { LOCAL_USER_AUTHOR, isMessageAuthor } from "../../shared/message-author.js";
+import {
+	LOCAL_USER_AUTHOR,
+	PI_TRANSCRIPT_ENTRY_ID_SOURCE,
+	isAccountablePromptMessage,
+	isMessageAuthor,
+	isPiTranscriptEntryId,
+} from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 export type { PromptSource } from "../../shared/prompt-source.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -1309,6 +1315,26 @@ function promptAuthorMessageKey(
 	return undefined;
 }
 
+/** Replace untrusted cursor provenance with a server-confirmed transcript cursor. */
+function projectVisiblePromptEntryId<T>(event: T, entryId?: string): T {
+	if (!event || typeof event !== "object" || Array.isArray(event)) return event;
+	const raw = event as Record<string, unknown>;
+	if (!raw.message || typeof raw.message !== "object" || Array.isArray(raw.message)) return event;
+	const message = raw.message as Record<string, unknown>;
+	const { _entryIdSource: _untrustedEntryIdSource, ...withoutEntryIdSource } = message;
+	if (!entryId && _untrustedEntryIdSource === undefined) return event;
+	return {
+		...raw,
+		message: {
+			...withoutEntryIdSource,
+			...(entryId === undefined ? {} : {
+				entryId,
+				_entryIdSource: PI_TRANSCRIPT_ENTRY_ID_SOURCE,
+			}),
+		},
+	} as T;
+}
+
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
 type PromptAuthorEventBinding = { promptId: string; alreadySettled: boolean };
 
@@ -1412,10 +1438,13 @@ export function prepareVisibleAgentEvent(
 			// no intervening start) continue to reuse the completed occurrence.
 			session.lastKeylessPromptAuthorEnd = undefined;
 		}
-		return event;
+		return projectVisiblePromptEntryId(event);
 	}
 
 	const message = raw.message as Record<string, unknown>;
+	const durablePromptEntryId = raw.type === "message_end" && isAccountablePromptMessage(message)
+		? promptAuthorMessageId(message, raw)
+		: undefined;
 	let author: MessageAuthor;
 	const userRole = message.role === "user" || message.role === "user-with-attachments";
 	const modelText = userRole ? extractUserMessageText(message) : "";
@@ -1488,11 +1517,15 @@ export function prepareVisibleAgentEvent(
 	const projectedRaw = userRole && selectedPromptBinding
 		? { ...raw, message: projectCorrelatedPromptMessage(message, selectedPromptBinding) }
 		: raw;
-	const prepared = normalizeVisibleAgentEvent(session, projectedRaw, {
+	const normalized = normalizeVisibleAgentEvent(session, projectedRaw, {
 		agentAuthor: sessionAuthor,
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
+	const prepared = projectVisiblePromptEntryId(
+		normalized,
+		isPiTranscriptEntryId(durablePromptEntryId) ? durablePromptEntryId : undefined,
+	);
 	if (raw.type === "message_end" && stableBinding && session.promptAuthorReplayBindings) {
 		const replayIndex = session.promptAuthorReplayBindings.findIndex(
 			(binding) => binding.promptId === stableBinding!.promptId,
