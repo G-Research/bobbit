@@ -11,9 +11,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
-	PI_TRANSCRIPT_ENTRY_ID_SOURCE,
 	isMessageAuthor,
-	isPiTranscriptEntryId,
 	type BobbitMessage,
 	type MessageAuthor,
 } from "../../shared/message-author.js";
@@ -1103,23 +1101,16 @@ export function createPromptAuthorStreamCorrelation(
 	};
 }
 
-export interface MergeAuthorSidecarOptions {
-	/**
-	 * Expose a cursor only on transcript snapshot rows confirmed by a settled binding.
-	 * Opt-in keeps title/model and transcript-sanitizer projections unchanged.
-	 */
-	projectTranscriptEntryIds?: boolean;
-}
-
 /**
  * Correlate sidecar bindings before inference. Matching is global by phase so
  * an early legacy duplicate cannot consume a later row's exact id binding.
+ * Transcript cursor provenance is intentionally outside this ledger: Pi agent
+ * events do not carry entry ids, so author settlements cannot prove them.
  */
 export function mergeAuthorSidecarIntoMessages<T extends object>(
 	entries: PromptAuthorBinding[],
 	messages: T[],
 	context: NormalizeVisibleMessageContext = {},
-	options: MergeAuthorSidecarOptions = {},
 ): Array<BobbitMessage<T>> {
 	if (!Array.isArray(messages)) return messages;
 	const directPromptBindings = entries
@@ -1201,22 +1192,10 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		authored = messages.map((row, index) => {
 			const binding = assignments.get(index);
 			if (!binding) return row;
-			let projected: T & Record<string, unknown> = projectCorrelatedPromptMessage(
+			const projected: T & Record<string, unknown> = projectCorrelatedPromptMessage(
 				row as T & Record<string, unknown>,
 				binding,
 			);
-			const entryId = options.projectTranscriptEntryIds
-				&& isPiTranscriptEntryId(binding.settlement?.messageId)
-				? binding.settlement.messageId
-				: undefined;
-			if (entryId !== undefined
-				&& (projected.entryId !== entryId || projected._entryIdSource !== PI_TRANSCRIPT_ENTRY_ID_SOURCE)) {
-				projected = {
-					...projected,
-					entryId,
-					_entryIdSource: PI_TRANSCRIPT_ENTRY_ID_SOURCE,
-				};
-			}
 			if (projected !== row) changed = true;
 			return projected;
 		});
