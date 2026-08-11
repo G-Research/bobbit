@@ -1193,6 +1193,12 @@ function cancelPromptAuthorBinding(
 	if (idx === -1) return false;
 
 	const [pending] = pendingAuthors!.splice(idx, 1);
+	const pendingAttemptId = pending.attemptId ?? pending.promptId;
+	for (const [messageKey, binding] of session.promptAuthorMessageBindings ?? []) {
+		if (!binding.settled && (binding.attemptId ?? binding.promptId) === pendingAttemptId) {
+			session.promptAuthorMessageBindings!.delete(messageKey);
+		}
+	}
 	retainPromptAuthorAmbiguityFence(session, pending);
 	cancelSessionPromptActivity(
 		session,
@@ -1766,7 +1772,12 @@ export function prepareVisibleAgentEvent(
 	// acknowledgement will finalize. This keeps rejected activity quarantined
 	// without leaking a predecessor's author into an accepted redriven echo.
 	const selectedPromptBinding = bufferedPending ?? stableBinding ?? selectedPending;
-	if (userRole && selectedPending) commitCorrelatedPromptActivity(session, selectedPending);
+	// Streaming user updates establish correlation and projection only. The exact
+	// terminal occurrence (or a positive RPC acknowledgement) is the acceptance
+	// boundary; an update followed by a rejected RPC must remain cancellable.
+	if (userRole && raw.type === "message_end" && selectedPending) {
+		commitCorrelatedPromptActivity(session, selectedPending);
+	}
 	const sessionAuthor = agentAuthorForSession(session, agentDeps);
 	if (selectedPromptBinding) {
 		author = selectedPromptBinding.author;

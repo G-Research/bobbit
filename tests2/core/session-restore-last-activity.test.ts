@@ -462,6 +462,66 @@ describe("authoritative session activity attribution", () => {
 		},
 	);
 
+	it.each([
+		{ correlation: "keyed", failure: "negative" },
+		{ correlation: "keyed", failure: "throw" },
+		{ correlation: "keyless", failure: "negative" },
+		{ correlation: "keyless", failure: "throw" },
+	] as const)(
+		"keeps an unambiguous restored $correlation steer update cancellable before a $failure acknowledgement",
+		async ({ correlation, failure }) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-activity-update-steer-${correlation}-${failure}-`));
+			roots.push(root);
+			const store = new SessionStore(path.join(root, "state"));
+			const row = makePersisted(root, `ordinary-update-steer-${correlation}-${failure}`, 10_000, 11_000);
+			store.put(row);
+
+			const activityWrites: number[] = [];
+			const updateStore = store.update.bind(store);
+			store.update = ((id: string, patch: any) => {
+				if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+				updateStore(id, patch);
+			}) as typeof store.update;
+
+			let clock = 20_000;
+			const bridges = new Map<string, RestoreBridge>();
+			const manager = makeManager(store, bridges, () => ++clock);
+			await manager.restoreSession(row);
+			const session = manager.getSession(row.id)!;
+			session.status = "streaming";
+			const bridge = bridges.get(row.id)!;
+			const text = "unambiguous rejected steer update";
+			const identity = correlation === "keyed" ? { id: "current-steer-update" } : {};
+			bridge.steerEvents = [
+				{ type: "message_update", message: { ...identity, role: "user", content: text } },
+			];
+			if (failure === "negative") bridge.steerResponse = { success: false, error: "synthetic update rejection" };
+			else bridge.steerError = new Error("synthetic update throw");
+
+			await expect(manager.deliverLiveSteer(row.id, text))
+				.rejects.toThrow(/synthetic update (rejection|throw)/);
+			await store.flushAsync();
+
+			expect(session.lastActivity).toBe(row.lastActivity);
+			expect(store.get(row.id)?.lastActivity).toBe(row.lastActivity);
+			expect(store.get(row.id)?.lastReadAt).toBe(row.lastReadAt);
+			expect(activityWrites).toEqual([]);
+			expect(session.inFlightSteerTexts).toEqual([]);
+			expect(session.promptQueue.toArray()).toMatchObject([{ text, isSteered: true }]);
+			expect(readAuthorSidecar(row.id).filter((binding) => binding.settlement?.outcome === "cancelled"))
+				.toHaveLength(1);
+
+			// The update's later terminal projection belongs to the cancelled attempt.
+			// It must neither release quarantine nor consume the one recovered row.
+			bridge.emit({ type: "message_end", message: { ...identity, role: "user", content: text } });
+			bridge.emit({ type: "message_end", message: { id: "later-assistant", role: "assistant", content: "old output" } });
+			await store.flushAsync();
+			expect(session.lastActivity).toBe(row.lastActivity);
+			expect(activityWrites).toEqual([]);
+			expect(session.promptQueue.toArray()).toMatchObject([{ text, isSteered: true }]);
+		},
+	);
+
 	it("keeps a same-text restored steer quarantined behind late settled replay", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-rejected-steer-"));
 		roots.push(root);

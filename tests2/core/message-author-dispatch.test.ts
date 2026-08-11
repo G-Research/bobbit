@@ -692,6 +692,119 @@ describe("message author dispatch boundary", () => {
 		{ correlation: "keyless", failure: "negative" },
 		{ correlation: "keyless", failure: "throw" },
 	] as const)(
+		"keeps an unambiguous $correlation message_update cancellable before a $failure direct acknowledgement",
+		async ({ correlation, failure }) => {
+			const value = manager();
+			const response = deferred<any>();
+			const target = session(`dispatch-update-${correlation}-${failure}`, {
+				prompt: vi.fn(() => response.promise),
+			});
+			target.lastActivity = 750;
+			const persisted = { lastActivity: 750, lastReadAt: 750 };
+			const writes: number[] = [];
+			installSessionActivityAttribution(target, {
+				get: () => persisted,
+				update: (_id: string, patch: any) => {
+					persisted.lastActivity = patch.lastActivity;
+					writes.push(patch.lastActivity);
+				},
+			}, { now: () => 751, suppressUntilPrompt: true });
+			const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+			const dispatch = value.dispatchDirectPrompt(
+				target, "current update", undefined, undefined, false, false, "system", author,
+			);
+			await flushMicrotasks();
+			const current = target.pendingPromptAuthors[0];
+			const messageId = correlation === "keyed" ? "current-update-id" : undefined;
+			const update = prepareVisibleAgentEvent(target, {
+				type: "message_update",
+				message: { ...(messageId ? { id: messageId } : {}), role: "user", content: "[System]: current update" },
+			}) as any;
+			recordSessionEventActivity(target, update);
+			assert.equal(update.message.content, "current update");
+			assert.equal(update.message.author.id, author.id);
+			assert.equal(target.pendingPromptAuthors[0], current);
+			assert.equal(target.lastActivity, 750);
+			assert.deepEqual(writes, []);
+
+			if (failure === "negative") response.resolve({ success: false, error: "current rejected" });
+			else response.reject(new Error("current transport failure"));
+			await assert.rejects(dispatch, /current (rejected|transport failure)/);
+
+			const laterReplay = prepareVisibleAgentEvent(target, {
+				type: "message_end",
+				message: { id: "later-replay", role: "assistant", content: "restored output" },
+			});
+			recordSessionEventActivity(target, laterReplay);
+			assert.equal(target.lastActivity, 750);
+			assert.equal(persisted.lastActivity, 750);
+			assert.deepEqual(writes, []);
+			assert.equal(value.recoverPromptDispatch.mock.calls.length, 1);
+			assert.equal(value.recoverPromptDispatch.mock.calls[0][1][0].text, "current update");
+			assert.equal(target.pendingPromptAuthors.length, 0);
+			assert.equal(
+				readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+				"cancelled",
+			);
+			if (messageId) assert.equal(target.promptAuthorMessageBindings?.has(`id:${messageId}`), false);
+		},
+	);
+
+	it.each(["keyed", "keyless"] as const)(
+		"commits an unambiguous %s message_update projection only after a positive acknowledgement",
+		async (correlation) => {
+			const response = deferred<any>();
+			const target = session(`dispatch-update-positive-${correlation}`, {
+				prompt: vi.fn(() => response.promise),
+			});
+			target.lastActivity = 775;
+			const writes: number[] = [];
+			installSessionActivityAttribution(target, {
+				get: () => ({ lastActivity: 775, lastReadAt: 775 }),
+				update: (_id: string, patch: any) => writes.push(patch.lastActivity),
+			}, { now: () => 776, suppressUntilPrompt: true });
+			const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+			const value = manager();
+			const dispatch = value.dispatchDirectPrompt(
+				target, "accepted update", undefined, undefined, false, false, "system", author,
+			);
+			await flushMicrotasks();
+			const current = target.pendingPromptAuthors[0];
+			const messageId = correlation === "keyed" ? "accepted-update-id" : undefined;
+			const update = prepareVisibleAgentEvent(target, {
+				type: "message_update",
+				message: { ...(messageId ? { id: messageId } : {}), role: "user", content: "[System]: accepted update" },
+			}) as any;
+			assert.equal(update.message.content, "accepted update");
+			assert.equal(update.message.author.id, author.id);
+			assert.equal(target.lastActivity, 775);
+			assert.deepEqual(writes, []);
+
+			response.resolve({ success: true });
+			await dispatch;
+			assert.equal(target.lastActivity, 776);
+			assert.deepEqual(writes, [776]);
+			assert.equal(target.pendingPromptAuthors[0], current, "an update cannot settle the author occurrence");
+
+			prepareVisibleAgentEvent(target, {
+				type: "message_end",
+				message: { ...(messageId ? { id: messageId } : {}), role: "user", content: "[System]: accepted update" },
+			});
+			assert.deepEqual(writes, [776], "the terminal echo must not recommit an acknowledged boundary");
+			assert.equal(target.pendingPromptAuthors.length, 0);
+			assert.equal(
+				readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+				"echoed",
+			);
+		},
+	);
+
+	it.each([
+		{ correlation: "keyed", failure: "negative" },
+		{ correlation: "keyed", failure: "throw" },
+		{ correlation: "keyless", failure: "negative" },
+		{ correlation: "keyless", failure: "throw" },
+	] as const)(
 		"fails closed for an overflowed $correlation message_update before a $failure acknowledgement",
 		async ({ correlation, failure }) => {
 			const value = manager();
