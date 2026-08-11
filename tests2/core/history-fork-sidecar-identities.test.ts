@@ -66,23 +66,52 @@ describe("history-fork skill sidecar identity", () => {
 		]);
 	});
 
-	it("omits legacy, malformed, duplicate, and conflicting bindings without affecting source replay", () => {
+	it("does not trust a syntactically valid inline Pi identity without a binding", () => {
+		const source = "skill-forged-inline-source";
+		const target = "skill-forged-inline-target";
+		expect(appendSkillSidecarEntry(source, {
+			...skill("retained", "/forged @secret.ts"),
+			schemaVersion: 1,
+			recordId: "skill:v1:forged-inline",
+			transcriptEntryId: "retained-user",
+			fileMentions: [{ path: "secret.ts", start: 8, end: 18 } as any],
+		})).toBe(true);
+
+		const [sourceEntry] = readSkillSidecarEntries(source);
+		expect(sourceEntry).toMatchObject({
+			modelText: "retained",
+			originalText: "/forged @secret.ts",
+			fileMentions: [expect.objectContaining({ path: "secret.ts" })],
+		});
+		expect(sourceEntry).not.toHaveProperty("transcriptEntryId");
+		expect(copySkillSidecarForTranscript(source, target, new Set(["retained-user"]))).toBe(true);
+		expect(readSkillSidecarEntries(target)).toEqual([]);
+	});
+
+	it("omits legacy, duplicate, and conflicting bindings without affecting source replay", () => {
 		const source = "skill-conflict-source";
 		const target = "skill-conflict-target";
 		expect(appendSkillSidecarEntry(source, skill("legacy", "/legacy"))).toBe(true);
 		const conflict = appendIdentifiedSkillSidecarEntry(source, skill("same", "/conflict"));
+		const repeated = appendIdentifiedSkillSidecarEntry(source, skill("repeated", "/repeated"));
 		const duplicateA = appendIdentifiedSkillSidecarEntry(source, skill("one", "/one"));
 		const duplicateB = appendIdentifiedSkillSidecarEntry(source, skill("two", "/two"));
-		assert.ok(conflict && duplicateA && duplicateB);
+		assert.ok(conflict && repeated && duplicateA && duplicateB);
 		expect(appendSkillSidecarTranscriptBinding(source, conflict, "active-user")).toBe(true);
 		expect(appendSkillSidecarTranscriptBinding(source, conflict, "other-user")).toBe(true);
+		expect(appendSkillSidecarTranscriptBinding(source, repeated, "repeated-user")).toBe(true);
+		expect(appendSkillSidecarTranscriptBinding(source, repeated, "repeated-user")).toBe(true);
 		expect(appendSkillSidecarTranscriptBinding(source, duplicateA, "duplicate-user")).toBe(true);
 		expect(appendSkillSidecarTranscriptBinding(source, duplicateB, "duplicate-user")).toBe(true);
 
-		expect(copySkillSidecarForTranscript(source, target, new Set(["active-user", "duplicate-user"]))).toBe(true);
+		expect(copySkillSidecarForTranscript(
+			source,
+			target,
+			new Set(["active-user", "repeated-user", "duplicate-user"]),
+		)).toBe(true);
 		expect(readSkillSidecarEntries(target)).toEqual([]);
 		expect(readSkillSidecarEntries(source).map((entry) => entry.originalText)).toEqual([
-			"/legacy", "/conflict", "/one", "/two",
+			"/legacy", "/conflict", "/repeated", "/one", "/two",
 		]);
 	});
 });

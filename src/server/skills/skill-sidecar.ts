@@ -33,7 +33,7 @@ export interface SkillSidecarEntry {
 	schemaVersion?: 1;
 	/** Bobbit-local identity. It is deliberately distinct from Pi's transcript id. */
 	recordId?: string;
-	/** Authoritative Pi message-entry identity, populated only after settlement. */
+	/** Authoritative Pi message-entry identity, projected only from a unique settlement binding. */
 	transcriptEntryId?: string;
 	/** Unix epoch (ms) at the moment the user message was persisted. */
 	ts: number;
@@ -166,11 +166,11 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 					if (binding.schemaVersion !== 1
 						|| !isSkillRecordId(binding.recordId)
 						|| !isPiTranscriptEntryId(binding.transcriptEntryId)) continue;
+					// Exactly one valid append-only binding may establish provenance.
+					// Repeated identical bindings fail closed just like conflicts.
 					const existing = bindings.get(binding.recordId);
 					bindings.set(binding.recordId,
-						existing === undefined || existing === binding.transcriptEntryId
-							? binding.transcriptEntryId
-							: null);
+						existing === undefined ? binding.transcriptEntryId : null);
 					continue;
 				}
 				const entry = parsed as SkillSidecarEntry;
@@ -183,15 +183,14 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 				) {
 					const {
 						recordId: candidateRecordId,
-						transcriptEntryId: candidateTranscriptEntryId,
+						// Inline identity is project-visible, untrusted metadata. Only a
+						// separate append-only binding may project it onto the entry.
+						transcriptEntryId: _untrustedTranscriptEntryId,
 						...legacyFields
 					} = entry;
 					const normalized: SkillSidecarEntry = {
 						...legacyFields,
 						...(isSkillRecordId(candidateRecordId) ? { recordId: candidateRecordId } : {}),
-						...(isPiTranscriptEntryId(candidateTranscriptEntryId)
-							? { transcriptEntryId: candidateTranscriptEntryId }
-							: {}),
 					};
 					out.push(normalized);
 					if (normalized.recordId) {
@@ -201,21 +200,11 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 			} catch { /* skip malformed line */ }
 		}
 		return out.map((entry) => {
-			const withoutTranscriptIdentity = (): SkillSidecarEntry => {
-				const { transcriptEntryId: _untrusted, ...rest } = entry;
-				return rest;
-			};
-			if (!entry.recordId || recordCounts.get(entry.recordId) !== 1) {
-				return entry.transcriptEntryId === undefined ? entry : withoutTranscriptIdentity();
-			}
+			if (!entry.recordId || recordCounts.get(entry.recordId) !== 1) return entry;
 			const appended = bindings.get(entry.recordId);
-			if (appended === null) return withoutTranscriptIdentity();
-			if (appended !== undefined
-				&& entry.transcriptEntryId !== undefined
-				&& entry.transcriptEntryId !== appended) {
-				return withoutTranscriptIdentity();
-			}
-			return appended === undefined ? entry : { ...entry, transcriptEntryId: appended };
+			return appended === undefined || appended === null
+				? entry
+				: { ...entry, transcriptEntryId: appended };
 		});
 	} catch (err) {
 		console.warn(`[skill-sidecar] Read failed for session ${sessionId}:`, err);
@@ -236,22 +225,35 @@ export function copySkillSidecarForTranscript(
 	const target = sidecarPath(toSessionId);
 	if (!target) return false;
 	try {
-		const candidates = readSkillSidecarEntries(fromSessionId).filter((entry) =>
-			isPiTranscriptEntryId(entry.transcriptEntryId)
+		type BoundEntry = SkillSidecarEntry & { recordId: string; transcriptEntryId: string };
+		const candidates = readSkillSidecarEntries(fromSessionId).filter((entry): entry is BoundEntry =>
+			isSkillRecordId(entry.recordId)
+			&& isPiTranscriptEntryId(entry.transcriptEntryId)
 			&& retainedEntryIds.has(entry.transcriptEntryId),
 		);
 		const counts = new Map<string, number>();
 		for (const entry of candidates) {
-			counts.set(entry.transcriptEntryId!, (counts.get(entry.transcriptEntryId!) ?? 0) + 1);
+			counts.set(entry.transcriptEntryId, (counts.get(entry.transcriptEntryId) ?? 0) + 1);
 		}
-		const retained = candidates.filter((entry) => counts.get(entry.transcriptEntryId!) === 1);
+		const retained = candidates.filter((entry) => counts.get(entry.transcriptEntryId) === 1);
 		if (retained.length === 0) {
 			try { fs.unlinkSync(target); } catch (error) {
 				if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
 			}
 			return true;
 		}
-		fs.writeFileSync(target, retained.map((entry) => JSON.stringify(entry)).join("\n") + "\n", "utf-8");
+		const serialized: string[] = [];
+		for (const entry of retained) {
+			const { transcriptEntryId, ...storedEntry } = entry;
+			serialized.push(JSON.stringify(storedEntry));
+			serialized.push(JSON.stringify({
+				schemaVersion: 1,
+				type: "transcript-binding",
+				recordId: entry.recordId,
+				transcriptEntryId,
+			} satisfies SkillSidecarBindingRecord));
+		}
+		fs.writeFileSync(target, serialized.join("\n") + "\n", "utf-8");
 		return true;
 	} catch (err) {
 		console.warn(`[skill-sidecar] Filtered copy failed from ${fromSessionId} to ${toSessionId}:`, err);
