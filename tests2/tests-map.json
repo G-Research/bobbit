@@ -2885,6 +2885,15 @@
       }
     },
     {
+      "path": "tests2/core/session-fs-sandbox-publication.test.ts",
+      "reason": "Deterministic no-Docker coverage for sandbox transcript publication through fixed container code, content-free argv, atomic concurrent winners, host symlink-swap isolation, strict path validation, and failure cleanup without host fallback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/history-fork-sidecar-identities.test.ts",
       "reason": "Core coverage for fail-closed Pi transcript identity binding and history filtering of skill, file-mention, and compaction sidecars while preserving Bobbit-local ids.",
       "execution": {
@@ -2904,7 +2913,7 @@
     },
     {
       "path": "tests2/integration/history-fork-api.test.ts",
-      "reason": "Integration coverage for authoritative history-fork route validation, transcript and sidecar filtering, unchanged source state, flattened sandbox ownership, controlled fork/session/project-delete FIFO races, borrower-first project teardown, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
+      "reason": "Integration coverage for authoritative history-fork route validation, strict duplicate-author filtering, transcript and sidecar cuts, unchanged source state, container-coordinate sandbox publication/rebase/rehydration, flattened ownership, controlled fork/session/project-delete FIFO races, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

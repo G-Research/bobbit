@@ -12,6 +12,7 @@ import {
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
+	mergeAuthorSidecarIntoMessages,
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.js";
 import {
@@ -31,9 +32,11 @@ import {
 	localApiFetch,
 } from "./helpers/session-fixtures.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
+import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
 const sessions = createSessionTracker();
 let serverModule: any;
+let rpcBridgeModule: any;
 let agentSessionsDir = "";
 const fixtureRoots: string[] = [];
 
@@ -271,6 +274,40 @@ async function registerUntrackedFixtureProject(gateway: any, label: string): Pro
 	return { id: project.id as string, rootPath };
 }
 
+function installSandboxSessionFilesystem(
+	gateway: any,
+	label: string,
+	removed: string[] = [],
+): { filesystem: SandboxSessionFilesystem; restore: () => void } {
+	const manager = gateway.sessionManager;
+	const sandboxManager = manager.sandboxManager;
+	if (!sandboxManager || typeof sandboxManager.get !== "function") {
+		throw new Error("history fork fixture requires the production SandboxManager");
+	}
+	const originalGet = sandboxManager.get;
+	const containerRoot = path.join(gateway.bobbitDir, `sandbox-session-fs-${label}-${randomUUID()}`);
+	fixtureRoots.push(containerRoot);
+	const filesystem = new SandboxSessionFilesystem({
+		root: containerRoot,
+		hostAgentSessionsDir: agentSessionsDir,
+		removeWorktree: name => { removed.push(name); },
+	});
+	sandboxManager.get = () => filesystem;
+	return {
+		filesystem,
+		restore: () => { sandboxManager.get = originalGet; },
+	};
+}
+
+function bridgeSandboxTranscriptForHost(
+	filesystem: SandboxSessionFilesystem,
+	containerPath: string,
+): string {
+	const hostPath = path.join(agentSessionsDir, `sandbox-fixture-${randomUUID()}-${path.basename(containerPath)}`);
+	fs.copyFileSync(filesystem.hostPath(containerPath), hostPath);
+	return hostPath;
+}
+
 function configureSandboxOwner(gateway: any, sessionId: string, name: string): {
 	root: string;
 	cwd: string;
@@ -320,6 +357,7 @@ test.describe("history fork API", () => {
 	test.beforeAll(async () => {
 		const runtime = await loadServerTestRuntime();
 		serverModule = runtime.server;
+		rpcBridgeModule = runtime.rpcBridge;
 		agentSessionsDir = path.join(runtime.bobbitDir.globalAgentDir(), "sessions");
 		expect(typeof serverModule.__setHistoryForkSidecarCopyFake).toBe("function");
 		expect(typeof serverModule.__clearHistoryForkSidecarCopyFake).toBe("function");
@@ -563,6 +601,48 @@ test.describe("history fork API", () => {
 		expect(fs.existsSync(statePath(gateway, "tool-content", fork.id))).toBe(false);
 	});
 
+	test("strict author filtering cannot move selected duplicate identity onto a retained prompt", async ({ gateway }) => {
+		const sourceId = await createTrackedSession();
+		const duplicateText = "[System]: identical prompt";
+		seedTranscript(gateway, sourceId, [
+			messageEntry("retained-user", null, "user", duplicateText),
+			messageEntry("retained-assistant", "retained-user", "assistant", "answer"),
+			messageEntry("selected-user", "retained-assistant", "user", duplicateText),
+			messageEntry("selected-assistant", "selected-user", "assistant", "discarded"),
+		]);
+		seedAuthorBinding(sourceId, "retained-exact-author", "retained-user", duplicateText);
+		expect(appendPromptAuthorDispatch(sourceId, {
+			promptId: "selected-weak-author",
+			dispatchedAt: Date.parse(FIXTURE_TIME) + 10,
+			modelText: duplicateText,
+			modelPrefix: "[System]: ",
+			source: "task-notification",
+			author: SYSTEM_AUTHOR,
+		})).toBe(true);
+		expect(appendPromptAuthorSettlement(sourceId, {
+			promptId: "selected-weak-author",
+			settledAt: Date.parse(FIXTURE_TIME) + 11,
+			outcome: "echoed",
+		})).toBe(true);
+
+		const response = await historyFork(gateway, sourceId, "selected-user", false);
+		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
+		const fork = await response.json();
+		sessions.add(fork.id);
+		const copied = readAuthorSidecar(fork.id);
+		expect(copied.map(binding => binding.promptId)).toEqual(["retained-exact-author"]);
+		expect(JSON.stringify(copied)).not.toContain("selected-weak-author");
+		const [projected] = mergeAuthorSidecarIntoMessages(copied, [{
+			id: "retained-user",
+			role: "user",
+			content: duplicateText,
+		}]);
+		expect(projected).toMatchObject({
+			content: "identical prompt",
+			author: SYSTEM_AUTHOR,
+		});
+	});
+
 	test("fails and purges the destination when any filtered sidecar copy fails", async ({ gateway }) => {
 		const sourceId = await createTrackedSession();
 		const entries: TranscriptEntry[] = [
@@ -691,11 +771,19 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "flatten");
 		let capturedOptions: any;
 		manager.createSession = async (...args: any[]) => {
 			capturedOptions = args[4];
 			args[0] = nonGitCwd();
-			args[4] = { ...args[4], sandboxed: false };
+			args[4] = {
+				...args[4],
+				sandboxed: false,
+				preExistingAgentSessionFile: bridgeSandboxTranscriptForHost(
+					sandboxFixture.filesystem,
+					args[4].preExistingAgentSessionFile,
+				),
+			};
 			return originalCreateSession.apply(manager, args);
 		};
 		let response: Response;
@@ -703,6 +791,7 @@ test.describe("history fork API", () => {
 			response = await historyFork(gateway, borrowerId, "selected-user", false);
 		} finally {
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
@@ -714,6 +803,65 @@ test.describe("history fork API", () => {
 		expect(forkPersisted).toMatchObject({
 			borrowsWorktree: true,
 			borrowedWorktreeOwnerSessionId: ownerId,
+		});
+	});
+
+	test("publishes, rebases, and rehydrates a sandbox history transcript using container coordinates", async ({ gateway }) => {
+		const sourceId = await createTrackedSession();
+		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `container-coordinate-${randomUUID()}`);
+		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
+		const sourceBytes = fs.readFileSync(seeded.file);
+		const manager = gateway.sessionManager;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "container-coordinate");
+		const originalApplySandboxWiring = manager.applySandboxWiring;
+		const originalSendCommand = rpcBridgeModule.RpcBridge.prototype.sendCommand;
+		manager.applySandboxWiring = async (options: any) => {
+			options.cwd = nonGitCwd();
+			delete options.containerId;
+			return true;
+		};
+		rpcBridgeModule.RpcBridge.prototype.sendCommand = function(command: any, ...rest: any[]) {
+			if (command?.type === "switch_session" && typeof command.sessionPath === "string") {
+				command = {
+					...command,
+					sessionPath: sandboxFixture.filesystem.hostPath(command.sessionPath),
+				};
+			}
+			return originalSendCommand.call(this, command, ...rest);
+		};
+
+		let response: Response;
+		try {
+			response = await historyFork(gateway, sourceId, "selected-user", false);
+		} finally {
+			manager.applySandboxWiring = originalApplySandboxWiring;
+			rpcBridgeModule.RpcBridge.prototype.sendCommand = originalSendCommand;
+			sandboxFixture.restore();
+		}
+
+		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
+		const fork = await response.json();
+		sessions.add(fork.id);
+		const persisted = manager.getPersistedSession(fork.id);
+		expect(persisted).toMatchObject({
+			sandboxed: true,
+			borrowsWorktree: true,
+			borrowedWorktreeOwnerSessionId: sourceId,
+		});
+		expect(persisted.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const destinationBytes = fs.readFileSync(
+			sandboxFixture.filesystem.hostPath(persisted.agentSessionFile),
+			"utf8",
+		);
+		expect(destinationBytes).toContain("retained prompt");
+		expect(destinationBytes).not.toContain("selected prompt");
+		expect(destinationBytes).not.toContain("discarded answer");
+		expect(fs.readFileSync(seeded.file).equals(sourceBytes)).toBe(true);
+		expect(manager.getPersistedSession(sourceId)).toMatchObject({
+			cwd: sourceCoordinates.cwd,
+			worktreePath: sourceCoordinates.root,
+			branch: sourceCoordinates.branch,
+			agentSessionFile: seeded.file,
 		});
 	});
 
@@ -735,7 +883,7 @@ test.describe("history fork API", () => {
 		const originalSourceStop = source.rpcClient.stop;
 		let forkId = "";
 
-		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "fork-wins", removed);
 		manager.withSandboxWorktreeOwnerLifecycle = function(ownerId: string, operation: () => Promise<unknown>) {
 			lifecycleCalls++;
 			if (lifecycleCalls === 2) deleteQueued.resolve();
@@ -745,7 +893,14 @@ test.describe("history fork API", () => {
 			createEntered.resolve();
 			await releaseCreate.promise;
 			args[0] = nonGitCwd();
-			args[4] = { ...args[4], sandboxed: false };
+			args[4] = {
+				...args[4],
+				sandboxed: false,
+				preExistingAgentSessionFile: bridgeSandboxTranscriptForHost(
+					sandboxFixture.filesystem,
+					args[4].preExistingAgentSessionFile,
+				),
+			};
 			return originalCreateSession.apply(manager, args);
 		};
 		source.rpcClient.stop = async (...args: any[]) => {
@@ -775,6 +930,7 @@ test.describe("history fork API", () => {
 			manager.createSession = originalCreateSession;
 			manager.withSandboxWorktreeOwnerLifecycle = originalLifecycle;
 			manager.sandboxManager = originalSandboxManager;
+			sandboxFixture.restore();
 			source.rpcClient.stop = originalSourceStop;
 		}
 
@@ -810,7 +966,7 @@ test.describe("history fork API", () => {
 		let createCalls = 0;
 		let destinationId = "";
 
-		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "delete-wins", removed);
 		manager.withSandboxWorktreeOwnerLifecycle = function(ownerId: string, operation: () => Promise<unknown>) {
 			lifecycleCalls++;
 			if (lifecycleCalls === 2) forkQueued.resolve();
@@ -853,6 +1009,7 @@ test.describe("history fork API", () => {
 			manager.createSession = originalCreateSession;
 			manager.withSandboxWorktreeOwnerLifecycle = originalLifecycle;
 			manager.sandboxManager = originalSandboxManager;
+			sandboxFixture.restore();
 			source.rpcClient.getState = originalGetState;
 		}
 
@@ -895,7 +1052,7 @@ test.describe("history fork API", () => {
 		const terminationOrder: string[] = [];
 		const removed: string[] = [];
 		let response: Response | undefined;
-		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "project-delete", removed);
 		manager.terminateSession = async (sessionId: string) => {
 			terminationOrder.push(sessionId);
 			return originalTerminateSession.call(manager, sessionId);
@@ -906,6 +1063,7 @@ test.describe("history fork API", () => {
 		} finally {
 			manager.terminateSession = originalTerminateSession;
 			manager.sandboxManager = originalSandboxManager;
+			sandboxFixture.restore();
 			if (response?.status !== 200) {
 				await manager.terminateSession(borrowerId).catch(() => undefined);
 				await manager.terminateSession(ownerId).catch(() => undefined);
@@ -951,7 +1109,7 @@ test.describe("history fork API", () => {
 		let deletePromise: Promise<Response> | undefined;
 		let deleteResponse: Response | undefined;
 
-		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "project-delete-fork-wins", removed);
 		manager.withSandboxWorktreeOwnerLifecycle = function(ownerId: string, operation: () => Promise<unknown>) {
 			lifecycleCalls++;
 			if (lifecycleCalls === 2) projectDeleteQueued.resolve();
@@ -961,7 +1119,14 @@ test.describe("history fork API", () => {
 			createEntered.resolve();
 			await releaseCreate.promise;
 			args[0] = project.rootPath;
-			args[4] = { ...args[4], sandboxed: false };
+			args[4] = {
+				...args[4],
+				sandboxed: false,
+				preExistingAgentSessionFile: bridgeSandboxTranscriptForHost(
+					sandboxFixture.filesystem,
+					args[4].preExistingAgentSessionFile,
+				),
+			};
 			const created = await originalCreateSession.apply(manager, args);
 			configureSandboxBorrower(gateway, created.id, sourceId, sourceCoordinates.cwd);
 			return created;
@@ -991,6 +1156,7 @@ test.describe("history fork API", () => {
 			manager.createSession = originalCreateSession;
 			manager.withSandboxWorktreeOwnerLifecycle = originalLifecycle;
 			manager.sandboxManager = originalSandboxManager;
+			sandboxFixture.restore();
 			source.rpcClient.stop = originalSourceStop;
 		}
 
@@ -1142,6 +1308,7 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "deduplicated-failure");
 		let capturedDestinationId = "";
 		let capturedDestinationFile = "";
 		let capturedOptions: any;
@@ -1193,10 +1360,12 @@ test.describe("history fork API", () => {
 				rejectLaunch(new Error("fixture released blocked launch during assertion cleanup"));
 			}
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(capturedDestinationId).toBeTruthy();
-		expect(fs.existsSync(capturedDestinationFile)).toBe(false);
+		expect(capturedDestinationFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		expect(fs.existsSync(sandboxFixture.filesystem.hostPath(capturedDestinationFile))).toBe(false);
 		expect(fs.existsSync(authorPath(gateway, capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "skill-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
