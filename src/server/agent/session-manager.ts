@@ -1715,7 +1715,12 @@ export function prepareVisibleAgentEvent(
 			(record.attemptId ?? record.promptId) === (stableBinding!.attemptId ?? stableBinding!.promptId)
 		) ?? -1;
 	}
-	if (!stableBinding && !bufferedPending && pendingIndex === -1 && userRole && modelText && session.pendingPromptAuthors?.length) {
+	// Once tombstone history has overflowed, an uncorrelated raw-text frame may
+	// belong to a dropped predecessor. Positive RPC acknowledgement remains the
+	// only safe pre-ack boundary for both streaming updates and terminal echoes.
+	if (!stableBinding && !bufferedPending && pendingIndex === -1 && userRole && modelText
+		&& !session.promptAuthorCancellationTombstones?.overflowed
+		&& session.pendingPromptAuthors?.length) {
 		pendingIndex = session.pendingPromptAuthors.findIndex((record) =>
 			promptAuthorBindingMatchesText(record, modelText)
 				&& !reservedAttemptIds.has(record.attemptId ?? record.promptId),

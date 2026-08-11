@@ -22,6 +22,7 @@ import {
 import {
 	cancelPendingSessionPromptActivity,
 	installSessionActivityAttribution,
+	recordSessionEventActivity,
 } from "../../src/server/agent/session-activity.ts";
 import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
 
@@ -582,6 +583,157 @@ describe("message author dispatch boundary", () => {
 		assert.equal(value.recoverPromptDispatch.mock.calls[0][1].length, 1);
 		assert.equal(target.pendingPromptAuthors.length, 0);
 	});
+
+	it.each([
+		{ correlation: "keyed", failure: "negative" },
+		{ correlation: "keyed", failure: "throw" },
+		{ correlation: "keyless", failure: "negative" },
+		{ correlation: "keyless", failure: "throw" },
+	] as const)(
+		"fails closed for an overflowed $correlation message_update before a $failure acknowledgement",
+		async ({ correlation, failure }) => {
+			const value = manager();
+			const response = deferred<any>();
+			const target = session(`dispatch-overflow-update-${correlation}-${failure}`, {
+				prompt: vi.fn(() => response.promise),
+			});
+			target.lastActivity = 800;
+			const persisted = { lastActivity: 800, lastReadAt: 800 };
+			const writes: number[] = [];
+			installSessionActivityAttribution(target, {
+				get: () => persisted,
+				update: (_id: string, patch: any) => {
+					persisted.lastActivity = patch.lastActivity;
+					writes.push(patch.lastActivity);
+				},
+			}, { now: () => 801, suppressUntilPrompt: true });
+			target.promptAuthorTombstoneBudget = { maxCount: 0, maxBytes: 0 };
+			const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+			restorePromptAuthorBindings(target, [{
+				schemaVersion: 1,
+				type: "prompt-author",
+				promptId: "dropped-historical-update",
+				dispatchedAt: 1,
+				modelText: "[System]: same bytes",
+				source: "system",
+				author,
+				settlement: {
+					schemaVersion: 1,
+					type: "prompt-author-settlement",
+					promptId: "dropped-historical-update",
+					settledAt: 2,
+					outcome: "cancelled",
+				},
+			}]);
+			const dispatch = value.dispatchDirectPrompt(
+				target, "same bytes", undefined, undefined, false, false, "system", author,
+			);
+			await flushMicrotasks();
+			const preparedUpdate = prepareVisibleAgentEvent(target, {
+				type: "message_update",
+				message: {
+					...(correlation === "keyed" ? { id: "historical-update-id" } : {}),
+					role: "user",
+					content: "[System]: same bytes",
+				},
+			});
+			recordSessionEventActivity(target, preparedUpdate);
+			assert.equal(target.lastActivity, 800);
+			assert.equal(persisted.lastActivity, 800);
+			assert.deepEqual(writes, []);
+			assert.equal(target.pendingPromptAuthors.length, 1, "update must not settle the current attempt");
+
+			if (failure === "negative") response.resolve({ success: false, error: "current rejected" });
+			else response.reject(new Error("current transport failure"));
+			await assert.rejects(dispatch, /current (rejected|transport failure)/);
+
+			const laterReplay = prepareVisibleAgentEvent(target, {
+				type: "message_end",
+				message: { id: "later-replay", role: "assistant", content: "restored output" },
+			});
+			recordSessionEventActivity(target, laterReplay);
+			assert.equal(target.lastActivity, 800);
+			assert.equal(persisted.lastActivity, 800);
+			assert.deepEqual(writes, []);
+			assert.equal(value.recoverPromptDispatch.mock.calls.length, 1);
+			assert.equal(value.recoverPromptDispatch.mock.calls[0][1].length, 1);
+			assert.equal(value.recoverPromptDispatch.mock.calls[0][1][0].text, "same bytes");
+			assert.equal(target.pendingPromptAuthors.length, 0);
+		},
+	);
+
+	it.each(["keyed", "keyless"] as const)(
+		"lets a positive acknowledgement authorize an overflowed %s message_update exactly once",
+		async (correlation) => {
+			const response = deferred<any>();
+			const target = session(`dispatch-overflow-update-positive-${correlation}`, {
+				prompt: vi.fn(() => response.promise),
+			});
+			target.lastActivity = 900;
+			const persisted = { lastActivity: 900, lastReadAt: 900 };
+			const writes: number[] = [];
+			installSessionActivityAttribution(target, {
+				get: () => persisted,
+				update: (_id: string, patch: any) => {
+					persisted.lastActivity = patch.lastActivity;
+					writes.push(patch.lastActivity);
+				},
+			}, { now: () => 901, suppressUntilPrompt: true });
+			target.promptAuthorTombstoneBudget = { maxCount: 0, maxBytes: 0 };
+			const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+			restorePromptAuthorBindings(target, [{
+				schemaVersion: 1,
+				type: "prompt-author",
+				promptId: "dropped-positive-update",
+				dispatchedAt: 1,
+				modelText: "[System]: same bytes",
+				source: "system",
+				author,
+				settlement: {
+					schemaVersion: 1,
+					type: "prompt-author-settlement",
+					promptId: "dropped-positive-update",
+					settledAt: 2,
+					outcome: "cancelled",
+				},
+			}]);
+			const value = manager();
+			const dispatch = value.dispatchDirectPrompt(
+				target, "same bytes", undefined, undefined, false, false, "system", author,
+			);
+			await flushMicrotasks();
+			const current = target.pendingPromptAuthors[0];
+			const messageId = correlation === "keyed" ? "current-update-id" : undefined;
+			const preparedUpdate = prepareVisibleAgentEvent(target, {
+				type: "message_update",
+				message: { ...(messageId ? { id: messageId } : {}), role: "user", content: "[System]: same bytes" },
+			});
+			recordSessionEventActivity(target, preparedUpdate);
+			assert.equal(target.lastActivity, 900);
+			assert.deepEqual(writes, []);
+			assert.equal(target.pendingPromptAuthors[0], current, "update must remain nonterminal");
+
+			response.resolve({ success: true });
+			await dispatch;
+			assert.equal(target.lastActivity, 901);
+			assert.equal(persisted.lastActivity, 901);
+			assert.deepEqual(writes, [901]);
+			assert.equal(target.pendingPromptAuthors[0], current);
+
+			const visibleEnd = prepareVisibleAgentEvent(target, {
+				type: "message_end",
+				message: { ...(messageId ? { id: messageId } : {}), role: "user", content: "[System]: same bytes" },
+			}) as any;
+			assert.equal(visibleEnd.message.content, "same bytes");
+			assert.equal(visibleEnd.message.author.id, author.id);
+			assert.deepEqual(writes, [901], "terminal correlation must not recommit the boundary");
+			assert.equal(target.pendingPromptAuthors.length, 0);
+			assert.equal(
+				readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+				"echoed",
+			);
+		},
+	);
 
 	it("settles and projects a buffered same-text echo only after the current RPC is accepted", async () => {
 		const target = session("dispatch-buffered-after-predecessor");
