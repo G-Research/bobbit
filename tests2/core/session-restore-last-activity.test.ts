@@ -12,6 +12,8 @@ import { registerRpcBridgeFactory, type RpcBridgeOptions } from "../../src/serve
 class RestoreBridge {
 	listener?: (event: any) => void;
 	running = true;
+	steerResponse: any = { success: true };
+	steerEvents: any[] = [];
 
 	constructor(readonly id: string) {}
 
@@ -25,7 +27,10 @@ class RestoreBridge {
 	async stop(): Promise<void> { this.running = false; }
 	async waitForReady(): Promise<void> {}
 	async abort(): Promise<any> { return { success: true }; }
-	async steer(): Promise<any> { return { success: true }; }
+	async steer(): Promise<any> {
+		for (const event of this.steerEvents) this.emit(event);
+		return this.steerResponse;
+	}
 	async compact(): Promise<any> { return { success: true }; }
 	async getMessages(): Promise<any> { return { success: true, data: { messages: [] } }; }
 	async getState(): Promise<any> { return { success: true, data: {} }; }
@@ -185,6 +190,61 @@ describe("authoritative session activity attribution", () => {
 		expect(await pending).toBe(true);
 		expect(flush).toHaveBeenCalledOnce();
 		expect(new SessionStore(path.join(root, "state")).get(row.id)?.lastReadAt).toBe(12_000);
+	});
+
+	it("keeps restored activity quarantined when an unobserved steer is rejected amid unrelated replay", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-rejected-steer-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "ordinary-rejected-steer", 10_000, 11_000);
+		const originalLastActivity = row.lastActivity;
+		const originalLastReadAt = row.lastReadAt;
+		store.put(row);
+
+		const activityWrites: number[] = [];
+		const update = store.update.bind(store);
+		store.update = ((id: string, patch: any) => {
+			if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+			update(id, patch);
+		}) as typeof store.update;
+
+		let clock = 20_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const session = manager.getSession(row.id)!;
+		session.status = "streaming";
+		const bridge = bridges.get(row.id)!;
+		bridge.steerEvents = [
+			{ type: "agent_start" },
+			{ type: "message_end", message: { id: "unrelated-assistant", role: "assistant", content: [] } },
+			{ type: "tool_execution_start", toolName: "replayed-read" },
+			{ type: "tool_execution_end", toolName: "replayed-read" },
+		];
+		bridge.steerResponse = { success: false, error: "synthetic pre-observation rejection" };
+
+		await expect(manager.deliverLiveSteer(row.id, "rejected restored steer"))
+			.rejects.toThrow("synthetic pre-observation rejection");
+
+		// Replay can arrive after the negative acknowledgement. A rejected dispatch
+		// must leave restore quarantine closed, so these otherwise-visible frames are
+		// still restore-only and cannot mutate either copy of the timestamp.
+		for (const event of REPLAY_VISIBLE_EVENTS.filter((candidate) => candidate.type !== "agent_end")) {
+			bridge.emit(event);
+		}
+		await store.flushAsync();
+
+		expect(
+			session.lastActivity,
+			"REJECTED_DISPATCH_MUTATED_LAST_ACTIVITY: in-memory activity changed before origin observation",
+		).toBe(originalLastActivity);
+		expect(
+			store.get(row.id)?.lastActivity,
+			"REJECTED_DISPATCH_MUTATED_LAST_ACTIVITY: persisted activity changed before origin observation",
+		).toBe(originalLastActivity);
+		expect(new SessionStore(path.join(root, "state")).get(row.id)?.lastActivity).toBe(originalLastActivity);
+		expect(store.get(row.id)?.lastReadAt).toBe(originalLastReadAt);
+		expect(activityWrites).toEqual([]);
 	});
 
 	it("drives the real concurrent restore handler without clustering either timestamp", async () => {
