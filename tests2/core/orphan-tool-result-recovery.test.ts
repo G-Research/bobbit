@@ -22,9 +22,11 @@ const { isOrphanToolResultOrderingError } = await import("../../src/server/agent
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
+const { initSkillSidecarDir } = await import("../../src/server/skills/skill-sidecar.ts");
 
 const legacyStateDir = path.join(tmpRoot, "state");
 fs.mkdirSync(legacyStateDir, { recursive: true });
+initSkillSidecarDir(legacyStateDir);
 initAuthorSidecarDir(legacyStateDir, {
 	secretsDir: path.join(tmpRoot, "private-secrets"),
 	hmacKey: Buffer.alloc(32, 0x5a),
@@ -745,7 +747,15 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(queued[0].images, [{ type: "image", data: "fixture-image", mimeType: "image/png" }]);
 		assert.deepEqual(queued[0].attachments, [{ name: "fixture.txt" }]);
 		assert.equal(h.persistedRecord.messageQueue[0].id, queued[0].id, "durable parking must preserve the queue row identity");
+		assert.equal(rollback.pendingSkillExpansions.length, 1);
+		const skillRecordId = rollback.pendingSkillExpansions[0].recordId;
+		assert.match(
+			skillRecordId,
+			/^skill:v1:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+			"parked skill envelopes need a valid Bobbit-local record identity",
+		);
 		assert.deepEqual(rollback.pendingSkillExpansions, [{
+			recordId: skillRecordId,
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",
 			skillExpansions,
@@ -764,6 +774,13 @@ describe("SessionManager poisoned-history recovery", () => {
 		]);
 		assert.equal(rollback.promptQueue.isEmpty, true);
 		assert.deepEqual(h.persistedRecord.messageQueue, []);
+		assert.deepEqual(rollback.pendingSkillExpansions, [{
+			recordId: skillRecordId,
+			promptId: queued[0].id,
+			modelText: "expanded mockup instructions\n\nhero",
+			originalText: "/mockup hero",
+			skillExpansions,
+		}], "recovery dispatch must retain the same skill record identity and payload");
 	});
 
 	it("preserves a slash-skill envelope across follow-up respawn for the live echo", async () => {
