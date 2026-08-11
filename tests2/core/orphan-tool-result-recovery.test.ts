@@ -48,7 +48,7 @@ afterEach(() => {
 function bridge(
 	prompts: Array<{ text: string; images?: unknown }>,
 	rejectWith?: string,
-	onPrompt?: () => void,
+	onPrompt?: (text: string) => void,
 	rejectAsThrow = false,
 ): any {
 	return {
@@ -56,7 +56,7 @@ function bridge(
 		async stop() {},
 		prompt(text: string, images?: unknown) {
 			prompts.push({ text, images });
-			onPrompt?.();
+			onPrompt?.(text);
 			if (rejectWith && rejectAsThrow) return Promise.reject(new Error(rejectWith));
 			return Promise.resolve(rejectWith
 				? { success: false, error: rejectWith }
@@ -141,10 +141,15 @@ function harness(options?: {
 		const { pendingSkillExpansions: _discardedEnvelope, ...restoredState } = current;
 		let restored: any;
 		let promptCallCount = 0;
-		const restoredBridge = bridge(newPrompts, options?.rejectRedriveWith, () => {
-			if (options?.observeTurnBeforeRedriveReject) {
-				manager.handleAgentLifecycle(restored, { type: "agent_start" });
-			}
+		const emitCorrelatedUserEcho = (text: string) => {
+			const echo = prepareVisibleAgentEvent(restored, {
+				type: "message_end",
+				message: { role: "user", content: [{ type: "text", text }] },
+			});
+			manager.handleAgentLifecycle(restored, echo);
+		};
+		const restoredBridge = bridge(newPrompts, options?.rejectRedriveWith, (text) => {
+			if (options?.observeTurnBeforeRedriveReject) emitCorrelatedUserEcho(text);
 		}, options?.throwRedriveRejection);
 		if (options?.rejectRedriveOnce && !options.completeTurnBeforeRedriveReject) {
 			const rejectOnce = restoredBridge.prompt.bind(restoredBridge);
@@ -160,6 +165,7 @@ function harness(options?: {
 		if (options?.completeTurnBeforeRedriveReject) {
 			restoredBridge.prompt = (text: string, images?: unknown) => {
 				newPrompts.push({ text, images });
+				emitCorrelatedUserEcho(text);
 				manager.handleAgentLifecycle(restored, { type: "agent_start" });
 				manager.handleAgentLifecycle(restored, {
 					type: "message_end",
