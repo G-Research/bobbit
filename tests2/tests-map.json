@@ -22,7 +22,7 @@
   "v2Native": [
     {
       "path": "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
-      "reason": "Core lifecycle regression coverage proving borrowed sandbox worktree ownership survives persistence/reload, suppresses verification and teardown, preserves source bytes and unregistered coordinates, while an owning control still verifies and removes its exact registered worktree.",
+      "reason": "Core lifecycle regression coverage proving durable flattened and legacy-inferred sandbox worktree ownership, fail-closed ambiguity, pre-mutation owner protection, nested-cwd teardown authority, borrower-safe cleanup, and rejection-safe per-owner FIFO serialization.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2904,7 +2904,7 @@
     },
     {
       "path": "tests2/integration/history-fork-api.test.ts",
-      "reason": "Integration coverage for authoritative history-fork route validation, transcript and sidecar filtering, unchanged source state, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
+      "reason": "Integration coverage for authoritative history-fork route validation, transcript and sidecar filtering, unchanged source state, flattened sandbox ownership, controlled fork/terminate FIFO races, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

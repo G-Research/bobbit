@@ -53,6 +53,22 @@ type SeededTranscript = {
 	entries: TranscriptEntry[];
 };
 
+type Deferred<T = void> = {
+	promise: Promise<T>;
+	resolve: (value?: T) => void;
+	reject: (error: Error) => void;
+};
+
+function deferred<T = void>(): Deferred<T> {
+	let resolve!: (value?: T) => void;
+	let reject!: (error: Error) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = (value?: T) => res(value as T);
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
 function messageEntry(
 	id: string,
 	parentId: string | null,
@@ -235,6 +251,51 @@ async function createTrackedSessionWithoutWorktree(cwd: string, projectId: strin
 	});
 	expect(response.status, await response.clone().text()).toBe(201);
 	return sessions.add((await response.json()).id as string);
+}
+
+function configureSandboxOwner(gateway: any, sessionId: string, name: string): {
+	root: string;
+	cwd: string;
+	branch: string;
+} {
+	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+	const live = gateway.sessionManager.getSession(sessionId);
+	if (!persisted?.projectId || !live) throw new Error(`session ${sessionId} must be live and persisted`);
+	const branch = `session/${name}`;
+	const root = `/workspace-wt/${branch}`;
+	const cwd = `${root}/packages/web`;
+	gateway.sessionManager.getSessionStore(persisted.projectId).update(sessionId, {
+		cwd,
+		worktreePath: root,
+		repoPath: "/workspace",
+		branch,
+		sandboxed: true,
+	});
+	Object.assign(live, { cwd, worktreePath: root, repoPath: "/workspace", branch, sandboxed: true });
+	return { root, cwd, branch };
+}
+
+function configureSandboxBorrower(
+	gateway: any,
+	sessionId: string,
+	ownerSessionId: string,
+	cwd: string,
+): void {
+	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+	const live = gateway.sessionManager.getSession(sessionId);
+	if (!persisted?.projectId || !live) throw new Error(`session ${sessionId} must be live and persisted`);
+	gateway.sessionManager.getSessionStore(persisted.projectId).update(sessionId, {
+		cwd,
+		sandboxed: true,
+		borrowsWorktree: true,
+		borrowedWorktreeOwnerSessionId: ownerSessionId,
+	});
+	Object.assign(live, {
+		cwd,
+		sandboxed: true,
+		borrowsWorktree: true,
+		borrowedWorktreeOwnerSessionId: ownerSessionId,
+	});
 }
 
 test.describe("history fork API", () => {
@@ -600,6 +661,201 @@ test.describe("history fork API", () => {
 		expect(fs.readFileSync(sourceTranscript.file).equals(sourceBytes), "source JSONL bytes remain unchanged").toBe(true);
 		expect(gateway.sessionManager.getSession(sourceId), "terminating fork does not stop source").toBeTruthy();
 		expect(gateway.sessionManager.getPersistedSession(sourceId)).toMatchObject(sourceCoordinates);
+	});
+
+	test("forking from a sandbox borrower flattens durable ownership to the original worktree owner", async ({ gateway }) => {
+		const ownerId = await createTrackedSession();
+		const borrowerId = await createTrackedSession();
+		const ownerCoordinates = configureSandboxOwner(gateway, ownerId, `flatten-${randomUUID()}`);
+		configureSandboxBorrower(gateway, borrowerId, ownerId, ownerCoordinates.cwd);
+		seedTranscript(gateway, borrowerId, ordinaryHistory());
+		expect(gateway.sessionManager.resolveSandboxWorktreeOwnerSessionId(borrowerId)).toBe(ownerId);
+
+		const manager = gateway.sessionManager;
+		const originalCreateSession = manager.createSession;
+		let capturedOptions: any;
+		manager.createSession = async (...args: any[]) => {
+			capturedOptions = args[4];
+			args[0] = nonGitCwd();
+			args[4] = { ...args[4], sandboxed: false };
+			return originalCreateSession.apply(manager, args);
+		};
+		let response: Response;
+		try {
+			response = await historyFork(gateway, borrowerId, "selected-user", false);
+		} finally {
+			manager.createSession = originalCreateSession;
+		}
+
+		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
+		const fork = await response.json();
+		sessions.add(fork.id);
+		const forkPersisted = gateway.sessionManager.getPersistedSession(fork.id);
+		expect(capturedOptions.borrowedWorktreeOwnerSessionId).toBe(ownerId);
+		expect(capturedOptions.borrowedWorktreeOwnerSessionId).not.toBe(borrowerId);
+		expect(forkPersisted).toMatchObject({
+			borrowsWorktree: true,
+			borrowedWorktreeOwnerSessionId: ownerId,
+		});
+	});
+
+	test("fork registration wins the owner FIFO before DELETE, which waits and rejects without mutation", async ({ gateway }) => {
+		const sourceId = await createTrackedSession();
+		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `fork-wins-${randomUUID()}`);
+		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
+		const manager = gateway.sessionManager;
+		const source = manager.getSession(sourceId);
+		const originalCreateSession = manager.createSession;
+		const originalLifecycle = manager.withSandboxWorktreeOwnerLifecycle;
+		const originalSandboxManager = manager.sandboxManager;
+		const createEntered = deferred<void>();
+		const releaseCreate = deferred<void>();
+		const deleteQueued = deferred<void>();
+		const removed: string[] = [];
+		let lifecycleCalls = 0;
+		let sourceStopCalls = 0;
+		const originalSourceStop = source.rpcClient.stop;
+		let forkId = "";
+
+		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		manager.withSandboxWorktreeOwnerLifecycle = function(ownerId: string, operation: () => Promise<unknown>) {
+			lifecycleCalls++;
+			if (lifecycleCalls === 2) deleteQueued.resolve();
+			return originalLifecycle.call(this, ownerId, operation);
+		};
+		manager.createSession = async (...args: any[]) => {
+			createEntered.resolve();
+			await releaseCreate.promise;
+			args[0] = nonGitCwd();
+			args[4] = { ...args[4], sandboxed: false };
+			return originalCreateSession.apply(manager, args);
+		};
+		source.rpcClient.stop = async (...args: any[]) => {
+			sourceStopCalls++;
+			return originalSourceStop.apply(source.rpcClient, args);
+		};
+
+		try {
+			const forkPromise = historyFork(gateway, sourceId, "selected-user", false);
+			await createEntered.promise;
+			const deletePromise = localApiFetch(gateway, `/api/sessions/${sourceId}`, { method: "DELETE" });
+			await deleteQueued.promise;
+			expect(lifecycleCalls).toBe(2);
+			expect(manager.getSession(sourceId)).toBe(source);
+
+			releaseCreate.resolve();
+			const forkResponse = await forkPromise;
+			expect(forkResponse.status, JSON.stringify(await responseJson(forkResponse))).toBe(201);
+			const fork = await forkResponse.json();
+			forkId = sessions.add(fork.id);
+
+			const deleteResponse = await deletePromise;
+			expect(deleteResponse.status).toBe(409);
+			expect(await responseJson(deleteResponse)).toMatchObject({ code: "SHARED_SANDBOX_WORKTREE_IN_USE" });
+		} finally {
+			releaseCreate.resolve();
+			manager.createSession = originalCreateSession;
+			manager.withSandboxWorktreeOwnerLifecycle = originalLifecycle;
+			manager.sandboxManager = originalSandboxManager;
+			source.rpcClient.stop = originalSourceStop;
+		}
+
+		expect(sourceStopCalls).toBe(0);
+		expect(removed).toEqual([]);
+		expect(manager.getSession(sourceId)).toBe(source);
+		const preservedSource = manager.getPersistedSession(sourceId);
+		expect(preservedSource?.agentSessionFile).toBe(seeded.file);
+		expect(preservedSource?.archived).not.toBe(true);
+		expect(manager.getSession(forkId)).toBeTruthy();
+		expect(manager.getPersistedSession(forkId)).toMatchObject({
+			borrowsWorktree: true,
+			borrowedWorktreeOwnerSessionId: sourceId,
+		});
+		expect(sourceCoordinates.branch).toMatch(/^session\/fork-wins-/);
+	});
+
+	test("owner DELETE wins the FIFO before fork registration, which cleans artifacts and never recreates", async ({ gateway }) => {
+		const sourceId = await createTrackedSession();
+		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `delete-wins-${randomUUID()}`);
+		seedTranscript(gateway, sourceId, ordinaryHistory());
+		const manager = gateway.sessionManager;
+		const source = manager.getSession(sourceId);
+		const originalCreateSession = manager.createSession;
+		const originalLifecycle = manager.withSandboxWorktreeOwnerLifecycle;
+		const originalSandboxManager = manager.sandboxManager;
+		const originalGetState = source.rpcClient.getState;
+		const deleteEntered = deferred<void>();
+		const releaseDelete = deferred<void>();
+		const forkQueued = deferred<void>();
+		const removed: string[] = [];
+		let lifecycleCalls = 0;
+		let createCalls = 0;
+		let destinationId = "";
+
+		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		manager.withSandboxWorktreeOwnerLifecycle = function(ownerId: string, operation: () => Promise<unknown>) {
+			lifecycleCalls++;
+			if (lifecycleCalls === 2) forkQueued.resolve();
+			return originalLifecycle.call(this, ownerId, operation);
+		};
+		source.rpcClient.getState = async () => {
+			deleteEntered.resolve();
+			await releaseDelete.promise;
+			return { success: true, data: {} };
+		};
+		manager.createSession = async () => {
+			createCalls++;
+			throw new Error("fork must not recreate after owner termination");
+		};
+		serverModule.__setHistoryForkSidecarCopyFake((
+			_kind: "skill" | "compaction" | "author",
+			_fromSessionId: string,
+			toSessionId: string,
+		) => {
+			destinationId = toSessionId;
+			return undefined;
+		});
+
+		let deleteResponse: Response;
+		let forkResponse: Response;
+		try {
+			const deletePromise = localApiFetch(gateway, `/api/sessions/${sourceId}`, { method: "DELETE" });
+			await deleteEntered.promise;
+			const forkPromise = historyFork(gateway, sourceId, "selected-user", false);
+			await forkQueued.promise;
+			expect(destinationId).toBeTruthy();
+			expect(lifecycleCalls).toBe(2);
+
+			releaseDelete.resolve();
+			deleteResponse = await deletePromise;
+			forkResponse = await forkPromise;
+		} finally {
+			releaseDelete.resolve();
+			serverModule.__clearHistoryForkSidecarCopyFake();
+			manager.createSession = originalCreateSession;
+			manager.withSandboxWorktreeOwnerLifecycle = originalLifecycle;
+			manager.sandboxManager = originalSandboxManager;
+			source.rpcClient.getState = originalGetState;
+		}
+
+		expect(deleteResponse!.status).toBe(200);
+		expect(forkResponse!.status).toBe(422);
+		expect(await responseJson(forkResponse!)).toEqual({
+			error: "The source session is no longer available for history forking",
+			code: "HISTORY_FORK_SOURCE_UNAVAILABLE",
+		});
+		expect(createCalls).toBe(0);
+		expect(removed).toEqual([sourceCoordinates.branch]);
+		expect(manager.getSession(sourceId)).toBeUndefined();
+		expect(manager.getPersistedSession(sourceId)?.archived).toBe(true);
+		expect(manager.getSession(destinationId)).toBeUndefined();
+		expect(manager.getPersistedSession(destinationId)).toBeUndefined();
+		expect(transcriptFilesForSession(agentSessionsDir, destinationId)).toEqual([]);
+		expect(fs.existsSync(authorPath(gateway, destinationId))).toBe(false);
+		expect(fs.existsSync(statePath(gateway, "skill-sidecar", destinationId, ".jsonl"))).toBe(false);
+		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", destinationId, ".jsonl"))).toBe(false);
+		expect(fs.existsSync(statePath(gateway, "proposal-drafts", destinationId))).toBe(false);
+		expect(fs.existsSync(statePath(gateway, "tool-content", destinationId))).toBe(false);
 	});
 
 	test("new-worktree mode uses the established fresh branch lifecycle and preserves reattempt context", async ({ gateway }) => {
