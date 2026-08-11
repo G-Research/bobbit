@@ -562,6 +562,29 @@ import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 const askSubmittedToolUseIds = new Set<string>();
 // One process-wide reservation per exact history-fork request tuple.
 const historyForkReservations = new Set<string>();
+
+type HistoryForkSidecarKind = "skill" | "compaction" | "author";
+type HistoryForkSidecarCopyFake = (
+	kind: HistoryForkSidecarKind,
+	fromSessionId: string,
+	toSessionId: string,
+) => boolean | undefined;
+let _historyForkSidecarCopyFake: HistoryForkSidecarCopyFake | undefined;
+/** Test seam for deterministic destination-sidecar write failures. */
+export function __setHistoryForkSidecarCopyFake(fake: HistoryForkSidecarCopyFake): void {
+	_historyForkSidecarCopyFake = fake;
+}
+export function __clearHistoryForkSidecarCopyFake(): void {
+	_historyForkSidecarCopyFake = undefined;
+}
+function copyHistoryForkSidecar(
+	kind: HistoryForkSidecarKind,
+	fromSessionId: string,
+	toSessionId: string,
+	copy: () => boolean,
+): boolean {
+	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
+}
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
@@ -14272,17 +14295,23 @@ async function handleApiRoute(
 					// A partial proposal/sidecar copy must fail the history fork so cleanup
 					// cannot leave discarded-entry references in a successful destination.
 					copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir());
-					copySkillSidecarForTranscript(
-						sourceId,
-						forkId,
-						historyMaterialization!.retainedUserEntries,
-					);
-					copyCompactionSidecarForTranscript(
-						sourceId,
-						forkId,
-						historyMaterialization!.retainedCompactions,
-						historyMaterialization!.retainedEntryIds,
-					);
+					if (!copyHistoryForkSidecar("skill", sourceId, forkId, () =>
+						copySkillSidecarForTranscript(
+							sourceId,
+							forkId,
+							historyMaterialization!.retainedUserEntries,
+						))) {
+						throw new Error("failed to copy filtered skill sidecar");
+					}
+					if (!copyHistoryForkSidecar("compaction", sourceId, forkId, () =>
+						copyCompactionSidecarForTranscript(
+							sourceId,
+							forkId,
+							historyMaterialization!.retainedCompactions,
+							historyMaterialization!.retainedEntryIds,
+						))) {
+						throw new Error("failed to copy filtered compaction sidecar");
+					}
 				} else {
 					try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
 						console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
@@ -14294,7 +14323,13 @@ async function handleApiRoute(
 				// The destination id is fixed before creation. Copy author bindings now so
 				// switch_session replay is normalized correctly on its first pass and the
 				// resulting EventBuffer never captures fallback authors.
-				copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
+				const authorCopied = hasEntryId
+					? copyHistoryForkSidecar("author", sourceId, forkId, () =>
+						copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript }))
+					: copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
+				if (hasEntryId && !authorCopied) {
+					throw new Error("failed to copy filtered author sidecar");
+				}
 				const launched = await launchSidebarSessionFork({
 					forkId,
 					projectId,

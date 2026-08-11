@@ -27,8 +27,11 @@ import {
 	createSessionTracker,
 	localApiFetch,
 } from "./helpers/session-fixtures.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 const sessions = createSessionTracker();
+let serverModule: any;
+let agentSessionsDir = "";
 const fixtureRoots: string[] = [];
 
 const SYSTEM_AUTHOR = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
@@ -125,6 +128,17 @@ function authorPath(gateway: any, sessionId: string): string {
 	return path.join(gateway.bobbitDir, "secrets", "author-sidecar", `${sessionId}.jsonl`);
 }
 
+function transcriptFilesForSession(root: string, sessionId: string): string[] {
+	if (!root || !fs.existsSync(root)) return [];
+	const matches: string[] = [];
+	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+		const candidate = path.join(root, entry.name);
+		if (entry.isDirectory()) matches.push(...transcriptFilesForSession(candidate, sessionId));
+		else if (entry.isFile() && entry.name.endsWith(`_${sessionId}.jsonl`)) matches.push(candidate);
+	}
+	return matches;
+}
+
 function seedAuthorBinding(sessionId: string, promptId: string, messageId: string, modelText: string): void {
 	const dispatchedAt = Date.parse(FIXTURE_TIME);
 	expect(appendPromptAuthorDispatch(sessionId, {
@@ -183,7 +197,16 @@ async function createTrackedSessionWithoutWorktree(cwd: string, projectId: strin
 }
 
 test.describe("history fork API", () => {
+	test.beforeAll(async () => {
+		const runtime = await loadServerTestRuntime();
+		serverModule = runtime.server;
+		agentSessionsDir = path.join(runtime.bobbitDir.globalAgentDir(), "sessions");
+		expect(typeof serverModule.__setHistoryForkSidecarCopyFake).toBe("function");
+		expect(typeof serverModule.__clearHistoryForkSidecarCopyFake).toBe("function");
+	});
+
 	test.afterEach(async ({ gateway }) => {
+		serverModule?.__clearHistoryForkSidecarCopyFake();
 		await sessions.cleanup(gateway);
 		for (const root of fixtureRoots.splice(0)) {
 			try {
@@ -285,7 +308,15 @@ test.describe("history fork API", () => {
 				tokensBefore: 800,
 				additiveFixtureField: { preserve: true },
 			},
-			messageEntry("selected-user", "kept-compaction", "user", "selected prompt"),
+			{
+				type: "compaction",
+				id: "duplicate-sidecar-compaction",
+				parentId: "kept-compaction",
+				timestamp: FIXTURE_TIME,
+				summary: "retained checkpoint with ambiguous sidecar",
+				firstKeptEntryId: "kept-user",
+			},
+			messageEntry("selected-user", "duplicate-sidecar-compaction", "user", "selected prompt"),
 			messageEntry("later-assistant", "selected-user", "assistant", "discarded answer"),
 			messageEntry("later-user", "later-assistant", "user", "discarded later prompt"),
 		];
@@ -304,7 +335,12 @@ test.describe("history fork API", () => {
 		seedAuthorBinding(sourceId, "author-cut", "selected-user", "selected prompt");
 		seedSkillBinding(sourceId, "[System]: kept prompt", "/fixture @src/fixture.ts");
 		seedSkillBinding(sourceId, "selected prompt", "/discarded");
+		// A discarded checkpoint may share the retained Pi checkpoint's boundary.
+		// Source ordering must not let it replace the exact retained id.
+		seedCompactionBinding(sourceId, "discarded-same-boundary", "kept-user");
 		seedCompactionBinding(sourceId, "kept-compaction", "kept-user");
+		seedCompactionBinding(sourceId, "duplicate-sidecar-compaction", "kept-user");
+		seedCompactionBinding(sourceId, "duplicate-sidecar-compaction", "kept-user");
 		seedCompactionBinding(sourceId, "unprovable-compaction", null);
 
 		const proposalSource = statePath(gateway, "proposal-drafts", sourceId);
@@ -351,7 +387,7 @@ test.describe("history fork API", () => {
 		});
 		expect(Boolean(forkPersisted.sandboxed)).toBe(Boolean(sourcePersisted.sandboxed));
 
-		const expectedTranscript = [seeded.header, entries[0], entries[2], entries[3]]
+		const expectedTranscript = [seeded.header, entries[0], entries[2], entries[3], entries[4]]
 			.map(entry => JSON.stringify(entry)).join("\r\n") + "\r\n";
 		expect(stagedTranscript).toBe(expectedTranscript);
 		const forkTranscript = fs.readFileSync(forkPersisted.agentSessionFile, "utf8");
@@ -371,6 +407,63 @@ test.describe("history fork API", () => {
 		expect(fs.readFileSync(path.join(proposalFork, "goal.md"), "utf8")).toBe("# Durable proposal\n");
 		expect(fs.readFileSync(path.join(proposalFork, "goal.history", "0001.md"), "utf8")).toBe("# Earlier draft\n");
 		expect(fs.existsSync(statePath(gateway, "tool-content", fork.id))).toBe(false);
+	});
+
+	test("fails and purges the destination when any filtered sidecar copy fails", async ({ gateway }) => {
+		const sourceId = await createTrackedSession();
+		const entries: TranscriptEntry[] = [
+			messageEntry("kept-user", null, "user", "[System]: kept prompt"),
+			{
+				type: "compaction",
+				id: "kept-compaction",
+				parentId: "kept-user",
+				timestamp: FIXTURE_TIME,
+				summary: "retained summary",
+				firstKeptEntryId: "kept-user",
+			},
+			messageEntry("selected-user", "kept-compaction", "user", "selected prompt"),
+		];
+		const seeded = seedTranscript(gateway, sourceId, entries);
+		const sourceBytes = fs.readFileSync(seeded.file);
+		seedAuthorBinding(sourceId, "author-kept", "kept-user", "[System]: kept prompt");
+		seedSkillBinding(sourceId, "[System]: kept prompt", "/fixture");
+		seedCompactionBinding(sourceId, "kept-compaction", "kept-user");
+		const proposalSource = statePath(gateway, "proposal-drafts", sourceId);
+		fs.mkdirSync(proposalSource, { recursive: true });
+		fs.writeFileSync(path.join(proposalSource, "goal.md"), "source proposal", "utf8");
+
+		for (const failedKind of ["skill", "compaction", "author"] as const) {
+			let destinationId = "";
+			serverModule.__setHistoryForkSidecarCopyFake((
+				kind: "skill" | "compaction" | "author",
+				fromSessionId: string,
+				toSessionId: string,
+			) => {
+				expect(fromSessionId).toBe(sourceId);
+				destinationId = toSessionId;
+				return kind === failedKind ? false : undefined;
+			});
+
+			let response: Response;
+			try {
+				response = await historyFork(gateway, sourceId, "selected-user", false);
+			} finally {
+				serverModule.__clearHistoryForkSidecarCopyFake();
+			}
+			expect(response.status).toBe(500);
+			expect((await responseJson(response)).error).toContain(`failed to copy filtered ${failedKind} sidecar`);
+			expect(destinationId).toBeTruthy();
+			expect(gateway.sessionManager.getSession(destinationId)).toBeUndefined();
+			expect(gateway.sessionManager.getPersistedSession(destinationId)).toBeUndefined();
+			expect(transcriptFilesForSession(agentSessionsDir, destinationId)).toEqual([]);
+			expect(fs.existsSync(authorPath(gateway, destinationId))).toBe(false);
+			expect(fs.existsSync(statePath(gateway, "skill-sidecar", destinationId, ".jsonl"))).toBe(false);
+			expect(fs.existsSync(statePath(gateway, "compaction-sidecar", destinationId, ".jsonl"))).toBe(false);
+			expect(fs.existsSync(statePath(gateway, "proposal-drafts", destinationId))).toBe(false);
+			expect(fs.existsSync(statePath(gateway, "tool-content", destinationId))).toBe(false);
+			expect(fs.readFileSync(seeded.file).equals(sourceBytes), "source JSONL bytes remain unchanged").toBe(true);
+			expect(gateway.sessionManager.getSession(sourceId), "source remains live").toBeTruthy();
+		}
 	});
 
 	test("reuse mode uses the exact live cwd and carries no worktree teardown ownership", async ({ gateway }) => {
