@@ -2,7 +2,7 @@
 
 ## Status and decision
 
-This document is the implementation contract for **Fork From History**. It synthesizes the two design explorations and the merged interaction prototype at `docs/design/history-fork-prompt-actions-prototype.html`.
+This document is the implementation contract for **Fork From History**. It records the selected design and the alternatives considered during implementation.
 
 The selected design is deliberately narrow:
 
