@@ -6680,12 +6680,36 @@ async function handleApiRoute(
 		const project = projectRegistry.get(projectId);
 		try {
 			if (project) assertNormalMutableProject(project, "removed");
-			// Drain the project's worktree pool before removing
+			// Drain the project's worktree pool before removing.
 			await sessionManager.removeWorktreePool(projectId);
-			// Terminate all live sessions belonging to the removed project
-			const liveSessions = sessionManager.listSessions().filter(s => s.projectId === projectId);
-			for (const s of liveSessions) {
-				try { await sessionManager.terminateSession(s.id); } catch {}
+			// Borrowers must stop before the sandbox session that owns their shared
+			// worktree. terminateSession() serializes both sides through the existing
+			// per-owner FIFO, so a concurrently registered borrower either finishes
+			// first and makes owner teardown reject, or observes the terminated owner.
+			const liveSessions = sessionManager.getAllSessionsRaw()
+				.map(session => ({ session, persisted: sessionManager.getPersistedSession(session.id) }))
+				.filter(({ session, persisted }) => (persisted?.projectId ?? session.projectId) === projectId);
+			const borrowers = liveSessions.filter(({ session, persisted }) =>
+				persisted?.borrowsWorktree ?? session.borrowsWorktree,
+			);
+			const ownersAndIndependent = liveSessions.filter(entry => !borrowers.includes(entry));
+			for (const { session } of [...borrowers, ...ownersAndIndependent]) {
+				await sessionManager.terminateSession(session.id);
+			}
+			// Never remove a project context/store while a replacement or concurrent
+			// launch has left a live session behind.
+			const survivors = sessionManager.getAllSessionsRaw()
+				.filter(session =>
+					(sessionManager.getPersistedSession(session.id)?.projectId ?? session.projectId) === projectId,
+				)
+				.map(session => session.id);
+			if (survivors.length > 0) {
+				json({
+					error: "Project still has active sessions",
+					code: "PROJECT_SESSIONS_STILL_ACTIVE",
+					sessionIds: survivors,
+				}, 409);
+				return;
 			}
 			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
 			await projectContextManager.remove(projectId);
@@ -6696,6 +6720,10 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
+			if (err instanceof SharedSandboxWorktreeInUseError) {
+				json({ error: err.message, code: err.code }, 409);
+				return;
+			}
 			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
