@@ -9547,10 +9547,16 @@ export class SessionManager {
 			// snapshot so clients never fall back to the reduced visible transcript.
 			this.broadcastSessionCost(session);
 
-			const msgs = await session.rpcClient.getMessages();
+			// Compaction changes Pi's visible transcript without necessarily advancing
+			// Bobbit's event sequence before this async refresh starts. Discard the old
+			// base and its identity-bound cursor projection so get_messages and the
+			// authoritative cursor plane are read and correlated as one fresh pair.
+			session.messagesSnapshotCache = undefined;
+			session.messagesSnapshotCursorProjection = undefined;
+			const msgs = await this.getMessagesSnapshotBase(session);
 			if (msgs.success) {
 				const data = this.buildVisibleMessageSnapshot(session.id, msgs.data);
-				broadcast(session.clients, { type: "messages", data });
+				broadcast(session.clients, { type: "messages", data: data as unknown[] });
 			}
 			const st = await session.rpcClient.getState();
 			if (st.success) {
@@ -11121,6 +11127,11 @@ export class SessionManager {
 		try { oldUnsubscribe(); } catch { /* stopped old bridge; listener cleanup is best-effort */ }
 		session.rpcClient = rpcClient;
 		session.unsubscribe = unsub;
+		// Snapshot bases and cursor projections are bridge-specific. Clear both at
+		// the commit boundary so no response from the stopped bridge can be reused or
+		// projected onto the replacement bridge's messages.
+		session.messagesSnapshotCache = undefined;
+		session.messagesSnapshotCursorProjection = undefined;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		if (verifiedReplacementTuple) {
@@ -11147,10 +11158,10 @@ export class SessionManager {
 
 		// Refresh messages and state for connected clients
 		try {
-			const msgs = await rpcClient.getMessages();
+			const msgs = await this.getMessagesSnapshotBase(session);
 			if (msgs.success) {
 				const data = this.buildVisibleMessageSnapshot(session.id, msgs.data);
-				broadcast(session.clients, { type: "messages", data });
+				broadcast(session.clients, { type: "messages", data: data as unknown[] });
 			}
 			const st = await rpcClient.getState();
 			if (st.success) broadcast(session.clients, { type: "state", data: st.data });

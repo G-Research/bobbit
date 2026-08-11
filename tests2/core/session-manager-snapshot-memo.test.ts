@@ -341,6 +341,47 @@ describe("SessionManager snapshot memo", () => {
 		expect(live.messagesSnapshotCache.seq).toBe(1);
 	});
 
+	it("refreshes compaction messages and cursors as one fresh authoritative pair", async () => {
+		const visibleMessages = [
+			{ role: "user", content: "same prompt" },
+			{ role: "assistant", content: "answer" },
+		];
+		const snapshots = [
+			{
+				entries: [userEntry("before-compaction", null, "same prompt"), assistantEntry("before-answer", "before-compaction")],
+				leafId: "before-answer",
+				forkMessages: [{ entryId: "before-compaction", text: "same prompt" }],
+			},
+			{
+				entries: [userEntry("after-compaction", null, "same prompt"), assistantEntry("after-answer", "after-compaction")],
+				leafId: "after-answer",
+				forkMessages: [{ entryId: "after-compaction", text: "same prompt" }],
+			},
+		];
+		const getMessages = vi.fn(async () => ({ success: true, data: visibleMessages }));
+		const getCursors = vi.fn(async () => ({ success: true, data: snapshots[getCursors.mock.calls.length - 1] }));
+		const sends: string[] = [];
+		const value = manager();
+		value.broadcastSessionCost = vi.fn();
+		const live = session(getMessages, getCursors);
+		live.rpcClient.getState = vi.fn(async () => ({ success: false }));
+		live.clients.add({ readyState: 1, send: (payload: string) => sends.push(payload) });
+		value.sessions.set(live.id, live);
+
+		const stale = await value.getMessagesSnapshotBase(live);
+		expect(value.buildVisibleMessageSnapshot(live.id, stale.data)[0]).toMatchObject({ entryId: "before-compaction" });
+		await value.refreshAfterCompaction(live);
+
+		expect(getMessages).toHaveBeenCalledTimes(2);
+		expect(getCursors).toHaveBeenCalledTimes(2);
+		const replacement = sends.map((payload) => JSON.parse(payload)).find((frame) => frame.type === "messages");
+		expect(replacement.data[0]).toMatchObject({
+			entryId: "after-compaction",
+			_entryIdSource: "pi-transcript",
+		});
+		expect(replacement.data[0]).not.toHaveProperty("entryId", "before-compaction");
+	});
+
 	it("keeps cached bases immutable while the production snapshot chokepoint rebuilds fresh structured overlays", async () => {
 		const baseMessage = {
 			id: "base",

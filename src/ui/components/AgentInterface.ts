@@ -892,6 +892,26 @@ export class AgentInterface extends LitElement {
 		});
 	}
 
+	/**
+	 * A full snapshot commits through AgentInterface, MessageList, and then its
+	 * keyed message children. Parent `updateComplete` alone can run before cursor
+	 * enrichment exposes prompt-action controls in historic user rows, leaving
+	 * their late layout growth below a formerly pinned viewport. Wait for the
+	 * list commit and two paint frames, then perform one authoritative final pin.
+	 */
+	private async _updateAndPinAfterSnapshot(): Promise<void> {
+		const sourceSession = this.session;
+		this.requestUpdate();
+		await this.updateComplete;
+		if (this.session !== sourceSession) return;
+		const messageList = this.querySelector("message-list") as (HTMLElement & { updateComplete?: Promise<unknown> }) | null;
+		if (messageList?.updateComplete) await messageList.updateComplete;
+		await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		if (this.session !== sourceSession) return;
+		this._pinIfSticking();
+		this._refreshJumpButton();
+	}
+
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
@@ -953,8 +973,8 @@ export class AgentInterface extends LitElement {
 			// during the same task is recognised as a resize-driven scroll
 			// (the deferred handler bails). Overscroll-clamps `scrollTop` if
 			// the browser left it above target after a rapid shrink-then-grow.
-			// On positive delta + sticky intent, pin synchronously. On
-			// negative delta within the near-bottom band, re-engage stick.
+			// Any signed delta preserves an existing sticky intent; a negative
+			// delta within the near-bottom band can also re-engage stick.
 			this._resizeObserver = new ResizeObserver(() => {
 				if (!this._scrollContainer) return;
 				const el = this._scrollContainer;
@@ -993,9 +1013,14 @@ export class AgentInterface extends LitElement {
 						this._scrollToBottomNow({ animate: false });
 					}
 				} else {
-					// Negative shrink — if we're now in the near-bottom band
-					// and the user hasn't explicitly escaped, re-engage stick.
-					if (this._isNearBottom() && !this._escapedFromLock) {
+					// A keyed snapshot can shrink in several late child commits. Browser
+					// scroll anchoring may move scrollTop upward at the same time, so the
+					// resulting geometry is not necessarily near-bottom even though user
+					// intent is still sticky. Preserve that explicit intent for shrink as
+					// well as growth; only a user escape may suppress the re-pin.
+					if (this._isAtBottom && !this._escapedFromLock) {
+						this._scrollToBottomNow({ animate: false });
+					} else if (this._isNearBottom() && !this._escapedFromLock) {
 						this._isAtBottom = true;
 						this._refreshJumpButton();
 						// Apply the post-collapse clamp inherited from the old
@@ -1214,6 +1239,14 @@ export class AgentInterface extends LitElement {
 
 		this._unsubscribeSession = this.session.subscribe(async (ev: AgentEvent) => {
 			// Handle custom events not in AgentEvent union
+			if ((ev as any).type === "messages_snapshot") {
+				// The reducer replacement already cleared stale streaming state. Sync
+				// the detached streaming container once, then pin after the keyed
+				// message children have committed their cursor-action layout.
+				if (this._streamingContainer) this._streamingContainer.setMessage(null, true);
+				await this._updateAndPinAfterSnapshot();
+				return;
+			}
 			if ((ev as any).type === "compaction_start") {
 				if (this._streamingContainer) this._streamingContainer.startCompacting();
 				this._updateAndPin();
