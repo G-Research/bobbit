@@ -14,6 +14,7 @@ import {
 	suppressSessionActivityUntilPrompt,
 } from "../../src/server/agent/session-activity.ts";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
+import { initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.ts";
 import { registerRpcBridgeFactory, type RpcBridgeOptions } from "../../src/server/agent/rpc-bridge.ts";
 
 class RestoreBridge {
@@ -113,6 +114,14 @@ function makePersisted(root: string, id: string, lastActivity: number, lastReadA
 }
 
 function makeManager(store: SessionStore, bridges: Map<string, RestoreBridge>, now: () => number): any {
+	const stateDir = (store as any).storeDir as string;
+	// isolate:false workers retain author-sidecar module state across files. Give
+	// this fixture the same keyed, durable prompt-attempt binding as production
+	// instead of accidentally falling back to raw in-memory text correlation.
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(stateDir, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x41),
+	});
 	registerRpcBridgeFactory((options: RpcBridgeOptions) => {
 		const id = options.env?.BOBBIT_SESSION_ID;
 		if (!id) return null;
@@ -122,7 +131,7 @@ function makeManager(store: SessionStore, bridges: Map<string, RestoreBridge>, n
 	});
 	const manager: any = new SessionManager({
 		projectContextManager: {} as any,
-		stateDir: path.dirname((store as any).storePath ?? ""),
+		stateDir,
 		clock: {
 			now,
 			setTimeout,
@@ -420,6 +429,10 @@ describe("authoritative session activity attribution", () => {
 		expect(activityWrites.length).toBeGreaterThanOrEqual(1);
 		expect(session.inFlightSteerTexts).toEqual([]);
 		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(readAuthorSidecar(row.id).at(-1)?.settlement).toMatchObject({
+			outcome: "echoed",
+			messageId: "accepted-steer",
+		});
 	});
 
 	it("accepts an exact user echo before a throwing steer acknowledgement", async () => {
@@ -445,6 +458,10 @@ describe("authoritative session activity attribution", () => {
 		expect(session.lastActivity).toBeGreaterThan(row.lastReadAt!);
 		expect(session.inFlightSteerTexts).toEqual([]);
 		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(readAuthorSidecar(row.id).at(-1)?.settlement).toMatchObject({
+			outcome: "echoed",
+			messageId: "accepted-throw",
+		});
 	});
 
 	it("makes a deferred old direct-prompt acknowledgement inert before object respawn", async () => {
