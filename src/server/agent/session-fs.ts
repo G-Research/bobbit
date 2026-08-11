@@ -12,6 +12,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { FileHandle } from "node:fs/promises";
 import type { SandboxManager } from "./sandbox-manager.js";
 import { sidecarPathFor } from "./session-sidecar.js";
 
@@ -174,6 +176,58 @@ export async function sessionFileRead(
 		return fs.readFileSync(hostPath, "utf-8");
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * Atomically publish generated session-file content in the destination's own
+ * filesystem realm. Sandboxed session files live in the established sessions
+ * bind mount, so staging and rename occur on its host side without passing
+ * transcript content through a shell or command argument.
+ */
+export async function sessionFileWriteAtomic(
+	ctx: SessionFsContext,
+	filePath: string,
+	content: string,
+	_sandboxManager: SandboxManager | null,
+): Promise<void> {
+	let targetPath = filePath;
+	if (ctx.sandboxed) {
+		if (!ctx.projectId || !isContainerAgentSessionPath(filePath)) {
+			throw new CrossRealmCopyError("cross-realm session write not supported");
+		}
+		targetPath = await containerPathToHostLazy(filePath);
+		if (targetPath === filePath) {
+			throw new CrossRealmCopyError("sandbox session path is not in the sessions bind mount");
+		}
+	}
+
+	const directory = path.dirname(targetPath);
+	await fs.promises.mkdir(directory, { recursive: true });
+	const temporaryPath = path.join(
+		directory,
+		`.${path.basename(targetPath)}.bobbit-stage-${process.pid}-${randomUUID()}.tmp`,
+	);
+	let handle: FileHandle | undefined;
+	let temporaryCreated = false;
+	try {
+		handle = await fs.promises.open(temporaryPath, "wx", 0o600);
+		temporaryCreated = true;
+		const stat = await handle.stat();
+		if (!stat.isFile()) throw new Error("Session transcript staging entry is not a regular file");
+		await handle.writeFile(content, { encoding: "utf-8" });
+		await handle.sync();
+		await handle.close();
+		handle = undefined;
+		await fs.promises.rename(temporaryPath, targetPath);
+		temporaryCreated = false;
+	} finally {
+		if (handle) {
+			try { await handle.close(); } catch { /* retain the primary staging failure */ }
+		}
+		if (temporaryCreated) {
+			try { await fs.promises.unlink(temporaryPath); } catch { /* remove only this invocation's exclusive temp */ }
+		}
 	}
 }
 
