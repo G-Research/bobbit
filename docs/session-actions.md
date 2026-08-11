@@ -2,7 +2,7 @@
 
 Unified session actions keep every per-session command behind one canonical model so the sidebar row menu, the open-session desktop header, and the open-session mobile header do not drift. The sidebar action set is the baseline, and the header renders the same descriptors both as direct buttons and through the same hamburger popover component.
 
-This feature sits in the browser app shell. It does not change session REST semantics; actions call the existing session, staff, routing, clipboard, prompt-inspector, refresh, fork, window-opening, and pack launcher helpers.
+This feature sits in the browser app shell. Canonicalizing the pre-existing session actions does not change their REST semantics; those actions call the established session, staff, routing, clipboard, prompt-inspector, refresh, fork, window-opening, and pack launcher helpers. Historic prompt actions extend the existing fork endpoint with a durable `entryId` so the server can apply a transcript boundary.
 
 ## Canonical model
 
