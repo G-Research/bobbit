@@ -127,6 +127,11 @@ function statePath(gateway: any, kind: string, sessionId: string, extension = ""
 	return path.join(gateway.bobbitDir, "state", kind, `${sessionId}${extension}`);
 }
 
+function filesystemIdentity(value: string): string {
+	const canonical = fs.realpathSync.native(value);
+	return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
 function authorPath(gateway: any, sessionId: string): string {
 	return path.join(gateway.bobbitDir, "secrets", "author-sidecar", `${sessionId}.jsonl`);
 }
@@ -630,15 +635,15 @@ test.describe("history fork API", () => {
 		sessions.add(fork.id);
 		const forkPersisted = gateway.sessionManager.getPersistedSession(fork.id);
 
-		expect(path.resolve(capturedOptions.worktreeOpts.repoPath)).toBe(path.resolve(projectRoot));
+		expect(filesystemIdentity(capturedOptions.worktreeOpts.repoPath)).toBe(filesystemIdentity(projectRoot));
 		expect(capturedOptions.awaitWorktreeSetup).toBe(true);
 		expect(capturedOptions.reattemptGoalId).toBe("fixture-reattempt-goal");
 		expect(fork.status).toBe("idle");
-		expect(path.resolve(fork.cwd)).not.toBe(path.resolve(projectRoot));
-		expect(path.resolve(fork.cwd)).toBe(path.resolve(forkPersisted.cwd));
-		expect(path.resolve(forkPersisted.cwd)).not.toBe(path.resolve(projectRoot));
-		expect(path.resolve(forkPersisted.worktreePath)).toBe(path.resolve(forkPersisted.cwd));
-		expect(forkPersisted.repoPath && path.resolve(forkPersisted.repoPath)).toBe(path.resolve(projectRoot));
+		expect(filesystemIdentity(fork.cwd)).not.toBe(filesystemIdentity(projectRoot));
+		expect(filesystemIdentity(fork.cwd)).toBe(filesystemIdentity(forkPersisted.cwd));
+		expect(filesystemIdentity(forkPersisted.cwd)).not.toBe(filesystemIdentity(projectRoot));
+		expect(filesystemIdentity(forkPersisted.worktreePath)).toBe(filesystemIdentity(forkPersisted.cwd));
+		expect(filesystemIdentity(forkPersisted.repoPath)).toBe(filesystemIdentity(projectRoot));
 		expect(forkPersisted.branch).toMatch(/^session\//);
 		expect(forkPersisted.reattemptGoalId).toBe("fixture-reattempt-goal");
 		expect(fs.existsSync(path.join(forkPersisted.cwd, ".git"))).toBe(true);
@@ -675,7 +680,7 @@ test.describe("history fork API", () => {
 			manager.createSession = originalCreateSession;
 		}
 
-		expect(path.resolve(capturedOptions.worktreeOpts.repoPath)).toBe(path.resolve(projectRoot));
+		expect(filesystemIdentity(capturedOptions.worktreeOpts.repoPath)).toBe(filesystemIdentity(projectRoot));
 		expect(capturedOptions.awaitWorktreeSetup).toBe(true);
 		expect(response.status).toBe(500);
 		expect((await responseJson(response)).error).toContain("failed to fork session");
