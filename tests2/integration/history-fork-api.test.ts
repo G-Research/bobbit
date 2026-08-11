@@ -217,7 +217,7 @@ test.describe("history fork API", () => {
 
 		const invalidMode = await historyFork(gateway, sourceId, "selected-user", "false");
 		expect(invalidMode.status).toBe(400);
-		expect(await responseJson(invalidMode)).toMatchObject({ code: "HISTORY_FORK_CURSOR_INVALID" });
+		expect(await responseJson(invalidMode)).toEqual({ error: "Invalid newWorktree flag" });
 
 		const missing = await historyFork(gateway, sourceId, "missing-user");
 		expect(missing.status).toBe(409);

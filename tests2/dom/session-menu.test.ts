@@ -537,7 +537,7 @@ function dispatchMenuKey(keyName: string): void {
 }
 
 function tooltip(): HTMLElement | null {
-	return document.querySelector<HTMLElement>("sidebar-actions-popover [role='tooltip']");
+	return document.querySelector<HTMLElement>("sidebar-actions-popover [role='tooltip']:not([hidden])");
 }
 
 describe("canonical session actions help primitive", () => {

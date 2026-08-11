@@ -2856,6 +2856,42 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/history-fork-transcript.test.ts",
+      "reason": "Core coverage for authoritative active-branch history-fork transcript validation, exact cut-before materialization, raw-record preservation, streaming cursor rejection, and immutable concurrent snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/prompt-history-actions.test.ts",
+      "reason": "DOM coverage for eligible historic prompt filtering, canonical desktop/mobile actions, accessible help and toggle interactions, deduplicated dispatch, and exact visible prompt copying with clipboard feedback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/history-fork-api.test.ts",
+      "reason": "Integration coverage for authoritative history-fork route validation, transcript and sidecar filtering, unchanged source state, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts",
+      "reason": "Browser journey covering desktop and mobile prompt actions, help and clipboard accessibility, toggle reset, stale-cursor failure, both fork worktree modes, exact transcript cuts, source preservation, reload, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -2985,6 +3021,10 @@
     },
     {
       "path": "tests2/browser/journeys/goal-dashboard-agent-dedupe.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts",
       "type": "smoke-journey"
     }
   ],

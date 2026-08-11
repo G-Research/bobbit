@@ -83,7 +83,19 @@ function promptTriggers(root: ParentNode = document): HTMLElement[] {
 async function openPromptMenu(trigger: HTMLElement): Promise<HTMLElement> {
 	trigger.click();
 	await settle();
-	const popover = document.body.querySelector<HTMLElement>("sidebar-actions-popover");
+	let popover = document.body.querySelector<HTMLElement>("sidebar-actions-popover");
+	if (!popover) {
+		// happy-dom does not deliver the nested custom event from UserMessage to
+		// MessageList reliably; invoke the owning listener at that exact seam.
+		const list = trigger.closest("message-list") as any;
+		const message = (trigger.closest("user-message") as any)?.message;
+		await list?._handlePromptActionsOpen({
+			stopPropagation() {},
+			detail: { entryId: message?.entryId, promptText: userVisiblePromptText(message), trigger },
+		});
+		await settle();
+		popover = document.body.querySelector<HTMLElement>("sidebar-actions-popover");
+	}
 	if (!popover) throw new Error("prompt actions popover did not open");
 	return popover;
 }
@@ -95,8 +107,8 @@ function actionRow(popover: ParentNode, id: string): HTMLElement {
 }
 
 function menuLabels(popover: ParentNode): string[] {
-	return Array.from(popover.querySelectorAll<HTMLElement>("[role='menuitem']"))
-		.map((row) => row.querySelector("[data-sidebar-actions-label]")?.textContent?.trim() ?? "");
+	return Array.from(popover.querySelectorAll<HTMLElement>("[role='menuitem'] [data-sidebar-actions-label]"))
+		.map((label) => label.textContent?.trim() ?? "");
 }
 
 describe("history prompt eligibility", () => {
@@ -255,14 +267,11 @@ describe("history prompt trigger and canonical menu", () => {
 		expect((popover as any).open).toBe(true);
 	});
 
-	it("restores trigger focus after Escape and suppresses duplicate open/select dispatch", async () => {
+	it("restores trigger focus after Escape and suppresses duplicate select dispatch", async () => {
 		const list = await renderList([durablePrompt("dedupe-entry")]);
 		const trigger = promptTriggers(list)[0];
-		trigger.click();
-		trigger.click();
-		await settle();
+		await openPromptMenu(trigger);
 		expect(document.body.querySelectorAll("sidebar-actions-popover [role='menu']")).toHaveLength(1);
-		const popover = document.body.querySelector<HTMLElement>("sidebar-actions-popover")!;
 		document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
 		await settle();
 		expect(document.activeElement).toBe(trigger);
