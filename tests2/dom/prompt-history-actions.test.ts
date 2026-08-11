@@ -16,12 +16,14 @@ const originalPerfFlags = localStorage.getItem("bobbitPerfFlags");
 let isEligibleHistoryPrompt: (message: any, context: any) => boolean;
 let userVisiblePromptText: (message: any) => string;
 let headerToast: () => unknown;
+let RemoteAgentCtor: new () => any;
 
 beforeAll(async () => {
 	await import("../../src/app/session-manager.js");
 	const messagesModule = await import("../../src/ui/components/Messages.js");
 	const listModule = await import("../../src/ui/components/MessageList.js");
 	({ headerToast } = await import("../../src/app/header-toast.js"));
+	({ RemoteAgent: RemoteAgentCtor } = await import("../../src/app/remote-agent.js"));
 	userVisiblePromptText = (messagesModule as any).userVisiblePromptText;
 	isEligibleHistoryPrompt = (listModule as any).isEligibleHistoryPrompt;
 	await import("../../src/ui/components/AgentInterface.js");
@@ -393,5 +395,46 @@ describe("prompt text copy contract", () => {
 		await settle();
 		render(headerToast() as any, toastHost);
 		expect(toastHost.querySelector("[data-testid='header-toast']")?.textContent).toBe("Couldn't copy prompt");
+	});
+
+	it("applies settled cursor snapshots once and restores the pinned tail after child layout", async () => {
+		const agent = new RemoteAgentCtor();
+		agent.replaceMessages([
+			{ id: "live-user", role: "user", content: [{ type: "text", text: "historic prompt" }], author: USER },
+			{ id: "live-answer", role: "assistant", content: [{ type: "text", text: "answer" }] },
+		]);
+		const element = document.createElement("agent-interface") as any;
+		const scroll = document.createElement("div");
+		let scrollHeight = 1_000;
+		Object.defineProperty(scroll, "scrollHeight", { configurable: true, get: () => scrollHeight });
+		Object.defineProperty(scroll, "clientHeight", { configurable: true, get: () => 100 });
+		scroll.scrollTop = 899;
+		element.session = agent;
+		element._scrollContainer = scroll;
+		element._isAtBottom = true;
+		element._escapedFromLock = false;
+		element.requestUpdate = () => undefined;
+		Object.defineProperty(element, "updateComplete", { configurable: true, get: () => Promise.resolve(true) });
+		element.querySelector = (selector: string) => selector === "message-list"
+			? { updateComplete: Promise.resolve(true) }
+			: null;
+		element.setupSessionSubscription();
+		scrollHeight = 1_200;
+
+		await agent.handleServerMessage({
+			type: "messages",
+			data: [
+				{
+					id: "live-user", role: "user", content: [{ type: "text", text: "historic prompt" }], author: USER,
+					entryId: "cursor-historic", _entryIdSource: "pi-transcript",
+				},
+				{ id: "live-answer", role: "assistant", content: [{ type: "text", text: "answer" }] },
+			],
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(agent.state.messages.map((message: any) => message.id)).toEqual(["live-user", "live-answer"]);
+		expect(agent.state.messages.filter((message: any) => message.entryId === "cursor-historic")).toHaveLength(1);
+		expect(scroll.scrollTop).toBe(1_099);
 	});
 });

@@ -570,6 +570,7 @@ export async function expectLatestMessagePinned(
 		const last = msgs[msgs.length - 1];
 		const elRect = el.getBoundingClientRect();
 		const lastRect = last.getBoundingClientRect();
+		const agentInterface = document.querySelector("agent-interface") as any;
 		return {
 			viewportBottom: elRect.bottom,
 			lastBottom: lastRect.bottom,
@@ -579,6 +580,10 @@ export async function expectLatestMessagePinned(
 			scrollHeight: el.scrollHeight,
 			clientHeight: el.clientHeight,
 			msgCount: msgs.length,
+			isAtBottom: agentInterface?._isAtBottom,
+			escapedFromLock: agentInterface?._escapedFromLock,
+			ignoreScrollToTop: agentInterface?._ignoreScrollToTop,
+			lastScrollTop: agentInterface?._lastScrollTop,
 		} as const;
 	}, { scrollSel: SCROLL_SEL, msgSel: MESSAGE_SEL });
 	if ("error" in probe) {
@@ -595,7 +600,9 @@ export async function expectLatestMessagePinned(
 		`expectLatestMessagePinned${label}: scroll viewport not pinned to bottom; ` +
 		`distFromScrollBottom=${Math.round(pinDist)} (>${tailPx}). ` +
 		`scrollTop=${Math.round(probe.scrollTop)} scrollHeight=${probe.scrollHeight} ` +
-		`clientHeight=${probe.clientHeight} msgCount=${probe.msgCount}`,
+		`clientHeight=${probe.clientHeight} msgCount=${probe.msgCount} ` +
+		`isAtBottom=${probe.isAtBottom} escaped=${probe.escapedFromLock} ` +
+		`ignore=${probe.ignoreScrollToTop} lastScrollTop=${probe.lastScrollTop}`,
 	).toBeLessThanOrEqual(tailPx);
 	expect(
 		belowFold,

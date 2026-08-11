@@ -902,13 +902,31 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.sessions.get(ps.id)?.id).toBe(ps.id);
 	});
 
-	it("repairs assignRole refresh history before switch_session", async () => {
+	it("repairs assignRole history and replaces the old bridge cursor projection", async () => {
 		const file = hostTranscript("assign-role");
 		const switches: string[] = [];
 		const replacement = recordingBridge((sessionPath) => {
 			switches.push(sessionPath);
 			assertOrphanRewritten(fs.readFileSync(file, "utf8"));
 		});
+		const replacementMessages = {
+			messages: [
+				{ id: "replacement-user-message", role: "user", content: "replacement prompt" },
+				{ id: "replacement-answer-message", role: "assistant", content: "replacement answer" },
+			],
+		};
+		replacement.getMessages = vi.fn(async () => ({ success: true, data: replacementMessages }));
+		replacement.getTranscriptCursorSnapshot = vi.fn(async () => ({
+			success: true,
+			data: {
+				entries: [
+					{ id: "replacement-cursor", parentId: null, type: "message", message: { role: "user", content: [{ type: "text", text: "replacement prompt" }] } },
+					{ id: "replacement-answer", parentId: "replacement-cursor", type: "message", message: { role: "assistant", content: [{ type: "text", text: "replacement answer" }] } },
+				],
+				leafId: "replacement-answer",
+				forkMessages: [{ entryId: "replacement-cursor", text: "replacement prompt" }],
+			},
+		}));
 		const ps = persisted("assign-role", file);
 		const manager = makeManager(ps, replacement);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
@@ -917,7 +935,11 @@ describe("executable SessionManager rehydration boundaries", () => {
 		oldBridge.getState = async () => ({ success: false, error: "fixture state unavailable" });
 		oldBridge.stop = vi.fn(async () => {});
 		const oldUnsubscribe = vi.fn();
-		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: oldUnsubscribe }));
+		const oldData = { messages: [{ role: "user", content: "old prompt" }] };
+		const live = liveSession(ps.id, oldBridge, { unsubscribe: oldUnsubscribe });
+		live.messagesSnapshotCache = { seq: 0, promise: Promise.resolve({ success: true, data: oldData }) };
+		live.messagesSnapshotCursorProjection = { seq: 0, data: oldData, entryIds: ["old-bridge-cursor"] };
+		manager.sessions.set(ps.id, live);
 
 		const assigned = await manager.assignRole(ps.id, {
 			name: "boundary-role",
@@ -930,6 +952,15 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(oldBridge.stop).toHaveBeenCalledTimes(1);
 		expect(oldUnsubscribe).toHaveBeenCalledTimes(1);
 		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		expect(replacement.getMessages).toHaveBeenCalledTimes(1);
+		expect(replacement.getTranscriptCursorSnapshot).toHaveBeenCalledTimes(1);
+		const current = await live.messagesSnapshotCache.promise;
+		const visible = manager.buildVisibleMessageSnapshot(ps.id, current.data);
+		expect(visible.messages[0]).toMatchObject({
+			entryId: "replacement-cursor",
+			_entryIdSource: "pi-transcript",
+		});
+		expect(JSON.stringify(visible)).not.toContain("old-bridge-cursor");
 	});
 
 	it("durably queues prompts during assignRole staging and dispatches them only after commit", async () => {
