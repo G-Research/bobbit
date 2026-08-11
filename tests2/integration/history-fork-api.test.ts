@@ -516,7 +516,7 @@ test.describe("history fork API", () => {
 		expect(gateway.sessionManager.getSession(sourceId), "terminating fork does not stop source").toBeTruthy();
 	});
 
-	test("new-worktree mode uses the established fresh branch lifecycle", async ({ gateway }) => {
+	test("new-worktree mode uses the established fresh branch lifecycle and preserves reattempt context", async ({ gateway }) => {
 		const projectRoot = path.join(gateway.bobbitDir, `history-fork-project-${randomUUID()}`);
 		copyGitTemplate(projectRoot);
 		const project = await registerProject({
@@ -526,6 +526,10 @@ test.describe("history fork API", () => {
 		});
 		const sourceId = await createTrackedSessionWithoutWorktree(projectRoot, project.id);
 		seedTranscript(gateway, sourceId, ordinaryHistory());
+		const sourcePersisted = gateway.sessionManager.getPersistedSession(sourceId);
+		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, {
+			reattemptGoalId: "fixture-reattempt-goal",
+		});
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
@@ -547,6 +551,7 @@ test.describe("history fork API", () => {
 
 		expect(path.resolve(capturedOptions.worktreeOpts.repoPath)).toBe(path.resolve(projectRoot));
 		expect(capturedOptions.awaitWorktreeSetup).toBe(true);
+		expect(capturedOptions.reattemptGoalId).toBe("fixture-reattempt-goal");
 		expect(fork.status).toBe("idle");
 		expect(path.resolve(fork.cwd)).not.toBe(path.resolve(projectRoot));
 		expect(path.resolve(fork.cwd)).toBe(path.resolve(forkPersisted.cwd));
@@ -554,6 +559,7 @@ test.describe("history fork API", () => {
 		expect(path.resolve(forkPersisted.worktreePath)).toBe(path.resolve(forkPersisted.cwd));
 		expect(forkPersisted.repoPath && path.resolve(forkPersisted.repoPath)).toBe(path.resolve(projectRoot));
 		expect(forkPersisted.branch).toMatch(/^session\//);
+		expect(forkPersisted.reattemptGoalId).toBe("fixture-reattempt-goal");
 		expect(fs.existsSync(path.join(forkPersisted.cwd, ".git"))).toBe(true);
 		expect(fs.readFileSync(forkPersisted.agentSessionFile, "utf8")).not.toContain("selected prompt");
 	});
