@@ -147,6 +147,70 @@ export function findCompactionSidecarEntry(
 	return readCompactionSidecarEntries(sessionId).find((e) => e.id === id);
 }
 
+/** Minimal structural contract accepted from the transcript materializer. */
+export interface RetainedCompactionTranscriptEntry {
+	entry: Record<string, unknown>;
+}
+
+/**
+ * Copy only compaction cards whose Pi checkpoint and exact first-kept boundary
+ * both survive a history cut. Null, stale, or otherwise unprovable sidecar
+ * records are deliberately dropped so the destination cannot expose an
+ * expansion link into discarded transcript history.
+ */
+export function copyCompactionSidecarForTranscript(
+	fromSessionId: string,
+	toSessionId: string,
+	retainedCompactions: readonly RetainedCompactionTranscriptEntry[],
+	retainedEntryIds: ReadonlySet<string>,
+): boolean {
+	const target = sidecarPath(toSessionId);
+	if (!target) return false;
+	try {
+		const survivingBoundaries = new Map<string, number>();
+		for (const record of retainedCompactions) {
+			const entry = record?.entry;
+			if (!entry || entry.type !== "compaction") continue;
+			const compactionId = typeof entry.id === "string" ? entry.id : "";
+			const firstKeptEntryId = typeof entry.firstKeptEntryId === "string"
+				? entry.firstKeptEntryId
+				: "";
+			if (
+				!compactionId
+				|| !retainedEntryIds.has(compactionId)
+				|| !firstKeptEntryId
+				|| !retainedEntryIds.has(firstKeptEntryId)
+			) continue;
+			survivingBoundaries.set(
+				firstKeptEntryId,
+				(survivingBoundaries.get(firstKeptEntryId) ?? 0) + 1,
+			);
+		}
+
+		const retained: CompactionSidecarEntry[] = [];
+		for (const entry of readCompactionSidecarEntries(fromSessionId)) {
+			const boundary = entry.firstKeptEntryId;
+			if (!boundary || !retainedEntryIds.has(boundary)) continue;
+			const available = survivingBoundaries.get(boundary) ?? 0;
+			if (available <= 0) continue;
+			retained.push(entry);
+			survivingBoundaries.set(boundary, available - 1);
+		}
+
+		if (retained.length === 0) {
+			try { fs.unlinkSync(target); } catch (error) {
+				if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+			}
+			return true;
+		}
+		fs.writeFileSync(target, retained.map((entry) => JSON.stringify(entry)).join("\n") + "\n", "utf-8");
+		return true;
+	} catch (err) {
+		console.warn(`[compaction-sidecar] Filtered copy failed from ${fromSessionId} to ${toSessionId}:`, err);
+		return false;
+	}
+}
+
 /** Delete the sidecar for a session (archive purge / terminate). */
 export function purgeCompactionSidecar(sessionId: string): void {
 	const file = sidecarPath(sessionId);

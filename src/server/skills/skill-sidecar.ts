@@ -114,6 +114,128 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 	}
 }
 
+/** Minimal structural contract accepted from the transcript materializer. */
+export interface RetainedUserTranscriptEntry {
+	entry: Record<string, unknown>;
+}
+
+const SIDECAR_CORRELATION_TOLERANCE_MS = 2_000;
+
+function epochMilliseconds(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value !== "string" || value.length === 0) return undefined;
+	const numeric = Number(value);
+	if (Number.isFinite(numeric)) return numeric;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function retainedPromptCandidate(
+	record: RetainedUserTranscriptEntry,
+): { modelText: string; timestamp?: number } | undefined {
+	const envelope = record?.entry;
+	if (!envelope || envelope.type !== "message") return undefined;
+	const message = envelope.message;
+	if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
+	const prompt = message as Record<string, unknown>;
+	if (prompt.role !== "user" && prompt.role !== "user-with-attachments") return undefined;
+
+	let modelText: string | undefined;
+	if (typeof prompt.content === "string") {
+		modelText = prompt.content;
+	} else if (Array.isArray(prompt.content)) {
+		const parts: string[] = [];
+		let hasToolResult = false;
+		for (const block of prompt.content) {
+			if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+			const value = block as Record<string, unknown>;
+			if (value.type === "tool_result" || value.type === "toolResult") hasToolResult = true;
+			if (value.type === "text" && typeof value.text === "string") parts.push(value.text);
+		}
+		if (hasToolResult) return undefined;
+		modelText = parts.join("");
+	}
+	if (modelText === undefined) return undefined;
+	return {
+		modelText,
+		timestamp:
+			epochMilliseconds(envelope.timestamp)
+			?? epochMilliseconds(envelope.ts)
+			?? epochMilliseconds(prompt.timestamp)
+			?? epochMilliseconds(prompt.ts),
+	};
+}
+
+/**
+ * Copy only skill/file-mention records proven to belong to retained transcript
+ * prompts. Matching is occurrence-aware: timestamp-qualified exact-text
+ * matches reserve their sidecar occurrence first, then remaining duplicates
+ * use the same exact-text FIFO fallback as snapshot replay.
+ */
+export function copySkillSidecarForTranscript(
+	fromSessionId: string,
+	toSessionId: string,
+	retainedUserEntries: readonly RetainedUserTranscriptEntry[],
+): boolean {
+	const target = sidecarPath(toSessionId);
+	if (!target) return false;
+	try {
+		const sourceEntries = readSkillSidecarEntries(fromSessionId);
+		const candidates = retainedUserEntries
+			.map(retainedPromptCandidate)
+			.filter((candidate): candidate is { modelText: string; timestamp?: number } => !!candidate);
+		const consumed = new Set<number>();
+		const retainedIndexes = new Set<number>();
+		const unresolved: Array<{ modelText: string; timestamp?: number }> = [];
+
+		// Timestamp matches run first so an earlier same-text branch occurrence
+		// cannot consume a later retained prompt's precise sidecar record.
+		for (const candidate of candidates) {
+			if (candidate.timestamp === undefined) {
+				unresolved.push(candidate);
+				continue;
+			}
+			let index = -1;
+			let closestDelta = Number.POSITIVE_INFINITY;
+			for (let entryIndex = 0; entryIndex < sourceEntries.length; entryIndex++) {
+				const entry = sourceEntries[entryIndex];
+				if (consumed.has(entryIndex) || entry.modelText !== candidate.modelText) continue;
+				const delta = Math.abs(entry.ts - candidate.timestamp);
+				if (delta > SIDECAR_CORRELATION_TOLERANCE_MS || delta >= closestDelta) continue;
+				index = entryIndex;
+				closestDelta = delta;
+			}
+			if (index < 0) {
+				unresolved.push(candidate);
+				continue;
+			}
+			consumed.add(index);
+			retainedIndexes.add(index);
+		}
+		for (const candidate of unresolved) {
+			const index = sourceEntries.findIndex((entry, entryIndex) =>
+				!consumed.has(entryIndex) && entry.modelText === candidate.modelText,
+			);
+			if (index < 0) continue;
+			consumed.add(index);
+			retainedIndexes.add(index);
+		}
+
+		const retained = sourceEntries.filter((_entry, index) => retainedIndexes.has(index));
+		if (retained.length === 0) {
+			try { fs.unlinkSync(target); } catch (error) {
+				if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+			}
+			return true;
+		}
+		fs.writeFileSync(target, retained.map((entry) => JSON.stringify(entry)).join("\n") + "\n", "utf-8");
+		return true;
+	} catch (err) {
+		console.warn(`[skill-sidecar] Filtered copy failed from ${fromSessionId} to ${toSessionId}:`, err);
+		return false;
+	}
+}
+
 /** Find the entry matching a persisted user message body within ±toleranceMs of `ts`. */
 export function findSkillSidecarEntry(
 	sessionId: string,
