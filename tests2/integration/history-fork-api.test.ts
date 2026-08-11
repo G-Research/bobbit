@@ -126,6 +126,33 @@ function ordinaryHistory(): TranscriptEntry[] {
 	];
 }
 
+function setPersistedTranscriptPath(gateway: any, sessionId: string, file: string): void {
+	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+	const live = gateway.sessionManager.getSession(sessionId);
+	if (!persisted?.projectId || !live) throw new Error(`session ${sessionId} must be live and persisted`);
+	live.agentSessionFile = file;
+	gateway.sessionManager.getSessionStore(persisted.projectId).update(sessionId, { agentSessionFile: file });
+}
+
+function removeTrustedRecoveryTranscripts(sessionId: string): void {
+	for (const existing of transcriptFilesForSession(agentSessionsDir, sessionId)) {
+		fs.rmSync(existing, { force: true });
+	}
+}
+
+function seedTrustedRecoveryTranscript(gateway: any, sessionId: string, content: string): string {
+	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+	if (!persisted) throw new Error(`session ${sessionId} must be persisted`);
+	removeTrustedRecoveryTranscripts(sessionId);
+	const cwdSlug = `--${persisted.cwd.replace(/[^a-zA-Z0-9]/g, "-")}--`;
+	const directory = path.join(agentSessionsDir, cwdSlug);
+	const file = path.join(directory, `${FIXTURE_TIME.replace(/[:.]/g, "-")}_${sessionId}.jsonl`);
+	fs.mkdirSync(directory, { recursive: true });
+	fs.writeFileSync(file, content, "utf8");
+	fixtureRoots.push(directory);
+	return file.replace(/\\/g, "/");
+}
+
 async function historyFork(
 	gateway: any,
 	sourceId: string,
@@ -373,6 +400,60 @@ test.describe("history fork API", () => {
 		}
 	});
 
+	test("resolves only authoritative persisted or trusted-root transcript paths", async ({ gateway }) => {
+		const cwd = path.join(nonGitCwd(), `transcript-resolution-${randomUUID()}`);
+		fs.mkdirSync(cwd, { recursive: true });
+		fixtureRoots.push(cwd);
+		const sourceId = await createTrackedSession(cwd);
+		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
+		const manager = gateway.sessionManager;
+		const persisted = manager.getPersistedSession(sourceId);
+
+		const canonicalContainer = "/home/node/.bobbit/agent/sessions/--workspace--/authoritative.jsonl";
+		expect(manager.recoverSessionFile({
+			...persisted,
+			sandboxed: true,
+			agentSessionFile: canonicalContainer,
+		})).toBe(canonicalContainer);
+		expect(filesystemIdentity(manager.recoverSessionFile(persisted))).toBe(filesystemIdentity(seeded.file));
+
+		const recovered = seedTrustedRecoveryTranscript(gateway, sourceId, seeded.content);
+		const attackerRoot = path.join(gateway.bobbitDir, `untrusted-transcripts-${randomUUID()}`);
+		const lexicalParent = path.join(attackerRoot, "lexical-parent");
+		fs.mkdirSync(lexicalParent, { recursive: true });
+		fixtureRoots.push(attackerRoot);
+		const traversalTarget = path.join(attackerRoot, "traversal-canary.jsonl");
+		fs.writeFileSync(traversalTarget, seeded.content, "utf8");
+		const traversalPath = `${lexicalParent}${path.sep}..${path.sep}${path.basename(traversalTarget)}`;
+		const malformedOutside = path.join(attackerRoot, "malformed.jsonl");
+		fs.writeFileSync(malformedOutside, '{"not":"a transcript"}\n', "utf8");
+		const wrongExtension = path.join(attackerRoot, "recognizable.txt");
+		fs.writeFileSync(wrongExtension, seeded.content, "utf8");
+		const directoryPath = path.join(attackerRoot, "directory.jsonl");
+		fs.mkdirSync(directoryPath);
+
+		const rejectedStoredPaths = [traversalPath, malformedOutside, wrongExtension, directoryPath];
+		const symlinkPath = path.join(attackerRoot, "symlink.jsonl");
+		try {
+			fs.symlinkSync(traversalTarget, symlinkPath, "file");
+			rejectedStoredPaths.push(symlinkPath);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (!["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) throw error;
+		}
+
+		for (const storedPath of rejectedStoredPaths) {
+			const resolved = manager.recoverSessionFile({ ...persisted, agentSessionFile: storedPath });
+			expect(filesystemIdentity(resolved), storedPath).toBe(filesystemIdentity(recovered));
+			expect(path.resolve(resolved), storedPath).not.toBe(path.resolve(storedPath));
+		}
+
+		fs.rmSync(recovered, { force: true });
+		for (const storedPath of rejectedStoredPaths) {
+			expect(manager.recoverSessionFile({ ...persisted, agentSessionFile: storedPath }), storedPath).toBeNull();
+		}
+	});
+
 	test("returns stable validation errors without allocating a destination", async ({ gateway }) => {
 		const sourceId = await createTrackedSession();
 		const base = ordinaryHistory();
@@ -430,6 +511,61 @@ test.describe("history fork API", () => {
 		});
 
 		expect(new Set(gateway.sessionManager.listSessions().map((session: any) => session.id))).toEqual(beforeIds);
+	});
+
+	test("history fork rejects raw malicious paths and reads only a recovered trusted transcript", async ({ gateway }) => {
+		const cwd = path.join(nonGitCwd(), `malicious-fork-source-${randomUUID()}`);
+		fs.mkdirSync(cwd, { recursive: true });
+		fixtureRoots.push(cwd);
+		const sourceId = await createTrackedSession(cwd);
+		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
+		const trusted = seedTrustedRecoveryTranscript(gateway, sourceId, seeded.content);
+		const trustedBytes = fs.readFileSync(trusted);
+
+		const attackerRoot = path.join(gateway.bobbitDir, `history-fork-attacker-${randomUUID()}`);
+		const lexicalParent = path.join(attackerRoot, "lexical-parent");
+		fs.mkdirSync(lexicalParent, { recursive: true });
+		fixtureRoots.push(attackerRoot);
+		const attackerFile = path.join(attackerRoot, "attacker.jsonl");
+		const attackerEntries = [
+			messageEntry("attacker-user", null, "user", "ATTACKER_CANARY"),
+			messageEntry("attacker-assistant", "attacker-user", "assistant", "attacker answer"),
+			messageEntry("selected-user", "attacker-assistant", "user", "attacker selected prompt"),
+		];
+		const attackerContent = [seeded.header, ...attackerEntries]
+			.map(entry => JSON.stringify(entry)).join("\n") + "\n";
+		fs.writeFileSync(attackerFile, attackerContent, "utf8");
+		const attackerBytes = fs.readFileSync(attackerFile);
+		const maliciousStoredPath = `${lexicalParent}${path.sep}..${path.sep}${path.basename(attackerFile)}`;
+		setPersistedTranscriptPath(gateway, sourceId, maliciousStoredPath);
+
+		const response = await historyFork(gateway, sourceId, "selected-user", false);
+		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
+		const fork = await response.json();
+		sessions.add(fork.id);
+		const forkPersisted = gateway.sessionManager.getPersistedSession(fork.id);
+		const forkTranscript = fs.readFileSync(forkPersisted.agentSessionFile, "utf8");
+		expect(forkTranscript).toContain("retained prompt");
+		expect(forkTranscript).not.toContain("selected prompt");
+		expect(forkTranscript).not.toContain("ATTACKER_CANARY");
+		expect(fs.readFileSync(attackerFile).equals(attackerBytes), "outside canary remains byte-identical").toBe(true);
+		expect(fs.readFileSync(trusted).equals(trustedBytes), "recovered source remains byte-identical").toBe(true);
+		expect(gateway.sessionManager.getPersistedSession(sourceId).agentSessionFile).toBe(maliciousStoredPath);
+		expect(gateway.sessionManager.getSession(sourceId)).toBeTruthy();
+
+		const unavailableCwd = path.join(nonGitCwd(), `malicious-fork-unavailable-${randomUUID()}`);
+		fs.mkdirSync(unavailableCwd, { recursive: true });
+		fixtureRoots.push(unavailableCwd);
+		const unavailableId = await createTrackedSession(unavailableCwd);
+		setPersistedTranscriptPath(gateway, unavailableId, maliciousStoredPath);
+		removeTrustedRecoveryTranscripts(unavailableId);
+		const beforeIds = new Set(gateway.sessionManager.listSessions().map((session: any) => session.id));
+		const missing = await historyFork(gateway, unavailableId, "selected-user", false);
+		expect(missing.status).toBe(404);
+		expect(await responseJson(missing)).toEqual({ error: "source transcript missing or empty" });
+		expect(new Set(gateway.sessionManager.listSessions().map((session: any) => session.id))).toEqual(beforeIds);
+		expect(fs.readFileSync(attackerFile).equals(attackerBytes), "failed resolution never mutates the canary").toBe(true);
+		expect(gateway.sessionManager.getPersistedSession(unavailableId).agentSessionFile).toBe(maliciousStoredPath);
 	});
 
 	test("rejects the newest durable user cursor while the source is streaming", async ({ gateway }) => {
@@ -806,13 +942,18 @@ test.describe("history fork API", () => {
 		});
 	});
 
-	test("publishes, rebases, and rehydrates a sandbox history transcript using container coordinates", async ({ gateway }) => {
+	test("publishes, rebases, and rehydrates a sandbox history transcript using canonical container coordinates", async ({ gateway }) => {
 		const sourceId = await createTrackedSession();
 		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `container-coordinate-${randomUUID()}`);
 		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
-		const sourceBytes = fs.readFileSync(seeded.file);
 		const manager = gateway.sessionManager;
 		const sandboxFixture = installSandboxSessionFilesystem(gateway, "container-coordinate");
+		const sourceContainerPath = `/home/node/.bobbit/agent/sessions/--canonical-source--/${sourceId}.jsonl`;
+		const sourceHostPath = sandboxFixture.filesystem.hostPath(sourceContainerPath);
+		fs.mkdirSync(path.dirname(sourceHostPath), { recursive: true });
+		fs.writeFileSync(sourceHostPath, seeded.content, "utf8");
+		setPersistedTranscriptPath(gateway, sourceId, sourceContainerPath);
+		const sourceBytes = fs.readFileSync(sourceHostPath);
 		const originalApplySandboxWiring = manager.applySandboxWiring;
 		const originalSendCommand = rpcBridgeModule.RpcBridge.prototype.sendCommand;
 		manager.applySandboxWiring = async (options: any) => {
@@ -856,12 +997,12 @@ test.describe("history fork API", () => {
 		expect(destinationBytes).toContain("retained prompt");
 		expect(destinationBytes).not.toContain("selected prompt");
 		expect(destinationBytes).not.toContain("discarded answer");
-		expect(fs.readFileSync(seeded.file).equals(sourceBytes)).toBe(true);
+		expect(fs.readFileSync(sourceHostPath).equals(sourceBytes)).toBe(true);
 		expect(manager.getPersistedSession(sourceId)).toMatchObject({
 			cwd: sourceCoordinates.cwd,
 			worktreePath: sourceCoordinates.root,
 			branch: sourceCoordinates.branch,
-			agentSessionFile: seeded.file,
+			agentSessionFile: sourceContainerPath,
 		});
 	});
 

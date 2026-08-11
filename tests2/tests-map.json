@@ -2886,7 +2886,7 @@
     },
     {
       "path": "tests2/core/session-fs-sandbox-publication.test.ts",
-      "reason": "Deterministic no-Docker coverage for sandbox transcript publication through fixed container code, content-free argv, atomic concurrent winners, host symlink-swap isolation, strict path validation, and failure cleanup without host fallback.",
+      "reason": "Deterministic no-Docker coverage for canonical container-session path rejection, sandbox transcript publication through fixed container code, content-free argv, atomic concurrent winners, host symlink-swap isolation, strict path validation, and failure cleanup without host fallback.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2913,7 +2913,7 @@
     },
     {
       "path": "tests2/integration/history-fork-api.test.ts",
-      "reason": "Integration coverage for authoritative history-fork route validation, strict duplicate-author filtering, transcript and sidecar cuts, unchanged source state, container-coordinate sandbox publication/rebase/rehydration, flattened ownership, controlled fork/session/project-delete FIFO races, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
+      "reason": "Integration coverage for authoritative persisted/recovered transcript resolution, malicious raw-path rejection, history-fork route validation, strict duplicate-author filtering, transcript and sidecar cuts, unchanged source state, canonical container-coordinate sandbox publication/rebase/rehydration, flattened ownership, controlled fork/session/project-delete FIFO races, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { activeAgentSessionsDir } from "../../src/server/agent/agent-session-path.ts";
 import {
+	canonicalContainerAgentSessionPath,
 	CrossRealmCopyError,
 	sessionFileDeleteContainerOnly,
 	sessionFileRenameAtomic,
@@ -42,6 +43,34 @@ function siblingTemps(directory: string): string[] {
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
 describe("sandbox session transcript publication", () => {
+	it("accepts only canonical paths under the supported container session roots", () => {
+		for (const supported of [
+			"/home/node/.bobbit/agent/sessions",
+			"/home/node/.bobbit/agent/sessions/--workspace--/turn.jsonl",
+			"/bobbit-state/sessions",
+			"/bobbit-state/sessions/--workspace--/turn.jsonl",
+		]) {
+			expect(canonicalContainerAgentSessionPath(supported)).toBe(supported);
+		}
+
+		for (const rejected of [
+			"",
+			"\0/home/node/.bobbit/agent/sessions/turn.jsonl",
+			"/home/node/.bobbit/agent/sessions\\turn.jsonl",
+			"/home/node/.bobbit/agent/sessions/../turn.jsonl",
+			"/home/node/.bobbit/agent/sessions/./turn.jsonl",
+			"/home/node/.bobbit/agent/sessions//turn.jsonl",
+			"home/node/.bobbit/agent/sessions/turn.jsonl",
+			"./home/node/.bobbit/agent/sessions/turn.jsonl",
+			"/home/node/.bobbit/agent/session/turn.jsonl",
+			"/home/node/.bobbit/agent/sessions-lookalike/turn.jsonl",
+			"/bobbit-state/session/turn.jsonl",
+			"/bobbit-state/sessions-lookalike/turn.jsonl",
+		]) {
+			expect(canonicalContainerAgentSessionPath(rejected), rejected).toBeNull();
+		}
+	});
+
 	it("publishes complete bytes through fixed container code without putting content in argv", async () => {
 		const filesystem = createFilesystem("atomic");
 		const destination = target("atomic");
