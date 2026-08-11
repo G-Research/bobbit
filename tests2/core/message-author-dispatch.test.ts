@@ -404,7 +404,183 @@ describe("message author dispatch boundary", () => {
 			readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
 			"echoed",
 		);
-		assert.equal(target.cancelledPromptAuthorPredecessors[0].promptId, "old-attempt");
+		assert.equal(target.promptAuthorCancellationTombstones.bindings[0].promptId, "old-attempt");
+	});
+
+	it("bounds rejected prompt tombstones without retaining raw payloads", async () => {
+		const target = session("dispatch-bounded-tombstones", {
+			prompt: vi.fn(async () => ({ success: false, error: "rejected" })),
+			steer: vi.fn(async () => ({ success: false, error: "steer rejected" })),
+		});
+		target.promptAuthorTombstoneBudget = { maxCount: 2, maxBytes: 1024 };
+		const largePayload = "large rejected payload ".repeat(400_000);
+		for (const text of [largePayload, "rejected two", "rejected three", "rejected four"]) {
+			await assert.rejects(dispatchTrackedPrompt(target, text), /rejected/);
+		}
+		const value = manager();
+		target.status = "streaming";
+		for (const text of ["steer rejected payload one", "steer rejected payload two"]) {
+			const row = target.promptQueue.enqueue(text, { isSteered: true });
+			await assert.rejects(value._dispatchSteer(target, [row]), /steer rejected/);
+		}
+
+		const owner = target.promptAuthorCancellationTombstones;
+		assert.equal(owner.bindings.length, 2);
+		assert.equal(owner.overflowed, true);
+		assert.ok(owner.residentBytes <= 1024);
+		assert.equal(owner.bindings.some((binding: any) => "modelText" in binding), false);
+		assert.equal(JSON.stringify(owner).includes("large rejected payload"), false);
+		assert.equal(JSON.stringify(owner).includes("steer rejected payload"), false);
+		assert.equal(target.pendingPromptAuthors.length, 0);
+	});
+
+	it("applies the same digest-only tombstone bound while restoring cancelled sidecars", () => {
+		const target = session("restore-bounded-tombstones");
+		target.promptAuthorTombstoneBudget = { maxCount: 2, maxBytes: 1024 };
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		restorePromptAuthorBindings(target, Array.from({ length: 5 }, (_, index) => ({
+			schemaVersion: 1 as const,
+			type: "prompt-author" as const,
+			promptId: `cancelled-${index}`,
+			dispatchedAt: index,
+			modelText: `restored secret ${index}`,
+			source: "system" as const,
+			author,
+			settlement: {
+				schemaVersion: 1 as const,
+				type: "prompt-author-settlement" as const,
+				promptId: `cancelled-${index}`,
+				settledAt: index + 1,
+				outcome: "cancelled" as const,
+			},
+		})));
+
+		const owner = target.promptAuthorCancellationTombstones;
+		assert.equal(owner.bindings.length, 2);
+		assert.equal(owner.overflowed, true);
+		assert.ok(owner.residentBytes <= 1024);
+		assert.equal(owner.bindings.some((binding: any) => "modelText" in binding), false);
+		assert.equal(JSON.stringify(owner).includes("restored secret"), false);
+
+		const byteLimited = session("restore-byte-bounded-tombstones");
+		byteLimited.promptAuthorTombstoneBudget = { maxCount: 100, maxBytes: 1 };
+		restorePromptAuthorBindings(byteLimited, [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "too-large-for-byte-budget",
+			dispatchedAt: 1,
+			modelText: "byte bounded restored secret",
+			source: "system",
+			author,
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId: "too-large-for-byte-budget",
+				settledAt: 2,
+				outcome: "cancelled",
+			},
+		}]);
+		assert.equal(byteLimited.promptAuthorCancellationTombstones.bindings.length, 0);
+		assert.equal(byteLimited.promptAuthorCancellationTombstones.residentBytes, 0);
+		assert.equal(byteLimited.promptAuthorCancellationTombstones.overflowed, true);
+	});
+
+	it("fails closed after tombstone overflow but lets a positive ack finalize buffered projection", async () => {
+		const target = session("dispatch-overflow-positive");
+		target.lastActivity = 500;
+		const persisted = { lastActivity: 500, lastReadAt: 500 };
+		installSessionActivityAttribution(target, {
+			get: () => persisted,
+			update: (_id: string, patch: any) => { persisted.lastActivity = patch.lastActivity; },
+		}, { now: () => 501, suppressUntilPrompt: true });
+		target.promptAuthorTombstoneBudget = { maxCount: 1, maxBytes: 1024 };
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		const cancelled = (promptId: string, modelText: string) => ({
+			schemaVersion: 1 as const,
+			type: "prompt-author" as const,
+			promptId,
+			dispatchedAt: 1,
+			modelText,
+			source: "system" as const,
+			author,
+			settlement: {
+				schemaVersion: 1 as const,
+				type: "prompt-author-settlement" as const,
+				promptId,
+				settledAt: 2,
+				outcome: "cancelled" as const,
+			},
+		});
+		restorePromptAuthorBindings(target, [
+			cancelled("retained", "[System]: other text"),
+			cancelled("dropped", "[System]: same bytes"),
+		]);
+		const response = deferred<any>();
+		target.rpcClient = { prompt: vi.fn(() => response.promise) };
+		const dispatch = dispatchTrackedPrompt(target, "same bytes", { source: "system", author, now: () => 3 });
+		await flushMicrotasks();
+
+		const visible = prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { role: "user", content: "[System]: same bytes" },
+		}) as any;
+		assert.equal(visible.message.content, "same bytes");
+		assert.equal(target.lastActivity, 500, "ambiguous echo cannot commit before acknowledgement");
+		assert.equal(target.pendingPromptAuthors.length, 1);
+
+		response.resolve({ success: true });
+		await dispatch;
+		assert.equal(target.lastActivity, 501);
+		assert.equal(persisted.lastActivity, 501);
+		assert.equal(target.pendingPromptAuthors.length, 0);
+		assert.equal(readAuthorSidecar(target.id).at(-1)?.settlement?.outcome, "echoed");
+	});
+
+	it("keeps overflowed historical echo plus current rejection quarantined and recoverable once", async () => {
+		const value = manager();
+		const response = deferred<any>();
+		const target = session("dispatch-overflow-negative", { prompt: vi.fn(() => response.promise) });
+		target.lastActivity = 700;
+		const writes: number[] = [];
+		installSessionActivityAttribution(target, {
+			get: () => ({ lastActivity: 700, lastReadAt: 700 }),
+			update: (_id: string, patch: any) => writes.push(patch.lastActivity),
+		}, { now: () => 701, suppressUntilPrompt: true });
+		target.promptAuthorTombstoneBudget = { maxCount: 0, maxBytes: 0 };
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		restorePromptAuthorBindings(target, [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "dropped-historical",
+			dispatchedAt: 1,
+			modelText: "same bytes",
+			source: "system",
+			author,
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId: "dropped-historical",
+				settledAt: 2,
+				outcome: "cancelled",
+			},
+		}]);
+		const dispatch = value.dispatchDirectPrompt(
+			target, "same bytes", undefined, undefined, false, false, "system", author,
+		);
+		await flushMicrotasks();
+		prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { role: "user", content: "same bytes" },
+		});
+		assert.equal(target.lastActivity, 700);
+
+		response.resolve({ success: false, error: "current rejected" });
+		await assert.rejects(dispatch, /current rejected/);
+		assert.equal(target.lastActivity, 700);
+		assert.deepEqual(writes, []);
+		assert.equal(value.recoverPromptDispatch.mock.calls.length, 1);
+		assert.equal(value.recoverPromptDispatch.mock.calls[0][1].length, 1);
+		assert.equal(target.pendingPromptAuthors.length, 0);
 	});
 
 	it("settles and projects a buffered same-text echo only after the current RPC is accepted", async () => {
