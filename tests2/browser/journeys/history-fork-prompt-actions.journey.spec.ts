@@ -35,6 +35,16 @@ async function sendPromptAndWait(sessionId: string, text: string): Promise<void>
 	const ws = await connectWs(sessionId);
 	try {
 		ws.send({ type: "prompt", text });
+		const echo = await ws.waitFor(message => message.type === "event"
+			&& message.data?.type === "message_end"
+			&& message.data?.message?.role === "user"
+			&& message.data.message.content?.[0]?.text === text, 20_000);
+		// Pi message events precede persistence and carry no SessionEntry id. The
+		// action must arrive through the authoritative read-only cursor refresh,
+		// never through invented event or message metadata in the test harness.
+		expect(echo.data).not.toHaveProperty("entryId");
+		expect(echo.data).not.toHaveProperty("id");
+		expect(echo.data.message).not.toHaveProperty("entryId");
 		await ws.waitFor(agentEndPredicate(), 20_000);
 	} finally {
 		ws.ws.close();
@@ -87,6 +97,42 @@ async function sourceTranscript(gateway: { sessionManager?: any }, sessionId: st
 	await expect.poll(() => gateway.sessionManager?.getPersistedSession(sessionId)?.agentSessionFile, { timeout: 20_000 }).toBeTruthy();
 	const path = gateway.sessionManager.getPersistedSession(sessionId).agentSessionFile as string;
 	return { path, bytes: readFileSync(path, "utf8") };
+}
+
+async function expectAuthoritativeCursorRpc(gateway: { sessionManager?: any }, sessionId: string): Promise<void> {
+	const rpcClient = gateway.sessionManager?.getSession(sessionId)?.rpcClient;
+	expect(rpcClient, "source session exposes its live Pi RPC bridge").toBeTruthy();
+	const before = await sourceTranscript(gateway, sessionId);
+	const entriesResponse = await rpcClient.sendCommand({ type: "get_entries" });
+	expect(entriesResponse?.success).toBe(true);
+	const entries = entriesResponse.data?.entries as any[];
+	expect(Array.isArray(entries)).toBe(true);
+	expect(entries.length).toBeGreaterThanOrEqual(6);
+	expect(entriesResponse.data?.leafId).toBe(entries.at(-1)?.id);
+	const afterLeaf = await rpcClient.sendCommand({ type: "get_entries", since: entries.at(-1)?.id });
+	expect(afterLeaf).toMatchObject({ success: true, data: { entries: [], leafId: entries.at(-1)?.id } });
+	const staleCursor = await rpcClient.sendCommand({ type: "get_entries", since: "missing-entry" });
+	expect(staleCursor?.success).toBe(false);
+	for (let index = 0; index < entries.length; index++) {
+		expect(entries[index].id).toMatch(/^mock-entry-/);
+		expect(entries[index].parentId).toBe(index === 0 ? null : entries[index - 1].id);
+	}
+
+	const forkMessagesResponse = await rpcClient.sendCommand({ type: "get_fork_messages" });
+	expect(forkMessagesResponse?.success).toBe(true);
+	expect(forkMessagesResponse.data?.messages).toEqual([
+		expect.objectContaining({ entryId: expect.any(String), text: RETAINED }),
+		expect.objectContaining({ entryId: expect.any(String), text: SELECTED }),
+		expect.objectContaining({ entryId: expect.any(String), text: LATER }),
+	]);
+
+	const transcript = await sourceTranscript(gateway, sessionId);
+	expect(transcript.path).toBe(before.path);
+	expect(transcript.bytes).toBe(before.bytes);
+	const records = transcript.bytes.trim().split(/\r?\n/).map(line => JSON.parse(line));
+	expect(records[0]).toMatchObject({ type: "session", id: expect.any(String) });
+	const persistedEntries = records.filter(record => record.type !== "session" && record.type !== "system");
+	expect(persistedEntries).toEqual(entries);
 }
 
 async function sessionDetails(sessionId: string): Promise<any> {
@@ -223,6 +269,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 		let forkId = "";
 		try {
 			await seedHistory(sourceId);
+			await expectAuthoritativeCursorRpc(gateway, sourceId);
 			const sourceBefore = await sourceTranscript(gateway, sourceId);
 			const source = await sessionDetails(sourceId);
 			const sourcePersisted = gateway.sessionManager.getPersistedSession(sourceId);
@@ -288,6 +335,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			sourceId = (await createResponse.json()).id;
 			await waitForSessionStatus(sourceId, "idle", 30_000);
 			await seedHistory(sourceId);
+			await expectAuthoritativeCursorRpc(gateway, sourceId);
 			const sourceBefore = await sourceTranscript(gateway, sourceId);
 			const source = await sessionDetails(sourceId);
 
