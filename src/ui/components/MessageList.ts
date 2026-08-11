@@ -41,6 +41,7 @@ const HISTORY_FORK_HELP_TEXT = "The new session will include the conversation up
 
 type HistoryPromptMessage = BobbitMessage<AgentMessage> & {
 	_origin?: unknown;
+	_pending?: unknown;
 	entryId?: unknown;
 	_entryIdSource?: unknown;
 };
@@ -58,6 +59,7 @@ export function isEligibleHistoryPrompt(
 ): boolean {
 	const candidate = message as HistoryPromptMessage;
 	if (!context.canForkSource || !isAccountablePromptMessage(candidate)) return false;
+	if (candidate._pending === true) return false;
 	if (candidate._origin !== "server" || candidate._entryIdSource !== "pi-transcript") return false;
 	if (typeof candidate.entryId !== "string"
 		|| candidate.entryId.length === 0
