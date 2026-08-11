@@ -14961,7 +14961,7 @@ async function handleApiRoute(
 	const markReadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/mark-read$/);
 	if (markReadMatch && req.method === "POST") {
 		const id = markReadMatch[1];
-		const ok = sessionManager.markSessionRead(id);
+		const ok = await sessionManager.markSessionRead(id);
 		if (!ok) { json({ error: "session not found" }, 404); return; }
 		json({ ok: true });
 		return;

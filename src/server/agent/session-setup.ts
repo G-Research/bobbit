@@ -54,6 +54,7 @@ import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-pro
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { installSessionActivityAttribution, recordSessionEventActivity } from "./session-activity.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
@@ -395,6 +396,8 @@ export interface PipelineContext {
 	/** Runtime boundary flags for legacy worktree setup test hooks. */
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
 	remoteGitPolicy?: RemoteGitPolicy;
+	/** Authoritative activity clock; defaults to Date.now in narrow tests. */
+	now?: () => number;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -1030,13 +1033,20 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 // ── Event subscription ─────────────────────────────────────────────────────
 
 /** Shared event subscription, returns unsubscribe fn. */
-export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): () => void {
+export function subscribeToEvents(
+	session: SessionInfo,
+	ctx: PipelineContext,
+	opts: { suppressUntilPrompt?: boolean } = {},
+): () => void {
+	installSessionActivityAttribution(session, ctx.store, {
+		now: ctx.now,
+		suppressUntilPrompt: opts.suppressUntilPrompt,
+	});
 	return session.rpcClient.onEvent((event: any) => {
-		session.lastActivity = Date.now();
-		ctx.store.update(session.id, { lastActivity: session.lastActivity });
 		const preparedEvent = ctx.prepareVisibleAgentEvent
 			? ctx.prepareVisibleAgentEvent(session, event)
 			: prepareVisibleAgentEvent(session, event);
+		recordSessionEventActivity(session, preparedEvent);
 		ctx.handleAgentLifecycle(session, preparedEvent);
 		// Suppress Pi retryable agent_end ({ willRetry:true }) before it reaches
 		// clients/EventBuffer. Pi 0.80+ emits a non-terminal agent_end before each
@@ -1463,8 +1473,11 @@ export async function executeWorktreeAsync(
 
 	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
 
-	// Subscribe to events
-	session.unsubscribe = subscribeToEvents(session, ctx);
+	// Subscribe to events. A cloned transcript is restore-only until this
+	// session dispatches a new prompt, even if replay frames arrive late.
+	session.unsubscribe = subscribeToEvents(session, ctx, {
+		suppressUntilPrompt: !!plan.preExistingAgentSessionFile,
+	});
 
 	// Start agent with retry
 	await withRetry(
@@ -1670,8 +1683,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
 
-	// Subscribe to events
-	session.unsubscribe = subscribeToEvents(session, ctx);
+	// Subscribe to events. A cloned transcript is restore-only until this
+	// session dispatches a new prompt, even if replay frames arrive late.
+	session.unsubscribe = subscribeToEvents(session, ctx, {
+		suppressUntilPrompt: !!plan.preExistingAgentSessionFile,
+	});
 
 	// Start agent with retry
 	const __t = performance.now();

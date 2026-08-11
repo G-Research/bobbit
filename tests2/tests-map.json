@@ -2956,6 +2956,10 @@
       "type": "smoke-journey"
     },
     {
+      "path": "tests2/browser/journeys/session-activity-restart.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
       "path": "tests2/browser/journeys/session-lifecycle.journey.spec.ts",
       "type": "smoke-journey"
     },

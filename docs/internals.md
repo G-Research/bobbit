@@ -1350,7 +1350,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 
 ### Data flow
 
-1. **Server stores** `lastReadAt?: number` on `PersistedSession` (see `src/server/agent/session-store.ts`). It is included in `UpdatableSessionFields` so writes go through the normal `SessionStore.update()` path with disk persistence.
+1. **Server stores** `lastReadAt?: number` on `PersistedSession` (see `src/server/agent/session-store.ts`). It is included in `UpdatableSessionFields`. Routine activity writes remain debounced, but `SessionManager.markSessionRead()` awaits `SessionStore.flushAsync()` before the endpoint acknowledges, so a successful read survives an immediate graceful stop/start.
 2. **Server exposes** `lastReadAt` in session-list payloads - `GET /api/sessions` (via `listSessions()`) and the archived-sessions list (via `listArchivedSessions()`). The field is threaded through both the live and archived `SessionSummary` shapes in `session-manager.ts`. The single-session `GET /api/sessions/:id` endpoint and the WS `messages` frame (which carries chat transcript, not session metadata) do not include `lastReadAt` - the client only needs it for the sidebar list, which is hydrated from the list endpoint.
 3. **Client computes unseen-ness locally** in `src/app/render-helpers.ts::hasUnseenActivity` by comparing `session.lastActivity > (session.lastReadAt ?? 0)`. No round-trip is needed to render the dot.
 4. **On navigation**, the sidebar calls `markSessionVisited(sessionId)` which (a) updates an in-memory mirror so the dot disappears on the very next render, and (b) fires `POST /api/sessions/:id/mark-read` so other browsers learn on their next refresh. The endpoint is backed by `SessionManager.markSessionRead`, which uses `resolveStoreForId` so live, dormant, and archived sessions are all markable.
@@ -1374,19 +1374,16 @@ Existing users have a `bobbit-session-visited` map in `localStorage` from before
 - The role-restart path - swaps the bridge after a role change.
 - The abort-restart path (`restoreFromAbort`) - swaps the bridge after a force-abort.
 
-All three bridges emit `switch_session` history replay frames followed by lifecycle frames on resume (`agent_start`, `agent_idle`, `connection_state`, `state`, `session_title`, etc.). Without a guard, every one of those frames would call `session.lastActivity = Date.now()` and clobber the persisted value. The original guard - a `restoring` / `switchingSession` flag flipped to `false` after `switch_session` resolves - was insufficient because lifecycle frames continue to fire after the flag clears, and under concurrent restore every restored session ended up clustered at restart time with identical timestamps.
+These bridges emit `switch_session` history replay plus lifecycle/model/thinking frames on resume. The confirmed corruption was an attribution error: replayed `message_update`, `message_end`, tool, or `agent_end` frames could arrive after the `switch_session` response. A boolean flipped at that response therefore mislabeled old history as new work. Concurrent restore stamped many sessions with the same restart-time value while leaving `lastReadAt` intact, which made previously read sessions unread.
 
-**Single source of truth**: the exported helper `isUserVisibleActivity(event)` at the top of `src/server/agent/session-manager.ts`. It returns `true` only for events that represent real new turn activity:
+**Single source of truth**: `src/server/agent/session-activity.ts`. It combines two checks:
 
-- `message_update`
-- `message_end`
-- `tool_execution_start`
-- `tool_execution_end`
-- `agent_end`
+1. `isUserVisibleActivity()` accepts new message, tool execution, and final `agent_end` frames, while rejecting lifecycle/status/model/thinking frames and retryable intermediate `agent_end` frames.
+2. Restored or rehydrated bridges remain in an origin-based quarantine until Bobbit dispatches a new prompt or steer. The quarantine does **not** end at the `switch_session` response, so late history frames stay restore-only. Dispatch records the prompt immediately and opens the boundary; subsequent meaningful assistant/tool events advance the timestamp.
 
-Everything else returns `false`, including all lifecycle frames, `auto_compaction_*`, `process_exit`, container `died`/`recovered` events, and `gate_verification_*` frames. All three rpc-event listeners now wrap the `session.lastActivity = Date.now()` bump in `if (isUserVisibleActivity(event))`. The pre-existing `restoring` / `switchingSession` flags are retained for cost-tracking but no longer relied on for `lastActivity`. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+The same attributor is installed by standard session setup, cold restore, external sessions, role restart, force-abort restart, dormant revival, and boot continuation. It uses a monotonic timestamp greater than both prior activity and `lastReadAt`, so genuine same-millisecond work still becomes unread. Restore lifecycle/status, history hydration, model/thinking restoration, and synthetic bookkeeping preserve both timestamps. Boot continuation is deliberately genuine new work because it crosses the prompt boundary; ordinary idle restore does not. Notification policy remains separate, so team-member suppression and immediate human-attention states are unchanged.
 
-Locked by `tests/session-restore-last-activity.test.ts` - source-scan assertions verify all three sites import the helper, and behavioural tests verify (a) lifecycle frames don't bump, (b) real activity does bump, and (c) concurrent restore of N sessions with widely-varied pre-restart timestamps does not cluster them.
+Locked by `tests2/core/session-restore-last-activity.test.ts`, which drives the real concurrent `restoreSession()` handler and sends replay events on both sides of the switch response, and `tests2/browser/journeys/session-activity-restart.journey.spec.ts`, which marks multiple ordinary sessions read, performs a graceful gateway restart, checks exact timestamps and indicators, then proves a new prompt becomes unread.
 
 ### Client must not mutate `lastActivity`
 
@@ -1400,17 +1397,17 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 
 | File | Role |
 |---|---|
-| `src/server/agent/session-store.ts` | `PersistedSession.lastReadAt` field + `UpdatableSessionFields` entry |
-| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `isUserVisibleActivity()` filter applied at `restoreSession`, role-restart, and abort-restart event listeners |
-| `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
+| `src/server/agent/session-store.ts` | Timestamp persistence, debounced activity writes, and `flushAsync()` durability barrier |
+| `src/server/agent/session-activity.ts` | Authoritative prompt boundary, restore quarantine, event classifier, and monotonic activity writer |
+| `src/server/agent/session-manager.ts` | Restore/restart wiring, durable `markSessionRead()`, and `lastReadAt` in session summaries |
+| `src/server/agent/session-setup.ts` | Fresh/continue/fork subscription wiring through the shared attributor |
+| `src/server/server.ts` | Awaited `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
 | `src/app/notification-policy.ts` | Shared notification predicates for unread state and one-shot idle-transition beeps |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
-| `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
-| `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
-| `tests/session-restore-last-activity.test.ts` | `isUserVisibleActivity` filter at all three restore sites; concurrent-restore non-clustering |
-| `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
+| `tests2/core/session-restore-last-activity.test.ts` | Real restore handler, before/after-response replay, concrete store transitions, and concurrent non-clustering |
+| `tests2/browser/journeys/session-activity-restart.journey.spec.ts` | Navigation mark-read, graceful restart durability, exact timestamps/indicators, and genuine new activity |
 
 ---
 

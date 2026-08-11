@@ -112,6 +112,13 @@ import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "..
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
+import {
+	installSessionActivityAttribution,
+	recordSessionEventActivity,
+	recordSessionPromptActivity,
+	suppressSessionActivityUntilPrompt,
+} from "./session-activity.js";
+export { isUserVisibleActivity } from "./session-activity.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import type { ProjectContext } from "./project-context.js";
@@ -577,30 +584,6 @@ function redactDispatchFailureReason(reason: string, providerAuthFailure: boolea
 	return redactSensitive(reason)
 		.replace(/\b(?:sk|pk|rk)-(?:or-)?[A-Za-z0-9_-]{4,}\b/gi, "<redacted-api-key>")
 		.slice(0, 500);
-}
-
-/**
- * Returns true only for rpc events that represent genuine new user-visible
- * activity (a message, tool call, or end-of-turn). Lifecycle frames the
- * agent CLI emits automatically on resume (agent_start, agent_idle,
- * connection_state, state, session_title, etc.) return false so they don't
- * clobber the persisted `lastActivity` timestamp on restore / role-restart /
- * abort-restart paths.
- *
- * See goal `goal-fix-lastac-724b3421` for the bug this guards against.
- */
-export function isUserVisibleActivity(event: any): boolean {
-	if (!event || typeof event.type !== "string") return false;
-	switch (event.type) {
-		case "message_update":
-		case "message_end":
-		case "tool_execution_start":
-		case "tool_execution_end":
-		case "agent_end":
-			return true;
-		default:
-			return false;
-	}
 }
 
 /**
@@ -1215,6 +1198,9 @@ export async function dispatchTrackedPrompt(
 	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
 	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now());
+	// This explicit dispatch is the origin boundary that releases any restore
+	// replay quarantine and records genuine new work before agent events race in.
+	recordSessionPromptActivity(session);
 
 	try {
 		const response = opts.whenReady
@@ -3052,6 +3038,7 @@ export class SessionManager {
 			testPreparingDelayMs: this.testPreparingDelayMs,
 			worktreeSetupRuntime: this.worktreeSetupRuntime,
 			remoteGitPolicy: this.remoteGitPolicy,
+			now: () => this.clock.now(),
 			// Hierarchical goal-metadata resolver, bound to THIS project's GoalManager.
 			// The pipeline (tool activation, prompt order, bridge-install) resolves the
 			// effective (inherited) metadata for a session's goal through this single
@@ -5133,6 +5120,7 @@ export class SessionManager {
 		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
 		session.inFlightSteerTexts.push(ledgerRecord);
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, batchText, source, author);
+		recordSessionPromptActivity(session);
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
 		try {
@@ -5458,6 +5446,7 @@ export class SessionManager {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
+		recordSessionPromptActivity(session);
 		this.markPromptDispatchStreaming(session);
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
@@ -5610,6 +5599,7 @@ export class SessionManager {
 		};
 
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
+		recordSessionPromptActivity(session);
 		const dispatchPromise = session.rpcClient.prompt(prepared.piText, next.images);
 		dispatchPromise
 			.then((resp: any) => {
@@ -8230,11 +8220,17 @@ export class SessionManager {
 		// so replayed update/end frames retain and settle the original identity.
 		const settledSteersPruned = restorePromptAuthorBindings(session, readAuthorSidecar(ps.id));
 
-		// Skip cost tracking during session restore (switch_session replays
-		// all historical message_update events which would double-count costs)
+		// Skip cost tracking and lifecycle effects during switch_session replay.
+		// Activity attribution has a stronger origin fence: it stays suppressed
+		// until Bobbit dispatches a genuine new prompt, so replay frames arriving
+		// after the switch response cannot corrupt the persisted timestamp.
 		let restoring = true;
 
 		const restoreStore = this.getSessionStore(ps.projectId);
+		installSessionActivityAttribution(session, restoreStore, {
+			now: () => this.clock.now(),
+			suppressUntilPrompt: true,
+		});
 		const unsub = rpcClient.onEvent((event: any) => {
 			// During restore, switch_session replays every persisted message as an
 			// rpc event. Bumping lastActivity here would clobber the pre-restart
@@ -8243,10 +8239,7 @@ export class SessionManager {
 			// switch succeeds and this replacement becomes canonical.
 			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
 			if (!restoring) {
-				if (isUserVisibleActivity(preparedEvent)) {
-					session.lastActivity = Date.now();
-					restoreStore.update(ps.id, { lastActivity: session.lastActivity });
-				}
+				recordSessionEventActivity(session, preparedEvent);
 				this.handleAgentLifecycle(session, preparedEvent);
 			} else {
 				// Preserve the narrow replay reconciliation that proves an accepted
@@ -10384,17 +10377,6 @@ export class SessionManager {
 			promptQueue: new PromptQueue(),
 		};
 
-		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = this.clock.now();
-			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-			this.handleAgentLifecycle(session, preparedEvent);
-			this.emitAgentEvent(session, preparedEvent);
-			this.trackCostFromEvent(session, preparedEvent);
-		});
-		session.unsubscribe = unsub;
-
-		this.sessions.set(id, session);
-
 		// Resolve project from goal (if provided) or from opts.projectId — which the
 		// REST handler must have resolved via resolveProjectForRequest. No fallback.
 		let extProjectId = opts.goalId
@@ -10422,6 +10404,16 @@ export class SessionManager {
 			nonInteractive: true,
 			projectId: extProjectId,
 		});
+		installSessionActivityAttribution(session, extStore, { now: () => this.clock.now() });
+		const unsub = rpcClient.onEvent((event: any) => {
+			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+			recordSessionEventActivity(session, preparedEvent);
+			this.handleAgentLifecycle(session, preparedEvent);
+			this.emitAgentEvent(session, preparedEvent);
+			this.trackCostFromEvent(session, preparedEvent);
+		});
+		session.unsubscribe = unsub;
+		this.sessions.set(id, session);
 
 		// Then update with agentSessionFile (tracked for terminate)
 		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
@@ -10565,11 +10557,16 @@ export class SessionManager {
 		return [...ids];
 	}
 
-	/** Record that the user viewed this session. Updates lastReadAt only — never lastActivity. */
-	markSessionRead(id: string): boolean {
+	/**
+	 * Record that the user viewed this session. The acknowledgement is a
+	 * durability barrier for this mutation only; routine activity remains
+	 * debounced and asynchronous.
+	 */
+	async markSessionRead(id: string): Promise<boolean> {
 		const store = this.resolveStoreForId(id);
 		if (!store?.get(id)) return false;
 		store.update(id, { lastReadAt: this.clock.now() });
+		await store.flushAsync();
 		return true;
 	}
 
@@ -10932,10 +10929,7 @@ export class SessionManager {
 			// failed assignment is process-locally invisible as well as metadata-safe.
 			if (!replacementCommitted) return;
 			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-			if (isUserVisibleActivity(preparedEvent)) {
-				session.lastActivity = this.clock.now();
-				roleStore.update(id, { lastActivity: session.lastActivity });
-			}
+			recordSessionEventActivity(session, preparedEvent);
 			this.handleAgentLifecycle(session, preparedEvent);
 			this.emitAgentEvent(session, preparedEvent);
 			this.trackCostFromEvent(session, preparedEvent);
@@ -11040,6 +11034,9 @@ export class SessionManager {
 			);
 			this._writeModelNameFile(id, `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`);
 		}
+		// The replacement may still flush replay frames after switch_session's
+		// response. Keep them quarantined until the next explicit prompt dispatch.
+		suppressSessionActivityUntilPrompt(session);
 		replacementCommitted = true;
 
 		// assignRole owns the status fence until every concurrently queued role
@@ -13356,7 +13353,6 @@ export class SessionManager {
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
 			let replayingSession = false;
-			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
 				// Keep staged startup/replay invisible. During replay, prepare only for
 				// occurrence-aware steer reconciliation; skip all normal event side effects.
@@ -13368,10 +13364,7 @@ export class SessionManager {
 					return;
 				}
 				const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-				if (isUserVisibleActivity(preparedEvent)) {
-					session.lastActivity = this.clock.now();
-					abortStore.update(id, { lastActivity: session.lastActivity });
-				}
+				recordSessionEventActivity(session, preparedEvent);
 				this.handleAgentLifecycle(session, preparedEvent);
 				this.emitAgentEvent(session, preparedEvent);
 				this.trackCostFromEvent(session, preparedEvent);
@@ -13416,6 +13409,8 @@ export class SessionManager {
 				await rpcClient.stop().catch(() => {});
 				throw err;
 			}
+			// Preserve the pre-abort activity timestamp across any late replay.
+			suppressSessionActivityUntilPrompt(session);
 			switchingSession = false;
 
 			// Requeue only steers that the bounded replay did not prove durable.

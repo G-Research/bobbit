@@ -1454,7 +1454,11 @@ The QA extension must emit `[screenshot_file]<path>[/screenshot_file]` markers, 
 
 ## `lastActivity` reads "just now" after restart
 
-The `isUserVisibleActivity` filter in `src/server/agent/session-manager.ts` decides which event types bump `lastActivity`. Internal heartbeats / state pushes are excluded. If every restored session reads as "just now", check the filter hasn't been weakened.
+**Fingerprint:** several otherwise unrelated sessions acquire identical or tightly clustered `lastActivity` values during gateway boot. Compare each row's persisted `lastReadAt`: if it is still present and older than the new clustered activity value, read state was not lost — restore traffic was incorrectly attributed as new work.
+
+The authoritative boundary is `src/server/agent/session-activity.ts`. A restored/rehydrated bridge stays quarantined until Bobbit dispatches a new prompt or steer. Do not end that quarantine at the `switch_session` response: Pi can emit replayed message/tool/terminal frames after the response. Lifecycle/status/history/model/thinking frames and synthetic restore bookkeeping must not update activity. A genuine prompt opens the boundary and meaningful subsequent message/tool/final-turn frames update it.
+
+Diagnose by recording `SessionStore.update()` patches during restore. Restore-only traffic must produce no `lastActivity` or `lastReadAt` patch. A post-restore prompt must produce `lastActivity` only. Run `tests2/core/session-restore-last-activity.test.ts` for both sides of the switch boundary and concurrent non-clustering, then `tests2/browser/journeys/session-activity-restart.journey.spec.ts` for the real graceful stop/start and mark-read durability path. Do not fix this with a delay or client-side unread exception.
 
 ## Sidebar shows spurious "now ●" (unread dot) on idle sessions
 
