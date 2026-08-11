@@ -1558,9 +1558,16 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 	session.promptAuthorAmbiguityFences = {
 		bindings: [],
 		residentBytes: 0,
-		// Replacement reuses the SessionInfo capsule and late old-bridge replay can
-		// still arrive. Never reopen ambiguous correlation after a prior drop.
-		overflowed: previousFences?.overflowed === true,
+		// Missing, wholly corrupt, future-version, legacy, and genuinely empty
+		// sidecars all arrive through the compatibility reader as zero rows. A
+		// restored generation with no bindings must therefore be treated like dropped
+		// ambiguity history: raw-text equality is not proof that a late replay belongs
+		// to a current dispatch. Positive RPC acknowledgement remains authoritative.
+		// The reader exposes no completeness metadata when at least one row survives a
+		// partial file, so that existing non-empty compatibility path is unchanged.
+		// This sticky bounded owner carries the zero-row trust decision across in-place
+		// role/abort replacements without retaining raw text.
+		overflowed: entries.length === 0 || previousFences?.overflowed === true,
 	};
 	// Preserve bounded live-process fences across bridge replacement. Dropping
 	// them here would reopen ABA when a late old-bridge echo follows hydration.

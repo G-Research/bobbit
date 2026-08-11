@@ -143,6 +143,10 @@ function lateHistoricalPromptEvents(text: string, correlation: "keyed" | "keyles
 	];
 }
 
+async function flushMicrotasks(): Promise<void> {
+	for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+}
+
 function makeManager(store: SessionStore, bridges: Map<string, RestoreBridge>, now: () => number): any {
 	const stateDir = (store as any).storeDir as string;
 	// isolate:false workers retain author-sidecar module state across files. Give
@@ -208,9 +212,13 @@ const REPLAY_VISIBLE_EVENTS = [
 ];
 
 describe("authoritative session activity attribution", () => {
-	it("classifies meaningful work but excludes restore/lifecycle and retry frames", () => {
+	it("classifies meaningful work but excludes restore/lifecycle, user projections, and retry frames", () => {
 		for (const event of LIFECYCLE_EVENTS) expect(isUserVisibleActivity(event)).toBe(false);
 		for (const event of REPLAY_VISIBLE_EVENTS) expect(isUserVisibleActivity(event)).toBe(true);
+		for (const type of ["message_update", "message_end"]) {
+			expect(isUserVisibleActivity({ type, message: { role: "user" } })).toBe(false);
+			expect(isUserVisibleActivity({ type, message: { role: "user-with-attachments" } })).toBe(false);
+		}
 		expect(isUserVisibleActivity({ type: "agent_end", willRetry: true })).toBe(false);
 		expect(isUserVisibleActivity(undefined)).toBe(false);
 	});
@@ -367,6 +375,170 @@ describe("authoritative session activity attribution", () => {
 		expect(store.get(row.id)?.lastActivity).toBe(row.lastActivity);
 		expect(store.get(row.id)?.lastReadAt).toBe(row.lastReadAt);
 		expect(activityWrites).toEqual([]);
+	});
+
+	it.each([
+		{ correlation: "keyed", failure: "negative" },
+		{ correlation: "keyed", failure: "throw" },
+		{ correlation: "keyless", failure: "negative" },
+		{ correlation: "keyless", failure: "throw" },
+	] as const)(
+		"fails closed when missing-sidecar $correlation replay precedes a direct $failure",
+		async ({ correlation, failure }) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-activity-missing-direct-${correlation}-${failure}-`));
+			roots.push(root);
+			const store = new SessionStore(path.join(root, "state"));
+			const row = makePersisted(root, `missing-direct-${correlation}-${failure}`, 10_000, 11_000);
+			store.put(row);
+			const activityWrites: number[] = [];
+			const update = store.update.bind(store);
+			store.update = ((id: string, patch: any) => {
+				if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+				update(id, patch);
+			}) as typeof store.update;
+
+			let clock = 20_000;
+			const bridges = new Map<string, RestoreBridge>();
+			const manager = makeManager(store, bridges, () => ++clock);
+			await manager.restoreSession(row);
+			const session = manager.getSession(row.id)!;
+			const bridge = bridges.get(row.id)!;
+			const text = "historical bytes absent from sidecar";
+			expect(readAuthorSidecar(row.id)).toEqual([]);
+			expect(session.promptAuthorAmbiguityFences).toMatchObject({ bindings: [], overflowed: true });
+			bridge.promptEvents = lateHistoricalPromptEvents(text, correlation);
+			if (failure === "negative") bridge.promptResponse = { success: false, error: "Anthropic API key is missing" };
+			else bridge.promptError = new Error("Anthropic API key is missing");
+			const recover = vi.spyOn(manager, "recoverPromptDispatch");
+
+			await expect(manager.enqueuePrompt(row.id, text)).rejects.toThrow(/authentication failure|missing-api-key/i);
+			bridge.emit({ type: "message_end", message: { id: "later-assistant", role: "assistant", content: "old output" } });
+			await store.flushAsync();
+
+			expect(session.lastActivity).toBe(row.lastActivity);
+			expect(store.get(row.id)?.lastActivity).toBe(row.lastActivity);
+			expect(store.get(row.id)?.lastReadAt).toBe(row.lastReadAt);
+			expect(activityWrites).toEqual([]);
+			expect(recover).toHaveBeenCalledTimes(1);
+			expect(session.promptQueue.toArray()).toMatchObject([{ text }]);
+			expect(session.pendingPromptAuthors).toEqual([]);
+			expect(readAuthorSidecar(row.id).filter((binding) => binding.settlement?.outcome === "cancelled"))
+				.toHaveLength(1);
+		},
+	);
+
+	it.each(["keyed", "keyless"] as const)(
+		"lets a positive acknowledgement finalize missing-sidecar %s replay exactly once",
+		async (correlation) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-activity-missing-positive-${correlation}-`));
+			roots.push(root);
+			const store = new SessionStore(path.join(root, "state"));
+			const row = makePersisted(root, `missing-positive-${correlation}`, 12_000, 13_000);
+			store.put(row);
+			const activityWrites: number[] = [];
+			const update = store.update.bind(store);
+			store.update = ((id: string, patch: any) => {
+				if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+				update(id, patch);
+			}) as typeof store.update;
+
+			let clock = 30_000;
+			const bridges = new Map<string, RestoreBridge>();
+			const manager = makeManager(store, bridges, () => ++clock);
+			await manager.restoreSession(row);
+			const session = manager.getSession(row.id)!;
+			const bridge = bridges.get(row.id)!;
+			const text = "missing-sidecar accepted bytes";
+			bridge.promptEvents = lateHistoricalPromptEvents(text, correlation);
+			bridge.promptResponse = { success: true };
+
+			await expect(manager.enqueuePrompt(row.id, text)).resolves.toEqual({ status: "dispatched" });
+			await store.flushAsync();
+
+			expect(session.lastActivity).toBeGreaterThan(row.lastReadAt!);
+			expect(store.get(row.id)?.lastActivity).toBe(session.lastActivity);
+			expect(activityWrites).toHaveLength(1);
+			expect(session.pendingPromptAuthors).toEqual([]);
+			expect(readAuthorSidecar(row.id)).toHaveLength(1);
+			expect(readAuthorSidecar(row.id)[0].settlement?.outcome).toBe("echoed");
+		},
+	);
+
+	it("keeps a missing-sidecar queued prompt recoverable after keyed historical replay", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-missing-queued-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "missing-queued", 14_000, 15_000);
+		store.put(row);
+		const activityWrites: number[] = [];
+		const update = store.update.bind(store);
+		store.update = ((id: string, patch: any) => {
+			if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+			update(id, patch);
+		}) as typeof store.update;
+
+		let clock = 40_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const session = manager.getSession(row.id)!;
+		const bridge = bridges.get(row.id)!;
+		const text = "missing-sidecar queued bytes";
+		session.status = "streaming";
+		await expect(manager.enqueuePrompt(row.id, text)).resolves.toEqual({ status: "queued" });
+		session.status = "idle";
+		bridge.promptEvents = lateHistoricalPromptEvents(text, "keyed");
+		bridge.promptResponse = { success: false, error: "Anthropic API key is missing" };
+		const recover = vi.spyOn(manager, "recoverPromptDispatch");
+		manager.drainQueue(session);
+		await flushMicrotasks();
+		bridge.emit({ type: "message_end", message: { id: "later-assistant", role: "assistant", content: "old output" } });
+		await store.flushAsync();
+
+		expect(session.lastActivity).toBe(row.lastActivity);
+		expect(store.get(row.id)?.lastActivity).toBe(row.lastActivity);
+		expect(store.get(row.id)?.lastReadAt).toBe(row.lastReadAt);
+		expect(activityWrites).toEqual([]);
+		expect(recover).toHaveBeenCalledTimes(1);
+		expect(session.promptQueue.toArray()).toMatchObject([{ text }]);
+		expect(session.pendingPromptAuthors).toEqual([]);
+	});
+
+	it("keeps a missing-sidecar steer recoverable after keyless historical replay and a throw", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-missing-steer-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "missing-steer", 16_000, 17_000);
+		store.put(row);
+		const activityWrites: number[] = [];
+		const update = store.update.bind(store);
+		store.update = ((id: string, patch: any) => {
+			if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+			update(id, patch);
+		}) as typeof store.update;
+
+		let clock = 50_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const session = manager.getSession(row.id)!;
+		const bridge = bridges.get(row.id)!;
+		const text = "missing-sidecar steer bytes";
+		session.status = "streaming";
+		bridge.steerEvents = lateHistoricalPromptEvents(text, "keyless");
+		bridge.steerError = new Error("synthetic missing-sidecar steer throw");
+
+		await expect(manager.deliverLiveSteer(row.id, text)).rejects.toThrow("synthetic missing-sidecar steer throw");
+		bridge.emit({ type: "message_end", message: { id: "later-assistant", role: "assistant", content: "old output" } });
+		await store.flushAsync();
+
+		expect(session.lastActivity).toBe(row.lastActivity);
+		expect(store.get(row.id)?.lastActivity).toBe(row.lastActivity);
+		expect(store.get(row.id)?.lastReadAt).toBe(row.lastReadAt);
+		expect(activityWrites).toEqual([]);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(session.promptQueue.toArray()).toMatchObject([{ text, isSteered: true }]);
+		expect(session.pendingPromptAuthors).toEqual([]);
 	});
 
 	it.each([
@@ -591,6 +763,10 @@ describe("authoritative session activity attribution", () => {
 		let clock = 20_000;
 		const bridges = new Map<string, RestoreBridge>();
 		const manager = makeManager(store, bridges, () => ++clock);
+		// Exercise the existing non-empty compatibility path. The reader exposes no
+		// completeness metadata for partially readable files, so only its explicit
+		// zero-row result enters the new fail-closed restore mode.
+		seedSettledKeylessPrompt(row.id, "unrelated historical prompt");
 		await manager.restoreSession(row);
 		const session = manager.getSession(row.id)!;
 		session.status = "streaming";
@@ -625,6 +801,7 @@ describe("authoritative session activity attribution", () => {
 		let clock = 20_000;
 		const bridges = new Map<string, RestoreBridge>();
 		const manager = makeManager(store, bridges, () => ++clock);
+		seedSettledKeylessPrompt(row.id, "unrelated historical prompt");
 		await manager.restoreSession(row);
 		const session = manager.getSession(row.id)!;
 		session.status = "streaming";

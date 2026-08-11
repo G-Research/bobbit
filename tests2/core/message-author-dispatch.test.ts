@@ -1046,6 +1046,169 @@ describe("message author dispatch boundary", () => {
 		);
 	});
 
+	it.each([
+		{ correlation: "keyed", failure: "negative" },
+		{ correlation: "keyed", failure: "throw" },
+		{ correlation: "keyless", failure: "negative" },
+		{ correlation: "keyless", failure: "throw" },
+	] as const)(
+		"does not let an unsuppressed $correlation user update accept a direct $failure",
+		async ({ correlation, failure }) => {
+			const value = manager();
+			const response = deferred<any>();
+			const target = session(`dispatch-unsuppressed-${correlation}-${failure}`, {
+				prompt: vi.fn(() => response.promise),
+			});
+			target.lastActivity = 1_100;
+			const persisted = { lastActivity: 1_100, lastReadAt: 1_100 };
+			const writes: number[] = [];
+			installSessionActivityAttribution(target, {
+				get: () => persisted,
+				update: (_id: string, patch: any) => {
+					persisted.lastActivity = patch.lastActivity;
+					writes.push(patch.lastActivity);
+				},
+			}, { now: () => 1_101 });
+			const dispatch = value.dispatchDirectPrompt(
+				target, "unsuppressed direct", undefined, undefined, false, false, "user", LOCAL_USER_AUTHOR,
+			);
+			await flushMicrotasks();
+			const current = target.pendingPromptAuthors[0];
+			const update = prepareVisibleAgentEvent(target, {
+				type: "message_update",
+				message: {
+					...(correlation === "keyed" ? { id: "unsuppressed-direct-id" } : {}),
+					role: "user",
+					content: "unsuppressed direct",
+				},
+			});
+			assert.equal(recordSessionEventActivity(target, update), false);
+			assert.equal(target.lastActivity, 1_100);
+			assert.deepEqual(writes, []);
+
+			if (failure === "negative") response.resolve({ success: false, error: "current rejected" });
+			else response.reject(new Error("current transport failure"));
+			await assert.rejects(dispatch, /current (rejected|transport failure)/);
+
+			assert.equal(target.lastActivity, 1_100);
+			assert.equal(persisted.lastActivity, 1_100);
+			assert.deepEqual(writes, []);
+			assert.equal(value.recoverPromptDispatch.mock.calls.length, 1);
+			assert.equal(value.recoverPromptDispatch.mock.calls[0][1][0].text, "unsuppressed direct");
+			assert.equal(target.pendingPromptAuthors.length, 0);
+			assert.equal(
+				readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+				"cancelled",
+			);
+		},
+	);
+
+	it.each([
+		{ correlation: "keyed", failure: "negative" },
+		{ correlation: "keyless", failure: "throw" },
+	] as const)(
+		"does not let an unsuppressed $correlation user update accept a steer $failure",
+		async ({ correlation, failure }) => {
+			const value = manager();
+			const target = session(`steer-unsuppressed-${correlation}-${failure}`);
+			target.status = "streaming";
+			target.lastActivity = 1_200;
+			const writes: number[] = [];
+			installSessionActivityAttribution(target, {
+				get: () => ({ lastActivity: 1_200, lastReadAt: 1_200 }),
+				update: (_id: string, patch: any) => writes.push(patch.lastActivity),
+			}, { now: () => 1_201 });
+			target.rpcClient = {
+				steer: vi.fn(async () => {
+					const update = prepareVisibleAgentEvent(target, {
+						type: "message_update",
+						message: {
+							...(correlation === "keyed" ? { id: "unsuppressed-steer-id" } : {}),
+							role: "user",
+							content: "unsuppressed steer",
+						},
+					});
+					recordSessionEventActivity(target, update);
+					if (failure === "throw") throw new Error("steer transport failure");
+					return { success: false, error: "steer rejected" };
+				}),
+			};
+			const row = target.promptQueue.enqueue("unsuppressed steer", {
+				isSteered: true,
+				source: "user",
+				author: LOCAL_USER_AUTHOR,
+			});
+
+			await assert.rejects(
+				value._dispatchSteer(target, [row]),
+				/steer (rejected|transport failure)/,
+			);
+			assert.equal(target.lastActivity, 1_200);
+			assert.deepEqual(writes, []);
+			assert.equal(target.inFlightSteerTexts.length, 0);
+			assert.deepEqual(target.promptQueue.toArray().map((queued: any) => queued.text), ["unsuppressed steer"]);
+			assert.equal(readAuthorSidecar(target.id).at(-1)?.settlement?.outcome, "cancelled");
+		},
+	);
+
+	it("counts an unsuppressed accepted prompt once and lets an exact terminal beat a late negative", async () => {
+		const value = manager();
+		const positiveResponse = deferred<any>();
+		const positive = session("dispatch-unsuppressed-positive", {
+			prompt: vi.fn(() => positiveResponse.promise),
+		});
+		positive.lastActivity = 1_300;
+		const positiveWrites: number[] = [];
+		installSessionActivityAttribution(positive, {
+			get: () => ({ lastActivity: 1_300, lastReadAt: 1_300 }),
+			update: (_id: string, patch: any) => positiveWrites.push(patch.lastActivity),
+		}, { now: () => 1_301 });
+		const positiveDispatch = value.dispatchDirectPrompt(
+			positive, "positive unsuppressed", undefined, undefined, false, false, "user", LOCAL_USER_AUTHOR,
+		);
+		await flushMicrotasks();
+		const update = prepareVisibleAgentEvent(positive, {
+			type: "message_update",
+			message: { id: "positive-unsuppressed-id", role: "user", content: "positive unsuppressed" },
+		});
+		recordSessionEventActivity(positive, update);
+		assert.deepEqual(positiveWrites, []);
+		positiveResponse.resolve({ success: true });
+		await positiveDispatch;
+		assert.deepEqual(positiveWrites, [1_301]);
+		const end = prepareVisibleAgentEvent(positive, {
+			type: "message_end",
+			message: { id: "positive-unsuppressed-id", role: "user", content: "positive unsuppressed" },
+		});
+		recordSessionEventActivity(positive, end);
+		assert.deepEqual(positiveWrites, [1_301]);
+
+		const negativeResponse = deferred<any>();
+		const terminal = session("dispatch-unsuppressed-terminal", {
+			prompt: vi.fn(() => negativeResponse.promise),
+		});
+		terminal.lastActivity = 1_400;
+		const terminalWrites: number[] = [];
+		installSessionActivityAttribution(terminal, {
+			get: () => ({ lastActivity: 1_400, lastReadAt: 1_400 }),
+			update: (_id: string, patch: any) => terminalWrites.push(patch.lastActivity),
+		}, { now: () => 1_401 });
+		const terminalDispatch = value.dispatchDirectPrompt(
+			terminal, "terminal unsuppressed", undefined, undefined, false, false, "user", LOCAL_USER_AUTHOR,
+		);
+		await flushMicrotasks();
+		const terminalEnd = prepareVisibleAgentEvent(terminal, {
+			type: "message_end",
+			message: { id: "terminal-unsuppressed-id", role: "user", content: "terminal unsuppressed" },
+		});
+		recordSessionEventActivity(terminal, terminalEnd);
+		negativeResponse.resolve({ success: false, error: "late negative" });
+		await assert.doesNotReject(terminalDispatch);
+		assert.deepEqual(terminalWrites, [1_401]);
+		assert.equal(value.recoverPromptDispatch.mock.calls.length, 0);
+		assert.equal(readAuthorSidecar(terminal.id).at(-1)?.settlement?.outcome, "echoed");
+	});
+
 	it("keeps recovery rows unprefixed after a rejected decorated direct prompt", async () => {
 		const value = manager();
 		const target = session("dispatch-recovery", {

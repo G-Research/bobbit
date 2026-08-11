@@ -153,10 +153,20 @@ export function recordSessionEventActivity(session: ActivitySession, event: unkn
  */
 export function isUserVisibleActivity(event: unknown): boolean {
 	if (!event || typeof event !== "object") return false;
-	const candidate = event as { type?: unknown; willRetry?: unknown };
+	const candidate = event as {
+		type?: unknown;
+		willRetry?: unknown;
+		message?: { role?: unknown };
+	};
 	switch (candidate.type) {
 		case "message_update":
 		case "message_end":
+			// User projections are evidence for the exact prompt-boundary transaction,
+			// not independent activity. Counting them here would let an uncommitted or
+			// cancelled dispatch advance activity whenever restore quarantine is open,
+			// and would double-count accepted prompts after their boundary commits.
+			return candidate.message?.role !== "user"
+				&& candidate.message?.role !== "user-with-attachments";
 		case "tool_execution_start":
 		case "tool_execution_end":
 			return true;
