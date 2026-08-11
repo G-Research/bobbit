@@ -14232,15 +14232,6 @@ async function handleApiRoute(
 				if (recovered) sourceJsonl = recovered;
 			}
 			if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
-			if (!ps.sandboxed) {
-				try {
-					const st = fs.statSync(sourceJsonl);
-					if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
-				} catch {
-					json({ error: "source transcript missing or empty" }, 404);
-					return;
-				}
-			}
 
 			const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
 			let historyMaterialization: HistoryForkMaterialization | undefined;
