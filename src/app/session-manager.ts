@@ -2956,15 +2956,22 @@ export type ForkSessionResponse = {
  * session and either spins up a fresh worktree (`newWorktree: true`, default)
  * or reuses the source session's existing worktree (`newWorktree: false`).
  */
-export async function forkSession(source: GatewaySession, opts: { newWorktree: boolean }): Promise<void> {
+export async function forkSession(
+	source: GatewaySession,
+	opts: { newWorktree: boolean; entryId?: string },
+): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = source.goalId || null;
 	renderApp();
 	try {
+		const body: { newWorktree: boolean; entryId?: string } = {
+			newWorktree: opts.newWorktree,
+		};
+		if (opts.entryId !== undefined) body.entryId = opts.entryId;
 		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/fork`, {
 			method: "POST",
-			body: JSON.stringify({ newWorktree: opts.newWorktree }),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({} as any));

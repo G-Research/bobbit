@@ -51,11 +51,12 @@ import {
 } from "../../app/message-author-appearance.js";
 import { sessionColorMap } from "../../app/session-colors.js";
 import { copyTextToClipboard } from "../../app/api.js";
+import { showHeaderToast } from "../../app/header-toast.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
-import { canContinueArchivedSession, continueArchivedSession } from "../../app/session-actions.js";
+import { canContinueArchivedSession, canForkSession, continueArchivedSession } from "../../app/session-actions.js";
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.js";
@@ -65,6 +66,15 @@ import type { UserMessageWithAttachments } from "./Messages.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 import type { GitRepoKnown } from "../../app/git-status-refresh.js";
 import { selectPromptAuthorDisplayMode } from "../message-author-presentation.js";
+
+interface PromptHistoryForkDetail {
+	entryId: string;
+	newWorktree: boolean;
+}
+
+interface PromptCopyDetail {
+	promptText: string;
+}
 
 @customElement("agent-interface")
 export class AgentInterface extends LitElement {
@@ -267,6 +277,7 @@ export class AgentInterface extends LitElement {
 	private _contextPopoverOpen = false;
 	private _costPopoverOpen = false;
 	private _permissionGrantClickLocked = false;
+	private _historyForkPending = false;
 
 	// --- Scroll-lock state — vanilla-TS port of `use-stick-to-bottom`
 	// (https://github.com/stackblitz-labs/use-stick-to-bottom, 731⭐, powers
@@ -458,6 +469,57 @@ export class AgentInterface extends LitElement {
 			this._cwdCopyResetTimer = undefined;
 		}, 1500);
 	}
+
+	private _historyForkSource(): GatewaySession | undefined {
+		const sessionId = this.session?.sessionId;
+		if (!sessionId) return undefined;
+		const source = appState.gatewaySessions.find((candidate) => candidate.id === sessionId);
+		if (!source) return undefined;
+		const effective: GatewaySession = {
+			...source,
+			readOnly: source.readOnly || this.readOnly,
+			nonInteractive: source.nonInteractive || this.nonInteractive,
+		};
+		return canForkSession(effective) ? source : undefined;
+	}
+
+	private _handlePromptCopy = async (event: CustomEvent<PromptCopyDetail>): Promise<void> => {
+		event.stopPropagation();
+		const promptText = event.detail?.promptText;
+		const copied = typeof promptText === "string"
+			&& promptText.length > 0
+			&& await copyTextToClipboard(promptText);
+		showHeaderToast(copied ? "Prompt copied" : "Couldn't copy prompt");
+	};
+
+	private _handlePromptHistoryFork = async (event: CustomEvent<PromptHistoryForkDetail>): Promise<void> => {
+		event.stopPropagation();
+		if (this._historyForkPending || appState.creatingSession) return;
+		const entryId = event.detail?.entryId;
+		if (typeof entryId !== "string"
+			|| entryId.length === 0
+			|| entryId.length > 256
+			|| entryId.trim() !== entryId
+			|| typeof event.detail?.newWorktree !== "boolean") return;
+		const source = this._historyForkSource();
+		if (!source) {
+			showHeaderToast("This session can no longer be forked");
+			return;
+		}
+		this._historyForkPending = true;
+		this.requestUpdate();
+		try {
+			// Avoid an eager AgentInterface -> session-manager -> ChatPanel cycle.
+			const { forkSession } = await import("../../app/session-manager.js");
+			await forkSession(source, {
+				entryId,
+				newWorktree: event.detail.newWorktree,
+			});
+		} finally {
+			this._historyForkPending = false;
+			this.requestUpdate();
+		}
+	};
 
 	/**
 	 * Window-level Escape handler. Aborts the streaming agent regardless of
@@ -2016,12 +2078,15 @@ export class AgentInterface extends LitElement {
 			...visibleMessages,
 			...Array.from(this._preCompactionPromptAuthorSlices.values()).flat(),
 		]);
+		const canForkSource = !!this._historyForkSource();
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${visibleMessages}
 					.sessionId=${this.session?.sessionId ?? ""}
+					.canForkSource=${canForkSource}
+					.promptActionsBusy=${this._historyForkPending || appState.creatingSession}
 					.tools=${state.tools}
 					.pendingToolCalls=${this.session ? this.session.state.pendingToolCalls : new Set<string>()}
 					.isStreaming=${state.isStreaming}
@@ -2045,6 +2110,8 @@ export class AgentInterface extends LitElement {
 					.onRetry=${!state.isStreaming && typeof (this.session as any)?.retry === 'function'
 						? () => (this.session as any).retry()
 						: undefined}
+					@prompt-history-fork=${this._handlePromptHistoryFork}
+					@prompt-copy=${this._handlePromptCopy}
 					@permission-mode-change=${(e: CustomEvent) => {
 						const { id, mode } = e.detail;
 						this._patchPermissionRow(id, { mode });
