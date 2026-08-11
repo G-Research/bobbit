@@ -365,6 +365,96 @@ describe("message author dispatch boundary", () => {
 		);
 	});
 
+	it("projects an RPC-accepted same-text attempt ahead of its cancelled predecessor", async () => {
+		const target = session("dispatch-accepted-after-predecessor");
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		restorePromptAuthorBindings(target, [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "old-attempt",
+			dispatchedAt: 1,
+			modelText: "[System]: same bytes",
+			source: "system",
+			author,
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId: "old-attempt",
+				settledAt: 2,
+				outcome: "cancelled",
+			},
+		}]);
+		target.rpcClient = { prompt: vi.fn(async () => ({ success: true })) };
+		await dispatchTrackedPrompt(target, "same bytes", {
+			source: "system",
+			author,
+			now: () => 3,
+		});
+		const current = target.pendingPromptAuthors[0];
+
+		const visible = prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { id: "current-pi-id", role: "user", content: "[System]: same bytes" },
+		}) as any;
+
+		assert.equal(visible.message.content, "same bytes");
+		assert.equal(visible.message.author.id, author.id);
+		assert.equal(target.pendingPromptAuthors.length, 0);
+		assert.equal(
+			readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+			"echoed",
+		);
+		assert.equal(target.cancelledPromptAuthorPredecessors[0].promptId, "old-attempt");
+	});
+
+	it("settles and projects a buffered same-text echo only after the current RPC is accepted", async () => {
+		const target = session("dispatch-buffered-after-predecessor");
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		const predecessorAuthor = { kind: "system", id: "system:predecessor", label: "Predecessor" } as const;
+		restorePromptAuthorBindings(target, [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "old-attempt",
+			dispatchedAt: 1,
+			modelText: "[System]: same bytes",
+			source: "system",
+			author: predecessorAuthor,
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId: "old-attempt",
+				settledAt: 2,
+				outcome: "cancelled",
+			},
+		}]);
+		const pendingResponse = deferred<any>();
+		target.rpcClient = { prompt: vi.fn(() => pendingResponse.promise) };
+		const dispatch = dispatchTrackedPrompt(target, "same bytes", {
+			source: "system",
+			author,
+			now: () => 3,
+		});
+		await flushMicrotasks();
+		const current = target.pendingPromptAuthors[0];
+
+		const visible = prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { id: "ambiguous-pi-id", role: "user", content: "[System]: same bytes" },
+		}) as any;
+		assert.equal(visible.message.content, "same bytes");
+		assert.equal(visible.message.author.id, author.id, "current projection is buffered separately from attribution");
+		assert.equal(target.pendingPromptAuthors[0], current, "ambiguous echo stays pending before acknowledgement");
+		assert.equal(readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement, undefined);
+
+		pendingResponse.resolve({ success: true });
+		await dispatch;
+		assert.equal(target.pendingPromptAuthors.length, 0);
+		assert.equal(
+			readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+			"echoed",
+		);
+	});
+
 	it("commits the current same-text echo once its cancelled predecessor is identified", async () => {
 		const target = session("dispatch-current-after-predecessor");
 		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;

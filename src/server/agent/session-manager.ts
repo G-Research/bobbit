@@ -1262,7 +1262,7 @@ export async function dispatchTrackedPrompt(
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
-		if (!commitSessionPromptActivity(session, activityBoundary)) {
+		if (!acceptPreparedPromptDispatch(session, prepared, activityBoundary)) {
 			throw new Error("prompt dispatch was superseded before acknowledgement");
 		}
 		return response;
@@ -1358,9 +1358,17 @@ function promptAuthorMessageKey(
 
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
 const PROMPT_ACTIVITY_BOUNDARY = Symbol("prompt-activity-boundary");
+const PROMPT_AMBIGUOUS_ECHO = Symbol("prompt-ambiguous-echo");
 type PromptAuthorEventBinding = { promptId: string; attemptId?: string; alreadySettled: boolean };
+type BufferedPromptEcho = {
+	messageKey?: string;
+	messageId?: string;
+	messageTimestamp?: number;
+	modelText: string;
+};
 type ActivityBoundPromptAuthorRecord = PendingPromptAuthorRecord & {
 	[PROMPT_ACTIVITY_BOUNDARY]?: SessionPromptActivityBoundary;
+	[PROMPT_AMBIGUOUS_ECHO]?: BufferedPromptEcho;
 };
 
 function beginPreparedPromptActivity(
@@ -1370,6 +1378,46 @@ function beginPreparedPromptActivity(
 	const boundary = beginSessionPromptActivity(session, prepared.attemptId);
 	(prepared.pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY] = boundary;
 	return boundary;
+}
+
+function acceptPreparedPromptDispatch(
+	session: SessionInfo,
+	prepared: PreparedPromptAuthorDispatch,
+	boundary: SessionPromptActivityBoundary | undefined,
+): boolean {
+	if (!commitSessionPromptActivity(session, boundary)) return false;
+	const pending = prepared.pending as ActivityBoundPromptAuthorRecord;
+	const buffered = pending[PROMPT_AMBIGUOUS_ECHO];
+	if (!buffered) return true;
+	delete pending[PROMPT_AMBIGUOUS_ECHO];
+	const pendingIndex = session.pendingPromptAuthors?.findIndex((record) => record === pending) ?? -1;
+	if (pendingIndex === -1) return true;
+	session.pendingPromptAuthors!.splice(pendingIndex, 1);
+	const settledBinding: LivePromptAuthorMessageBinding = {
+		promptId: pending.promptId,
+		attemptId: pending.attemptId,
+		author: pending.author,
+		settled: true,
+		modelText: buffered.modelText,
+		...(pending.modelTextDigest === undefined ? {} : { modelTextDigest: pending.modelTextDigest }),
+		...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
+	};
+	if (buffered.messageKey) {
+		if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
+		session.promptAuthorMessageBindings.set(buffered.messageKey, settledBinding);
+	} else {
+		session.lastKeylessPromptAuthorEnd = settledBinding;
+	}
+	void appendPromptAuthorSettlement(session.id, {
+		schemaVersion: 2,
+		type: "prompt-author-settlement",
+		promptId: pending.promptId,
+		settledAt: sessionManagerModuleClock.now(),
+		outcome: "echoed",
+		...(buffered.messageId ? { messageId: buffered.messageId } : {}),
+		...(buffered.messageTimestamp === undefined ? {} : { messageTimestamp: buffered.messageTimestamp }),
+	});
+	return true;
 }
 
 function commitCorrelatedPromptActivity(
@@ -1526,29 +1574,56 @@ export function prepareVisibleAgentEvent(
 			promptAuthorBindingMatchesText(binding, modelText),
 		);
 	}
-	if (!stableBinding && userRole && modelText) {
+	const reservedAttemptIds = new Set(
+		[...(session.promptAuthorMessageBindings?.values() ?? [])]
+			.filter((binding) => !binding.settled)
+			.map((binding) => binding.attemptId ?? binding.promptId),
+	);
+	let pendingIndex = !stableBinding && userRole && modelText
+		? (session.pendingPromptAuthors?.findIndex((record) =>
+			promptAuthorBindingMatchesText(record, modelText)
+				&& !reservedAttemptIds.has(record.attemptId ?? record.promptId)
+				&& (record as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY]?.state === "committed"
+		) ?? -1)
+		: -1;
+	if (pendingIndex !== -1 && messageKey) {
+		const pending = session.pendingPromptAuthors![pendingIndex];
+		stableBinding = {
+			promptId: pending.promptId,
+			attemptId: pending.attemptId,
+			author: pending.author,
+			settled: false,
+			...(pending.modelText === undefined ? {} : { modelText: pending.modelText }),
+			...(pending.modelTextDigest === undefined ? {} : { modelTextDigest: pending.modelTextDigest }),
+			...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
+		};
+	}
+	let bufferedPending: ActivityBoundPromptAuthorRecord | undefined;
+	if (!stableBinding && pendingIndex === -1 && userRole && modelText) {
 		// A cancelled/restored predecessor may still arrive after switch_session's
-		// response. Pi does not echo a Bobbit nonce, so equal raw text is ambiguous:
+		// response. Pi does not echo a Bobbit nonce, so equal raw text is ambiguous
+		// until the current RPC is positively acknowledged. Before that boundary,
 		// bind the historical occurrence first rather than settling a newer attempt.
 		stableBinding = session.cancelledPromptAuthorPredecessors?.find((binding) =>
 			promptAuthorBindingMatchesText(binding, modelText),
 		);
+		if (stableBinding && raw.type === "message_end") {
+			bufferedPending = session.pendingPromptAuthors?.find((record) =>
+				promptAuthorBindingMatchesText(record, modelText)
+					&& !reservedAttemptIds.has(record.attemptId ?? record.promptId),
+			) as ActivityBoundPromptAuthorRecord | undefined;
+		}
 	}
 	if (stableBinding && messageKey && !session.promptAuthorMessageBindings?.has(messageKey)) {
 		if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
 		session.promptAuthorMessageBindings.set(messageKey, stableBinding);
 	}
-	let pendingIndex = stableBinding && !stableBinding.settled
-		? (session.pendingPromptAuthors?.findIndex((record) =>
+	if (stableBinding && !stableBinding.settled) {
+		pendingIndex = session.pendingPromptAuthors?.findIndex((record) =>
 			(record.attemptId ?? record.promptId) === (stableBinding!.attemptId ?? stableBinding!.promptId)
-		) ?? -1)
-		: -1;
-	if (!stableBinding && userRole && modelText && session.pendingPromptAuthors?.length) {
-		const reservedAttemptIds = new Set(
-			[...(session.promptAuthorMessageBindings?.values() ?? [])]
-				.filter((binding) => !binding.settled)
-				.map((binding) => binding.attemptId ?? binding.promptId),
-		);
+		) ?? -1;
+	}
+	if (!stableBinding && pendingIndex === -1 && userRole && modelText && session.pendingPromptAuthors?.length) {
 		pendingIndex = session.pendingPromptAuthors.findIndex((record) =>
 			promptAuthorBindingMatchesText(record, modelText)
 				&& !reservedAttemptIds.has(record.attemptId ?? record.promptId),
@@ -1570,7 +1645,11 @@ export function prepareVisibleAgentEvent(
 	}
 
 	const selectedPending = pendingIndex === -1 ? undefined : session.pendingPromptAuthors![pendingIndex];
-	const selectedPromptBinding = stableBinding ?? selectedPending;
+	// A tombstone remains authoritative for acceptance until the RPC responds,
+	// while the exact current retry supplies the projection that a positive
+	// acknowledgement will finalize. This keeps rejected activity quarantined
+	// without leaking a predecessor's author into an accepted redriven echo.
+	const selectedPromptBinding = bufferedPending ?? stableBinding ?? selectedPending;
 	if (userRole && selectedPending) commitCorrelatedPromptActivity(session, selectedPending);
 	const sessionAuthor = agentAuthorForSession(session, agentDeps);
 	if (selectedPromptBinding) {
@@ -1594,6 +1673,15 @@ export function prepareVisibleAgentEvent(
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
+	if (bufferedPending) {
+		const messageId = promptAuthorMessageId(message, raw);
+		bufferedPending[PROMPT_AMBIGUOUS_ECHO] = {
+			...(messageKey ? { messageKey } : {}),
+			...(messageId ? { messageId } : {}),
+			...(typeof message.timestamp === "number" ? { messageTimestamp: message.timestamp } : {}),
+			modelText,
+		};
+	}
 	if (raw.type === "message_end" && stableBinding) {
 		const replayIndex = session.promptAuthorReplayBindings?.findIndex(
 			(binding) => (binding.attemptId ?? binding.promptId)
@@ -5262,7 +5350,7 @@ export class SessionManager {
 			if ((steerResp as any)?.success === false) {
 				throw new Error((steerResp as any)?.error || "steer rejected");
 			}
-			commitSessionPromptActivity(session, activityBoundary);
+			acceptPreparedPromptDispatch(session, prepared, activityBoundary);
 		} catch (err) {
 			if (activityBoundary?.state === "committed") {
 				console.warn(`[session-manager] steer for ${session.id} reported a failure after its correlated user echo; treating the dispatch as accepted`);
@@ -5623,7 +5711,7 @@ export class SessionManager {
 			}
 			// The exact RPC attempt accepted the intent. A stale bridge response cannot
 			// consume a row already recovered by replacement reconciliation.
-			if (!commitSessionPromptActivity(session, activityBoundary)) return;
+			if (!acceptPreparedPromptDispatch(session, prepared, activityBoundary)) return;
 			consumeDurableAcceptanceRow();
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
@@ -5747,7 +5835,7 @@ export class SessionManager {
 					if (acceptedBeforeAckFailure(reason)) return;
 					if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 					recoverDispatchedRows(reason);
-				} else if (commitSessionPromptActivity(session, activityBoundary)) {
+				} else if (acceptPreparedPromptDispatch(session, prepared, activityBoundary)) {
 					// Dispatch landed — clear the busy-guard retry budget and any
 					// ownership ledger for the dequeued durable row. A cancelled token
 					// identifies a stale bridge acknowledgement and owns no state.
