@@ -14356,6 +14356,9 @@ async function handleApiRoute(
 							worktreeOpts,
 							preExistingAgentSessionFile: destJsonl,
 							preExistingAgentSessionOldCwds: oldTranscriptCwds,
+							// A cut-before history fork is writable in the exact source cwd, but
+							// the source remains the sole owner of that worktree's lifecycle.
+							borrowsWorktree: (hasEntryId && !newWorktree) || undefined,
 							taskId: ps.taskId,
 							reattemptGoalId: ps.reattemptGoalId,
 							staffId: ps.staffId,

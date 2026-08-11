@@ -752,6 +752,8 @@ export interface SessionInfo {
 	teamLeadSessionId?: string;
 	/** Path to the git worktree for this session */
 	worktreePath?: string;
+	/** This writable session uses another session's worktree but never owns its teardown. */
+	borrowsWorktree?: boolean;
 	/** Task ID this session is working on */
 	taskId?: string;
 	/** Staff agent ID this session belongs to */
@@ -2653,7 +2655,7 @@ export class SessionManager {
 			try {
 				// Verify/repair/recreate worktree if needed. Headquarters never owns
 				// sandbox worktrees, even for legacy sessions with /workspace-wt cwd.
-				if (projectId !== HEADQUARTERS_PROJECT_ID && session.cwd?.startsWith("/workspace-wt/")) {
+				if (projectId !== HEADQUARTERS_PROJECT_ID && !session.borrowsWorktree && session.cwd?.startsWith("/workspace-wt/")) {
 					let worktreeOk = false;
 
 					// Check if worktree still exists (volumes may survive rm -f)
@@ -7890,6 +7892,7 @@ export class SessionManager {
 			parentSessionId: ps.parentSessionId,
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
+			borrowsWorktree: ps.borrowsWorktree,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,
@@ -8044,7 +8047,7 @@ export class SessionManager {
 		if (restoredSandboxed) {
 			// Verify the sandbox worktree still exists inside the container. Headquarters
 			// sessions are no-worktree, so never repair/recreate /workspace-wt paths.
-			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && !ps.borrowsWorktree && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
 				try {
 					await this.commandRunner.execFile("docker", [
 						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
@@ -8369,6 +8372,7 @@ export class SessionManager {
 			parentSessionId: ps.parentSessionId,
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
+			borrowsWorktree: ps.borrowsWorktree,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,
@@ -8756,7 +8760,7 @@ export class SessionManager {
 		} });
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -8943,6 +8947,7 @@ export class SessionManager {
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
+				borrowsWorktree: opts?.borrowsWorktree,
 				allowedTools: opts?.allowedTools,
 				// Mirror session-setup's effectiveRoleId fallback: when callers
 				// (team-manager, staff-manager) pass only `roleName`, use that as
@@ -8989,6 +8994,7 @@ export class SessionManager {
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
+				borrowsWorktree: opts?.borrowsWorktree,
 				sessionScopedAllowedTools,
 				worktreePath,
 				repoPath,
@@ -9081,6 +9087,7 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
+			borrowsWorktree: opts?.borrowsWorktree,
 			sessionScopedAllowedTools,
 			// Prebuilt host multi-repo worktrees already have all ordinary-cleanup
 			// coordinates. Carry them into persistOnce instead of adding them only
@@ -10919,6 +10926,7 @@ export class SessionManager {
 				parentSessionId: session.parentSessionId,
 				childKind: session.childKind,
 				readOnly: session.readOnly,
+				borrowsWorktree: session.borrowsWorktree,
 				sandboxed: session.sandboxed,
 				projectId: session.projectId,
 			});
@@ -11684,14 +11692,10 @@ export class SessionManager {
 		this.sessionSecretStore.remove(id);
 
 		// Clean up sandbox worktree inside the container.
-		// Skip for sessions that SHARE the parent's worktree and must never remove it:
-		// delegate children (`delegateOf`) AND read-only child principals
-		// (`readOnly` + `parentSessionId`, e.g. the host-agents PR-walkthrough reviewer).
-		// A read-only child cannot write, so it never owns its own worktree — it shares
-		// the launching session's still-active /workspace-wt/<name>. Only the owning
-		// session should clean up. (Team children own a SEPARATE worktree and are not
-		// read-only, so they are not skipped here.)
-		if (session.sandboxed && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+		// Skip sessions that share another owner's worktree: delegates, read-only
+		// children, and explicit writable history forks (`borrowsWorktree`). Only the
+		// session that provisioned the sandbox worktree may remove it.
+		if (session.sandboxed && !session.borrowsWorktree && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
 			try {
 				const sandbox = this.sandboxManager.get(session.projectId);
 				if (sandbox) {

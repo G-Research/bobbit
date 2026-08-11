@@ -148,8 +148,8 @@ export async function launchSidebarSessionFork<TFork extends { id: string; cwd: 
 		if (repoPath) worktreeOpts = { repoPath };
 	} else {
 		// A reuse fork intentionally borrows the live source's exact working
-		// directory. It carries no worktree options or ownership metadata: the
-		// source remains the sole owner of any surrounding worktree lifecycle.
+		// directory. It carries no worktree registration coordinates; the launch
+		// request marks it as borrowed so the source remains the sole lifecycle owner.
 		sessionCwd = input.source.cwd
 			|| input.persisted.cwd
 			|| input.persisted.worktreePath
