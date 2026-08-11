@@ -1024,6 +1024,18 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/history-fork-api.test.ts",
+		allowReason: "isolated integration gateway and test-owned transcript, proposal, and worktree artifacts",
+		reads: frozen([
+			{ expression: "seeded.file", count: 2 },
+			{ expression: "stagedFile", count: 1 },
+			{ expression: "forkPersisted.agentSessionFile", count: 2 },
+			{ expression: "path.join(proposalFork, \"goal.md\")", count: 1 },
+			{ expression: "path.join(proposalFork, \"goal.history\", \"0001.md\")", count: 1 },
+			{ expression: "sentinel", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		allowReason: "isolated installed-pack provider configuration",
 		reads: frozen([
