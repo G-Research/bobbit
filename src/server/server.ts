@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
+import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
@@ -163,7 +163,12 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
-import { sessionFileRead, sessionFileWriteAtomic, sessionFsContextForAgentFile } from "./agent/session-fs.js";
+import {
+	sessionFileDeleteContainerOnly,
+	sessionFileRead,
+	sessionFileWriteAtomic,
+	sessionFsContextForAgentFile,
+} from "./agent/session-fs.js";
 import {
 	HistoryForkValidationError,
 	materializeHistoryForkTranscript,
@@ -14300,16 +14305,37 @@ async function handleApiRoute(
 			// Use the project root for the cloned `.jsonl` slug (same as /continue);
 			// worktree-backed sessions rotate to the final cwd-derived file after the
 			// worktree is ready, adopting this clone via switch_session.
-			const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const formattedDestJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const sandboxHistoryDestination = hasEntryId && ps.sandboxed === true;
+			const sandboxDestJsonl = sandboxHistoryDestination
+				? tryHostPathToContainer(formattedDestJsonl)
+				: null;
+			if (sandboxHistoryDestination && !sandboxDestJsonl) {
+				json({ error: "failed to resolve sandbox transcript destination" }, 500);
+				return;
+			}
+			const destJsonl = sandboxDestJsonl ?? formattedDestJsonl;
 			const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
 			const cleanupFailedFork = async (): Promise<void> => {
 				let failedRecord = sessionManager.getPersistedSession(forkId);
-				const failedAgentFile = failedRecord?.agentSessionFile;
+				const failedTranscripts = new Set<string>([destJsonl]);
+				if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
 				try {
 					if (sessionManager.getSession(forkId)) {
 						await sessionManager.terminateSession(forkId);
 					} else if (failedRecord && !failedRecord.archived) {
 						await sessionManager.storeArchive(forkId);
+					}
+					failedRecord = sessionManager.getPersistedSession(forkId);
+					if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+					if (sandboxHistoryDestination && failedRecord?.archived) {
+						for (const transcript of failedTranscripts) {
+							await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
+						}
+						// purgeArchivedSession uses compatibility deletion with host fallback.
+						// Hide this newly generated container path from that legacy path; if
+						// container deletion failed, trusted orphan cleanup owns it instead.
+						failedRecord.agentSessionFile = "";
 					}
 					if (sessionManager.getArchivedSession(forkId)) {
 						await sessionManager.purgeArchivedSession(forkId);
@@ -14318,10 +14344,18 @@ async function handleApiRoute(
 					console.warn(`[fork] failed-session lifecycle cleanup failed for ${forkId}: ${cleanupErr}`);
 				}
 				failedRecord = sessionManager.getPersistedSession(forkId);
-				cleanupFailedContinue(failedAgentFile || failedRecord?.agentSessionFile || destJsonl, forkId, bobbitStateDir());
-				if ((failedAgentFile && failedAgentFile !== destJsonl)
-					|| (failedRecord?.agentSessionFile && failedRecord.agentSessionFile !== destJsonl)) {
-					cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+				if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+				if (sandboxHistoryDestination) {
+					for (const transcript of failedTranscripts) {
+						await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
+					}
+					// State sidecars and proposal/tool directories remain host-owned. Never
+					// pass a container transcript path to direct-host cleanup.
+					cleanupFailedContinue(undefined, forkId, bobbitStateDir());
+				} else {
+					for (const transcript of failedTranscripts) {
+						cleanupFailedContinue(transcript, forkId, bobbitStateDir());
+					}
 				}
 				purgeAuthorSidecar(forkId);
 				purgeSkillSidecar(forkId);
@@ -14383,7 +14417,10 @@ async function handleApiRoute(
 				// resulting EventBuffer never captures fallback authors.
 				const authorCopied = hasEntryId
 					? copyHistoryForkSidecar("author", sourceId, forkId, () =>
-						copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript }))
+						copyAuthorSidecar(sourceId, forkId, {
+							transcript: clonedTranscript,
+							strictExactIdentity: true,
+						}))
 					: copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
 				if (hasEntryId && !authorCopied) {
 					throw new Error("failed to copy filtered author sidecar");

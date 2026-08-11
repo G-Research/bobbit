@@ -111,6 +111,8 @@ export interface InitAuthorSidecarOptions {
 export interface CopyAuthorSidecarOptions {
 	/** Exact cloned Pi JSONL. When supplied, only transcript-confirmed bindings copy. */
 	transcript?: string | null;
+	/** Require settlement.messageId to match a retained Pi entry exactly. */
+	strictExactIdentity?: boolean;
 }
 
 interface LegacyPromptAuthorDispatchRecord {
@@ -1239,6 +1241,7 @@ function transcriptPromptCandidates(transcript: string): TranscriptPromptCandida
 function transcriptConfirmedBindings(
 	bindings: PromptAuthorBinding[],
 	transcript: string,
+	strictExactIdentity = false,
 ): PromptAuthorBinding[] {
 	const candidates = transcriptPromptCandidates(transcript);
 	const confirmed = new Set<PromptAuthorBinding>();
@@ -1253,6 +1256,9 @@ function transcriptConfirmedBindings(
 		if (!candidate) continue;
 		candidate.consumed = true;
 		confirmed.add(binding);
+	}
+	if (strictExactIdentity) {
+		return bindings.filter((binding) => confirmed.has(binding));
 	}
 	for (const binding of bindings) {
 		if (confirmed.has(binding) || binding.settlement?.messageId) continue;
@@ -1296,7 +1302,11 @@ export function copyAuthorSidecar(
 		let bindings = readAuthorSidecar(fromSessionId)
 			.filter((binding) => binding.settlement?.outcome === "echoed");
 		if (options.transcript !== undefined) {
-			bindings = transcriptConfirmedBindings(bindings, options.transcript ?? "");
+			bindings = transcriptConfirmedBindings(
+				bindings,
+				options.transcript ?? "",
+				options.strictExactIdentity === true,
+			);
 		}
 		const records: AuthorSidecarRecord[] = [];
 		for (const binding of bindings) {

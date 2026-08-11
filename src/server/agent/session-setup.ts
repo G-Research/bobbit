@@ -23,13 +23,26 @@ import { readAuthorSidecar } from "./author-sidecar.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
-import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
+import {
+	rebaseAgentTranscriptCwdMetadataFile as rebaseAgentTranscriptCwdMetadataFileLegacy,
+	rebaseTranscriptCwdMetadataContent,
+	sanitizeAgentTranscriptFile as sanitizeAgentTranscriptFileLegacy,
+	sanitizeTranscriptContent,
+	type RebaseTranscriptCwdMetadataOptions,
+	type SanitizeResult,
+} from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import type { PersistedSession, SessionStore } from "./session-store.js";
-import { sessionFsContextForAgentFile } from "./session-fs.js";
+import {
+	sessionFileRead,
+	sessionFileRenameAtomic,
+	sessionFileWriteAtomic,
+	sessionFsContextForAgentFile,
+	type SessionFsContext,
+} from "./session-fs.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -61,6 +74,61 @@ import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, providerFromModel, recoverAnthropicApiKeyRuntime } from "./host-tokens.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
+
+async function transformPreExistingTranscript(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	transform: (content: string) => SanitizeResult,
+	operation: string,
+): Promise<number> {
+	try {
+		const content = await sessionFileRead(ctx, filePath, sandboxManager);
+		if (!content) return 0;
+		const result = transform(content);
+		if (!result.changed) return 0;
+		await sessionFileWriteAtomic(ctx, filePath, result.content, sandboxManager);
+		return result.rewritten;
+	} catch (error) {
+		console.warn(`[session-setup] Failed to ${operation} ${filePath} in sandbox (non-fatal):`, error);
+		return 0;
+	}
+}
+
+async function rebaseAgentTranscriptCwdMetadataFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	options: RebaseTranscriptCwdMetadataOptions,
+): Promise<number> {
+	if (!ctx.sandboxed) {
+		return rebaseAgentTranscriptCwdMetadataFileLegacy(ctx, filePath, sandboxManager, options);
+	}
+	return transformPreExistingTranscript(
+		ctx,
+		filePath,
+		sandboxManager,
+		(content) => rebaseTranscriptCwdMetadataContent(content, options),
+		"rebase transcript cwd metadata",
+	);
+}
+
+async function sanitizeAgentTranscriptFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+): Promise<number> {
+	if (!ctx.sandboxed) {
+		return sanitizeAgentTranscriptFileLegacy(ctx, filePath, sandboxManager);
+	}
+	return transformPreExistingTranscript(
+		ctx,
+		filePath,
+		sandboxManager,
+		sanitizeTranscriptContent,
+		"sanitize transcript",
+	);
+}
 
 export interface PiExtensionDiagnostic {
 	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
@@ -1503,24 +1571,23 @@ export async function executeWorktreeAsync(
 		// actual cwd-slug before issuing switch_session.
 		const { formatAgentSessionFilePath } = await import("./agent-session-path.js");
 		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
-		if (correctPath !== plan.preExistingAgentSessionFile) {
-			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
-			const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
-			// Preserve the source transcript's filesystem realm while moving it to
-			// the cwd-derived slot. The formatter returns the host mount path; a
-			// container-side source needs the corresponding container path instead.
-			const correctAgentPath = sourceFsCtx.sandboxed
-				? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
-				: correctPath;
-			const correctFsCtx = sessionFsContextForAgentFile(plan, correctAgentPath);
-			if (sourceFsCtx.sandboxed || correctFsCtx.sandboxed) {
-				// Container-side paths use the session filesystem abstraction. A
-				// host-absolute transcript owned by a sandboxed session deliberately
-				// remains host-side so it is never passed to docker exec as a host path.
-				await sessionFileCopy(sourceFsCtx, plan.preExistingAgentSessionFile, correctFsCtx, correctAgentPath, ctx.sandboxManager);
-				await sessionFileDelete(sourceFsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+		const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
+		// The formatter returns the host mount path. A container-coordinate clone
+		// stays in that realm through publication, rebase, persistence, and replay.
+		const correctAgentPath = sourceFsCtx.sandboxed
+			? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
+			: correctPath;
+		if (correctAgentPath !== plan.preExistingAgentSessionFile) {
+			if (sourceFsCtx.sandboxed) {
+				await sessionFileRenameAtomic(
+					sourceFsCtx,
+					plan.preExistingAgentSessionFile,
+					correctAgentPath,
+					ctx.sandboxManager,
+				);
 			} else {
-				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
+				// Legacy host-absolute sandbox transcripts and ordinary local sessions
+				// retain their established host move compatibility.
 				const fsp = await import("node:fs/promises");
 				await fsp.mkdir(path.dirname(correctAgentPath), { recursive: true });
 				try {
