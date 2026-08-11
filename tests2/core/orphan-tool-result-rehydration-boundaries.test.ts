@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createMemFs } from "../harness/mem-fs.js";
+import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-rehydration-boundaries-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -3629,18 +3630,15 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 
 	it("rewrites an orphan in a sandbox container-path clone before switching the sandbox process", async () => {
 		const containerFile = "/home/node/.bobbit/agent/sessions/--orphan-boundaries--/continue-sandbox.jsonl";
-		const hostFile = containerPathToHost(containerFile);
+		const sandbox = new SandboxSessionFilesystem({
+			root: path.join(tmpRoot, "continue-sandbox-container"),
+			hostAgentSessionsDir: activeAgentSessionsDir(),
+		});
+		vi.spyOn(sandbox, "exec");
+		const hostFile = sandbox.hostPath(containerFile);
 		fs.mkdirSync(path.dirname(hostFile), { recursive: true });
 		fs.writeFileSync(hostFile, orphanTranscript(), "utf8");
 		createdFiles.push(hostFile);
-		const sandbox = {
-			exec: vi.fn(async (args: string[]) => {
-				if (args[0] === "cat") return fs.readFileSync(hostFile, "utf8");
-				if (args[0] === "test") return "";
-				if (args[0] === "echo") return "ok";
-				throw new Error(`unexpected sandbox exec: ${args.join(" ")}`);
-			}),
-		};
 		const sandboxManager = {
 			ensureForProject: vi.fn(async () => sandbox),
 			get: vi.fn(() => sandbox),
