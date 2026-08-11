@@ -15,7 +15,9 @@ import {
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.js";
 import {
-	appendSkillSidecarEntry,
+	appendIdentifiedSkillSidecarEntry,
+	appendSkillSidecarTranscriptBinding,
+	mergeSidecarEntriesIntoMessages,
 	readSkillSidecarEntries,
 } from "../../src/server/skills/skill-sidecar.js";
 import {
@@ -158,17 +160,32 @@ function seedAuthorBinding(sessionId: string, promptId: string, messageId: strin
 	})).toBe(true);
 }
 
-function seedSkillBinding(sessionId: string, modelText: string, originalText: string, offsetMs = 0): void {
-	expect(appendSkillSidecarEntry(sessionId, {
+function seedSkillBinding(
+	sessionId: string,
+	modelText: string,
+	originalText: string,
+	transcriptEntryId?: string,
+	offsetMs = 0,
+): void {
+	const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
 		ts: Date.parse(FIXTURE_TIME) + offsetMs,
 		modelText,
 		originalText,
 		skillExpansions: [{ name: "fixture", invocation: "/fixture" } as any],
 		fileMentions: [{ path: "src/fixture.ts", start: 0, end: 15 } as any],
-	})).toBe(true);
+	});
+	expect(recordId).toBeTruthy();
+	if (recordId && transcriptEntryId) {
+		expect(appendSkillSidecarTranscriptBinding(sessionId, recordId, transcriptEntryId)).toBe(true);
+	}
 }
 
-function seedCompactionBinding(sessionId: string, id: string, firstKeptEntryId: string | null): void {
+function seedCompactionBinding(
+	sessionId: string,
+	id: string,
+	firstKeptEntryId: string | null,
+	transcriptCompactionEntryId?: string,
+): void {
 	expect(appendCompactionSidecarEntry(sessionId, {
 		schemaVersion: 1,
 		id,
@@ -180,6 +197,7 @@ function seedCompactionBinding(sessionId: string, id: string, firstKeptEntryId: 
 		endedAt: "2026-08-11T12:00:00.025Z",
 		success: true,
 		firstKeptEntryId,
+		...(transcriptCompactionEntryId ? { transcriptCompactionEntryId } : {}),
 	})).toBe(true);
 }
 
@@ -296,7 +314,7 @@ test.describe("history fork API", () => {
 		const sourceId = await createTrackedSession();
 		const entries: TranscriptEntry[] = [
 			messageEntry("kept-user", null, "user", "[System]: kept prompt"),
-			messageEntry("inactive-user", "kept-user", "user", "discarded inactive prompt"),
+			messageEntry("inactive-user", "kept-user", "user", "[System]: kept prompt"),
 			messageEntry("kept-assistant", "kept-user", "assistant", "kept answer"),
 			{
 				type: "compaction",
@@ -333,15 +351,17 @@ test.describe("history fork API", () => {
 
 		seedAuthorBinding(sourceId, "author-kept", "kept-user", "[System]: kept prompt");
 		seedAuthorBinding(sourceId, "author-cut", "selected-user", "selected prompt");
-		seedSkillBinding(sourceId, "[System]: kept prompt", "/fixture @src/fixture.ts");
-		seedSkillBinding(sourceId, "selected prompt", "/discarded");
-		// A discarded checkpoint may share the retained Pi checkpoint's boundary.
-		// Source ordering must not let it replace the exact retained id.
-		seedCompactionBinding(sourceId, "discarded-same-boundary", "kept-user");
-		seedCompactionBinding(sourceId, "kept-compaction", "kept-user");
-		seedCompactionBinding(sourceId, "duplicate-sidecar-compaction", "kept-user");
-		seedCompactionBinding(sourceId, "duplicate-sidecar-compaction", "kept-user");
-		seedCompactionBinding(sourceId, "unprovable-compaction", null);
+		// Inactive B is physically first and text-identical to retained A. Only the
+		// proven Pi binding may cross the history boundary.
+		seedSkillBinding(sourceId, "[System]: kept prompt", "/inactive @secret.ts", "inactive-user");
+		seedSkillBinding(sourceId, "[System]: kept prompt", "/fixture @src/fixture.ts", "kept-user");
+		seedSkillBinding(sourceId, "selected prompt", "/discarded", "selected-user");
+		// Bobbit card ids remain distinct from authoritative Pi checkpoint ids.
+		seedCompactionBinding(sourceId, "c_1700000000000_discard", "kept-user", "discarded-same-boundary");
+		seedCompactionBinding(sourceId, "c_1700000000001_kept", "kept-user", "kept-compaction");
+		seedCompactionBinding(sourceId, "c_1700000000002_dup_a", "kept-user", "duplicate-sidecar-compaction");
+		seedCompactionBinding(sourceId, "c_1700000000003_dup_b", "kept-user", "duplicate-sidecar-compaction");
+		seedCompactionBinding(sourceId, "c_1700000000004_unbound", null);
 
 		const proposalSource = statePath(gateway, "proposal-drafts", sourceId);
 		fs.mkdirSync(path.join(proposalSource, "goal.history"), { recursive: true });
@@ -399,9 +419,22 @@ test.describe("history fork API", () => {
 		expect(authorBindings.map(binding => binding.promptId)).toEqual(["author-kept"]);
 		expect(authorBindings[0].author).toEqual(SYSTEM_AUTHOR);
 		expect(readSkillSidecarEntries(fork.id)).toEqual([
-			expect.objectContaining({ modelText: "[System]: kept prompt", originalText: "/fixture @src/fixture.ts" }),
+			expect.objectContaining({
+				modelText: "[System]: kept prompt",
+				originalText: "/fixture @src/fixture.ts",
+				transcriptEntryId: "kept-user",
+			}),
 		]);
-		expect(readCompactionSidecarEntries(fork.id).map(entry => entry.id)).toEqual(["kept-compaction"]);
+		expect(JSON.stringify(readSkillSidecarEntries(fork.id))).not.toContain("inactive");
+		const projectedPrompt = mergeSidecarEntriesIntoMessages(
+			readSkillSidecarEntries(fork.id),
+			[{ role: "user", content: "[System]: kept prompt" }],
+		);
+		expect(projectedPrompt[0]).toMatchObject({ content: "/fixture @src/fixture.ts" });
+		expect(JSON.stringify(projectedPrompt)).not.toContain("inactive");
+		expect(readCompactionSidecarEntries(fork.id)).toEqual([
+			expect.objectContaining({ id: "c_1700000000001_kept", transcriptCompactionEntryId: "kept-compaction" }),
+		]);
 
 		const proposalFork = statePath(gateway, "proposal-drafts", fork.id);
 		expect(fs.readFileSync(path.join(proposalFork, "goal.md"), "utf8")).toBe("# Durable proposal\n");

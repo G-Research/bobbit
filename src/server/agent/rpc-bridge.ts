@@ -165,6 +165,8 @@ export interface IRpcBridge {
 	abort(): Promise<any>;
 	getState(): Promise<any>;
 	getMessages(): Promise<any>;
+	/** Narrow read-only Pi session-tree plane used for authoritative sidecar binding. */
+	getTranscriptEntries?(): Promise<any>;
 	/** Read-only Pi transcript cursor/tree plane used to authorize history actions. */
 	getTranscriptCursorSnapshot?(): Promise<any>;
 	setModel(provider: string, modelId: string): Promise<any>;
@@ -874,6 +876,19 @@ export class RpcBridge {
 		const response = await this.sendCommand({ type: "get_messages" });
 		if (response?.success) return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
 		return response;
+	}
+
+	/** Read Pi's session tree without invoking any mutating fork operation. */
+	async getTranscriptEntries() {
+		const response = await this.sendCommand({ type: "get_entries" });
+		if (!response?.success) return response;
+		return {
+			success: true,
+			data: {
+				entries: response.data?.entries,
+				leafId: response.data?.leafId,
+			},
+		};
 	}
 
 	/**

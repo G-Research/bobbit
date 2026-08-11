@@ -107,6 +107,18 @@ function makeBridge(
 }
 
 describe("in-process mock bridge transcript cursor snapshot", () => {
+	it("exposes a narrow read-only transcript entries plane", async () => {
+		const bridge = new InProcessMockBridge();
+		(bridge as any).sendCommand = async (command: { type: string }) => {
+			assert.equal(command.type, "get_entries");
+			return { success: true, data: { entries: [{ id: "entry-1" }], leafId: "entry-1", ignored: true } };
+		};
+		assert.deepEqual(await bridge.getTranscriptEntries(), {
+			success: true,
+			data: { entries: [{ id: "entry-1" }], leafId: "entry-1" },
+		});
+	});
+
 	it("reads both immutable cursor planes concurrently and preserves failure precedence", async () => {
 		const bridge = new InProcessMockBridge();
 		const calls: string[] = [];

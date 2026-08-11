@@ -326,6 +326,18 @@ export class InProcessMockBridge {
 		return this.sendCommand({ type: "get_messages" });
 	}
 
+	async getTranscriptEntries() {
+		const response = await this.sendCommand({ type: "get_entries" });
+		if (!response?.success) return response;
+		return {
+			success: true,
+			data: {
+				entries: response.data?.entries,
+				leafId: response.data?.leafId,
+			},
+		};
+	}
+
 	async getTranscriptCursorSnapshot() {
 		const [forkMessages, entries] = await Promise.all([
 			this.sendCommand({ type: "get_fork_messages" }),
