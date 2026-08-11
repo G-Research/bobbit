@@ -340,12 +340,16 @@ Both fork modes preserve the source context that still applies: project; goal, t
 Whole-session forks retain their established full-JSONL and best-effort cache-copy behavior. History forks instead apply the cut consistently to destination state:
 
 - proposal drafts and their history are copied because they are session-level;
-- author bindings are copied only when confirmed by the retained transcript;
+- author bindings are copied only when an echoed settlement's exact Pi message ID names a retained prompt and its digest confirms the same model text; each retained row can admit at most one binding. History cuts disable timestamp- and text-only fallback matching so a discarded duplicate prompt cannot transfer its author to identical retained text;
 - slash-skill/file-mention and compaction sidecars are copied only when their proven Pi entry or checkpoint survives the cut;
 - positional tool-content cache directories are not copied because their indexes may refer to discarded rows; retained tool content remains in the JSONL;
 - live prompt queues, in-flight steer state, EventBuffer snapshots, and other source-only runtime state are not copied.
 
 A filtered sidecar copy failure fails the request instead of returning a destination with stale references. Launch failures purge the destination transcript, session record, proposals, caches, and copied sidecars. Cleanup never mutates the source or a borrowed worktree.
+
+For a sandbox history fork, the materialized transcript stays in container coordinates through initial publication, cwd rebasing, sanitization, final-path rename, persistence, and `switch_session`. The host creates only an exclusive owner-only flat stage in the trusted sessions mount; fixed in-container code copies it to an exclusive sibling temporary file, flushes complete bytes, and atomically renames it over the destination. Transcript content is never passed in command arguments, and each invocation removes only its own host stage and sibling temporary file.
+
+Failure cleanup validates canonical container session paths and deletes generated transcripts only through the live container. It never translates an attacker-influenced container path into direct host deletion. If the sandbox is unavailable, Bobbit still purges the host-owned destination record and sidecars but leaves the transcript orphan for trusted maintenance rather than risk host filesystem mutation.
 
 #### Source immutability, single-flight, and navigation
 
