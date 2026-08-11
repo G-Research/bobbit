@@ -708,6 +708,46 @@ export class ModelSelectionRecoveryError extends Error {
 	}
 }
 
+/** Owner termination is rejected before any lifecycle mutation while a history fork borrows its sandbox worktree. */
+export class SharedSandboxWorktreeInUseError extends Error {
+	readonly code = "SHARED_SANDBOX_WORKTREE_IN_USE";
+
+	constructor(ownerSessionId: string) {
+		super(`Session ${ownerSessionId} cannot be terminated while another live session is using its sandbox worktree`);
+		this.name = "SharedSandboxWorktreeInUseError";
+	}
+}
+
+type SandboxWorktreeOwnerCoordinates = { root: string; name: string };
+
+type SandboxWorktreeOwnerRecord = Pick<
+	PersistedSession,
+	"branch" | "cwd" | "worktreePath"
+>;
+
+/** Derive removal authority from the owner's branch, never from a nested cwd suffix. */
+function sandboxWorktreeOwnerCoordinates(
+	session: SandboxWorktreeOwnerRecord,
+): SandboxWorktreeOwnerCoordinates | undefined {
+	const cwd = normalizeWorktreeHostPath(session.cwd);
+	if (session.branch) {
+		const root = `/workspace-wt/${session.branch}`;
+		const normalizedRoot = normalizeWorktreeHostPath(root);
+		if (cwd && normalizedRoot && (cwd === normalizedRoot || cwd.startsWith(`${normalizedRoot}/`))) {
+			return { root, name: session.branch };
+		}
+		return undefined;
+	}
+	if (!session.worktreePath?.startsWith("/workspace-wt/")) return undefined;
+	const root = session.worktreePath.replace(/\/$/, "");
+	const normalizedRoot = normalizeWorktreeHostPath(root);
+	if (!normalizedRoot || !cwd || (cwd !== normalizedRoot && !cwd.startsWith(`${normalizedRoot}/`))) {
+		return undefined;
+	}
+	const name = root.slice("/workspace-wt/".length);
+	return name ? { root, name } : undefined;
+}
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -754,6 +794,8 @@ export interface SessionInfo {
 	worktreePath?: string;
 	/** This writable session uses another session's worktree but never owns its teardown. */
 	borrowsWorktree?: boolean;
+	/** Flattened session id of the sandbox worktree lifecycle owner. Provenance only. */
+	borrowedWorktreeOwnerSessionId?: string;
 	/** Task ID this session is working on */
 	taskId?: string;
 	/** Staff agent ID this session belongs to */
@@ -2167,6 +2209,11 @@ type IdleWaiter = {
 	cleanup: () => void;
 };
 
+type SandboxBorrowerLifecycleQueue = {
+	tail: Promise<void>;
+	pending: number;
+};
+
 /**
  * Build the markdown workflow list injected into the goal-assistant prompt's
  * `{{AVAILABLE_WORKFLOWS}}` placeholder. Pure function over the resolved
@@ -2291,6 +2338,8 @@ export class SessionManager {
 	 * `promptOwner` until the final replacement commits or rolls back.
 	 */
 	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
+	/** Per-owner FIFO shared by sandbox history-reuse registration and termination. */
+	private _sandboxBorrowerLifecycleQueues = new Map<string, SandboxBorrowerLifecycleQueue>();
 	/**
 	 * Raw explicit/inherited thinking requests retained only while initial setup is
 	 * verifying its spawn tuple. The provisional spawn pin may already have been
@@ -3007,9 +3056,95 @@ export class SessionManager {
 	}
 
 	private getAllPersistedSessionsForWorktreeGuard(): PersistedSession[] {
-		return this.projectContextManager
-			? this.projectContextManager.getAllSessions()
-			: (this._testStore?.getAll() ?? []);
+		if (this.projectContextManager) {
+			const manager = this.projectContextManager as ProjectContextManager & {
+				getAllSessions?: () => PersistedSession[];
+				getAllLiveSessions?: () => PersistedSession[];
+			};
+			return manager.getAllSessions?.() ?? manager.getAllLiveSessions?.() ?? [];
+		}
+		return this._testStore?.getAll() ?? [];
+	}
+
+	/**
+	 * Resolve a sandbox worktree's durable, flattened lifecycle owner. Legacy
+	 * borrowers are accepted only when exactly one live same-project owner has
+	 * an authoritative worktree root containing their cwd.
+	 */
+	resolveSandboxWorktreeOwnerSessionId(sessionId: string): string | undefined {
+		const all = this.getAllPersistedSessionsForWorktreeGuard();
+		const byId = new Map(all.map(session => [session.id, session]));
+		const source = byId.get(sessionId);
+		if (!source || source.archived || !source.sandboxed) return undefined;
+		if (!source.borrowsWorktree) return source.id;
+
+		let ownerId = source.borrowedWorktreeOwnerSessionId;
+		const visited = new Set([source.id]);
+		while (ownerId) {
+			if (visited.has(ownerId)) return undefined;
+			visited.add(ownerId);
+			const owner = byId.get(ownerId);
+			if (!owner || owner.archived || !owner.sandboxed || owner.projectId !== source.projectId) {
+				return undefined;
+			}
+			if (owner.borrowsWorktree) {
+				ownerId = owner.borrowedWorktreeOwnerSessionId;
+				continue;
+			}
+			const coordinates = sandboxWorktreeOwnerCoordinates(owner);
+			const sharesOwnedRoot = coordinates
+				? isWorktreePathReferencedByLiveSession(coordinates.root, [source])
+				: normalizeWorktreeHostPath(owner.cwd) === normalizeWorktreeHostPath(source.cwd);
+			return sharesOwnedRoot ? owner.id : undefined;
+		}
+
+		const inferred = all.filter(candidate => {
+			if (candidate.archived || candidate.borrowsWorktree || !candidate.sandboxed) return false;
+			if (candidate.projectId !== source.projectId) return false;
+			const coordinates = sandboxWorktreeOwnerCoordinates(candidate);
+			return !!coordinates && isWorktreePathReferencedByLiveSession(coordinates.root, [source]);
+		});
+		return inferred.length === 1 ? inferred[0].id : undefined;
+	}
+
+	/** Rejection-safe FIFO for one flattened sandbox worktree owner. */
+	async withSandboxWorktreeOwnerLifecycle<T>(ownerSessionId: string, operation: () => Promise<T>): Promise<T> {
+		let queue = this._sandboxBorrowerLifecycleQueues.get(ownerSessionId);
+		if (!queue) {
+			queue = { tail: Promise.resolve(), pending: 0 };
+			this._sandboxBorrowerLifecycleQueues.set(ownerSessionId, queue);
+		}
+		const predecessor = queue.tail;
+		let release!: () => void;
+		queue.tail = new Promise<void>(resolve => { release = resolve; });
+		queue.pending++;
+		await predecessor;
+		try {
+			return await operation();
+		} finally {
+			release();
+			queue.pending--;
+			if (queue.pending === 0 && this._sandboxBorrowerLifecycleQueues.get(ownerSessionId) === queue) {
+				this._sandboxBorrowerLifecycleQueues.delete(ownerSessionId);
+			}
+		}
+	}
+
+	private assertSandboxOwnerHasNoLiveBorrowers(ownerSessionId: string): void {
+		const owner = this.getPersistedSession(ownerSessionId);
+		if (!owner || owner.archived || !owner.sandboxed || owner.borrowsWorktree) return;
+		const coordinates = sandboxWorktreeOwnerCoordinates(owner);
+		if (!coordinates) return;
+		for (const borrower of this.getAllPersistedSessionsForWorktreeGuard()) {
+			if (borrower.archived || !borrower.borrowsWorktree || borrower.projectId !== owner.projectId) continue;
+			const explicitlyOwned = borrower.borrowedWorktreeOwnerSessionId === ownerSessionId;
+			const legacyReference = !borrower.borrowedWorktreeOwnerSessionId
+				&& !!coordinates
+				&& isWorktreePathReferencedByLiveSession(coordinates.root, [borrower]);
+			if (explicitlyOwned || legacyReference) {
+				throw new SharedSandboxWorktreeInUseError(ownerSessionId);
+			}
+		}
 	}
 
 	/** Resolve the correct CostTracker for a session based on its project. */
@@ -7893,6 +8028,7 @@ export class SessionManager {
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
 			borrowsWorktree: ps.borrowsWorktree,
+			borrowedWorktreeOwnerSessionId: ps.borrowedWorktreeOwnerSessionId,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,
@@ -8373,6 +8509,7 @@ export class SessionManager {
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
 			borrowsWorktree: ps.borrowsWorktree,
+			borrowedWorktreeOwnerSessionId: ps.borrowedWorktreeOwnerSessionId,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,
@@ -8760,7 +8897,7 @@ export class SessionManager {
 		} });
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -8948,6 +9085,7 @@ export class SessionManager {
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
 				borrowsWorktree: opts?.borrowsWorktree,
+				borrowedWorktreeOwnerSessionId: opts?.borrowedWorktreeOwnerSessionId,
 				allowedTools: opts?.allowedTools,
 				// Mirror session-setup's effectiveRoleId fallback: when callers
 				// (team-manager, staff-manager) pass only `roleName`, use that as
@@ -8995,6 +9133,7 @@ export class SessionManager {
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
 				borrowsWorktree: opts?.borrowsWorktree,
+				borrowedWorktreeOwnerSessionId: opts?.borrowedWorktreeOwnerSessionId,
 				sessionScopedAllowedTools,
 				worktreePath,
 				repoPath,
@@ -9088,6 +9227,7 @@ export class SessionManager {
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
 			borrowsWorktree: opts?.borrowsWorktree,
+			borrowedWorktreeOwnerSessionId: opts?.borrowedWorktreeOwnerSessionId,
 			sessionScopedAllowedTools,
 			// Prebuilt host multi-repo worktrees already have all ordinary-cleanup
 			// coordinates. Carry them into persistOnce instead of adding them only
@@ -10927,6 +11067,7 @@ export class SessionManager {
 				childKind: session.childKind,
 				readOnly: session.readOnly,
 				borrowsWorktree: session.borrowsWorktree,
+				borrowedWorktreeOwnerSessionId: session.borrowedWorktreeOwnerSessionId,
 				sandboxed: session.sandboxed,
 				projectId: session.projectId,
 			});
@@ -11605,16 +11746,41 @@ export class SessionManager {
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
-		// In-place restore temporarily removes the SessionInfo from the map. A
-		// terminate accepted during that gap must serialize behind the replacement,
-		// not report "not live" and let a successfully restored ghost survive after
-		// the caller archives its persisted record. Mark it synchronously so every
-		// queued non-terminal install observes cancellation before it can stage.
-		const coordinator = this._sessionReplacementCoordinators.get(id);
-		if (!this.sessions.has(id) && !coordinator) return false;
-		if (coordinator) coordinator.terminalRequest = "terminate";
-		return this._coordinateSessionReplacement(id, "terminate", (token) =>
-			this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+		const persisted = this.getPersistedSession(id);
+		const live = this.sessions.get(id);
+		const lifecycleOwnerId = (live?.sandboxed || persisted?.sandboxed)
+			? ((live?.borrowsWorktree || persisted?.borrowsWorktree)
+				? (this.resolveSandboxWorktreeOwnerSessionId(id)
+					?? live?.borrowedWorktreeOwnerSessionId
+					?? persisted?.borrowedWorktreeOwnerSessionId
+					?? id)
+				: id)
+			: undefined;
+
+		const terminate = async (): Promise<boolean> => {
+			// In-place restore temporarily removes the SessionInfo from the map. A
+			// terminate accepted during that gap must serialize behind the replacement,
+			// not report "not live" and let a successfully restored ghost survive after
+			// the caller archives its persisted record. The shared-worktree guard runs
+			// before terminal intent so a 409 leaves the owner byte-for-byte live.
+			const coordinator = this._sessionReplacementCoordinators.get(id);
+			if (!this.sessions.has(id) && !coordinator) return false;
+			const current = this.sessions.get(id);
+			const currentPersisted = this.getPersistedSession(id);
+			if (
+				(current?.sandboxed || currentPersisted?.sandboxed)
+				&& !(current?.borrowsWorktree || currentPersisted?.borrowsWorktree)
+			) {
+				this.assertSandboxOwnerHasNoLiveBorrowers(id);
+			}
+			if (coordinator) coordinator.terminalRequest = "terminate";
+			return this._coordinateSessionReplacement(id, "terminate", (token) =>
+				this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+		};
+
+		return lifecycleOwnerId
+			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, terminate)
+			: terminate();
 	}
 
 	private async _terminateSessionOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
@@ -11696,15 +11862,17 @@ export class SessionManager {
 		// children, and explicit writable history forks (`borrowsWorktree`). Only the
 		// session that provisioned the sandbox worktree may remove it.
 		if (session.sandboxed && !session.borrowsWorktree && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
-			try {
-				const sandbox = this.sandboxManager.get(session.projectId);
-				if (sandbox) {
-					// Extract worktree name from container path: /workspace-wt/<name>
-					const worktreeName = session.cwd.replace("/workspace-wt/", "");
-					await sandbox.removeWorktree(worktreeName);
+			const removalAuthority = this.getPersistedSession(id) ?? session;
+			const coordinates = sandboxWorktreeOwnerCoordinates(removalAuthority);
+			if (!coordinates) {
+				console.warn(`[session-manager] Refusing ambiguous sandbox worktree removal for ${id}`);
+			} else {
+				try {
+					const sandbox = this.sandboxManager.get(session.projectId);
+					if (sandbox) await sandbox.removeWorktree(coordinates.name);
+				} catch (err) {
+					console.warn(`[session-manager] Failed to remove sandbox worktree for ${id}:`, err);
 				}
-			} catch (err) {
-				console.warn(`[session-manager] Failed to remove sandbox worktree for ${id}:`, err);
 			}
 		}
 
@@ -11829,7 +11997,24 @@ export class SessionManager {
 	 * children are cascade-reaped before it is archived.
 	 */
 	async storeArchive(id: string): Promise<boolean> {
-		return this.archiveWithCascade(id);
+		const persisted = this.getPersistedSession(id);
+		const lifecycleOwnerId = persisted?.sandboxed
+			? (persisted.borrowsWorktree
+				? (this.resolveSandboxWorktreeOwnerSessionId(id)
+					?? persisted.borrowedWorktreeOwnerSessionId
+					?? id)
+				: id)
+			: undefined;
+		const archive = async () => {
+			const current = this.getPersistedSession(id);
+			if (current?.sandboxed && !current.borrowsWorktree) {
+				this.assertSandboxOwnerHasNoLiveBorrowers(id);
+			}
+			return this.archiveWithCascade(id);
+		};
+		return lifecycleOwnerId
+			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, archive)
+			: archive();
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */
