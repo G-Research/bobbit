@@ -847,6 +847,16 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/session-fs-sandbox-publication.test.ts",
+		allowReason: "isolated test-owned sandbox filesystem transcript, canary, and staging artifacts",
+		reads: frozen([
+			{ expression: "hostDestination", count: 1 },
+			{ expression: "path.join(sentinel, \"sentinel.txt\")", count: 1 },
+			{ expression: "filesystem.hostPath(destination)", count: 2 },
+			{ expression: "hostCanary", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/extension-host-surface-token.test.ts",
 		declarations: frozen(["scan:server-typescript-source-guards"]),
 		reads: frozen([
@@ -1040,7 +1050,8 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/history-fork-api.test.ts",
 		allowReason: "isolated integration gateway and test-owned transcript, proposal, and worktree artifacts",
 		reads: frozen([
-			{ expression: "seeded.file", count: 4 },
+			{ expression: "seeded.file", count: 6 },
+			{ expression: "sandboxFixture.filesystem.hostPath(persisted.agentSessionFile)", count: 1 },
 			{ expression: "stagedFile", count: 1 },
 			{ expression: "forkPersisted.agentSessionFile", count: 2 },
 			{ expression: "path.join(proposalFork, \"goal.md\")", count: 1 },
