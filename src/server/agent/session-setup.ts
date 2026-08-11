@@ -10,6 +10,7 @@
  *   delegate — await pipeline + first prompt + streaming confirmation
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
@@ -230,7 +231,18 @@ export function applySandboxCwdOffset(containerBaseCwd: string, relativeOffset?:
 /** Compute a safe relative cwd offset, returning undefined when cwd is outside root. */
 export function relativeSandboxCwdOffset(rootPath?: string, cwd?: string): string | undefined {
 	if (!rootPath || !cwd) return undefined;
-	return normalizeSandboxCwdOffset(path.relative(rootPath, cwd));
+	let offsetRoot = rootPath;
+	let offsetCwd = cwd;
+	try {
+		// Resolve both existing paths before using either canonical spelling. This
+		// makes equivalent Windows long/8.3 aliases comparable while preserving
+		// the established lexical behavior when either path cannot be resolved.
+		const canonicalRoot = fs.realpathSync.native(rootPath);
+		const canonicalCwd = fs.realpathSync.native(cwd);
+		offsetRoot = canonicalRoot;
+		offsetCwd = canonicalCwd;
+	} catch { /* atomic lexical fallback */ }
+	return normalizeSandboxCwdOffset(path.relative(offsetRoot, offsetCwd));
 }
 
 // ── Interfaces ─────────────────────────────────────────────────────────────
@@ -487,8 +499,8 @@ function effectiveGoalId(plan: SessionSetupPlan): string | undefined {
  * same cwd the session will boot with.
  */
 export function offsetWorktreeCwd(plan: Pick<SessionSetupPlan, "repoPath" | "cwd">, worktreeCwd: string): string {
-	const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, plan.cwd) : "";
-	return relativeOffset && relativeOffset !== "." ? path.join(worktreeCwd, relativeOffset) : worktreeCwd;
+	const relativeOffset = relativeSandboxCwdOffset(plan.repoPath, plan.cwd);
+	return relativeOffset ? path.join(worktreeCwd, relativeOffset) : worktreeCwd;
 }
 
 /**
@@ -1340,8 +1352,7 @@ export async function executeWorktreeAsync(
 		// Apply subdirectory offset: if the session's original CWD (project rootPath) is a
 		// subdirectory of the repo, offset the working directory within the worktree.
 		const originalCwd = plan.cwd;
-		const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
-		const sandboxCwdOffset = normalizeSandboxCwdOffset(relativeOffset);
+		const sandboxCwdOffset = relativeSandboxCwdOffset(plan.repoPath, originalCwd);
 		if (sandboxCwdOffset) plan.sandboxCwdOffset = sandboxCwdOffset;
 		// Same offset the goalProvisioned hook was dispatched with above.
 		const offsetCwd = offsetWorktreeCwd(plan, worktreeCwd);

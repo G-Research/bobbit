@@ -646,8 +646,12 @@ test.describe("history fork API", () => {
 		expect(filesystemIdentity(forkPersisted.repoPath)).toBe(filesystemIdentity(projectRoot));
 		expect(forkPersisted.branch).toMatch(/^session\//);
 		expect(forkPersisted.reattemptGoalId).toBe("fixture-reattempt-goal");
+		expect(fs.existsSync(forkPersisted.cwd)).toBe(true);
 		expect(fs.existsSync(path.join(forkPersisted.cwd, ".git"))).toBe(true);
-		expect(fs.readFileSync(forkPersisted.agentSessionFile, "utf8")).not.toContain("selected prompt");
+		const forkTranscript = fs.readFileSync(forkPersisted.agentSessionFile, "utf8");
+		const forkHeader = JSON.parse(forkTranscript.split(/\r?\n/, 1)[0]);
+		expect(filesystemIdentity(forkHeader.cwd)).toBe(filesystemIdentity(forkPersisted.cwd));
+		expect(forkTranscript).not.toContain("selected prompt");
 	});
 
 	test("awaited fresh worktree setup failures return an error and purge the destination", async ({ gateway }) => {
