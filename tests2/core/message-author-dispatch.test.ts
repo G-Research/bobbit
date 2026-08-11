@@ -17,7 +17,12 @@ import {
 	dispatchTrackedPrompt,
 	prepareVisibleAgentEvent,
 	projectPromptAuthorMessagesForTitle,
+	restorePromptAuthorBindings,
 } from "../../src/server/agent/session-manager.ts";
+import {
+	cancelPendingSessionPromptActivity,
+	installSessionActivityAttribution,
+} from "../../src/server/agent/session-activity.ts";
 import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
 
 const AGENT_AUTHOR: MessageAuthor = {
@@ -67,6 +72,7 @@ function manager(): any {
 		},
 	};
 	value.broadcastQueue = vi.fn();
+	value.tryGenerateTitleFromPrompt = vi.fn();
 	value.markPromptDispatchStreaming = vi.fn((target: any) => { target.status = "streaming"; });
 	value._sessionWriterIsCurrent = vi.fn(() => true);
 	value.clearRecoveredPromptDispatchOwnership = vi.fn();
@@ -80,6 +86,20 @@ function manager(): any {
 
 async function flushMicrotasks(): Promise<void> {
 	for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
+}
+
+function deferred<T>(): {
+	promise: Promise<T>;
+	resolve: (value: T) => void;
+	reject: (reason: unknown) => void;
+} {
+	let resolve!: (value: T) => void;
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
 }
 
 describe("message author dispatch boundary", () => {
@@ -239,6 +259,158 @@ describe("message author dispatch boundary", () => {
 		assert.equal(target.pendingPromptAuthors[0].modelText, "safe base");
 		assert.equal(target.pendingPromptAuthors[0].modelPrefix, undefined);
 		assert.deepEqual(readAuthorSidecar(target.id), []);
+	});
+
+	it.each(["negative", "throw"] as const)(
+		"makes a stale %s callback inert after a same-row redrain",
+		async (failure) => {
+			const value = manager();
+			const oldResponse = deferred<any>();
+			const replacementResponse = deferred<any>();
+			const prompt = vi.fn()
+				.mockImplementationOnce(() => oldResponse.promise)
+				.mockImplementationOnce(() => replacementResponse.promise);
+			const target = session(`dispatch-attempt-${failure}`, { prompt });
+			target.lastActivity = 100;
+			installSessionActivityAttribution(target, {
+				get: () => ({ lastReadAt: 100 }),
+				update: vi.fn(),
+			}, { now: () => 101, suppressUntilPrompt: true });
+			const durable = target.promptQueue.enqueue("same durable row", { suppressTitleGen: true });
+
+			const oldDispatch = value.dispatchDirectPrompt(
+				target,
+				durable.text,
+				undefined,
+				undefined,
+				false,
+				false,
+				"user",
+				LOCAL_USER_AUTHOR,
+				durable.id,
+			);
+			await flushMicrotasks();
+			const oldPreparedRecord = target.pendingPromptAuthors[0];
+			cancelPendingSessionPromptActivity(target);
+			assert.equal(
+				value.cancelRestoredPromptAuthorDispatch(target, oldPreparedRecord.promptId),
+				true,
+			);
+			target.status = "idle";
+			value.drainQueue(target);
+			await flushMicrotasks();
+			assert.equal(prompt.mock.calls.length, 2);
+			const replacementRecord = target.pendingPromptAuthors[0];
+			assert.equal(replacementRecord.promptId, durable.id);
+			assert.notEqual(replacementRecord.attemptId, oldPreparedRecord.attemptId);
+
+			if (failure === "negative") oldResponse.resolve({ success: false, error: "old rejected" });
+			else oldResponse.reject(new Error("old transport failure"));
+			await oldDispatch;
+			await flushMicrotasks();
+
+			assert.equal(target.pendingPromptAuthors[0], replacementRecord);
+			assert.equal(target.promptQueue.length, 0, "old callback must not duplicate the durable row");
+			assert.equal(value.recoverPromptDispatch.mock.calls.length, 0);
+
+			replacementResponse.resolve({ success: true });
+			await flushMicrotasks();
+			assert.equal(target.lastActivity, 101);
+			assert.equal(target.promptQueue.length, 0);
+		},
+	);
+
+	it("does not let a late cancelled same-text message id settle a new attempt", async () => {
+		const target = session("dispatch-late-predecessor");
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		restorePromptAuthorBindings(target, [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "old-attempt",
+			dispatchedAt: 1,
+			modelText: "[System]: same bytes",
+			source: "system",
+			author,
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId: "old-attempt",
+				settledAt: 2,
+				outcome: "cancelled",
+			},
+		}]);
+		const pendingResponse = deferred<any>();
+		target.rpcClient = { prompt: vi.fn(() => pendingResponse.promise) };
+		const dispatch = dispatchTrackedPrompt(target, "same bytes", {
+			source: "system",
+			author,
+			now: () => 3,
+		});
+		await flushMicrotasks();
+		const current = target.pendingPromptAuthors[0];
+
+		prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { id: "historical-pi-id", role: "user", content: "[System]: same bytes" },
+		});
+
+		assert.equal(target.pendingPromptAuthors[0], current);
+		assert.equal(readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement, undefined);
+		pendingResponse.resolve({ success: false, error: "current rejected" });
+		await assert.rejects(dispatch, /current rejected/);
+		assert.equal(target.pendingPromptAuthors.length, 0);
+		assert.equal(
+			readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+			"cancelled",
+		);
+	});
+
+	it("commits the current same-text echo once its cancelled predecessor is identified", async () => {
+		const target = session("dispatch-current-after-predecessor");
+		const author = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		restorePromptAuthorBindings(target, [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "old-attempt",
+			dispatchedAt: 1,
+			modelText: "[System]: same bytes",
+			source: "system",
+			author,
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId: "old-attempt",
+				settledAt: 2,
+				outcome: "cancelled",
+			},
+		}]);
+		const pendingResponse = deferred<any>();
+		target.rpcClient = { prompt: vi.fn(() => pendingResponse.promise) };
+		const dispatch = dispatchTrackedPrompt(target, "same bytes", {
+			source: "system",
+			author,
+			now: () => 3,
+		});
+		await flushMicrotasks();
+		const current = target.pendingPromptAuthors[0];
+
+		prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { id: "historical-pi-id", role: "user", content: "[System]: same bytes" },
+		});
+		prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { id: "current-pi-id", role: "user", content: "[System]: same bytes" },
+		});
+		assert.equal(target.pendingPromptAuthors.length, 0, "current echo should settle the live attempt");
+		pendingResponse.resolve({ success: false, error: "late negative acknowledgement" });
+
+		await assert.doesNotReject(dispatch);
+		assert.equal(target.pendingPromptAuthors.length, 0);
+		assert.equal(
+			readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
+			"echoed",
+		);
 	});
 
 	it("keeps recovery rows unprefixed after a rejected decorated direct prompt", async () => {

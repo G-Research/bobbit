@@ -618,7 +618,10 @@ function isBlankContentBlockError(errMsg: string | undefined): boolean {
 export type { InFlightSteerRecord } from "./session-store.js";
 
 export interface PendingPromptAuthorRecord {
+	/** Durable sidecar/queue correlation id; retries may reuse it. */
 	promptId: string;
+	/** Explicit in-memory attempt identity. Restored records reuse their unique sidecar id. */
+	attemptId?: string;
 	dispatchedAt: number;
 	/** Exact Pi text exists only for current-process dispatches. Restored v2 rows use the digest. */
 	modelText?: string;
@@ -631,6 +634,8 @@ export interface PendingPromptAuthorRecord {
 
 interface LivePromptAuthorMessageBinding {
 	promptId: string;
+	/** Current-process attempt identity; restored bindings reuse their sidecar id. */
+	attemptId?: string;
 	author: MessageAuthor;
 	settled: boolean;
 	/** Exact Pi text is retained only in memory for live occurrence matching. */
@@ -844,6 +849,9 @@ export interface SessionInfo {
 	 * replay occurrence is removed only at its terminal frame; its last-terminal
 	 * guard still makes duplicate keyless ends idempotent until the next start. */
 	promptAuthorReplayBindings?: ReplayPromptAuthorBinding[];
+	/** Cancelled/restored occurrences that can still arrive as late replay. They
+	 * block weaker raw-text fallback from settling a newer same-text attempt. */
+	cancelledPromptAuthorPredecessors?: ReplayPromptAuthorBinding[];
 	/** Last keyless terminal occurrence within one live lifecycle boundary. */
 	lastKeylessPromptAuthorEnd?: ReplayPromptAuthorBinding;
 	/** Pending grant request from the guard extension's long-poll */
@@ -1011,6 +1019,9 @@ function resolveAcceptedPromptAuthor(source: PromptSource, explicit?: MessageAut
 }
 
 export interface PreparedPromptAuthorDispatch {
+	/** Unique identity for this one Pi RPC; never a durable queue-row id. */
+	attemptId: string;
+	/** Durable sidecar/queue correlation id, intentionally separate from attemptId. */
 	promptId: string;
 	/** Exact text for this one Pi RPC. Durable queues and recovery state keep the base text. */
 	piText: string;
@@ -1047,8 +1058,10 @@ export function preparePromptAuthorDispatch(
 	const piText = sidecarPersisted ? desiredPiText : baseModelText;
 	const modelPrefix = sidecarPersisted ? desiredPrefix : undefined;
 	const modelTextDigest = digestPromptModelText(piText);
+	const attemptId = promptAttemptId("attempt");
 	const pending: PendingPromptAuthorRecord = {
 		promptId,
+		attemptId,
 		dispatchedAt: now,
 		modelText: piText,
 		...(modelTextDigest === undefined ? {} : { modelTextDigest }),
@@ -1062,6 +1075,7 @@ export function preparePromptAuthorDispatch(
 	// terminal guard. Restore replay guards remain authoritative until replay ends.
 	session.lastKeylessPromptAuthorEnd = undefined;
 	return {
+		attemptId,
 		promptId,
 		piText,
 		...(modelPrefix === undefined ? {} : { modelPrefix }),
@@ -1070,28 +1084,55 @@ export function preparePromptAuthorDispatch(
 	};
 }
 
-function cancelPromptAuthorBinding(session: SessionInfo, promptId: string, now: number): void {
-	let idx = -1;
-	for (let candidate = (session.pendingPromptAuthors?.length ?? 0) - 1; candidate >= 0; candidate--) {
-		if (session.pendingPromptAuthors![candidate].promptId === promptId) {
-			idx = candidate;
-			break;
-		}
-	}
-	if (idx !== -1) {
-		const [pending] = session.pendingPromptAuthors!.splice(idx, 1);
-		cancelSessionPromptActivity(
-			session,
-			(pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY],
-		);
-	}
+function retainCancelledPromptAuthorPredecessor(
+	session: SessionInfo,
+	pending: PendingPromptAuthorRecord,
+): void {
+	const predecessors = session.cancelledPromptAuthorPredecessors ??= [];
+	const attemptId = pending.attemptId ?? pending.promptId;
+	if (predecessors.some((binding) => (binding.attemptId ?? binding.promptId) === attemptId)) return;
+	predecessors.push({
+		promptId: pending.promptId,
+		attemptId,
+		author: pending.author,
+		settled: true,
+		...(pending.modelText === undefined ? {} : { modelText: pending.modelText }),
+		...(pending.modelTextDigest === undefined ? {} : { modelTextDigest: pending.modelTextDigest }),
+		...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
+	});
+}
+
+/** Cancel one exact prepared attempt, or a restored attempt by its unique sidecar id. */
+function cancelPromptAuthorBinding(
+	session: SessionInfo,
+	target: PreparedPromptAuthorDispatch | string,
+	now: number,
+): boolean {
+	const pendingAuthors = session.pendingPromptAuthors;
+	const idx = typeof target === "string"
+		? (() => {
+			for (let candidate = (pendingAuthors?.length ?? 0) - 1; candidate >= 0; candidate--) {
+				if (pendingAuthors![candidate].promptId === target) return candidate;
+			}
+			return -1;
+		})()
+		: (pendingAuthors?.findIndex((candidate) => candidate === target.pending) ?? -1);
+	if (idx === -1) return false;
+
+	const [pending] = pendingAuthors!.splice(idx, 1);
+	retainCancelledPromptAuthorPredecessor(session, pending);
+	cancelSessionPromptActivity(
+		session,
+		(pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY],
+	);
 	void appendPromptAuthorSettlement(session.id, {
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
-		promptId,
+		promptId: pending.promptId,
 		settledAt: now,
 		outcome: "cancelled",
 	});
+	return true;
 }
 
 export type SystemPromptSource = Exclude<PromptSource, "user" | "agent">;
@@ -1231,7 +1272,7 @@ export async function dispatchTrackedPrompt(
 			return { success: true };
 		}
 		cancelSessionPromptActivity(session, activityBoundary);
-		cancelPromptAuthorBinding(session, promptId, now());
+		cancelPromptAuthorBinding(session, prepared, now());
 		throw error;
 	}
 }
@@ -1275,6 +1316,10 @@ function batchPromptId(prefix: string, rows: QueuedMessage[]): string {
 	return `${prefix}:${digest}`;
 }
 
+function promptAttemptId(prefix: string): string {
+	return `${prefix}:${randomUUID()}`;
+}
+
 /** Helper: extract the exact model text used by author-sidecar correlation. */
 function extractUserMessageText(message: any): string {
 	if (!message || typeof message !== "object") return "";
@@ -1313,7 +1358,7 @@ function promptAuthorMessageKey(
 
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
 const PROMPT_ACTIVITY_BOUNDARY = Symbol("prompt-activity-boundary");
-type PromptAuthorEventBinding = { promptId: string; alreadySettled: boolean };
+type PromptAuthorEventBinding = { promptId: string; attemptId?: string; alreadySettled: boolean };
 type ActivityBoundPromptAuthorRecord = PendingPromptAuthorRecord & {
 	[PROMPT_ACTIVITY_BOUNDARY]?: SessionPromptActivityBoundary;
 };
@@ -1322,7 +1367,7 @@ function beginPreparedPromptActivity(
 	session: SessionInfo,
 	prepared: PreparedPromptAuthorDispatch,
 ): SessionPromptActivityBoundary | undefined {
-	const boundary = beginSessionPromptActivity(session, prepared.promptId);
+	const boundary = beginSessionPromptActivity(session, prepared.attemptId);
 	(prepared.pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY] = boundary;
 	return boundary;
 }
@@ -1343,6 +1388,7 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		.filter((entry) => entry.settlement === undefined)
 		.map(({ promptId, dispatchedAt, modelText, modelTextDigest, modelPrefix, source, author }) => ({
 			promptId,
+			attemptId: promptId,
 			dispatchedAt,
 			...(modelText === undefined ? {} : { modelText }),
 			...(modelTextDigest === undefined ? {} : { modelTextDigest }),
@@ -1355,6 +1401,7 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		if (entry.settlement?.outcome !== "echoed") continue;
 		const binding: LivePromptAuthorMessageBinding = {
 			promptId: entry.promptId,
+			attemptId: entry.promptId,
 			author: entry.author,
 			settled: true,
 			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
@@ -1373,11 +1420,23 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		.filter((entry) => entry.settlement?.outcome !== "cancelled")
 		.map((entry) => ({
 			promptId: entry.promptId,
+			attemptId: entry.promptId,
 			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
 			...(entry.modelTextDigest === undefined ? {} : { modelTextDigest: entry.modelTextDigest }),
 			...(entry.modelPrefix === undefined ? {} : { modelPrefix: entry.modelPrefix }),
 			author: entry.author,
 			settled: entry.settlement?.outcome === "echoed",
+		}));
+	session.cancelledPromptAuthorPredecessors = entries
+		.filter((entry) => entry.settlement?.outcome === "cancelled")
+		.map((entry) => ({
+			promptId: entry.promptId,
+			attemptId: entry.promptId,
+			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
+			...(entry.modelTextDigest === undefined ? {} : { modelTextDigest: entry.modelTextDigest }),
+			...(entry.modelPrefix === undefined ? {} : { modelPrefix: entry.modelPrefix }),
+			author: entry.author,
+			settled: true,
 		}));
 	session.lastKeylessPromptAuthorEnd = undefined;
 
@@ -1467,22 +1526,38 @@ export function prepareVisibleAgentEvent(
 			promptAuthorBindingMatchesText(binding, modelText),
 		);
 	}
+	if (!stableBinding && userRole && modelText) {
+		// A cancelled/restored predecessor may still arrive after switch_session's
+		// response. Pi does not echo a Bobbit nonce, so equal raw text is ambiguous:
+		// bind the historical occurrence first rather than settling a newer attempt.
+		stableBinding = session.cancelledPromptAuthorPredecessors?.find((binding) =>
+			promptAuthorBindingMatchesText(binding, modelText),
+		);
+	}
+	if (stableBinding && messageKey && !session.promptAuthorMessageBindings?.has(messageKey)) {
+		if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
+		session.promptAuthorMessageBindings.set(messageKey, stableBinding);
+	}
 	let pendingIndex = stableBinding && !stableBinding.settled
-		? (session.pendingPromptAuthors?.findIndex((record) => record.promptId === stableBinding!.promptId) ?? -1)
+		? (session.pendingPromptAuthors?.findIndex((record) =>
+			(record.attemptId ?? record.promptId) === (stableBinding!.attemptId ?? stableBinding!.promptId)
+		) ?? -1)
 		: -1;
 	if (!stableBinding && userRole && modelText && session.pendingPromptAuthors?.length) {
-		const reservedPromptIds = new Set(
+		const reservedAttemptIds = new Set(
 			[...(session.promptAuthorMessageBindings?.values() ?? [])]
 				.filter((binding) => !binding.settled)
-				.map((binding) => binding.promptId),
+				.map((binding) => binding.attemptId ?? binding.promptId),
 		);
 		pendingIndex = session.pendingPromptAuthors.findIndex((record) =>
-			promptAuthorBindingMatchesText(record, modelText) && !reservedPromptIds.has(record.promptId),
+			promptAuthorBindingMatchesText(record, modelText)
+				&& !reservedAttemptIds.has(record.attemptId ?? record.promptId),
 		);
 		if (pendingIndex !== -1 && messageKey) {
 			const pending = session.pendingPromptAuthors[pendingIndex];
 			stableBinding = {
 				promptId: pending.promptId,
+				attemptId: pending.attemptId,
 				author: pending.author,
 				settled: false,
 				...(pending.modelText === undefined ? {} : { modelText: pending.modelText }),
@@ -1519,20 +1594,27 @@ export function prepareVisibleAgentEvent(
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
-	if (raw.type === "message_end" && stableBinding && session.promptAuthorReplayBindings) {
-		const replayIndex = session.promptAuthorReplayBindings.findIndex(
-			(binding) => binding.promptId === stableBinding!.promptId,
-		);
-		if (replayIndex !== -1) session.promptAuthorReplayBindings.splice(replayIndex, 1);
+	if (raw.type === "message_end" && stableBinding) {
+		const replayIndex = session.promptAuthorReplayBindings?.findIndex(
+			(binding) => (binding.attemptId ?? binding.promptId)
+				=== (stableBinding!.attemptId ?? stableBinding!.promptId),
+		) ?? -1;
+		if (replayIndex !== -1) session.promptAuthorReplayBindings!.splice(replayIndex, 1);
+		const predecessorIndex = session.cancelledPromptAuthorPredecessors?.findIndex(
+			(binding) => (binding.attemptId ?? binding.promptId)
+				=== (stableBinding!.attemptId ?? stableBinding!.promptId),
+		) ?? -1;
+		if (predecessorIndex !== -1) session.cancelledPromptAuthorPredecessors!.splice(predecessorIndex, 1);
 	}
 	if (raw.type === "message_end" && stableBinding?.settled) {
 		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
 			promptId: stableBinding.promptId,
+			attemptId: stableBinding.attemptId,
 			alreadySettled: true,
 		} satisfies PromptAuthorEventBinding;
 		if (!messageKey) {
 			const hasConcurrentSameTextPrompt = session.pendingPromptAuthors?.some((record) =>
-				record.promptId !== stableBinding!.promptId
+				(record.attemptId ?? record.promptId) !== (stableBinding!.attemptId ?? stableBinding!.promptId)
 				&& promptAuthorBindingMatchesText(record, modelText),
 			) ?? false;
 			// A live guard protects one otherwise-indistinguishable duplicate. Once
@@ -1550,11 +1632,13 @@ export function prepareVisibleAgentEvent(
 		if (stableBinding) stableBinding.settled = true;
 		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
 			promptId: pending.promptId,
+			attemptId: pending.attemptId,
 			alreadySettled: false,
 		} satisfies PromptAuthorEventBinding;
 		if (!messageKey) {
 			session.lastKeylessPromptAuthorEnd = {
 				promptId: pending.promptId,
+				attemptId: pending.attemptId,
 				// A restored v2 pending row contains only a digest. The raw echo itself
 				// safely supplies memory-only exact text for duplicate terminal guards.
 				modelText,
@@ -5124,8 +5208,15 @@ export class SessionManager {
 		return preparePromptAuthorDispatch(session, promptId, baseModelText, source, author, this.clock.now());
 	}
 
-	private cancelPromptAuthorDispatch(session: SessionInfo, promptId: string): void {
-		cancelPromptAuthorBinding(session, promptId, this.clock.now());
+	private cancelPromptAuthorDispatch(
+		session: SessionInfo,
+		prepared: PreparedPromptAuthorDispatch,
+	): boolean {
+		return cancelPromptAuthorBinding(session, prepared, this.clock.now());
+	}
+
+	private cancelRestoredPromptAuthorDispatch(session: SessionInfo, promptId: string): boolean {
+		return cancelPromptAuthorBinding(session, promptId, this.clock.now());
 	}
 
 	/**
@@ -5182,9 +5273,8 @@ export class SessionManager {
 			// steer RPC is pending; in that case the row has already been recovered
 			// exactly once and must not be enqueued again here.
 			const lidx = session.inFlightSteerTexts.findIndex((record) => record.promptId === promptId);
-			if (lidx !== -1) {
+			if (lidx !== -1 && this.cancelPromptAuthorDispatch(session, prepared)) {
 				session.inFlightSteerTexts.splice(lidx, 1);
-				this.cancelPromptAuthorDispatch(session, promptId);
 				for (const r of [...rows].reverse()) {
 					session.promptQueue.enqueueAtFront(r.text, {
 						isSteered: true,
@@ -5243,7 +5333,7 @@ export class SessionManager {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		for (const record of [...ledger].reverse()) {
-			this.cancelPromptAuthorDispatch(session, record.promptId);
+			this.cancelRestoredPromptAuthorDispatch(session, record.promptId);
 			session.promptQueue.enqueueAtFront(record.text, {
 				isSteered: true,
 				source: record.source,
@@ -5489,7 +5579,7 @@ export class SessionManager {
 		source: PromptSource = "user",
 		author: MessageAuthor = LOCAL_USER_AUTHOR,
 		durableQueueRowId?: string,
-		promptId = `prompt:${randomUUID()}`,
+		promptId = promptAttemptId("prompt"),
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
@@ -5525,7 +5615,7 @@ export class SessionManager {
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				if (acceptedBeforeAckFailure(reason)) return;
-				this.cancelPromptAuthorDispatch(session, promptId);
+				if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 				cancelled = true;
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 				recovered = true;
@@ -5538,7 +5628,7 @@ export class SessionManager {
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
 			if (!recovered && acceptedBeforeAckFailure(reason)) return;
-			if (!cancelled) this.cancelPromptAuthorDispatch(session, promptId);
+			if (!cancelled && !this.cancelPromptAuthorDispatch(session, prepared)) return;
 			if (!recovered) {
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 			}
@@ -5655,7 +5745,7 @@ export class SessionManager {
 				if (resp && resp.success === false) {
 					const reason = resp.error || "unknown";
 					if (acceptedBeforeAckFailure(reason)) return;
-					this.cancelPromptAuthorDispatch(session, promptId);
+					if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 					recoverDispatchedRows(reason);
 				} else if (commitSessionPromptActivity(session, activityBoundary)) {
 					// Dispatch landed — clear the busy-guard retry budget and any
@@ -5668,7 +5758,7 @@ export class SessionManager {
 			.catch((err: any) => {
 				const reason = err?.message || String(err);
 				if (acceptedBeforeAckFailure(reason)) return;
-				this.cancelPromptAuthorDispatch(session, promptId);
+				if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}: ${safeReason}`);

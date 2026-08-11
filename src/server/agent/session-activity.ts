@@ -19,7 +19,8 @@ interface AttributionState {
 }
 
 export interface SessionPromptActivityBoundary {
-	readonly promptId: string;
+	/** Unique identity of one RPC dispatch attempt, never a durable queue-row id. */
+	readonly attemptId: string;
 	/** Exact attribution installation that created this token, when installed. */
 	readonly owner?: object;
 	state: "pending" | "committed" | "cancelled";
@@ -69,23 +70,23 @@ export function suppressSessionActivityUntilPrompt(session: ActivitySession): vo
 }
 
 /**
- * Start an origin-correlated prompt boundary without changing activity. A
- * repeated durable prompt id supersedes only its previous live attempt; the
- * token identity prevents a stale acknowledgement from committing the retry.
+ * Start an origin-correlated prompt boundary without changing activity.
+ * `attemptId` identifies one RPC invocation; durable queue ownership must stay
+ * separate so a redrain can never alias an older asynchronous callback.
  */
 export function beginSessionPromptActivity(
 	session: ActivitySession,
-	promptId: string,
+	attemptId: string,
 ): SessionPromptActivityBoundary {
 	const state = attribution.get(session as object);
-	const previous = state?.pendingBoundaries.get(promptId);
+	const previous = state?.pendingBoundaries.get(attemptId);
 	if (previous) previous.state = "cancelled";
 	const boundary: SessionPromptActivityBoundary = {
-		promptId,
+		attemptId,
 		...(state ? { owner: state } : {}),
 		state: "pending",
 	};
-	state?.pendingBoundaries.set(promptId, boundary);
+	state?.pendingBoundaries.set(attemptId, boundary);
 	return boundary;
 }
 
@@ -108,12 +109,12 @@ export function commitSessionPromptActivity(
 		boundary.state = "committed";
 		return true;
 	}
-	if (!state || boundary.owner !== state || state.pendingBoundaries.get(boundary.promptId) !== boundary) {
+	if (!state || boundary.owner !== state || state.pendingBoundaries.get(boundary.attemptId) !== boundary) {
 		boundary.state = "cancelled";
 		return false;
 	}
 	boundary.state = "committed";
-	state.pendingBoundaries.delete(boundary.promptId);
+	state.pendingBoundaries.delete(boundary.attemptId);
 	state.suppressUntilPrompt = false;
 	bump(session, state);
 	return true;
@@ -127,8 +128,8 @@ export function cancelSessionPromptActivity(
 	if (!boundary || boundary.state !== "pending") return false;
 	const state = attribution.get(session as object);
 	boundary.state = "cancelled";
-	if (state && boundary.owner === state && state.pendingBoundaries.get(boundary.promptId) === boundary) {
-		state.pendingBoundaries.delete(boundary.promptId);
+	if (state && boundary.owner === state && state.pendingBoundaries.get(boundary.attemptId) === boundary) {
+		state.pendingBoundaries.delete(boundary.attemptId);
 	}
 	return true;
 }
