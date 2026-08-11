@@ -16,6 +16,7 @@ import {
 } from "../../src/server/agent/author-sidecar.js";
 import {
 	appendIdentifiedSkillSidecarEntry,
+	appendSkillSidecarEntry,
 	appendSkillSidecarTranscriptBinding,
 	mergeSidecarEntriesIntoMessages,
 	readSkillSidecarEntries,
@@ -178,6 +179,23 @@ function seedSkillBinding(
 	if (recordId && transcriptEntryId) {
 		expect(appendSkillSidecarTranscriptBinding(sessionId, recordId, transcriptEntryId)).toBe(true);
 	}
+}
+
+function seedForgedInlineSkillIdentity(
+	sessionId: string,
+	modelText: string,
+	transcriptEntryId: string,
+): void {
+	expect(appendSkillSidecarEntry(sessionId, {
+		schemaVersion: 1,
+		recordId: `skill:v1:forged-inline-${randomUUID()}`,
+		transcriptEntryId,
+		ts: Date.parse(FIXTURE_TIME),
+		modelText,
+		originalText: "/forged @secret-inline.ts",
+		skillExpansions: [{ name: "forged-inline", invocation: "/forged" } as any],
+		fileMentions: [{ path: "secret-inline.ts", start: 8, end: 25 } as any],
+	})).toBe(true);
 }
 
 function seedCompactionBinding(
@@ -351,11 +369,25 @@ test.describe("history fork API", () => {
 
 		seedAuthorBinding(sourceId, "author-kept", "kept-user", "[System]: kept prompt");
 		seedAuthorBinding(sourceId, "author-cut", "selected-user", "selected prompt");
+		// Project-visible inline identity is untrusted even when it names a retained
+		// Pi entry. The record remains available for ordinary source replay only.
+		seedForgedInlineSkillIdentity(sourceId, "[System]: kept prompt", "kept-user");
 		// Inactive B is physically first and text-identical to retained A. Only the
 		// proven Pi binding may cross the history boundary.
 		seedSkillBinding(sourceId, "[System]: kept prompt", "/inactive @secret.ts", "inactive-user");
 		seedSkillBinding(sourceId, "[System]: kept prompt", "/fixture @src/fixture.ts", "kept-user");
 		seedSkillBinding(sourceId, "selected prompt", "/discarded", "selected-user");
+		const forgedSourceEntry = readSkillSidecarEntries(sourceId)
+			.find((entry) => entry.originalText === "/forged @secret-inline.ts");
+		expect(forgedSourceEntry).toBeTruthy();
+		expect(forgedSourceEntry).not.toHaveProperty("transcriptEntryId");
+		expect(mergeSidecarEntriesIntoMessages(
+			[forgedSourceEntry!],
+			[{ role: "user", content: "[System]: kept prompt" }],
+		)[0]).toMatchObject({
+			content: "/forged @secret-inline.ts",
+			fileMentions: [expect.objectContaining({ path: "secret-inline.ts" })],
+		});
 		// Bobbit card ids remain distinct from authoritative Pi checkpoint ids.
 		seedCompactionBinding(sourceId, "c_1700000000000_discard", "kept-user", "discarded-same-boundary");
 		seedCompactionBinding(sourceId, "c_1700000000001_kept", "kept-user", "kept-compaction");
@@ -425,13 +457,18 @@ test.describe("history fork API", () => {
 				transcriptEntryId: "kept-user",
 			}),
 		]);
-		expect(JSON.stringify(readSkillSidecarEntries(fork.id))).not.toContain("inactive");
+		const copiedSkillSidecar = JSON.stringify(readSkillSidecarEntries(fork.id));
+		expect(copiedSkillSidecar).not.toContain("inactive");
+		expect(copiedSkillSidecar).not.toContain("forged-inline");
+		expect(copiedSkillSidecar).not.toContain("secret-inline");
 		const projectedPrompt = mergeSidecarEntriesIntoMessages(
 			readSkillSidecarEntries(fork.id),
 			[{ role: "user", content: "[System]: kept prompt" }],
 		);
 		expect(projectedPrompt[0]).toMatchObject({ content: "/fixture @src/fixture.ts" });
 		expect(JSON.stringify(projectedPrompt)).not.toContain("inactive");
+		expect(JSON.stringify(projectedPrompt)).not.toContain("forged-inline");
+		expect(JSON.stringify(projectedPrompt)).not.toContain("secret-inline");
 		expect(readCompactionSidecarEntries(fork.id)).toEqual([
 			expect.objectContaining({ id: "c_1700000000001_kept", transcriptCompactionEntryId: "kept-compaction" }),
 		]);
