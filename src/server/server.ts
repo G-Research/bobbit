@@ -131,7 +131,11 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, 
 import { SearchUnavailableError } from "./search/search-service.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
-import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
+import {
+	copySkillSidecarForTranscript,
+	initSkillSidecarDir,
+	purgeSkillSidecar,
+} from "./skills/skill-sidecar.js";
 import {
 	copyAuthorSidecar,
 	initAuthorSidecarDir,
@@ -141,8 +145,10 @@ import {
 import { agentAuthorForSession, BOBBIT_SYSTEM_AUTHOR } from "./agent/message-author.js";
 import { LOCAL_USER_AUTHOR } from "../shared/message-author.js";
 import {
+	copyCompactionSidecarForTranscript,
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
+	purgeCompactionSidecar,
 } from "./agent/compaction-sidecar.js";
 import {
 	projectOwnTranscriptJsonl,
@@ -157,7 +163,12 @@ import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
-import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
+import { sessionFileRead, sessionFileWriteAtomic, sessionFsContextForAgentFile } from "./agent/session-fs.js";
+import {
+	HistoryForkValidationError,
+	materializeHistoryForkTranscript,
+	type HistoryForkMaterialization,
+} from "./agent/history-fork.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
 import {
@@ -549,6 +560,8 @@ import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 // Entries are also refilled from the transcript check, so survive process
 // restarts via the transcript fallback in findAskResponseAnswers.
 const askSubmittedToolUseIds = new Set<string>();
+// One process-wide reservation per exact history-fork request tuple.
+const historyForkReservations = new Set<string>();
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
@@ -14055,172 +14068,312 @@ async function handleApiRoute(
 		}
 	}
 
-	// POST /api/sessions/:id/fork — fork a live plain session: clone the source
-	// transcript (and tool-content / proposal drafts) into a fresh session and
-	// preserve its project/goal/task/model/role context. The caller chooses
-	// whether to spin up a new worktree (default) or reuse the source's worktree.
+	// POST /api/sessions/:id/fork — fork a live plain session. Whole-session
+	// requests clone the transcript; entryId requests materialize the active
+	// history strictly before that prompt. Both preserve the established context
+	// and let the caller choose a fresh (default) or reused source worktree.
 	const forkMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/fork$/);
 	if (forkMatch && req.method === "POST") {
 		const sourceId = forkMatch[1];
 		const forkBody = await readBody(req).catch(() => ({} as any));
-		// Default to a NEW worktree when the flag is omitted.
-		const newWorktree = forkBody?.newWorktree === undefined ? true : !!forkBody.newWorktree;
-
-		const source = sessionManager.getSession(sourceId);
-		const ps = sessionManager.getPersistedSession(sourceId);
-		if (!ps) { json({ error: "session not found" }, 404); return; }
-		if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
-		if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
-
-		const unsupported = isUnsupportedForkSource(source, ps);
-		if (unsupported) { json({ error: unsupported }, 422); return; }
-
-		const projectId = ps.projectId || source.projectId;
-		if (!projectId || !projectRegistry.get(projectId)) {
-			json({ error: "source project no longer registered" }, 410);
+		const hasEntryId = forkBody != null
+			&& typeof forkBody === "object"
+			&& Object.prototype.hasOwnProperty.call(forkBody, "entryId");
+		const entryId = hasEntryId ? forkBody.entryId : undefined;
+		if (
+			hasEntryId
+			&& (typeof entryId !== "string"
+				|| entryId.length === 0
+				|| entryId.length > 256
+				|| entryId.trim() !== entryId)
+		) {
+			json({ error: "Invalid history fork entry id", code: "HISTORY_FORK_CURSOR_INVALID" }, 400);
 			return;
 		}
-		const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
-		const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
-		const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
-		const forkInitialModel = forkSourceTuple.initialModel
-			?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
-		if (forkInitialModel && !(await requireCurrentSessionModel(forkInitialModel, "Fork model"))) return;
-
-		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
-		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
-		if (goal?.state === "todo") {
-			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+		if (
+			forkBody != null
+			&& typeof forkBody === "object"
+			&& Object.prototype.hasOwnProperty.call(forkBody, "newWorktree")
+			&& typeof forkBody.newWorktree !== "boolean"
+		) {
+			json({ error: "Invalid newWorktree flag" }, 400);
+			return;
 		}
+		// Whole-session omission remains backward-compatible. The prompt surface
+		// sends its history default (`false`) explicitly.
+		const newWorktree = forkBody?.newWorktree === undefined ? true : forkBody.newWorktree;
+		let historyReservationKey: string | undefined;
+		let historyReservationAcquired = false;
 
-		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
-		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
-		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+		try {
+			let source = sessionManager.getSession(sourceId);
+			const ps = sessionManager.getPersistedSession(sourceId);
+			if (!ps) { json({ error: "session not found" }, 404); return; }
+			if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
+			if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
 
-		// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
-		// rows that never persisted `agentSessionFile`.
-		let sourceJsonl = ps.agentSessionFile;
-		if (!sourceJsonl) {
-			const recovered = sessionManager.recoverSessionFile(ps);
-			if (recovered) sourceJsonl = recovered;
-		}
-		if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
-		if (!ps.sandboxed) {
-			try {
-				const st = fs.statSync(sourceJsonl);
-				if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
-			} catch {
-				json({ error: "source transcript missing or empty" }, 404);
+			const unsupported = isUnsupportedForkSource(source, ps);
+			if (unsupported) { json({ error: unsupported }, 422); return; }
+
+			const projectId = ps.projectId || source.projectId;
+			if (!projectId || !projectRegistry.get(projectId)) {
+				json({ error: "source project no longer registered" }, 410);
 				return;
 			}
-		}
+			const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
+			const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+			const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
+			const forkInitialModel = forkSourceTuple.initialModel
+				?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
+			if (forkInitialModel && !(await requireCurrentSessionModel(forkInitialModel, "Fork model"))) return;
 
-		const projCwd = projectRegistry.get(projectId)!.rootPath;
-		const forkId = randomUUID();
-		// Use the project root for the cloned `.jsonl` slug (same as /continue);
-		// worktree-backed sessions rotate to the final cwd-derived file after the
-		// worktree is ready, adopting this clone via switch_session.
-		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
+			if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
 
-		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
-		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
-		let clonedTranscript: string | null = null;
-		try {
-			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
-			clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
-		} catch (err) {
-			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
-			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
-			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
-			return;
-		}
-		try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
-			console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
-		}
-		try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
-			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
-		}
+			const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+			const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+			const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 
-		try {
-			// The destination id is fixed before creation. Copy author bindings now so
-			// switch_session replay is normalized correctly on its first pass and the
-			// resulting EventBuffer never captures fallback authors.
-			copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
-			const launched = await launchSidebarSessionFork({
-				forkId,
-				projectId,
-				projectRoot: projCwd,
-				destJsonl,
-				newWorktree,
-				source,
-				persisted: ps,
-			}, {
-				resolveNewWorktreeRepoPath: async projectRoot => {
-					try {
-						return await isGitRepo(projectRoot, serverCommandRunner)
-							? await getRepoRoot(projectRoot, serverCommandRunner)
-							: undefined;
-					} catch {
-						return undefined;
+			// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
+			// rows that never persisted `agentSessionFile`.
+			let sourceJsonl = ps.agentSessionFile;
+			if (!sourceJsonl) {
+				const recovered = sessionManager.recoverSessionFile(ps);
+				if (recovered) sourceJsonl = recovered;
+			}
+			if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
+			if (!ps.sandboxed) {
+				try {
+					const st = fs.statSync(sourceJsonl);
+					if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
+				} catch {
+					json({ error: "source transcript missing or empty" }, 404);
+					return;
+				}
+			}
+
+			const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+			let historyMaterialization: HistoryForkMaterialization | undefined;
+			let clonedTranscript: string | null = null;
+			if (hasEntryId) {
+				historyReservationKey = `${sourceId}\0${entryId}\0${newWorktree ? "1" : "0"}`;
+				if (historyForkReservations.has(historyReservationKey)) {
+					json({
+						error: "A fork from this prompt is already being created",
+						code: "HISTORY_FORK_IN_PROGRESS",
+					}, 409);
+					return;
+				}
+				historyForkReservations.add(historyReservationKey);
+				historyReservationAcquired = true;
+
+				const sourceWasStreaming = source.status === "streaming";
+				const sourceContent = await sessionFileRead(srcCtx, sourceJsonl, sandboxManager ?? null);
+				if (!sourceContent) {
+					json({ error: "source transcript missing or empty" }, 404);
+					return;
+				}
+
+				// Source eligibility is authoritative at launch time too. The immutable
+				// read is retained, but a source that stopped being live cannot be forked.
+				const currentSource = sessionManager.getSession(sourceId);
+				const currentPersisted = sessionManager.getPersistedSession(sourceId);
+				if (!currentSource || !currentPersisted) {
+					json({ error: "only live sessions can be forked" }, 422);
+					return;
+				}
+				const currentUnsupported = isUnsupportedForkSource(currentSource, currentPersisted);
+				if (currentUnsupported) {
+					json({ error: currentUnsupported }, 422);
+					return;
+				}
+				source = currentSource;
+
+				try {
+					historyMaterialization = materializeHistoryForkTranscript(
+						sourceContent,
+						entryId,
+						{ sourceStreaming: sourceWasStreaming || source.status === "streaming" },
+					);
+					clonedTranscript = historyMaterialization.content;
+				} catch (err) {
+					if (err instanceof HistoryForkValidationError) {
+						json({ error: err.message, code: err.code }, err.status);
+						return;
 					}
-				},
-				buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
-					const createOpts: any = {
-						sessionId: forkId,
-						projectId,
-						sandboxed: !!ps.sandboxed,
-						worktreeOpts,
-						preExistingAgentSessionFile: destJsonl,
-						preExistingAgentSessionOldCwds: oldTranscriptCwds,
-						taskId: ps.taskId,
-						reattemptGoalId: ps.reattemptGoalId,
-						staffId: ps.staffId,
-						allowedTools: ps.allowedTools,
-					};
-					if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
-						createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
-					}
+					jsonError(500, err, {
+						error: `failed to materialize history fork: ${err instanceof Error ? err.message : String(err)}`,
+					});
+					return;
+				}
+			}
 
-					if (forkStaff) {
-						createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
-						createOpts.roleName = forkStaff.roleId;
-						createOpts.accessory = forkStaff.accessory;
-						createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
-					} else {
-						if (forkRole) {
-							const opts = roleCreateOptions(forkRole);
-							if (createOpts.initialModel) delete opts.initialModel;
-							Object.assign(createOpts, opts);
-						} else if (ps.role) {
-							createOpts.role = ps.role;
-							createOpts.roleName = ps.role;
-							if (ps.accessory) createOpts.accessory = ps.accessory;
-						} else if (ps.accessory) {
-							createOpts.accessory = ps.accessory;
+			// History validation must complete before any goal state or destination
+			// state changes. Whole-session forks retain the established transition.
+			if (goal?.state === "todo") {
+				await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+			}
+
+			const projCwd = projectRegistry.get(projectId)!.rootPath;
+			const forkId = randomUUID();
+			// Use the project root for the cloned `.jsonl` slug (same as /continue);
+			// worktree-backed sessions rotate to the final cwd-derived file after the
+			// worktree is ready, adopting this clone via switch_session.
+			const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
+			const cleanupFailedFork = async (): Promise<void> => {
+				let failedRecord = sessionManager.getPersistedSession(forkId);
+				const failedAgentFile = failedRecord?.agentSessionFile;
+				try {
+					if (sessionManager.getSession(forkId)) {
+						await sessionManager.terminateSession(forkId);
+					} else if (failedRecord && !failedRecord.archived) {
+						await sessionManager.storeArchive(forkId);
+					}
+					if (sessionManager.getArchivedSession(forkId)) {
+						await sessionManager.purgeArchivedSession(forkId);
+					}
+				} catch (cleanupErr) {
+					console.warn(`[fork] failed-session lifecycle cleanup failed for ${forkId}: ${cleanupErr}`);
+				}
+				failedRecord = sessionManager.getPersistedSession(forkId);
+				cleanupFailedContinue(failedAgentFile || failedRecord?.agentSessionFile || destJsonl, forkId, bobbitStateDir());
+				if ((failedAgentFile && failedAgentFile !== destJsonl)
+					|| (failedRecord?.agentSessionFile && failedRecord.agentSessionFile !== destJsonl)) {
+					cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+				}
+				purgeAuthorSidecar(forkId);
+				purgeSkillSidecar(forkId);
+				purgeCompactionSidecar(forkId);
+			};
+
+			try {
+				if (hasEntryId) {
+					await sessionFileWriteAtomic(dstCtx, destJsonl, clonedTranscript!, sandboxManager ?? null);
+				} else {
+					await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+					clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
+				}
+			} catch (err) {
+				if (err instanceof CrossRealmCopyError) {
+					await cleanupFailedFork();
+					json({ error: "cross-realm fork not supported" }, 422);
+					return;
+				}
+				await cleanupFailedFork();
+				jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
+
+			try {
+				// Positional tool caches are safe only for an uncut transcript. History
+				// forks retain their exact tool content in JSONL and build fresh caches.
+				if (hasEntryId) {
+					// A partial proposal/sidecar copy must fail the history fork so cleanup
+					// cannot leave discarded-entry references in a successful destination.
+					copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir());
+					copySkillSidecarForTranscript(
+						sourceId,
+						forkId,
+						historyMaterialization!.retainedUserEntries,
+					);
+					copyCompactionSidecarForTranscript(
+						sourceId,
+						forkId,
+						historyMaterialization!.retainedCompactions,
+						historyMaterialization!.retainedEntryIds,
+					);
+				} else {
+					try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+						console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
+					}
+					try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+						console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
+					}
+				}
+				// The destination id is fixed before creation. Copy author bindings now so
+				// switch_session replay is normalized correctly on its first pass and the
+				// resulting EventBuffer never captures fallback authors.
+				copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
+				const launched = await launchSidebarSessionFork({
+					forkId,
+					projectId,
+					projectRoot: projCwd,
+					destJsonl,
+					newWorktree,
+					source,
+					persisted: ps,
+				}, {
+					resolveNewWorktreeRepoPath: async projectRoot => {
+						try {
+							return await isGitRepo(projectRoot, serverCommandRunner)
+								? await getRepoRoot(projectRoot, serverCommandRunner)
+								: undefined;
+						} catch {
+							return undefined;
 						}
-					}
-					if (forkSourceTuple.initialModel) {
-						delete createOpts.initialThinkingLevel;
-						Object.assign(createOpts, forkSourceTuple);
-					}
-					return createOpts;
-				},
-				createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
-				setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
-			});
-			if (ps.staffId) launched.fork.staffId = ps.staffId;
-			json({
-				id: launched.fork.id,
-				cwd: launched.fork.cwd,
-				status: launched.fork.status,
-				projectId: launched.projectId,
-				goalId: launched.goalId,
-				title: launched.title,
-			}, 201);
-		} catch (err) {
-			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
-			purgeAuthorSidecar(forkId);
-			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+					},
+					buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
+						const createOpts: any = {
+							sessionId: forkId,
+							projectId,
+							sandboxed: !!ps.sandboxed,
+							worktreeOpts,
+							preExistingAgentSessionFile: destJsonl,
+							preExistingAgentSessionOldCwds: oldTranscriptCwds,
+							taskId: ps.taskId,
+							reattemptGoalId: ps.reattemptGoalId,
+							staffId: ps.staffId,
+							allowedTools: ps.allowedTools,
+						};
+						if (newWorktree && ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+							createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+						}
+
+						if (forkStaff) {
+							createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
+							createOpts.roleName = forkStaff.roleId;
+							createOpts.accessory = forkStaff.accessory;
+							createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+						} else {
+							if (forkRole) {
+								const opts = roleCreateOptions(forkRole);
+								if (createOpts.initialModel) delete opts.initialModel;
+								Object.assign(createOpts, opts);
+							} else if (ps.role) {
+								createOpts.role = ps.role;
+								createOpts.roleName = ps.role;
+								if (ps.accessory) createOpts.accessory = ps.accessory;
+							} else if (ps.accessory) {
+								createOpts.accessory = ps.accessory;
+							}
+						}
+						if (forkSourceTuple.initialModel) {
+							delete createOpts.initialThinkingLevel;
+							Object.assign(createOpts, forkSourceTuple);
+						}
+						return createOpts;
+					},
+					createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
+					setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
+				});
+				if (ps.staffId) launched.fork.staffId = ps.staffId;
+				json({
+					id: launched.fork.id,
+					cwd: launched.fork.cwd,
+					status: launched.fork.status,
+					projectId: launched.projectId,
+					goalId: launched.goalId,
+					title: launched.title,
+				}, 201);
+			} catch (err) {
+				await cleanupFailedFork();
+				jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+			}
+		} finally {
+			if (historyReservationAcquired && historyReservationKey) {
+				historyForkReservations.delete(historyReservationKey);
+			}
 		}
 		return;
 	}
