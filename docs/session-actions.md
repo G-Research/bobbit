@@ -164,7 +164,7 @@ The prompt menu's **New worktree** toggle is independent of the session-level Fo
 - click/tap or keyboard activation updates `aria-checked` and the accessible on/off label without selecting Fork or closing the menu;
 - selecting the Fork row sends the current value with the durable prompt cursor.
 
-Borrowing is intentionally different from owning. The new session is writable but receives no worktree teardown coordinates and is marked as a borrower, so its termination or recovery cannot remove, repair, or recreate the source-owned tree. No reset, cleanup, stash, registration, or source-agent unwind occurs. See [REST API — Fork session endpoint](rest-api.md#fork-session-endpoint) for the authoritative boundary and lifecycle contract.
+Borrowing is intentionally different from owning. The new session is writable but receives no worktree teardown coordinates and is marked as a borrower, so its termination or recovery cannot remove, repair, or recreate the shared tree. For sandbox reuse, ownership is flattened to the final non-borrowing session so a fork of a borrower cannot become a teardown authority. No reset, cleanup, stash, registration, or source-agent unwind occurs. See [REST API — Fork session endpoint](rest-api.md#fork-session-endpoint) for the authoritative boundary and serialized lifecycle contract.
 
 ### Copy prompt
 

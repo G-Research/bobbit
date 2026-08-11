@@ -139,7 +139,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/fork` | Fork a live session. Body `{ newWorktree?: boolean, entryId?: string }`: omit `entryId` to clone the whole source JSONL, or supply a durable Pi prompt cursor to clone the active branch strictly before that prompt. See [Fork session endpoint](#fork-session-endpoint). |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
-| `DELETE` | `/api/sessions/:id` | Terminate a session |
+| `DELETE` | `/api/sessions/:id` | Terminate a session. A sandbox worktree owner with a live history-fork borrower returns typed `409 SHARED_SANDBOX_WORKTREE_IN_USE` without changing the owner. |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
@@ -326,8 +326,10 @@ The immutable read is also the concurrency boundary: entries appended afterward 
 
 #### Worktree modes and ownership
 
-- `newWorktree: false` reuses the source session's exact live `cwd`, including a nested directory within its worktree, and therefore shares the same filesystem state and branch. A history fork is persisted as a writable borrowed-worktree session without worktree/repository/branch teardown coordinates. It does not register, claim, reset, clean, stash, adopt, repair, or remove that tree. The source remains its sole lifecycle owner, including for sandbox worktrees, so terminating or recovering the borrower cannot tear down or recreate the shared tree.
+- `newWorktree: false` reuses the source session's exact live `cwd`, including a nested directory within its worktree, and therefore shares the same filesystem state and branch. A history fork is persisted as a writable borrowed-worktree session without worktree/repository/branch teardown coordinates. It does not register, claim, reset, clean, stash, adopt, repair, or remove that tree. For a sandbox source, Bobbit resolves and persists the flattened final owner rather than treating an intermediate borrower as the owner; this keeps borrower chains on one teardown authority. Terminating or recovering a borrower cannot tear down or recreate the shared tree.
 - `newWorktree: true` uses the established session-level Fork lifecycle. A Git-backed project gets a fresh owned `session/...` branch/worktree and the response waits for setup to finish; a non-Git project uses the established project-root behavior. Sandbox provisioning follows the same fresh-fork path rather than a history-specific lifecycle.
+
+Sandbox borrower creation, borrower termination/archive, and final-owner termination/archive serialize through one FIFO keyed by that final owner. Reuse-fork launch revalidates the live source, cwd, and owner inside the FIFO, so it cannot attach after owner teardown. Final-owner teardown checks for live borrowers before any lifecycle mutation and returns `409 { "error": "...", "code": "SHARED_SANDBOX_WORKTREE_IN_USE" }` if one remains; callers should terminate borrowers first and retry. This rejection leaves the owner live and unchanged.
 
 Both modes pass prior runtime cwd values only as provenance for rebasing top-level Pi runtime metadata during `switch_session`. User and assistant content mentioning an old path is not rewritten.
 
@@ -382,7 +384,7 @@ History validation uses the standard `{ error, code }` response shape:
 | `409` | `HISTORY_FORK_TRANSCRIPT_INVALID` | `The session transcript changed or is not valid for history forking` |
 | `409` | `HISTORY_FORK_IN_PROGRESS` | `A fork from this prompt is already being created` |
 
-An invalid `newWorktree` value returns `400 { "error": "Invalid newWorktree flag" }` without a code. Existing route failures remain unchanged: missing persisted source or transcript is `404`; an unregistered project or missing goal is `410`; archived, terminated/non-live, delegate, child, read-only, non-interactive, team, or cross-realm sources are `422`; clone, filtered-sidecar, worktree-setup, and launch failures are `500` with a descriptive `error`.
+An invalid `newWorktree` value returns `400 { "error": "Invalid newWorktree flag" }` without a code. A sandbox reuse request whose final owner cannot be resolved returns `422 { "error": "The source sandbox worktree owner is unavailable for history forking", "code": "HISTORY_FORK_SOURCE_UNAVAILABLE" }`. If the source cwd or owner changes before serialized launch, the route returns the same status and code with `error: "The source session is no longer available for history forking"`. Existing route failures remain unchanged: missing persisted source or transcript is `404`; an unregistered project or missing goal is `410`; archived, terminated/non-live, delegate, child, read-only, non-interactive, team, or cross-realm sources are `422`; clone, filtered-sidecar, worktree-setup, and launch failures are `500` with a descriptive `error`.
 
 See [Unified Session Actions — Historic prompt actions](session-actions.md#historic-prompt-actions) for the user-facing controls and [History Fork Prompt Actions](design/history-fork-prompt-actions.md) for the design rationale.
 
@@ -1065,7 +1067,9 @@ Staff records include a persisted `accessory` string as part of the staff identi
 | `GET` | `/api/projects/:id` | Get a single project. `GET /api/projects/headquarters` works even when Headquarters is hidden from normal lists. |
 | `GET` | `/api/projects/:id/base-ref/detect` | Read-only `base_ref` resolver helper. Returns `{ resolved, detected }`. `resolved` is exactly what worktrees branch off right now (`resolveBaseRef` against the pool/primary repo). `detected` is the live `git ls-remote --symref origin HEAD` result as `origin/<branch>`, **filtered to be saveable** — it is `null` unless it passes the same grammar + cross-component existence checks add-time pinning applies, so any non-`null` value can be saved without rejection. No mutation. Drives the Settings "Detect from remote" action. See [design/base-ref.md](design/base-ref.md). |
 | `PUT` | `/api/projects/:id` | Update normal-project name/color/root/palette. Headquarters and hidden/system projects are immutable. |
-| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete files on disk). The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
+| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete the registered project root). The server drains its worktree pool, terminates live history-fork borrowers before their owners and other sessions, and removes project state only after no live project session remains. The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
+
+Project deletion uses normal per-owner sandbox lifecycle serialization rather than bypassing shared-worktree ownership. If a concurrent launch or replacement leaves any live project session after termination, deletion stops before project-context removal and returns `409 { "error": "Project still has active sessions", "code": "PROJECT_SESSIONS_STILL_ACTIVE", "sessionIds": [...] }`. A shared sandbox owner conflict is likewise a typed `409` with `code: "SHARED_SANDBOX_WORKTREE_IN_USE"`. These fail-closed responses preserve the registered project and its remaining live sessions so the caller can terminate borrowers or other survivors and retry.
 
 #### Add Project directory helpers
 
