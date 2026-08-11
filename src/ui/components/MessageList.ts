@@ -49,7 +49,7 @@ type HistoryPromptMessage = BobbitMessage<AgentMessage> & {
 export interface HistoryPromptEligibilityContext {
 	canForkSource: boolean;
 	isStreaming: boolean;
-	newestDurableUserEntryId?: string;
+	currentStreamingUserEntryId?: string;
 }
 
 /** Fail closed unless this is a server-settled, transcript-confirmed user prompt. */
@@ -65,7 +65,7 @@ export function isEligibleHistoryPrompt(
 		|| candidate.entryId.length === 0
 		|| candidate.entryId.length > HISTORY_ENTRY_ID_MAX_LENGTH
 		|| candidate.entryId.trim() !== candidate.entryId) return false;
-	return !(context.isStreaming && candidate.entryId === context.newestDurableUserEntryId);
+	return !(context.isStreaming && candidate.entryId === context.currentStreamingUserEntryId);
 }
 
 function durableUserEntryId(message: BobbitMessage<AgentMessage>): string | undefined {
@@ -253,19 +253,22 @@ export class MessageList extends LitElement {
 		if (!current || (!changedProperties.has("messages")
 			&& !changedProperties.has("canForkSource")
 			&& !changedProperties.has("isStreaming"))) return;
-		const newestDurableUserEntryId = this._newestDurableUserEntryId();
+		const currentStreamingUserEntryId = this._currentStreamingUserEntryId();
 		const selected = this.messages.find((message) => durableUserEntryId(message) === current.entryId);
 		if (!selected || !isEligibleHistoryPrompt(selected, {
 			canForkSource: this.canForkSource,
 			isStreaming: this.isStreaming,
-			newestDurableUserEntryId,
+			currentStreamingUserEntryId,
 		})) this._closePromptActions();
 	}
 
-	private _newestDurableUserEntryId(): string | undefined {
+	private _currentStreamingUserEntryId(): string | undefined {
+		if (!this.isStreaming) return undefined;
 		for (let index = this.messages.length - 1; index >= 0; index--) {
-			const entryId = durableUserEntryId(this.messages[index]);
-			if (entryId) return entryId;
+			const message = this.messages[index];
+			// The final accountable row is the current turn. Do not scan past an
+			// optimistic or id-less row and misclassify the prior durable prompt.
+			if (isAccountablePromptMessage(message)) return durableUserEntryId(message);
 		}
 		return undefined;
 	}
@@ -330,7 +333,7 @@ export class MessageList extends LitElement {
 		if (!selected || !isEligibleHistoryPrompt(selected, {
 			canForkSource: this.canForkSource,
 			isStreaming: this.isStreaming,
-			newestDurableUserEntryId: this._newestDurableUserEntryId(),
+			currentStreamingUserEntryId: this._currentStreamingUserEntryId(),
 		})) return;
 		if (this._openPromptActions?.entryId === entryId && this._openPromptActions.element.open) {
 			this._closePromptActions();
@@ -401,7 +404,7 @@ export class MessageList extends LitElement {
 		const items: Array<{ key: string; template: TemplateResult; eager?: boolean }> = [];
 		let i = 0;
 		const msgs = this.messages;
-		const newestDurableUserEntryId = this._newestDurableUserEntryId();
+		const currentStreamingUserEntryId = this._currentStreamingUserEntryId();
 
 		while (i < msgs.length) {
 			const msg = msgs[i];
@@ -492,7 +495,7 @@ export class MessageList extends LitElement {
 				const showPromptActions = isEligibleHistoryPrompt(msg, {
 					canForkSource: this.canForkSource,
 					isStreaming: this.isStreaming,
-					newestDurableUserEntryId,
+					currentStreamingUserEntryId,
 				});
 				items.push({
 					key: keyFor(msg),

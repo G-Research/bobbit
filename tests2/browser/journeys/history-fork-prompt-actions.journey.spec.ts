@@ -21,6 +21,7 @@ import {
 	waitForSessionStatus,
 } from "../_helpers/journey-fixture.js";
 import { agentEndPredicate, connectWs } from "../e2e-setup.js";
+import { sendMessage } from "../../../tests/e2e/ui/ui-helpers.js";
 
 const RETAINED = "HISTORY_FORK_RETAINED_ALPHA";
 const SELECTED = [
@@ -29,6 +30,7 @@ const SELECTED = [
 	"preserve this final line",
 ].join("\n");
 const LATER = "HISTORY_FORK_LATER_CHARLIE";
+const IN_FLIGHT = "HISTORY_FORK_IN_FLIGHT_DELTA";
 const TOOLTIP = "The new session will include the conversation up to, but not including, this prompt.";
 
 async function sendPromptAndWait(sessionId: string, text: string): Promise<void> {
@@ -204,6 +206,19 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sourceId}`);
 			await expectSourceHistory(page);
+
+			// A real later turn keeps the immediately preceding durable prompt
+			// actionable while its optimistic/id-less user row is in flight.
+			await sendMessage(page, `STAY_BUSY:4000 ${IN_FLIGHT}`);
+			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 20_000 });
+			await expect(promptRow(page, IN_FLIGHT)).toBeVisible({ timeout: 10_000 });
+			await expect(promptTrigger(page, IN_FLIGHT)).toHaveCount(0);
+			await expect(promptTrigger(page, LATER)).toBeVisible();
+			await openPromptActions(page, LATER);
+			await page.keyboard.press("Escape");
+			await expect(popover(page)).toHaveCount(0);
+			await waitForSessionStatus(sourceId, "idle", 20_000);
+
 			await page.route(`**/api/sessions/${sourceId}/fork`, async route => {
 				if (route.request().method() !== "POST") return route.fallback();
 				requests.push(route.request().postDataJSON());

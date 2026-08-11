@@ -115,7 +115,7 @@ function menuLabels(popover: ParentNode): string[] {
 describe("history prompt eligibility", () => {
 	it("fails closed across the role, provenance, cursor, forkability, pending, and current-turn matrix", () => {
 		const eligible = durablePrompt("entry-eligible");
-		const context = { canForkSource: true, isStreaming: false, newestDurableUserEntryId: "entry-newest" };
+		const context = { canForkSource: true, isStreaming: false, currentStreamingUserEntryId: "entry-newest" };
 		expect(isEligibleHistoryPrompt(eligible, context)).toBe(true);
 
 		const ineligible = [
@@ -140,12 +140,12 @@ describe("history prompt eligibility", () => {
 		expect(isEligibleHistoryPrompt(eligible, {
 			...context,
 			isStreaming: true,
-			newestDurableUserEntryId: eligible.entryId,
+			currentStreamingUserEntryId: eligible.entryId,
 		})).toBe(false);
 		expect(isEligibleHistoryPrompt(eligible, {
 			...context,
 			isStreaming: true,
-			newestDurableUserEntryId: "later-entry",
+			currentStreamingUserEntryId: "later-entry",
 		})).toBe(true);
 	});
 
@@ -173,6 +173,51 @@ describe("history prompt eligibility", () => {
 		document.body.innerHTML = "";
 		const nonForkable = await renderList([durablePrompt("archived-source")], { canForkSource: false });
 		expect(promptTriggers(nonForkable)).toHaveLength(0);
+	});
+
+	it.each([
+		["optimistic", durablePrompt("current-optimistic", "current optimistic", { _origin: "optimistic" })],
+		["id-less server", durablePrompt("current-idless", "current id-less server", { entryId: undefined })],
+	] as const)("keeps the prior durable prompt actionable for an %s current row", async (_kind, current) => {
+		const prior = durablePrompt("prior-durable");
+		const list = await renderList([prior]);
+		const initialTrigger = promptTriggers(list)[0];
+		const initialPopover = await openPromptMenu(initialTrigger);
+
+		list.messages = [prior, current];
+		list.isStreaming = true;
+		await list.updateComplete;
+		await settle();
+
+		const [priorTrigger] = promptTriggers(list);
+		expect(promptTriggers(list)).toHaveLength(1);
+		expect(priorTrigger.closest("user-message")?.textContent).toContain("prior-durable");
+		expect(initialPopover.isConnected).toBe(true);
+		expect(initialPopover.querySelector("[role='menu']")).toBeTruthy();
+
+		priorTrigger.click();
+		await settle();
+		expect(document.body.querySelector("sidebar-actions-popover")).toBeNull();
+		const reopened = await openPromptMenu(promptTriggers(list)[0]);
+		expect(actionRow(reopened, "history-fork")).toBeTruthy();
+	});
+
+	it("excludes only a trusted durable current row while streaming and restores it when settled", async () => {
+		const prior = durablePrompt("prior-trusted");
+		const current = durablePrompt("current-trusted");
+		const list = await renderList([prior, current], { isStreaming: true });
+
+		expect(promptTriggers(list)).toHaveLength(1);
+		expect(promptTriggers(list)[0].closest("user-message")?.textContent).toContain("prior-trusted");
+		const popover = await openPromptMenu(promptTriggers(list)[0]);
+
+		list.isStreaming = false;
+		await list.updateComplete;
+		await settle();
+
+		expect(promptTriggers(list)).toHaveLength(2);
+		expect(promptTriggers(list)[1].closest("user-message")?.textContent).toContain("current-trusted");
+		expect(popover.isConnected).toBe(true);
 	});
 });
 
