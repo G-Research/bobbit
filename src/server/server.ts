@@ -14299,7 +14299,7 @@ async function handleApiRoute(
 						copySkillSidecarForTranscript(
 							sourceId,
 							forkId,
-							historyMaterialization!.retainedUserEntries,
+							historyMaterialization!.retainedEntryIds,
 						))) {
 						throw new Error("failed to copy filtered skill sidecar");
 					}

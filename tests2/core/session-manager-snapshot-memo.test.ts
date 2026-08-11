@@ -15,12 +15,15 @@ import {
 } from "../../src/server/agent/compaction-sidecar.ts";
 import {
 	SessionManager,
+	preparePromptAuthorDispatch,
 	prepareVisibleAgentEvent,
 } from "../../src/server/agent/session-manager.ts";
 import { correlateTranscriptPromptEntryIds } from "../../src/server/agent/visible-message-snapshot.ts";
 import {
+	appendIdentifiedSkillSidecarEntry,
 	appendSkillSidecarEntry,
 	initSkillSidecarDir,
+	readSkillSidecarEntries,
 } from "../../src/server/skills/skill-sidecar.ts";
 import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
 
@@ -281,6 +284,91 @@ describe("SessionManager snapshot memo", () => {
 			_entryIdSource: "pi-transcript",
 		});
 		expect(messages[0]).not.toHaveProperty("_entryIdSource");
+	});
+
+	it("binds a settled skill record to its aligned authoritative Pi cursor without a connected client", async () => {
+		const messages = [
+			{ id: "inner-user", role: "user", content: "expanded prompt" },
+			{ id: "inner-answer", role: "assistant", content: "answer" },
+		];
+		const entries = [
+			userEntry("pi-user", null, "expanded prompt"),
+			assistantEntry("pi-answer", "pi-user"),
+		];
+		const getMessages = vi.fn(async () => ({ success: true, data: messages }));
+		const getCursors = vi.fn(async () => ({ success: true, data: {
+			entries,
+			leafId: "pi-answer",
+			forkMessages: [{ entryId: "pi-user", text: "expanded prompt" }],
+		} }));
+		const value = manager();
+		const live = session(getMessages, getCursors);
+		value.sessions.set(live.id, live);
+		const recordId = appendIdentifiedSkillSidecarEntry(live.id, {
+			ts: 1,
+			modelText: "expanded prompt",
+			originalText: "/fixture",
+			skillExpansions: [],
+		});
+		assert.ok(recordId);
+		live.pendingSkillExpansions = [{
+			recordId,
+			modelText: "expanded prompt",
+			originalText: "/fixture",
+			skillExpansions: [],
+		}];
+		preparePromptAuthorDispatch(live, "prompt-skill", "expanded prompt", "user", LOCAL_USER_AUTHOR, 1);
+		prepareVisibleAgentEvent(live, {
+			type: "message_end",
+			message: { id: "inner-user", role: "user", content: "expanded prompt" },
+		});
+		expect(live.pendingSkillTranscriptBindings).toHaveLength(1);
+
+		value.scheduleSettledPromptCursorRefresh(live);
+		await vi.waitFor(() => expect(readSkillSidecarEntries(live.id)[0]).toMatchObject({
+			recordId,
+			transcriptEntryId: "pi-user",
+		}));
+		expect(live.clients.size).toBe(0);
+	});
+
+	it("leaves a timestamp-only skill occurrence unbound when the authoritative snapshot is ambiguous", async () => {
+		const messages = [
+			{ role: "user", content: "duplicate", timestamp: 7 },
+			{ role: "user", content: "duplicate", timestamp: 7 },
+		];
+		const entries = [
+			userEntry("pi-first", null, "duplicate"),
+			userEntry("pi-second", "pi-first", "duplicate"),
+		];
+		const getCursors = vi.fn(async () => ({ success: true, data: {
+			entries,
+			leafId: "pi-second",
+			forkMessages: [
+				{ entryId: "pi-first", text: "duplicate" },
+				{ entryId: "pi-second", text: "duplicate" },
+			],
+		} }));
+		const value = manager();
+		const live = session(async () => ({ success: true, data: messages }), getCursors);
+		value.sessions.set(live.id, live);
+		const recordId = appendIdentifiedSkillSidecarEntry(live.id, {
+			ts: 1, modelText: "duplicate", originalText: "/duplicate", skillExpansions: [],
+		});
+		assert.ok(recordId);
+		live.pendingSkillExpansions = [{
+			recordId, modelText: "duplicate", originalText: "/duplicate", skillExpansions: [],
+		}];
+		preparePromptAuthorDispatch(live, "prompt-ambiguous", "duplicate", "user", LOCAL_USER_AUTHOR, 1);
+		prepareVisibleAgentEvent(live, {
+			type: "message_end",
+			message: { role: "user", content: "duplicate", timestamp: 7 },
+		});
+
+		value.scheduleSettledPromptCursorRefresh(live);
+		await vi.waitFor(() => expect(getCursors).toHaveBeenCalledOnce());
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(readSkillSidecarEntries(live.id)[0]).not.toHaveProperty("transcriptEntryId");
 	});
 
 	it("schedules cursor enrichment only at the final agent lifecycle boundary", () => {

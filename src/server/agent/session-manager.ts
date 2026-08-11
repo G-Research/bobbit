@@ -4,6 +4,7 @@ import type { MessageAuthor } from "../../shared/message-author.js";
 import {
 	LOCAL_USER_AUTHOR,
 	isMessageAuthor,
+	isPiTranscriptEntryId,
 } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 export type { PromptSource } from "../../shared/prompt-source.js";
@@ -59,11 +60,17 @@ import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, rest
 import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
-import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
+import {
+	appendIdentifiedSkillSidecarEntry,
+	appendSkillSidecarTranscriptBinding,
+} from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
 	parseCompactionStartMs,
+	resolveCompactionTranscriptEntryId,
+	type CompactionSidecarEntry,
+	type TranscriptEntriesSnapshot,
 } from "./compaction-sidecar.js";
 import {
 	SessionStore,
@@ -909,13 +916,9 @@ export interface SessionInfo {
 	 * equals `modelText`, we splice the matching envelope onto the message:
 	 * rewrite `content` to `originalText` and attach `skillExpansions`.
 	 */
-	pendingSkillExpansions?: Array<{
-		modelText: string;
-		originalText: string;
-		skillExpansions: SkillExpansion[];
-		/** `@path` file-mention chips re-attached alongside skill expansions. */
-		fileMentions?: FileMention[];
-	}>;
+	pendingSkillExpansions?: PendingSkillSidecarEnvelope[];
+	/** Settled raw Pi occurrences awaiting an authoritative snapshot/cursor pair. */
+	pendingSkillTranscriptBindings?: PendingSkillTranscriptBinding[];
 	/** Repo path (cached from worktree provisioning). */
 	repoPath?: string;
 	/** Active branch name. Mirrors the persisted store; stable for the session's lifetime. */
@@ -977,6 +980,22 @@ interface MessageSnapshotBaseResponse {
 	data?: unknown;
 	error?: string;
 	cursorEntryIds?: readonly (string | undefined)[];
+}
+
+interface PendingSkillSidecarEnvelope {
+	modelText: string;
+	originalText: string;
+	skillExpansions: SkillExpansion[];
+	fileMentions?: FileMention[];
+	recordId?: string;
+	promptId?: string;
+}
+
+interface PendingSkillTranscriptBinding {
+	recordId: string;
+	promptId: string;
+	modelText: string;
+	messageIdentity: { id: string } | { timestamp: number };
 }
 
 /** Exact canonical bridge identity required by ownership-sensitive respawns. */
@@ -1092,6 +1111,10 @@ export function preparePromptAuthorDispatch(
 	};
 	if (!session.pendingPromptAuthors) session.pendingPromptAuthors = [];
 	session.pendingPromptAuthors.push(pending);
+	const skillEnvelope = session.pendingSkillExpansions?.find((entry) =>
+		entry.promptId === undefined && entry.modelText === baseModelText,
+	);
+	if (skillEnvelope) skillEnvelope.promptId = promptId;
 	// A newly accepted same-text occurrence supersedes only the live keyless
 	// terminal guard. Restore replay guards remain authoritative until replay ends.
 	session.lastKeylessPromptAuthorEnd = undefined;
@@ -1107,6 +1130,9 @@ export function preparePromptAuthorDispatch(
 function cancelPromptAuthorBinding(session: SessionInfo, promptId: string, now: number): void {
 	const idx = session.pendingPromptAuthors?.findIndex((record) => record.promptId === promptId) ?? -1;
 	if (idx !== -1) session.pendingPromptAuthors!.splice(idx, 1);
+	for (const envelope of session.pendingSkillExpansions ?? []) {
+		if (envelope.promptId === promptId) envelope.promptId = undefined;
+	}
 	void appendPromptAuthorSettlement(session.id, {
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
@@ -1581,6 +1607,33 @@ export function prepareVisibleAgentEvent(
 			...(typeof message.timestamp === "number" ? { messageTimestamp: message.timestamp } : {}),
 		});
 	}
+	const eventBinding = (prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
+	if (raw.type === "message_end" && eventBinding && !eventBinding.alreadySettled) {
+		const envelope = session.pendingSkillExpansions?.find((entry) =>
+			entry.promptId === eventBinding.promptId
+			&& entry.recordId !== undefined
+			&& entry.modelText === modelText,
+		);
+		const rawMessageId = typeof message.id === "string" && message.id.length > 0
+			? message.id
+			: undefined;
+		const messageIdentity = rawMessageId
+			? { id: rawMessageId }
+			: typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+				? { timestamp: message.timestamp }
+				: undefined;
+		if (envelope?.recordId && messageIdentity) {
+			if (!session.pendingSkillTranscriptBindings) session.pendingSkillTranscriptBindings = [];
+			if (!session.pendingSkillTranscriptBindings.some((binding) => binding.recordId === envelope.recordId)) {
+				session.pendingSkillTranscriptBindings.push({
+					recordId: envelope.recordId,
+					promptId: eventBinding.promptId,
+					modelText,
+					messageIdentity,
+				});
+			}
+		}
+	}
 	return prepared;
 }
 
@@ -1818,7 +1871,7 @@ export function isRetryableAgentEnd(event: unknown): boolean {
  *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
  *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }>; previousAssistantStreamMessage?: any }, truncated: unknown): void {
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: PendingSkillSidecarEnvelope[]; previousAssistantStreamMessage?: any }, truncated: unknown): void {
 	const normalizeStartedAt = performance.now();
 	const normalized = normalizeToolResultErrorEvent(truncated);
 	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
@@ -1972,7 +2025,7 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
  * the un-spliced (modelText) message — that is what the model has seen.
  */
 function spliceSkillExpansionsIntoEvent(
-	session: { pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> },
+	session: { pendingSkillExpansions?: PendingSkillSidecarEnvelope[] },
 	event: unknown,
 ): unknown {
 	const ev = event as any;
@@ -4557,7 +4610,7 @@ export class SessionManager {
 		const hasSkillExpansions = !!opts?.skillExpansions?.length;
 		const hasFileMentions = !!opts?.fileMentions?.length;
 		if (hasSkillExpansions || hasFileMentions) {
-			appendSkillSidecarEntry(sessionId, {
+			const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
 				ts: this.clock.now(),
 				modelText: dispatchText,
 				originalText: text,
@@ -4570,6 +4623,7 @@ export class SessionManager {
 				originalText: text,
 				skillExpansions: opts?.skillExpansions ?? [],
 				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+				...(recordId ? { recordId } : {}),
 			});
 		}
 		session.promptQueue.enqueue(dispatchText, {
@@ -4670,7 +4724,7 @@ export class SessionManager {
 				const hasSkillExpansions = !!opts?.skillExpansions?.length;
 				const hasFileMentions = !!opts?.fileMentions?.length;
 				if (hasSkillExpansions || hasFileMentions) {
-					appendSkillSidecarEntry(sessionId, {
+					const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
 						ts: this.clock.now(),
 						modelText: dispatchText,
 						originalText: text,
@@ -4683,6 +4737,7 @@ export class SessionManager {
 						originalText: text,
 						skillExpansions: opts?.skillExpansions ?? [],
 						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+						...(recordId ? { recordId } : {}),
 					});
 				}
 				rollback.promptQueue.enqueue(dispatchText, {
@@ -4798,7 +4853,7 @@ export class SessionManager {
 		const hasSkillExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
 		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
 		if (hasSkillExpansions || hasFileMentions) {
-			appendSkillSidecarEntry(session.id, {
+			const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
 				ts: this.clock.now(),
 				modelText: dispatchText,
 				originalText: text,
@@ -4814,6 +4869,7 @@ export class SessionManager {
 				originalText: text,
 				skillExpansions: opts?.skillExpansions ?? [],
 				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+				...(recordId ? { recordId } : {}),
 			});
 		}
 
@@ -5993,33 +6049,37 @@ export class SessionManager {
 					startedAtMs,
 					trigger: reason === "overflow" ? "overflow" as const : "auto" as const,
 					compactionId: makeCompactionId(startedAtMs),
+					rpcClient: session.rpcClient,
+					baselinePromise: this.readCompactionTranscriptEntries(session.rpcClient),
 				};
 			}
 		} else if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
-			// `willRetry:true` means a successful overflow compaction completed and
-			// Pi will retry the surrounding agent turn. No later compaction_end is
-			// emitted, so completion must still persist and reach the client here.
+			// `willRetry:true` completes this compaction even though Pi retries the
+			// surrounding turn. Detach ownership now so duplicate end events cannot
+			// append a second card while the authoritative tree read is pending.
 			session.isCompacting = false;
-			const pending = (session as any)._pendingCompactionStart as
-				| { startedAtMs: number; trigger: "auto" | "overflow"; compactionId: string }
-				| undefined;
 			const reason = (event as any).reason;
-			// Manual path is handled in ws/handler.ts. Auto/overflow path writes
-			// the sidecar here from the upstream CompactionResult.
-			if (reason !== "manual" && pending) {
-				const endedAtMs = this.clock.now();
-				const result = (event as any).result as
-					| { tokensBefore?: number; firstKeptEntryId?: string }
+			const aborted = !!(event as any).aborted;
+			const errorMessage = (event as any).errorMessage as string | undefined;
+			const result = (event as any).result as
+				| { summary?: string; tokensBefore?: number; firstKeptEntryId?: string }
+				| undefined;
+			if (reason !== "manual") {
+				const pending = (session as any)._pendingCompactionStart as
+					| {
+						startedAtMs: number;
+						trigger: "auto" | "overflow";
+						compactionId: string;
+						rpcClient: SessionInfo["rpcClient"];
+						baselinePromise: Promise<TranscriptEntriesSnapshot | undefined>;
+					}
 					| undefined;
-				const aborted = !!(event as any).aborted;
-				const errorMessage = (event as any).errorMessage as string | undefined;
-				const success = !!result && !aborted && !errorMessage;
-				try {
-					// Append the sidecar SYNCHRONOUSLY before refreshAfterCompaction
-					// so the post-compaction snapshot (and the live card's affordance
-					// fetch) see the orphan boundary immediately. Reuse the start-time
-					// compactionId so it matches the id we broadcast on the end event.
-					appendCompactionSidecarEntry(session.id, {
+				(session as any)._pendingCompactionStart = undefined;
+				if (pending) {
+					const endedAtMs = this.clock.now();
+					const success = !!result && !aborted && !errorMessage;
+					if (success) (event as any).compactionId = pending.compactionId;
+					const entry: CompactionSidecarEntry = {
 						schemaVersion: 1,
 						id: pending.compactionId,
 						trigger: pending.trigger,
@@ -6031,68 +6091,57 @@ export class SessionManager {
 						success,
 						error: success ? undefined : (errorMessage || (aborted ? "aborted" : "compaction failed")),
 						firstKeptEntryId: result?.firstKeptEntryId ?? null,
-					});
-				} catch (err) {
-					console.warn(`[session-manager] Failed to append compaction sidecar for ${session.id}:`, err);
+					};
+					(session as any)._compactionFinalization = this.finalizeCompactionSidecar(
+						session,
+						pending.rpcClient,
+						pending.baselinePromise,
+						entry,
+						result,
+						!aborted,
+					);
 				}
-				// Stamp the broadcast end-event with the shared compactionId so the
-				// client stamps its live `compact_active` card with it (the card the
-				// user is looking at then mounts the affordance immediately). The
-				// event object is forwarded to clients verbatim by emitSessionEvent
-				// after this handler returns. Only when the compaction succeeded —
-				// a failed compaction has no orphan boundary to recover.
-				if (success) (event as any).compactionId = pending.compactionId;
-			}
-			// Manual path: ws/handler.ts stashes the shared compactionId on the
-			// session synchronously before the RPC. The agent emits this manual
-			// `compaction_end` BEFORE the RPC promise resolves in ws/handler.ts,
-			// and we call refreshAfterCompaction() below. If we waited for the
-			// ws-handler's post-RPC append, that snapshot would lack the persisted
-			// sidecar anchor and the live card would stay positive-ordered (sorts
-			// after the preserved tail). So write the SUCCESS sidecar row HERE,
-			// synchronously, before refreshAfterCompaction — using the stashed
-			// compactionId and this event's result payload. ws/handler.ts still
-			// owns the FAILURE append (when the RPC rejects without ever emitting a
-			// successful compaction_end), and skips its own success append via the
-			// `_manualSidecarWritten` marker so we don't double-write.
-			if (reason === "manual") {
+			} else {
 				const manualId = (session as any)._manualCompactionId as string | undefined;
-				const manualAborted = !!(event as any).aborted;
-				const manualError = (event as any).errorMessage as string | undefined;
-				const manualResult = (event as any).result as
-					| { tokensBefore?: number; firstKeptEntryId?: string }
+				const baselinePromise = (session as any)._manualCompactionBaselinePromise as
+					| Promise<TranscriptEntriesSnapshot | undefined>
 					| undefined;
-				const manualSuccess = !!manualId && !manualAborted && !manualError && !!manualResult;
-				if (manualId && !manualAborted) (event as any).compactionId = manualId;
-				if (manualId && manualSuccess) {
+				const manualRpcClient = (session as any)._manualCompactionRpcClient as
+					| SessionInfo["rpcClient"]
+					| undefined;
+				(session as any)._manualCompactionId = undefined;
+				(session as any)._manualCompactionRpcClient = undefined;
+				(session as any)._manualCompactionBaselinePromise = undefined;
+				const success = !!manualId && !!result && !aborted && !errorMessage;
+				if (manualId && !aborted) (event as any).compactionId = manualId;
+				if (manualId && success) {
 					const endedAtMs = this.clock.now();
 					const startedAtMs = parseCompactionStartMs(manualId) ?? endedAtMs;
-					try {
-						const wrote = appendCompactionSidecarEntry(session.id, {
-							schemaVersion: 1,
-							id: manualId,
-							trigger: "manual",
-							tokensBefore: manualResult?.tokensBefore ?? null,
-							tokensAfter: null,
-							durationMs: Math.max(0, endedAtMs - startedAtMs),
-							startedAt: new Date(startedAtMs).toISOString(),
-							endedAt: new Date(endedAtMs).toISOString(),
-							success: true,
-							firstKeptEntryId: manualResult?.firstKeptEntryId ?? null,
-						});
-						// Tell ws/handler.ts not to append a duplicate success row — but
-						// ONLY if our append actually succeeded. On failure leave the
-						// marker unset so the ws/handler.ts fallback can append the row
-						// when the RPC resolves (otherwise the sidecar boundary is lost).
-						if (wrote) (session as any)._manualSidecarWritten = manualId;
-					} catch (err) {
-						console.warn(`[session-manager] Failed to append manual compaction sidecar for ${session.id}:`, err);
-					}
+					const entry: CompactionSidecarEntry = {
+						schemaVersion: 1,
+						id: manualId,
+						trigger: "manual",
+						tokensBefore: result?.tokensBefore ?? null,
+						tokensAfter: null,
+						durationMs: Math.max(0, endedAtMs - startedAtMs),
+						startedAt: new Date(startedAtMs).toISOString(),
+						endedAt: new Date(endedAtMs).toISOString(),
+						success: true,
+						firstKeptEntryId: result?.firstKeptEntryId ?? null,
+					};
+					(session as any)._compactionFinalization = this.finalizeCompactionSidecar(
+						session,
+						manualRpcClient ?? session.rpcClient,
+						baselinePromise ?? Promise.resolve(undefined),
+						entry,
+						result,
+						true,
+						manualId,
+					);
+				} else if (!aborted) {
+					void this.refreshAfterCompaction(session);
 				}
-				(session as any)._manualCompactionId = undefined;
 			}
-			(session as any)._pendingCompactionStart = undefined;
-			if (!(event as any).aborted) this.refreshAfterCompaction(session);
 		} else if (event.type === "process_exit") {
 			session.streamingStartedAt = undefined;
 			this.resolveStoreForSession(session.id).update(session.id, {
@@ -7301,6 +7350,50 @@ export class SessionManager {
 		emitSessionEvent(session, truncateLargeToolContent(event));
 	}
 
+	private async readCompactionTranscriptEntries(
+		rpcClient: SessionInfo["rpcClient"],
+	): Promise<TranscriptEntriesSnapshot | undefined> {
+		if (typeof rpcClient.getTranscriptEntries !== "function") return undefined;
+		try {
+			const response = await rpcClient.getTranscriptEntries();
+			return response?.success ? response.data as TranscriptEntriesSnapshot : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async finalizeCompactionSidecar(
+		session: SessionInfo,
+		rpcClient: SessionInfo["rpcClient"],
+		baselinePromise: Promise<TranscriptEntriesSnapshot | undefined>,
+		entry: CompactionSidecarEntry,
+		result: { summary?: string; tokensBefore?: number; firstKeptEntryId?: string } | undefined,
+		refresh: boolean,
+		manualId?: string,
+	): Promise<void> {
+		const baseline = await baselinePromise.catch(() => undefined);
+		const post = await this.readCompactionTranscriptEntries(rpcClient);
+		if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+		let transcriptCompactionEntryId: string | undefined;
+		if (baseline && post
+			&& typeof result?.summary === "string"
+			&& typeof result.firstKeptEntryId === "string"
+			&& typeof result.tokensBefore === "number"
+			&& Number.isFinite(result.tokensBefore)) {
+			transcriptCompactionEntryId = resolveCompactionTranscriptEntryId(baseline, post, {
+				summary: result.summary,
+				firstKeptEntryId: result.firstKeptEntryId,
+				tokensBefore: result.tokensBefore,
+			});
+		}
+		const wrote = appendCompactionSidecarEntry(session.id, {
+			...entry,
+			...(transcriptCompactionEntryId ? { transcriptCompactionEntryId } : {}),
+		});
+		if (manualId && wrote) (session as any)._manualSidecarWritten = manualId;
+		if (refresh) await this.refreshAfterCompaction(session);
+	}
+
 	/**
 	 * Pi emits id-less message events before its append step. After the final
 	 * agent_end, schedule one authoritative read-only snapshot behind the current
@@ -7309,16 +7402,45 @@ export class SessionManager {
 	 * emitting a second user message.
 	 */
 	private scheduleSettledPromptCursorRefresh(session: SessionInfo): void {
-		if (session.clients.size === 0
-			|| typeof session.rpcClient.getTranscriptCursorSnapshot !== "function") return;
+		if (typeof session.rpcClient.getTranscriptCursorSnapshot !== "function"
+			|| (session.clients.size === 0 && !session.pendingSkillTranscriptBindings?.length)) return;
 		const rpcClient = session.rpcClient;
 		queueMicrotask(() => {
 			if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+			const pendingBindings = session.pendingSkillTranscriptBindings?.splice(0) ?? [];
 			void this.getMessagesSnapshotBase(session).then((response) => {
 				if (!response.success || response.data === undefined) return;
 				if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
-				const data = this.buildVisibleMessageSnapshot(session.id, response.data);
-				broadcast(session.clients, { type: "messages", data: data as unknown[] });
+				const messages = Array.isArray(response.data)
+					? response.data
+					: response.data && typeof response.data === "object" && Array.isArray((response.data as any).messages)
+						? (response.data as any).messages
+						: undefined;
+				if (messages && response.cursorEntryIds) {
+					for (const binding of pendingBindings) {
+						const matches: number[] = [];
+						for (let index = 0; index < messages.length; index++) {
+							const message = messages[index];
+							if (!message || typeof message !== "object"
+								|| (message.role !== "user" && message.role !== "user-with-attachments")
+								|| extractUserMessageText(message) !== binding.modelText) continue;
+							if ("id" in binding.messageIdentity) {
+								if (message.id === binding.messageIdentity.id) matches.push(index);
+							} else if (typeof message.id !== "string"
+								&& message.timestamp === binding.messageIdentity.timestamp) {
+								matches.push(index);
+							}
+						}
+						if (matches.length !== 1) continue;
+						const transcriptEntryId = response.cursorEntryIds[matches[0]];
+						if (!isPiTranscriptEntryId(transcriptEntryId)) continue;
+						appendSkillSidecarTranscriptBinding(session.id, binding.recordId, transcriptEntryId);
+					}
+				}
+				if (session.clients.size > 0) {
+					const data = this.buildVisibleMessageSnapshot(session.id, response.data);
+					broadcast(session.clients, { type: "messages", data: data as unknown[] });
+				}
 			}).catch((error) => {
 				console.warn(`[session-manager] Failed to refresh settled prompt cursors for ${session.id}:`, error);
 			});

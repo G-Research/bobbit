@@ -21,10 +21,20 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { isPiTranscriptEntryId } from "../../shared/message-author.js";
 import type { SkillExpansion } from "./resolve-skill-expansions.js";
 import type { FileMention } from "./resolve-file-mentions.js";
 
+const SKILL_RECORD_ID_PREFIX = "skill:v1:";
+
 export interface SkillSidecarEntry {
+	/** Additive schema marker. Legacy records without it remain readable. */
+	schemaVersion?: 1;
+	/** Bobbit-local identity. It is deliberately distinct from Pi's transcript id. */
+	recordId?: string;
+	/** Authoritative Pi message-entry identity, populated only after settlement. */
+	transcriptEntryId?: string;
 	/** Unix epoch (ms) at the moment the user message was persisted. */
 	ts: number;
 	/** What the agent saw. Used as a lookup key against the persisted message body. */
@@ -39,6 +49,24 @@ export interface SkillSidecarEntry {
 	 * carrying only file mentions (no skill expansions) round-trip correctly.
 	 */
 	fileMentions?: FileMention[];
+}
+
+interface SkillSidecarBindingRecord {
+	schemaVersion: 1;
+	type: "transcript-binding";
+	recordId: string;
+	transcriptEntryId: string;
+}
+
+function isSkillRecordId(value: unknown): value is string {
+	return typeof value === "string"
+		&& value.startsWith(SKILL_RECORD_ID_PREFIX)
+		&& value.length <= 128
+		&& value === value.trim();
+}
+
+export function makeSkillSidecarRecordId(): string {
+	return `${SKILL_RECORD_ID_PREFIX}${randomUUID()}`;
 }
 
 let _sidecarDir: string | undefined;
@@ -83,6 +111,41 @@ export function appendSkillSidecarEntry(sessionId: string, entry: SkillSidecarEn
 	}
 }
 
+/** Stage a newly-written record with a versioned Bobbit-local identity. */
+export function appendIdentifiedSkillSidecarEntry(
+	sessionId: string,
+	entry: Omit<SkillSidecarEntry, "schemaVersion" | "recordId" | "transcriptEntryId">,
+): string | undefined {
+	const recordId = makeSkillSidecarRecordId();
+	return appendSkillSidecarEntry(sessionId, { ...entry, schemaVersion: 1, recordId })
+		? recordId
+		: undefined;
+}
+
+/** Append-only authoritative binding. A fork observes either unbound or proven data. */
+export function appendSkillSidecarTranscriptBinding(
+	sessionId: string,
+	recordId: string,
+	transcriptEntryId: string,
+): boolean {
+	if (!isSkillRecordId(recordId) || !isPiTranscriptEntryId(transcriptEntryId)) return false;
+	const file = sidecarPath(sessionId);
+	if (!file) return false;
+	try {
+		const binding: SkillSidecarBindingRecord = {
+			schemaVersion: 1,
+			type: "transcript-binding",
+			recordId,
+			transcriptEntryId,
+		};
+		fs.appendFileSync(file, JSON.stringify(binding) + "\n", "utf-8");
+		return true;
+	} catch (err) {
+		console.warn(`[skill-sidecar] Binding append failed for session ${sessionId}:`, err);
+		return false;
+	}
+}
+
 /** Read all entries for a session. Empty array on any failure (backward compat). */
 export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] {
 	const file = sidecarPath(sessionId);
@@ -91,137 +154,97 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 		if (!fs.existsSync(file)) return [];
 		const raw = fs.readFileSync(file, "utf-8");
 		const out: SkillSidecarEntry[] = [];
+		const bindings = new Map<string, string | null>();
+		const recordCounts = new Map<string, number>();
 		for (const line of raw.split(/\r?\n/)) {
 			const trimmed = line.trim();
 			if (!trimmed) continue;
 			try {
-				const parsed = JSON.parse(trimmed) as SkillSidecarEntry;
+				const parsed = JSON.parse(trimmed) as SkillSidecarEntry | SkillSidecarBindingRecord;
+				if ((parsed as SkillSidecarBindingRecord)?.type === "transcript-binding") {
+					const binding = parsed as SkillSidecarBindingRecord;
+					if (binding.schemaVersion !== 1
+						|| !isSkillRecordId(binding.recordId)
+						|| !isPiTranscriptEntryId(binding.transcriptEntryId)) continue;
+					const existing = bindings.get(binding.recordId);
+					bindings.set(binding.recordId,
+						existing === undefined || existing === binding.transcriptEntryId
+							? binding.transcriptEntryId
+							: null);
+					continue;
+				}
+				const entry = parsed as SkillSidecarEntry;
 				// Accept entries with skillExpansions OR fileMentions (either may be
 				// absent now that file mentions can be persisted without skills).
 				if (
-					parsed &&
-					typeof parsed.modelText === "string" &&
-					(Array.isArray(parsed.skillExpansions) || Array.isArray(parsed.fileMentions))
+					entry &&
+					typeof entry.modelText === "string" &&
+					(Array.isArray(entry.skillExpansions) || Array.isArray(entry.fileMentions))
 				) {
-					out.push(parsed);
+					const {
+						recordId: candidateRecordId,
+						transcriptEntryId: candidateTranscriptEntryId,
+						...legacyFields
+					} = entry;
+					const normalized: SkillSidecarEntry = {
+						...legacyFields,
+						...(isSkillRecordId(candidateRecordId) ? { recordId: candidateRecordId } : {}),
+						...(isPiTranscriptEntryId(candidateTranscriptEntryId)
+							? { transcriptEntryId: candidateTranscriptEntryId }
+							: {}),
+					};
+					out.push(normalized);
+					if (normalized.recordId) {
+						recordCounts.set(normalized.recordId, (recordCounts.get(normalized.recordId) ?? 0) + 1);
+					}
 				}
 			} catch { /* skip malformed line */ }
 		}
-		return out;
+		return out.map((entry) => {
+			const withoutTranscriptIdentity = (): SkillSidecarEntry => {
+				const { transcriptEntryId: _untrusted, ...rest } = entry;
+				return rest;
+			};
+			if (!entry.recordId || recordCounts.get(entry.recordId) !== 1) {
+				return entry.transcriptEntryId === undefined ? entry : withoutTranscriptIdentity();
+			}
+			const appended = bindings.get(entry.recordId);
+			if (appended === null) return withoutTranscriptIdentity();
+			if (appended !== undefined
+				&& entry.transcriptEntryId !== undefined
+				&& entry.transcriptEntryId !== appended) {
+				return withoutTranscriptIdentity();
+			}
+			return appended === undefined ? entry : { ...entry, transcriptEntryId: appended };
+		});
 	} catch (err) {
 		console.warn(`[skill-sidecar] Read failed for session ${sessionId}:`, err);
 		return [];
 	}
 }
 
-/** Minimal structural contract accepted from the transcript materializer. */
-export interface RetainedUserTranscriptEntry {
-	entry: Record<string, unknown>;
-}
-
-const SIDECAR_CORRELATION_TOLERANCE_MS = 2_000;
-
-function epochMilliseconds(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (typeof value !== "string" || value.length === 0) return undefined;
-	const numeric = Number(value);
-	if (Number.isFinite(numeric)) return numeric;
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function retainedPromptCandidate(
-	record: RetainedUserTranscriptEntry,
-): { modelText: string; timestamp?: number } | undefined {
-	const envelope = record?.entry;
-	if (!envelope || envelope.type !== "message") return undefined;
-	const message = envelope.message;
-	if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
-	const prompt = message as Record<string, unknown>;
-	if (prompt.role !== "user" && prompt.role !== "user-with-attachments") return undefined;
-
-	let modelText: string | undefined;
-	if (typeof prompt.content === "string") {
-		modelText = prompt.content;
-	} else if (Array.isArray(prompt.content)) {
-		const parts: string[] = [];
-		let hasToolResult = false;
-		for (const block of prompt.content) {
-			if (!block || typeof block !== "object" || Array.isArray(block)) continue;
-			const value = block as Record<string, unknown>;
-			if (value.type === "tool_result" || value.type === "toolResult") hasToolResult = true;
-			if (value.type === "text" && typeof value.text === "string") parts.push(value.text);
-		}
-		if (hasToolResult) return undefined;
-		modelText = parts.join("");
-	}
-	if (modelText === undefined) return undefined;
-	return {
-		modelText,
-		timestamp:
-			epochMilliseconds(envelope.timestamp)
-			?? epochMilliseconds(envelope.ts)
-			?? epochMilliseconds(prompt.timestamp)
-			?? epochMilliseconds(prompt.ts),
-	};
-}
-
 /**
- * Copy only skill/file-mention records proven to belong to retained transcript
- * prompts. Matching is occurrence-aware: timestamp-qualified exact-text
- * matches reserve their sidecar occurrence first, then remaining duplicates
- * use the same exact-text FIFO fallback as snapshot replay.
+ * Copy only records carrying a proven Pi identity that survives the history
+ * cut. Text, time, physical sidecar order, and legacy FIFO are intentionally
+ * irrelevant here; they remain source-display compatibility mechanisms only.
  */
 export function copySkillSidecarForTranscript(
 	fromSessionId: string,
 	toSessionId: string,
-	retainedUserEntries: readonly RetainedUserTranscriptEntry[],
+	retainedEntryIds: ReadonlySet<string>,
 ): boolean {
 	const target = sidecarPath(toSessionId);
 	if (!target) return false;
 	try {
-		const sourceEntries = readSkillSidecarEntries(fromSessionId);
-		const candidates = retainedUserEntries
-			.map(retainedPromptCandidate)
-			.filter((candidate): candidate is { modelText: string; timestamp?: number } => !!candidate);
-		const consumed = new Set<number>();
-		const retainedIndexes = new Set<number>();
-		const unresolved: Array<{ modelText: string; timestamp?: number }> = [];
-
-		// Timestamp matches run first so an earlier same-text branch occurrence
-		// cannot consume a later retained prompt's precise sidecar record.
-		for (const candidate of candidates) {
-			if (candidate.timestamp === undefined) {
-				unresolved.push(candidate);
-				continue;
-			}
-			let index = -1;
-			let closestDelta = Number.POSITIVE_INFINITY;
-			for (let entryIndex = 0; entryIndex < sourceEntries.length; entryIndex++) {
-				const entry = sourceEntries[entryIndex];
-				if (consumed.has(entryIndex) || entry.modelText !== candidate.modelText) continue;
-				const delta = Math.abs(entry.ts - candidate.timestamp);
-				if (delta > SIDECAR_CORRELATION_TOLERANCE_MS || delta >= closestDelta) continue;
-				index = entryIndex;
-				closestDelta = delta;
-			}
-			if (index < 0) {
-				unresolved.push(candidate);
-				continue;
-			}
-			consumed.add(index);
-			retainedIndexes.add(index);
+		const candidates = readSkillSidecarEntries(fromSessionId).filter((entry) =>
+			isPiTranscriptEntryId(entry.transcriptEntryId)
+			&& retainedEntryIds.has(entry.transcriptEntryId),
+		);
+		const counts = new Map<string, number>();
+		for (const entry of candidates) {
+			counts.set(entry.transcriptEntryId!, (counts.get(entry.transcriptEntryId!) ?? 0) + 1);
 		}
-		for (const candidate of unresolved) {
-			const index = sourceEntries.findIndex((entry, entryIndex) =>
-				!consumed.has(entryIndex) && entry.modelText === candidate.modelText,
-			);
-			if (index < 0) continue;
-			consumed.add(index);
-			retainedIndexes.add(index);
-		}
-
-		const retained = sourceEntries.filter((_entry, index) => retainedIndexes.has(index));
+		const retained = candidates.filter((entry) => counts.get(entry.transcriptEntryId!) === 1);
 		if (retained.length === 0) {
 			try { fs.unlinkSync(target); } catch (error) {
 				if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;

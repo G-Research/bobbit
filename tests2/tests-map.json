@@ -2867,6 +2867,15 @@
       }
     },
     {
+      "path": "tests2/core/history-fork-sidecar-identities.test.ts",
+      "reason": "Core coverage for fail-closed Pi transcript identity binding and history filtering of skill, file-mention, and compaction sidecars while preserving Bobbit-local ids.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/prompt-history-actions.test.ts",
       "reason": "DOM coverage for eligible historic prompt filtering, canonical desktop/mobile actions, accessible help and toggle interactions, deduplicated dispatch, and exact visible prompt copying with clipboard feedback.",
       "execution": {
