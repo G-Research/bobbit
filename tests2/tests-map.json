@@ -2904,7 +2904,7 @@
     },
     {
       "path": "tests2/integration/history-fork-api.test.ts",
-      "reason": "Integration coverage for authoritative history-fork route validation, transcript and sidecar filtering, unchanged source state, flattened sandbox ownership, controlled fork/terminate FIFO races, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
+      "reason": "Integration coverage for authoritative history-fork route validation, transcript and sidecar filtering, unchanged source state, flattened sandbox ownership, controlled fork/session/project-delete FIFO races, borrower-first project teardown, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

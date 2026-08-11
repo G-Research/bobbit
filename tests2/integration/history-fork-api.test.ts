@@ -253,6 +253,24 @@ async function createTrackedSessionWithoutWorktree(cwd: string, projectId: strin
 	return sessions.add((await response.json()).id as string);
 }
 
+async function registerUntrackedFixtureProject(gateway: any, label: string): Promise<{ id: string; rootPath: string }> {
+	const rootPath = path.join(gateway.bobbitDir, `${label}-${randomUUID()}`);
+	fs.mkdirSync(rootPath, { recursive: true });
+	fixtureRoots.push(rootPath);
+	const response = await localApiFetch(gateway, "/api/projects", {
+		method: "POST",
+		body: JSON.stringify({
+			name: `${label}-${randomUUID()}`,
+			rootPath,
+			acceptCanonical: true,
+			__e2e_seed_skip__: true,
+		}),
+	});
+	expect(response.status, await response.clone().text()).toBe(201);
+	const project = await response.json();
+	return { id: project.id as string, rootPath };
+}
+
 function configureSandboxOwner(gateway: any, sessionId: string, name: string): {
 	root: string;
 	cwd: string;
@@ -856,6 +874,144 @@ test.describe("history fork API", () => {
 		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", destinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "proposal-drafts", destinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "tool-content", destinationId))).toBe(false);
+	});
+
+	test("project DELETE terminates a shared-worktree borrower before its owner and removes the owner worktree once", async ({ gateway }) => {
+		const project = await registerUntrackedFixtureProject(gateway, "project-delete-borrower-order");
+		const ownerId = await createTrackedSessionWithoutWorktree(project.rootPath, project.id);
+		const borrowerId = await createTrackedSessionWithoutWorktree(project.rootPath, project.id);
+		const ownerCoordinates = configureSandboxOwner(gateway, ownerId, `project-delete-${randomUUID()}`);
+		configureSandboxBorrower(gateway, borrowerId, ownerId, ownerCoordinates.cwd);
+
+		const manager = gateway.sessionManager;
+		const projectContexts = gateway.projectContextManager;
+		const registry = projectContexts.getRegistry();
+		const initialContext = projectContexts.getOrCreate(project.id);
+		expect(initialContext).toBeTruthy();
+		expect(registry.get(project.id)).toMatchObject({ id: project.id });
+
+		const originalTerminateSession = manager.terminateSession;
+		const originalSandboxManager = manager.sandboxManager;
+		const terminationOrder: string[] = [];
+		const removed: string[] = [];
+		let response: Response | undefined;
+		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		manager.terminateSession = async (sessionId: string) => {
+			terminationOrder.push(sessionId);
+			return originalTerminateSession.call(manager, sessionId);
+		};
+
+		try {
+			response = await localApiFetch(gateway, `/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" });
+		} finally {
+			manager.terminateSession = originalTerminateSession;
+			manager.sandboxManager = originalSandboxManager;
+			if (response?.status !== 200) {
+				await manager.terminateSession(borrowerId).catch(() => undefined);
+				await manager.terminateSession(ownerId).catch(() => undefined);
+				await localApiFetch(gateway, `/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" }).catch(() => undefined);
+			}
+		}
+
+		expect(response!.status, JSON.stringify(await responseJson(response!))).toBe(200);
+		expect(await response!.json()).toEqual({ ok: true });
+		expect(terminationOrder).toEqual([borrowerId, ownerId]);
+		expect(removed).toEqual([ownerCoordinates.branch]);
+		expect(manager.getSession(borrowerId)).toBeUndefined();
+		expect(manager.getSession(ownerId)).toBeUndefined();
+		expect(manager.getAllSessionsRaw().filter((session: any) => session.projectId === project.id)).toEqual([]);
+		expect(Array.from(projectContexts.all()).some((context: any) => context.project.id === project.id)).toBe(false);
+		expect(registry.get(project.id)).toBeUndefined();
+	});
+
+	test("history borrower registration wins the owner FIFO and makes concurrent project DELETE return a typed 409", async ({ gateway, scope }) => {
+		const project = await registerUntrackedFixtureProject(gateway, "project-delete-borrower-wins");
+		scope.trackProject(project.id);
+		const sourceId = await createTrackedSessionWithoutWorktree(project.rootPath, project.id);
+		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `project-delete-fork-wins-${randomUUID()}`);
+		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
+		const manager = gateway.sessionManager;
+		const source = manager.getSession(sourceId);
+		const projectContexts = gateway.projectContextManager;
+		const registry = projectContexts.getRegistry();
+		const initialContext = projectContexts.getOrCreate(project.id);
+		expect(initialContext).toBeTruthy();
+
+		const originalCreateSession = manager.createSession;
+		const originalLifecycle = manager.withSandboxWorktreeOwnerLifecycle;
+		const originalSandboxManager = manager.sandboxManager;
+		const originalSourceStop = source.rpcClient.stop;
+		const createEntered = deferred<void>();
+		const releaseCreate = deferred<void>();
+		const projectDeleteQueued = deferred<void>();
+		const removed: string[] = [];
+		let lifecycleCalls = 0;
+		let sourceStopCalls = 0;
+		let forkId = "";
+		let deletePromise: Promise<Response> | undefined;
+		let deleteResponse: Response | undefined;
+
+		manager.sandboxManager = { get: () => ({ removeWorktree: async (name: string) => { removed.push(name); } }) };
+		manager.withSandboxWorktreeOwnerLifecycle = function(ownerId: string, operation: () => Promise<unknown>) {
+			lifecycleCalls++;
+			if (lifecycleCalls === 2) projectDeleteQueued.resolve();
+			return originalLifecycle.call(this, ownerId, operation);
+		};
+		manager.createSession = async (...args: any[]) => {
+			createEntered.resolve();
+			await releaseCreate.promise;
+			args[0] = project.rootPath;
+			args[4] = { ...args[4], sandboxed: false };
+			const created = await originalCreateSession.apply(manager, args);
+			configureSandboxBorrower(gateway, created.id, sourceId, sourceCoordinates.cwd);
+			return created;
+		};
+		source.rpcClient.stop = async (...args: any[]) => {
+			sourceStopCalls++;
+			return originalSourceStop.apply(source.rpcClient, args);
+		};
+
+		try {
+			const forkPromise = historyFork(gateway, sourceId, "selected-user", false);
+			await createEntered.promise;
+			deletePromise = localApiFetch(gateway, `/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" });
+			await projectDeleteQueued.promise;
+			expect(lifecycleCalls).toBe(2);
+			expect(manager.getSession(sourceId)).toBe(source);
+
+			releaseCreate.resolve();
+			const forkResponse = await forkPromise;
+			expect(forkResponse.status, JSON.stringify(await responseJson(forkResponse))).toBe(201);
+			const fork = await forkResponse.json();
+			forkId = sessions.add(fork.id);
+			deleteResponse = await deletePromise;
+		} finally {
+			releaseCreate.resolve();
+			if (deletePromise && !deleteResponse) deleteResponse = await deletePromise.catch(() => undefined);
+			manager.createSession = originalCreateSession;
+			manager.withSandboxWorktreeOwnerLifecycle = originalLifecycle;
+			manager.sandboxManager = originalSandboxManager;
+			source.rpcClient.stop = originalSourceStop;
+		}
+
+		expect(deleteResponse!.status).toBe(409);
+		expect(await responseJson(deleteResponse!)).toMatchObject({ code: "SHARED_SANDBOX_WORKTREE_IN_USE" });
+		expect(sourceStopCalls).toBe(0);
+		expect(removed).toEqual([]);
+		expect(manager.getSession(sourceId)).toBe(source);
+		expect(manager.getPersistedSession(sourceId)).toMatchObject({ agentSessionFile: seeded.file });
+		expect(manager.getPersistedSession(sourceId)?.archived).not.toBe(true);
+		expect(manager.getSession(forkId)).toBeTruthy();
+		expect(manager.getPersistedSession(forkId)).toMatchObject({
+			projectId: project.id,
+			sandboxed: true,
+			borrowsWorktree: true,
+			borrowedWorktreeOwnerSessionId: sourceId,
+		});
+		expect(manager.resolveSandboxWorktreeOwnerSessionId(forkId)).toBe(sourceId);
+		expect(projectContexts.getOrCreate(project.id)).toBe(initialContext);
+		expect(registry.get(project.id)).toMatchObject({ id: project.id });
+		expect(sourceCoordinates.branch).toMatch(/^session\/project-delete-fork-wins-/);
 	});
 
 	test("new-worktree mode uses the established fresh branch lifecycle and preserves reattempt context", async ({ gateway }) => {
