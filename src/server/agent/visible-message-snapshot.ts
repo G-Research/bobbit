@@ -19,24 +19,30 @@ export interface VisibleMessageSnapshotContext {
 	inFlightSteerTexts?: readonly PersistedInFlightSteer[];
 }
 
-function stripUntrustedSnapshotAuthors(messages: any[]): any[] {
+function stripUntrustedSnapshotMetadata(messages: any[]): any[] {
 	let changed = false;
 	const stripped = messages.map((message) => {
-		if (!message || typeof message !== "object" || Array.isArray(message) || !("author" in message)) {
+		if (!message || typeof message !== "object" || Array.isArray(message)
+			|| (!("author" in message) && !("_entryIdSource" in message))) {
 			return message;
 		}
-		const { author: _untrustedAuthor, ...withoutAuthor } = message;
+		const {
+			author: _untrustedAuthor,
+			_entryIdSource: _untrustedEntryIdSource,
+			...withoutUntrustedMetadata
+		} = message;
 		changed = true;
-		return withoutAuthor;
+		return withoutUntrustedMetadata;
 	});
 	return changed ? stripped : messages;
 }
 
 function transformMessages(messages: any[], context: VisibleMessageSnapshotContext): any[] {
 	// Pi transcript rows are untrusted at this boundary. Remove even
-	// valid-looking author metadata before Bobbit adds its trusted live,
-	// compaction, and sidecar identities below.
-	const trustedBase = stripUntrustedSnapshotAuthors(messages);
+	// valid-looking Bobbit metadata before trusted compaction and sidecar
+	// projection below. A raw entryId may remain as a correlation input, but it
+	// gains provenance only from a transcript-confirmed author binding.
+	const trustedBase = stripUntrustedSnapshotMetadata(messages);
 	const authorBindings = readAuthorSidecar(context.sessionId);
 	const withInFlight = spliceInFlightSteers(
 		spliceInFlightMessage(trustedBase, context.latestMessageUpdate),
@@ -57,6 +63,7 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 			systemAuthor: context.systemAuthor,
 			agentDeps: context.agentDeps,
 		},
+		{ projectTranscriptEntryIds: true },
 	);
 	const truncated = truncateLargeToolContentInMessages(withAuthors);
 	const skillEntries = readSkillSidecarEntries(context.sessionId);

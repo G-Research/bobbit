@@ -10,7 +10,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
+import {
+	PI_TRANSCRIPT_ENTRY_ID_SOURCE,
+	isMessageAuthor,
+	isPiTranscriptEntryId,
+	type BobbitMessage,
+	type MessageAuthor,
+} from "../../shared/message-author.js";
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import { serverSecretsDir } from "../bobbit-dir.js";
 import { loadOrCreateCookieSigningKey } from "../auth/cookie-signing-key.js";
@@ -1097,6 +1103,14 @@ export function createPromptAuthorStreamCorrelation(
 	};
 }
 
+export interface MergeAuthorSidecarOptions {
+	/**
+	 * Expose a cursor only on transcript snapshot rows confirmed by a settled binding.
+	 * Opt-in keeps title/model and transcript-sanitizer projections unchanged.
+	 */
+	projectTranscriptEntryIds?: boolean;
+}
+
 /**
  * Correlate sidecar bindings before inference. Matching is global by phase so
  * an early legacy duplicate cannot consume a later row's exact id binding.
@@ -1105,7 +1119,8 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 	entries: PromptAuthorBinding[],
 	messages: T[],
 	context: NormalizeVisibleMessageContext = {},
-): Array<T & { author?: MessageAuthor }> {
+	options: MergeAuthorSidecarOptions = {},
+): Array<BobbitMessage<T>> {
 	if (!Array.isArray(messages)) return messages;
 	const directPromptBindings = entries
 		.filter((entry) => isPromptAuthorBinding(entry) && entry.settlement?.outcome !== "cancelled")
@@ -1186,10 +1201,22 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		authored = messages.map((row, index) => {
 			const binding = assignments.get(index);
 			if (!binding) return row;
-			const projected = projectCorrelatedPromptMessage(
+			let projected: T & Record<string, unknown> = projectCorrelatedPromptMessage(
 				row as T & Record<string, unknown>,
 				binding,
 			);
+			const entryId = options.projectTranscriptEntryIds
+				&& isPiTranscriptEntryId(binding.settlement?.messageId)
+				? binding.settlement.messageId
+				: undefined;
+			if (entryId !== undefined
+				&& (projected.entryId !== entryId || projected._entryIdSource !== PI_TRANSCRIPT_ENTRY_ID_SOURCE)) {
+				projected = {
+					...projected,
+					entryId,
+					_entryIdSource: PI_TRANSCRIPT_ENTRY_ID_SOURCE,
+				};
+			}
 			if (projected !== row) changed = true;
 			return projected;
 		});
