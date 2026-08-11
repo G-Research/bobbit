@@ -785,6 +785,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/history-fork-api.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("recursive-directory-scan", "transcriptFilesForSession", "test-owned isolated agent-session transcript tree"),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
@@ -1027,7 +1033,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/history-fork-api.test.ts",
 		allowReason: "isolated integration gateway and test-owned transcript, proposal, and worktree artifacts",
 		reads: frozen([
-			{ expression: "seeded.file", count: 2 },
+			{ expression: "seeded.file", count: 4 },
 			{ expression: "stagedFile", count: 1 },
 			{ expression: "forkPersisted.agentSessionFile", count: 2 },
 			{ expression: "path.join(proposalFork, \"goal.md\")", count: 1 },
