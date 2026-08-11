@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import {
 	appendPromptAuthorDispatch,
@@ -13,7 +13,11 @@ import {
 	appendCompactionSidecarEntry,
 	initCompactionSidecarDir,
 } from "../../src/server/agent/compaction-sidecar.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import {
+	SessionManager,
+	prepareVisibleAgentEvent,
+} from "../../src/server/agent/session-manager.ts";
+import { correlateTranscriptPromptEntryIds } from "../../src/server/agent/visible-message-snapshot.ts";
 import {
 	appendSkillSidecarEntry,
 	initSkillSidecarDir,
@@ -49,13 +53,121 @@ function manager(): any {
 	return value;
 }
 
-function session(getMessages: () => Promise<any>): any {
+function session(
+	getMessages: () => Promise<any>,
+	getTranscriptCursorSnapshot?: () => Promise<any>,
+): any {
 	return {
 		id: `snapshot-${Math.random().toString(16).slice(2)}`,
+		title: "Snapshot session",
+		cwd: stateDir,
+		status: "idle",
+		clients: new Set(),
 		eventBuffer: new EventBuffer(),
-		rpcClient: { getMessages },
+		rpcClient: { getMessages, getTranscriptCursorSnapshot },
 	};
 }
+
+function userEntry(id: string, parentId: string | null, text: string): any {
+	return {
+		id,
+		parentId,
+		type: "message",
+		message: { role: "user", content: [{ type: "text", text }] },
+	};
+}
+
+function assistantEntry(id: string, parentId: string | null, text = "answer"): any {
+	return {
+		id,
+		parentId,
+		type: "message",
+		message: { role: "assistant", content: [{ type: "text", text }] },
+	};
+}
+
+describe("authoritative transcript cursor correlation", () => {
+	it("never trusts a cursor claimed by an id-less Pi agent event", () => {
+		const live = session(async () => ({ success: true, data: [] }));
+		const prepared = prepareVisibleAgentEvent(live, {
+			type: "message_end",
+			entryId: "untrusted-event-entry",
+			message: {
+				role: "user",
+				content: "prompt",
+				entryId: "untrusted-message-entry",
+				_entryIdSource: "pi-transcript",
+			},
+		}) as any;
+		expect(prepared.message.entryId).toBe("untrusted-message-entry");
+		expect(prepared.message).not.toHaveProperty("_entryIdSource");
+	});
+
+	it("uses the active compaction-aware branch and preserves duplicate occurrences", () => {
+		const entries = [
+			userEntry("user-old", null, "duplicate"),
+			assistantEntry("assistant-old", "user-old"),
+			userEntry("user-kept", "assistant-old", "duplicate"),
+			assistantEntry("assistant-kept", "user-kept"),
+			{
+				id: "compaction",
+				parentId: "assistant-kept",
+				type: "compaction",
+				firstKeptEntryId: "user-kept",
+			},
+			userEntry("user-tail", "compaction", "duplicate"),
+			assistantEntry("active-leaf", "user-tail"),
+			userEntry("inactive-user", "assistant-old", "duplicate"),
+			assistantEntry("inactive-leaf", "inactive-user"),
+		];
+		const messages = [
+			{ role: "compactionSummary", content: "summary" },
+			{ role: "user", content: "duplicate" },
+			{ role: "assistant", content: "kept answer" },
+			{ role: "user", content: "duplicate" },
+			{ role: "assistant", content: "tail answer" },
+		];
+		const forkMessages = ["user-old", "user-kept", "user-tail", "inactive-user"]
+			.map((entryId) => ({ entryId, text: "duplicate" }));
+
+		expect(correlateTranscriptPromptEntryIds(messages, {
+			entries,
+			leafId: "active-leaf",
+			forkMessages,
+		})).toEqual([undefined, "user-kept", undefined, "user-tail", undefined]);
+	});
+
+	it("leaves only a proven streaming tail unstamped and fails closed on incoherent data", () => {
+		const entries = [
+			userEntry("first", null, "same"),
+			assistantEntry("middle", "first"),
+			userEntry("second", "middle", "same"),
+			assistantEntry("leaf", "second"),
+		];
+		const cursor = {
+			entries,
+			leafId: "leaf",
+			forkMessages: [
+				{ entryId: "first", text: "same" },
+				{ entryId: "second", text: "same" },
+			],
+		};
+		const withTail = [
+			{ role: "user", content: "same" },
+			{ role: "assistant", content: "a" },
+			{ role: "user", content: "same" },
+			{ role: "assistant", content: "b" },
+			{ role: "user", content: "same" },
+		];
+		expect(correlateTranscriptPromptEntryIds(withTail, cursor, { allowUnpersistedTail: true }))
+			.toEqual(["first", undefined, "second", undefined, undefined]);
+		expect(correlateTranscriptPromptEntryIds(withTail, cursor)).toBeUndefined();
+		expect(correlateTranscriptPromptEntryIds(withTail.slice(0, 4), {
+			...cursor,
+			forkMessages: [{ entryId: "first", text: "wrong" }],
+		})).toBeUndefined();
+	});
+});
 
 describe("SessionManager snapshot memo", () => {
 	it("coalesces concurrent callers and reuses a byte-identical normalized base at one sequence", async () => {
@@ -121,6 +233,112 @@ describe("SessionManager snapshot memo", () => {
 		const current = await newRequest;
 		assert.equal(await value.getMessagesSnapshotBase(live), current);
 		assert.equal(getMessages.mock.calls.length, 2);
+	});
+
+	it("coalesces the cursor plane with get_messages and stamps only correlated rows", async () => {
+		const messages = [
+			{ role: "user", content: "duplicate" },
+			{ role: "assistant", content: "one" },
+			{ role: "user", content: "duplicate" },
+			{ role: "assistant", content: "two" },
+		];
+		const entries = [
+			userEntry("cursor-one", null, "duplicate"),
+			assistantEntry("answer-one", "cursor-one", "one"),
+			userEntry("cursor-two", "answer-one", "duplicate"),
+			assistantEntry("answer-two", "cursor-two", "two"),
+		];
+		const getMessages = vi.fn(async () => ({ success: true, data: { messages } }));
+		const getCursors = vi.fn(async () => ({
+			success: true,
+			data: {
+				entries,
+				leafId: "answer-two",
+				forkMessages: [
+					{ entryId: "cursor-one", text: "duplicate" },
+					{ entryId: "cursor-two", text: "duplicate" },
+				],
+			},
+		}));
+		const value = manager();
+		const live = session(getMessages, getCursors);
+		value.sessions.set(live.id, live);
+
+		const [first, second] = await Promise.all([
+			value.getMessagesSnapshotBase(live),
+			value.getMessagesSnapshotBase(live),
+		]);
+		expect(first).toBe(second);
+		expect(getMessages).toHaveBeenCalledOnce();
+		expect(getCursors).toHaveBeenCalledOnce();
+		const visible = value.buildVisibleMessageSnapshot(live.id, first.data) as { messages: any[] };
+		expect(visible.messages[0]).toMatchObject({
+			entryId: "cursor-one",
+			_entryIdSource: "pi-transcript",
+		});
+		expect(visible.messages[2]).toMatchObject({
+			entryId: "cursor-two",
+			_entryIdSource: "pi-transcript",
+		});
+		expect(messages[0]).not.toHaveProperty("_entryIdSource");
+	});
+
+	it("schedules cursor enrichment only at the final agent lifecycle boundary", () => {
+		const value = manager();
+		value._sessionReplacementCoordinators = new Map();
+		value._sessionWriterIsCurrent = () => true;
+		value._consumeSteerEcho = () => undefined;
+		value.resolveStoreForSession = () => ({
+			get: () => undefined,
+			update: () => undefined,
+		});
+		value.resolveIdleWaiters = () => undefined;
+		value.drainQueue = () => undefined;
+		value._finishSessionSetup = async () => undefined;
+		value.scheduleSettledPromptCursorRefresh = vi.fn();
+		const live = session(async () => ({ success: true, data: [] }));
+		live.status = "streaming";
+		live.promptQueue = { dequeueAllSteered: () => [] };
+		value.sessions.set(live.id, live);
+
+		value.handleAgentLifecycle(live, { type: "agent_end", messages: [], willRetry: true });
+		expect(value.scheduleSettledPromptCursorRefresh).not.toHaveBeenCalled();
+		value.handleAgentLifecycle(live, { type: "agent_end", messages: [], willRetry: false });
+		expect(value.scheduleSettledPromptCursorRefresh).toHaveBeenCalledOnce();
+		expect(value.scheduleSettledPromptCursorRefresh).toHaveBeenCalledWith(live);
+	});
+
+	it("broadcasts a cursor-enriched replacement after the settled event sequence advances", async () => {
+		const entries = [
+			userEntry("settled-prompt", null, "live prompt"),
+			assistantEntry("settled-answer", "settled-prompt"),
+		];
+		const getMessages = vi.fn(async () => ({ success: true, data: [
+			{ role: "user", content: "live prompt" },
+			{ role: "assistant", content: "answer" },
+		] }));
+		const getCursors = vi.fn(async () => ({ success: true, data: {
+			entries,
+			leafId: "settled-answer",
+			forkMessages: [{ entryId: "settled-prompt", text: "live prompt" }],
+		} }));
+		const sends: string[] = [];
+		const client = { readyState: 1, send: (payload: string) => sends.push(payload) };
+		const value = manager();
+		const live = session(getMessages, getCursors);
+		live.clients.add(client);
+		value.sessions.set(live.id, live);
+
+		value.scheduleSettledPromptCursorRefresh(live);
+		live.eventBuffer.push({ type: "agent_end" });
+		await vi.waitFor(() => expect(sends.length).toBe(1));
+		const frame = JSON.parse(sends[0]);
+		expect(frame.type).toBe("messages");
+		expect(frame.data[0]).toMatchObject({
+			entryId: "settled-prompt",
+			_entryIdSource: "pi-transcript",
+		});
+		expect(live.messagesSnapshotCache.seq).toBe(1);
 	});
 
 	it("keeps cached bases immutable while the production snapshot chokepoint rebuilds fresh structured overlays", async () => {

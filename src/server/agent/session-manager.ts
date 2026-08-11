@@ -3,10 +3,7 @@ import { realClock, realCommandRunner } from "../gateway-deps.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import {
 	LOCAL_USER_AUTHOR,
-	PI_TRANSCRIPT_ENTRY_ID_SOURCE,
-	isAccountablePromptMessage,
 	isMessageAuthor,
-	isPiTranscriptEntryId,
 } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 export type { PromptSource } from "../../shared/prompt-source.js";
@@ -43,7 +40,11 @@ import {
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 } from "./author-sidecar.js";
-import { buildVisibleMessageSnapshot as buildVisibleMessageSnapshotData } from "./visible-message-snapshot.js";
+import {
+	buildVisibleMessageSnapshot as buildVisibleMessageSnapshotData,
+	correlateTranscriptPromptEntryIds,
+	type TranscriptCursorSnapshot,
+} from "./visible-message-snapshot.js";
 import {
 	BATCH_SYSTEM_AUTHOR,
 	BOBBIT_SYSTEM_AUTHOR,
@@ -961,8 +962,21 @@ export interface SessionInfo {
 	 */
 	messagesSnapshotCache?: {
 		seq: number;
-		promise: Promise<{ success: boolean; data?: unknown; error?: string }>;
+		promise: Promise<MessageSnapshotBaseResponse>;
 	};
+	/** Cursor ids aligned to one exact immutable get_messages base object. */
+	messagesSnapshotCursorProjection?: {
+		seq: number;
+		data: unknown;
+		entryIds: readonly (string | undefined)[];
+	};
+}
+
+interface MessageSnapshotBaseResponse {
+	success: boolean;
+	data?: unknown;
+	error?: string;
+	cursorEntryIds?: readonly (string | undefined)[];
 }
 
 /** Exact canonical bridge identity required by ownership-sensitive respawns. */
@@ -1315,24 +1329,15 @@ function promptAuthorMessageKey(
 	return undefined;
 }
 
-/** Replace untrusted cursor provenance with a server-confirmed transcript cursor. */
-function projectVisiblePromptEntryId<T>(event: T, entryId?: string): T {
+/** Agent events cannot prove Pi transcript ids; strip any claimed provenance. */
+function stripVisiblePromptEntryIdProvenance<T>(event: T): T {
 	if (!event || typeof event !== "object" || Array.isArray(event)) return event;
 	const raw = event as Record<string, unknown>;
 	if (!raw.message || typeof raw.message !== "object" || Array.isArray(raw.message)) return event;
 	const message = raw.message as Record<string, unknown>;
 	const { _entryIdSource: _untrustedEntryIdSource, ...withoutEntryIdSource } = message;
-	if (!entryId && _untrustedEntryIdSource === undefined) return event;
-	return {
-		...raw,
-		message: {
-			...withoutEntryIdSource,
-			...(entryId === undefined ? {} : {
-				entryId,
-				_entryIdSource: PI_TRANSCRIPT_ENTRY_ID_SOURCE,
-			}),
-		},
-	} as T;
+	if (_untrustedEntryIdSource === undefined) return event;
+	return { ...raw, message: withoutEntryIdSource } as T;
 }
 
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
@@ -1438,13 +1443,10 @@ export function prepareVisibleAgentEvent(
 			// no intervening start) continue to reuse the completed occurrence.
 			session.lastKeylessPromptAuthorEnd = undefined;
 		}
-		return projectVisiblePromptEntryId(event);
+		return stripVisiblePromptEntryIdProvenance(event);
 	}
 
 	const message = raw.message as Record<string, unknown>;
-	const durablePromptEntryId = raw.type === "message_end" && isAccountablePromptMessage(message)
-		? promptAuthorMessageId(message, raw)
-		: undefined;
 	let author: MessageAuthor;
 	const userRole = message.role === "user" || message.role === "user-with-attachments";
 	const modelText = userRole ? extractUserMessageText(message) : "";
@@ -1522,10 +1524,7 @@ export function prepareVisibleAgentEvent(
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
-	const prepared = projectVisiblePromptEntryId(
-		normalized,
-		isPiTranscriptEntryId(durablePromptEntryId) ? durablePromptEntryId : undefined,
-	);
+	const prepared = stripVisiblePromptEntryIdProvenance(normalized);
 	if (raw.type === "message_end" && stableBinding && session.promptAuthorReplayBindings) {
 		const replayIndex = session.promptAuthorReplayBindings.findIndex(
 			(binding) => binding.promptId === stableBinding!.promptId,
@@ -5943,6 +5942,7 @@ export class SessionManager {
 			});
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
+			this.scheduleSettledPromptCursorRefresh(session);
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
@@ -7299,6 +7299,30 @@ export class SessionManager {
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
 		if (isRetryableAgentEnd(event)) return;
 		emitSessionEvent(session, truncateLargeToolContent(event));
+	}
+
+	/**
+	 * Pi emits id-less message events before its append step. After the final
+	 * agent_end, schedule one authoritative read-only snapshot behind the current
+	 * event call stack so persistence and the event-buffer sequence are both
+	 * settled. Replacing from this snapshot enriches existing rows rather than
+	 * emitting a second user message.
+	 */
+	private scheduleSettledPromptCursorRefresh(session: SessionInfo): void {
+		if (session.clients.size === 0
+			|| typeof session.rpcClient.getTranscriptCursorSnapshot !== "function") return;
+		const rpcClient = session.rpcClient;
+		queueMicrotask(() => {
+			if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+			void this.getMessagesSnapshotBase(session).then((response) => {
+				if (!response.success || response.data === undefined) return;
+				if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+				const data = this.buildVisibleMessageSnapshot(session.id, response.data);
+				broadcast(session.clients, { type: "messages", data: data as unknown[] });
+			}).catch((error) => {
+				console.warn(`[session-manager] Failed to refresh settled prompt cursors for ${session.id}:`, error);
+			});
+		});
 	}
 
 	/**
@@ -9445,32 +9469,70 @@ export class SessionManager {
 	 * Callers must treat `data` as immutable and freshly apply in-flight overlays,
 	 * sidecar merges, truncation, ordering stamps, and serialization.
 	 */
-	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
+	async getMessagesSnapshotBase(session: SessionInfo): Promise<MessageSnapshotBaseResponse> {
 		const seq = session.eventBuffer.lastSeq;
 		const cached = session.messagesSnapshotCache;
 		if (cached?.seq === seq) return cached.promise;
 
-		const promise = (async (): Promise<{ success: boolean; data?: unknown; error?: string }> => {
+		const promise = (async (): Promise<MessageSnapshotBaseResponse> => {
 			if (session.condition?.code === "MODEL_SELECTION_REQUIRED") {
 				const entries = await this.readPersistedTranscriptEntries(session.id);
 				return entries
 					? { success: true, data: prepareArchivedMessageSnapshot(entries) }
 					: { success: false, error: "Persisted session transcript is unavailable" };
 			}
-			const response = await session.rpcClient.getMessages();
+			const cursorRead = typeof session.rpcClient.getTranscriptCursorSnapshot === "function"
+				? session.rpcClient.getTranscriptCursorSnapshot()
+				: Promise.resolve(undefined);
+			const [response, cursorResponse] = await Promise.all([
+				session.rpcClient.getMessages(),
+				cursorRead.catch(() => undefined),
+			]);
 			if (!response?.success) return response;
-			return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+			const data = normalizeToolResultErrorSnapshot(response.data);
+			const messages = Array.isArray(data)
+				? data
+				: data && typeof data === "object" && Array.isArray((data as any).messages)
+					? (data as any).messages
+					: undefined;
+			const cursorEntryIds = messages && cursorResponse?.success
+				? correlateTranscriptPromptEntryIds(
+					messages,
+					cursorResponse.data as TranscriptCursorSnapshot,
+					{ allowUnpersistedTail: session.status === "streaming" },
+				)
+				: undefined;
+			return {
+				...response,
+				data,
+				...(cursorEntryIds ? { cursorEntryIds } : {}),
+			};
 		})();
 		session.messagesSnapshotCache = { seq, promise };
 		promise.then(
 			(response) => {
 				if (!response?.success && session.messagesSnapshotCache?.promise === promise) {
 					session.messagesSnapshotCache = undefined;
+					session.messagesSnapshotCursorProjection = undefined;
+					return;
+				}
+				if (response.success
+					&& response.data !== undefined
+					&& response.cursorEntryIds
+					&& session.messagesSnapshotCache?.promise === promise) {
+					session.messagesSnapshotCursorProjection = {
+						seq,
+						data: response.data,
+						entryIds: response.cursorEntryIds,
+					};
+				} else if (session.messagesSnapshotCache?.promise === promise) {
+					session.messagesSnapshotCursorProjection = undefined;
 				}
 			},
 			() => {
 				if (session.messagesSnapshotCache?.promise === promise) {
 					session.messagesSnapshotCache = undefined;
+					session.messagesSnapshotCursorProjection = undefined;
 				}
 			},
 		);
@@ -10344,6 +10406,7 @@ export class SessionManager {
 		const persisted = this.resolveStoreForId(id)?.get(id);
 		const identity = live ?? persisted;
 		const correlatedSnapshot = applyArchivedSnapshotCorrelations(snapshot);
+		const cursorProjection = live?.messagesSnapshotCursorProjection;
 		const visible = buildVisibleMessageSnapshotData(correlatedSnapshot, {
 			sessionId: id,
 			session: {
@@ -10355,6 +10418,9 @@ export class SessionManager {
 			agentDeps: this.messageAuthorDependencies(identity),
 			latestMessageUpdate: live?.latestMessageUpdate,
 			inFlightSteerTexts: live?.inFlightSteerTexts,
+			...(cursorProjection?.data === snapshot
+				? { transcriptPromptEntryIds: cursorProjection.entryIds }
+				: {}),
 		});
 		return stripArchivedSnapshotCorrelations(visible);
 	}
