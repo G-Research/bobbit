@@ -405,7 +405,7 @@ describe("message author dispatch boundary", () => {
 			readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement?.outcome,
 			"echoed",
 		);
-		assert.equal(target.promptAuthorCancellationTombstones.bindings[0].promptId, "old-attempt");
+		assert.equal(target.promptAuthorAmbiguityFences.bindings[0].promptId, "old-attempt");
 	});
 
 	it("bounds rejected prompt tombstones without retaining raw payloads", async () => {
@@ -425,7 +425,7 @@ describe("message author dispatch boundary", () => {
 			await assert.rejects(value._dispatchSteer(target, [row]), /steer rejected/);
 		}
 
-		const owner = target.promptAuthorCancellationTombstones;
+		const owner = target.promptAuthorAmbiguityFences;
 		assert.equal(owner.bindings.length, 2);
 		assert.equal(owner.overflowed, true);
 		assert.ok(owner.residentBytes <= 1024);
@@ -456,7 +456,7 @@ describe("message author dispatch boundary", () => {
 			},
 		})));
 
-		const owner = target.promptAuthorCancellationTombstones;
+		const owner = target.promptAuthorAmbiguityFences;
 		assert.equal(owner.bindings.length, 2);
 		assert.equal(owner.overflowed, true);
 		assert.ok(owner.residentBytes <= 1024);
@@ -481,9 +481,111 @@ describe("message author dispatch boundary", () => {
 				outcome: "cancelled",
 			},
 		}]);
-		assert.equal(byteLimited.promptAuthorCancellationTombstones.bindings.length, 0);
-		assert.equal(byteLimited.promptAuthorCancellationTombstones.residentBytes, 0);
-		assert.equal(byteLimited.promptAuthorCancellationTombstones.overflowed, true);
+		assert.equal(byteLimited.promptAuthorAmbiguityFences.bindings.length, 0);
+		assert.equal(byteLimited.promptAuthorAmbiguityFences.residentBytes, 0);
+		assert.equal(byteLimited.promptAuthorAmbiguityFences.overflowed, true);
+	});
+
+	it("uses the shared bounded digest owner for settled keyless restore ambiguity only", () => {
+		const target = session("restore-settled-keyless-fences");
+		target.promptAuthorTombstoneBudget = { maxCount: 2, maxBytes: 1024 };
+		const author = { kind: "user", id: "user:local", label: "User" } as const;
+		const echoed = (promptId: string, modelText: string, messageId?: string) => ({
+			schemaVersion: 1 as const,
+			type: "prompt-author" as const,
+			promptId,
+			dispatchedAt: 1,
+			modelText,
+			source: "user" as const,
+			author,
+			settlement: {
+				schemaVersion: 1 as const,
+				type: "prompt-author-settlement" as const,
+				promptId,
+				settledAt: 2,
+				outcome: "echoed" as const,
+				...(messageId ? { messageId } : {}),
+			},
+		});
+		restorePromptAuthorBindings(target, [
+			echoed("keyless-1", "settled secret one"),
+			echoed("keyless-2", "settled secret two"),
+			echoed("keyless-dropped", "settled secret three"),
+			echoed("stable-id", "known stable bytes", "pi-stable-id"),
+		]);
+
+		const owner = target.promptAuthorAmbiguityFences;
+		assert.deepEqual(owner.bindings.map((binding: any) => binding.promptId), ["keyless-1", "keyless-2"]);
+		assert.equal(owner.overflowed, true);
+		assert.ok(owner.residentBytes <= 1024);
+		assert.equal(owner.bindings.some((binding: any) => "modelText" in binding), false);
+		assert.equal(JSON.stringify(owner).includes("settled secret"), false);
+		assert.equal(target.promptAuthorMessageBindings.get("id:pi-stable-id")?.promptId, "stable-id");
+		assert.equal(owner.bindings.some((binding: any) => binding.promptId === "stable-id"), false);
+
+		// Rehydration is the common restore/replacement owner. It preserves the
+		// sticky overflow fence even when the next sidecar snapshot is fully keyed.
+		restorePromptAuthorBindings(target, [echoed("stable-id", "known stable bytes", "pi-stable-id")]);
+		assert.equal(target.promptAuthorAmbiguityFences.overflowed, true);
+	});
+
+	it("keeps a same-text queued retry pending behind a settled keyless fence", async () => {
+		const value = manager();
+		const response = deferred<any>();
+		const target = session("dispatch-queued-settled-keyless", {
+			prompt: vi.fn(() => response.promise),
+		});
+		target.lastActivity = 450;
+		const writes: number[] = [];
+		installSessionActivityAttribution(target, {
+			get: () => ({ lastActivity: 450, lastReadAt: 450 }),
+			update: (_id: string, patch: any) => writes.push(patch.lastActivity),
+		}, { now: () => 451, suppressUntilPrompt: true });
+		restorePromptAuthorBindings(target, [{
+			schemaVersion: 1,
+			type: "prompt-author",
+			promptId: "settled-keyless-predecessor",
+			dispatchedAt: 1,
+			modelText: "same queued bytes",
+			source: "user",
+			author: LOCAL_USER_AUTHOR,
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId: "settled-keyless-predecessor",
+				settledAt: 2,
+				outcome: "echoed",
+			},
+		}]);
+		target.promptAuthorReplayBindings = undefined;
+		target.lastKeylessPromptAuthorEnd = undefined;
+		target.promptQueue.enqueue("same queued bytes", { source: "user", author: LOCAL_USER_AUTHOR });
+
+		value.drainQueue(target);
+		await flushMicrotasks();
+		const current = target.pendingPromptAuthors[0];
+		const update = prepareVisibleAgentEvent(target, {
+			type: "message_update",
+			message: { role: "user", content: "same queued bytes" },
+		});
+		recordSessionEventActivity(target, update);
+		assert.equal(target.pendingPromptAuthors[0], current, "an update cannot settle either occurrence");
+		assert.equal(readAuthorSidecar(target.id).find((row) => row.promptId === current.promptId)?.settlement, undefined);
+		const end = prepareVisibleAgentEvent(target, {
+			type: "message_end",
+			message: { role: "user", content: "same queued bytes" },
+		});
+		recordSessionEventActivity(target, end);
+		assert.equal(target.pendingPromptAuthors[0], current);
+		assert.equal(target.lastActivity, 450);
+		response.resolve({ success: false, error: "queued rejection" });
+		await flushMicrotasks();
+
+		assert.equal(target.lastActivity, 450);
+		assert.deepEqual(writes, []);
+		assert.equal(value.recoverPromptDispatch.mock.calls.length, 1);
+		assert.equal(value.recoverPromptDispatch.mock.calls[0][1].length, 1);
+		assert.equal(target.pendingPromptAuthors.length, 0);
 	});
 
 	it("fails closed after tombstone overflow but lets a positive ack finalize buffered projection", async () => {

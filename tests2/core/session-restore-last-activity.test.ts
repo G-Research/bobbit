@@ -14,7 +14,12 @@ import {
 	suppressSessionActivityUntilPrompt,
 } from "../../src/server/agent/session-activity.ts";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
-import { initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.ts";
+import {
+	appendPromptAuthorDispatch,
+	appendPromptAuthorSettlement,
+	initAuthorSidecarDir,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.ts";
 import { registerRpcBridgeFactory, type RpcBridgeOptions } from "../../src/server/agent/rpc-bridge.ts";
 
 class RestoreBridge {
@@ -24,6 +29,7 @@ class RestoreBridge {
 	steerError?: Error;
 	steerEvents: any[] = [];
 	promptResponse: any = { success: true };
+	promptError?: Error;
 	promptEvents?: any[];
 
 	constructor(readonly id: string) {}
@@ -73,6 +79,7 @@ class RestoreBridge {
 			{ type: "agent_end" },
 		];
 		for (const event of events) this.emit(event);
+		if (this.promptError) throw this.promptError;
 		return this.promptResponse;
 	}
 
@@ -111,6 +118,29 @@ function makePersisted(root: string, id: string, lastActivity: number, lastReadA
 		lastReadAt,
 		wasStreaming: false,
 	};
+}
+
+function seedSettledKeylessPrompt(sessionId: string, text: string): void {
+	appendPromptAuthorDispatch(sessionId, {
+		promptId: "historical-keyless",
+		dispatchedAt: 1,
+		modelText: text,
+		source: "user",
+		author: { kind: "user", id: "user:local", label: "User" },
+	});
+	appendPromptAuthorSettlement(sessionId, {
+		promptId: "historical-keyless",
+		settledAt: 2,
+		outcome: "echoed",
+	});
+}
+
+function lateHistoricalPromptEvents(text: string, correlation: "keyed" | "keyless"): any[] {
+	const identity = correlation === "keyed" ? { id: "late-historical-user" } : {};
+	return [
+		{ type: "message_update", message: { ...identity, role: "user", content: text } },
+		{ type: "message_end", message: { ...identity, role: "user", content: text } },
+	];
 }
 
 function makeManager(store: SessionStore, bridges: Map<string, RestoreBridge>, now: () => number): any {
@@ -339,7 +369,100 @@ describe("authoritative session activity attribution", () => {
 		expect(activityWrites).toEqual([]);
 	});
 
-	it("keeps restored activity quarantined when an unobserved steer is rejected amid unrelated replay", async () => {
+	it.each([
+		{ correlation: "keyed", failure: "negative" },
+		{ correlation: "keyed", failure: "throw" },
+		{ correlation: "keyless", failure: "negative" },
+		{ correlation: "keyless", failure: "throw" },
+	] as const)(
+		"keeps a restored same-text attempt quarantined when late settled $correlation replay precedes a $failure acknowledgement",
+		async ({ correlation, failure }) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-activity-settled-${correlation}-${failure}-`));
+			roots.push(root);
+			const store = new SessionStore(path.join(root, "state"));
+			const row = makePersisted(root, `ordinary-settled-${correlation}-${failure}`, 10_000, 11_000);
+			store.put(row);
+
+			const activityWrites: number[] = [];
+			const update = store.update.bind(store);
+			store.update = ((id: string, patch: any) => {
+				if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+				update(id, patch);
+			}) as typeof store.update;
+
+			let clock = 20_000;
+			const bridges = new Map<string, RestoreBridge>();
+			const manager = makeManager(store, bridges, () => ++clock);
+			const text = "same settled keyless bytes";
+			seedSettledKeylessPrompt(row.id, text);
+			await manager.restoreSession(row);
+			const session = manager.getSession(row.id)!;
+			const bridge = bridges.get(row.id)!;
+			expect(session.promptAuthorReplayBindings).toBeUndefined();
+			expect(session.promptAuthorAmbiguityFences?.bindings.map((binding: any) => binding.promptId))
+				.toContain("historical-keyless");
+			bridge.promptEvents = lateHistoricalPromptEvents(text, correlation);
+			if (failure === "negative") bridge.promptResponse = { success: false, error: "Anthropic API key is missing" };
+			else bridge.promptError = new Error("Anthropic API key is missing");
+			const recover = vi.spyOn(manager, "recoverPromptDispatch");
+
+			await expect(manager.enqueuePrompt(row.id, text)).rejects.toThrow(/authentication failure|missing-api-key/i);
+			bridge.emit({ type: "message_end", message: { id: "later-replay", role: "assistant", content: "old output" } });
+			await store.flushAsync();
+
+			expect(session.lastActivity).toBe(row.lastActivity);
+			expect(store.get(row.id)?.lastActivity).toBe(row.lastActivity);
+			expect(store.get(row.id)?.lastReadAt).toBe(row.lastReadAt);
+			expect(activityWrites).toEqual([]);
+			expect(recover).toHaveBeenCalledTimes(1);
+			expect(readAuthorSidecar(row.id).filter((binding) => binding.settlement?.outcome === "cancelled"))
+				.toHaveLength(1);
+			expect(session.pendingPromptAuthors).toEqual([]);
+		},
+	);
+
+	it.each(["keyed", "keyless"] as const)(
+		"lets a positive acknowledgement finalize one buffered attempt after late settled %s replay",
+		async (correlation) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-activity-settled-positive-${correlation}-`));
+			roots.push(root);
+			const store = new SessionStore(path.join(root, "state"));
+			const row = makePersisted(root, `ordinary-settled-positive-${correlation}`, 12_000, 13_000);
+			store.put(row);
+
+			const activityWrites: number[] = [];
+			const update = store.update.bind(store);
+			store.update = ((id: string, patch: any) => {
+				if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+				update(id, patch);
+			}) as typeof store.update;
+
+			let clock = 30_000;
+			const bridges = new Map<string, RestoreBridge>();
+			const manager = makeManager(store, bridges, () => ++clock);
+			const text = "same settled positive bytes";
+			seedSettledKeylessPrompt(row.id, text);
+			await manager.restoreSession(row);
+			const session = manager.getSession(row.id)!;
+			const bridge = bridges.get(row.id)!;
+			bridge.promptEvents = lateHistoricalPromptEvents(text, correlation);
+			bridge.promptResponse = { success: true };
+
+			await expect(manager.enqueuePrompt(row.id, text)).resolves.toEqual({ status: "dispatched" });
+			await store.flushAsync();
+
+			expect(session.lastActivity).toBeGreaterThan(row.lastReadAt!);
+			expect(store.get(row.id)?.lastActivity).toBe(session.lastActivity);
+			expect(activityWrites).toHaveLength(1);
+			const currentSettlements = readAuthorSidecar(row.id)
+				.filter((binding) => binding.promptId !== "historical-keyless")
+				.map((binding) => binding.settlement?.outcome);
+			expect(currentSettlements).toEqual(["echoed"]);
+			expect(session.pendingPromptAuthors).toEqual([]);
+		},
+	);
+
+	it("keeps a same-text restored steer quarantined behind late settled replay", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-rejected-steer-"));
 		roots.push(root);
 		const store = new SessionStore(path.join(root, "state"));
@@ -358,19 +481,16 @@ describe("authoritative session activity attribution", () => {
 		let clock = 20_000;
 		const bridges = new Map<string, RestoreBridge>();
 		const manager = makeManager(store, bridges, () => ++clock);
+		const text = "rejected restored steer";
+		seedSettledKeylessPrompt(row.id, text);
 		await manager.restoreSession(row);
 		const session = manager.getSession(row.id)!;
 		session.status = "streaming";
 		const bridge = bridges.get(row.id)!;
-		bridge.steerEvents = [
-			{ type: "agent_start" },
-			{ type: "message_end", message: { id: "unrelated-assistant", role: "assistant", content: [] } },
-			{ type: "tool_execution_start", toolName: "replayed-read" },
-			{ type: "tool_execution_end", toolName: "replayed-read" },
-		];
+		bridge.steerEvents = lateHistoricalPromptEvents(text, "keyless");
 		bridge.steerResponse = { success: false, error: "synthetic pre-observation rejection" };
 
-		await expect(manager.deliverLiveSteer(row.id, "rejected restored steer"))
+		await expect(manager.deliverLiveSteer(row.id, text))
 			.rejects.toThrow("synthetic pre-observation rejection");
 
 		// Replay can arrive after the negative acknowledgement. A rejected dispatch

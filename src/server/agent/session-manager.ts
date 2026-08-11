@@ -638,6 +638,8 @@ interface LivePromptAuthorMessageBinding {
 	attemptId?: string;
 	author: MessageAuthor;
 	settled: boolean;
+	/** This digest-only binding survives the transient restore cursor because its keyless occurrence may replay late. */
+	ambiguityFence?: true;
 	/** Exact Pi text is retained only in memory for live occurrence matching. */
 	modelText?: string;
 	modelTextDigest?: string;
@@ -651,7 +653,7 @@ export interface PromptAuthorTombstoneBudget {
 	maxBytes: number;
 }
 
-export interface PromptAuthorCancellationTombstones {
+export interface PromptAuthorAmbiguityFences {
 	bindings: ReplayPromptAuthorBinding[];
 	residentBytes: number;
 	/** Once correlation history is dropped, raw/keyless pre-ack echoes fail closed. */
@@ -866,8 +868,8 @@ export interface SessionInfo {
 	 * replay occurrence is removed only at its terminal frame; its last-terminal
 	 * guard still makes duplicate keyless ends idempotent until the next start. */
 	promptAuthorReplayBindings?: ReplayPromptAuthorBinding[];
-	/** Bounded digest-only cancellation history used to fence late replay. */
-	promptAuthorCancellationTombstones?: PromptAuthorCancellationTombstones;
+	/** Bounded digest-only history of cancelled and settled-keyless occurrences used to fence late replay. */
+	promptAuthorAmbiguityFences?: PromptAuthorAmbiguityFences;
 	/** Test-only per-session admission budget; production uses the exported default. */
 	promptAuthorTombstoneBudget?: PromptAuthorTombstoneBudget;
 	/** Last keyless terminal occurrence within one live lifecycle boundary. */
@@ -1102,30 +1104,30 @@ export function preparePromptAuthorDispatch(
 	};
 }
 
-function promptAuthorTombstoneOwner(session: SessionInfo): PromptAuthorCancellationTombstones {
-	return session.promptAuthorCancellationTombstones ??= {
+function promptAuthorAmbiguityFenceOwner(session: SessionInfo): PromptAuthorAmbiguityFences {
+	return session.promptAuthorAmbiguityFences ??= {
 		bindings: [],
 		residentBytes: 0,
 		overflowed: false,
 	};
 }
 
-function promptAuthorTombstoneBytes(binding: ReplayPromptAuthorBinding): number {
+function promptAuthorAmbiguityFenceBytes(binding: ReplayPromptAuthorBinding): number {
 	return Buffer.byteLength(JSON.stringify(binding), "utf8");
 }
 
-/** Single admission boundary shared by live rejection and sidecar hydration. */
-function retainCancelledPromptAuthorTombstone(
+/** Single bounded admission boundary shared by live rejection and sidecar hydration. */
+function retainPromptAuthorAmbiguityFence(
 	session: SessionInfo,
 	pending: Pick<PendingPromptAuthorRecord, "promptId" | "attemptId" | "modelText" | "modelTextDigest" | "modelPrefix" | "author">,
 ): void {
-	const owner = promptAuthorTombstoneOwner(session);
+	const owner = promptAuthorAmbiguityFenceOwner(session);
 	const attemptId = pending.attemptId ?? pending.promptId;
 	if (owner.bindings.some((binding) => (binding.attemptId ?? binding.promptId) === attemptId)) return;
 	const modelTextDigest = pending.modelTextDigest
 		?? (pending.modelText === undefined ? undefined : digestPromptModelText(pending.modelText));
-	// Raw prompt bodies are never cancellation state. Without the keyed digest,
-	// membership is unknowable, so future ambiguous pre-ack echoes fail closed.
+	// Raw prompt bodies are never retained. Without the keyed digest, membership
+	// is unknowable, so future ambiguous pre-ack echoes fail closed.
 	if (!modelTextDigest) {
 		owner.overflowed = true;
 		return;
@@ -1135,10 +1137,11 @@ function retainCancelledPromptAuthorTombstone(
 		attemptId,
 		author: pending.author,
 		settled: true,
+		ambiguityFence: true,
 		modelTextDigest,
 		...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
 	};
-	const bytes = promptAuthorTombstoneBytes(binding);
+	const bytes = promptAuthorAmbiguityFenceBytes(binding);
 	const budget = session.promptAuthorTombstoneBudget ?? DEFAULT_PROMPT_AUTHOR_TOMBSTONE_BUDGET;
 	if (owner.bindings.length >= budget.maxCount || bytes > budget.maxBytes - owner.residentBytes) {
 		owner.overflowed = true;
@@ -1148,28 +1151,28 @@ function retainCancelledPromptAuthorTombstone(
 	owner.residentBytes += bytes;
 }
 
-function findCancelledPromptAuthorTombstone(
+function findPromptAuthorAmbiguityFence(
 	session: SessionInfo,
 	modelText: string,
 ): ReplayPromptAuthorBinding | undefined {
 	const digest = digestPromptModelText(modelText);
 	if (!digest) return undefined;
-	return session.promptAuthorCancellationTombstones?.bindings.find(
+	return session.promptAuthorAmbiguityFences?.bindings.find(
 		(binding) => binding.modelTextDigest === digest,
 	);
 }
 
-function removeCancelledPromptAuthorTombstone(
+function removePromptAuthorAmbiguityFence(
 	session: SessionInfo,
 	binding: ReplayPromptAuthorBinding,
 ): void {
-	const owner = session.promptAuthorCancellationTombstones;
+	const owner = session.promptAuthorAmbiguityFences;
 	if (!owner) return;
 	const index = owner.bindings.findIndex((candidate) =>
 		(candidate.attemptId ?? candidate.promptId) === (binding.attemptId ?? binding.promptId));
 	if (index === -1) return;
 	const [removed] = owner.bindings.splice(index, 1);
-	owner.residentBytes = Math.max(0, owner.residentBytes - promptAuthorTombstoneBytes(removed));
+	owner.residentBytes = Math.max(0, owner.residentBytes - promptAuthorAmbiguityFenceBytes(removed));
 }
 
 /** Cancel one exact prepared attempt, or a restored attempt by its unique sidecar id. */
@@ -1190,7 +1193,7 @@ function cancelPromptAuthorBinding(
 	if (idx === -1) return false;
 
 	const [pending] = pendingAuthors!.splice(idx, 1);
-	retainCancelledPromptAuthorTombstone(session, pending);
+	retainPromptAuthorAmbiguityFence(session, pending);
 	cancelSessionPromptActivity(
 		session,
 		(pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY],
@@ -1545,18 +1548,18 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			author: entry.author,
 			settled: entry.settlement?.outcome === "echoed",
 		}));
-	const previousTombstones = session.promptAuthorCancellationTombstones;
-	session.promptAuthorCancellationTombstones = {
+	const previousFences = session.promptAuthorAmbiguityFences;
+	session.promptAuthorAmbiguityFences = {
 		bindings: [],
 		residentBytes: 0,
 		// Replacement reuses the SessionInfo capsule and late old-bridge replay can
 		// still arrive. Never reopen ambiguous correlation after a prior drop.
-		overflowed: previousTombstones?.overflowed === true,
+		overflowed: previousFences?.overflowed === true,
 	};
-	// Preserve bounded live-process tombstones across bridge replacement. Dropping
+	// Preserve bounded live-process fences across bridge replacement. Dropping
 	// them here would reopen ABA when a late old-bridge echo follows hydration.
-	for (const binding of previousTombstones?.bindings ?? []) {
-		retainCancelledPromptAuthorTombstone(session, {
+	for (const binding of previousFences?.bindings ?? []) {
+		retainPromptAuthorAmbiguityFence(session, {
 			promptId: binding.promptId,
 			attemptId: binding.attemptId,
 			modelText: binding.modelText,
@@ -1566,8 +1569,15 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		});
 	}
 	for (const entry of entries) {
-		if (entry.settlement?.outcome !== "cancelled") continue;
-		retainCancelledPromptAuthorTombstone(session, {
+		const cancelled = entry.settlement?.outcome === "cancelled";
+		const settledKeyless = entry.settlement?.outcome === "echoed"
+			&& !entry.settlement.messageId
+			&& entry.settlement.messageTimestamp === undefined;
+		if (!cancelled && !settledKeyless) continue;
+		// The transient replay cursor is cleared as soon as switch_session responds,
+		// but Pi may emit a historical keyless occurrence later. Keep only its digest
+		// in the same bounded, sticky-fail-closed owner as cancelled attempts.
+		retainPromptAuthorAmbiguityFence(session, {
 			promptId: entry.promptId,
 			attemptId: entry.promptId,
 			modelText: entry.modelText,
@@ -1694,9 +1704,9 @@ export function prepareVisibleAgentEvent(
 		// response. Pi does not echo a Bobbit nonce, so equal raw text is ambiguous
 		// until the current RPC is positively acknowledged. Before that boundary,
 		// bind the historical occurrence first rather than settling a newer attempt.
-		stableBinding = findCancelledPromptAuthorTombstone(session, modelText);
+		stableBinding = findPromptAuthorAmbiguityFence(session, modelText);
 		if (raw.type === "message_end" && (stableBinding
-			|| session.promptAuthorCancellationTombstones?.overflowed)) {
+			|| session.promptAuthorAmbiguityFences?.overflowed)) {
 			// Overflow means a matching predecessor may have been dropped. Preserve
 			// the current projection for a positive ack, but never let this raw-text
 			// echo commit activity or consume recovery intent before that ack.
@@ -1719,7 +1729,7 @@ export function prepareVisibleAgentEvent(
 	// belong to a dropped predecessor. Positive RPC acknowledgement remains the
 	// only safe pre-ack boundary for both streaming updates and terminal echoes.
 	if (!stableBinding && !bufferedPending && pendingIndex === -1 && userRole && modelText
-		&& !session.promptAuthorCancellationTombstones?.overflowed
+		&& !session.promptAuthorAmbiguityFences?.overflowed
 		&& session.pendingPromptAuthors?.length) {
 		pendingIndex = session.pendingPromptAuthors.findIndex((record) =>
 			promptAuthorBindingMatchesText(record, modelText)
@@ -1739,6 +1749,15 @@ export function prepareVisibleAgentEvent(
 			if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
 			session.promptAuthorMessageBindings.set(messageKey, stableBinding);
 		}
+	}
+	if (!bufferedPending && raw.type === "message_end" && stableBinding?.ambiguityFence) {
+		// A preceding keyed message_update may already have promoted the historical
+		// digest fence to an exact message binding. Its terminal frame is still an
+		// ambiguous projection for a same-text current attempt until the RPC ack.
+		bufferedPending = session.pendingPromptAuthors?.find((record) =>
+			promptAuthorBindingMatchesText(record, modelText)
+				&& (record as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY]?.state === "pending",
+		) as ActivityBoundPromptAuthorRecord | undefined;
 	}
 
 	const selectedPending = pendingIndex === -1 ? undefined : session.pendingPromptAuthors![pendingIndex];
@@ -1794,7 +1813,7 @@ export function prepareVisibleAgentEvent(
 				=== (stableBinding!.attemptId ?? stableBinding!.promptId),
 		) ?? -1;
 		if (replayIndex !== -1) session.promptAuthorReplayBindings!.splice(replayIndex, 1);
-		removeCancelledPromptAuthorTombstone(session, stableBinding);
+		removePromptAuthorAmbiguityFence(session, stableBinding);
 	}
 	if (raw.type === "message_end" && stableBinding?.settled) {
 		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
@@ -5415,7 +5434,7 @@ export class SessionManager {
 			(binding) => binding.promptId === promptId && binding.settlement === undefined,
 		);
 		if (!restored) return false;
-		retainCancelledPromptAuthorTombstone(session, {
+		retainPromptAuthorAmbiguityFence(session, {
 			promptId: restored.promptId,
 			attemptId: restored.promptId,
 			modelText: restored.modelText,
