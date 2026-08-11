@@ -14229,13 +14229,9 @@ async function handleApiRoute(
 			const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
 			const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 
-			// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
-			// rows that never persisted `agentSessionFile`.
-			let sourceJsonl = ps.agentSessionFile;
-			if (!sourceJsonl) {
-				const recovered = sessionManager.recoverSessionFile(ps);
-				if (recovered) sourceJsonl = recovered;
-			}
+			// Resolve or recover the source `.jsonl` authoritatively. Never let a raw
+			// persisted path bypass host/container transcript-path validation.
+			const sourceJsonl = sessionManager.recoverSessionFile(ps);
 			if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
 
 			const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);

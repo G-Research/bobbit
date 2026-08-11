@@ -27,7 +27,14 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
-import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
+import {
+	canonicalContainerAgentSessionPath,
+	sessionFileDelete,
+	sessionFileExists,
+	sessionFileRead,
+	sessionFsContextForAgentFile,
+	sessionSidecarDelete,
+} from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
 import {
@@ -13120,21 +13127,28 @@ export class SessionManager {
 	}
 
 	/**
-	 * Try to recover a session's .jsonl file when agentSessionFile is empty.
-	 * The agent CLI stores files as: <sessionsDir>/<cwd-slug>/<timestamp>_<uuid>.jsonl
-	 * We scan the CWD-derived directory for a .jsonl created close to the session's createdAt.
+	 * Resolve a session's persisted .jsonl path, or recover one when the stored
+	 * path is absent or invalid. Stored sandbox paths must use a canonical agent
+	 * sessions container path; stored host paths retain the existing read-only
+	 * compatibility validation. Recovery scans only trusted sessions roots.
 	 *
-	 * Public so the continue-archived REST handler can resolve the source
-	 * `.jsonl` path for legacy persisted sessions whose `agentSessionFile`
-	 * field was never populated.
+	 * Public so fork and continue routes can resolve transcript sources without
+	 * using a raw persisted path.
 	 */
 	recoverSessionFile(ps: PersistedSession): string | null {
 		try {
-			if (ps.agentSessionFile && isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
-				const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
-				if (safePath) {
-					trustPersistedAgentSessionFile(safePath);
-					return safePath.replace(/\\/g, "/");
+			if (ps.agentSessionFile) {
+				const containerPath = ps.sandboxed
+					? canonicalContainerAgentSessionPath(ps.agentSessionFile)
+					: null;
+				if (containerPath) return containerPath;
+
+				if (isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
+					const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+					if (safePath) {
+						trustPersistedAgentSessionFile(safePath);
+						return safePath.replace(/\\/g, "/");
+					}
 				}
 			}
 

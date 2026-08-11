@@ -62,7 +62,7 @@ function isContainerAgentSessionPath(filePath: string): boolean {
 		|| normalized.startsWith("/bobbit-state/sessions/");
 }
 
-function canonicalContainerAgentSessionPath(filePath: string): string | null {
+export function canonicalContainerAgentSessionPath(filePath: string): string | null {
 	if (!filePath || filePath.includes("\0") || filePath.includes("\\")) return null;
 	const normalized = path.posix.normalize(filePath);
 	if (normalized !== filePath || !isContainerAgentSessionPath(normalized)) return null;
