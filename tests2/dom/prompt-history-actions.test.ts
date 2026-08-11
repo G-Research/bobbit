@@ -4,6 +4,7 @@ __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { reloadPerfFlags } from "../../src/app/perf-flags.js";
 import { state as appState } from "../../src/app/state.js";
 import { selectPromptAuthorDisplayMode } from "../../src/ui/message-author-presentation.js";
 
@@ -11,6 +12,7 @@ const USER = { kind: "user", id: "user:local", label: "User" } as const;
 const HELP_TEXT = "The new session will include the conversation up to, but not including, this prompt.";
 const originalInnerWidth = window.innerWidth;
 const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+const originalPerfFlags = localStorage.getItem("bobbitPerfFlags");
 let isEligibleHistoryPrompt: (message: any, context: any) => boolean;
 let userVisiblePromptText: (message: any) => string;
 let headerToast: () => unknown;
@@ -37,6 +39,9 @@ afterEach(() => {
 	if (originalClipboardDescriptor) Object.defineProperty(navigator, "clipboard", originalClipboardDescriptor);
 	else delete (navigator as any).clipboard;
 	delete (document as any).execCommand;
+	if (originalPerfFlags === null) localStorage.removeItem("bobbitPerfFlags");
+	else localStorage.setItem("bobbitPerfFlags", originalPerfFlags);
+	reloadPerfFlags();
 });
 
 async function settle(root: ParentNode = document.body): Promise<void> {
@@ -83,21 +88,17 @@ function promptTriggers(root: ParentNode = document): HTMLElement[] {
 async function openPromptMenu(trigger: HTMLElement): Promise<HTMLElement> {
 	trigger.click();
 	await settle();
-	let popover = document.body.querySelector<HTMLElement>("sidebar-actions-popover");
-	if (!popover) {
-		// happy-dom does not deliver the nested custom event from UserMessage to
-		// MessageList reliably; invoke the owning listener at that exact seam.
-		const list = trigger.closest("message-list") as any;
-		const message = (trigger.closest("user-message") as any)?.message;
-		await list?._handlePromptActionsOpen({
-			stopPropagation() {},
-			detail: { entryId: message?.entryId, promptText: userVisiblePromptText(message), trigger },
-		});
-		await settle();
-		popover = document.body.querySelector<HTMLElement>("sidebar-actions-popover");
-	}
+	const popover = document.body.querySelector<HTMLElement>("sidebar-actions-popover");
 	if (!popover) throw new Error("prompt actions popover did not open");
 	return popover;
+}
+
+function setDeferredRendering(enabled: boolean): void {
+	localStorage.setItem(
+		"bobbitPerfFlags",
+		enabled ? "deferOffscreenRender" : "-deferOffscreenRender",
+	);
+	reloadPerfFlags();
 }
 
 function actionRow(popover: ParentNode, id: string): HTMLElement {
@@ -176,6 +177,19 @@ describe("history prompt eligibility", () => {
 });
 
 describe("history prompt trigger and canonical menu", () => {
+	it.each([
+		["direct", false],
+		["deferred", true],
+	] as const)("opens from a real trigger click in %s render mode", async (_mode, deferred) => {
+		setDeferredRendering(deferred);
+		const list = await renderList([durablePrompt(`entry-${_mode}`)]);
+		expect(list.querySelectorAll("deferred-block")).toHaveLength(deferred ? 1 : 0);
+		const trigger = promptTriggers(list)[0];
+		const popover = await openPromptMenu(trigger);
+		expect(popover.querySelector("[role='menu']")).toBeTruthy();
+		expect(trigger.getAttribute("aria-expanded")).toBe("true");
+	});
+
 	it("uses one always-visible trigger and identical desktop/mobile actions", async () => {
 		const snapshots: Array<{ triggerClass: string; icon: string; labels: string[] }> = [];
 		for (const width of [1280, 390]) {

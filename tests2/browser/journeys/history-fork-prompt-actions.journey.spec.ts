@@ -212,6 +212,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			await help.focus();
 			await expect(page.getByRole("tooltip")).toHaveText(TOOLTIP);
 			await page.keyboard.press("Escape");
+			await expect(popover(page)).toHaveCount(0);
 
 			await openPromptActions(page);
 			await page.keyboard.press("ArrowDown");
@@ -219,6 +220,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			await page.keyboard.press("Enter");
 			await expect(page.getByRole("tooltip")).toHaveText(TOOLTIP);
 			await page.keyboard.press("Escape");
+			await expect(popover(page)).toHaveCount(0);
 
 			await openPromptActions(page);
 			await popover(page).getByRole("menuitem", { name: "Copy prompt" }).click();
@@ -245,6 +247,7 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			await expect(toggle).toHaveAttribute("aria-checked", "true");
 			expect(requests).toEqual([]);
 			await page.keyboard.press("Escape");
+			await expect(popover(page)).toHaveCount(0);
 			await openPromptActions(page);
 			await expect(worktreeToggle(page)).toHaveAttribute("aria-checked", "false");
 

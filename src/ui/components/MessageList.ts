@@ -315,7 +315,7 @@ export class MessageList extends LitElement {
 		];
 	}
 
-	private async _handlePromptActionsOpen(event: CustomEvent<PromptActionsOpenDetail>): Promise<void> {
+	private _handlePromptActionsOpen = async (event: CustomEvent<PromptActionsOpenDetail>): Promise<void> => {
 		event.stopPropagation();
 		const { entryId, promptText, trigger } = event.detail ?? {} as PromptActionsOpenDetail;
 		if (!this.canForkSource || this.promptActionsBusy
@@ -380,7 +380,7 @@ export class MessageList extends LitElement {
 		document.body.appendChild(element);
 		this._openPromptActions = record;
 		this.requestUpdate();
-	}
+	};
 
 	private buildRenderItems() {
 		// Map tool results by call id for quick lookup
