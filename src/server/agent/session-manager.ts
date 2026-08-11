@@ -8880,6 +8880,7 @@ export class SessionManager {
 				rolePrompt: resolvedRolePrompt,
 				roleName: opts?.roleName,
 				workflowContext: opts?.workflowContext,
+				reattemptGoalId: opts?.reattemptGoalId,
 				effectiveAllowedTools: optsAllowedTagged,
 				projectId,
 				sandboxBranch,
