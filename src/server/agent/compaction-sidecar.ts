@@ -167,7 +167,11 @@ export function copyCompactionSidecarForTranscript(
 	const target = sidecarPath(toSessionId);
 	if (!target) return false;
 	try {
-		const survivingBoundaries = new Map<string, number>();
+		// A boundary is not a compaction identity: distinct active and discarded
+		// checkpoints can share it. Correlate by the Pi checkpoint id first, then
+		// verify the boundary so source-sidecar order cannot select the wrong card.
+		const retainedBoundariesById = new Map<string, string>();
+		const ambiguousTranscriptIds = new Set<string>();
 		for (const record of retainedCompactions) {
 			const entry = record?.entry;
 			if (!entry || entry.type !== "compaction") continue;
@@ -181,21 +185,33 @@ export function copyCompactionSidecarForTranscript(
 				|| !firstKeptEntryId
 				|| !retainedEntryIds.has(firstKeptEntryId)
 			) continue;
-			survivingBoundaries.set(
-				firstKeptEntryId,
-				(survivingBoundaries.get(firstKeptEntryId) ?? 0) + 1,
-			);
+			if (retainedBoundariesById.has(compactionId)) {
+				retainedBoundariesById.delete(compactionId);
+				ambiguousTranscriptIds.add(compactionId);
+				continue;
+			}
+			if (!ambiguousTranscriptIds.has(compactionId)) {
+				retainedBoundariesById.set(compactionId, firstKeptEntryId);
+			}
 		}
 
-		const retained: CompactionSidecarEntry[] = [];
+		const candidatesById = new Map<string, CompactionSidecarEntry[]>();
 		for (const entry of readCompactionSidecarEntries(fromSessionId)) {
-			const boundary = entry.firstKeptEntryId;
-			if (!boundary || !retainedEntryIds.has(boundary)) continue;
-			const available = survivingBoundaries.get(boundary) ?? 0;
-			if (available <= 0) continue;
-			retained.push(entry);
-			survivingBoundaries.set(boundary, available - 1);
+			const expectedBoundary = retainedBoundariesById.get(entry.id);
+			if (
+				!expectedBoundary
+				|| !retainedEntryIds.has(entry.id)
+				|| entry.firstKeptEntryId !== expectedBoundary
+				|| !retainedEntryIds.has(expectedBoundary)
+			) continue;
+			const candidates = candidatesById.get(entry.id) ?? [];
+			candidates.push(entry);
+			candidatesById.set(entry.id, candidates);
 		}
+		const retained = Array.from(retainedBoundariesById.keys())
+			.map((id) => candidatesById.get(id))
+			.filter((candidates): candidates is [CompactionSidecarEntry] => candidates?.length === 1)
+			.map(([entry]) => entry);
 
 		if (retained.length === 0) {
 			try { fs.unlinkSync(target); } catch (error) {
