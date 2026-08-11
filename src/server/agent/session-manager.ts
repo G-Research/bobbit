@@ -114,6 +114,7 @@ import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import {
 	beginSessionPromptActivity,
+	cancelPendingSessionPromptActivity,
 	cancelSessionPromptActivity,
 	commitSessionPromptActivity,
 	installSessionActivityAttribution,
@@ -2322,6 +2323,9 @@ export class SessionManager {
 	}
 
 	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
+		// Fence pending activity before any old-bridge stop can release a stale RPC
+		// acknowledgement. Object replacement alone cannot invalidate its WeakMap state.
+		cancelPendingSessionPromptActivity(session);
 		this._taskIdCache.delete(session.id);
 		session.lifecycleFenced = true;
 		session.lifecycleGeneration = replacingGeneration - 1;
@@ -11018,6 +11022,10 @@ export class SessionManager {
 			// Persist the metadata before the irreversible old-process stop. If the
 			// stop rejects, restore the prior durable values and retain its listener.
 			roleStore.update(id, { role: role.name, accessory: role.accessory });
+			// The old SessionInfo remains canonical through the stop await. Cancel its
+			// pending activity transactions first so stop-triggered late RPC success
+			// cannot write activity or open the replacement's restore quarantine.
+			cancelPendingSessionPromptActivity(session);
 			try {
 				await oldRpcClient.stop();
 				oldBridgeStopped = true;
@@ -13225,7 +13233,10 @@ export class SessionManager {
 			}
 		} catch { /* retain the durable transcript path */ }
 
-		// Kill the process
+		// Kill the process. Force-abort reuses this SessionInfo for the replacement,
+		// so cancel old-bridge activity transactions before stop can resolve a stale
+		// prompt acknowledgement against the still-canonical object.
+		cancelPendingSessionPromptActivity(session);
 		session.unsubscribe();
 		await session.rpcClient.stop();
 

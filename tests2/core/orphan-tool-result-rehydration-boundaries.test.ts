@@ -746,8 +746,14 @@ describe("executable SessionManager rehydration boundaries", () => {
 			listener = next;
 			return () => { listener = undefined; };
 		});
-		bridge.promptWhenReady = vi.fn(async () => {
+		bridge.promptWhenReady = vi.fn(async (text: string) => {
 			bootEntered.resolve();
+			// A generic terminal sequence cannot prove which dispatch Pi observed.
+			// Emit the exact pending prompt echo before the late negative ack.
+			listener?.({
+				type: "message_end",
+				message: { id: "boot-continuation-echo", role: "user", content: text },
+			});
 			await rejectAck.promise;
 			throw new Error("Command timed out: prompt");
 		});

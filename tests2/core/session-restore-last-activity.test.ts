@@ -5,6 +5,7 @@ import path from "node:path";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import {
 	beginSessionPromptActivity,
+	cancelPendingSessionPromptActivity,
 	cancelSessionPromptActivity,
 	commitSessionPromptActivity,
 	installSessionActivityAttribution,
@@ -220,6 +221,30 @@ describe("authoritative session activity attribution", () => {
 		expect(writes).toEqual([12_001]);
 	});
 
+	it("cancels all pending replacement transactions without changing quarantine", () => {
+		const session = { id: "boundary-transaction-only-cancel", lastActivity: 13_000 };
+		const writes: number[] = [];
+		installSessionActivityAttribution(session, {
+			get: () => ({ lastReadAt: 13_000 }),
+			update: (_id, patch) => writes.push(patch.lastActivity),
+		}, { now: () => 14_000 });
+		const first = beginSessionPromptActivity(session, "first")!;
+		const second = beginSessionPromptActivity(session, "second")!;
+
+		cancelPendingSessionPromptActivity(session);
+
+		expect(first.state).toBe("cancelled");
+		expect(second.state).toBe("cancelled");
+		expect(commitSessionPromptActivity(session, first)).toBe(false);
+		expect(commitSessionPromptActivity(session, second)).toBe(false);
+		expect(session.lastActivity).toBe(13_000);
+		expect(writes).toEqual([]);
+		// Transaction-only cancellation does not itself enter restore quarantine.
+		expect(recordSessionEventActivity(session, REPLAY_VISIBLE_EVENTS[0])).toBe(true);
+		expect(session.lastActivity).toBe(14_000);
+		expect(writes).toEqual([14_000]);
+	});
+
 	it("invalidates pending tokens when replacement re-enters quarantine", () => {
 		const session = { id: "boundary-replacement", lastActivity: 15_000 };
 		const writes: number[] = [];
@@ -419,6 +444,127 @@ describe("authoritative session activity attribution", () => {
 		await expect(manager.deliverLiveSteer(row.id, "echoed before throw")).resolves.toBeUndefined();
 		expect(session.lastActivity).toBeGreaterThan(row.lastReadAt!);
 		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(session.promptQueue.toArray()).toEqual([]);
+	});
+
+	it("makes a deferred old direct-prompt acknowledgement inert before object respawn", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-stale-respawn-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "ordinary-stale-respawn", 10_000, 11_000);
+		const originalLastActivity = row.lastActivity;
+		const originalLastReadAt = row.lastReadAt;
+		store.put(row);
+
+		const activityWrites: number[] = [];
+		const update = store.update.bind(store);
+		store.update = ((id: string, patch: any) => {
+			if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+			update(id, patch);
+		}) as typeof store.update;
+
+		let clock = 20_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const oldSession = manager.getSession(row.id)!;
+		const oldBridge = bridges.get(row.id)!;
+		let promptEntered!: () => void;
+		let resolveOldAck!: () => void;
+		const entered = new Promise<void>((resolve) => { promptEntered = resolve; });
+		const oldAck = new Promise<void>((resolve) => { resolveOldAck = resolve; });
+		oldBridge.prompt = vi.fn(async () => {
+			promptEntered();
+			await oldAck;
+			return { success: true };
+		});
+
+		const dispatch = manager.enqueuePrompt(row.id, "old bridge deferred direct prompt");
+		await entered;
+		// Isolate replacement replay from the separately covered boot-continuation
+		// activity boundary; this restart has no accepted replacement-side prompt.
+		store.update(row.id, { wasStreaming: false });
+		await manager.restartAgent(row.id);
+		const replacement = manager.getSession(row.id)!;
+		const replacementBridge = bridges.get(row.id)!;
+		expect(replacement).not.toBe(oldSession);
+		expect(replacementBridge).not.toBe(oldBridge);
+
+		resolveOldAck();
+		await expect(dispatch).resolves.toEqual({ status: "dispatched" });
+		for (const event of REPLAY_VISIBLE_EVENTS) replacementBridge.emit(event);
+		await store.flushAsync();
+
+		expect(oldSession.lastActivity).toBe(originalLastActivity);
+		expect(replacement.lastActivity).toBe(originalLastActivity);
+		expect(store.get(row.id)?.lastActivity).toBe(originalLastActivity);
+		expect(store.get(row.id)?.lastReadAt).toBe(originalLastReadAt);
+		expect(activityWrites).toEqual([]);
+		expect(replacement.promptQueue.toArray()).toEqual([]);
+	});
+
+	it("makes a deferred old prompt acknowledgement inert before same-object hard abort", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-stale-abort-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "ordinary-stale-abort", 12_000, 13_000);
+		const originalLastActivity = row.lastActivity;
+		const originalLastReadAt = row.lastReadAt;
+		store.put(row);
+
+		const activityWrites: number[] = [];
+		const update = store.update.bind(store);
+		store.update = ((id: string, patch: any) => {
+			if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+			update(id, patch);
+		}) as typeof store.update;
+
+		let clock = 30_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const session = manager.getSession(row.id)!;
+		const oldBridge = bridges.get(row.id)!;
+		let promptEntered!: () => void;
+		let resolveOldAck!: () => void;
+		let stopEntered!: () => void;
+		let releaseStop!: () => void;
+		const entered = new Promise<void>((resolve) => { promptEntered = resolve; });
+		const oldAck = new Promise<void>((resolve) => { resolveOldAck = resolve; });
+		const stopping = new Promise<void>((resolve) => { stopEntered = resolve; });
+		const stopped = new Promise<void>((resolve) => { releaseStop = resolve; });
+		oldBridge.prompt = vi.fn(async () => {
+			promptEntered();
+			await oldAck;
+			return { success: true };
+		});
+		oldBridge.abort = vi.fn(() => new Promise(() => {}));
+		oldBridge.getState = vi.fn(async () => ({ success: true, data: { sessionFile: row.agentSessionFile } }));
+		oldBridge.stop = vi.fn(async () => {
+			stopEntered();
+			await stopped;
+			oldBridge.running = false;
+		});
+
+		const dispatch = manager.enqueuePrompt(row.id, "old bridge deferred abort prompt");
+		await entered;
+		const abort = manager.forceAbort(row.id, 1);
+		await stopping;
+
+		resolveOldAck();
+		await expect(dispatch).resolves.toEqual({ status: "dispatched" });
+		releaseStop();
+		await abort;
+		const replacementBridge = bridges.get(row.id)!;
+		expect(manager.getSession(row.id)).toBe(session);
+		expect(replacementBridge).not.toBe(oldBridge);
+		for (const event of REPLAY_VISIBLE_EVENTS) replacementBridge.emit(event);
+		await store.flushAsync();
+
+		expect(session.lastActivity).toBe(originalLastActivity);
+		expect(store.get(row.id)?.lastActivity).toBe(originalLastActivity);
+		expect(store.get(row.id)?.lastReadAt).toBe(originalLastReadAt);
+		expect(activityWrites).toEqual([]);
 		expect(session.promptQueue.toArray()).toEqual([]);
 	});
 

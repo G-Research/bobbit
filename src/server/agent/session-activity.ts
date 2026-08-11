@@ -48,13 +48,24 @@ export function installSessionActivityAttribution(
 	});
 }
 
+/**
+ * Cancel every still-pending dispatch transaction for this exact session
+ * object. This deliberately changes neither restore quarantine nor author
+ * correlation: replacement owners use it before stopping the old bridge so a
+ * late acknowledgement cannot write activity through stale object state.
+ */
+export function cancelPendingSessionPromptActivity(session: ActivitySession): void {
+	const state = attribution.get(session as object);
+	if (state) cancelPendingBoundaries(state);
+}
+
 /** Re-enter the restore-only quarantine for an in-place bridge replacement. */
 export function suppressSessionActivityUntilPrompt(session: ActivitySession): void {
 	const state = attribution.get(session as object);
 	if (!state) return;
 	state.suppressUntilPrompt = true;
 	// RPC acknowledgements from the replaced bridge are no longer authoritative.
-	cancelPendingBoundaries(state);
+	cancelPendingSessionPromptActivity(session);
 }
 
 /**
