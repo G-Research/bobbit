@@ -265,6 +265,8 @@ export interface SessionSetupPlan {
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
+	/** Explicit no-teardown ownership marker for a writable borrowed worktree. */
+	borrowsWorktree?: boolean;
 	repoPath?: string;
 	branch?: string;
 	repoWorktrees?: Record<string, string>;
@@ -1074,6 +1076,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		assistantType: plan.assistantType,
 		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
+		borrowsWorktree: plan.borrowsWorktree,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
 		repoWorktrees: plan.repoWorktrees,
@@ -1627,6 +1630,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
+		borrowsWorktree: plan.borrowsWorktree,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn
