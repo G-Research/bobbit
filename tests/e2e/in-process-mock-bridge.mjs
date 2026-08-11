@@ -326,6 +326,27 @@ export class InProcessMockBridge {
 		return this.sendCommand({ type: "get_messages" });
 	}
 
+	async getTranscriptCursorSnapshot() {
+		const [forkMessages, entries] = await Promise.all([
+			this.sendCommand({ type: "get_fork_messages" }),
+			this.sendCommand({ type: "get_entries" }),
+		]);
+		if (!forkMessages?.success || !entries?.success) {
+			return {
+				success: false,
+				error: forkMessages?.error ?? entries?.error ?? "Pi transcript cursor data is unavailable",
+			};
+		}
+		return {
+			success: true,
+			data: {
+				forkMessages: forkMessages.data?.messages,
+				entries: entries.data?.entries,
+				leafId: entries.data?.leafId,
+			},
+		};
+	}
+
 	/** Inject an abortable delay for this agent. Omit it to restore real time. */
 	setSleep(sleep) {
 		this.options.sleep = sleep;
