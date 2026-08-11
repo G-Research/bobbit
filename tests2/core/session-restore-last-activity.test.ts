@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import {
+	beginSessionPromptActivity,
+	cancelSessionPromptActivity,
+	commitSessionPromptActivity,
+	installSessionActivityAttribution,
 	isUserVisibleActivity,
+	recordSessionEventActivity,
+	suppressSessionActivityUntilPrompt,
 } from "../../src/server/agent/session-activity.ts";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
 import { registerRpcBridgeFactory, type RpcBridgeOptions } from "../../src/server/agent/rpc-bridge.ts";
@@ -13,7 +19,10 @@ class RestoreBridge {
 	listener?: (event: any) => void;
 	running = true;
 	steerResponse: any = { success: true };
+	steerError?: Error;
 	steerEvents: any[] = [];
+	promptResponse: any = { success: true };
+	promptEvents?: any[];
 
 	constructor(readonly id: string) {}
 
@@ -29,6 +38,7 @@ class RestoreBridge {
 	async abort(): Promise<any> { return { success: true }; }
 	async steer(): Promise<any> {
 		for (const event of this.steerEvents) this.emit(event);
+		if (this.steerError) throw this.steerError;
 		return this.steerResponse;
 	}
 	async compact(): Promise<any> { return { success: true }; }
@@ -51,14 +61,17 @@ class RestoreBridge {
 	}
 
 	async prompt(text: string): Promise<any> {
-		this.emit({ type: "agent_start" });
-		this.emit({ type: "message_end", message: { role: "user", content: text } });
-		this.emit({ type: "message_update", message: { id: `new-${this.id}`, role: "assistant", content: [] } });
-		this.emit({ type: "tool_execution_start", toolName: "read" });
-		this.emit({ type: "tool_execution_end", toolName: "read" });
-		this.emit({ type: "message_end", message: { id: `new-${this.id}`, role: "assistant", content: [] } });
-		this.emit({ type: "agent_end" });
-		return { success: true };
+		const events = this.promptEvents ?? [
+			{ type: "agent_start" },
+			{ type: "message_end", message: { role: "user", content: text } },
+			{ type: "message_update", message: { id: `new-${this.id}`, role: "assistant", content: [] } },
+			{ type: "tool_execution_start", toolName: "read" },
+			{ type: "tool_execution_end", toolName: "read" },
+			{ type: "message_end", message: { id: `new-${this.id}`, role: "assistant", content: [] } },
+			{ type: "agent_end" },
+		];
+		for (const event of events) this.emit(event);
+		return this.promptResponse;
 	}
 
 	async promptWhenReady(text: string): Promise<any> { return this.prompt(text); }
@@ -162,6 +175,68 @@ describe("authoritative session activity attribution", () => {
 		expect(isUserVisibleActivity(undefined)).toBe(false);
 	});
 
+	it("keeps begin and cancel side-effect free, then ignores stale late commits", () => {
+		const session = { id: "boundary-cancel", lastActivity: 10_000 };
+		const persisted = { lastActivity: 10_000, lastReadAt: 11_000 };
+		const writes: number[] = [];
+		installSessionActivityAttribution(session, {
+			get: () => persisted,
+			update: (_id, patch) => {
+				persisted.lastActivity = patch.lastActivity;
+				writes.push(patch.lastActivity);
+			},
+		}, { now: () => 20_000, suppressUntilPrompt: true });
+
+		const boundary = beginSessionPromptActivity(session, "prompt:cancelled")!;
+		expect(session.lastActivity).toBe(10_000);
+		expect(cancelSessionPromptActivity(session, boundary)).toBe(true);
+		expect(commitSessionPromptActivity(session, boundary)).toBe(false);
+		expect(recordSessionEventActivity(session, REPLAY_VISIBLE_EVENTS[0])).toBe(false);
+		expect(session.lastActivity).toBe(10_000);
+		expect(persisted).toEqual({ lastActivity: 10_000, lastReadAt: 11_000 });
+		expect(writes).toEqual([]);
+	});
+
+	it("commits concurrent exact tokens independently and monotonically once", () => {
+		const session = { id: "boundary-concurrent", lastActivity: 12_000 };
+		const persisted = { lastActivity: 12_000, lastReadAt: 12_000 };
+		const writes: number[] = [];
+		installSessionActivityAttribution(session, {
+			get: () => persisted,
+			update: (_id, patch) => {
+				persisted.lastActivity = patch.lastActivity;
+				writes.push(patch.lastActivity);
+			},
+		}, { now: () => 12_000, suppressUntilPrompt: true });
+
+		const rejected = beginSessionPromptActivity(session, "prompt:rejected")!;
+		const accepted = beginSessionPromptActivity(session, "prompt:accepted")!;
+		expect(cancelSessionPromptActivity(session, rejected)).toBe(true);
+		expect(commitSessionPromptActivity(session, accepted)).toBe(true);
+		expect(commitSessionPromptActivity(session, accepted)).toBe(true);
+		expect(commitSessionPromptActivity(session, rejected)).toBe(false);
+		expect(session.lastActivity).toBe(12_001);
+		expect(persisted.lastActivity).toBe(12_001);
+		expect(writes).toEqual([12_001]);
+	});
+
+	it("invalidates pending tokens when replacement re-enters quarantine", () => {
+		const session = { id: "boundary-replacement", lastActivity: 15_000 };
+		const writes: number[] = [];
+		installSessionActivityAttribution(session, {
+			get: () => ({ lastReadAt: 16_000 }),
+			update: (_id, patch) => writes.push(patch.lastActivity),
+		}, { now: () => 16_000 });
+		const oldBridgeBoundary = beginSessionPromptActivity(session, "durable-row")!;
+		suppressSessionActivityUntilPrompt(session);
+		const retryBoundary = beginSessionPromptActivity(session, "durable-row")!;
+
+		expect(commitSessionPromptActivity(session, oldBridgeBoundary)).toBe(false);
+		expect(commitSessionPromptActivity(session, retryBoundary)).toBe(true);
+		expect(session.lastActivity).toBe(16_001);
+		expect(writes).toEqual([16_001]);
+	});
+
 	it("does not acknowledge mark-read before its persistence barrier completes", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mark-read-"));
 		roots.push(root);
@@ -190,6 +265,44 @@ describe("authoritative session activity attribution", () => {
 		expect(await pending).toBe(true);
 		expect(flush).toHaveBeenCalledOnce();
 		expect(new SessionStore(path.join(root, "state")).get(row.id)?.lastReadAt).toBe(12_000);
+	});
+
+	it("keeps restored activity quarantined when a direct prompt is rejected after unrelated events", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-rejected-direct-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "ordinary-rejected-direct", 10_000, 11_000);
+		store.put(row);
+
+		const activityWrites: number[] = [];
+		const update = store.update.bind(store);
+		store.update = ((id: string, patch: any) => {
+			if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+			update(id, patch);
+		}) as typeof store.update;
+
+		let clock = 20_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const session = manager.getSession(row.id)!;
+		const bridge = bridges.get(row.id)!;
+		bridge.promptEvents = [
+			{ type: "agent_start" },
+			{ type: "message_end", message: { id: "unrelated-assistant", role: "assistant", content: [] } },
+			{ type: "tool_execution_start", toolName: "replayed-read" },
+		];
+		bridge.promptResponse = { success: false, error: "Anthropic API key is missing" };
+
+		await expect(manager.enqueuePrompt(row.id, "rejected restored direct prompt"))
+			.rejects.toThrow(/authentication failure|missing-api-key/i);
+		bridge.emit(REPLAY_VISIBLE_EVENTS[0]);
+		await store.flushAsync();
+
+		expect(session.lastActivity).toBe(row.lastActivity);
+		expect(store.get(row.id)?.lastActivity).toBe(row.lastActivity);
+		expect(store.get(row.id)?.lastReadAt).toBe(row.lastReadAt);
+		expect(activityWrites).toEqual([]);
 	});
 
 	it("keeps restored activity quarantined when an unobserved steer is rejected amid unrelated replay", async () => {
@@ -245,6 +358,68 @@ describe("authoritative session activity attribution", () => {
 		expect(new SessionStore(path.join(root, "state")).get(row.id)?.lastActivity).toBe(originalLastActivity);
 		expect(store.get(row.id)?.lastReadAt).toBe(originalLastReadAt);
 		expect(activityWrites).toEqual([]);
+	});
+
+	it("accepts an exact user echo before a negative steer acknowledgement exactly once", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-echoed-steer-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "ordinary-echoed-steer", 10_000, 11_000);
+		store.put(row);
+
+		const activityWrites: number[] = [];
+		const update = store.update.bind(store);
+		store.update = ((id: string, patch: any) => {
+			if (id === row.id && "lastActivity" in patch) activityWrites.push(patch.lastActivity);
+			update(id, patch);
+		}) as typeof store.update;
+
+		let clock = 20_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const session = manager.getSession(row.id)!;
+		session.status = "streaming";
+		const bridge = bridges.get(row.id)!;
+		bridge.steerEvents = [
+			{ type: "agent_start" },
+			{ type: "message_end", message: { id: "accepted-steer", role: "user", content: "echoed restored steer" } },
+		];
+		bridge.steerResponse = { success: false, error: "late synthetic rejection" };
+
+		await expect(manager.deliverLiveSteer(row.id, "echoed restored steer")).resolves.toBeUndefined();
+		await store.flushAsync();
+
+		expect(session.lastActivity).toBeGreaterThan(row.lastReadAt!);
+		expect(store.get(row.id)?.lastActivity).toBe(session.lastActivity);
+		expect(activityWrites.length).toBeGreaterThanOrEqual(1);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(session.promptQueue.toArray()).toEqual([]);
+	});
+
+	it("accepts an exact user echo before a throwing steer acknowledgement", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-activity-echoed-throw-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const row = makePersisted(root, "ordinary-echoed-throw", 10_000, 11_000);
+		store.put(row);
+
+		let clock = 20_000;
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(store, bridges, () => ++clock);
+		await manager.restoreSession(row);
+		const session = manager.getSession(row.id)!;
+		session.status = "streaming";
+		const bridge = bridges.get(row.id)!;
+		bridge.steerEvents = [
+			{ type: "message_end", message: { id: "accepted-throw", role: "user", content: "echoed before throw" } },
+		];
+		bridge.steerError = new Error("late transport failure");
+
+		await expect(manager.deliverLiveSteer(row.id, "echoed before throw")).resolves.toBeUndefined();
+		expect(session.lastActivity).toBeGreaterThan(row.lastReadAt!);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(session.promptQueue.toArray()).toEqual([]);
 	});
 
 	it("drives the real concurrent restore handler without clustering either timestamp", async () => {

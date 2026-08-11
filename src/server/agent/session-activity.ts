@@ -15,6 +15,14 @@ interface AttributionState {
 	store: ActivityStore;
 	now: () => number;
 	suppressUntilPrompt: boolean;
+	pendingBoundaries: Map<string, SessionPromptActivityBoundary>;
+}
+
+export interface SessionPromptActivityBoundary {
+	readonly promptId: string;
+	/** Exact attribution installation that created this token, when installed. */
+	readonly owner?: object;
+	state: "pending" | "committed" | "cancelled";
 }
 
 const attribution = new WeakMap<object, AttributionState>();
@@ -30,29 +38,93 @@ export function installSessionActivityAttribution(
 	store: ActivityStore,
 	opts: { now?: () => number; suppressUntilPrompt?: boolean } = {},
 ): void {
+	const previous = attribution.get(session as object);
+	if (previous) cancelPendingBoundaries(previous);
 	attribution.set(session as object, {
 		store,
 		now: opts.now ?? Date.now,
 		suppressUntilPrompt: opts.suppressUntilPrompt === true,
+		pendingBoundaries: new Map(),
 	});
 }
 
 /** Re-enter the restore-only quarantine for an in-place bridge replacement. */
 export function suppressSessionActivityUntilPrompt(session: ActivitySession): void {
 	const state = attribution.get(session as object);
-	if (state) state.suppressUntilPrompt = true;
+	if (!state) return;
+	state.suppressUntilPrompt = true;
+	// RPC acknowledgements from the replaced bridge are no longer authoritative.
+	cancelPendingBoundaries(state);
 }
 
 /**
- * A prompt/steer dispatched by Bobbit is the authoritative boundary between
- * restore-only traffic and genuine new work. Record it immediately so a new
- * user-visible turn advances activity even before the first assistant frame.
+ * Start an origin-correlated prompt boundary without changing activity. A
+ * repeated durable prompt id supersedes only its previous live attempt; the
+ * token identity prevents a stale acknowledgement from committing the retry.
  */
-export function recordSessionPromptActivity(session: ActivitySession): boolean {
+export function beginSessionPromptActivity(
+	session: ActivitySession,
+	promptId: string,
+): SessionPromptActivityBoundary {
 	const state = attribution.get(session as object);
-	if (!state) return false;
+	const previous = state?.pendingBoundaries.get(promptId);
+	if (previous) previous.state = "cancelled";
+	const boundary: SessionPromptActivityBoundary = {
+		promptId,
+		...(state ? { owner: state } : {}),
+		state: "pending",
+	};
+	state?.pendingBoundaries.set(promptId, boundary);
+	return boundary;
+}
+
+/** Commit exactly one live dispatch attempt. Idempotent after an early echo. */
+export function commitSessionPromptActivity(
+	session: ActivitySession,
+	boundary: SessionPromptActivityBoundary | undefined,
+): boolean {
+	if (!boundary) return false;
+	if (boundary.state === "committed") return true;
+	if (boundary.state !== "pending") return false;
+	const state = attribution.get(session as object);
+	if (!boundary.owner) {
+		// Narrow test doubles may omit attribution. Preserve dispatch acceptance
+		// semantics without fabricating a timestamp writer.
+		if (state) {
+			boundary.state = "cancelled";
+			return false;
+		}
+		boundary.state = "committed";
+		return true;
+	}
+	if (!state || boundary.owner !== state || state.pendingBoundaries.get(boundary.promptId) !== boundary) {
+		boundary.state = "cancelled";
+		return false;
+	}
+	boundary.state = "committed";
+	state.pendingBoundaries.delete(boundary.promptId);
 	state.suppressUntilPrompt = false;
-	return bump(session, state);
+	bump(session, state);
+	return true;
+}
+
+/** Cancel exactly one attempt; late acknowledgement or echo becomes inert. */
+export function cancelSessionPromptActivity(
+	session: ActivitySession,
+	boundary: SessionPromptActivityBoundary | undefined,
+): boolean {
+	if (!boundary || boundary.state !== "pending") return false;
+	const state = attribution.get(session as object);
+	boundary.state = "cancelled";
+	if (state && boundary.owner === state && state.pendingBoundaries.get(boundary.promptId) === boundary) {
+		state.pendingBoundaries.delete(boundary.promptId);
+	}
+	return true;
+}
+
+function cancelPendingBoundaries(state: AttributionState): void {
+	for (const boundary of state.pendingBoundaries.values()) boundary.state = "cancelled";
+	state.pendingBoundaries.clear();
 }
 
 /** Record only meaningful RPC activity after the prompt boundary is open. */

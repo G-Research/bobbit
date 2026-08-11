@@ -113,10 +113,13 @@ import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import {
+	beginSessionPromptActivity,
+	cancelSessionPromptActivity,
+	commitSessionPromptActivity,
 	installSessionActivityAttribution,
 	recordSessionEventActivity,
-	recordSessionPromptActivity,
 	suppressSessionActivityUntilPrompt,
+	type SessionPromptActivityBoundary,
 } from "./session-activity.js";
 export { isUserVisibleActivity } from "./session-activity.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -820,9 +823,8 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
-	/** Monotonic counter bumped only by inbound agent events that prove the
-	 * agent observed/advanced a turn. Local status changes such as aborting do
-	 * not affect it, so prompt-dispatch recovery can distinguish those cases. */
+	/** Monotonic diagnostic count of inbound events that advance a canonical Pi
+	 * turn. Dispatch acceptance uses exact prompt activity boundaries instead. */
 	agentObservedTurnVersion?: number;
 	/** Last user prompt text, for retry on fresh-response errors */
 	lastPromptText?: string;
@@ -1068,8 +1070,20 @@ export function preparePromptAuthorDispatch(
 }
 
 function cancelPromptAuthorBinding(session: SessionInfo, promptId: string, now: number): void {
-	const idx = session.pendingPromptAuthors?.findIndex((record) => record.promptId === promptId) ?? -1;
-	if (idx !== -1) session.pendingPromptAuthors!.splice(idx, 1);
+	let idx = -1;
+	for (let candidate = (session.pendingPromptAuthors?.length ?? 0) - 1; candidate >= 0; candidate--) {
+		if (session.pendingPromptAuthors![candidate].promptId === promptId) {
+			idx = candidate;
+			break;
+		}
+	}
+	if (idx !== -1) {
+		const [pending] = session.pendingPromptAuthors!.splice(idx, 1);
+		cancelSessionPromptActivity(
+			session,
+			(pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY],
+		);
+	}
 	void appendPromptAuthorSettlement(session.id, {
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
@@ -1194,13 +1208,10 @@ export async function dispatchTrackedPrompt(
 	const source = opts.source ?? "system";
 	const now = opts.now ?? Date.now;
 	const promptId = `prompt:${randomUUID()}`;
-	const observedBeforeDispatch = session.agentObservedTurnVersion ?? 0;
 	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
 	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now());
-	// This explicit dispatch is the origin boundary that releases any restore
-	// replay quarantine and records genuine new work before agent events race in.
-	recordSessionPromptActivity(session);
+	const activityBoundary = beginPreparedPromptActivity(session, prepared);
 
 	try {
 		const response = opts.whenReady
@@ -1209,12 +1220,16 @@ export async function dispatchTrackedPrompt(
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
+		if (!commitSessionPromptActivity(session, activityBoundary)) {
+			throw new Error("prompt dispatch was superseded before acknowledgement");
+		}
 		return response;
 	} catch (error) {
-		if ((session.agentObservedTurnVersion ?? 0) !== observedBeforeDispatch) {
-			console.warn(`[session-manager] tracked prompt for ${session.id} reported a failure after the agent observed the turn; treating the dispatch as accepted`);
+		if (activityBoundary?.state === "committed") {
+			console.warn(`[session-manager] tracked prompt for ${session.id} reported a failure after its correlated user echo; treating the dispatch as accepted`);
 			return { success: true };
 		}
+		cancelSessionPromptActivity(session, activityBoundary);
 		cancelPromptAuthorBinding(session, promptId, now());
 		throw error;
 	}
@@ -1296,7 +1311,30 @@ function promptAuthorMessageKey(
 }
 
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
+const PROMPT_ACTIVITY_BOUNDARY = Symbol("prompt-activity-boundary");
 type PromptAuthorEventBinding = { promptId: string; alreadySettled: boolean };
+type ActivityBoundPromptAuthorRecord = PendingPromptAuthorRecord & {
+	[PROMPT_ACTIVITY_BOUNDARY]?: SessionPromptActivityBoundary;
+};
+
+function beginPreparedPromptActivity(
+	session: SessionInfo,
+	prepared: PreparedPromptAuthorDispatch,
+): SessionPromptActivityBoundary | undefined {
+	const boundary = beginSessionPromptActivity(session, prepared.promptId);
+	(prepared.pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY] = boundary;
+	return boundary;
+}
+
+function commitCorrelatedPromptActivity(
+	session: SessionInfo,
+	pending: PendingPromptAuthorRecord | undefined,
+): boolean {
+	return commitSessionPromptActivity(
+		session,
+		(pending as ActivityBoundPromptAuthorRecord | undefined)?.[PROMPT_ACTIVITY_BOUNDARY],
+	);
+}
 
 /** Rebuild live correlation state before switch_session replays transcript events. */
 export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
@@ -1455,8 +1493,9 @@ export function prepareVisibleAgentEvent(
 		}
 	}
 
-	const selectedPromptBinding = stableBinding
-		?? (pendingIndex === -1 ? undefined : session.pendingPromptAuthors![pendingIndex]);
+	const selectedPending = pendingIndex === -1 ? undefined : session.pendingPromptAuthors![pendingIndex];
+	const selectedPromptBinding = stableBinding ?? selectedPending;
+	if (userRole && selectedPending) commitCorrelatedPromptActivity(session, selectedPending);
 	const sessionAuthor = agentAuthorForSession(session, agentDeps);
 	if (selectedPromptBinding) {
 		author = selectedPromptBinding.author;
@@ -5120,15 +5159,20 @@ export class SessionManager {
 		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
 		session.inFlightSteerTexts.push(ledgerRecord);
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, batchText, source, author);
-		recordSessionPromptActivity(session);
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
+		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		try {
 			const steerResp = await session.rpcClient.steer(prepared.piText);
 			if ((steerResp as any)?.success === false) {
 				throw new Error((steerResp as any)?.error || "steer rejected");
 			}
+			commitSessionPromptActivity(session, activityBoundary);
 		} catch (err) {
+			if (activityBoundary?.state === "committed") {
+				console.warn(`[session-manager] steer for ${session.id} reported a failure after its correlated user echo; treating the dispatch as accepted`);
+				return;
+			}
 			// Splice this entry from the ledger only if this catch path still owns
 			// it. Abort/restart reconciliation can drain the same ledger while the
 			// steer RPC is pending; in that case the row has already been recovered
@@ -5446,28 +5490,25 @@ export class SessionManager {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
-		recordSessionPromptActivity(session);
 		this.markPromptDispatchStreaming(session);
-		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
+		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
+		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
+		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const consumeDurableAcceptanceRow = () => {
 			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
 			this.clearRecoveredPromptDispatchOwnership(session, [durableQueueRowId]);
 			this.broadcastQueue(session);
 		};
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
-			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
-			if (observedTurnVersion === dispatchObservedTurnVersion) return false;
+			if (activityBoundary?.state !== "committed") return false;
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
-			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); treating the dispatch as accepted`);
+			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after its correlated user echo; treating the dispatch as accepted`);
 			consumeDurableAcceptanceRow();
 			session.recoverDrainAttempts = 0;
 			return true;
 		};
-
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
-		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		let recovered = false;
 		let cancelled = false;
 		try {
@@ -5486,7 +5527,9 @@ export class SessionManager {
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
-			// The RPC accepted the intent; only now consume its durable acceptance row.
+			// The exact RPC attempt accepted the intent. A stale bridge response cannot
+			// consume a row already recovered by replacement reconciliation.
+			if (!commitSessionPromptActivity(session, activityBoundary)) return;
 			consumeDurableAcceptanceRow();
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
@@ -5553,7 +5596,6 @@ export class SessionManager {
 
 		// Optimistic status update to prevent double-dispatch race
 		this.markPromptDispatchStreaming(session);
-		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
 		// Snapshot the rows we're about to dispatch so we can re-enqueue them
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
@@ -5576,13 +5618,12 @@ export class SessionManager {
 		}
 
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
-			// Apply this fence before cancellation: the echo may already have settled
-			// the sidecar, and a later cancelled row must never overwrite acceptance.
-			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
-			if (observedTurnVersion === dispatchObservedTurnVersion) return false;
+			// Apply this exact-origin fence before cancellation: an echoed attempt is
+			// accepted even if its RPC acknowledgement subsequently fails.
+			if (activityBoundary?.state !== "committed") return false;
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
-			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after its correlated user echo; not recovering ${dispatchedRowsForRecovery.length} row(s)`);
 			this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 			return true;
 		};
@@ -5599,7 +5640,7 @@ export class SessionManager {
 		};
 
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
-		recordSessionPromptActivity(session);
+		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const dispatchPromise = session.rpcClient.prompt(prepared.piText, next.images);
 		dispatchPromise
 			.then((resp: any) => {
@@ -5612,9 +5653,10 @@ export class SessionManager {
 					if (acceptedBeforeAckFailure(reason)) return;
 					this.cancelPromptAuthorDispatch(session, promptId);
 					recoverDispatchedRows(reason);
-				} else {
+				} else if (commitSessionPromptActivity(session, activityBoundary)) {
 					// Dispatch landed — clear the busy-guard retry budget and any
-					// ownership ledger for the dequeued durable row.
+					// ownership ledger for the dequeued durable row. A cancelled token
+					// identifies a stale bridge acknowledgement and owns no state.
 					this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 					session.recoverDrainAttempts = 0;
 				}
@@ -7756,7 +7798,6 @@ export class SessionManager {
 		// Mark streaming as a second fence for the instant after coordinator release,
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
-		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 		const markAccepted = (): boolean => {
 			if (!this._sessionWriterIsCurrent(session)) return false;
 			session.restoreStartupWasStreaming = false;
@@ -7782,18 +7823,8 @@ export class SessionManager {
 			// rehydrates wasStreaming=true and safely tries again on the next boot.
 			return markAccepted();
 		} catch (err) {
-			// A terminal event proves Pi accepted and completed the continuation even
-			// when the command acknowledgement subsequently rejects or times out. Keep
-			// that completed lifecycle and clear the durable boot marker rather than
-			// scheduling the same continuation again after a later gateway restart.
-			if ((session.agentObservedTurnVersion ?? 0) !== dispatchObservedTurnVersion && markAccepted()) {
-				this._bootRepromptedSessions.delete(session.id);
-				const reason = err instanceof Error ? err.message : String(err);
-				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
-				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
-				console.warn(`[session-manager] Boot continuation for ${session.id} reported ${safeReason} after agent observed the turn; treating the dispatch as accepted`);
-				return true;
-			}
+			// dispatchTrackedSystemPrompt already treats an exact correlated user echo
+			// as acceptance. Unrelated lifecycle/replay cannot accept this attempt.
 			this._bootRepromptedSessions.delete(session.id);
 			if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
 				broadcastStatus(session, "idle");
