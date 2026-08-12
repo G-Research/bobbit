@@ -147,6 +147,7 @@ type ExplorerState = {
 	refreshGeneration: number;
 	selectionGeneration: number;
 	navigationGeneration: number;
+	pendingFocus?: { path: string; generation: number };
 	location: { path: string; kind: LocationKind };
 	pathEditing: boolean;
 	pathDraft: string;
@@ -331,7 +332,7 @@ function deactivate(state: ExplorerState): void {
 	state.active = false;
 	state.refreshGeneration += 1;
 	state.selectionGeneration += 1;
-	state.navigationGeneration += 1;
+	invalidateNavigation(state);
 	state.search.generation += 1;
 	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
 	if (state.copyTimer !== undefined) window.clearTimeout(state.copyTimer);
@@ -399,7 +400,7 @@ function subscribeToStatus(state: ExplorerState): void {
 
 async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
 	closeContextMenu(state, false);
-	state.navigationGeneration += 1;
+	invalidateNavigation(state);
 	const activeQuery = state.search.query;
 	state.search.generation += 1;
 	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
@@ -567,7 +568,10 @@ function flattenRows(state: ExplorerState): Array<{ entry: TreeEntry; level: num
 function renderTree(state: ExplorerState): void {
 	const restoreFocus = state.tree.contains(document.activeElement);
 	const menuInvokerPath = state.menu?.invoker?.closest<HTMLElement>("[role=treeitem][data-path]")?.dataset.path;
-	const finishRender = (): void => reconcileContextMenuAfterTreeRender(state, menuInvokerPath);
+	const finishRender = (): void => {
+		reconcileContextMenuAfterTreeRender(state, menuInvokerPath);
+		consumePendingFocus(state);
+	};
 	renderDiscoveryControls(state);
 	state.tree.replaceChildren();
 	if (state.search.query) {
@@ -641,6 +645,21 @@ function renderTree(state: ExplorerState): void {
 	if (rootDirectory.state === "error") state.tree.prepend(errorRow(rootDirectory.error!, () => void refresh(state, true), true));
 	finishRender();
 	if (restoreFocus) requestAnimationFrame(() => focusPath(state, state.focused));
+}
+
+function consumePendingFocus(state: ExplorerState): void {
+	const pending = state.pendingFocus;
+	if (!pending) return;
+	if (pending.generation !== state.navigationGeneration) {
+		state.pendingFocus = undefined;
+		return;
+	}
+	if (!state.tree.querySelector(`[role=treeitem][data-path="${cssEscape(pending.path)}"]`)) return;
+	state.pendingFocus = undefined;
+	requestAnimationFrame(() => {
+		if (pending.generation !== state.navigationGeneration || state.focused !== pending.path) return;
+		focusPath(state, pending.path);
+	});
 }
 
 function reconcileContextMenuAfterTreeRender(state: ExplorerState, invokerPath?: string): void {
@@ -796,6 +815,7 @@ function normalizeStatusCode(code: string | undefined): string | undefined {
 }
 
 async function toggleDirectory(state: ExplorerState, entry: TreeEntry, focusChild = false): Promise<void> {
+	invalidateNavigation(state);
 	state.location = { path: entry.path, kind: "directory" };
 	renderPathBar(state);
 	if (state.expanded.has(entry.path)) {
@@ -982,7 +1002,7 @@ function enterPathEdit(state: ExplorerState, invoker?: HTMLElement | null): void
 }
 
 function cancelPathEdit(state: ExplorerState, restoreFocus: boolean): void {
-	state.navigationGeneration += 1;
+	invalidateNavigation(state);
 	if (state.pathOrigin) state.location = { ...state.pathOrigin };
 	const invoker = state.pathInvoker;
 	state.pathEditing = false;
@@ -1001,7 +1021,7 @@ function cancelPathEdit(state: ExplorerState, restoreFocus: boolean): void {
 async function navigateToPath(state: ExplorerState, rawPath: string, source: "path" | "breadcrumb" | "search"): Promise<boolean> {
 	closeContextMenu(state, false);
 	if (source === "path" && state.pathLoading) return false;
-	const path = rawPath.trim();
+	const path = rawPath;
 	if (safeRelative(path, true) === undefined || path.split("/").includes(".git")) {
 		if (source === "path") {
 			state.pathDraft = rawPath;
@@ -1012,7 +1032,7 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 		}
 		return false;
 	}
-	const generation = ++state.navigationGeneration;
+	const generation = beginNavigation(state);
 	if (source === "path") {
 		state.pathDraft = rawPath;
 		state.pathLoading = true;
@@ -1038,30 +1058,26 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 			setLive(state, "Showing all files so the requested path can be revealed.");
 		}
 		state.location = { path: resolvedPath, kind: kind as LocationKind };
+		if (source === "path") commitPathEdit(state);
 		if (kind === "root") {
 			state.focused = nearestFocus(state.focused, flattenRows(state).map((row) => row.entry.path));
 			if (state.narrow) showTree(state, false);
 		} else {
 			state.focused = resolvedPath;
+			if (source !== "search") state.pendingFocus = { path: resolvedPath, generation };
 			if (kind === "file") {
 				const entry = state.discovered.get(resolvedPath) ?? normalizeEntry({ path: resolvedPath, name: resolvedPath.split("/").pop(), kind });
-				if (entry) await selectEntry(state, entry);
+				if (entry) await selectEntry(state, entry, generation);
+				if (generation !== state.navigationGeneration || state.selected !== resolvedPath) return false;
 			} else {
 				if (state.narrow) showTree(state, false);
 				if (kind !== "directory") setLive(state, "This item cannot be opened. It can still be revealed in the tree.");
 			}
 		}
-		if (source === "path") {
-			state.pathEditing = false;
-			state.pathLoading = false;
-			state.pathError = undefined;
-			state.pathOrigin = undefined;
-			state.pathInvoker = undefined;
-		}
+		if (generation !== state.navigationGeneration) return false;
 		renderPathBar(state);
 		renderTree(state);
 		queueStore(state);
-		if (source !== "search" && kind !== "root") requestAnimationFrame(() => focusPath(state, resolvedPath));
 		return true;
 	} catch (error) {
 		if (generation !== state.navigationGeneration) return false;
@@ -1074,6 +1090,26 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 		} else setAlert(state, mapNavigationFailure(error).message);
 		return false;
 	}
+}
+
+function beginNavigation(state: ExplorerState): number {
+	state.pendingFocus = undefined;
+	return ++state.navigationGeneration;
+}
+
+function invalidateNavigation(state: ExplorerState): void {
+	state.pendingFocus = undefined;
+	state.navigationGeneration += 1;
+}
+
+function commitPathEdit(state: ExplorerState): void {
+	state.pathEditing = false;
+	state.pathLoading = false;
+	state.pathError = undefined;
+	state.pathDraft = "";
+	state.pathOrigin = undefined;
+	state.pathInvoker = undefined;
+	renderPathBar(state);
 }
 
 function mapNavigationFailure(error: unknown): PanelFailure {
@@ -1205,7 +1241,7 @@ function captureBrowseSnapshot(state: ExplorerState): BrowseSnapshot {
 
 function clearSearch(state: ExplorerState, restore: boolean): void {
 	state.search.generation += 1;
-	state.navigationGeneration += 1;
+	invalidateNavigation(state);
 	state.selectionGeneration += 1;
 	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
 	const snapshot = state.search.snapshot;
@@ -1232,6 +1268,7 @@ function clearSearch(state: ExplorerState, restore: boolean): void {
 	state.search.error = undefined;
 	state.search.snapshot = undefined;
 	renderTree(state);
+	if (restore && snapshot) queueStore(state);
 }
 
 function toggleChangedOnly(state: ExplorerState): void {
@@ -1343,7 +1380,9 @@ async function copyPathAction(state: ExplorerState, action: "copy-path" | "copy-
 	requestAnimationFrame(() => invoker?.isConnected && invoker.focus());
 }
 
-async function selectEntry(state: ExplorerState, entry: TreeEntry): Promise<void> {
+async function selectEntry(state: ExplorerState, entry: TreeEntry, navigationGeneration?: number): Promise<void> {
+	if (navigationGeneration === undefined) invalidateNavigation(state);
+	else if (navigationGeneration !== state.navigationGeneration) return;
 	state.selected = entry.path;
 	state.selectedKind = entry.kind;
 	state.focused = entry.path;

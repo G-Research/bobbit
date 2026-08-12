@@ -184,9 +184,9 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
 		await openFromSessionMenu(page);
-		const panel = await waitForExplorer(page);
+		let panel = await waitForExplorer(page);
 
-		const search = panel.getByRole("combobox", { name: "Search files and folders" });
+		let search = panel.getByRole("combobox", { name: "Search files and folders" });
 		await expect(search).toBeVisible();
 		await treeItem(page, "copy-source.txt").click();
 		await expect(treeItem(page, "copy-source.txt")).toHaveAttribute("aria-selected", "true");
@@ -205,6 +205,13 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(search).toHaveValue("");
 		await expect(treeItem(page, "copy-source.txt"), "clearing search restores the prior tree selection").toHaveAttribute("aria-selected", "true");
 		await expect(panel.locator(PREVIEW), "clearing search restores the prior preview even when the responsive tree pane is active").toContainText("retained copy source");
+		await page.waitForTimeout(300);
+		await page.reload();
+		panel = await waitForExplorer(page);
+		search = panel.getByRole("combobox", { name: "Search files and folders" });
+		await expect(search, "the cleared query remains transient after reload").toHaveValue("");
+		await expect(treeItem(page, "copy-source.txt"), "reload restores the browse selection persisted by search clear").toHaveAttribute("aria-selected", "true");
+		await expect(panel.locator(PREVIEW)).toContainText("retained copy source");
 
 		const pathShortcut = process.platform === "darwin" ? "Meta+L" : "Control+L";
 		await treeItem(page, "copy-source.txt").focus();

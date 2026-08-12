@@ -486,6 +486,100 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/deep");
 	});
 
+	it("preserves exact spaced paths and commits a resolved file before its preview read settles", async () => {
+		const pendingRead = deferred<unknown>();
+		const exactPath = " report ";
+		const fakeHost = host({
+			list: () => list([{ path: "keep.txt", name: "keep.txt", kind: "file" }]),
+			resolve: ({ path }) => ({ path, kind: "file", chain: [{ path, name: path, kind: "file" }] }),
+			read: ({ path }) => path === exactPath ? pendingRead.promise : { kind: "text", text: "keep" },
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("exact-spaced-path", fakeHost);
+		await tick();
+		click(row(root, "keep.txt"));
+		await tick();
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = exactPath;
+		key(input, "Enter");
+		await tick();
+
+		expect(fakeHost.callRoute).toHaveBeenCalledWith("resolve", expect.objectContaining({ body: { path: exactPath } }));
+		expect(root.querySelector('[aria-label="Relative path"]')).toBeNull();
+		expect(root.querySelector('.bb-explorer-crumb[data-path=" report "]')?.textContent).toBe(exactPath);
+		expect(row(root, exactPath).getAttribute("aria-selected")).toBe("true");
+		key(root, "Escape");
+		expect(root.querySelector('.bb-explorer-crumb[data-path=" report "]')).not.toBeNull();
+		expect(row(root, exactPath).getAttribute("aria-selected")).toBe("true");
+
+		pendingRead.resolve({ kind: "text", text: "spaced path preview" });
+		await tick();
+		expect(root.textContent).toContain("spaced path preview");
+	});
+
+	it("focuses a resolved nested row after the initial root listing makes it renderable", async () => {
+		const initialList = deferred<unknown>();
+		const fakeHost = host({
+			list: () => initialList.promise,
+			resolve: ({ path }) => ({ path, kind: "directory", chain: [
+				{ path: "deep", name: "deep", kind: "directory" },
+				{ path, name: "nested", kind: "directory" },
+			] }),
+			read: () => ({ kind: "text", text: "unused" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("pending-navigation-focus", fakeHost);
+		await tick();
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "deep/nested";
+		key(input, "Enter");
+		await tick();
+		expect(root.querySelector('[role="treeitem"][data-path="deep/nested"]')).toBeNull();
+
+		initialList.resolve(list([{ path: "deep", name: "deep", kind: "directory" }]));
+		await tick();
+		await tick();
+		expect(document.activeElement).toBe(row(root, "deep/nested"));
+		expect(row(root, "deep/nested").tabIndex).toBe(0);
+	});
+
+	it("does not let an older navigation steal focus after a newer tree selection", async () => {
+		const pendingRead = deferred<unknown>();
+		const fakeHost = host({
+			list: () => list([
+				{ path: "a.txt", name: "a.txt", kind: "file" },
+				{ path: "b.txt", name: "b.txt", kind: "file" },
+			]),
+			resolve: ({ path }) => ({ path, kind: "file", chain: [{ path, name: path, kind: "file" }] }),
+			read: ({ path }) => path === "a.txt" ? pendingRead.promise : { kind: "text", text: "newer B" },
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("superseded-navigation-focus", fakeHost);
+		await tick();
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "a.txt";
+		key(input, "Enter");
+		await tick();
+
+		row(root, "b.txt").focus();
+		key(row(root, "b.txt"), "Enter");
+		await tick();
+		pendingRead.resolve({ kind: "text", text: "stale A" });
+		await tick();
+		await tick();
+		expect(row(root, "b.txt").getAttribute("aria-selected")).toBe("true");
+		expect(row(root, "b.txt").tabIndex).toBe(0);
+		expect(document.activeElement).toBe(row(root, "b.txt"));
+		expect(root.textContent).toContain("newer B");
+		expect(root.textContent).not.toContain("stale A");
+	});
+
 	it("cancels an in-flight path resolve, fences its late response, and prevents duplicate submits", async () => {
 		const pending = deferred<unknown>();
 		const fakeHost = host({
@@ -668,6 +762,59 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[role="tree"]')).not.toBeNull();
 		expect(row(root, "src/original.txt").getAttribute("aria-selected")).toBe("true");
 		expect(root.textContent).toContain("opened src/original.txt");
+	});
+
+	it("persists a restored browse snapshot after search clear and lets directory navigation supersede that write", async () => {
+		let persisted: unknown;
+		const put = vi.fn(async (_key: string, value: unknown) => { persisted = value; });
+		const routes = {
+			list: ({ path }: Record<string, unknown>) => path === "src"
+				? list([{ path: "src/original.txt", name: "original.txt", kind: "file" }])
+				: list([{ path: "src", name: "src", kind: "directory" }]),
+			search: ({ query }: Record<string, unknown>) => ({
+				query, count: 1, limit: 200, truncated: false,
+				results: query === "folder"
+					? [{ path: "destination", name: "destination", kind: "directory" }]
+					: [{ path: "result.txt", name: "result.txt", kind: "file" }],
+			}),
+			resolve: ({ path }: Record<string, unknown>) => ({ path, kind: path === "destination" ? "directory" : "file", chain: [
+				{ path, name: path, kind: path === "destination" ? "directory" : "file" },
+			] }),
+			read: ({ path }: Record<string, unknown>) => ({ kind: "text", text: `opened ${path}` }),
+			diff: () => ({ kind: "empty" }),
+		};
+		const fakeHost = host(routes, { put });
+		const root = mount("search-clear-persistence", fakeHost);
+		await tick();
+		click(row(root, "src"));
+		await tick();
+		click(row(root, "src/original.txt"));
+		await tick(200);
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "file";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		key(search, "Enter");
+		await tick(200);
+		expect(persisted).toEqual(expect.objectContaining({ selected: "result.txt", focused: "result.txt" }));
+
+		click(root.querySelector('[aria-label="Clear search"]')!);
+		await tick(200);
+		expect(persisted).toEqual(expect.objectContaining({ expanded: ["src"], selected: "src/original.txt", focused: "src/original.txt" }));
+		const restoredHost = host(routes, { stored: persisted });
+		const restored = mount("search-clear-remount", restoredHost);
+		await tick();
+		expect(row(restored, "src").getAttribute("aria-expanded")).toBe("true");
+		expect(row(restored, "src/original.txt").getAttribute("aria-selected")).toBe("true");
+		expect(restored.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')?.value).toBe("");
+		expect(restored.querySelector('[role="listbox"]')).toBeNull();
+
+		search.value = "folder";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		click(root.querySelector('[role="option"][data-path="destination"]')!);
+		await tick(200);
+		expect(persisted).toEqual(expect.objectContaining({ selected: "src/original.txt", focused: "destination" }));
 	});
 
 	it("renders bounded search states, fences cleared work, and wraps composite keyboard navigation", async () => {
