@@ -287,7 +287,7 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		expectArchivedPreferencesPreserved(before, after, ids);
 	});
 
-	test("search auto-open clear preserves explicit archived tree preferences", async ({ page }) => {
+	test("ephemeral search demand exposes archives without changing explicit preferences", async ({ page }) => {
 		await loadFixture(page, { showArchived: false });
 		const ids = await fixtureIds(page);
 		await page.evaluate(() => (window as any).__setArchivedSearchPreferenceFixture());
@@ -296,11 +296,30 @@ test.describe("Sidebar archived deterministic fixture", () => {
 		await page.evaluate(() => {
 			document.querySelector("search-box")?.dispatchEvent(new CustomEvent("search-input", { detail: { query: "Alpha Archived" }, bubbles: true, composed: true }));
 		});
-		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(true);
+		await expect.poll(() => page.evaluate(() => ({
+			archivedSearchDemand: (window as any).bobbitState.archivedSearchDemand,
+			showArchived: (window as any).bobbitState.showArchived,
+			persistedShowArchived: localStorage.getItem("bobbit-show-archived"),
+		})), { timeout: 5_000 }).toEqual({
+			archivedSearchDemand: true,
+			showArchived: false,
+			persistedShowArchived: "false",
+		});
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: search demand exposes archived section`).toBeVisible({ timeout: 5_000 });
+
 		await page.evaluate(() => {
 			document.querySelector("search-box")?.dispatchEvent(new CustomEvent("search-clear", { bubbles: true, composed: true }));
 		});
-		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
+		await expect.poll(() => page.evaluate(() => ({
+			archivedSearchDemand: (window as any).bobbitState.archivedSearchDemand,
+			showArchived: (window as any).bobbitState.showArchived,
+			persistedShowArchived: localStorage.getItem("bobbit-show-archived"),
+		})), { timeout: 5_000 }).toEqual({
+			archivedSearchDemand: false,
+			showArchived: false,
+			persistedShowArchived: "false",
+		});
+		await expect(page.locator(`[data-nav-id="archived-header:${ids.projectA}"]`), `${MARK}: clearing search removes ephemeral archived section`).toHaveCount(0, { timeout: 5_000 });
 
 		const after = await sidebarTreeExpansionSnapshot(page);
 		expectArchivedPreferencesPreserved(before, after, ids);
