@@ -48,6 +48,8 @@ function createGitFixture(): string {
 
 	write(root, "src/changed.ts", 'export const version = "base";\n');
 	write(root, "src/deleted.txt", "deleted baseline\n");
+	write(root, "deep/navigation/direct-target.txt", "opened by canonical relative path\n");
+	write(root, "search-only/level/Report.md", "opened from recursive path-fragment search\n");
 	write(root, "copy-source.txt", "retained copy source\nsecond line\n");
 	write(root, "rename-old.txt", "rename baseline\n");
 	write(root, "conflict.txt", "conflict baseline\n");
@@ -165,6 +167,140 @@ test.describe("Journey: built-in file explorer pack", () => {
 		gitFixture = undefined;
 	});
 
+	// These locators intentionally pin the public role/name contract from the approved
+	// interaction design instead of coupling the journey to implementation-only test ids.
+	test("navigates and discovers nested paths, filters and collapses the tree, copies paths, and restores durable preferences", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		const projectRoot = createGitFixture();
+		gitFixture = await createFixtureProject(projectRoot, "discovery");
+		const persisted = gateway.sessionManager?.getPersistedSession(gitFixture.sessionId) as { cwd?: string; worktreePath?: string } | undefined;
+		const root = persisted?.worktreePath ?? persisted?.cwd;
+		expect(root, "the explorer fixture must mutate the bound session working directory").toBeTruthy();
+		populateGitChanges(root!);
+		await page.setViewportSize({ width: 1600, height: 1000 });
+		await openApp(page);
+		await navigateToHash(page, `#/session/${gitFixture.sessionId}`);
+		await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
+		await openFromSessionMenu(page);
+		const panel = await waitForExplorer(page);
+
+		const search = panel.getByRole("combobox", { name: "Search files and folders" });
+		await expect(search).toBeVisible();
+		await treeItem(page, "copy-source.txt").click();
+		await expect(treeItem(page, "copy-source.txt")).toHaveAttribute("aria-selected", "true");
+
+		await search.fill("LEVEL/rep");
+		const reportResult = panel.getByRole("option").filter({ hasText: "Report.md" });
+		await expect(reportResult, "search traverses directories that the lazy tree has never loaded").toBeVisible({ timeout: 15_000 });
+		await expect(reportResult).toContainText(/search-only.*level/);
+		await search.press("Enter");
+		await expect(panel.locator(PREVIEW)).toContainText("search-only/level/Report.md", { timeout: 15_000 });
+		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("opened from recursive path-fragment search");
+		await expect(search).toHaveValue("LEVEL/rep");
+		await panel.getByRole("button", { name: "Clear search" }).click();
+		await expect(search).toHaveValue("");
+		await expect(treeItem(page, "copy-source.txt"), "clearing search restores the prior tree selection").toHaveAttribute("aria-selected", "true");
+		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("retained copy source");
+
+		const pathShortcut = process.platform === "darwin" ? "Meta+L" : "Control+L";
+		await treeItem(page, "copy-source.txt").focus();
+		await page.keyboard.press(pathShortcut);
+		let pathInput = panel.getByRole("textbox", { name: "Relative path" });
+		await expect(pathInput).toBeFocused();
+		await pathInput.fill("deep/navigation");
+		await pathInput.press("Enter");
+		await expect(treeItem(page, "deep/navigation"), "direct directory navigation reveals initially unloaded ancestors").toBeVisible({ timeout: 15_000 });
+		await expect(treeItem(page, "deep/navigation")).toBeFocused();
+		const breadcrumbs = panel.getByRole("navigation", { name: "Current path" });
+		await expect(breadcrumbs).toBeVisible();
+		await expect(breadcrumbs.getByRole("button", { name: /navigation/i })).toHaveAttribute("aria-current", "location");
+
+		await breadcrumbs.getByRole("button", { name: /deep/i }).click();
+		await expect(treeItem(page, "deep")).toBeFocused();
+		await treeItem(page, "deep").focus();
+		await page.keyboard.press(pathShortcut);
+		pathInput = panel.getByRole("textbox", { name: "Relative path" });
+		await pathInput.fill("deep/navigation/direct-target.txt");
+		await pathInput.press("Enter");
+		await expect(treeItem(page, "deep/navigation/direct-target.txt")).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
+		await expect(panel.locator(PREVIEW)).toContainText("deep/navigation/direct-target.txt");
+		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("opened by canonical relative path");
+
+		const selectedTarget = treeItem(page, "deep/navigation/direct-target.txt");
+		const deleted = treeItem(page, "src/deleted.txt");
+		const src = treeItem(page, "src");
+		await src.click();
+		await expect(deleted).toBeVisible();
+		await deleted.click({ button: "right" });
+		let pathMenu = page.getByRole("menu", { name: "Path actions" });
+		await expect(pathMenu).toBeVisible();
+		await pathMenu.getByRole("menuitem", { name: "Copy relative path" }).click();
+		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("src/deleted.txt");
+		await expect(panel.getByText("Relative path copied", { exact: true })).toBeVisible();
+		await expect(selectedTarget, "opening a pointer context menu does not replace the selected preview").toHaveAttribute("aria-selected", "true");
+
+		await deleted.focus();
+		await deleted.press("Shift+F10");
+		pathMenu = page.getByRole("menu", { name: "Path actions" });
+		await expect(pathMenu.getByRole("menuitem", { name: "Copy relative path" })).toBeFocused();
+		await pathMenu.getByRole("menuitem", { name: "Copy filename" }).click();
+		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("deleted.txt");
+		await expect(panel.getByText("Filename copied", { exact: true })).toBeVisible();
+		await expect(deleted, "keyboard path actions restore focus to their invoking row").toBeFocused();
+		await expect(selectedTarget).toHaveAttribute("aria-selected", "true");
+
+		const collapseAll = panel.getByRole("button", { name: "Collapse all" });
+		await collapseAll.click();
+		await expect(collapseAll, "toolbar collapse keeps focus on its command").toBeFocused();
+		await expect(collapseAll).toBeDisabled();
+		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("opened by canonical relative path");
+		await expect(treeItem(page, "deep/navigation/direct-target.txt")).toHaveCount(0);
+
+		const changedOnly = panel.getByRole("button", { name: "Changed files only" });
+		await changedOnly.click();
+		await expect(changedOnly).toHaveAttribute("aria-pressed", "true");
+		await expect(treeItem(page, "copy-source.txt"), "unchanged root files are hidden by the Git filter").toHaveCount(0);
+		await treeItem(page, "src").click();
+		await expect(treeItem(page, "src/deleted.txt"), "virtual deleted paths remain discoverable when filtered").toBeVisible();
+		await changedOnly.click();
+		await expect(changedOnly).toHaveAttribute("aria-pressed", "false");
+		await expect(treeItem(page, "copy-source.txt")).toBeVisible();
+
+		await page.setViewportSize({ width: 600, height: 800 });
+		await changedOnly.focus();
+		await page.keyboard.press(pathShortcut);
+		pathInput = panel.getByRole("textbox", { name: "Relative path" });
+		await pathInput.fill("deep/navigation/direct-target.txt");
+		await pathInput.press("Enter");
+		await expect(panel.getByRole("navigation", { name: "Current path" }), "the path bar remains available in the narrow preview pane").toBeVisible();
+		await expect(panel.getByRole("button", { name: "Back to files" })).toBeVisible();
+		await panel.getByRole("button", { name: "Back to files" }).click();
+		await expect(search).toBeVisible();
+		await expect(changedOnly).toBeVisible();
+		await expect(collapseAll).toBeVisible();
+		expect((await search.boundingBox())?.width ?? 0, "narrow search remains usable").toBeGreaterThanOrEqual(120);
+
+		await changedOnly.click();
+		await expect(changedOnly).toHaveAttribute("aria-pressed", "true");
+		await search.fill("Report.md");
+		await expect(panel.getByRole("option").filter({ hasText: "Report.md" }), "search remains whole-root while Changed files only is active").toBeVisible({ timeout: 15_000 });
+		await page.reload();
+		let restored = await waitForExplorer(page);
+		await expect(restored.getByRole("button", { name: "Changed files only" })).toHaveAttribute("aria-pressed", "true");
+		await expect(restored.getByRole("combobox", { name: "Search files and folders" }), "search queries are transient across reload").toHaveValue("");
+		await expect(restored.getByRole("navigation", { name: "Current path" })).toBeVisible();
+
+		await restored.getByRole("button", { name: /Edit path/ }).click();
+		pathInput = restored.getByRole("textbox", { name: "Relative path" });
+		await pathInput.fill("draft/not-submitted");
+		await page.reload();
+		restored = await waitForExplorer(page);
+		await expect(restored.getByRole("textbox", { name: "Relative path" }), "path editing state is transient across reload").toHaveCount(0);
+		await expect(restored.getByRole("navigation", { name: "Current path" })).toBeVisible();
+		await expect(restored.getByRole("button", { name: "Changed files only" }), "the durable filter preference survives both reloads").toHaveAttribute("aria-pressed", "true");
+	});
+
 	test("launches a singleton, browses Git state read-only, restores it, refreshes, and browses outside Git @smoke", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		const projectRoot = createGitFixture();
@@ -189,7 +325,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 			expect.objectContaining({ kind: "session-menu", label: "Open File Explorer" }),
 			expect.objectContaining({ kind: "composer-slash", id: "files" }),
 		]));
-		expect(explorer?.routeNames).toEqual(expect.arrayContaining(["list", "read", "diff"]));
+		expect(explorer?.routeNames).toEqual(expect.arrayContaining(["list", "read", "diff", "resolve", "search"]));
 
 		await openApp(page);
 		await navigateToHash(page, "#/market");
