@@ -1271,7 +1271,8 @@ function openContextMenu(state: ExplorerState, target: TreeEntry, invoker?: HTML
 	menu.addEventListener("keydown", (event) => onContextMenuKeydown(state, event));
 	state.root.append(menu);
 	state.menuPointerDown = (event) => {
-		if (!(event.target as Element | null)?.closest(".bb-explorer-context-menu")) closeContextMenu(state, true);
+		const insideMenu = event.composedPath().includes(menu) || (event.target instanceof Node && menu.contains(event.target));
+		if (!insideMenu) closeContextMenu(state, true);
 	};
 	document.addEventListener("pointerdown", state.menuPointerDown, true);
 	const width = menu.offsetWidth || 200;
