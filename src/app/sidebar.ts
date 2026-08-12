@@ -52,7 +52,7 @@ import {
 } from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
 import { collectEligibleStatusSessions, selectSidebarStatusSections, type SidebarStatusSections, type StatusCandidate } from "./sidebar-status.js";
-import { getSidebarViewFilters, setSidebarView, type SidebarSessionView, type SidebarViewFilters } from "./sidebar-view-preferences.js";
+import { getSidebarViewFilters, setSidebarView, sidebarNeedsArchivedSessions, type SidebarSessionView, type SidebarViewFilters } from "./sidebar-view-preferences.js";
 import { isPinned, isSessionBusy, sessionTeamKind } from "../shared/session-tags.js";
 
 export { isProjectExpanded, toggleProjectExpanded };
@@ -1093,10 +1093,13 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 // SEARCH HANDLERS
 // ============================================================================
 
-/** Tracks whether archived section was auto-opened by search (vs manual toggle).
- *  Exported so that a manual toggle from the Filters popover (or its keyboard shortcut)
- *  can take precedence and prevent search-clear from undoing the user's choice. */
-export function clearArchivedBySearch(): void { _archivedBySearch = false; }
+/** Tracks whether archived visibility was auto-opened by search (vs manual toggle).
+ * Manual filter changes cancel that ephemeral demand without changing the
+ * persisted Project preference. */
+export function clearArchivedBySearch(): void {
+	if (_archivedBySearch) state.showArchived = false;
+	_archivedBySearch = false;
+}
 let _archivedBySearch = false;
 
 /** Ensure archived is visible for search without loading unfiltered archived pages. */
@@ -1113,10 +1116,10 @@ function _revertArchivedIfSearchOpened(): void {
 	if (_archivedBySearch) {
 		state.showArchived = false;
 		_archivedBySearch = false;
-		// Search auto-open is ephemeral. Clearing it may unload fetched archived
-		// records, but it must never delete the user's persisted archived tree
-		// expansion choices.
-		clearArchivedSessionsState();
+		// Search auto-open is ephemeral. Keep the shared archive cache while either
+		// view still requests archived rows; tree expansion preferences remain owned
+		// by the existing archive state module.
+		if (!sidebarNeedsArchivedSessions(state, false)) clearArchivedSessionsState();
 	}
 }
 
@@ -1827,7 +1830,7 @@ function renderStatusHeading(key: "pinned" | "unread" | "read", count: number): 
 		<div class="sidebar-status-heading" id=${headingId}>
 			${key === "pinned" ? html`<span class="sidebar-status-heading-icon">${icon(Pin, "xs")}</span>` : nothing}
 			<span>${label}</span>
-			<span class="sidebar-status-count" aria-hidden="true">${count}</span>
+			<span class="sidebar-status-count">${count}</span>
 		</div>
 	`;
 }
