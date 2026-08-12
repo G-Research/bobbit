@@ -296,8 +296,10 @@ test.describe("unified session actions", () => {
 		expect(sidebarSourceIds, "sidebar session menus should keep quick-only FLIP sources").toEqual(["modify", "terminate"]);
 		await closePopover(page);
 
-		const headerIds = await headerActionIds(page);
-		expect(headerIds).toEqual(sidebarIds);
+		await openHeaderActions(page);
+		const headerMenuIds = await popoverActionIds(page);
+		expect(headerMenuIds, "header and sidebar menus should expose the exact same eligible actions in canonical order").toEqual(sidebarIds);
+		await closePopover(page);
 		expectCanonicalActionsPresentInPriorityOrder(sidebarIds);
 	});
 
