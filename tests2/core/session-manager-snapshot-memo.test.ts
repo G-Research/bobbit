@@ -456,6 +456,41 @@ describe("SessionManager snapshot memo", () => {
 		expect(live.messagesSnapshotCache.seq).toBe(1);
 	});
 
+	it("keeps the sole mid-turn cursor refresh when streaming events advance", async () => {
+		const messages = deferred<any>();
+		const cursors = deferred<any>();
+		const getMessages = vi.fn(() => messages.promise);
+		const getCursors = vi.fn(() => cursors.promise);
+		const sends: string[] = [];
+		const client = { readyState: 1, send: (payload: string) => sends.push(payload) };
+		const value = manager();
+		const live = session(getMessages, getCursors);
+		live.clients.add(client);
+		value.sessions.set(live.id, live);
+
+		value.schedulePromptCursorRefresh(live);
+		await vi.waitFor(() => expect(getMessages).toHaveBeenCalledOnce());
+		live.latestMessageUpdate = {
+			id: "assistant-message",
+			message: { id: "assistant-message", role: "assistant", content: "live answer" },
+		};
+		live.eventBuffer.push({ type: "message_update" });
+		messages.resolve({ success: true, data: [
+			{ id: "user-message", role: "user", content: "prompt" },
+		] });
+		cursors.resolve({ success: true, data: {
+			entries: [userEntry("pi-user", null, "prompt")],
+			leafId: "pi-user",
+			forkMessages: [{ entryId: "pi-user", text: "prompt" }],
+		} });
+
+		await vi.waitFor(() => expect(sends).toHaveLength(1));
+		const frame = JSON.parse(sends[0]);
+		expect(frame.data[0]).toMatchObject({ entryId: "pi-user", _entryIdSource: "pi-transcript" });
+		expect(frame.data[1]).toMatchObject({ content: "live answer" });
+		expect(getMessages).toHaveBeenCalledOnce();
+	});
+
 	it("fences a stale cursor refresh after a newer snapshot wins", async () => {
 		const oldMessages = deferred<any>();
 		const oldCursors = deferred<any>();

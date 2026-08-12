@@ -7951,7 +7951,6 @@ export class SessionManager {
 			if (this.sessions.get(session.id) !== session
 				|| session.rpcClient !== rpcClient
 				|| session.promptCursorRefreshGeneration !== refreshGeneration) return;
-			const refreshSeq = session.eventBuffer.lastSeq;
 			const pendingBindings = options.settleBindings
 				? [...(session.pendingSkillTranscriptBindings ?? [])]
 				: [];
@@ -7959,8 +7958,7 @@ export class SessionManager {
 				if (!response.success || response.data === undefined) return;
 				if (this.sessions.get(session.id) !== session
 					|| session.rpcClient !== rpcClient
-					|| session.promptCursorRefreshGeneration !== refreshGeneration
-					|| session.eventBuffer.lastSeq !== refreshSeq) return;
+					|| session.promptCursorRefreshGeneration !== refreshGeneration) return;
 				if (options.settleBindings && pendingBindings.length > 0) {
 					session.pendingSkillTranscriptBindings = session.pendingSkillTranscriptBindings
 						?.filter((binding) => !pendingBindings.includes(binding));
