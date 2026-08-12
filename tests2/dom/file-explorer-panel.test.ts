@@ -410,6 +410,113 @@ describe("built-in file explorer panel", () => {
 		expect(statusDispose).toHaveBeenCalledTimes(1);
 	});
 
+	it("preserves remount navigation when deferred replacement initialization completes", async () => {
+		const staleList = deferred<unknown>();
+		const replacementList = deferred<unknown>();
+		const pendingResolve = deferred<unknown>();
+		let listCalls = 0;
+		const fakeHost = host({
+			list: () => ++listCalls === 1 ? staleList.promise : replacementList.promise,
+			resolve: () => pendingResolve.promise,
+			read: ({ path }) => ({ kind: "text", text: `preview ${path}` }),
+			diff: () => ({ kind: "empty" }),
+		}, {
+			stored: { version: 1, expanded: [], selected: "old.txt", focused: "old.txt", view: "file" },
+		});
+		const sid = `remount-navigation-${++mountAttempt}`;
+		const root = mount(sid, fakeHost);
+		await tick();
+		expect(fakeHost.store.read).toHaveBeenCalledTimes(1);
+		expect(listCalls).toBe(1);
+
+		root.remove();
+		const remounted = mount(sid, fakeHost);
+		expect(remounted).toBe(root);
+		await tick();
+
+		click(remounted.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const input = remounted.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "new.txt";
+		input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		key(input, "Enter");
+		await tick();
+		pendingResolve.resolve({
+			path: "new.txt",
+			kind: "file",
+			chain: [{ path: "new.txt", name: "new.txt", kind: "file" }],
+		});
+		await tick();
+		await tick();
+		expect(remounted.querySelector(".bb-explorer-preview-path")?.textContent).toBe("new.txt");
+		expect(remounted.textContent).toContain("preview new.txt");
+		expect(remounted.querySelector('[aria-label="Current path"]')?.textContent).toContain("new.txt");
+
+		staleList.resolve(list([{ path: "stale.txt", name: "stale.txt", kind: "file" }]));
+		await tick();
+		await tick();
+		expect(listCalls).toBe(2);
+		expect(fakeHost.store.read).toHaveBeenCalledTimes(1);
+
+		replacementList.resolve(list([
+			{ path: "new.txt", name: "new.txt", kind: "file" },
+			{ path: "old.txt", name: "old.txt", kind: "file" },
+		]));
+		await tick();
+		await tick();
+		expect(row(remounted, "new.txt").getAttribute("aria-selected")).toBe("true");
+		expect(row(remounted, "old.txt").getAttribute("aria-selected")).not.toBe("true");
+		expect(remounted.querySelector(".bb-explorer-preview-path")?.textContent).toBe("new.txt");
+		expect(remounted.querySelector('[aria-label="Current path"]')?.textContent).toContain("new.txt");
+		expect(remounted.textContent).toContain("preview new.txt");
+		expect(remounted.textContent).not.toContain("stale.txt");
+		expect(listCalls).toBe(2);
+		expect(fakeHost.store.read).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries a deferred durable-state read after its lifecycle is invalidated", async () => {
+		const staleStore = deferred<{ state: "present"; value: Record<string, unknown> }>();
+		const replacementStore = deferred<{ state: "present"; value: Record<string, unknown> }>();
+		const fakeHost = host({
+			list: () => list([
+				{ path: "stale.txt", name: "stale.txt", kind: "file" },
+				{ path: "restored.txt", name: "restored.txt", kind: "file" },
+			]),
+			read: ({ path }) => ({ kind: "text", text: `preview ${path}` }),
+			diff: () => ({ kind: "empty" }),
+		});
+		fakeHost.store.read.mockImplementationOnce(() => staleStore.promise).mockImplementationOnce(() => replacementStore.promise);
+		const sid = `deferred-store-remount-${++mountAttempt}`;
+		const root = mount(sid, fakeHost);
+		await tick();
+		expect(fakeHost.store.read).toHaveBeenCalledTimes(1);
+		expect(fakeHost.callRoute).not.toHaveBeenCalledWith("list", expect.anything());
+
+		root.remove();
+		const remounted = mount(sid, fakeHost);
+		expect(remounted).toBe(root);
+		await tick();
+		staleStore.resolve({
+			state: "present",
+			value: { version: 1, expanded: [], selected: "stale.txt", focused: "stale.txt", view: "file" },
+		});
+		await tick();
+		await tick();
+		expect(fakeHost.store.read).toHaveBeenCalledTimes(2);
+		expect(fakeHost.callRoute).not.toHaveBeenCalledWith("list", expect.anything());
+
+		replacementStore.resolve({
+			state: "present",
+			value: { version: 1, expanded: [], selected: "restored.txt", focused: "restored.txt", view: "file" },
+		});
+		await tick();
+		await tick();
+		expect(row(remounted, "restored.txt").getAttribute("aria-selected")).toBe("true");
+		expect(row(remounted, "stale.txt").getAttribute("aria-selected")).not.toBe("true");
+		expect(fakeHost.store.read).toHaveBeenCalledTimes(2);
+		expect(fakeHost.callRoute.mock.calls.filter(([route]) => route === "list")).toHaveLength(1);
+	});
+
 	it("ignores a late preview response after a newer file selection", async () => {
 		const slow = deferred<unknown>();
 		const fakeHost = host({
