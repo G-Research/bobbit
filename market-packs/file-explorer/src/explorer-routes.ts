@@ -460,10 +460,7 @@ async function scanSearchDirectory(
 			const explorerEntry: ExplorerEntry = { path: entryPath, name: rawEntry.name, kind };
 			if (stableLowercase(entryPath).includes(foldedQuery)) {
 				state.matches.push(explorerEntry);
-				if (state.matches.length > SEARCH_RESULT_LIMIT) {
-					markSearchTruncated(state, "result-cap");
-					state.stop = true;
-				}
+				if (state.matches.length > SEARCH_RESULT_LIMIT) markSearchTruncated(state, "result-cap");
 			}
 			if (kind === "directory") {
 				const childDepth = directory.depth + 1;
