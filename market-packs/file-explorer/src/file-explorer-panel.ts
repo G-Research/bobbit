@@ -164,6 +164,7 @@ type ExplorerState = {
 	alertFrame?: number;
 	initialized: boolean;
 	initializing: boolean;
+	uiStateRestored: boolean;
 	initializingLifecycle?: number;
 	initializationQueued: boolean;
 	lifecycleGeneration: number;
@@ -279,7 +280,7 @@ function createState(sid: string): ExplorerState {
 		refreshGeneration: 0, selectionGeneration: 0, navigationGeneration: 0,
 		location: { path: "", kind: "root" }, pathEditing: false, pathDraft: "", pathLoading: false,
 		search: { query: "", phase: "idle", results: [], activeIndex: -1, count: 0, truncated: false, generation: 0 },
-		initialized: false, initializing: false, initializationQueued: false, lifecycleGeneration: 0,
+		initialized: false, initializing: false, uiStateRestored: false, initializationQueued: false, lifecycleGeneration: 0,
 		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
 	refreshButton.addEventListener("click", () => void refresh(state!, true));
@@ -400,8 +401,11 @@ async function initialize(state: ExplorerState): Promise<void> {
 	state.initializing = true;
 	state.initializingLifecycle = lifecycle;
 	try {
-		await restoreUiState(state, lifecycle);
-		if (!ownsLifecycle(state, lifecycle)) return;
+		if (!state.uiStateRestored) {
+			await restoreUiState(state, lifecycle);
+			if (!ownsLifecycle(state, lifecycle)) return;
+			state.uiStateRestored = true;
+		}
 		const completed = await refresh(state, false);
 		if (!ownsLifecycle(state, lifecycle)) return;
 		if (!completed) {
