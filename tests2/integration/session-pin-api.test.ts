@@ -101,12 +101,13 @@ function reloadStore(store: any): SessionStore {
 	return new SessionStore(stateDir!);
 }
 
-async function waitUntilCalled(spy: { mock: { calls: unknown[][] } }, calls: number): Promise<void> {
-	for (let attempt = 0; attempt < 50; attempt++) {
+async function waitUntilCalled(spy: { mock: { calls: unknown[][] } }, calls: number, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
 		if (spy.mock.calls.length >= calls) return;
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		await new Promise<void>((resolve) => setTimeout(resolve, 10));
 	}
-	throw new Error(`pin persistence barrier was not entered (expected ${calls} flushAsync call(s), saw ${spy.mock.calls.length})`);
+	throw new Error(`pin persistence barrier was not entered within ${timeoutMs}ms (expected ${calls} flushAsync call(s), saw ${spy.mock.calls.length})`);
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
