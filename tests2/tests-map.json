@@ -18046,6 +18046,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
+    },
+    {
+      "file": "tests/e2e/session-pin-archive-restart.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Authenticated production-gateway coverage for live pin, archive retention, archived list projection, archived unpin, and durable tag state across two real gateway restarts."
     }
   ]
 }
