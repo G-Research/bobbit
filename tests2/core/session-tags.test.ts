@@ -4,6 +4,7 @@ import {
 	isPinned,
 	isSessionArchived,
 	isSessionBusy,
+	isSessionReadFilterable,
 	normalizeTags,
 	projectServerTags,
 	removeTag,
@@ -94,6 +95,17 @@ describe("canonical session tag classifiers", () => {
 		["busy", false, false],
 	] as const)("classifies status=%s compacting=%s as busy=%s", (status, isCompacting, expected) => {
 		expect(isSessionBusy({ status, isCompacting })).toBe(expected);
+	});
+
+	it.each([
+		["idle", true],
+		["terminated", true],
+		["archived", false],
+		["streaming", false],
+		["aborting", false],
+		[undefined, false],
+	] as const)("classifies status=%s as read-filterable=%s", (status, expected) => {
+		expect(isSessionReadFilterable({ status })).toBe(expected);
 	});
 
 	it("detects leads and explicit or legacy team members", () => {

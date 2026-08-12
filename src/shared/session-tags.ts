@@ -107,6 +107,15 @@ export function isSessionBusy(session: SessionTagSource): boolean {
 }
 
 /**
+ * Whether a read session is eligible for suppression by production Show Read.
+ * Other states, including serialized `archived` records and active work, remain
+ * visible when Show Read is off.
+ */
+export function isSessionReadFilterable(session: SessionTagSource): boolean {
+	return session.status === "idle" || session.status === "terminated";
+}
+
+/**
  * Classify team ownership without treating delegates or first-class children
  * as members merely because they have a parent.
  */

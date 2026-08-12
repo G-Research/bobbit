@@ -124,7 +124,7 @@ describe("selectSidebarStatusSections", () => {
 			candidate("member-active", { server_tags: ["team-kind=member", "read-state=unread"] }),
 			candidate("busy", { server_tags: ["activity-state=busy", "read-state=unread"] }),
 			candidate("read", { server_tags: ["read-state=read"] }),
-			candidate("busy-read", { server_tags: ["activity-state=busy", "read-state=read"] }),
+			candidate("busy-read", { status: "streaming", server_tags: ["activity-state=busy", "read-state=read"] }),
 			candidate("unread", { server_tags: ["read-state=unread"] }),
 		];
 		const sections = select(candidates, {
@@ -138,8 +138,19 @@ describe("selectSidebarStatusSections", () => {
 		const busyReadVisible = select(candidates, {
 			filters: { showArchived: false, showTeams: true, showBusy: true, showRead: false },
 		});
-		assert.equal(ids(busyReadVisible.read).includes("busy-read"), true, "busy rows retain the production Show Read exemption");
+		assert.equal(ids(busyReadVisible.read).includes("busy-read"), true, "active-work states are not read-filterable");
 		assert.equal(ids(busyReadVisible.read).includes("read"), false);
+	});
+
+	it("uses production read-filterability for archived and terminal records", () => {
+		const sections = select([
+			candidate("archived-read", { status: "archived", server_tags: ["read-state=read"] }, true),
+			candidate("terminated-read", { status: "terminated", server_tags: ["read-state=read"] }, true),
+			candidate("idle-read", { status: "idle", server_tags: ["read-state=read"] }),
+		], {
+			filters: { showArchived: true, showTeams: false, showBusy: true, showRead: false },
+		});
+		assert.deepEqual(ids(sections.read), ["archived-read"]);
 	});
 
 	it("Show teams hides only canonical members, not delegates or first-class children", () => {

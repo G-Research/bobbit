@@ -108,6 +108,9 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	}
 	if (route.endsWith("/mark-read") && method === "POST") return response({ ok: true });
 	if (route === "/api/projects") return response({ projects: [{ ...PROJECT }] });
+	if (route.startsWith("/api/sessions") && route.includes("include=archived")) {
+		return response({ sessions: [fixtureArchivedSession()], archivedDelegates: [], total: 1, hasMore: false, nextCursor: null });
+	}
 	if (route.startsWith("/api/sessions")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
 	if (route.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
 	if (route === "/api/staff" || route.startsWith("/api/staff?") || route === "/api/staff/orphaned") return response({ staff: [] });
@@ -161,7 +164,7 @@ function fixtureArchivedSession(): GatewaySession {
 	return createSession({
 		id: IDS.archived,
 		title: "Archived Safe Session",
-		status: "terminated",
+		status: "archived",
 		createdAt: 1,
 		lastActivity: 100,
 		archived: true,

@@ -23,6 +23,7 @@ import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLi
 import { buildArchivedSessionActions, buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
+import { isSessionReadFilterable } from "../shared/session-tags.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
@@ -329,11 +330,8 @@ export function passesSidebarFilters(
 			|| session.isCompacting;
 		if (busy) return false;
 	}
-	if (!state.showRead) {
-		// Only filter out idle/done sessions with no unread activity.
-		// Busy sessions (if not already filtered above) always remain visible.
-		const idleLike = session.status === "idle" || session.status === "terminated";
-		if (idleLike && !hasUnseenActivity(session)) return false;
+	if (!state.showRead && isSessionReadFilterable(session) && !hasUnseenActivity(session)) {
+		return false;
 	}
 	return true;
 }
