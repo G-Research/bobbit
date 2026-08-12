@@ -876,6 +876,34 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("Couldn’t copy. Clipboard access is unavailable.");
 	});
 
+	it("keeps a shadow-root menu open for an inside composed pointer event and copies the action", async () => {
+		const writeText = vi.fn(async () => undefined);
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+		const fakeHost = host({
+			list: () => list([{ path: "folder/two.ts", name: "two.ts", kind: "file" }]),
+			read: () => ({ kind: "text", text: "preview" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const shadowHost = document.createElement("div");
+		const shadowRoot = shadowHost.attachShadow({ mode: "open" });
+		const root = createFileExplorerPanel().render({ __sessionId: "shadow-path-actions" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]) as HTMLElement;
+		shadowRoot.append(root);
+		document.body.append(shadowHost);
+		mounted.push(shadowHost);
+		await tick();
+
+		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
+		await tick();
+		const copyPath = [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === "Copy relative path")!;
+		const insidePointer = new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true });
+		Object.defineProperty(insidePointer, "target", { configurable: true, get: () => shadowHost });
+		copyPath.dispatchEvent(insidePointer);
+		expect(root.querySelector('[role="menu"]')).not.toBeNull();
+		click(copyPath);
+		await tick();
+		expect(writeText).toHaveBeenCalledWith("folder/two.ts");
+	});
+
 	it("keeps narrow controls wrap-safe without fixed-height clipping", async () => {
 		const fakeHost = host({
 			list: () => list([{ path: "file.txt", name: "file.txt", kind: "file" }]),
