@@ -425,12 +425,112 @@ describe("built-in file explorer panel", () => {
 		search.value = "transient";
 		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
 		root.remove();
-		await tick();
-		await tick();
 		const restoredRoot = mount("restored-narrow", fakeHost);
-		await tick();
+		expect(restoredRoot).toBe(root);
 		expect(restoredRoot.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')?.value).toBe("");
 		expect(restoredRoot.querySelector('[role="listbox"]')).toBeNull();
+		expect(row(restoredRoot, "src").getAttribute("aria-expanded")).toBe("true");
+		expect(row(restoredRoot, "src/restored.txt").getAttribute("aria-selected")).toBe("true");
+		await tick();
+		expect(row(restoredRoot, "src/restored.txt")).not.toBeNull();
+	});
+
+	it("synchronously reconciles cached same-session remounts without losing durable browse state", async () => {
+		const staleSearch = deferred<unknown>();
+		const statusCallbacks: Array<(value: { status: "idle" | "running" | "error" }) => void> = [];
+		const statusDispose = vi.fn();
+		const writeText = vi.fn(async () => undefined);
+		const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+		const sid = `rapid-remount-${++mountAttempt}`;
+		const fakeHost = host({
+			list: ({ path }) => path === "src"
+				? list([{ path: "src/restored.txt", name: "restored.txt", kind: "file" }])
+				: list([{ path: "src", name: "src", kind: "directory" }], [{ path: "src/restored.txt", worktree: "M" }]),
+			search: () => staleSearch.promise,
+			read: () => ({ kind: "text", text: "durable file" }),
+			diff: () => ({ kind: "text", text: "diff --git a/src/restored.txt b/src/restored.txt\n--- a/src/restored.txt\n+++ b/src/restored.txt\n@@ -1 +1 @@\n-old\n+durable diff\n" }),
+		}, {
+			onStatus: (callback) => statusCallbacks.push(callback),
+			statusDispose,
+		});
+		const root = mount(sid, fakeHost);
+		await tick();
+		click(row(root, "src"));
+		await tick();
+		click(row(root, "src/restored.txt"));
+		await tick();
+		click(root.querySelector('[data-action="view-diff"]')!);
+		await tick();
+		expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(1);
+		expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Diff");
+
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const pathInput = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		pathInput.value = "../transient";
+		pathInput.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		key(pathInput, "Enter");
+		expect(root.querySelector('[aria-label="Relative path"]')).not.toBeNull();
+		root.remove();
+		const pathRemount = mount(sid, fakeHost);
+		expect(pathRemount).toBe(root);
+		expect(pathRemount.querySelector('[aria-label="Relative path"]')).toBeNull();
+		expect(pathRemount.querySelector('[aria-label="Current path"]')).not.toBeNull();
+		expect(row(pathRemount, "src").getAttribute("aria-expanded")).toBe("true");
+		expect(row(pathRemount, "src/restored.txt").getAttribute("aria-selected")).toBe("true");
+		expect(pathRemount.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Diff");
+		await tick();
+		expect(pathRemount.querySelector('[role="alert"]')?.textContent).toBe("");
+		expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(2);
+		expect(statusDispose).toHaveBeenCalledTimes(1);
+
+		row(pathRemount, "src/restored.txt").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+		await tick();
+		click([...pathRemount.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "Copy relative path")!);
+		await tick();
+		expect(pathRemount.textContent).toContain("Relative path copied");
+		row(pathRemount, "src/restored.txt").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+		await tick();
+		expect(pathRemount.querySelector('[role="menu"]')).not.toBeNull();
+		const search = pathRemount.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "transient";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		expect(search.getAttribute("aria-busy")).toBe("true");
+
+		pathRemount.remove();
+		const searchRemount = mount(sid, fakeHost);
+		expect(searchRemount).toBe(root);
+		expect(search.value).toBe("");
+		expect(searchRemount.querySelector('[role="listbox"]')).toBeNull();
+		expect(searchRemount.querySelector('[role="menu"]')).toBeNull();
+		expect(searchRemount.querySelector(".bb-explorer-inline-feedback")).toBeNull();
+		expect(searchRemount.querySelector('[role="status"]')?.textContent).toBe("");
+		expect(searchRemount.querySelector('[role="alert"]')?.textContent).toBe("");
+		expect(row(searchRemount, "src").getAttribute("aria-expanded")).toBe("true");
+		expect(row(searchRemount, "src/restored.txt").getAttribute("aria-selected")).toBe("true");
+		expect(searchRemount.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Diff");
+
+		staleSearch.resolve({
+			query: "transient", count: 1, limit: 200, truncated: false,
+			results: [{ path: "stale.txt", name: "stale.txt", kind: "file" }],
+		});
+		await tick();
+		expect(searchRemount.textContent).not.toContain("stale.txt");
+		expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(3);
+		expect(statusDispose).toHaveBeenCalledTimes(2);
+		const listCallsBeforeIdle = fakeHost.callRoute.mock.calls.filter(([route]) => route === "list").length;
+		statusCallbacks.at(-1)!({ status: "running" });
+		statusCallbacks.at(-1)!({ status: "idle" });
+		await tick();
+		expect(fakeHost.callRoute.mock.calls.filter(([route]) => route === "list").length).toBeGreaterThan(listCallsBeforeIdle);
+		expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(3);
+		expect(statusDispose).toHaveBeenCalledTimes(2);
+		expect(row(searchRemount, "src/restored.txt")).not.toBeNull();
+
+		if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+		else Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
 	});
 
 	it("navigates canonical paths with breadcrumbs and cancels invalid path edits without losing selection", async () => {
