@@ -165,6 +165,7 @@ type ExplorerState = {
 	initialized: boolean;
 	initializing: boolean;
 	uiStateRestored: boolean;
+	durableMutationGeneration: number;
 	initializingLifecycle?: number;
 	initializationQueued: boolean;
 	lifecycleGeneration: number;
@@ -280,7 +281,7 @@ function createState(sid: string): ExplorerState {
 		refreshGeneration: 0, selectionGeneration: 0, navigationGeneration: 0,
 		location: { path: "", kind: "root" }, pathEditing: false, pathDraft: "", pathLoading: false,
 		search: { query: "", phase: "idle", results: [], activeIndex: -1, count: 0, truncated: false, generation: 0 },
-		initialized: false, initializing: false, uiStateRestored: false, initializationQueued: false, lifecycleGeneration: 0,
+		initialized: false, initializing: false, uiStateRestored: false, durableMutationGeneration: 0, initializationQueued: false, lifecycleGeneration: 0,
 		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
 	refreshButton.addEventListener("click", () => void refresh(state!, true));
@@ -487,7 +488,7 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<boolean
 	state.tree.setAttribute("aria-busy", "false");
 	if (activeQuery) scheduleSearch(state, true);
 	if (announce) setLive(state, rootOkay ? "Explorer refreshed." : "Explorer refresh failed.");
-	queueStore(state);
+	queueStore(state, false);
 	return true;
 }
 
@@ -941,7 +942,10 @@ function onTreeKeydown(state: ExplorerState, event: KeyboardEvent): void {
 		default: return;
 	}
 	event.preventDefault();
-	if (target) focusPath(state, target);
+	if (target) {
+		markDurableMutation(state);
+		focusPath(state, target);
+	}
 }
 
 function renderPathBar(state: ExplorerState): void {
@@ -1745,6 +1749,7 @@ function pruneState(state: ExplorerState): void {
 async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<void> {
 	if (!state.host?.capabilities?.store || !state.host.store) return;
 	const store = state.host.store;
+	const mutationGeneration = state.durableMutationGeneration;
 	try {
 		let stored: unknown;
 		if (store.read) {
@@ -1752,6 +1757,7 @@ async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<
 			if (result.state === "present") stored = result.value;
 		} else if (store.get) stored = await store.get(`ui/${state.sid}`);
 		if (!ownsLifecycle(state, lifecycle)) return;
+		if (mutationGeneration !== state.durableMutationGeneration) return;
 		const value = recordOf(stored);
 		if (value?.version !== STORE_VERSION) return;
 		for (const candidate of arrayOf(value.expanded)) {
@@ -1769,7 +1775,12 @@ async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<
 	}
 }
 
-function queueStore(state: ExplorerState): void {
+function markDurableMutation(state: ExplorerState): void {
+	state.durableMutationGeneration += 1;
+}
+
+function queueStore(state: ExplorerState, userMutation = true): void {
+	if (userMutation) markDurableMutation(state);
 	if (!state.host?.capabilities?.store || !state.host.store?.put) return;
 	if (state.storeTimer !== undefined) window.clearTimeout(state.storeTimer);
 	state.storeTimer = window.setTimeout(() => {
