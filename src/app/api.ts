@@ -44,6 +44,7 @@ import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject } from "./headquarters.js";
+import { normalizeTags, removeTag, replaceTag } from "../shared/session-tags.js";
 
 function configApiProjectId(projectId?: string | null): string {
 	const selected = projectId || state.activeProjectId || HEADQUARTERS_PROJECT_ID;
@@ -332,6 +333,125 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 	}
 }
 
+type SessionWithUserTags = GatewaySession & { user_tags?: unknown };
+type SessionTagsSnapshot = {
+	hadOwnProperty: boolean;
+	value: unknown;
+};
+type LoadedSessionTagsSnapshot = {
+	live: SessionTagsSnapshot[];
+	archived: SessionTagsSnapshot[];
+};
+
+const sessionPinMutationSequences = new Map<string, number>();
+
+function userTagsEqual(left: readonly string[] | undefined, right: readonly string[]): boolean {
+	return !!left && left.length === right.length && left.every((tag, index) => tag === right[index]);
+}
+
+function patchSessionTagsInList(
+	list: GatewaySession[],
+	sessionId: string,
+	getTags: (session: SessionWithUserTags) => string[],
+): { list: GatewaySession[]; changed: boolean } {
+	let changed = false;
+	const next = list.map((session) => {
+		if (session.id !== sessionId) return session;
+		const current = session as SessionWithUserTags;
+		const userTags = getTags(current);
+		if (userTagsEqual(Array.isArray(current.user_tags) ? current.user_tags : undefined, userTags)) return session;
+		changed = true;
+		return { ...session, user_tags: [...userTags] } as GatewaySession;
+	});
+	return { list: changed ? next : list, changed };
+}
+
+function patchLoadedSessionUserTags(sessionId: string, userTags: readonly string[]): boolean {
+	const authoritativeTags = normalizeTags(userTags);
+	const live = patchSessionTagsInList(state.gatewaySessions, sessionId, () => authoritativeTags);
+	const archived = patchSessionTagsInList(state.archivedSessions, sessionId, () => authoritativeTags);
+	if (live.changed) state.gatewaySessions = live.list;
+	if (archived.changed) state.archivedSessions = archived.list;
+	return live.changed || archived.changed;
+}
+
+function optimisticallyPatchLoadedSessionPin(sessionId: string, pinned: boolean): LoadedSessionTagsSnapshot {
+	const capture = (list: GatewaySession[]): SessionTagsSnapshot[] => list
+		.filter((session) => session.id === sessionId)
+		.map((session) => {
+			const row = session as SessionWithUserTags;
+			return {
+				hadOwnProperty: Object.prototype.hasOwnProperty.call(row, "user_tags"),
+				value: Array.isArray(row.user_tags) ? [...row.user_tags] : row.user_tags,
+			};
+		});
+	const snapshot = {
+		live: capture(state.gatewaySessions),
+		archived: capture(state.archivedSessions),
+	};
+	const update = (session: SessionWithUserTags) => pinned
+		? replaceTag(session.user_tags, "pinned", "true")
+		: removeTag(session.user_tags, "pinned");
+	const live = patchSessionTagsInList(state.gatewaySessions, sessionId, update);
+	const archived = patchSessionTagsInList(state.archivedSessions, sessionId, update);
+	if (live.changed) state.gatewaySessions = live.list;
+	if (archived.changed) state.archivedSessions = archived.list;
+	return snapshot;
+}
+
+function restoreLoadedSessionUserTags(sessionId: string, snapshot: LoadedSessionTagsSnapshot): void {
+	const restore = (list: GatewaySession[], snapshots: SessionTagsSnapshot[]): GatewaySession[] => {
+		let matchIndex = 0;
+		return list.map((session) => {
+			if (session.id !== sessionId) return session;
+			const previous = snapshots[matchIndex++];
+			if (!previous) return session;
+			const restored = { ...session } as SessionWithUserTags;
+			if (previous.hadOwnProperty) {
+				restored.user_tags = Array.isArray(previous.value) ? [...previous.value] : previous.value;
+			} else {
+				delete restored.user_tags;
+			}
+			return restored as GatewaySession;
+		});
+	};
+	state.gatewaySessions = restore(state.gatewaySessions, snapshot.live);
+	state.archivedSessions = restore(state.archivedSessions, snapshot.archived);
+}
+
+/**
+ * Optimistically pin or unpin every loaded representation of a session. Only
+ * the newest mutation for an id may reconcile or roll back client state.
+ */
+export async function setSessionPinned(sessionId: string, pinned: boolean): Promise<void> {
+	const sequence = (sessionPinMutationSequences.get(sessionId) ?? 0) + 1;
+	sessionPinMutationSequences.set(sessionId, sequence);
+	const snapshot = optimisticallyPatchLoadedSessionPin(sessionId, pinned);
+	renderApp();
+
+	try {
+		const response = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ pinned }),
+		});
+		if (!response.ok) {
+			throw await errorFromResponse(response, `Failed to ${pinned ? "pin" : "unpin"} session: ${response.status}`);
+		}
+		const body = await response.json().catch(() => null) as { user_tags?: unknown } | null;
+		if (!body || !Array.isArray(body.user_tags)) throw new Error("Pin response did not include user_tags");
+		if (sessionPinMutationSequences.get(sessionId) !== sequence) return;
+		patchLoadedSessionUserTags(sessionId, body.user_tags);
+		renderApp();
+	} catch (error) {
+		if (sessionPinMutationSequences.get(sessionId) !== sequence) return;
+		restoreLoadedSessionUserTags(sessionId, snapshot);
+		renderApp();
+		console.error(`[sidebar] Failed to ${pinned ? "pin" : "unpin"} session:`, error);
+		await flashSidebarToast(`Couldn't ${pinned ? "pin" : "unpin"} session`);
+	}
+}
+
 const SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS = 100;
 const SESSION_LIST_PUSH_RECONNECT_MS = 3_000;
 let sessionListPushRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -439,6 +559,9 @@ export function startSessionListPushSync(): void {
 			if (msg?.type === "remote_state_snapshot") {
 				if (applyRemoteStateSnapshotMessage(msg)) renderApp();
 			} else if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
+				if (msg.type === "sessions_changed" && typeof msg.sessionId === "string" && Array.isArray(msg.user_tags)) {
+					if (patchLoadedSessionUserTags(msg.sessionId, msg.user_tags)) renderApp();
+				}
 				scheduleSessionListRefreshFromPush();
 			} else if (msg?.type === "staff_changed") {
 				scheduleStaffListRefreshFromPush();
