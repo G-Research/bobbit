@@ -505,8 +505,15 @@ describe("SessionManager snapshot memo", () => {
 		const value = manager();
 		const live = session(getMessages, getCursors);
 		live.clients.add(client);
+		const recordId = appendIdentifiedSkillSidecarEntry(live.id, {
+			ts: 1,
+			modelText: "prompt",
+			originalText: "/pending",
+			skillExpansions: [],
+		});
+		assert.ok(recordId);
 		live.pendingSkillTranscriptBindings = [{
-			recordId: "pending-record",
+			recordId,
 			promptId: "pending-prompt",
 			modelText: "prompt",
 			messageIdentity: { id: "user-message" },
@@ -541,9 +548,12 @@ describe("SessionManager snapshot memo", () => {
 			leafId: "old-user",
 			forkMessages: [{ entryId: "old-user", text: "prompt" }],
 		} });
-		await new Promise((resolve) => setImmediate(resolve));
+		await vi.waitFor(() => expect(readSkillSidecarEntries(live.id)[0]).toMatchObject({
+			recordId,
+			transcriptEntryId: "old-user",
+		}));
 		expect(sends).toHaveLength(1);
-		expect(live.pendingSkillTranscriptBindings).toHaveLength(1);
+		expect(live.pendingSkillTranscriptBindings).toHaveLength(0);
 	});
 
 	it("refreshes compaction messages and cursors as one fresh authoritative pair", async () => {

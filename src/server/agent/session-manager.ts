@@ -7948,17 +7948,18 @@ export class SessionManager {
 		const refreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
 		session.promptCursorRefreshGeneration = refreshGeneration;
 		queueMicrotask(() => {
-			if (this.sessions.get(session.id) !== session
-				|| session.rpcClient !== rpcClient
-				|| session.promptCursorRefreshGeneration !== refreshGeneration) return;
+			if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+			// A newer refresh supersedes only the client replacement. A final-turn
+			// refresh must still settle its captured sidecar bindings from the exact
+			// authoritative snapshot pair, even if the next turn has already started.
+			if (!options.settleBindings
+				&& session.promptCursorRefreshGeneration !== refreshGeneration) return;
 			const pendingBindings = options.settleBindings
 				? [...(session.pendingSkillTranscriptBindings ?? [])]
 				: [];
 			void this.getMessagesSnapshotBase(session).then((response) => {
 				if (!response.success || response.data === undefined) return;
-				if (this.sessions.get(session.id) !== session
-					|| session.rpcClient !== rpcClient
-					|| session.promptCursorRefreshGeneration !== refreshGeneration) return;
+				if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
 				if (options.settleBindings && pendingBindings.length > 0) {
 					session.pendingSkillTranscriptBindings = session.pendingSkillTranscriptBindings
 						?.filter((binding) => !pendingBindings.includes(binding));
@@ -7989,6 +7990,7 @@ export class SessionManager {
 						appendSkillSidecarTranscriptBinding(session.id, binding.recordId, transcriptEntryId);
 					}
 				}
+				if (session.promptCursorRefreshGeneration !== refreshGeneration) return;
 				if (session.clients.size > 0) {
 					const data = this.buildVisibleMessageSnapshot(session.id, response.data);
 					broadcast(session.clients, { type: "messages", data: data as unknown[] });
