@@ -476,6 +476,33 @@ describe("file explorer recursive search route", () => {
 		expect(entryFs.closed).toBe(1);
 	});
 
+	it("globally selects the first results after scanning adversarial enumeration order", async () => {
+		const reverseMatches = Array.from(
+			{ length: SEARCH_RESULT_LIMIT + 1 },
+			(_, index) => `match-z-${String(SEARCH_RESULT_LIMIT - index).padStart(4, "0")}`,
+		);
+		const expectedPaths = [
+			"match-a-late",
+			...Array.from({ length: SEARCH_RESULT_LIMIT - 1 }, (_, index) => `match-z-${String(index).padStart(4, "0")}`),
+		];
+
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			const resultFs = new SearchTreeFs(new Map([[
+				"",
+				[...reverseMatches.map((name) => entry(name, "file")), entry("match-a-late", "file")],
+			]]));
+			const result = await createRoutes({ fs: resultFs, git: neverGit(), searchTimeoutMs: 30_000 }).search(
+				{ workingDir: SESSION_ROOT },
+				{ body: { query: "match" } },
+			);
+
+			expect(result).toMatchObject({ ok: true, value: { count: SEARCH_RESULT_LIMIT, truncated: true, truncationReason: "result-cap" } });
+			if (!result.ok) throw new Error("expected search success");
+			expect(result.value.results.map((resultEntry: { path: string }) => resultEntry.path)).toEqual(expectedPaths);
+			expect(resultFs.closed).toBe(1);
+		}
+	});
+
 	it("bounds directory concurrency, total directories and traversal depth without traversing leaves", async () => {
 		const concurrencyTree = new Map<string, readonly DirectoryEntryLike[]>([["", Array.from({ length: SEARCH_CONCURRENCY_LIMIT * 2 }, (_, index) => entry(`dir-${index}`, "directory"))]]);
 		for (let index = 0; index < SEARCH_CONCURRENCY_LIMIT * 2; index++) concurrencyTree.set(`dir-${index}`, []);
