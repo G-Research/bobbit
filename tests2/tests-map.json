@@ -48,15 +48,6 @@
       }
     },
     {
-      "path": "tests2/dom/notification-policy.test.ts",
-      "reason": "DOM coverage proving the sidebar notification wrapper remains aligned with the shared unread policy used by status classification and server projection.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "dom"
-      }
-    },
-    {
       "path": "tests2/dom/session-pin-client.test.ts",
       "reason": "DOM coverage for canonical Pin/Unpin action order, optimistic mutation, sequencing, rollback, and additive session-list update handling.",
       "execution": {
