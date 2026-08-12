@@ -10,6 +10,8 @@ import { Archive, Eye, Filter, Users, Zap } from "lucide";
 import { renderApp, state } from "../../app/state.js";
 import { shortcutHint } from "../../app/shortcut-registry.js";
 import {
+	archivedGoalsLoaded,
+	archivedSessionsLoaded,
 	clearArchivedSessionsState,
 	fetchArchivedGoalsPaginated,
 	fetchArchivedSessions,
@@ -36,8 +38,10 @@ export function toggleShowArchived(): void {
 	const next = !activeFilters().showArchived;
 	updateFilter("showArchived", next);
 	if (next) {
-		void fetchArchivedSessions();
-		void fetchArchivedGoalsPaginated();
+		// Both views consume the same normal archive pages. Only a cold resource
+		// should use its reset-capable first-page loader here.
+		if (!archivedSessionsLoaded()) void fetchArchivedSessions();
+		if (!archivedGoalsLoaded()) void fetchArchivedGoalsPaginated();
 	} else if (!sidebarNeedsArchivedSessions(state, state.archivedSearchDemand)) {
 		clearArchivedSessionsState();
 	}

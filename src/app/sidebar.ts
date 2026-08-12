@@ -1800,8 +1800,10 @@ function switchSidebarView(view: SidebarSessionView): void {
 	setSidebarView(state, view);
 	const filters = getSidebarViewFilters(state, view);
 	if (filters.showArchived || state.searchQuery.trim()) {
-		void fetchArchivedSessions();
-		void fetchArchivedGoalsPaginated();
+		// Project and Status share one normal archive cache. Switching views may
+		// cold-load it, but must not reset pagination already fetched by either view.
+		if (!archivedSessionsLoaded()) void fetchArchivedSessions();
+		if (!archivedGoalsLoaded()) void fetchArchivedGoalsPaginated();
 	}
 	renderApp();
 }
