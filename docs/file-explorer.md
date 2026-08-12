@@ -173,6 +173,8 @@ The panel also subscribes to the bound session's status. The first observed `idl
 
 The versioned pack-store record contains canonical relative expanded paths, selected and focused paths, File/Diff mode, and the **Changed files only** preference. The Git filter is applied only after a fresh status confirms Git is available. Search queries/results/snapshots, path-bar location/drafts/errors, context menus, and copy feedback are transient and are not restored after reload. Persistence is best-effort; malformed, out-of-version, or non-canonical values do not block browsing.
 
+Within the current page, the singleton panel instance is cached per session. Reopening it reuses the current browse state and path-bar location, while an unfinished path edit, active search, context menu, and copy feedback are cleared when the panel detaches. Persisted state is hydrated only once per cached instance; if detachment interrupts that initial read, reopening retries it. A browse action made while hydration is pending takes precedence, so a late stored value cannot replace newer navigation.
+
 ## Responsive and accessibility behavior
 
 Below a 680 px panel width, Files and Preview become separate panes. Opening a file shows Preview; **Back to files** restores the originating tree row or active search input. The panel header and path bar stay visible in both panes.
