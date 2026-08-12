@@ -785,6 +785,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/history-fork-api.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("recursive-directory-scan", "transcriptFilesForSession", "test-owned isolated agent-session transcript tree"),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
@@ -826,11 +832,28 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	{
+		consumer: "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
+		allowReason: "test-owned persisted sandbox transcript used to prove byte preservation across reload and termination",
+		reads: frozen([
+			{ expression: "fixture.restored.agentSessionFile", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/core/focused-tool-contract-refresh.test.ts",
 		allowReason: "test-owned generated system prompt and the tool detail document path it points to",
 		reads: frozen([
 			{ expression: "spawnedOptions.systemPromptPath", count: 1 },
 			{ expression: "agentDocsPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-fs-sandbox-publication.test.ts",
+		allowReason: "isolated test-owned sandbox filesystem transcript, canary, and staging artifacts",
+		reads: frozen([
+			{ expression: "hostDestination", count: 1 },
+			{ expression: "path.join(sentinel, \"sentinel.txt\")", count: 1 },
+			{ expression: "filesystem.hostPath(destination)", count: 2 },
+			{ expression: "hostCanary", count: 1 },
 		]),
 	},
 	{
@@ -1021,6 +1044,23 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "seeded.transcriptFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/history-fork-api.test.ts",
+		allowReason: "isolated integration gateway and test-owned transcript, proposal, and worktree artifacts",
+		reads: frozen([
+			{ expression: "seeded.file", count: 4 },
+			{ expression: "sandboxFixture.filesystem.hostPath(persisted.agentSessionFile)", count: 1 },
+			{ expression: "stagedFile", count: 1 },
+			{ expression: "forkPersisted.agentSessionFile", count: 3 },
+			{ expression: "path.join(proposalFork, \"goal.md\")", count: 1 },
+			{ expression: "path.join(proposalFork, \"goal.history\", \"0001.md\")", count: 1 },
+			{ expression: "sentinel", count: 1 },
+			{ expression: "sourceTranscript.file", count: 2 },
+			{ expression: "trusted", count: 2 },
+			{ expression: "attackerFile", count: 3 },
+			{ expression: "sourceHostPath", count: 2 },
 		]),
 	},
 	{

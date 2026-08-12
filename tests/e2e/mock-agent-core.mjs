@@ -171,6 +171,14 @@ export class MockAgentCore {
 		this.env = options.env || process.env;
 		this._onEvent = options.onEvent || (() => {});
 		this.conversationMessages = [];
+		// Pi owns two related but intentionally distinct views: model-facing
+		// messages and the append-only session-entry tree. Agent events expose only
+		// messages; durable entry ids are available through read-only session RPCs.
+		this._transcriptEntries = [];
+		this._sessionHeader = null;
+		this._runtimeCwdMetadata = [];
+		this._lastTranscriptEntryId = null;
+		this._nextTranscriptEntrySequence = 1;
 		this.currentModel = mockModelFromString(options.initialModel) || { ...DEFAULT_MODEL };
 		// Pi initializes sessions at its default thinking level and reports the
 		// effective value through get_state after every runtime mutation.
@@ -198,8 +206,70 @@ export class MockAgentCore {
 	/** Override the event emitter (used by child-process mode). */
 	setEventEmitter(fn) { this._onEvent = fn; }
 
-	/** Emit an agent event to the listener */
-	emit(event) { this._onEvent(event); }
+	/** Emit an agent event to the listener. Message events deliberately remain
+	 * id-free: real Pi persists the corresponding SessionEntry only after the
+	 * terminal event. The read-only entry RPCs below are the authoritative cursor
+	 * surface. */
+	emit(event) {
+		this._onEvent(event);
+		if (event?.type === "message_end" && event.message && typeof event.message === "object") {
+			this._appendTranscriptMessage(event.message);
+		}
+		// Pi 0.82 distinguishes a low-level agent_end from the fully durable,
+		// no-more-continuations settlement boundary. History cursor enrichment must
+		// observe the latter, after every terminal message has been persisted.
+		if (event?.type === "agent_end" && event.willRetry !== true) {
+			this._onEvent({ type: "agent_settled" });
+		}
+	}
+
+	_nextTranscriptEntryId() {
+		const occupied = new Set(this._activeTranscriptEntries().map(entry => entry?.id).filter(Boolean));
+		let id;
+		do {
+			id = `mock-entry-${this._nextTranscriptEntrySequence++}`;
+		} while (occupied.has(id));
+		return id;
+	}
+
+	_activeTranscriptEntries() {
+		return Array.isArray(this._postCompactionEntries) ? this._postCompactionEntries : this._transcriptEntries;
+	}
+
+	_appendTranscriptMessage(message) {
+		const entry = {
+			type: "message",
+			id: this._nextTranscriptEntryId(),
+			parentId: this._lastTranscriptEntryId,
+			timestamp: new Date().toISOString(),
+			message,
+		};
+		this._activeTranscriptEntries().push(entry);
+		this._lastTranscriptEntryId = entry.id;
+		this._persistTranscript();
+		return entry;
+	}
+
+	_createSessionHeader() {
+		const uuid = (typeof crypto !== "undefined" && crypto.randomUUID?.()) || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		return {
+			type: "session",
+			version: 3,
+			id: `mock-session-${uuid}`,
+			timestamp: new Date().toISOString(),
+			cwd: this.cwd,
+		};
+	}
+
+	_persistTranscript() {
+		const sf = this.ensureSessionFile();
+		const lines = [
+			JSON.stringify(this._sessionHeader),
+			...this._runtimeCwdMetadata.map(entry => JSON.stringify(entry)),
+			...this._activeTranscriptEntries().map(entry => JSON.stringify(entry)),
+		];
+		fs.writeFileSync(sf, `${lines.join("\n")}\n`);
+	}
 
 	/** Ensure the session .jsonl file exists and return its path */
 	ensureSessionFile() {
@@ -212,7 +282,8 @@ export class MockAgentCore {
 		const ts = new Date().toISOString().replace(/[:.]/g, "-");
 		const uuid = (typeof crypto !== "undefined" && crypto.randomUUID?.()) || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.sessionFilePath = path.join(dir, `${ts}_${uuid}.jsonl`);
-		fs.writeFileSync(this.sessionFilePath, "");
+		this._sessionHeader ||= this._createSessionHeader();
+		fs.writeFileSync(this.sessionFilePath, `${JSON.stringify(this._sessionHeader)}\n`);
 		return this.sessionFilePath;
 	}
 
@@ -1236,7 +1307,7 @@ export class MockAgentCore {
 		const isManual = reason === "manual";
 		const startType = isManual ? "compaction_start" : "auto_compaction_start";
 		const endType = isManual ? "compaction_end" : "auto_compaction_end";
-		const sf = this.ensureSessionFile();
+		this.ensureSessionFile();
 		const ts = new Date().toISOString();
 		const firstKeptEntryId = "kept-0";
 		const tokensBefore = 50_000;
@@ -1279,7 +1350,8 @@ export class MockAgentCore {
 		});
 		// Persist the full transcript (with ids) and pin it so get_state keeps it.
 		this._postCompactionEntries = entries;
-		fs.writeFileSync(sf, entries.map(e => JSON.stringify(e)).join("\n") + "\n");
+		this._lastTranscriptEntryId = firstKeptEntryId;
+		this._persistTranscript();
 		// getMessages() returns only the active branch post-compaction.
 		this.conversationMessages = [{ id: firstKeptEntryId, ...keptMsg }];
 
@@ -3139,26 +3211,22 @@ export class MockAgentCore {
 
 			case "get_state": {
 				const sf = this.ensureSessionFile();
-				// Real Pi retains top-level runtime cwd headers when serializing state.
-				// Keep their exact raw JSONL lines instead of dropping them while the
-				// mock rewrites its message view.
-				const runtimeCwdHeaders = fs.readFileSync(sf, "utf8").split("\n").filter(line => {
-					try {
-						const parsed = JSON.parse(line);
-						return (parsed?.type === "system" || parsed?.type === "session") && typeof parsed.cwd === "string";
-					} catch {
-						return false;
+				// A few E2E seams replace conversationMessages directly. Rebuild the
+				// mock entry tree only for that explicit mismatch; normal agent turns,
+				// compaction, and switch_session retain their durable ids verbatim.
+				if (!Array.isArray(this._postCompactionEntries)) {
+					const trackedMessages = this._transcriptEntries
+						.filter(entry => entry?.type === "message")
+						.map(entry => entry.message);
+					const externallyReplaced = trackedMessages.length !== this.conversationMessages.length
+						|| trackedMessages.some((message, index) => message !== this.conversationMessages[index]);
+					if (externallyReplaced) {
+						this._transcriptEntries = [];
+						this._lastTranscriptEntryId = null;
+						for (const message of this.conversationMessages) this._appendTranscriptMessage(message);
 					}
-				});
-				// After an AUTO_COMPACT turn, preserve the full on-disk transcript
-				// (orphans + compaction marker + kept tail) WITH top-level ids so a
-				// post-compaction get_state (e.g. refreshAfterCompaction) does not
-				// clobber the ids the orphan-history endpoint splits on.
-				const lines = Array.isArray(this._postCompactionEntries)
-					? this._postCompactionEntries.map(e => JSON.stringify(e))
-					: this.conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
-				lines.push(...runtimeCwdHeaders);
-				fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
+				}
+				this._persistTranscript();
 				return {
 					success: true,
 					data: {
@@ -3172,6 +3240,48 @@ export class MockAgentCore {
 
 			case "get_messages":
 				return { success: true, data: this.conversationMessages };
+
+			case "get_entries": {
+				const entries = this._activeTranscriptEntries();
+				let start = 0;
+				if (msg.since !== undefined) {
+					const cursor = entries.findIndex(entry => entry?.id === msg.since);
+					if (cursor < 0) return { success: false, error: `Entry not found: ${msg.since}` };
+					start = cursor + 1;
+				}
+				return {
+					success: true,
+					data: {
+						entries: entries.slice(start),
+						leafId: this._lastTranscriptEntryId,
+					},
+				};
+			}
+
+			case "get_fork_messages": {
+				const entries = this._activeTranscriptEntries();
+				const byId = new Map(entries.filter(entry => typeof entry?.id === "string").map(entry => [entry.id, entry]));
+				const active = [];
+				const seen = new Set();
+				let current = this._lastTranscriptEntryId ? byId.get(this._lastTranscriptEntryId) : undefined;
+				while (current && !seen.has(current.id)) {
+					active.push(current);
+					seen.add(current.id);
+					current = current.parentId ? byId.get(current.parentId) : undefined;
+				}
+				active.reverse();
+				const messages = active.flatMap(entry => {
+					if (entry?.type !== "message" || (entry.message?.role !== "user" && entry.message?.role !== "user-with-attachments")) return [];
+					const content = entry.message.content;
+					const text = typeof content === "string"
+						? content
+						: Array.isArray(content)
+							? content.filter(block => block?.type === "text" && typeof block.text === "string").map(block => block.text).join("\n")
+							: "";
+					return [{ entryId: entry.id, text }];
+				});
+				return { success: true, data: { messages } };
+			}
 
 			case "set_model": {
 				const provider = msg.provider || "mock";
@@ -3194,18 +3304,16 @@ export class MockAgentCore {
 				return { success: true };
 
 			case "switch_session": {
-				// Faithful to the real pi-agent CLI: rehydrate the conversation from
-				// the given `.jsonl` transcript. Used by restore, Continue-Archived,
-				// and Fork. Without this the mock would drop the cloned history and
-				// forked/continued sessions would open empty in the E2E tier (the
-				// real CLI loads it; the mock previously no-op'd here). The file is
-				// written by `get_state` as newline-delimited {type:"message",message}.
-				// The real CLI also validates runtime cwd metadata before accepting the
-				// transcript; stale archived worktree paths must fail here.
+				// Faithful to the real pi-agent CLI: rehydrate both the visible message
+				// view and its durable append-only entry tree. Used by restore,
+				// Continue-Archived, and Fork.
 				try {
 					const sp = msg.sessionPath;
 					if (sp && fs.existsSync(sp)) {
 						const loaded = [];
+						const entries = [];
+						let sessionHeader = null;
+						const runtimeCwdMetadata = [];
 						for (const line of fs.readFileSync(sp, "utf-8").split("\n")) {
 							const trimmed = line.trim();
 							if (!trimmed) continue;
@@ -3214,10 +3322,25 @@ export class MockAgentCore {
 								if (parsed && (parsed.type === "system" || parsed.type === "session") && typeof parsed.cwd === "string" && !fs.existsSync(parsed.cwd)) {
 									return { success: false, error: `Stored session working directory does not exist: ${parsed.cwd}` };
 								}
-								if (parsed && parsed.type === "message" && parsed.message) loaded.push(parsed.message);
+								if (parsed?.type === "session" && !sessionHeader) {
+									sessionHeader = parsed;
+								} else if (parsed?.type === "system" && typeof parsed.cwd === "string") {
+									runtimeCwdMetadata.push(parsed);
+								} else if (parsed && parsed.type !== "session") {
+									entries.push(parsed);
+									if (parsed.type === "message" && parsed.message) loaded.push(parsed.message);
+								}
 							} catch { /* skip malformed line */ }
 						}
 						this.conversationMessages = loaded;
+						this._transcriptEntries = entries;
+						this._postCompactionEntries = null;
+						this._sessionHeader = sessionHeader || this._createSessionHeader();
+						this._runtimeCwdMetadata = runtimeCwdMetadata;
+						const lastEntry = entries.at(-1);
+						this._lastTranscriptEntryId = lastEntry?.type === "leaf"
+							? (typeof lastEntry.targetId === "string" ? lastEntry.targetId : null)
+							: (typeof lastEntry?.id === "string" ? lastEntry.id : null);
 						this.sessionFilePath = sp;
 					}
 				} catch { /* best-effort — leave existing conversation intact */ }

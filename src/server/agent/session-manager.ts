@@ -1,7 +1,11 @@
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { realClock, realCommandRunner } from "../gateway-deps.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
-import { LOCAL_USER_AUTHOR, isMessageAuthor } from "../../shared/message-author.js";
+import {
+	LOCAL_USER_AUTHOR,
+	isMessageAuthor,
+	isPiTranscriptEntryId,
+} from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 export type { PromptSource } from "../../shared/prompt-source.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -23,7 +27,14 @@ import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
-import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
+import {
+	canonicalContainerAgentSessionPath,
+	sessionFileDelete,
+	sessionFileExists,
+	sessionFileRead,
+	sessionFsContextForAgentFile,
+	sessionSidecarDelete,
+} from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
 import {
@@ -37,7 +48,11 @@ import {
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 } from "./author-sidecar.js";
-import { buildVisibleMessageSnapshot as buildVisibleMessageSnapshotData } from "./visible-message-snapshot.js";
+import {
+	buildVisibleMessageSnapshot as buildVisibleMessageSnapshotData,
+	correlateTranscriptPromptEntryIds,
+	type TranscriptCursorSnapshot,
+} from "./visible-message-snapshot.js";
 import {
 	BATCH_SYSTEM_AUTHOR,
 	BOBBIT_SYSTEM_AUTHOR,
@@ -52,11 +67,17 @@ import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, rest
 import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
-import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
+import {
+	appendIdentifiedSkillSidecarEntry,
+	appendSkillSidecarTranscriptBinding,
+} from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
 	parseCompactionStartMs,
+	resolveCompactionTranscriptEntryId,
+	type CompactionSidecarEntry,
+	type TranscriptEntriesSnapshot,
 } from "./compaction-sidecar.js";
 import {
 	SessionStore,
@@ -705,6 +726,46 @@ export class ModelSelectionRecoveryError extends Error {
 	}
 }
 
+/** Owner termination is rejected before any lifecycle mutation while a history fork borrows its sandbox worktree. */
+export class SharedSandboxWorktreeInUseError extends Error {
+	readonly code = "SHARED_SANDBOX_WORKTREE_IN_USE";
+
+	constructor(ownerSessionId: string) {
+		super(`Session ${ownerSessionId} cannot be terminated while another live session is using its sandbox worktree`);
+		this.name = "SharedSandboxWorktreeInUseError";
+	}
+}
+
+type SandboxWorktreeOwnerCoordinates = { root: string; name: string };
+
+type SandboxWorktreeOwnerRecord = Pick<
+	PersistedSession,
+	"branch" | "cwd" | "worktreePath"
+>;
+
+/** Derive removal authority from the owner's branch, never from a nested cwd suffix. */
+function sandboxWorktreeOwnerCoordinates(
+	session: SandboxWorktreeOwnerRecord,
+): SandboxWorktreeOwnerCoordinates | undefined {
+	const cwd = normalizeWorktreeHostPath(session.cwd);
+	if (session.branch) {
+		const root = `/workspace-wt/${session.branch}`;
+		const normalizedRoot = normalizeWorktreeHostPath(root);
+		if (cwd && normalizedRoot && (cwd === normalizedRoot || cwd.startsWith(`${normalizedRoot}/`))) {
+			return { root, name: session.branch };
+		}
+		return undefined;
+	}
+	if (!session.worktreePath?.startsWith("/workspace-wt/")) return undefined;
+	const root = session.worktreePath.replace(/\/$/, "");
+	const normalizedRoot = normalizeWorktreeHostPath(root);
+	if (!normalizedRoot || !cwd || (cwd !== normalizedRoot && !cwd.startsWith(`${normalizedRoot}/`))) {
+		return undefined;
+	}
+	const name = root.slice("/workspace-wt/".length);
+	return name ? { root, name } : undefined;
+}
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -749,6 +810,10 @@ export interface SessionInfo {
 	teamLeadSessionId?: string;
 	/** Path to the git worktree for this session */
 	worktreePath?: string;
+	/** This writable session uses another session's worktree but never owns its teardown. */
+	borrowsWorktree?: boolean;
+	/** Flattened session id of the sandbox worktree lifecycle owner. Provenance only. */
+	borrowedWorktreeOwnerSessionId?: string;
 	/** Task ID this session is working on */
 	taskId?: string;
 	/** Staff agent ID this session belongs to */
@@ -916,13 +981,9 @@ export interface SessionInfo {
 	 * equals `modelText`, we splice the matching envelope onto the message:
 	 * rewrite `content` to `originalText` and attach `skillExpansions`.
 	 */
-	pendingSkillExpansions?: Array<{
-		modelText: string;
-		originalText: string;
-		skillExpansions: SkillExpansion[];
-		/** `@path` file-mention chips re-attached alongside skill expansions. */
-		fileMentions?: FileMention[];
-	}>;
+	pendingSkillExpansions?: PendingSkillSidecarEnvelope[];
+	/** Settled raw Pi occurrences awaiting an authoritative snapshot/cursor pair. */
+	pendingSkillTranscriptBindings?: PendingSkillTranscriptBinding[];
 	/** Repo path (cached from worktree provisioning). */
 	repoPath?: string;
 	/** Active branch name. Mirrors the persisted store; stable for the session's lifetime. */
@@ -969,8 +1030,37 @@ export interface SessionInfo {
 	 */
 	messagesSnapshotCache?: {
 		seq: number;
-		promise: Promise<{ success: boolean; data?: unknown; error?: string }>;
+		promise: Promise<MessageSnapshotBaseResponse>;
 	};
+	/** Cursor ids aligned to one exact immutable get_messages base object. */
+	messagesSnapshotCursorProjection?: {
+		seq: number;
+		data: unknown;
+		entryIds: readonly (string | undefined)[];
+	};
+}
+
+interface MessageSnapshotBaseResponse {
+	success: boolean;
+	data?: unknown;
+	error?: string;
+	cursorEntryIds?: readonly (string | undefined)[];
+}
+
+interface PendingSkillSidecarEnvelope {
+	modelText: string;
+	originalText: string;
+	skillExpansions: SkillExpansion[];
+	fileMentions?: FileMention[];
+	recordId?: string;
+	promptId?: string;
+}
+
+interface PendingSkillTranscriptBinding {
+	recordId: string;
+	promptId: string;
+	modelText: string;
+	messageIdentity: { id: string } | { timestamp: number };
 }
 
 /** Exact canonical bridge identity required by ownership-sensitive respawns. */
@@ -1091,6 +1181,10 @@ export function preparePromptAuthorDispatch(
 	};
 	if (!session.pendingPromptAuthors) session.pendingPromptAuthors = [];
 	session.pendingPromptAuthors.push(pending);
+	const skillEnvelope = session.pendingSkillExpansions?.find((entry) =>
+		entry.promptId === undefined && entry.modelText === baseModelText,
+	);
+	if (skillEnvelope) skillEnvelope.promptId = promptId;
 	// A newly accepted same-text occurrence supersedes only the live keyless
 	// terminal guard. Restore replay guards remain authoritative until replay ends.
 	session.lastKeylessPromptAuthorEnd = undefined;
@@ -1198,6 +1292,9 @@ function cancelPromptAuthorBinding(
 		if (!binding.settled && (binding.attemptId ?? binding.promptId) === pendingAttemptId) {
 			session.promptAuthorMessageBindings!.delete(messageKey);
 		}
+	}
+	for (const envelope of session.pendingSkillExpansions ?? []) {
+		if (envelope.promptId === pending.promptId) envelope.promptId = undefined;
 	}
 	retainPromptAuthorAmbiguityFence(session, pending);
 	cancelSessionPromptActivity(
@@ -1435,6 +1532,17 @@ function promptAuthorMessageKey(
 	return undefined;
 }
 
+/** Agent events cannot prove Pi transcript ids; strip any claimed provenance. */
+function stripVisiblePromptEntryIdProvenance<T>(event: T): T {
+	if (!event || typeof event !== "object" || Array.isArray(event)) return event;
+	const raw = event as Record<string, unknown>;
+	if (!raw.message || typeof raw.message !== "object" || Array.isArray(raw.message)) return event;
+	const message = raw.message as Record<string, unknown>;
+	const { _entryIdSource: _untrustedEntryIdSource, ...withoutEntryIdSource } = message;
+	if (_untrustedEntryIdSource === undefined) return event;
+	return { ...raw, message: withoutEntryIdSource } as T;
+}
+
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
 const PROMPT_ACTIVITY_BOUNDARY = Symbol("prompt-activity-boundary");
 const PROMPT_AMBIGUOUS_ECHO = Symbol("prompt-ambiguous-echo");
@@ -1657,7 +1765,7 @@ export function prepareVisibleAgentEvent(
 			// no intervening start) continue to reuse the completed occurrence.
 			session.lastKeylessPromptAuthorEnd = undefined;
 		}
-		return event;
+		return stripVisiblePromptEntryIdProvenance(event);
 	}
 
 	const message = raw.message as Record<string, unknown>;
@@ -1802,11 +1910,12 @@ export function prepareVisibleAgentEvent(
 	const projectedRaw = userRole && selectedPromptBinding
 		? { ...raw, message: projectCorrelatedPromptMessage(message, selectedPromptBinding) }
 		: raw;
-	const prepared = normalizeVisibleAgentEvent(session, projectedRaw, {
+	const normalized = normalizeVisibleAgentEvent(session, projectedRaw, {
 		agentAuthor: sessionAuthor,
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
+	const prepared = stripVisiblePromptEntryIdProvenance(normalized);
 	if (bufferedPending) {
 		const messageId = promptAuthorMessageId(message, raw);
 		bufferedPending[PROMPT_AMBIGUOUS_ECHO] = {
@@ -1885,6 +1994,33 @@ export function prepareVisibleAgentEvent(
 			...(messageId ? { messageId } : {}),
 			...(typeof message.timestamp === "number" ? { messageTimestamp: message.timestamp } : {}),
 		});
+	}
+	const eventBinding = (prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
+	if (raw.type === "message_end" && eventBinding && !eventBinding.alreadySettled) {
+		const envelope = session.pendingSkillExpansions?.find((entry) =>
+			entry.promptId === eventBinding.promptId
+			&& entry.recordId !== undefined
+			&& entry.modelText === modelText,
+		);
+		const rawMessageId = typeof message.id === "string" && message.id.length > 0
+			? message.id
+			: undefined;
+		const messageIdentity = rawMessageId
+			? { id: rawMessageId }
+			: typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+				? { timestamp: message.timestamp }
+				: undefined;
+		if (envelope?.recordId && messageIdentity) {
+			if (!session.pendingSkillTranscriptBindings) session.pendingSkillTranscriptBindings = [];
+			if (!session.pendingSkillTranscriptBindings.some((binding) => binding.recordId === envelope.recordId)) {
+				session.pendingSkillTranscriptBindings.push({
+					recordId: envelope.recordId,
+					promptId: eventBinding.promptId,
+					modelText,
+					messageIdentity,
+				});
+			}
+		}
 	}
 	return prepared;
 }
@@ -2123,7 +2259,7 @@ export function isRetryableAgentEnd(event: unknown): boolean {
  *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
  *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }>; previousAssistantStreamMessage?: any }, truncated: unknown): void {
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: PendingSkillSidecarEnvelope[]; previousAssistantStreamMessage?: any }, truncated: unknown): void {
 	const normalizeStartedAt = performance.now();
 	const normalized = normalizeToolResultErrorEvent(truncated);
 	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
@@ -2277,7 +2413,7 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
  * the un-spliced (modelText) message — that is what the model has seen.
  */
 function spliceSkillExpansionsIntoEvent(
-	session: { pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> },
+	session: { pendingSkillExpansions?: PendingSkillSidecarEnvelope[] },
 	event: unknown,
 ): unknown {
 	const ev = event as any;
@@ -2417,6 +2553,11 @@ type IdleWaiter = {
 	cleanup: () => void;
 };
 
+type SandboxBorrowerLifecycleQueue = {
+	tail: Promise<void>;
+	pending: number;
+};
+
 /**
  * Build the markdown workflow list injected into the goal-assistant prompt's
  * `{{AVAILABLE_WORKFLOWS}}` placeholder. Pure function over the resolved
@@ -2541,6 +2682,8 @@ export class SessionManager {
 	 * `promptOwner` until the final replacement commits or rolls back.
 	 */
 	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
+	/** Per-owner FIFO shared by sandbox history-reuse registration and termination. */
+	private _sandboxBorrowerLifecycleQueues = new Map<string, SandboxBorrowerLifecycleQueue>();
 	/**
 	 * Raw explicit/inherited thinking requests retained only while initial setup is
 	 * verifying its spawn tuple. The provisional spawn pin may already have been
@@ -2908,7 +3051,7 @@ export class SessionManager {
 			try {
 				// Verify/repair/recreate worktree if needed. Headquarters never owns
 				// sandbox worktrees, even for legacy sessions with /workspace-wt cwd.
-				if (projectId !== HEADQUARTERS_PROJECT_ID && session.cwd?.startsWith("/workspace-wt/")) {
+				if (projectId !== HEADQUARTERS_PROJECT_ID && !session.borrowsWorktree && session.cwd?.startsWith("/workspace-wt/")) {
 					let worktreeOk = false;
 
 					// Check if worktree still exists (volumes may survive rm -f)
@@ -3260,9 +3403,95 @@ export class SessionManager {
 	}
 
 	private getAllPersistedSessionsForWorktreeGuard(): PersistedSession[] {
-		return this.projectContextManager
-			? this.projectContextManager.getAllSessions()
-			: (this._testStore?.getAll() ?? []);
+		if (this.projectContextManager) {
+			const manager = this.projectContextManager as ProjectContextManager & {
+				getAllSessions?: () => PersistedSession[];
+				getAllLiveSessions?: () => PersistedSession[];
+			};
+			return manager.getAllSessions?.() ?? manager.getAllLiveSessions?.() ?? [];
+		}
+		return this._testStore?.getAll() ?? [];
+	}
+
+	/**
+	 * Resolve a sandbox worktree's durable, flattened lifecycle owner. Legacy
+	 * borrowers are accepted only when exactly one live same-project owner has
+	 * an authoritative worktree root containing their cwd.
+	 */
+	resolveSandboxWorktreeOwnerSessionId(sessionId: string): string | undefined {
+		const all = this.getAllPersistedSessionsForWorktreeGuard();
+		const byId = new Map(all.map(session => [session.id, session]));
+		const source = byId.get(sessionId);
+		if (!source || source.archived || !source.sandboxed) return undefined;
+		if (!source.borrowsWorktree) return source.id;
+
+		let ownerId = source.borrowedWorktreeOwnerSessionId;
+		const visited = new Set([source.id]);
+		while (ownerId) {
+			if (visited.has(ownerId)) return undefined;
+			visited.add(ownerId);
+			const owner = byId.get(ownerId);
+			if (!owner || owner.archived || !owner.sandboxed || owner.projectId !== source.projectId) {
+				return undefined;
+			}
+			if (owner.borrowsWorktree) {
+				ownerId = owner.borrowedWorktreeOwnerSessionId;
+				continue;
+			}
+			const coordinates = sandboxWorktreeOwnerCoordinates(owner);
+			const sharesOwnedRoot = coordinates
+				? isWorktreePathReferencedByLiveSession(coordinates.root, [source])
+				: normalizeWorktreeHostPath(owner.cwd) === normalizeWorktreeHostPath(source.cwd);
+			return sharesOwnedRoot ? owner.id : undefined;
+		}
+
+		const inferred = all.filter(candidate => {
+			if (candidate.archived || candidate.borrowsWorktree || !candidate.sandboxed) return false;
+			if (candidate.projectId !== source.projectId) return false;
+			const coordinates = sandboxWorktreeOwnerCoordinates(candidate);
+			return !!coordinates && isWorktreePathReferencedByLiveSession(coordinates.root, [source]);
+		});
+		return inferred.length === 1 ? inferred[0].id : undefined;
+	}
+
+	/** Rejection-safe FIFO for one flattened sandbox worktree owner. */
+	async withSandboxWorktreeOwnerLifecycle<T>(ownerSessionId: string, operation: () => Promise<T>): Promise<T> {
+		let queue = this._sandboxBorrowerLifecycleQueues.get(ownerSessionId);
+		if (!queue) {
+			queue = { tail: Promise.resolve(), pending: 0 };
+			this._sandboxBorrowerLifecycleQueues.set(ownerSessionId, queue);
+		}
+		const predecessor = queue.tail;
+		let release!: () => void;
+		queue.tail = new Promise<void>(resolve => { release = resolve; });
+		queue.pending++;
+		await predecessor;
+		try {
+			return await operation();
+		} finally {
+			release();
+			queue.pending--;
+			if (queue.pending === 0 && this._sandboxBorrowerLifecycleQueues.get(ownerSessionId) === queue) {
+				this._sandboxBorrowerLifecycleQueues.delete(ownerSessionId);
+			}
+		}
+	}
+
+	private assertSandboxOwnerHasNoLiveBorrowers(ownerSessionId: string): void {
+		const owner = this.getPersistedSession(ownerSessionId);
+		if (!owner || owner.archived || !owner.sandboxed || owner.borrowsWorktree) return;
+		const coordinates = sandboxWorktreeOwnerCoordinates(owner);
+		if (!coordinates) return;
+		for (const borrower of this.getAllPersistedSessionsForWorktreeGuard()) {
+			if (borrower.archived || !borrower.borrowsWorktree || borrower.projectId !== owner.projectId) continue;
+			const explicitlyOwned = borrower.borrowedWorktreeOwnerSessionId === ownerSessionId;
+			const legacyReference = !borrower.borrowedWorktreeOwnerSessionId
+				&& !!coordinates
+				&& isWorktreePathReferencedByLiveSession(coordinates.root, [borrower]);
+			if (explicitlyOwned || legacyReference) {
+				throw new SharedSandboxWorktreeInUseError(ownerSessionId);
+			}
+		}
 	}
 
 	/** Resolve the correct CostTracker for a session based on its project. */
@@ -4866,7 +5095,7 @@ export class SessionManager {
 		const hasSkillExpansions = !!opts?.skillExpansions?.length;
 		const hasFileMentions = !!opts?.fileMentions?.length;
 		if (hasSkillExpansions || hasFileMentions) {
-			appendSkillSidecarEntry(sessionId, {
+			const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
 				ts: this.clock.now(),
 				modelText: dispatchText,
 				originalText: text,
@@ -4879,6 +5108,7 @@ export class SessionManager {
 				originalText: text,
 				skillExpansions: opts?.skillExpansions ?? [],
 				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+				...(recordId ? { recordId } : {}),
 			});
 		}
 		session.promptQueue.enqueue(dispatchText, {
@@ -4979,7 +5209,7 @@ export class SessionManager {
 				const hasSkillExpansions = !!opts?.skillExpansions?.length;
 				const hasFileMentions = !!opts?.fileMentions?.length;
 				if (hasSkillExpansions || hasFileMentions) {
-					appendSkillSidecarEntry(sessionId, {
+					const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
 						ts: this.clock.now(),
 						modelText: dispatchText,
 						originalText: text,
@@ -4992,6 +5222,7 @@ export class SessionManager {
 						originalText: text,
 						skillExpansions: opts?.skillExpansions ?? [],
 						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+						...(recordId ? { recordId } : {}),
 					});
 				}
 				rollback.promptQueue.enqueue(dispatchText, {
@@ -5107,7 +5338,7 @@ export class SessionManager {
 		const hasSkillExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
 		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
 		if (hasSkillExpansions || hasFileMentions) {
-			appendSkillSidecarEntry(session.id, {
+			const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
 				ts: this.clock.now(),
 				modelText: dispatchText,
 				originalText: text,
@@ -5123,6 +5354,7 @@ export class SessionManager {
 				originalText: text,
 				skillExpansions: opts?.skillExpansions ?? [],
 				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+				...(recordId ? { recordId } : {}),
 			});
 		}
 
@@ -6298,6 +6530,7 @@ export class SessionManager {
 			});
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
+			this.scheduleSettledPromptCursorRefresh(session);
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
@@ -6348,33 +6581,37 @@ export class SessionManager {
 					startedAtMs,
 					trigger: reason === "overflow" ? "overflow" as const : "auto" as const,
 					compactionId: makeCompactionId(startedAtMs),
+					rpcClient: session.rpcClient,
+					baselinePromise: this.readCompactionTranscriptEntries(session.rpcClient),
 				};
 			}
 		} else if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
-			// `willRetry:true` means a successful overflow compaction completed and
-			// Pi will retry the surrounding agent turn. No later compaction_end is
-			// emitted, so completion must still persist and reach the client here.
+			// `willRetry:true` completes this compaction even though Pi retries the
+			// surrounding turn. Detach ownership now so duplicate end events cannot
+			// append a second card while the authoritative tree read is pending.
 			session.isCompacting = false;
-			const pending = (session as any)._pendingCompactionStart as
-				| { startedAtMs: number; trigger: "auto" | "overflow"; compactionId: string }
-				| undefined;
 			const reason = (event as any).reason;
-			// Manual path is handled in ws/handler.ts. Auto/overflow path writes
-			// the sidecar here from the upstream CompactionResult.
-			if (reason !== "manual" && pending) {
-				const endedAtMs = this.clock.now();
-				const result = (event as any).result as
-					| { tokensBefore?: number; firstKeptEntryId?: string }
+			const aborted = !!(event as any).aborted;
+			const errorMessage = (event as any).errorMessage as string | undefined;
+			const result = (event as any).result as
+				| { summary?: string; tokensBefore?: number; firstKeptEntryId?: string }
+				| undefined;
+			if (reason !== "manual") {
+				const pending = (session as any)._pendingCompactionStart as
+					| {
+						startedAtMs: number;
+						trigger: "auto" | "overflow";
+						compactionId: string;
+						rpcClient: SessionInfo["rpcClient"];
+						baselinePromise: Promise<TranscriptEntriesSnapshot | undefined>;
+					}
 					| undefined;
-				const aborted = !!(event as any).aborted;
-				const errorMessage = (event as any).errorMessage as string | undefined;
-				const success = !!result && !aborted && !errorMessage;
-				try {
-					// Append the sidecar SYNCHRONOUSLY before refreshAfterCompaction
-					// so the post-compaction snapshot (and the live card's affordance
-					// fetch) see the orphan boundary immediately. Reuse the start-time
-					// compactionId so it matches the id we broadcast on the end event.
-					appendCompactionSidecarEntry(session.id, {
+				(session as any)._pendingCompactionStart = undefined;
+				if (pending) {
+					const endedAtMs = this.clock.now();
+					const success = !!result && !aborted && !errorMessage;
+					if (success) (event as any).compactionId = pending.compactionId;
+					const entry: CompactionSidecarEntry = {
 						schemaVersion: 1,
 						id: pending.compactionId,
 						trigger: pending.trigger,
@@ -6386,68 +6623,57 @@ export class SessionManager {
 						success,
 						error: success ? undefined : (errorMessage || (aborted ? "aborted" : "compaction failed")),
 						firstKeptEntryId: result?.firstKeptEntryId ?? null,
-					});
-				} catch (err) {
-					console.warn(`[session-manager] Failed to append compaction sidecar for ${session.id}:`, err);
+					};
+					(session as any)._compactionFinalization = this.finalizeCompactionSidecar(
+						session,
+						pending.rpcClient,
+						pending.baselinePromise,
+						entry,
+						result,
+						!aborted,
+					);
 				}
-				// Stamp the broadcast end-event with the shared compactionId so the
-				// client stamps its live `compact_active` card with it (the card the
-				// user is looking at then mounts the affordance immediately). The
-				// event object is forwarded to clients verbatim by emitSessionEvent
-				// after this handler returns. Only when the compaction succeeded —
-				// a failed compaction has no orphan boundary to recover.
-				if (success) (event as any).compactionId = pending.compactionId;
-			}
-			// Manual path: ws/handler.ts stashes the shared compactionId on the
-			// session synchronously before the RPC. The agent emits this manual
-			// `compaction_end` BEFORE the RPC promise resolves in ws/handler.ts,
-			// and we call refreshAfterCompaction() below. If we waited for the
-			// ws-handler's post-RPC append, that snapshot would lack the persisted
-			// sidecar anchor and the live card would stay positive-ordered (sorts
-			// after the preserved tail). So write the SUCCESS sidecar row HERE,
-			// synchronously, before refreshAfterCompaction — using the stashed
-			// compactionId and this event's result payload. ws/handler.ts still
-			// owns the FAILURE append (when the RPC rejects without ever emitting a
-			// successful compaction_end), and skips its own success append via the
-			// `_manualSidecarWritten` marker so we don't double-write.
-			if (reason === "manual") {
+			} else {
 				const manualId = (session as any)._manualCompactionId as string | undefined;
-				const manualAborted = !!(event as any).aborted;
-				const manualError = (event as any).errorMessage as string | undefined;
-				const manualResult = (event as any).result as
-					| { tokensBefore?: number; firstKeptEntryId?: string }
+				const baselinePromise = (session as any)._manualCompactionBaselinePromise as
+					| Promise<TranscriptEntriesSnapshot | undefined>
 					| undefined;
-				const manualSuccess = !!manualId && !manualAborted && !manualError && !!manualResult;
-				if (manualId && !manualAborted) (event as any).compactionId = manualId;
-				if (manualId && manualSuccess) {
+				const manualRpcClient = (session as any)._manualCompactionRpcClient as
+					| SessionInfo["rpcClient"]
+					| undefined;
+				(session as any)._manualCompactionId = undefined;
+				(session as any)._manualCompactionRpcClient = undefined;
+				(session as any)._manualCompactionBaselinePromise = undefined;
+				const success = !!manualId && !!result && !aborted && !errorMessage;
+				if (manualId && !aborted) (event as any).compactionId = manualId;
+				if (manualId && success) {
 					const endedAtMs = this.clock.now();
 					const startedAtMs = parseCompactionStartMs(manualId) ?? endedAtMs;
-					try {
-						const wrote = appendCompactionSidecarEntry(session.id, {
-							schemaVersion: 1,
-							id: manualId,
-							trigger: "manual",
-							tokensBefore: manualResult?.tokensBefore ?? null,
-							tokensAfter: null,
-							durationMs: Math.max(0, endedAtMs - startedAtMs),
-							startedAt: new Date(startedAtMs).toISOString(),
-							endedAt: new Date(endedAtMs).toISOString(),
-							success: true,
-							firstKeptEntryId: manualResult?.firstKeptEntryId ?? null,
-						});
-						// Tell ws/handler.ts not to append a duplicate success row — but
-						// ONLY if our append actually succeeded. On failure leave the
-						// marker unset so the ws/handler.ts fallback can append the row
-						// when the RPC resolves (otherwise the sidecar boundary is lost).
-						if (wrote) (session as any)._manualSidecarWritten = manualId;
-					} catch (err) {
-						console.warn(`[session-manager] Failed to append manual compaction sidecar for ${session.id}:`, err);
-					}
+					const entry: CompactionSidecarEntry = {
+						schemaVersion: 1,
+						id: manualId,
+						trigger: "manual",
+						tokensBefore: result?.tokensBefore ?? null,
+						tokensAfter: null,
+						durationMs: Math.max(0, endedAtMs - startedAtMs),
+						startedAt: new Date(startedAtMs).toISOString(),
+						endedAt: new Date(endedAtMs).toISOString(),
+						success: true,
+						firstKeptEntryId: result?.firstKeptEntryId ?? null,
+					};
+					(session as any)._compactionFinalization = this.finalizeCompactionSidecar(
+						session,
+						manualRpcClient ?? session.rpcClient,
+						baselinePromise ?? Promise.resolve(undefined),
+						entry,
+						result,
+						true,
+						manualId,
+					);
+				} else if (!aborted) {
+					void this.refreshAfterCompaction(session);
 				}
-				(session as any)._manualCompactionId = undefined;
 			}
-			(session as any)._pendingCompactionStart = undefined;
-			if (!(event as any).aborted) this.refreshAfterCompaction(session);
 		} else if (event.type === "process_exit") {
 			session.streamingStartedAt = undefined;
 			this.resolveStoreForSession(session.id).update(session.id, {
@@ -7656,6 +7882,103 @@ export class SessionManager {
 		emitSessionEvent(session, truncateLargeToolContent(event));
 	}
 
+	private async readCompactionTranscriptEntries(
+		rpcClient: SessionInfo["rpcClient"],
+	): Promise<TranscriptEntriesSnapshot | undefined> {
+		if (typeof rpcClient.getTranscriptEntries !== "function") return undefined;
+		try {
+			const response = await rpcClient.getTranscriptEntries();
+			return response?.success ? response.data as TranscriptEntriesSnapshot : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async finalizeCompactionSidecar(
+		session: SessionInfo,
+		rpcClient: SessionInfo["rpcClient"],
+		baselinePromise: Promise<TranscriptEntriesSnapshot | undefined>,
+		entry: CompactionSidecarEntry,
+		result: { summary?: string; tokensBefore?: number; firstKeptEntryId?: string } | undefined,
+		refresh: boolean,
+		manualId?: string,
+	): Promise<void> {
+		const baseline = await baselinePromise.catch(() => undefined);
+		const post = await this.readCompactionTranscriptEntries(rpcClient);
+		if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+		let transcriptCompactionEntryId: string | undefined;
+		if (baseline && post
+			&& typeof result?.summary === "string"
+			&& typeof result.firstKeptEntryId === "string"
+			&& typeof result.tokensBefore === "number"
+			&& Number.isFinite(result.tokensBefore)) {
+			transcriptCompactionEntryId = resolveCompactionTranscriptEntryId(baseline, post, {
+				summary: result.summary,
+				firstKeptEntryId: result.firstKeptEntryId,
+				tokensBefore: result.tokensBefore,
+			});
+		}
+		const wrote = appendCompactionSidecarEntry(session.id, {
+			...entry,
+			...(transcriptCompactionEntryId ? { transcriptCompactionEntryId } : {}),
+		});
+		if (manualId && wrote) (session as any)._manualSidecarWritten = manualId;
+		if (refresh) await this.refreshAfterCompaction(session);
+	}
+
+	/**
+	 * Pi emits id-less message events before its append step. After the final
+	 * agent_end, schedule one authoritative read-only snapshot behind the current
+	 * event call stack so persistence and the event-buffer sequence are both
+	 * settled. Replacing from this snapshot enriches existing rows rather than
+	 * emitting a second user message.
+	 */
+	private scheduleSettledPromptCursorRefresh(session: SessionInfo): void {
+		if (typeof session.rpcClient.getTranscriptCursorSnapshot !== "function"
+			|| (session.clients.size === 0 && !session.pendingSkillTranscriptBindings?.length)) return;
+		const rpcClient = session.rpcClient;
+		queueMicrotask(() => {
+			if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+			const pendingBindings = session.pendingSkillTranscriptBindings?.splice(0) ?? [];
+			void this.getMessagesSnapshotBase(session).then((response) => {
+				if (!response.success || response.data === undefined) return;
+				if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+				const messages = Array.isArray(response.data)
+					? response.data
+					: response.data && typeof response.data === "object" && Array.isArray((response.data as any).messages)
+						? (response.data as any).messages
+						: undefined;
+				if (messages && response.cursorEntryIds) {
+					for (const binding of pendingBindings) {
+						const matches: number[] = [];
+						for (let index = 0; index < messages.length; index++) {
+							const message = messages[index];
+							if (!message || typeof message !== "object"
+								|| (message.role !== "user" && message.role !== "user-with-attachments")
+								|| extractUserMessageText(message) !== binding.modelText) continue;
+							if ("id" in binding.messageIdentity) {
+								if (message.id === binding.messageIdentity.id) matches.push(index);
+							} else if (typeof message.id !== "string"
+								&& message.timestamp === binding.messageIdentity.timestamp) {
+								matches.push(index);
+							}
+						}
+						if (matches.length !== 1) continue;
+						const transcriptEntryId = response.cursorEntryIds[matches[0]];
+						if (!isPiTranscriptEntryId(transcriptEntryId)) continue;
+						appendSkillSidecarTranscriptBinding(session.id, binding.recordId, transcriptEntryId);
+					}
+				}
+				if (session.clients.size > 0) {
+					const data = this.buildVisibleMessageSnapshot(session.id, response.data);
+					broadcast(session.clients, { type: "messages", data: data as unknown[] });
+				}
+			}).catch((error) => {
+				console.warn(`[session-manager] Failed to refresh settled prompt cursors for ${session.id}:`, error);
+			});
+		});
+	}
+
 	/**
 	 * Check an event for usage data and record it via the cost tracker.
 	 * Broadcasts a cost_update to connected clients if cost data is found.
@@ -8099,6 +8422,8 @@ export class SessionManager {
 			parentSessionId: ps.parentSessionId,
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
+			borrowsWorktree: ps.borrowsWorktree,
+			borrowedWorktreeOwnerSessionId: ps.borrowedWorktreeOwnerSessionId,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,
@@ -8242,7 +8567,7 @@ export class SessionManager {
 		if (restoredSandboxed) {
 			// Verify the sandbox worktree still exists inside the container. Headquarters
 			// sessions are no-worktree, so never repair/recreate /workspace-wt paths.
-			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && !ps.borrowsWorktree && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
 				try {
 					await this.commandRunner.execFile("docker", [
 						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
@@ -8567,6 +8892,8 @@ export class SessionManager {
 			parentSessionId: ps.parentSessionId,
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
+			borrowsWorktree: ps.borrowsWorktree,
+			borrowedWorktreeOwnerSessionId: ps.borrowedWorktreeOwnerSessionId,
 			role: ps.role,
 			teamGoalId: ps.teamGoalId,
 			teamLeadSessionId: ps.teamLeadSessionId,
@@ -8957,7 +9284,7 @@ export class SessionManager {
 		} });
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -9144,6 +9471,8 @@ export class SessionManager {
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
+				borrowsWorktree: opts?.borrowsWorktree,
+				borrowedWorktreeOwnerSessionId: opts?.borrowedWorktreeOwnerSessionId,
 				allowedTools: opts?.allowedTools,
 				// Mirror session-setup's effectiveRoleId fallback: when callers
 				// (team-manager, staff-manager) pass only `roleName`, use that as
@@ -9190,6 +9519,8 @@ export class SessionManager {
 				parentSessionId: opts?.parentSessionId,
 				childKind: opts?.childKind,
 				readOnly: opts?.readOnly,
+				borrowsWorktree: opts?.borrowsWorktree,
+				borrowedWorktreeOwnerSessionId: opts?.borrowedWorktreeOwnerSessionId,
 				sessionScopedAllowedTools,
 				worktreePath,
 				repoPath,
@@ -9203,6 +9534,7 @@ export class SessionManager {
 				rolePrompt: resolvedRolePrompt,
 				roleName: opts?.roleName,
 				workflowContext: opts?.workflowContext,
+				reattemptGoalId: opts?.reattemptGoalId,
 				effectiveAllowedTools: optsAllowedTagged,
 				projectId,
 				sandboxBranch,
@@ -9281,6 +9613,8 @@ export class SessionManager {
 			parentSessionId: opts?.parentSessionId,
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
+			borrowsWorktree: opts?.borrowsWorktree,
+			borrowedWorktreeOwnerSessionId: opts?.borrowedWorktreeOwnerSessionId,
 			sessionScopedAllowedTools,
 			// Prebuilt host multi-repo worktrees already have all ordinary-cleanup
 			// coordinates. Carry them into persistOnce instead of adding them only
@@ -9792,32 +10126,70 @@ export class SessionManager {
 	 * Callers must treat `data` as immutable and freshly apply in-flight overlays,
 	 * sidecar merges, truncation, ordering stamps, and serialization.
 	 */
-	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
+	async getMessagesSnapshotBase(session: SessionInfo): Promise<MessageSnapshotBaseResponse> {
 		const seq = session.eventBuffer.lastSeq;
 		const cached = session.messagesSnapshotCache;
 		if (cached?.seq === seq) return cached.promise;
 
-		const promise = (async (): Promise<{ success: boolean; data?: unknown; error?: string }> => {
+		const promise = (async (): Promise<MessageSnapshotBaseResponse> => {
 			if (session.condition?.code === "MODEL_SELECTION_REQUIRED") {
 				const entries = await this.readPersistedTranscriptEntries(session.id);
 				return entries
 					? { success: true, data: prepareArchivedMessageSnapshot(entries) }
 					: { success: false, error: "Persisted session transcript is unavailable" };
 			}
-			const response = await session.rpcClient.getMessages();
+			const cursorRead = typeof session.rpcClient.getTranscriptCursorSnapshot === "function"
+				? session.rpcClient.getTranscriptCursorSnapshot()
+				: Promise.resolve(undefined);
+			const [response, cursorResponse] = await Promise.all([
+				session.rpcClient.getMessages(),
+				cursorRead.catch(() => undefined),
+			]);
 			if (!response?.success) return response;
-			return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+			const data = normalizeToolResultErrorSnapshot(response.data);
+			const messages = Array.isArray(data)
+				? data
+				: data && typeof data === "object" && Array.isArray((data as any).messages)
+					? (data as any).messages
+					: undefined;
+			const cursorEntryIds = messages && cursorResponse?.success
+				? correlateTranscriptPromptEntryIds(
+					messages,
+					cursorResponse.data as TranscriptCursorSnapshot,
+					{ allowUnpersistedTail: session.status === "streaming" },
+				)
+				: undefined;
+			return {
+				...response,
+				data,
+				...(cursorEntryIds ? { cursorEntryIds } : {}),
+			};
 		})();
 		session.messagesSnapshotCache = { seq, promise };
 		promise.then(
 			(response) => {
 				if (!response?.success && session.messagesSnapshotCache?.promise === promise) {
 					session.messagesSnapshotCache = undefined;
+					session.messagesSnapshotCursorProjection = undefined;
+					return;
+				}
+				if (response.success
+					&& response.data !== undefined
+					&& response.cursorEntryIds
+					&& session.messagesSnapshotCache?.promise === promise) {
+					session.messagesSnapshotCursorProjection = {
+						seq,
+						data: response.data,
+						entryIds: response.cursorEntryIds,
+					};
+				} else if (session.messagesSnapshotCache?.promise === promise) {
+					session.messagesSnapshotCursorProjection = undefined;
 				}
 			},
 			() => {
 				if (session.messagesSnapshotCache?.promise === promise) {
 					session.messagesSnapshotCache = undefined;
+					session.messagesSnapshotCursorProjection = undefined;
 				}
 			},
 		);
@@ -9832,10 +10204,16 @@ export class SessionManager {
 			// snapshot so clients never fall back to the reduced visible transcript.
 			this.broadcastSessionCost(session);
 
-			const msgs = await session.rpcClient.getMessages();
+			// Compaction changes Pi's visible transcript without necessarily advancing
+			// Bobbit's event sequence before this async refresh starts. Discard the old
+			// base and its identity-bound cursor projection so get_messages and the
+			// authoritative cursor plane are read and correlated as one fresh pair.
+			session.messagesSnapshotCache = undefined;
+			session.messagesSnapshotCursorProjection = undefined;
+			const msgs = await this.getMessagesSnapshotBase(session);
 			if (msgs.success) {
 				const data = this.buildVisibleMessageSnapshot(session.id, msgs.data);
-				broadcast(session.clients, { type: "messages", data });
+				broadcast(session.clients, { type: "messages", data: data as unknown[] });
 			}
 			const st = await session.rpcClient.getState();
 			if (st.success) {
@@ -10691,6 +11069,7 @@ export class SessionManager {
 		const persisted = this.resolveStoreForId(id)?.get(id);
 		const identity = live ?? persisted;
 		const correlatedSnapshot = applyArchivedSnapshotCorrelations(snapshot);
+		const cursorProjection = live?.messagesSnapshotCursorProjection;
 		const visible = buildVisibleMessageSnapshotData(correlatedSnapshot, {
 			sessionId: id,
 			session: {
@@ -10702,6 +11081,9 @@ export class SessionManager {
 			agentDeps: this.messageAuthorDependencies(identity),
 			latestMessageUpdate: live?.latestMessageUpdate,
 			inFlightSteerTexts: live?.inFlightSteerTexts,
+			...(cursorProjection?.data === snapshot
+				? { transcriptPromptEntryIds: cursorProjection.entryIds }
+				: {}),
 		});
 		return stripArchivedSnapshotCorrelations(visible);
 	}
@@ -11075,6 +11457,8 @@ export class SessionManager {
 				parentSessionId: session.parentSessionId,
 				childKind: session.childKind,
 				readOnly: session.readOnly,
+				borrowsWorktree: session.borrowsWorktree,
+				borrowedWorktreeOwnerSessionId: session.borrowedWorktreeOwnerSessionId,
 				sandboxed: session.sandboxed,
 				projectId: session.projectId,
 			});
@@ -11407,6 +11791,11 @@ export class SessionManager {
 		try { oldUnsubscribe(); } catch { /* stopped old bridge; listener cleanup is best-effort */ }
 		session.rpcClient = rpcClient;
 		session.unsubscribe = unsub;
+		// Snapshot bases and cursor projections are bridge-specific. Clear both at
+		// the commit boundary so no response from the stopped bridge can be reused or
+		// projected onto the replacement bridge's messages.
+		session.messagesSnapshotCache = undefined;
+		session.messagesSnapshotCursorProjection = undefined;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
 		if (verifiedReplacementTuple) {
@@ -11436,10 +11825,10 @@ export class SessionManager {
 
 		// Refresh messages and state for connected clients
 		try {
-			const msgs = await rpcClient.getMessages();
+			const msgs = await this.getMessagesSnapshotBase(session);
 			if (msgs.success) {
 				const data = this.buildVisibleMessageSnapshot(session.id, msgs.data);
-				broadcast(session.clients, { type: "messages", data });
+				broadcast(session.clients, { type: "messages", data: data as unknown[] });
 			}
 			const st = await rpcClient.getState();
 			if (st.success) broadcast(session.clients, { type: "state", data: st.data });
@@ -11752,16 +12141,41 @@ export class SessionManager {
 	}
 
 	async terminateSession(id: string): Promise<boolean> {
-		// In-place restore temporarily removes the SessionInfo from the map. A
-		// terminate accepted during that gap must serialize behind the replacement,
-		// not report "not live" and let a successfully restored ghost survive after
-		// the caller archives its persisted record. Mark it synchronously so every
-		// queued non-terminal install observes cancellation before it can stage.
-		const coordinator = this._sessionReplacementCoordinators.get(id);
-		if (!this.sessions.has(id) && !coordinator) return false;
-		if (coordinator) coordinator.terminalRequest = "terminate";
-		return this._coordinateSessionReplacement(id, "terminate", (token) =>
-			this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+		const persisted = this.getPersistedSession(id);
+		const live = this.sessions.get(id);
+		const lifecycleOwnerId = (live?.sandboxed || persisted?.sandboxed)
+			? ((live?.borrowsWorktree || persisted?.borrowsWorktree)
+				? (this.resolveSandboxWorktreeOwnerSessionId(id)
+					?? live?.borrowedWorktreeOwnerSessionId
+					?? persisted?.borrowedWorktreeOwnerSessionId
+					?? id)
+				: id)
+			: undefined;
+
+		const terminate = async (): Promise<boolean> => {
+			// In-place restore temporarily removes the SessionInfo from the map. A
+			// terminate accepted during that gap must serialize behind the replacement,
+			// not report "not live" and let a successfully restored ghost survive after
+			// the caller archives its persisted record. The shared-worktree guard runs
+			// before terminal intent so a 409 leaves the owner byte-for-byte live.
+			const coordinator = this._sessionReplacementCoordinators.get(id);
+			if (!this.sessions.has(id) && !coordinator) return false;
+			const current = this.sessions.get(id);
+			const currentPersisted = this.getPersistedSession(id);
+			if (
+				(current?.sandboxed || currentPersisted?.sandboxed)
+				&& !(current?.borrowsWorktree || currentPersisted?.borrowsWorktree)
+			) {
+				this.assertSandboxOwnerHasNoLiveBorrowers(id);
+			}
+			if (coordinator) coordinator.terminalRequest = "terminate";
+			return this._coordinateSessionReplacement(id, "terminate", (token) =>
+				this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+		};
+
+		return lifecycleOwnerId
+			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, terminate)
+			: terminate();
 	}
 
 	private async _terminateSessionOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
@@ -11839,23 +12253,21 @@ export class SessionManager {
 		this.sessionSecretStore.remove(id);
 
 		// Clean up sandbox worktree inside the container.
-		// Skip for sessions that SHARE the parent's worktree and must never remove it:
-		// delegate children (`delegateOf`) AND read-only child principals
-		// (`readOnly` + `parentSessionId`, e.g. the host-agents PR-walkthrough reviewer).
-		// A read-only child cannot write, so it never owns its own worktree — it shares
-		// the launching session's still-active /workspace-wt/<name>. Only the owning
-		// session should clean up. (Team children own a SEPARATE worktree and are not
-		// read-only, so they are not skipped here.)
-		if (session.sandboxed && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
-			try {
-				const sandbox = this.sandboxManager.get(session.projectId);
-				if (sandbox) {
-					// Extract worktree name from container path: /workspace-wt/<name>
-					const worktreeName = session.cwd.replace("/workspace-wt/", "");
-					await sandbox.removeWorktree(worktreeName);
+		// Skip sessions that share another owner's worktree: delegates, read-only
+		// children, and explicit writable history forks (`borrowsWorktree`). Only the
+		// session that provisioned the sandbox worktree may remove it.
+		if (session.sandboxed && !session.borrowsWorktree && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+			const removalAuthority = this.getPersistedSession(id) ?? session;
+			const coordinates = sandboxWorktreeOwnerCoordinates(removalAuthority);
+			if (!coordinates) {
+				console.warn(`[session-manager] Refusing ambiguous sandbox worktree removal for ${id}`);
+			} else {
+				try {
+					const sandbox = this.sandboxManager.get(session.projectId);
+					if (sandbox) await sandbox.removeWorktree(coordinates.name);
+				} catch (err) {
+					console.warn(`[session-manager] Failed to remove sandbox worktree for ${id}:`, err);
 				}
-			} catch (err) {
-				console.warn(`[session-manager] Failed to remove sandbox worktree for ${id}:`, err);
 			}
 		}
 
@@ -11980,7 +12392,24 @@ export class SessionManager {
 	 * children are cascade-reaped before it is archived.
 	 */
 	async storeArchive(id: string): Promise<boolean> {
-		return this.archiveWithCascade(id);
+		const persisted = this.getPersistedSession(id);
+		const lifecycleOwnerId = persisted?.sandboxed
+			? (persisted.borrowsWorktree
+				? (this.resolveSandboxWorktreeOwnerSessionId(id)
+					?? persisted.borrowedWorktreeOwnerSessionId
+					?? id)
+				: id)
+			: undefined;
+		const archive = async () => {
+			const current = this.getPersistedSession(id);
+			if (current?.sandboxed && !current.borrowsWorktree) {
+				this.assertSandboxOwnerHasNoLiveBorrowers(id);
+			}
+			return this.archiveWithCascade(id);
+		};
+		return lifecycleOwnerId
+			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, archive)
+			: archive();
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */
@@ -13086,21 +13515,28 @@ export class SessionManager {
 	}
 
 	/**
-	 * Try to recover a session's .jsonl file when agentSessionFile is empty.
-	 * The agent CLI stores files as: <sessionsDir>/<cwd-slug>/<timestamp>_<uuid>.jsonl
-	 * We scan the CWD-derived directory for a .jsonl created close to the session's createdAt.
+	 * Resolve a session's persisted .jsonl path, or recover one when the stored
+	 * path is absent or invalid. Stored sandbox paths must use a canonical agent
+	 * sessions container path; stored host paths retain the existing read-only
+	 * compatibility validation. Recovery scans only trusted sessions roots.
 	 *
-	 * Public so the continue-archived REST handler can resolve the source
-	 * `.jsonl` path for legacy persisted sessions whose `agentSessionFile`
-	 * field was never populated.
+	 * Public so fork and continue routes can resolve transcript sources without
+	 * using a raw persisted path.
 	 */
 	recoverSessionFile(ps: PersistedSession): string | null {
 		try {
-			if (ps.agentSessionFile && isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
-				const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
-				if (safePath) {
-					trustPersistedAgentSessionFile(safePath);
-					return safePath.replace(/\\/g, "/");
+			if (ps.agentSessionFile) {
+				const containerPath = ps.sandboxed
+					? canonicalContainerAgentSessionPath(ps.agentSessionFile)
+					: null;
+				if (containerPath) return containerPath;
+
+				if (isHostAbsoluteAgentSessionPath(ps.agentSessionFile) && fs.existsSync(ps.agentSessionFile)) {
+					const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
+					if (safePath) {
+						trustPersistedAgentSessionFile(safePath);
+						return safePath.replace(/\\/g, "/");
+					}
 				}
 			}
 

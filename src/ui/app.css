@@ -4411,6 +4411,118 @@ html {
 	padding-left: 24px;
 	box-shadow: 0 1px 4px var(--user-msg-shadow), 0 2px 8px var(--user-msg-shadow2);
 }
+/* Historic prompt actions share one always-visible trigger on desktop and touch. */
+.prompt-row {
+	align-items: flex-end;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.prompt-row > .user-message-container,
+user-message > div > .user-message-container {
+	flex: 0 1 auto;
+	min-width: 0;
+}
+
+.prompt-actions-trigger-wrap {
+	display: grid;
+	place-items: center;
+	align-self: flex-end;
+	flex: 0 0 32px;
+	width: 32px;
+	height: 32px;
+	margin-left: 2px;
+}
+
+.prompt-actions-trigger {
+	display: inline-grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.prompt-actions-trigger:hover,
+.prompt-actions-trigger[aria-expanded="true"] {
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+
+.prompt-actions-trigger:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 1px;
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+
+.prompt-actions-trigger:disabled {
+	cursor: wait;
+	opacity: 0.45;
+}
+
+/* The canonical popover supplies the visuals; these bounds keep its nested
+   help affordance comfortably operable on pointer and touch surfaces. */
+.bobbit-sidebar-actions-help,
+[data-sidebar-actions-help] {
+	min-width: 28px;
+	min-height: 28px;
+	touch-action: manipulation;
+}
+
+@media (max-width: 639px), (hover: none), (pointer: coarse) {
+	.prompt-actions-trigger-wrap {
+		flex-basis: 44px;
+		width: 44px;
+		height: 44px;
+		margin-left: 0;
+	}
+
+	.prompt-actions-trigger {
+		position: relative;
+		width: 44px;
+		height: 44px;
+		background: transparent;
+	}
+
+	.prompt-actions-trigger:hover,
+	.prompt-actions-trigger:focus-visible,
+	.prompt-actions-trigger[aria-expanded="true"] {
+		background: transparent;
+	}
+
+	.prompt-actions-trigger::before {
+		content: "";
+		position: absolute;
+		width: 28px;
+		height: 28px;
+		border-radius: 5px;
+		background: transparent;
+	}
+
+	.prompt-actions-trigger:hover::before,
+	.prompt-actions-trigger:focus-visible::before,
+	.prompt-actions-trigger[aria-expanded="true"]::before {
+		background: var(--accent);
+	}
+
+	.prompt-actions-trigger svg {
+		position: relative;
+		z-index: 1;
+	}
+
+	.bobbit-sidebar-actions-help,
+	[data-sidebar-actions-help] {
+		min-width: 36px;
+		min-height: 36px;
+	}
+}
+
 /* Sage green chevron marker */
 .user-message-container::before {
 	content: '❯';
