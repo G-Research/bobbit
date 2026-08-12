@@ -941,7 +941,16 @@
     },
     {
       "path": "tests2/browser/journeys/remote-state-coordinator.journey.spec.ts",
-      "reason": "Comprehensive Chromium proof using deterministic client/server clocks, explicit response barriers, a real local bare remote, and a credential-free GitHub fixture: a held older REST envelope cannot regress a fresher completion; cold Git stays loading through completion; two clients keep session, dashboard, and sidebar state consistent; failures retain safe aged last-good state; recovery stays single-flight; and reload hydration adds no fresh external call.",
+      "reason": "Focused Chromium proof using deterministic client/server clocks, explicit response barriers, a real local bare remote, and a credential-free GitHub fixture: cold Git stays loading through completion, active and sidebar PR freshness use independent cadences, and one automatic Git refresh updates two closed client surfaces.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/remote-state-coordinator-z-recovery.journey.spec.ts",
+      "reason": "Focused Chromium proof using the shared deterministic remote-state fixture: repository and PR failures retain safe last-good state, concurrent two-client refreshes remain single-flight, a held older REST envelope cannot regress a fresher completion, and reload hydration adds no external read.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
