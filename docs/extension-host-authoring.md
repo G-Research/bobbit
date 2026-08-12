@@ -1251,7 +1251,7 @@ is not loaded).
 # entrypoints/viewer-open.yaml
 id: my-pack.open
 kind: composer-slash          # composer-slash | session-menu
-label: My Viewer              # required for launcher kinds
+label: My viewer              # required for launcher kinds; use sentence case
 icon: zap                     # optional; stable launcher icon id
 target:
   route: my-pack              # OR { panelId: ... }
@@ -1285,7 +1285,7 @@ First-party launcher examples:
 # market-packs/terminal/entrypoints/terminal-session-menu.yaml
 id: terminal.session-menu
 kind: session-menu
-label: Open Terminal
+label: Open terminal
 icon: terminal
 target:
   action: channel-panel
@@ -1300,7 +1300,7 @@ target:
 # market-packs/file-explorer/entrypoints/file-explorer-session-menu.yaml
 id: file-explorer.session-menu
 kind: session-menu
-label: Open File Explorer
+label: Open file explorer
 icon: folder-tree
 target:
   panelId: file-explorer.panel
@@ -1310,7 +1310,7 @@ target:
 # market-packs/pr-walkthrough/entrypoints/pr-walkthrough-session-menu.yaml
 id: pr-walkthrough.session-menu
 kind: session-menu
-label: PR Walkthrough
+label: PR walkthrough
 icon: git-pull-request
 target:
   action: spawn
@@ -1348,7 +1348,7 @@ host.ui.navigate({ route: "artifacts", params: { artifactId } });
 # entrypoints/reviewer-launch.yaml
 id: my-pack.launch
 kind: session-menu            # any launcher kind
-label: Run Reviewer
+label: Run reviewer
 target:
   action: spawn               # discriminates a SpawnLaunchTarget
   route: run                  # pack route name; called POST with an empty body
@@ -1885,10 +1885,10 @@ contract:
 
 ```
 file-explorer/
-  pack.yaml                              # schema 2; entrypoints plus list/read/diff routes
+  pack.yaml                              # schema 2; entrypoints plus list/resolve/search/read/diff routes
   panels/file-explorer-panel.yaml        # singleton file-explorer.panel
   entrypoints/
-    file-explorer-session-menu.yaml      # Open File Explorer
+    file-explorer-session-menu.yaml      # Open file explorer
     file-explorer-slash.yaml             # /files
   lib/
     file-explorer-panel.js               # built browser panel
@@ -1896,8 +1896,9 @@ file-explorer/
 ```
 
 The launchers directly target the same singleton panel, so the existing panel workspace owns
-focus and reload restoration. The browser calls only `host.callRoute("list" | "read" | "diff")`,
-keeps relative expansion/selection/view state in `host.store`, and subscribes to
+focus and reload restoration. The browser calls only
+`host.callRoute("list" | "resolve" | "search" | "read" | "diff")`, keeps relative
+expansion/selection/view state in `host.store`, and subscribes to
 `host.session` status to refresh on the first observed `idle` and later non-idle→`idle`
 transitions. It imports no core app, UI,
 or server internals; the shared unified-diff parser under `src/shared/**` is bundled into the

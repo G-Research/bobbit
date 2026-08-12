@@ -25,7 +25,7 @@ const ARCHIVED_ACTION_LABELS: Record<typeof ARCHIVED_SAFE_ACTION_IDS[number], st
 	"continue-archived": "Continue in new session",
 	"copy-link": "Copy link",
 	"pin": "Pin session",
-	"view-system-prompt": "View System Prompt",
+	"view-system-prompt": "View system prompt",
 	"open-new-window": "Open in new window",
 };
 const ARCHIVED_READ_ONLY_ACTION_IDS = ARCHIVED_SAFE_ACTION_IDS.filter((id) => id !== "continue-archived");
@@ -35,8 +35,8 @@ const FORBIDDEN_LABELS = [
 	"End team",
 	"Refresh agent",
 	"Fork",
-	"PR Walkthrough",
-	"Open Terminal",
+	"PR walkthrough",
+	"Open terminal",
 ] as const;
 
 function sessionRow(page: Page, sessionId: string): Locator {

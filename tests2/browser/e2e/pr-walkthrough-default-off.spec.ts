@@ -99,7 +99,7 @@ async function expectPrwContributionsPresent(): Promise<void> {
 			if (!meta) return "absent";
 			const hasPanel = meta.panels?.some((p) => p.id === PANEL_ID);
 			const hasRoutes = ["bundle", "publish"].every((r) => meta.routeNames?.includes(r));
-			const hasLauncher = meta.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough");
+			const hasLauncher = meta.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR walkthrough");
 			return hasPanel && hasRoutes && hasLauncher ? "full" : "partial";
 		}, { timeout: 15_000 })
 		.toBe("full");

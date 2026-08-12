@@ -14273,7 +14273,6 @@ async function handleApiRoute(
 				historyForkReservations.add(historyReservationKey);
 				historyReservationAcquired = true;
 
-				const sourceWasStreaming = source.status === "streaming";
 				const sourceContent = await sessionFileRead(srcCtx, sourceJsonl, sandboxManager ?? null);
 				if (!sourceContent) {
 					json({ error: "source transcript missing or empty" }, 404);
@@ -14299,7 +14298,6 @@ async function handleApiRoute(
 					historyMaterialization = materializeHistoryForkTranscript(
 						sourceContent,
 						entryId,
-						{ sourceStreaming: sourceWasStreaming || source.status === "streaming" },
 					);
 					clonedTranscript = historyMaterialization.content;
 				} catch (err) {

@@ -115,9 +115,9 @@ function menuLabels(popover: ParentNode): string[] {
 }
 
 describe("history prompt eligibility", () => {
-	it("fails closed across the role, provenance, cursor, forkability, pending, and current-turn matrix", () => {
+	it("fails closed across the role, provenance, cursor, forkability, and pending matrix", () => {
 		const eligible = durablePrompt("entry-eligible");
-		const context = { canForkSource: true, isStreaming: false, currentStreamingUserEntryId: "entry-newest" };
+		const context = { canForkSource: true };
 		expect(isEligibleHistoryPrompt(eligible, context)).toBe(true);
 
 		const ineligible = [
@@ -138,17 +138,7 @@ describe("history prompt eligibility", () => {
 		for (const message of ineligible) {
 			expect(isEligibleHistoryPrompt(message, context), JSON.stringify(message)).toBe(false);
 		}
-		expect(isEligibleHistoryPrompt(eligible, { ...context, canForkSource: false })).toBe(false);
-		expect(isEligibleHistoryPrompt(eligible, {
-			...context,
-			isStreaming: true,
-			currentStreamingUserEntryId: eligible.entryId,
-		})).toBe(false);
-		expect(isEligibleHistoryPrompt(eligible, {
-			...context,
-			isStreaming: true,
-			currentStreamingUserEntryId: "later-entry",
-		})).toBe(true);
+		expect(isEligibleHistoryPrompt(eligible, { canForkSource: false })).toBe(false);
 	});
 
 	it("renders actions only for eligible durable historic rows", async () => {
@@ -169,8 +159,8 @@ describe("history prompt eligibility", () => {
 			durablePrompt("older"),
 			durablePrompt("current"),
 		], { isStreaming: true });
-		expect(promptTriggers(streaming)).toHaveLength(1);
-		expect(promptTriggers(streaming)[0].closest("user-message")?.textContent).toContain("older");
+		expect(promptTriggers(streaming)).toHaveLength(2);
+		expect(promptTriggers(streaming)[1].closest("user-message")?.textContent).toContain("current");
 
 		document.body.innerHTML = "";
 		const nonForkable = await renderList([durablePrompt("archived-source")], { canForkSource: false });
@@ -204,22 +194,15 @@ describe("history prompt eligibility", () => {
 		expect(actionRow(reopened, "history-fork")).toBeTruthy();
 	});
 
-	it("excludes only a trusted durable current row while streaming and restores it when settled", async () => {
+	it("keeps a trusted durable current row actionable while streaming", async () => {
 		const prior = durablePrompt("prior-trusted");
 		const current = durablePrompt("current-trusted");
 		const list = await renderList([prior, current], { isStreaming: true });
 
-		expect(promptTriggers(list)).toHaveLength(1);
-		expect(promptTriggers(list)[0].closest("user-message")?.textContent).toContain("prior-trusted");
-		const popover = await openPromptMenu(promptTriggers(list)[0]);
-
-		list.isStreaming = false;
-		await list.updateComplete;
-		await settle();
-
 		expect(promptTriggers(list)).toHaveLength(2);
 		expect(promptTriggers(list)[1].closest("user-message")?.textContent).toContain("current-trusted");
-		expect(popover.isConnected).toBe(true);
+		const popover = await openPromptMenu(promptTriggers(list)[1]);
+		expect(actionRow(popover, "history-fork")).toBeTruthy();
 	});
 });
 
@@ -256,14 +239,18 @@ describe("history prompt trigger and canonical menu", () => {
 			});
 		}
 		expect(snapshots[0]).toEqual(snapshots[1]);
-		expect(snapshots[0].labels).toEqual(["Fork from history", "Copy prompt"]);
+		expect(snapshots[0].labels).toEqual(["Fork before this point", "Copy prompt"]);
 	});
 
-	it("places the same trigger beside both legacy and author-labelled bubbles", async () => {
+	it("places prompt actions and timestamps in a right-aligned footer beneath every bubble", async () => {
 		const legacy = await renderList([durablePrompt("legacy")]);
 		const legacyTrigger = promptTriggers(legacy)[0];
+		const legacyFooter = legacyTrigger.closest(".prompt-metadata-row");
 		expect(legacyTrigger.closest(".user-message-container")).toBeNull();
-		expect(legacyTrigger.closest("user-message")).toBeTruthy();
+		expect(legacyFooter?.querySelector(".message-timestamp")).toBeTruthy();
+		expect(legacyFooter?.previousElementSibling?.classList.contains("user-message-container")).toBe(true);
+		expect(legacyFooter?.closest(".prompt-content-column")).toBeTruthy();
+		expect(legacyFooter?.closest(".prompt-row")).toBeTruthy();
 
 		document.body.innerHTML = "";
 		const labelled = await renderList([
@@ -271,8 +258,12 @@ describe("history prompt trigger and canonical menu", () => {
 			durablePrompt("system", "system", { author: { kind: "system", id: "system:bobbit", label: "Bobbit" } }),
 		]);
 		const labelledTrigger = promptTriggers(labelled)[0];
+		const labelledFooter = labelledTrigger.closest(".prompt-metadata-row");
 		expect(labelledTrigger.closest(".user-message-container")).toBeNull();
-		expect(labelledTrigger.closest(".prompt-row--labelled")).toBeTruthy();
+		expect(labelledFooter?.querySelector(".message-timestamp")).toBeTruthy();
+		expect(labelledFooter?.previousElementSibling?.classList.contains("prompt-bubble-shell")).toBe(true);
+		expect(labelledFooter?.closest(".prompt-content-column")).toBeTruthy();
+		expect(labelledFooter?.closest(".prompt-row--labelled")).toBeTruthy();
 	});
 
 	it("resets New worktree off on every open and never fires Fork while toggling", async () => {
@@ -302,30 +293,15 @@ describe("history prompt trigger and canonical menu", () => {
 		expect(forks).toEqual([{ entryId: "toggle-entry", newWorktree: false }]);
 	});
 
-	it("keeps help pointer/touch/keyboard interactions exact and nonactivating", async () => {
+	it("puts the fork explanation in the row tooltip without a separate help control", async () => {
 		const list = await renderList([durablePrompt("help-entry")]);
-		const forks: any[] = [];
-		list.addEventListener("prompt-history-fork", (event: Event) => forks.push((event as CustomEvent).detail));
 		const popover = await openPromptMenu(promptTriggers(list)[0]);
-		const help = popover.querySelector<HTMLElement>("[aria-label='About Fork from history']")!;
-		const toggle = popover.querySelector<HTMLElement>("[role='menuitemcheckbox']")!;
+		const fork = actionRow(popover, "history-fork");
 
-		help.dispatchEvent(new MouseEvent("mouseenter"));
-		await settle();
-		expect(popover.querySelector("[role='tooltip']")?.textContent?.trim()).toBe(HELP_TEXT);
-		help.click();
-		help.blur();
-		await settle();
-		expect(popover.querySelector("[role='tooltip']")?.textContent?.trim()).toBe(HELP_TEXT);
-		expect(forks).toEqual([]);
-		expect(toggle.getAttribute("aria-checked")).toBe("false");
-		expect((popover as any).open).toBe(true);
-
-		help.focus();
-		document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-		await settle();
-		expect(forks).toEqual([]);
-		expect((popover as any).open).toBe(true);
+		expect(fork.textContent?.trim()).toBe("Fork before this point");
+		expect(fork.getAttribute("title")).toBe(HELP_TEXT);
+		expect(popover.querySelector("[data-sidebar-actions-help]")).toBeNull();
+		expect(popover.textContent).not.toContain("(?)");
 	});
 
 	it("restores trigger focus after Escape and suppresses duplicate select dispatch", async () => {

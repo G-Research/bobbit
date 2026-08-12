@@ -2,7 +2,8 @@
  * Shared By Project / By Status sidebar Filters control.
  *
  * Existing keyboard shortcuts continue to call the exported toggle functions;
- * the preference adapter routes them to the active view's independent values.
+ * the preference adapter routes Show archived, Show busy, and Show read to the
+ * active view's independent values.
  */
 import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "@mariozechner/mini-lit";
@@ -145,7 +146,7 @@ function renderPopover(): TemplateResult | typeof nothing {
 			${renderToggleRow({
 				id: "archived",
 				icon: Archive,
-				label: "Show Archived",
+				label: "Show archived",
 				shortcut: shortcutHint("ui.toggle-show-archived", { prefix: "", suffix: "" }) || "Alt+Shift+A",
 				checked: filters.showArchived,
 				onToggle: toggleShowArchived,
@@ -153,7 +154,7 @@ function renderPopover(): TemplateResult | typeof nothing {
 			${renderToggleRow({
 				id: "busy",
 				icon: Zap,
-				label: "Show Busy",
+				label: "Show busy",
 				shortcut: shortcutHint("ui.toggle-show-busy", { prefix: "", suffix: "" }) || "Alt+Shift+B",
 				checked: filters.showBusy,
 				onToggle: toggleShowBusy,
@@ -161,7 +162,7 @@ function renderPopover(): TemplateResult | typeof nothing {
 			${renderToggleRow({
 				id: "read",
 				icon: Eye,
-				label: "Show Read",
+				label: "Show read",
 				shortcut: shortcutHint("ui.toggle-show-read", { prefix: "", suffix: "" }) || "Alt+Shift+R",
 				checked: filters.showRead,
 				onToggle: toggleShowRead,

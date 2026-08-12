@@ -337,7 +337,7 @@
     },
     {
       "path": "tests2/core/file-explorer-model.test.ts",
-      "reason": "Pure file explorer domain coverage for canonical relative paths, stable directory-first ordering, complete porcelain status combinations, retained-source copy augmentation, nested-root filtering, ancestor and virtual-deletion decoration, bounded file classification, and synthesized untracked diffs.",
+      "reason": "Pure file explorer domain coverage for canonical relative paths, stable directory-first ordering, locale-independent full-path search matching and exported traversal bounds, complete porcelain status combinations, retained-source copy augmentation, nested-root filtering, ancestor and virtual-deletion decoration, bounded file classification, and synthesized untracked diffs.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -346,7 +346,7 @@
     },
     {
       "path": "tests2/core/file-explorer-pack.test.ts",
-      "reason": "Built-in shipping contract coverage for the default-active read-only file explorer manifest, singleton panel and both launchers, disableable contributions, route registration, build/copy/harness allowlists, committed bundles, mediated Host API use, and forbidden import boundaries.",
+      "reason": "Built-in shipping contract coverage for the default-active read-only file explorer manifest, singleton panel and both launchers, disableable contributions, bounded list/read/diff/resolve/search route registration, build/copy/harness allowlists, committed bundles, mediated Host API use, and forbidden import boundaries.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -355,7 +355,7 @@
     },
     {
       "path": "tests2/core/file-explorer-routes.test.ts",
-      "reason": "Injected filesystem and Git route coverage for relative session-root list/read/diff behavior, entry and byte caps, deadlines and cleanup, safe error mapping, non-Git and unborn repositories, authoritative status and copy discovery, argv pathspecs, and text, empty, binary, deleted, renamed, copied, untracked, and oversized diffs.",
+      "reason": "Injected filesystem and Git route coverage for session-root list/read/diff/resolve/search behavior, canonical deep-path resolution, full-path substring matching, deterministic bounded traversal, concurrency/deadline cleanup, safe retryable errors, non-Git and unborn repositories, authoritative status and copy discovery, argv pathspecs, and text, empty, binary, deleted, renamed, copied, untracked, and oversized diffs.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -364,7 +364,7 @@
     },
     {
       "path": "tests2/dom/file-explorer-panel.test.ts",
-      "reason": "DOM coverage for the explorer's accessible lazy tree, status badges, mouse and keyboard navigation, read-only preview and complete HEAD diff tabs, bounded loading/error/empty states, local retry, stale-response fencing, manual and idle refresh, state restoration, and responsive narrow-panel flow.",
+      "reason": "DOM coverage for the explorer's accessible lazy tree, editable breadcrumbs, debounced recursive search and stale-response fencing, changed-only filtering, collapse-all focus repair, keyboard and mouse path-copy actions, clipboard success and failure, read-only preview and diff states, durable-only restoration, local retry, and responsive narrow-panel flow.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -373,7 +373,7 @@
     },
     {
       "path": "tests2/browser/e2e/file-explorer-pack.spec.ts",
-      "reason": "Chromium end-to-end journey for both explorer launchers and singleton restoration, accessible tree browsing, Git status and ancestor decorations including retained-source copies, read-only file and complete HEAD diff previews, binary/empty/oversized/deleted states, external refresh, reload restoration, non-Git browsing, and cleanup.",
+      "reason": "Chromium end-to-end journey for direct and breadcrumb navigation to initially unloaded paths, recursive search activation and clearing, changed-only filtering, collapse all, both path-copy actions, narrow layout, durable preference reload, both explorer launchers and singleton restoration, Git decorations, read-only previews and diffs, external refresh, non-Git browsing, and cleanup.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

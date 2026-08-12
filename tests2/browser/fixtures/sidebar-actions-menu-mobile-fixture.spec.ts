@@ -29,7 +29,7 @@ test("mobile rows expose quick actions plus hamburger menus without row navigati
 	await openMenu(page, "session", ids.session);
 	await expectQuickActionHiddenAndNonInteractive(sessionModify, "mobile sidebar modify quick action");
 	await expectQuickActionHiddenAndNonInteractive(sessionTerminate, "mobile sidebar terminate quick action");
-	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Pin session", "Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]);
+	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Pin session", "Refresh agent", "Fork", "Copy link", "View system prompt", "Open in new window"]);
 	await expect(item(page, "pin")).toBeVisible();
 	await expect(item(page, "refresh-agent")).toBeVisible();
 	await expect(item(page, "fork")).toBeVisible();
