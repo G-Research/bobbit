@@ -93,6 +93,28 @@ async function openPromptActions(page: Page, marker?: string): Promise<void> {
 	await expect(popover(page).getByRole("menuitem", { name: "Copy prompt" })).toBeVisible();
 }
 
+async function expectPromptControlsBelowBubble(page: Page, marker?: string): Promise<void> {
+	const geometry = await promptRow(page, marker).evaluate((row) => {
+		const bubble = row.querySelector(".user-message-container")!.getBoundingClientRect();
+		const footer = row.querySelector(".prompt-metadata-row")!.getBoundingClientRect();
+		const trigger = row.querySelector("[data-prompt-actions-trigger]")!.getBoundingClientRect();
+		const timestamp = row.querySelector(".message-timestamp")!;
+		const timestampRect = getComputedStyle(timestamp).display === "none"
+			? undefined
+			: timestamp.getBoundingClientRect();
+		return {
+			bubbleBottom: bubble.bottom,
+			bubbleRight: bubble.right,
+			footerTop: footer.top,
+			footerRight: footer.right,
+			controlsRight: Math.max(trigger.right, timestampRect?.right ?? 0),
+		};
+	});
+	expect(geometry.footerTop).toBeGreaterThanOrEqual(geometry.bubbleBottom - 0.5);
+	expect(geometry.footerRight).toBeCloseTo(geometry.bubbleRight, 0);
+	expect(geometry.controlsRight).toBeCloseTo(geometry.footerRight, 0);
+}
+
 async function expectSourceHistory(page: Page): Promise<void> {
 	for (const marker of [RETAINED, "HISTORY_FORK_SELECTED_BRAVO", LATER]) {
 		await expect(promptRow(page, marker)).toBeVisible({ timeout: 20_000 });
@@ -206,6 +228,7 @@ test.describe("Journey: Fork before this point prompt actions", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sourceId}`);
 			await expectSourceHistory(page);
+			await expectPromptControlsBelowBubble(page);
 
 			// At agent_start the authoritative cursor refresh makes the current
 			// durable prompt actionable while the assistant is still working.
@@ -248,6 +271,7 @@ test.describe("Journey: Fork before this point prompt actions", () => {
 			// Mobile uses the same overflow, label, and native row tooltip.
 			await page.setViewportSize({ width: 390, height: 844 });
 			await expect(promptTrigger(page)).toBeVisible();
+			await expectPromptControlsBelowBubble(page);
 			await openPromptActions(page);
 			await expect(forkRow(page)).toHaveAttribute("title", TOOLTIP);
 			await expect(popover(page).locator("[data-sidebar-actions-help]")).toHaveCount(0);
