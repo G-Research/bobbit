@@ -438,19 +438,28 @@ export function truncateLargeToolContent(event: any, threshold: number = LARGE_C
 	const eventType = event?.type;
 	if (eventType !== "message_update" && eventType !== "message_end") return event;
 
-	// Project every cumulative assistant snapshot at this single live transport
-	// boundary. Pi owns the original event, so clone only changed ancestors before
-	// EventBuffer retention and assistant-stream compaction inspect the projection.
+	// Project every cumulative assistant snapshot and completed tool-call checkpoint
+	// at this single live transport boundary. Pi owns the original event, so clone
+	// only changed ancestors before EventBuffer retention and stream compaction.
 	const message = truncateMessageContent(event.message, threshold);
 	const assistantMessageEvent = event.assistantMessageEvent;
 	const partial = truncateMessageContent(assistantMessageEvent?.partial, threshold);
-	if (message === event.message && partial === assistantMessageEvent?.partial) return event;
+	const toolCall = truncateToolBlock(assistantMessageEvent?.toolCall, threshold);
+	const assistantMessageEventChanged = partial !== assistantMessageEvent?.partial
+		|| toolCall !== assistantMessageEvent?.toolCall;
+	if (message === event.message && !assistantMessageEventChanged) return event;
 
 	return {
 		...event,
 		...(message === event.message ? {} : { message }),
-		...(partial === assistantMessageEvent?.partial
-			? {}
-			: { assistantMessageEvent: { ...assistantMessageEvent, partial } }),
+		...(assistantMessageEventChanged
+			? {
+				assistantMessageEvent: {
+					...assistantMessageEvent,
+					...(partial === assistantMessageEvent?.partial ? {} : { partial }),
+					...(toolCall === assistantMessageEvent?.toolCall ? {} : { toolCall }),
+				},
+			}
+			: {}),
 	};
 }

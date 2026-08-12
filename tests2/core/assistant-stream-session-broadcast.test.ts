@@ -91,6 +91,36 @@ function makeWriteUpdate(content: string, type: "toolcall_delta" | "toolcall_sta
 	};
 }
 
+function makeLargeWriteEnd(blockType: "toolCall" | "tool_use") {
+	const marker = "TOOLCALL_END_LARGE_WRITE_MARKER";
+	const content = `${"x".repeat(256 * 1024)}${marker}`;
+	const payload = { path: "large.txt", content };
+	const block = blockType === "toolCall"
+		? { type: blockType, id: "large-write-end", name: "write", arguments: payload }
+		: { type: blockType, id: "large-write-end", name: "write", input: payload };
+	const message = {
+		role: "assistant",
+		id: "stream-large-write-end",
+		content: [block],
+		timestamp: 1_735_000_000_000,
+	};
+	return {
+		content,
+		marker,
+		payloadField: blockType === "toolCall" ? "arguments" : "input",
+		event: {
+			type: "message_update",
+			message,
+			assistantMessageEvent: {
+				type: "toolcall_end",
+				contentIndex: 0,
+				toolCall: structuredClone(block),
+				partial: structuredClone(message),
+			},
+		},
+	};
+}
+
 function eventFrames(ws: FakeWebSocket) {
 	return ws.sent.filter((msg) => msg?.type === "event");
 }
@@ -322,6 +352,63 @@ describe("assistant stream session broadcast", () => {
 		assert.equal((capable as any).assistantStreamDeltaNeedsBaseline, false);
 		assert.deepEqual(reconstructAssistantStreamDelta(reconnectFrame), reconnectEvent);
 	});
+
+	it.each(["toolCall", "tool_use"] as const)(
+		"bounds every %s copy in toolcall_end without breaking compact reconstruction",
+		async (blockType) => {
+			const session: any = {
+				id: `sess-large-write-end-${blockType}`,
+				projectId: "project-1",
+				status: "idle",
+				statusVersion: 1,
+				title: "Session",
+				clients: new Set(),
+				eventBuffer: new EventBuffer(),
+				promptQueue: { toArray: () => [] },
+				cwd: process.cwd(),
+				rpcClient: {},
+			};
+			const capable = await authenticate(session, { assistantStreamDelta: 1 });
+			const legacy = await authenticate(session);
+			capable.sent.length = 0;
+			legacy.sent.length = 0;
+
+			const { content, event, marker, payloadField } = makeLargeWriteEnd(blockType);
+			const projected = truncateLargeToolContent(event) as any;
+			const projectedCopies = [
+				projected.message.content[0],
+				projected.assistantMessageEvent.partial.content[0],
+				projected.assistantMessageEvent.toolCall,
+			];
+			for (const block of projectedCopies) {
+				assert.equal(block[payloadField].content._truncated, true);
+				assert.equal(block[payloadField].content._originalLength, content.length);
+			}
+			const sourceCopies = [
+				event.message.content[0],
+				event.assistantMessageEvent.partial.content[0],
+				event.assistantMessageEvent.toolCall,
+			];
+			for (const block of sourceCopies) assert.equal((block as any)[payloadField].content, content);
+			assert.ok(Buffer.byteLength(JSON.stringify(projected), "utf8") < LARGE_CONTENT_THRESHOLD);
+			assert.equal(JSON.stringify(projected).includes(marker), false);
+
+			emitSessionEvent(session, projected);
+
+			const retained = session.eventBuffer.getAll()[0].event;
+			const legacyFrame = eventFrames(legacy)[0];
+			const capableFrame = eventFrames(capable)[0];
+			assert.deepEqual(retained, projected);
+			assert.deepEqual(legacyFrame.data, projected);
+			assert.equal(capableFrame.data.assistantStreamDelta, 1);
+			assert.deepEqual(reconstructAssistantStreamDelta(capableFrame.data), projected);
+			for (const value of [retained, legacyFrame, capableFrame]) {
+				const serialized = JSON.stringify(value);
+				assert.ok(Buffer.byteLength(serialized, "utf8") < LARGE_CONTENT_THRESHOLD);
+				assert.equal(serialized.includes(marker), false);
+			}
+		},
+	);
 
 	it("gives a capable mid-tool attach a self-contained baseline without changing replay", async () => {
 		const session: any = {
