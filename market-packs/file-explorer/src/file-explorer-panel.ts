@@ -160,6 +160,8 @@ type ExplorerState = {
 	menuDocumentClick?: (event: MouseEvent) => void;
 	copyMessage?: { text: string; error: boolean };
 	copyTimer?: number;
+	liveFrame?: number;
+	alertFrame?: number;
 	initialized: boolean;
 	initializing: boolean;
 	active: boolean;
@@ -183,6 +185,11 @@ export default function createFileExplorerPanel() {
 			if (!state) {
 				state = createState(sid);
 				states.set(sid, state);
+			} else if (state.active && !state.root.isConnected) {
+				// The panel instance is cached by session. Reconcile a detached instance
+				// synchronously so a same-turn remount cannot expose transient search/path
+				// state while its MutationObserver cleanup is still queued.
+				deactivate(state);
 			}
 			state.host = host;
 			queueMicrotask(() => {
@@ -335,7 +342,15 @@ function deactivate(state: ExplorerState): void {
 	invalidateNavigation(state);
 	state.search.generation += 1;
 	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	state.search.timer = undefined;
 	if (state.copyTimer !== undefined) window.clearTimeout(state.copyTimer);
+	state.copyTimer = undefined;
+	if (state.liveFrame !== undefined) cancelAnimationFrame(state.liveFrame);
+	state.liveFrame = undefined;
+	if (state.alertFrame !== undefined) cancelAnimationFrame(state.alertFrame);
+	state.alertFrame = undefined;
+	state.live.textContent = "";
+	state.alert.textContent = "";
 	if (state.pathEditing) {
 		if (state.pathOrigin) state.location = { ...state.pathOrigin };
 		state.pathEditing = false;
@@ -343,6 +358,7 @@ function deactivate(state: ExplorerState): void {
 		state.pathError = undefined;
 		state.pathDraft = "";
 		state.pathOrigin = undefined;
+		state.pathInvoker = undefined;
 		renderPathBar(state);
 	}
 	if (state.search.query) clearSearch(state, true);
@@ -1802,8 +1818,22 @@ function focusPath(state: ExplorerState, path: string): void {
 function treeItemId(state: ExplorerState, path: string): string { return `bb-explorer-${hash(`${state.sid}:${path}`)}`; }
 function hash(value: string): string { let result = 2166136261; for (let index = 0; index < value.length; index += 1) result = Math.imul(result ^ value.charCodeAt(index), 16777619); return (result >>> 0).toString(36); }
 function cssEscape(value: string): string { return typeof globalThis.CSS?.escape === "function" ? CSS.escape(value) : value.replace(/["\\]/g, "\\$&"); }
-function setLive(state: ExplorerState, message: string): void { state.live.textContent = ""; requestAnimationFrame(() => { state.live.textContent = message; }); }
-function setAlert(state: ExplorerState, message: string): void { state.alert.textContent = ""; requestAnimationFrame(() => { state.alert.textContent = message; }); }
+function setLive(state: ExplorerState, message: string): void {
+	if (state.liveFrame !== undefined) cancelAnimationFrame(state.liveFrame);
+	state.live.textContent = "";
+	state.liveFrame = requestAnimationFrame(() => {
+		state.liveFrame = undefined;
+		if (state.active) state.live.textContent = message;
+	});
+}
+function setAlert(state: ExplorerState, message: string): void {
+	if (state.alertFrame !== undefined) cancelAnimationFrame(state.alertFrame);
+	state.alert.textContent = "";
+	state.alertFrame = requestAnimationFrame(() => {
+		state.alertFrame = undefined;
+		if (state.active) state.alert.textContent = message;
+	});
+}
 function escapeHtml(value: string): string { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 async function mapLimit<T>(values: T[], limit: number, action: (value: T) => Promise<void>): Promise<void> {
