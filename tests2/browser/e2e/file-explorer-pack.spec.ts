@@ -17,6 +17,7 @@ import {
 } from "../_helpers/journey-fixture.js";
 
 test.describe.configure({ mode: "serial" });
+test.use({ permissions: ["clipboard-read", "clipboard-write"] });
 
 const PANEL = '[data-testid="file-explorer-panel"]';
 const TREE = '[data-testid="file-explorer-tree"]';
@@ -240,7 +241,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(pathMenu).toBeVisible();
 		await pathMenu.getByRole("menuitem", { name: "Copy relative path" }).click({ timeout: 5_000 });
 		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("src/deleted.txt");
-		await expect(panel.getByText("Relative path copied", { exact: true })).toBeVisible();
+		await expect(panel.locator(".bb-explorer-inline-feedback").getByText("Relative path copied", { exact: true })).toBeVisible();
 		await expect(selectedTarget, "opening a pointer context menu does not replace the selected preview").toHaveAttribute("aria-selected", "true");
 
 		await deleted.focus();
@@ -249,7 +250,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(pathMenu.getByRole("menuitem", { name: "Copy relative path" })).toBeFocused();
 		await pathMenu.getByRole("menuitem", { name: "Copy filename" }).click({ timeout: 5_000 });
 		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("deleted.txt");
-		await expect(panel.getByText("Filename copied", { exact: true })).toBeVisible();
+		await expect(panel.locator(".bb-explorer-inline-feedback").getByText("Filename copied", { exact: true })).toBeVisible();
 		await expect(deleted, "keyboard path actions restore focus to their invoking row").toBeFocused();
 		await expect(selectedTarget).toHaveAttribute("aria-selected", "true");
 
