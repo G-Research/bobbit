@@ -11420,12 +11420,29 @@ export class SessionManager {
 			const persisted = store?.get(id);
 			if (!store || !persisted) throw new SessionPinNotFoundError(id);
 
-			const current = normalizeTags(persisted.user_tags);
+			// A failed durability fence must not leave its optimistic store mutation
+			// available to list callers or a later save. Preserve the raw legacy shape,
+			// including field absence, rather than restoring only normalized tags.
+			const userTagsWerePresent = Object.prototype.hasOwnProperty.call(persisted, "user_tags");
+			const previousUserTags = (persisted as PersistedSession & { user_tags?: unknown }).user_tags;
+			const current = normalizeTags(previousUserTags);
 			const user_tags = pinned
 				? replaceTag(current, "pinned", "true")
 				: removeTag(current, "pinned");
 			store.update(id, { user_tags });
-			await store.flushAsync();
+			try {
+				await store.flushAsync();
+			} catch (error) {
+				store.restoreUserTagsShape(id, userTagsWerePresent, previousUserTags);
+				try {
+					// Keep the per-ID queue fenced until the compensation has either been
+					// published or failed. In both cases memory already holds the baseline.
+					await store.flushAsync();
+				} catch (rollbackError) {
+					console.error(`[session ${id}] Failed to persist pin rollback:`, rollbackError);
+				}
+				throw error;
+			}
 			return normalizeTags(store.get(id)?.user_tags);
 		});
 		this._pinMutationQueues.set(id, operation);

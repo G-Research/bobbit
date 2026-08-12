@@ -297,9 +297,14 @@ describe("session pin API", () => {
 		}
 	});
 
-	it("returns one 500 and emits no success invalidation when persistence fails", async () => {
+	it("restores an exact missing-field baseline before returning one 500 without invalidation", async () => {
 		const session = await scope.createSession({});
 		const store = projectStore(session.id);
+		const persisted = store.get(session.id) as Record<string, unknown>;
+		delete persisted.user_tags;
+		await store.flushAsync();
+		expect(Object.hasOwn(persisted, "user_tags")).toBe(false);
+
 		const failure = new Error("injected pin persistence failure");
 		const flush = vi.spyOn(store, "flushAsync").mockRejectedValueOnce(failure);
 		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -317,7 +322,10 @@ describe("session pin API", () => {
 			const result = await putPin(session.id, true);
 			expect(result.response.status).toBe(500);
 			expect(result.body).toEqual({ error: failure.message });
-			expect(flush).toHaveBeenCalledOnce();
+			expect(flush).toHaveBeenCalledTimes(2);
+			expect(Object.hasOwn(store.get(session.id), "user_tags"), "failed pin must restore field absence in memory").toBe(false);
+			expect(rowById(await sessionList(), session.id).user_tags).toEqual([]);
+			expect(Object.hasOwn(reloadStore(store).get(session.id)!, "user_tags"), "rollback must durably restore field absence").toBe(false);
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(invalidations).toBe(0);
 			expect(errorLog.mock.calls.filter((call) => call[0] === "[api] 500 error:")).toHaveLength(1);
@@ -326,6 +334,81 @@ describe("session pin API", () => {
 			socket.close();
 			flush.mockRestore();
 			errorLog.mockRestore();
+			await store.flushAsync();
+		}
+	});
+
+	it("retains an archived malformed baseline when mutation and rollback fences fail", async () => {
+		const session = await scope.createSession({});
+		const store = projectStore(session.id);
+		const baseline = ["owner=first", null, "pinned=false", "owner=archive", 42];
+		store.update(session.id, { user_tags: baseline } as any);
+		await store.flushAsync();
+		expect((await gw.api(`/api/sessions/${session.id}`, { method: "DELETE" })).ok).toBe(true);
+
+		const mutationFailure = new Error("injected archived pin persistence failure");
+		const rollbackFailure = new Error("injected archived pin rollback failure");
+		const flush = vi.spyOn(store, "flushAsync")
+			.mockRejectedValueOnce(mutationFailure)
+			.mockRejectedValueOnce(rollbackFailure);
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			const result = await putPin(session.id, true);
+			expect(result.response.status).toBe(500);
+			expect(result.body).toEqual({ error: mutationFailure.message });
+			expect(flush).toHaveBeenCalledTimes(2);
+			expect((store.get(session.id) as any).user_tags).toEqual(baseline);
+			expect(rowById(await sessionList("/api/sessions?include=archived"), session.id).user_tags)
+				.toEqual(["pinned=false", "owner=archive"]);
+			expect(errorLog.mock.calls.some((call) => String(call[0]).includes("Failed to persist pin rollback"))).toBe(true);
+
+			flush.mockRestore();
+			store.update(session.id, { lastActivity: (store.get(session.id)?.lastActivity ?? 0) + 1 });
+			await store.flushAsync();
+			expect((reloadStore(store).get(session.id) as any).user_tags).toEqual(baseline);
+		} finally {
+			flush.mockRestore();
+			errorLog.mockRestore();
+			await store.flushAsync();
+		}
+	});
+
+	it("holds a queued follow-up behind rollback persistence and starts it from the restored baseline", async () => {
+		const session = await scope.createSession({});
+		const store = projectStore(session.id);
+		const baseline = ["queue=keep", 42, "pinned=legacy"];
+		store.update(session.id, { user_tags: baseline } as any);
+		await store.flushAsync();
+		const failure = new Error("injected queued pin failure");
+		const rollbackBarrier = deferred();
+		const flush = vi.spyOn(store, "flushAsync")
+			.mockRejectedValueOnce(failure)
+			.mockImplementationOnce(() => rollbackBarrier.promise);
+		const setPinned = gw.sessionManager.setSessionPinned.bind(gw.sessionManager) as
+			(sessionId: string, pinned: boolean) => Promise<string[]>;
+
+		try {
+			const firstOutcome = setPinned(session.id, true).catch((error) => error);
+			await waitUntilCalled(flush, 2);
+			let followUpSettled = false;
+			const followUp = setPinned(session.id, false).then((tags) => {
+				followUpSettled = true;
+				return tags;
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(flush).toHaveBeenCalledTimes(2);
+			expect(followUpSettled, "queued mutation must wait for rollback persistence ordering").toBe(false);
+			expect((store.get(session.id) as any).user_tags).toEqual(baseline);
+
+			rollbackBarrier.resolve();
+			expect(await firstOutcome).toBe(failure);
+			expect(await followUp).toEqual(["queue=keep"]);
+			expect(flush).toHaveBeenCalledTimes(3);
+			expect((reloadStore(store).get(session.id) as any).user_tags).toEqual(["queue=keep"]);
+		} finally {
+			rollbackBarrier.resolve();
+			flush.mockRestore();
 			await store.flushAsync();
 		}
 	});
