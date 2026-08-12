@@ -2649,7 +2649,7 @@ The truncation system intercepts live events and history snapshots before they r
 ### Architecture
 
 ```
-Agent process → message_update (full content)
+Agent process → message_update/message_end (full content)
        │
        ├─→ handleAgentLifecycle() - receives original (for search indexing)
        ├─→ trackCostFromEvent()   - receives original (for token accounting)
@@ -2663,14 +2663,20 @@ Agent process → message_update (full content)
 
 Session history snapshots (`get_messages`, attach/reconnect hydration, archived reads) pass through `truncateLargeToolContentInMessages()` before they are sent to the browser, so reconnect cannot replay a large report or tool result as one unbounded frame.
 
+### Live transport projection invariant
+
+Every live `message_update` or `message_end` has exactly one size-boundary projection before `emitSessionEvent()` retains it in the EventBuffer or broadcasts it. `truncateLargeToolContent()` applies the same block projection to every cumulative assistant copy that Pi may include: `event.message`, `assistantMessageEvent.partial`, and the completed `assistantMessageEvent.toolCall` checkpoint on `toolcall_end`. It handles content under both `toolCall.arguments` and `tool_use.input`. This is copy-on-write: unchanged objects retain their references, while truncation shallow-clones only changed ancestors. Pi's original event therefore remains available to lifecycle processing, cost accounting, diagnostics, and the durable `.jsonl` transcript.
+
+Projection happens before assistant stream compaction so `message` and `partial` describe the same bounded state. Capable-client deltas are accepted only when reconstruction matches that projected state. When a growing string crosses the threshold and becomes a descriptor, append-only reconstruction cannot represent the replacement, so the sender falls back to the complete projected event. A reconnect then receives a self-contained baseline built from the projected state; it never depends on the pre-threshold string. Keeping this invariant at the common boundary also bounds legacy frames and EventBuffer retention. Do not add unrelated downstream WebSocket caps: they can hide a projection or reconstruction mismatch while leaving another retained copy unbounded.
+
 ### Key design decisions
 
 - **32KB threshold** - generous enough that normal code files (<10KB) pass through untouched, but catches generated data files, large test fixtures, and minified bundles. Exported as `LARGE_CONTENT_THRESHOLD` from `truncate-large-content.ts`.
 - **Zero overhead for small content** - no cloning occurs unless truncation is actually needed. The function returns the original event reference unchanged.
-- **Original event never mutated** - `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event. Only the broadcast/buffer path sees the truncated version.
+- **Original event never mutated** - `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event, and the agent-owned durable transcript keeps the full tool input. Only the EventBuffer/broadcast projection contains truncation descriptors.
 - **Dual format support** - both `toolCall`/`arguments` (pi-coding-agent RPC format) and `tool_use`/`input` (Anthropic API format) are handled for robustness. Text blocks and marker-less toolResult blocks are also bounded on history replay.
 - **Reviewer/QA report fields** - `verification_result.summary` and `verification_result.report_html` are truncated in both live session events and persisted-history snapshots. Large HTML reports remain available through the QA/report artifact paths instead of riding the chat WebSocket repeatedly.
-- **UI lazy loading** - `WriteRenderer` shows a preview (first 512 chars) with a "Load full content" button. It resolves full content with `GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`, using the tool-call id plus content-block index. Client-rendered history can include compaction placeholders and other synthetic rows that are not present in the runtime transcript, so a client-derived message index is not a safe address. The endpoint reads `block.arguments?.content ?? block.input?.content` for tool-call blocks and falls back to `block.text` for text blocks. The positional route remains legacy-compatible, but new clients must use identity resolution.
+- **UI dispatch and lazy loading** - `WriteRenderer` recognizes a truncation descriptor before dispatching by file extension. Truncated HTML, HTM, and SVG writes therefore use the generic preview, size badge, and "Load full content" controls rather than entering source-string renderers; ordinary source strings still use the inline HTML/SVG renderers. Completed writes keep the same lazy-loading flow through `GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`, using the tool-call id plus content-block index. Client-rendered history can include compaction placeholders and other synthetic rows that are not present in the runtime transcript, so a client-derived message index is not a safe address. The endpoint reads `block.arguments?.content ?? block.input?.content` for tool-call blocks and falls back to `block.text` for text blocks. The positional route remains legacy-compatible, but new clients must use identity resolution.
 - **`preview_open` snapshot blocks** - `preview_open` tool_results carry a second `{type:"text"}` block whose text begins with one of the `__preview_snapshot_v{1,2,3}__\n` sentinels. `truncateSnapshotBlock()` walks `toolResult` messages, and when a snapshot exceeds the threshold it rewrites the block to `{ type:"text", text: marker, _truncated:true, _originalLength, preview }` - the matched marker is preserved so downstream consumers (UI renderer, further truncation passes) can still detect the block. Current v3 markers are capped at 250 UTF-8 bytes and never trip the threshold; legacy v1 raw-HTML and unbounded v2 path markers can. `PreviewRenderer` uses the identity route with `expected=preview-snapshot`, which verifies that the returned block is a supported marker before parsing it. A missing call or block reports `transcript_tool_call_unavailable` or `transcript_block_unavailable`; a wrong block or marker reports `snapshot_block_mismatch`. Agent-facing context therefore only ever sees the 512-char preview; the UI hydrates the full HTML via the tool-content endpoint. See [Tool-content identity resolution](rest-api.md#tool-content-identity-resolution).
 - **Streaming throttle** - `remote-agent.ts` throttles `streamMessage` updates to 2x/sec when content is truncated, reducing Lit re-render pressure in the browser.
 
@@ -2682,7 +2688,7 @@ Session history snapshots (`get_messages`, attach/reconnect hydration, archived 
 | `session-manager.ts` | Applies live-event truncation at event listener sites and history truncation before snapshot sends |
 | `server.ts` | REST endpoint for lazy-loading full content from `.jsonl` |
 | `fetch-tool-content.ts` (UI) | Client-side REST helper for lazy loading |
-| `WriteRenderer.ts` (UI) | Detects truncation, shows preview + "Load full content" button |
+| `WriteRenderer.ts` (UI) | Routes truncation descriptors to the generic preview/lazy-load UI before extension dispatch |
 | `Messages.ts` (UI) | Handles `load-full-content` CustomEvent, fetches and re-renders |
 | `remote-agent.ts` (UI) | Throttles stream updates for truncated content |
 
