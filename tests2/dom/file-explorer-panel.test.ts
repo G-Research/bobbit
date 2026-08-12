@@ -485,6 +485,140 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/deep");
 	});
 
+	it("cancels an in-flight path resolve, fences its late response, and prevents duplicate submits", async () => {
+		const pending = deferred<unknown>();
+		const fakeHost = host({
+			list: () => list([{ path: "keep.txt", name: "keep.txt", kind: "file" }]),
+			resolve: ({ path }) => path === "slow" ? pending.promise : { path, kind: "directory", chain: [{ path, name: path, kind: "directory" }] },
+			read: () => ({ kind: "text", text: "keep" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("cancel-resolve", fakeHost);
+		await tick();
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		let input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "slow";
+		key(input, "Enter");
+		await tick();
+		input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		expect(input.readOnly).toBe(true);
+		expect(document.activeElement).toBe(input);
+		key(input, "Enter");
+		expect(fakeHost.callRoute.mock.calls.filter(([name]) => name === "resolve")).toHaveLength(1);
+		key(input, "Escape");
+		await tick();
+		expect(root.querySelector('[aria-label="Relative path"]')).toBeNull();
+		expect(document.activeElement).toBe(root.querySelector('[aria-label="Edit path (Ctrl+L)"]'));
+		pending.resolve({ path: "slow", kind: "directory", chain: [{ path: "slow", name: "slow", kind: "directory" }] });
+		await tick();
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toBe("Session files");
+		expect(root.querySelector('[data-path="slow"]')).toBeNull();
+	});
+
+	it("shows distinct path failures and retries a timeout without losing browse state", async () => {
+		let failure: { code: string; retryable: boolean } | undefined = { code: "NOT_FOUND", retryable: false };
+		const fakeHost = host({
+			list: () => list([{ path: "keep.txt", name: "keep.txt", kind: "file" }]),
+			resolve: ({ path }) => {
+				if (failure) throw failure;
+				return { path, kind: "directory", chain: [{ path, name: path, kind: "directory" }] };
+			},
+			read: () => ({ kind: "text", text: "keep" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("path-failures", fakeHost);
+		await tick();
+		click(row(root, "keep.txt"));
+		await tick();
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		let input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "missing";
+		key(input, "Enter");
+		await tick();
+		expect(root.textContent).toContain("No file or folder exists at this path.");
+		expect(row(root, "keep.txt").getAttribute("aria-selected")).toBe("true");
+
+		for (const [code, message] of [
+			["NOT_DIRECTORY", "This path is not a folder."],
+			["UNSUPPORTED_FILE", "This item cannot be opened. It can still be revealed in the tree."],
+		] as const) {
+			failure = { code, retryable: false };
+			input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+			input.value = code.toLowerCase();
+			input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+			key(input, "Enter");
+			await tick();
+			expect(root.textContent).toContain(message);
+		}
+		failure = { code: "FS_TIMEOUT", retryable: true };
+		input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "eventual";
+		input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		key(input, "Enter");
+		await tick();
+		expect(root.textContent).toContain("Path lookup timed out.");
+		failure = undefined;
+		click(root.querySelector('[data-action="retry-path"]')!);
+		await tick();
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("eventual");
+	});
+
+	it("keeps a navigated directory location through refresh while preserving the selected preview", async () => {
+		const fakeHost = host({
+			list: () => list([{ path: "folder", name: "folder", kind: "directory" }, { path: "keep.txt", name: "keep.txt", kind: "file" }]),
+			resolve: ({ path }) => ({ path, kind: "directory", chain: [{ path, name: path, kind: "directory" }] }),
+			read: () => ({ kind: "text", text: "selected preview" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("location-refresh", fakeHost);
+		await tick();
+		click(row(root, "keep.txt"));
+		await tick();
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "folder";
+		key(input, "Enter");
+		await tick();
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("folder");
+		click(root.querySelector('[aria-label="Refresh explorer"]')!);
+		await tick();
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("folder");
+		expect(root.querySelector(".bb-explorer-preview-path")?.textContent).toBe("keep.txt");
+		expect(root.textContent).toContain("selected preview");
+	});
+
+	it("reveals clean direct targets by disabling changed-only and leaves resolved directories collapsed until activation", async () => {
+		const fakeHost = host({
+			list: ({ path }) => path === "clean"
+				? list([{ path: "clean/child.txt", name: "child.txt", kind: "file" }])
+				: list([{ path: "clean", name: "clean", kind: "directory" }, { path: "changed.txt", name: "changed.txt", kind: "file" }], [{ path: "changed.txt", index: "M" }]),
+			resolve: ({ path }) => ({ path, kind: "directory", chain: [{ path, name: path, kind: "directory" }] }),
+			read: () => ({ kind: "text", text: "preview" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("changed-reveal", fakeHost);
+		await tick();
+		click(root.querySelector('[aria-label="Changed files only"]')!);
+		expect(root.querySelector('[data-path="clean"]')).toBeNull();
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "clean";
+		key(input, "Enter");
+		await tick();
+		expect(root.querySelector('[aria-label="Changed files only"]')?.getAttribute("aria-pressed")).toBe("false");
+		expect(root.querySelector('[role="status"]')?.textContent).toBe("Showing all files so the requested path can be revealed.");
+		expect(row(root, "clean").getAttribute("aria-expanded")).toBe("false");
+		expect(fakeHost.callRoute.mock.calls.filter(([name, init]) => name === "list" && (init?.body as Record<string, unknown>)?.path === "clean")).toHaveLength(0);
+		click(row(root, "clean"));
+		await tick();
+		expect(row(root, "clean").getAttribute("aria-expanded")).toBe("true");
+		expect(row(root, "clean/child.txt")).not.toBeNull();
+	});
+
 	it("debounces recursive search, fences stale responses, supports keyboard activation, and restores browse state on clear", async () => {
 		const stale = deferred<unknown>();
 		const fakeHost = host({
@@ -535,6 +669,68 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("opened src/original.txt");
 	});
 
+	it("renders bounded search states, fences cleared work, and wraps composite keyboard navigation", async () => {
+		const pending = deferred<unknown>();
+		let timeoutFails = true;
+		const fakeHost = host({
+			list: () => list([{ path: "browse.txt", name: "browse.txt", kind: "file" }]),
+			search: ({ query }) => {
+				if (query === "pending") return pending.promise;
+				if (query === "empty") return { query, count: 0, limit: 200, truncated: false, results: [] };
+				if (query === "many") return { query, count: 20, limit: 2, truncated: true, results: [
+					{ path: "a.txt", name: "a.txt", kind: "file" }, { path: "z.txt", name: "z.txt", kind: "file" },
+				] };
+				if (query === "timeout" && timeoutFails) throw { code: "FS_TIMEOUT", retryable: true };
+				if (query === "denied") throw { code: "READ_FAILED", retryable: false };
+				return { query, count: 1, limit: 200, truncated: false, results: [{ path: "ok.txt", name: "ok.txt", kind: "file" }] };
+			},
+			resolve: ({ path }) => ({ path, kind: "file", chain: [{ path, name: path, kind: "file" }] }),
+			read: () => ({ kind: "text", text: "preview" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("search-states", fakeHost);
+		await tick();
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		const submitQuery = async (query: string) => {
+			search.value = query;
+			search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+			await tick(220);
+		};
+
+		await submitQuery("pending");
+		expect(search.getAttribute("aria-busy")).toBe("true");
+		expect(root.textContent).toContain("Searching…");
+		click(root.querySelector('[aria-label="Clear search"]')!);
+		pending.resolve({ query: "pending", count: 1, limit: 200, truncated: false, results: [{ path: "late.txt", name: "late.txt", kind: "file" }] });
+		await tick();
+		expect(root.querySelector('[role="listbox"]')).toBeNull();
+		expect(root.textContent).not.toContain("late.txt");
+
+		await submitQuery("empty");
+		expect(root.textContent).toContain("No files or folders match “empty”.");
+		await submitQuery("many");
+		expect(root.textContent).toContain("Showing the first 2 results. More matches exist.");
+		key(search, "ArrowUp");
+		expect(search.getAttribute("aria-activedescendant")).toContain("option-1");
+		key(search, "ArrowDown");
+		expect(search.getAttribute("aria-activedescendant")).toContain("option-0");
+		search.dispatchEvent(new KeyboardEvent("keydown", { key: "End", ctrlKey: true, bubbles: true, cancelable: true }));
+		expect(search.getAttribute("aria-activedescendant")).toContain("option-1");
+		search.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", ctrlKey: true, bubbles: true, cancelable: true }));
+		expect(search.getAttribute("aria-activedescendant")).toContain("option-0");
+
+		await submitQuery("timeout");
+		expect(root.textContent).toContain("Search timed out.");
+		expect(root.querySelector('[data-action="retry-search"]')).not.toBeNull();
+		timeoutFails = false;
+		click(root.querySelector('[data-action="retry-search"]')!);
+		await tick();
+		expect(root.textContent).toContain("1 result");
+		await submitQuery("denied");
+		expect(root.textContent).toContain("Couldn’t search Session files.");
+		expect(root.querySelector('[data-action="retry-search"]')).toBeNull();
+	});
+
 	it("filters changed paths, collapses all with a valid tree tab stop, and persists only the durable preference", async () => {
 		const put = vi.fn(async () => undefined);
 		const fakeHost = host({
@@ -557,8 +753,10 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[data-path="src/clean.ts"]')).toBeNull();
 		expect(row(root, "gone")).not.toBeNull();
 		const collapse = root.querySelector<HTMLButtonElement>('[aria-label="Collapse all"]')!;
+		collapse.focus();
 		click(collapse);
 		await tick();
+		expect(document.activeElement).toBe(collapse);
 		expect(row(root, "src").getAttribute("aria-expanded")).toBe("false");
 		expect(root.querySelectorAll('[role="treeitem"][tabindex="0"]')).toHaveLength(1);
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("All folders collapsed.");
@@ -566,6 +764,41 @@ describe("built-in file explorer panel", () => {
 		expect(put).toHaveBeenLastCalledWith("ui/changed-collapse", expect.objectContaining({ changedOnly: true, expanded: [] }));
 		const lastStored = (put.mock.calls.at(-1) as unknown as [string, unknown] | undefined)?.[1];
 		expect(JSON.stringify(lastStored)).not.toContain("query");
+	});
+
+	it("suspends a restored changed-only preference while Git is unavailable, distinguishes non-Git, and recovers", async () => {
+		let git: Record<string, unknown> = { kind: "unavailable", error: { code: "GIT_TIMEOUT", retryable: true } };
+		const fakeHost = host({
+			list: () => ({
+				entries: [{ path: "clean.txt", name: "clean.txt", kind: "file" }, { path: "changed.txt", name: "changed.txt", kind: "file" }],
+				truncated: false,
+				git,
+			}),
+			read: () => ({ kind: "text", text: "preview" }),
+			diff: () => ({ kind: "empty" }),
+		}, { stored: { version: 1, expanded: [], view: "file", changedOnly: true } });
+		const root = mount("git-availability", fakeHost);
+		await tick();
+		const changed = root.querySelector<HTMLButtonElement>('[aria-label="Changed files only"]')!;
+		expect(changed.disabled).toBe(true);
+		expect(changed.getAttribute("aria-pressed")).toBe("true");
+		expect(changed.title).toContain("temporarily unavailable");
+		expect(row(root, "clean.txt")).not.toBeNull();
+
+		git = { kind: "none" };
+		click(root.querySelector('[aria-label="Refresh explorer"]')!);
+		await tick();
+		expect(changed.disabled).toBe(true);
+		expect(changed.title).toContain("not a Git worktree");
+		expect(row(root, "clean.txt")).not.toBeNull();
+
+		git = { kind: "git", head: "present", entries: [{ path: "changed.txt", index: "M" }] };
+		click(root.querySelector('[aria-label="Refresh explorer"]')!);
+		await tick();
+		expect(changed.disabled).toBe(false);
+		expect(changed.getAttribute("aria-pressed")).toBe("true");
+		expect(root.querySelector('[data-path="clean.txt"]')).toBeNull();
+		expect(row(root, "changed.txt")).not.toBeNull();
 	});
 
 	it("opens row path actions by mouse and keyboard, copies both canonical values, and reports clipboard failure", async () => {
@@ -583,9 +816,32 @@ describe("built-in file explorer panel", () => {
 		await tick();
 		click(row(root, "one.txt"));
 		await tick();
+		row(root, "one.txt").focus();
 		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
 		await tick();
 		expect(root.querySelector('[role="menu"]')?.getAttribute("aria-label")).toBe("Path actions");
+		let items = [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+		expect(document.activeElement).toBe(items[0]);
+		key(items[0], "ArrowUp");
+		expect(document.activeElement).toBe(items[1]);
+		key(items[1], "Home");
+		expect(document.activeElement).toBe(items[0]);
+		key(items[0], "End");
+		expect(document.activeElement).toBe(items[1]);
+		key(items[1], "Escape");
+		await tick();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
+		expect(document.activeElement).toBe(row(root, "one.txt"));
+
+		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
+		await tick();
+		document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		await tick();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
+		expect(document.activeElement).toBe(row(root, "one.txt"));
+
+		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
+		await tick();
 		click([...root.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "Copy relative path")!);
 		await tick();
 		expect(writeText).toHaveBeenCalledWith("folder/two.ts");
@@ -601,10 +857,38 @@ describe("built-in file explorer panel", () => {
 		writeText.mockRejectedValueOnce(new Error("denied"));
 		selected.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true, cancelable: true }));
 		await tick();
+		items = [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+		key(items[0], "Tab");
+		await tick();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
+		expect(document.activeElement).toBe(selected);
+
+		selected.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true, cancelable: true }));
+		await tick();
 		click(root.querySelector('[role="menuitem"]')!);
 		await tick();
 		expect(root.textContent).toContain("Couldn’t copy. Clipboard access is unavailable.");
 		Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+		selected.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true, cancelable: true }));
+		await tick();
+		click(root.querySelector('[role="menuitem"]')!);
+		await tick();
+		expect(root.textContent).toContain("Couldn’t copy. Clipboard access is unavailable.");
+	});
+
+	it("keeps narrow controls wrap-safe without fixed-height clipping", async () => {
+		const fakeHost = host({
+			list: () => list([{ path: "file.txt", name: "file.txt", kind: "file" }]),
+			read: () => ({ kind: "text", text: "preview" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("narrow-wrap", fakeHost);
+		await tick();
+		const styles = document.getElementById("bb-file-explorer-styles")?.textContent ?? "";
+		expect(styles).toContain("@media (max-width:300px)");
+		expect(styles).toContain(".bb-explorer-search{flex-basis:100%}");
+		expect(getComputedStyle(root.querySelector(".bb-explorer-tree-toolbar")!).height).not.toMatch(/^\d+px$/);
+		expect(getComputedStyle(root.querySelector(".bb-explorer-tree-pane")!).minHeight).toBe("0");
 	});
 
 	it("maps structured route failures to safe, retryable panel errors", () => {
