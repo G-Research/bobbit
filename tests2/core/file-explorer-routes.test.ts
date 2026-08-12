@@ -17,6 +17,12 @@ import {
 	DIFF_BYTE_LIMIT,
 	LIST_ENTRY_LIMIT,
 	READ_BYTE_LIMIT,
+	SEARCH_CONCURRENCY_LIMIT,
+	SEARCH_DEPTH_LIMIT,
+	SEARCH_DIRECTORY_LIMIT,
+	SEARCH_ENTRY_LIMIT,
+	SEARCH_QUERY_LIMIT,
+	SEARCH_RESULT_LIMIT,
 	STATUS_BYTE_LIMIT,
 } from "../../market-packs/file-explorer/src/explorer-model.ts";
 
@@ -73,6 +79,41 @@ class ArrayDirectoryHandle implements DirectoryHandleLike {
 	}
 }
 
+class SearchTreeFs implements ExplorerFsAdapter {
+	readonly opened: string[] = [];
+	active = 0;
+	maxActive = 0;
+	closed = 0;
+	constructor(
+		private readonly directories: ReadonlyMap<string, readonly DirectoryEntryLike[]>,
+		private readonly failingDirectories = new Set<string>(),
+	) {}
+
+	async opendir(target: string): Promise<DirectoryHandleLike> {
+		const relativePath = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+		this.opened.push(relativePath);
+		if (this.failingDirectories.has(relativePath)) throw Object.assign(new Error("unavailable"), { code: "EACCES" });
+		const entries = this.directories.get(relativePath);
+		if (!entries) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+		this.active++;
+		this.maxActive = Math.max(this.maxActive, this.active);
+		let index = 0;
+		let closed = false;
+		return {
+			read: async () => entries[index++] ?? null,
+			close: async () => {
+				if (closed) return;
+				closed = true;
+				this.active--;
+				this.closed++;
+			},
+		};
+	}
+
+	async open(): Promise<FileHandleLike> { throw new Error("unused"); }
+	async lstat(): Promise<StatLike> { throw new Error("unused"); }
+}
+
 class BytesFileHandle implements FileHandleLike {
 	closed = 0;
 	constructor(private readonly bytes: Uint8Array) {}
@@ -96,6 +137,10 @@ function directoryStat(): StatLike {
 
 function symlinkStat(): StatLike {
 	return { size: 0, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => true };
+}
+
+function otherStat(): StatLike {
+	return { size: 0, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => false };
 }
 
 function fsForFile(relativePath: string, bytes: Uint8Array, observedPaths: string[] = []): ExplorerFsAdapter {
@@ -296,6 +341,227 @@ describe("file explorer list route", () => {
 		const root = await routes.list({ workingDir: SESSION_ROOT }, { body: { path: "", includeStatus: true } });
 		expect(root).toMatchObject({ ok: true, value: { status: { kind: "none" } } });
 		expect(git.calls).toHaveLength(1);
+	});
+});
+
+describe("file explorer resolve route", () => {
+	it("resolves root, initially unloaded directories and files by lstatting only their canonical chain", async () => {
+		const kinds = new Map<string, StatLike>([
+			["deep", directoryStat()],
+			["deep/nested", directoryStat()],
+			["deep/nested/file.txt", fileStat(4)],
+		]);
+		const observed: string[] = [];
+		const fs: ExplorerFsAdapter = {
+			opendir: async () => { throw new Error("resolve must not enumerate siblings"); },
+			open: async () => { throw new Error("unused"); },
+			lstat: async (target) => {
+				const relativePath = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+				observed.push(relativePath);
+				const stat = kinds.get(relativePath);
+				if (!stat) throw Object.assign(new Error(`missing ${target}`), { code: "ENOENT" });
+				return stat;
+			},
+		};
+		const routes = createExplorerRoutes({ fs, git: neverGit() });
+
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "" } })).toEqual({
+			ok: true,
+			value: { path: "", kind: "root", chain: [] },
+		});
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "deep/nested" } })).toEqual({
+			ok: true,
+			value: {
+				path: "deep/nested",
+				kind: "directory",
+				chain: [
+					{ path: "deep", name: "deep", kind: "directory" },
+					{ path: "deep/nested", name: "nested", kind: "directory" },
+				],
+			},
+		});
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "deep/nested/file.txt" } })).toMatchObject({
+			ok: true,
+			value: {
+				path: "deep/nested/file.txt",
+				kind: "file",
+				chain: [{ path: "deep" }, { path: "deep/nested" }, { path: "deep/nested/file.txt", kind: "file" }],
+			},
+		});
+		expect(observed).toEqual(["deep", "deep/nested", "deep", "deep/nested", "deep/nested/file.txt"]);
+	});
+
+	it("rejects invalid and .git paths before I/O and distinguishes missing and non-directory parents", async () => {
+		const observed: string[] = [];
+		const fs: ExplorerFsAdapter = {
+			opendir: async () => { throw new Error("unused"); },
+			open: async () => { throw new Error("unused"); },
+			lstat: async (target) => {
+				const relativePath = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+				observed.push(relativePath);
+				if (relativePath === "file") return fileStat(1);
+				if (relativePath === "link") return symlinkStat();
+				if (relativePath === "socket") return otherStat();
+				throw Object.assign(new Error(`missing ${target}`), { code: "ENOENT" });
+			},
+		};
+		const routes = createExplorerRoutes({ fs, git: neverGit() });
+		for (const candidate of ["/absolute", "../outside", "a//b", "a\\b", ".git/config"]) {
+			expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: candidate } })).toMatchObject({ ok: false, error: { code: "INVALID_PATH" } });
+		}
+		expect(observed).toEqual([]);
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "link" } })).toMatchObject({ ok: true, value: { path: "link", kind: "symlink" } });
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "socket" } })).toMatchObject({ ok: true, value: { path: "socket", kind: "other" } });
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "missing" } })).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "file/child" } })).toMatchObject({ ok: false, error: { code: "NOT_DIRECTORY" } });
+		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "link/child" } })).toMatchObject({ ok: false, error: { code: "NOT_DIRECTORY" } });
+		expect(JSON.stringify(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "missing" } }))).not.toContain(SESSION_ROOT);
+	});
+});
+
+describe("file explorer recursive search route", () => {
+	function discoveryTree(): Map<string, readonly DirectoryEntryLike[]> {
+		return new Map([
+			["", [entry("docs", "directory"), entry("api", "directory"), entry("web", "directory"), entry(".git", "directory"), entry("shortcut", "symlink"), entry("socket", "other")]],
+			["docs", [entry("Report.md", "file")]],
+			["api", [entry("index.ts", "file")]],
+			["web", [entry("index.ts", "file")]],
+		]);
+	}
+
+	it("matches case-insensitive substrings against full canonical relative paths and sorts duplicate names", async () => {
+		const fs = new SearchTreeFs(discoveryTree());
+		const routes = createExplorerRoutes({ fs, git: neverGit() });
+		const searches = async (query: string) => {
+			const result = await routes.search({ workingDir: SESSION_ROOT }, { body: { query } });
+			expect(result.ok).toBe(true);
+			if (!result.ok) throw new Error("expected search success");
+			return result.value;
+		};
+
+		expect((await searches("report")).results.map((result) => result.path)).toEqual(["docs/Report.md"]);
+		expect((await searches("  DoCs/rEp  ")).results.map((result) => result.path)).toEqual(["docs/Report.md"]);
+		expect((await searches("index")).results.map((result) => result.path)).toEqual(["api/index.ts", "web/index.ts"]);
+		expect((await searches("web/ind")).results.map((result) => result.path)).toEqual(["web/index.ts"]);
+		expect((await searches("shortcut")).results).toEqual([{ path: "shortcut", name: "shortcut", kind: "symlink" }]);
+		expect((await searches("socket")).results).toEqual([{ path: "socket", name: "socket", kind: "other" }]);
+		expect(fs.opened).not.toContain(".git");
+	});
+
+	it("rejects empty, NUL and overlong queries before filesystem I/O", async () => {
+		const observed: string[] = [];
+		const routes = createExplorerRoutes({ fs: failIfUsedFs(observed), git: neverGit() });
+		for (const query of [undefined, "", "   ", "bad\0query", "x".repeat(SEARCH_QUERY_LIMIT + 1)]) {
+			expect(await routes.search({ workingDir: SESSION_ROOT }, { body: { query } })).toMatchObject({ ok: false, error: { code: "INVALID_QUERY", retryable: false } });
+		}
+		expect(observed).toEqual([]);
+	});
+
+	it("caps returned results and inspected entries with explicit truncation reasons", async () => {
+		const resultFs = new SearchTreeFs(new Map([["", Array.from({ length: SEARCH_RESULT_LIMIT + 1 }, (_, index) => entry(`match-${index}`, "file"))]]));
+		const result = await createExplorerRoutes({ fs: resultFs, git: neverGit(), searchTimeoutMs: 30_000 }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "match" } },
+		);
+		expect(result).toMatchObject({ ok: true, value: { count: SEARCH_RESULT_LIMIT, limit: SEARCH_RESULT_LIMIT, truncated: true, truncationReason: "result-cap" } });
+		if (result.ok) expect(result.value.results).toHaveLength(SEARCH_RESULT_LIMIT);
+		expect(resultFs.closed).toBe(1);
+
+		const entryFs = new SearchTreeFs(new Map([["", Array.from({ length: SEARCH_ENTRY_LIMIT }, (_, index) => entry(`file-${index}`, "file"))]]));
+		const bounded = await createExplorerRoutes({ fs: entryFs, git: neverGit(), searchTimeoutMs: 30_000 }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "absent" } },
+		);
+		expect(bounded).toMatchObject({ ok: true, value: { count: 0, truncated: true, truncationReason: "entry-cap" } });
+		expect(entryFs.closed).toBe(1);
+	});
+
+	it("bounds directory concurrency, total directories and traversal depth without traversing leaves", async () => {
+		const concurrencyTree = new Map<string, readonly DirectoryEntryLike[]>([["", Array.from({ length: SEARCH_CONCURRENCY_LIMIT * 2 }, (_, index) => entry(`dir-${index}`, "directory"))]]);
+		for (let index = 0; index < SEARCH_CONCURRENCY_LIMIT * 2; index++) concurrencyTree.set(`dir-${index}`, []);
+		const concurrencyFs = new SearchTreeFs(concurrencyTree);
+		await createExplorerRoutes({ fs: concurrencyFs, git: neverGit(), searchTimeoutMs: 30_000 }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "absent" } },
+		);
+		expect(concurrencyFs.maxActive).toBe(SEARCH_CONCURRENCY_LIMIT);
+		expect(concurrencyFs.closed).toBe(concurrencyFs.opened.length);
+
+		const directoryNames = Array.from({ length: SEARCH_DIRECTORY_LIMIT }, (_, index) => `dir-${index}`);
+		const directoryTree = new Map<string, readonly DirectoryEntryLike[]>([["", directoryNames.map((name) => entry(name, "directory"))]]);
+		for (const name of directoryNames) directoryTree.set(name, []);
+		const directoryFs = new SearchTreeFs(directoryTree);
+		const directoryBound = await createExplorerRoutes({ fs: directoryFs, git: neverGit(), searchTimeoutMs: 30_000 }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "absent" } },
+		);
+		expect(directoryBound).toMatchObject({ ok: true, value: { truncated: true, truncationReason: "directory-cap" } });
+		expect(directoryFs.opened).toHaveLength(SEARCH_DIRECTORY_LIMIT);
+		expect(directoryFs.closed).toBe(SEARCH_DIRECTORY_LIMIT);
+
+		const depthTree = new Map<string, readonly DirectoryEntryLike[]>();
+		let parent = "";
+		for (let depth = 1; depth <= SEARCH_DEPTH_LIMIT; depth++) {
+			depthTree.set(parent, [entry(`d${depth}`, "directory")]);
+			parent = parent ? `${parent}/d${depth}` : `d${depth}`;
+		}
+		depthTree.set(parent, [entry("hidden-match", "file")]);
+		const depthFs = new SearchTreeFs(depthTree);
+		const depthBound = await createExplorerRoutes({ fs: depthFs, git: neverGit(), searchTimeoutMs: 30_000 }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "hidden-match" } },
+		);
+		expect(depthBound).toMatchObject({ ok: true, value: { count: 0, truncated: true, truncationReason: "depth-cap" } });
+		expect(depthFs.opened).toHaveLength(SEARCH_DEPTH_LIMIT);
+	});
+
+	it("settles sibling workers, closes every handle, and returns retryable safe failures and timeouts", async () => {
+		const failingFs = new SearchTreeFs(new Map([
+			["", [entry("bad", "directory"), entry("good", "directory")]],
+			["good", [entry("file.txt", "file")]],
+		]), new Set(["bad"]));
+		const failedResult = await createExplorerRoutes({ fs: failingFs, git: neverGit() }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "file" } },
+		);
+		expect(failedResult).toEqual({ ok: false, error: { code: "SEARCH_FAILED", message: "Session files could not be searched.", retryable: true } });
+		expect(JSON.stringify(failedResult)).not.toContain(SESSION_ROOT);
+		expect(failingFs.active).toBe(0);
+		expect(failingFs.closed).toBe(2);
+
+		let resolveOpen!: (handle: DirectoryHandleLike) => void;
+		const delayedOpen = new Promise<DirectoryHandleLike>((resolve) => { resolveOpen = resolve; });
+		const lateHandle = new ArrayDirectoryHandle([]);
+		const timeoutFs: ExplorerFsAdapter = {
+			opendir: async () => delayedOpen,
+			open: async () => { throw new Error("unused"); },
+			lstat: async () => { throw new Error("unused"); },
+		};
+		const pending = createExplorerRoutes({ fs: timeoutFs, git: neverGit(), searchTimeoutMs: 10 }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "file" } },
+		);
+		expect(await pending).toEqual({ ok: false, error: { code: "FS_TIMEOUT", message: "The search operation timed out.", retryable: true } });
+		resolveOpen(lateHandle);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(lateHandle.closed).toBe(1);
+
+		let resolveRead!: (entry: DirectoryEntryLike | null) => void;
+		const delayedRead = new Promise<DirectoryEntryLike | null>((resolve) => { resolveRead = resolve; });
+		let readCloses = 0;
+		const slowReadFs: ExplorerFsAdapter = {
+			opendir: async () => ({ read: async () => delayedRead, close: async () => { readCloses++; } }),
+			open: async () => { throw new Error("unused"); },
+			lstat: async () => { throw new Error("unused"); },
+		};
+		const slowRead = createExplorerRoutes({ fs: slowReadFs, git: neverGit(), searchTimeoutMs: 10 }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "file" } },
+		);
+		expect(await slowRead).toMatchObject({ ok: false, error: { code: "FS_TIMEOUT", retryable: true } });
+		resolveRead(null);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(readCloses).toBe(1);
 	});
 });
 

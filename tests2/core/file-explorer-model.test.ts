@@ -9,7 +9,16 @@ import {
 	normalizeRelativePath,
 	parsePorcelainStatus,
 	parseStagedNameStatus,
+	SEARCH_CONCURRENCY_LIMIT,
+	SEARCH_DEPTH_LIMIT,
+	SEARCH_DIRECTORY_LIMIT,
+	SEARCH_ENTRY_LIMIT,
+	SEARCH_QUERY_LIMIT,
+	SEARCH_RESULT_LIMIT,
+	SEARCH_TIMEOUT_MS,
 	sortExplorerEntries,
+	sortExplorerPaths,
+	stableLowercase,
 	synthesizeAddedDiff,
 	type ExplorerEntry,
 } from "../../market-packs/file-explorer/src/explorer-model.ts";
@@ -43,6 +52,25 @@ describe("file explorer relative path protocol", () => {
 });
 
 describe("file explorer entry ordering", () => {
+	it("exports the product search bounds and locale-independent full-path helpers", () => {
+		expect({
+			results: SEARCH_RESULT_LIMIT,
+			entries: SEARCH_ENTRY_LIMIT,
+			directories: SEARCH_DIRECTORY_LIMIT,
+			concurrency: SEARCH_CONCURRENCY_LIMIT,
+			depth: SEARCH_DEPTH_LIMIT,
+			timeout: SEARCH_TIMEOUT_MS,
+			query: SEARCH_QUERY_LIMIT,
+		}).toEqual({ results: 200, entries: 20_000, directories: 5_000, concurrency: 4, depth: 100, timeout: 3_000, query: 256 });
+		expect(stableLowercase("Web/INDEX.ts")).toBe("web/index.ts");
+		const paths: ExplorerEntry[] = [
+			{ path: "web/index.ts", name: "index.ts", kind: "file" },
+			{ path: "api/index.ts", name: "index.ts", kind: "file" },
+			{ path: "API/Index.ts", name: "Index.ts", kind: "file" },
+		];
+		expect(sortExplorerPaths(paths).map((entry) => entry.path)).toEqual(["API/Index.ts", "api/index.ts", "web/index.ts"]);
+	});
+
 	it("sorts directories first, then names case-insensitively with deterministic ties", () => {
 		const entries: ExplorerEntry[] = [
 			{ path: "zeta.txt", name: "zeta.txt", kind: "file" },
