@@ -189,6 +189,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(search).toBeVisible();
 		await treeItem(page, "copy-source.txt").click();
 		await expect(treeItem(page, "copy-source.txt")).toHaveAttribute("aria-selected", "true");
+		await showTreeIfNarrow(panel);
 
 		await search.fill("LEVEL/rep");
 		const reportResult = panel.getByRole("option").filter({ hasText: "Report.md" });
@@ -197,11 +198,12 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await search.press("Enter");
 		await expect(panel.locator(PREVIEW)).toContainText("search-only/level/Report.md", { timeout: 15_000 });
 		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("opened from recursive path-fragment search");
+		await showTreeIfNarrow(panel);
 		await expect(search).toHaveValue("LEVEL/rep");
 		await panel.getByRole("button", { name: "Clear search" }).click();
 		await expect(search).toHaveValue("");
 		await expect(treeItem(page, "copy-source.txt"), "clearing search restores the prior tree selection").toHaveAttribute("aria-selected", "true");
-		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("retained copy source");
+		await expect(panel.locator(PREVIEW), "clearing search restores the prior preview even when the responsive tree pane is active").toContainText("retained copy source");
 
 		const pathShortcut = process.platform === "darwin" ? "Meta+L" : "Control+L";
 		await treeItem(page, "copy-source.txt").focus();
@@ -226,6 +228,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(treeItem(page, "deep/navigation/direct-target.txt")).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
 		await expect(panel.locator(PREVIEW)).toContainText("deep/navigation/direct-target.txt");
 		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("opened by canonical relative path");
+		await showTreeIfNarrow(panel);
 
 		const selectedTarget = treeItem(page, "deep/navigation/direct-target.txt");
 		const deleted = treeItem(page, "src/deleted.txt");
@@ -235,7 +238,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await deleted.click({ button: "right" });
 		let pathMenu = page.getByRole("menu", { name: "Path actions" });
 		await expect(pathMenu).toBeVisible();
-		await pathMenu.getByRole("menuitem", { name: "Copy relative path" }).click();
+		await pathMenu.getByRole("menuitem", { name: "Copy relative path" }).click({ timeout: 5_000 });
 		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("src/deleted.txt");
 		await expect(panel.getByText("Relative path copied", { exact: true })).toBeVisible();
 		await expect(selectedTarget, "opening a pointer context menu does not replace the selected preview").toHaveAttribute("aria-selected", "true");
@@ -244,7 +247,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await deleted.press("Shift+F10");
 		pathMenu = page.getByRole("menu", { name: "Path actions" });
 		await expect(pathMenu.getByRole("menuitem", { name: "Copy relative path" })).toBeFocused();
-		await pathMenu.getByRole("menuitem", { name: "Copy filename" }).click();
+		await pathMenu.getByRole("menuitem", { name: "Copy filename" }).click({ timeout: 5_000 });
 		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("deleted.txt");
 		await expect(panel.getByText("Filename copied", { exact: true })).toBeVisible();
 		await expect(deleted, "keyboard path actions restore focus to their invoking row").toBeFocused();
@@ -254,7 +257,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await collapseAll.click();
 		await expect(collapseAll, "toolbar collapse keeps focus on its command").toBeFocused();
 		await expect(collapseAll).toBeDisabled();
-		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("opened by canonical relative path");
+		await expect(panel.locator(PREVIEW), "collapsing preserves the selected preview while the tree pane is active").toContainText("opened by canonical relative path");
 		await expect(treeItem(page, "deep/navigation/direct-target.txt")).toHaveCount(0);
 
 		const changedOnly = panel.getByRole("button", { name: "Changed files only" });
