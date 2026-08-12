@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type WebSocket from "ws";
+import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionStore } from "../../src/server/agent/session-store.js";
 import { getGateway, type EntityCounts, type GatewayFixture } from "../harness/gateway.js";
@@ -134,6 +134,30 @@ function waitForPinEvent(ws: WebSocket, sessionId: string, timeoutMs = 2_000): P
 			ws.off("message", onMessage);
 		};
 		ws.on("message", onMessage);
+	});
+}
+
+function connectWsWithToken(wsBase: string, sessionId: string, token: string): Promise<WebSocket> {
+	return new Promise((resolve, reject) => {
+		const ws = new WebSocket(`${wsBase}/ws/${sessionId}`);
+		const onError = (error: Error) => { cleanup(); reject(error); };
+		const onMessage = (raw: unknown) => {
+			let message: { type?: string };
+			try { message = JSON.parse(String(raw)) as { type?: string }; } catch { return; }
+			if (message.type === "auth_ok") { cleanup(); resolve(ws); }
+			else if (message.type === "auth_failed") {
+				cleanup();
+				ws.close();
+				reject(new Error("sandbox websocket authentication failed"));
+			}
+		};
+		const cleanup = () => {
+			ws.off("error", onError);
+			ws.off("message", onMessage);
+		};
+		ws.on("error", onError);
+		ws.on("message", onMessage);
+		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token })));
 	});
 }
 
@@ -430,29 +454,79 @@ describe("session pin API", () => {
 		expect((reloadStore(projectStore(session.id)).get(session.id) as any).user_tags).toEqual(persisted.user_tags);
 	});
 
-	it("broadcasts the durable authoritative tags to two connected clients", async () => {
-		const session = await scope.createSession({});
-		await seedUserTags(session.id, ["client-sync=keep"]);
-		const clientA = await gw.connectWs(session.id);
-		const clientB = await gw.connectWs(session.id);
+	it("broadcasts authoritative post-flush tags to two UI clients but not a sandbox principal", async () => {
+		const victim = await scope.createSession({});
+		const sandboxSession = await scope.createSession({});
+		const proofTag = `egress-proof=${randomUUID()}`;
+		await seedUserTags(victim.id, ["client-sync=keep", proofTag]);
+
+		const sandboxStore = gw.sessionManager.sandboxTokenStore;
+		const sandboxToken = sandboxStore.register(gw.defaultProjectId);
+		sandboxStore.addSession(gw.defaultProjectId, sandboxSession.id);
+		const [clientA, clientB, sandboxClient] = await Promise.all([
+			gw.connectWs(victim.id),
+			gw.connectWs(victim.id),
+			connectWsWithToken(gw.wsBase, sandboxSession.id, sandboxToken),
+		]);
+		const sandboxFrames: unknown[] = [];
+		const onSandboxMessage = (raw: unknown) => {
+			try { sandboxFrames.push(JSON.parse(String(raw))); } catch { /* ignore non-JSON frames */ }
+		};
+		sandboxClient.on("message", onSandboxMessage);
+
+		const store = projectStore(victim.id);
+		const barrier = deferred();
+		const flush = vi.spyOn(store, "flushAsync").mockImplementationOnce(() => barrier.promise);
+		let deliveredA = false;
+		let deliveredB = false;
 
 		try {
-			const eventA = waitForPinEvent(clientA, session.id);
-			const eventB = waitForPinEvent(clientB, session.id);
-			const result = await putPin(session.id, true);
+			const eventA = waitForPinEvent(clientA, victim.id).then((event) => {
+				deliveredA = true;
+				return event;
+			});
+			const eventB = waitForPinEvent(clientB, victim.id).then((event) => {
+				deliveredB = true;
+				return event;
+			});
+			const request = putPin(victim.id, true);
+			await waitUntilCalled(flush, 1);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(deliveredA, "UI invalidation must remain behind the persistence barrier").toBe(false);
+			expect(deliveredB, "UI invalidation must remain behind the persistence barrier").toBe(false);
+			expect(sandboxFrames.filter((frame) => (
+				(frame as PinEvent)?.type === "sessions_changed"
+				&& (frame as PinEvent)?.sessionId === victim.id
+			))).toHaveLength(0);
+
+			barrier.resolve();
+			const result = await request;
 			expect(result.response.status).toBe(200);
+			expect(result.body.user_tags).toEqual(expect.arrayContaining([proofTag, "pinned=true"]));
 
 			for (const event of await Promise.all([eventA, eventB])) {
 				expect(event).toMatchObject({
 					type: "sessions_changed",
-					sessionId: session.id,
+					sessionId: victim.id,
 					projectId: gw.defaultProjectId,
 					user_tags: result.body.user_tags,
 				});
 			}
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(sandboxFrames.filter((frame) => (
+				(frame as PinEvent)?.type === "sessions_changed"
+				&& (frame as PinEvent)?.sessionId === victim.id
+			))).toHaveLength(0);
+			expect(JSON.stringify(sandboxFrames)).not.toContain(proofTag);
 		} finally {
+			barrier.resolve();
+			flush.mockRestore();
 			clientA.close();
 			clientB.close();
+			sandboxClient.off("message", onSandboxMessage);
+			sandboxClient.close();
+			sandboxStore.removeSession(gw.defaultProjectId, sandboxSession.id);
+			await store.flushAsync();
 		}
 	});
 });
