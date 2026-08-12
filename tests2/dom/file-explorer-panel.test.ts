@@ -60,6 +60,7 @@ afterEach(async () => {
 	for (const root of mounted.splice(0)) root.remove();
 	await tick();
 	vi.restoreAllMocks();
+	vi.unstubAllGlobals();
 });
 
 describe("built-in file explorer panel", () => {
@@ -764,6 +765,49 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("opened src/original.txt");
 	});
 
+	it("keeps Changed files only active while a clean search file is previewed and restores the filtered snapshot", async () => {
+		const put = vi.fn(async (_key: string, _value: unknown) => undefined);
+		const fakeHost = host({
+			list: () => list([
+				{ path: "changed.txt", name: "changed.txt", kind: "file" },
+				{ path: "clean.txt", name: "clean.txt", kind: "file" },
+			], [{ path: "changed.txt", index: "M" }]),
+			search: ({ query }) => ({
+				query, count: 1, limit: 200, truncated: false,
+				results: [{ path: "clean.txt", name: "clean.txt", kind: "file" }],
+			}),
+			resolve: ({ path }) => ({ path, kind: "file", chain: [{ path, name: path, kind: "file" }] }),
+			read: ({ path }) => ({ kind: "text", text: `opened ${path}` }),
+			diff: () => ({ kind: "empty" }),
+		}, { put });
+		const root = mount("search-keeps-filter", fakeHost);
+		await tick();
+		click(row(root, "changed.txt"));
+		await tick();
+		click(root.querySelector('[aria-label="Changed files only"]')!);
+		await tick(200);
+		put.mockClear();
+
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "clean";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		key(search, "Enter");
+		await tick(200);
+
+		expect(root.querySelector('[aria-label="Changed files only"]')?.getAttribute("aria-pressed")).toBe("true");
+		expect(root.textContent).toContain("Search includes all files.");
+		expect(root.textContent).toContain("opened clean.txt");
+		expect(put.mock.calls.some(([, value]) => (value as { changedOnly?: boolean }).changedOnly === false)).toBe(false);
+
+		click(root.querySelector('[aria-label="Clear search"]')!);
+		await tick();
+		expect(root.querySelector('[aria-label="Changed files only"]')?.getAttribute("aria-pressed")).toBe("true");
+		expect(row(root, "changed.txt").getAttribute("aria-selected")).toBe("true");
+		expect(root.querySelector('[data-path="clean.txt"]')).toBeNull();
+		expect(root.textContent).toContain("opened changed.txt");
+	});
+
 	it("persists a restored browse snapshot after search clear and lets directory navigation supersede that write", async () => {
 		let persisted: unknown;
 		const put = vi.fn(async (_key: string, value: unknown) => { persisted = value; });
@@ -849,9 +893,13 @@ describe("built-in file explorer panel", () => {
 		expect(search.getAttribute("aria-busy")).toBe("true");
 		expect(root.textContent).toContain("Searching…");
 		click(root.querySelector('[aria-label="Clear search"]')!);
+		expect(root.querySelector('[role="tree"]')?.getAttribute("aria-busy")).toBe("false");
+		expect(row(root, "browse.txt")).not.toBeNull();
 		pending.resolve({ query: "pending", count: 1, limit: 200, truncated: false, results: [{ path: "late.txt", name: "late.txt", kind: "file" }] });
 		await tick();
 		expect(root.querySelector('[role="listbox"]')).toBeNull();
+		expect(root.querySelector('[role="tree"]')?.getAttribute("aria-busy")).toBe("false");
+		expect(row(root, "browse.txt")).not.toBeNull();
 		expect(root.textContent).not.toContain("late.txt");
 
 		await submitQuery("empty");
@@ -877,6 +925,61 @@ describe("built-in file explorer panel", () => {
 		await submitQuery("denied");
 		expect(root.textContent).toContain("Couldn’t search Session files.");
 		expect(root.querySelector('[data-action="retry-search"]')).toBeNull();
+	});
+
+	it("returns narrow search previews to the combobox for keyboard and pointer activation", async () => {
+		class FakeResizeObserver {
+			constructor(private readonly callback: (entries: Array<{ contentRect: { width: number } }>) => void) {}
+			observe() { this.callback([{ contentRect: { width: 500 } }]); }
+			disconnect() {}
+		}
+		vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+		const fakeHost = host({
+			list: () => list([{ path: "browse.txt", name: "browse.txt", kind: "file" }]),
+			search: ({ query }) => ({
+				query, count: 1, limit: 200, truncated: false,
+				results: [{ path: "nested/result.txt", name: "result.txt", kind: "file" }],
+			}),
+			resolve: ({ path }) => ({ path, kind: "file", chain: [
+				{ path: "nested", name: "nested", kind: "directory" },
+				{ path, name: "result.txt", kind: "file" },
+			] }),
+			read: () => ({ kind: "text", text: "narrow search preview" }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("narrow-search-focus", fakeHost);
+		await tick();
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		const searchForResult = async () => {
+			search.value = "result";
+			search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+			await tick(220);
+		};
+
+		await searchForResult();
+		key(search, "ArrowDown");
+		const activeDescendant = search.getAttribute("aria-activedescendant");
+		key(search, "Enter");
+		await tick();
+		expect(root.dataset.narrowPane).toBe("preview");
+		click(root.querySelector('[aria-label="Back to files"]')!);
+		await tick();
+		expect(document.activeElement).toBe(search);
+		expect(search.getAttribute("aria-activedescendant")).toBe(activeDescendant);
+		key(search, "ArrowDown");
+		expect(search.getAttribute("aria-activedescendant")).toBe(activeDescendant);
+		key(search, "Escape");
+		expect(search.value).toBe("");
+		expect(root.querySelector('[role="tree"]')?.getAttribute("aria-busy")).toBe("false");
+
+		await searchForResult();
+		click(root.querySelector('[role="option"][data-path="nested/result.txt"]')!);
+		await tick();
+		expect(root.dataset.narrowPane).toBe("preview");
+		click(root.querySelector('[aria-label="Back to files"]')!);
+		await tick();
+		expect(document.activeElement).toBe(search);
+		expect(search.getAttribute("aria-activedescendant")).toContain("option-0");
 	});
 
 	it("filters changed paths, collapses all with a valid tree tab stop, and persists only the durable preference", async () => {
