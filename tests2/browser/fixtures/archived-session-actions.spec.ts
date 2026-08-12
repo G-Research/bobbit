@@ -17,12 +17,14 @@ test.describe.configure({ mode: "serial" });
 const ARCHIVED_SAFE_ACTION_IDS = [
 	"continue-archived",
 	"copy-link",
+	"pin",
 	"view-system-prompt",
 	"open-new-window",
 ] as const;
 const ARCHIVED_ACTION_LABELS: Record<typeof ARCHIVED_SAFE_ACTION_IDS[number], string> = {
 	"continue-archived": "Continue in new session",
 	"copy-link": "Copy link",
+	"pin": "Pin session",
 	"view-system-prompt": "View System Prompt",
 	"open-new-window": "Open in new window",
 };
@@ -281,7 +283,12 @@ test.describe("archived session actions", () => {
 
 		await showArchivedInSidebar(page);
 		if (!(await sessionRow(page, ineligibleId).isVisible().catch(() => false))) {
-			await page.locator(`[data-nav-id="goal:${goalId}"]`).first().click();
+			const goalRow = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+			await expect(goalRow, "goal-linked archive fixture should remain in the project hierarchy").toBeVisible({ timeout: 10_000 });
+			// The compact controls row is sticky and can cover a tree row after
+			// Playwright scrolls it into view; dispatching the row's click keeps
+			// this setup focused on contextual Continue eligibility.
+			await goalRow.evaluate((element) => (element as HTMLElement).click());
 		}
 		await openArchivedSidebarMenu(page, ineligibleId);
 		await expectArchivedSafeMenu(page, ARCHIVED_READ_ONLY_ACTION_IDS);

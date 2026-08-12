@@ -20,6 +20,7 @@ test.describe.configure({ mode: "serial" });
 const CANONICAL_SESSION_ACTION_IDS = [
 	"modify",
 	"terminate",
+	"pin",
 	"refresh-agent",
 	"fork",
 	"copy-link",
@@ -484,7 +485,7 @@ test.describe("unified session actions", () => {
 		expect(directIds.length, "constrained desktop should render more than two direct actions before overflowing the rest").toBeGreaterThan(2);
 		expect(directIds.length, "constrained desktop should not render every action directly").toBeLessThan(CANONICAL_SESSION_ACTION_IDS.length);
 		expectCanonicalOrder(directIds);
-		expect(directIds, "the constrained desktop reproducer must include a non-quick direct action").toContain("refresh-agent");
+		expect(directIds, "the constrained desktop reproducer must include the required Pin action as a non-quick direct action").toContain("pin");
 
 		await installActionAnimationRecorder(page, "__desktopHeaderActionAnimations");
 		await expect(headerTrigger(page), "overflow trigger should expose the complete header action menu").toBeVisible({ timeout: 5_000 });
