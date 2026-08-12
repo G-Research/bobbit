@@ -1852,7 +1852,7 @@ export function renderSidebarStatusContent(
 	] as const;
 	const count = sections.pinned.length + sections.unread.length + sections.read.length;
 	if (count === 0) {
-		return html`<div class="sidebar-status-empty">No sessions match this search and filter.</div>`;
+		return html`<div class="sidebar-status-empty">No sessions match this search and filter.</div>${renderArchivedSearchControls()}`;
 	}
 	return html`${entries.map(([key, rows]) => rows.length === 0 ? nothing : html`
 		<section
@@ -1863,7 +1863,7 @@ export function renderSidebarStatusContent(
 			${renderStatusHeading(key, rows.length)}
 			<div class="sidebar-status-rows">${rows.map(renderStatusCandidate)}</div>
 		</section>
-	`)}`;
+	`)}${renderArchivedSearchControls()}`;
 }
 
 export function renderSidebar() {
