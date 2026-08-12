@@ -12,7 +12,6 @@ export type HistoryForkErrorCode =
 	| "HISTORY_FORK_CURSOR_NOT_FOUND"
 	| "HISTORY_FORK_CURSOR_INACTIVE"
 	| "HISTORY_FORK_CURSOR_NOT_USER"
-	| "HISTORY_FORK_CURSOR_IN_FLIGHT"
 	| "HISTORY_FORK_TRANSCRIPT_INVALID"
 	| "HISTORY_FORK_IN_PROGRESS";
 
@@ -21,7 +20,6 @@ const HISTORY_FORK_ERRORS: Record<HistoryForkErrorCode, { status: 400 | 409 | 42
 	HISTORY_FORK_CURSOR_NOT_FOUND: { status: 409, message: "This prompt is no longer available" },
 	HISTORY_FORK_CURSOR_INACTIVE: { status: 409, message: "This prompt is no longer on the active conversation branch" },
 	HISTORY_FORK_CURSOR_NOT_USER: { status: 422, message: "History forks must start before a user prompt" },
-	HISTORY_FORK_CURSOR_IN_FLIGHT: { status: 409, message: "The current prompt cannot be forked until the turn finishes" },
 	HISTORY_FORK_TRANSCRIPT_INVALID: { status: 409, message: "The session transcript changed or is not valid for history forking" },
 	HISTORY_FORK_IN_PROGRESS: { status: 409, message: "A fork from this prompt is already being created" },
 };
@@ -91,7 +89,6 @@ function isOrdinaryUserEntry(record: ParsedTranscriptLine): boolean {
 export function materializeHistoryForkTranscript(
 	sourceContent: string,
 	entryId: string,
-	options: { sourceStreaming: boolean },
 ): HistoryForkMaterialization {
 	if (
 		typeof entryId !== "string"
@@ -112,18 +109,6 @@ export function materializeHistoryForkTranscript(
 	if (selectedIndex < 0) throw new HistoryForkValidationError("HISTORY_FORK_CURSOR_INACTIVE");
 	if (!isOrdinaryUserEntry(selected)) {
 		throw new HistoryForkValidationError("HISTORY_FORK_CURSOR_NOT_USER");
-	}
-
-	if (options.sourceStreaming) {
-		let newestUser: ParsedTranscriptLine | undefined;
-		for (let index = branch.length - 1; index >= 0; index--) {
-			if (!isOrdinaryUserEntry(branch[index])) continue;
-			newestUser = branch[index];
-			break;
-		}
-		if (newestUser === selected) {
-			throw new HistoryForkValidationError("HISTORY_FORK_CURSOR_IN_FLIGHT");
-		}
 	}
 
 	const retained = branch.slice(0, selectedIndex);

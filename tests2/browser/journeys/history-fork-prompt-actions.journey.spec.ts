@@ -77,7 +77,7 @@ async function clipboardText(page: Page): Promise<string> {
 }
 
 function forkRow(page: Page): Locator {
-	return popover(page).getByRole("menuitem", { name: /Fork from history/i }).first();
+	return popover(page).getByRole("menuitem", { name: "Fork before this point" }).first();
 }
 
 function worktreeToggle(page: Page): Locator {
@@ -193,10 +193,10 @@ function pathsEqual(left: string, right: string): boolean {
 		: resolvedLeft === resolvedRight;
 }
 
-test.describe("Journey: Fork from history prompt actions", () => {
+test.describe("Journey: Fork before this point prompt actions", () => {
 	test.use({ permissions: ["clipboard-read", "clipboard-write"], hasTouch: true });
 
-	test("desktop and mobile expose copy/help/toggle controls and a failed fork does not navigate", async ({ page }) => {
+	test("desktop and mobile expose copy/tooltip/toggle controls and a failed fork does not navigate", async ({ page }) => {
 		test.setTimeout(120_000);
 		const sourceId = await createSession();
 		const requests: Array<Record<string, unknown>> = [];
@@ -207,14 +207,14 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			await navigateToHash(page, `#/session/${sourceId}`);
 			await expectSourceHistory(page);
 
-			// A real later turn keeps the immediately preceding durable prompt
-			// actionable while its optimistic/id-less user row is in flight.
+			// At agent_start the authoritative cursor refresh makes the current
+			// durable prompt actionable while the assistant is still working.
 			await sendMessage(page, `STAY_BUSY:4000 ${IN_FLIGHT}`);
 			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 20_000 });
 			await expect(promptRow(page, IN_FLIGHT)).toBeVisible({ timeout: 10_000 });
-			await expect(promptTrigger(page, IN_FLIGHT)).toHaveCount(0);
+			await expect(promptTrigger(page, IN_FLIGHT)).toBeVisible({ timeout: 10_000 });
 			await expect(promptTrigger(page, LATER)).toBeVisible();
-			await openPromptActions(page, LATER);
+			await openPromptActions(page, IN_FLIGHT);
 			await page.keyboard.press("Escape");
 			await expect(popover(page)).toHaveCount(0);
 			await waitForSessionStatus(sourceId, "idle", 20_000);
@@ -233,19 +233,10 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			// original prompt string, including newlines, slash syntax, and @path.
 			await expect(promptTrigger(page)).toBeVisible();
 			await openPromptActions(page);
-			const help = popover(page).getByRole("menuitem", { name: "About Fork from history" });
-			await help.hover();
-			await expect(page.getByRole("tooltip")).toHaveText(TOOLTIP);
-			await help.focus();
-			await expect(page.getByRole("tooltip")).toHaveText(TOOLTIP);
-			await page.keyboard.press("Escape");
-			await expect(popover(page)).toHaveCount(0);
-
-			await openPromptActions(page);
-			await page.keyboard.press("ArrowDown");
-			await expect(popover(page).getByRole("menuitem", { name: "About Fork from history" })).toBeFocused();
-			await page.keyboard.press("Enter");
-			await expect(page.getByRole("tooltip")).toHaveText(TOOLTIP);
+			await expect(forkRow(page)).toHaveText("Fork before this point");
+			await expect(forkRow(page)).toHaveAttribute("title", TOOLTIP);
+			await expect(popover(page).locator("[data-sidebar-actions-help]")).toHaveCount(0);
+			await expect(popover(page)).not.toContainText("(?)");
 			await page.keyboard.press("Escape");
 			await expect(popover(page)).toHaveCount(0);
 
@@ -254,15 +245,12 @@ test.describe("Journey: Fork from history prompt actions", () => {
 			await expect.poll(() => clipboardText(page)).toBe(SELECTED);
 			await expect(page.getByText("Prompt copied", { exact: true })).toBeVisible();
 
-			// Mobile uses the same overflow and menu. Clicking the help stop models
-			// the touch/pinned interaction and must neither fork nor dismiss.
+			// Mobile uses the same overflow, label, and native row tooltip.
 			await page.setViewportSize({ width: 390, height: 844 });
 			await expect(promptTrigger(page)).toBeVisible();
 			await openPromptActions(page);
-			const mobileHelp = popover(page).getByRole("menuitem", { name: "About Fork from history" });
-			await mobileHelp.click();
-			await expect(page.getByRole("tooltip")).toHaveText(TOOLTIP);
-			await expect(popover(page).getByRole("menu")).toBeVisible();
+			await expect(forkRow(page)).toHaveAttribute("title", TOOLTIP);
+			await expect(popover(page).locator("[data-sidebar-actions-help]")).toHaveCount(0);
 			await popover(page).getByRole("menuitem", { name: "Copy prompt" }).click();
 			await expect.poll(() => clipboardText(page)).toBe(SELECTED);
 			await openPromptActions(page);

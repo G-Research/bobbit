@@ -18,8 +18,8 @@ The design does **not** add a second endpoint, invoke a Pi fork/session-switch R
 
 | Area | In scope | Explicitly out of scope |
 |---|---|---|
-| Prompt rows | One always-visible compact overflow trigger on eligible durable historic user prompts, identical on desktop and mobile | Assistant/tool/synthetic/optimistic/pending/current-turn actions; hover-only action bars; long press |
-| Prompt actions | **Fork from history**, `(?)` explanation, trailing **New worktree** toggle, **Copy prompt** | Resend, edit, retry, rollback, replacement, delete, branch switching |
+| Prompt rows | One always-visible compact overflow trigger on eligible durable user prompts, including the current prompt once its transcript cursor is confirmed, identical on desktop and mobile | Assistant/tool/synthetic/optimistic/pending actions; hover-only action bars; long press |
+| Prompt actions | **Fork before this point** with a row tooltip, trailing **New worktree** toggle, **Copy prompt** | Resend, edit, retry, rollback, replacement, delete, branch switching |
 | Copy | Original user-visible text only; preserve line breaks, typed slash-skill syntax, and `@path`; exclude attachments and private author prefixes | Copying rendered DOM, attachment labels/data, expanded model prompt, author badge text |
 | Fork API | Optional durable `entryId` on the existing live-fork endpoint; authoritative active-branch validation; exact cut before the selected prompt | New clone endpoint; client index/message-array input; Pi mutating fork RPC |
 | Transcript | One immutable raw source read; exact retained raw JSONL records; selected and later records physically absent | Rewriting source JSONL; leaving discarded entries behind a synthetic leaf marker |
@@ -114,7 +114,6 @@ interface ForkSessionError {
     | "HISTORY_FORK_CURSOR_NOT_FOUND"
     | "HISTORY_FORK_CURSOR_INACTIVE"
     | "HISTORY_FORK_CURSOR_NOT_USER"
-    | "HISTORY_FORK_CURSOR_IN_FLIGHT"
     | "HISTORY_FORK_TRANSCRIPT_INVALID"
     | "HISTORY_FORK_IN_PROGRESS";
   stack?: string; // existing development/error forwarding only
@@ -127,7 +126,6 @@ interface ForkSessionError {
 | `409 HISTORY_FORK_CURSOR_NOT_FOUND` | No id-bearing record in the immutable read: `This prompt is no longer available` |
 | `409 HISTORY_FORK_CURSOR_INACTIVE` | Entry exists but is not on the active branch: `This prompt is no longer on the active conversation branch` |
 | `422 HISTORY_FORK_CURSOR_NOT_USER` | Entry is not an ordinary `type:"message"` accountable user prompt, or is tool-result-only: `History forks must start before a user prompt` |
-| `409 HISTORY_FORK_CURSOR_IN_FLIGHT` | Entry is the current user prompt while the source is streaming: `The current prompt cannot be forked until the turn finishes` |
 | `409 HISTORY_FORK_TRANSCRIPT_INVALID` | Duplicate ids, cycle, missing parent, non-object JSON, malformed complete line, invalid header, or impossible ordering: `The session transcript changed or is not valid for history forking` |
 | `409 HISTORY_FORK_IN_PROGRESS` | Same source/cursor/worktree tuple already reserved: `A fork from this prompt is already being created` |
 
@@ -150,31 +148,17 @@ type BobbitMessage<T extends object> = T & {
 
 The reducer's normal `message.id` is not a history cursor. It may be Pi message identity, an optimistic id, a compaction id, or a synthesized render key. The only eligible pair is a bounded `entryId` plus `_entryIdSource:"pi-transcript"` on a server-origin row.
 
-### Live prompt echoes
+### Authoritative cursor snapshots
 
-`prepareVisibleAgentEvent()` in `src/server/agent/session-manager.ts` already calls `promptAuthorMessageId(message, event)` and records that id in an echoed prompt settlement. Extend this same terminal boundary:
+Live Pi events do not prove transcript cursor identity, so `prepareVisibleAgentEvent()` strips any claimed `_entryIdSource`. Cursor projection instead pairs one immutable `get_messages` response with Pi's transcript cursor snapshot, correlates accountable user rows against the active branch, and stamps only proven rows with `{ entryId, _entryIdSource: "pi-transcript" }`.
 
-```ts
-prepareVisibleAgentEvent(session, event, deps): unknown
-```
+Pi has appended the current user prompt by `agent_start`. Bobbit schedules this paired read behind that event's call stack and broadcasts a cursor-enriched replacement, making the ellipsis available while the assistant is working. The final `agent_end` refresh remains a fallback for transient persistence lag and is the only refresh that consumes pending skill-sidecar bindings.
 
-For `message_end` ordinary user prompts only, when `promptAuthorMessageId()` returns a valid authoritative Pi id, copy it onto the prepared visible `message` as:
-
-```ts
-{ entryId, _entryIdSource: "pi-transcript" }
-```
-
-Do not stamp `message_update`, `message_start`, assistant, tool result, keyless legacy echo, or optimistic client events. `src/app/remote-agent.ts` then receives the cursor as part of `event.message`; it needs no outer-event/index correlation and the reducer preserves the additive fields while reconciling the optimistic row.
-
-### Reload snapshots
-
-`transformMessages()` in `src/server/agent/visible-message-snapshot.ts` already performs author-sidecar correlation before user-facing skill/file projection. Extend `mergeAuthorSidecarIntoMessages()` in `src/server/agent/author-sidecar.ts` so a row assigned to an echoed binding with `settlement.messageId` receives the same `{ entryId, _entryIdSource }` pair. This uses the existing phased exact-id, timestamp/digest, and FIFO duplicate correlation. The cursor is attached only after the binding is transcript-confirmed; weak/unresolved/legacy rows without a settlement id fail closed and show no actions.
-
-This deliberately avoids a second Pi RPC, tail correlation, or reading JSONL on every message snapshot. The authoritative fork request still validates the cursor against its own immutable JSONL read. A forged or stale browser field cannot select an invalid boundary.
+Reload snapshots use the same paired projection. Weak, unresolved, unpersisted, or legacy rows fail closed and show no actions. The authoritative fork request still validates the cursor against its own immutable JSONL read, so a forged or stale browser field cannot select an invalid boundary.
 
 `src/server/agent/transcript-reader.ts` already exposes `entryId` for raw transcript projections. Pre-compaction expanded rows are intentionally ineligible: they are orphaned history, not entries on the current active branch. They must not gain `_entryIdSource:"pi-transcript"` for this surface.
 
-## Client eligibility and current-turn rule
+## Client eligibility
 
 Add a pure predicate at the `MessageList` row boundary:
 
@@ -183,8 +167,6 @@ export function isEligibleHistoryPrompt(
   message: BobbitMessage<AgentMessage>,
   context: {
     canForkSource: boolean;
-    isStreaming: boolean;
-    newestDurableUserEntryId?: string;
   },
 ): boolean;
 ```
@@ -195,7 +177,8 @@ It returns true only when all conditions hold:
 2. `isAccountablePromptMessage(message)` is true (`user` or `user-with-attachments`, not a tool-result-only provider row).
 3. Reducer provenance is `_origin === "server"`; `_origin:"optimistic"`, `"synthetic"`, or `"permission"` is rejected even if fields are malformed or injected.
 4. `entryId` is a bounded non-empty string and `_entryIdSource === "pi-transcript"`.
-5. While `isStreaming`, the row is not the last server-origin durable user row with a cursor. Older settled durable prompts remain actionable during a later turn; the current prompt becomes actionable after the session returns idle.
+
+A current streaming prompt is eligible as soon as the authoritative cursor refresh projects its durable entry id.
 
 No action is rendered for archived/read-only/non-interactive/terminated/delegate/child/team sessions because `canForkSession()` already rejects them. The server repeats the source and entry checks authoritatively.
 
@@ -257,52 +240,14 @@ Opening performs a dynamic import of `SidebarActionsPopover`, checks an incremen
 
 Items, in order:
 
-1. `history-fork`: label `Fork from history`, `GitFork` icon, optional help descriptor, trailing `New worktree` toggle.
+1. `history-fork`: label `Fork before this point`, `GitFork` icon, row `title` set to **“The new session will include the conversation up to, but not including, this prompt.”**, trailing `New worktree` toggle.
 2. `copy-prompt`: label `Copy prompt`, `Copy` icon.
 
-Selecting Fork dispatches a composed `prompt-history-fork` event with `{ entryId, newWorktree }`. Selecting Copy dispatches `prompt-copy` with the captured string. `AgentInterface` resolves the current `GatewaySession`, calls `forkSession()` or `copyTextToClipboard()`, and shows existing feedback. No prompt is put in the composer, prefetched, or resent.
-
-### Canonical help extension
-
-Extend the existing item model, not its callers' action models:
-
-```ts
-export interface SidebarActionsHelp {
-  id: string;
-  ariaLabel: string;
-  text: string;
-}
-
-export interface SidebarActionsPopoverItem {
-  // existing fields
-  help?: SidebarActionsHelp;
-}
-
-interface SidebarActionsFocusStop {
-  kind: "row" | "help" | "toggle";
-  itemIndex: number;
-}
-```
-
-A help-bearing item renders a `role="none"` flex wrapper containing three **siblings**: primary `role="menuitem"`, help button, and optional `role="menuitemcheckbox"`. A button is never nested in another button.
-
-The help button:
-
-- visibly says `(?)`;
-- has `aria-label="About Fork from history"`;
-- is associated by `aria-describedby` with a `role="tooltip"` node;
-- exposes exactly: **“The new session will include the conversation up to, but not including, this prompt.”**;
-- opens on pointer hover and focus;
-- toggles/pins on click/tap, Enter, or Space so touch and keyboard users can retain it;
-- closes on blur when unpinned, on a second activation, or when the popover closes;
-- calls `preventDefault()` and `stopPropagation()` for activation/pointer handling and never selects Fork, toggles the worktree choice, or dismisses the popover;
-- uses fixed, viewport-clamped positioning adjacent to the help control and flips independently if needed.
-
-Focus-stop order is Fork row → help → toggle → Copy row. ArrowDown/ArrowUp wrap; Home/End choose ends. Enter activates a row, help, or toggle according to the active stop. Space on the Fork row retains canonical behavior and toggles its trailing checkbox without forking; Space/Enter on help toggles the explanation; Space/Enter on the toggle changes `aria-checked` without selecting or closing.
+There is no separate `(?)` help control or focus stop. Selecting Fork dispatches a composed `prompt-history-fork` event with `{ entryId, newWorktree }`. Selecting Copy dispatches `prompt-copy` with the captured string. `AgentInterface` resolves the current `GatewaySession`, calls `forkSession()` or `copyTextToClipboard()`, and shows existing feedback. No prompt is put in the composer, prefetched, or resent.
 
 Pointer/touch activation of the toggle uses the existing `_handleToggle()` path. Its accessible label remains `New worktree (off) — reuse the source worktree` or `New worktree (on) — fork into a fresh worktree`; `aria-checked` is always current.
 
-Escape/outside pointer returns focus to the prompt trigger. Tab dismisses without forcibly moving focus. Successful selection closes the menu. Tooltip content counts as inside interaction for dismissal.
+Escape/outside pointer returns focus to the prompt trigger. Tab dismisses without forcibly moving focus. Successful selection closes the menu.
 
 ## Immutable JSONL branch materialization
 
@@ -365,7 +310,6 @@ export class HistoryForkValidationError extends Error {
 export function materializeHistoryForkTranscript(
   sourceContent: string,
   entryId: string,
-  options: { sourceStreaming: boolean },
 ): HistoryForkMaterialization;
 ```
 
@@ -374,10 +318,9 @@ Algorithm:
 1. Parse the immutable source string and validate exactly one usable session header and a strict tree.
 2. Resolve `entryId` in `byId`; distinguish missing from present-but-inactive.
 3. Require the selected active record to be `type:"message"` whose `message` is an accountable ordinary user prompt and not tool-result-only.
-4. Find the newest ordinary user entry on the active branch. If `sourceStreaming` and it is selected, reject as current/in-flight.
-5. Take the selected record's active-branch prefix; the selected record and every descendant are excluded.
-6. Emit the exact raw session header record(s), then exact raw records for those active ancestors in parent order. Preserve unknown/additive fields, model/thinking changes, assistant/tool records, compaction records, retained tails, timestamps, and each retained line's original terminator. Do not stringify parsed entries.
-7. Return retained ids and typed subsets for sidecar filtering.
+4. Take the selected record's active-branch prefix; the selected record and every descendant are excluded. This boundary is stable even while descendants are being appended.
+5. Emit the exact raw session header record(s), then exact raw records for those active ancestors in parent order. Preserve unknown/additive fields, model/thinking changes, assistant/tool records, compaction records, retained tails, timestamps, and each retained line's original terminator. Do not stringify parsed entries.
+6. Return retained ids and typed subsets for sidecar filtering.
 
 The destination for a first/root prompt therefore contains only the valid source session header. There is no user prompt prefill and no automatic dispatch.
 
@@ -517,7 +460,7 @@ Acquire it before the immutable read and release it in `finally`. A duplicate ge
 - The immutable `sessionFileRead()` snapshot defines the request. Appends completed after it are irrelevant.
 - A final partial append is ignored only under the strict unterminated-fragment rule.
 - If the selected entry is absent or inactive in that read, fail before allocating destination state.
-- Source status is captured/rechecked around materialization. If it becomes streaming and the selected entry is now its newest user entry, reject as in-flight; no destination has launched.
+- Source status is captured/rechecked around materialization for live-source eligibility, but streaming does not invalidate an exact cut before the selected prompt.
 - Server validation never relies on browser streaming state.
 
 ### Failure cleanup
@@ -552,7 +495,7 @@ If a failed create left a destination persisted-session record, use the establis
 | `src/app/session-manager.ts` | Add optional `entryId` to `forkSession()` body; retain global single-flight, refresh, navigation, and failure UI |
 | `src/ui/components/SidebarActionsPopover.ts` | Optional help descriptor, sibling help control/tooltip, `help` focus stop, positioning and non-bubbling interactions |
 | `src/ui/components/Messages.ts` | Export `userVisiblePromptText()`; render one eligible prompt trigger in both user-row markup branches |
-| `src/ui/components/MessageList.ts` | Pure eligibility/current-turn calculation; directly mount one canonical prompt popover; reset toggle off; dispatch fork/copy events |
+| `src/ui/components/MessageList.ts` | Pure durable-cursor eligibility; directly mount one canonical prompt popover; reset toggle off; dispatch fork/copy events |
 | `src/ui/components/AgentInterface.ts` | Pass source eligibility; handle prompt fork/copy composed events using existing app helpers |
 | `src/ui/app.css` | Trigger/bubble reservation and help hit-area styles; canonical variables/classes, same desktop/mobile content |
 | `docs/rest-api.md` | Optional `entryId`, history semantics, errors, worktree defaults |
@@ -598,7 +541,7 @@ All new tests live in `tests2/` and are registered in `tests2/tests-map.json`.
 - terminal leaf selection using existing semantics;
 - exact raw line/additive-field preservation for header/model/thinking/assistant/tool/compaction/custom entries;
 - duplicate text prompts selected by id, not text;
-- missing/stale/inactive/non-message/non-user/tool-result-only/current-turn errors;
+- missing/stale/inactive/non-message/non-user/tool-result-only errors; exact cut before newest streaming prompt;
 - duplicate ids, missing parent, cycle, out-of-order parent, malformed complete line;
 - safe ignore of only a final unterminated append fragment;
 - input/source string immutability.
@@ -643,8 +586,8 @@ Extend `tests2/integration/sidebar-actions-fork-github-link.test.ts` only where 
 
 `tests2/dom/prompt-history-actions.test.ts`
 
-- full eligible/ineligible role/origin/cursor/forkability/current-turn matrix;
-- absent on assistant, tool, synthetic, optimistic, pending, current streaming, pre-compaction orphan, archived, child/team/read-only rows;
+- full eligible/ineligible role/origin/cursor/forkability matrix;
+- absent on assistant, tool, synthetic, optimistic, pending, pre-compaction orphan, archived, child/team/read-only rows; present on the current streaming row once its cursor is proven;
 - one always-visible trigger and identical desktop/mobile item contents;
 - legacy and author-labelled bubble placement; no content/attachment overlap;
 - canonical icon/row/type/toggle classes and menu position behavior;

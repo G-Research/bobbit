@@ -386,7 +386,6 @@ History validation uses the standard `{ error, code }` response shape:
 | `409` | `HISTORY_FORK_CURSOR_NOT_FOUND` | `This prompt is no longer available` |
 | `409` | `HISTORY_FORK_CURSOR_INACTIVE` | `This prompt is no longer on the active conversation branch` |
 | `422` | `HISTORY_FORK_CURSOR_NOT_USER` | `History forks must start before a user prompt` |
-| `409` | `HISTORY_FORK_CURSOR_IN_FLIGHT` | `The current prompt cannot be forked until the turn finishes` |
 | `409` | `HISTORY_FORK_TRANSCRIPT_INVALID` | `The session transcript changed or is not valid for history forking` |
 | `409` | `HISTORY_FORK_IN_PROGRESS` | `A fork from this prompt is already being created` |
 

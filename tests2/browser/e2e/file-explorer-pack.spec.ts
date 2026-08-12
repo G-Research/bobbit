@@ -131,7 +131,7 @@ async function openFromSessionMenu(page: Page): Promise<void> {
 	await trigger.click();
 	const menu = page.locator("sidebar-actions-popover [role=menu]");
 	await expect(menu).toBeVisible({ timeout: 5_000 });
-	const launcher = menu.getByRole("menuitem", { name: /Open File Explorer/ });
+	const launcher = menu.getByRole("menuitem", { name: /Open file explorer/ });
 	await expect(launcher, "the built-in explorer must contribute a session launcher").toBeVisible();
 	await launcher.click();
 	await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
@@ -186,7 +186,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		const explorer = contributions.find((pack) => pack.packId === "file-explorer");
 		expect(explorer?.panels?.some((panel) => panel.id === "file-explorer.panel")).toBe(true);
 		expect(explorer?.entrypoints).toEqual(expect.arrayContaining([
-			expect.objectContaining({ kind: "session-menu", label: "Open File Explorer" }),
+			expect.objectContaining({ kind: "session-menu", label: "Open file explorer" }),
 			expect.objectContaining({ kind: "composer-slash", id: "files" }),
 		]));
 		expect(explorer?.routeNames).toEqual(expect.arrayContaining(["list", "read", "diff"]));
@@ -212,7 +212,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await trigger.click();
 		const menu = page.locator("sidebar-actions-popover [role=menu]");
 		await expect(menu).toBeVisible();
-		await expect(menu.getByRole("menuitem", { name: /Open File Explorer/ }), "disabling the pack removes its session launcher").toHaveCount(0);
+		await expect(menu.getByRole("menuitem", { name: /Open file explorer/ }), "disabling the pack removes its session launcher").toHaveCount(0);
 		await page.keyboard.press("Escape");
 		const composer = page.locator("message-editor textarea").first();
 		await composer.fill("/files");

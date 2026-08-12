@@ -324,7 +324,7 @@ describe("SessionManager snapshot memo", () => {
 		});
 		expect(live.pendingSkillTranscriptBindings).toHaveLength(1);
 
-		value.scheduleSettledPromptCursorRefresh(live);
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
 		await vi.waitFor(() => expect(readSkillSidecarEntries(live.id)[0]).toMatchObject({
 			recordId,
 			transcriptEntryId: "pi-user",
@@ -365,15 +365,40 @@ describe("SessionManager snapshot memo", () => {
 			message: { role: "user", content: "duplicate", timestamp: 7 },
 		});
 
-		value.scheduleSettledPromptCursorRefresh(live);
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
 		await vi.waitFor(() => expect(getCursors).toHaveBeenCalledOnce());
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(readSkillSidecarEntries(live.id)[0]).not.toHaveProperty("transcriptEntryId");
 	});
 
-	it("schedules cursor enrichment only at the final agent lifecycle boundary", () => {
+	it("does not consume pending skill bindings during the agent-start cursor refresh", async () => {
+		const getCursors = vi.fn(async () => ({ success: true, data: {
+			entries: [userEntry("pi-user", null, "prompt")],
+			leafId: "pi-user",
+			forkMessages: [{ entryId: "pi-user", text: "prompt" }],
+		} }));
+		const value = manager();
+		const live = session(async () => ({ success: true, data: [
+			{ id: "inner-user", role: "user", content: "prompt" },
+		] }), getCursors);
+		live.pendingSkillTranscriptBindings = [{
+			recordId: "skill-record",
+			promptId: "prompt-id",
+			modelText: "prompt",
+			messageIdentity: { id: "inner-user" },
+		}];
+		value.sessions.set(live.id, live);
+
+		value.schedulePromptCursorRefresh(live);
+		await vi.waitFor(() => expect(getCursors).toHaveBeenCalledOnce());
+		expect(live.pendingSkillTranscriptBindings).toHaveLength(1);
+	});
+
+	it("schedules cursor enrichment at agent start and a settling fallback at final agent end", () => {
 		const value = manager();
 		value._sessionReplacementCoordinators = new Map();
+		value._bootRepromptedSessions = new Set();
+		value.clock = { now: () => 1 };
 		value._sessionWriterIsCurrent = () => true;
 		value._consumeSteerEcho = () => undefined;
 		value.resolveStoreForSession = () => ({
@@ -383,17 +408,19 @@ describe("SessionManager snapshot memo", () => {
 		value.resolveIdleWaiters = () => undefined;
 		value.drainQueue = () => undefined;
 		value._finishSessionSetup = async () => undefined;
-		value.scheduleSettledPromptCursorRefresh = vi.fn();
+		value.schedulePromptCursorRefresh = vi.fn();
 		const live = session(async () => ({ success: true, data: [] }));
 		live.status = "streaming";
 		live.promptQueue = { dequeueAllSteered: () => [] };
 		value.sessions.set(live.id, live);
 
+		value.handleAgentLifecycle(live, { type: "agent_start" });
+		expect(value.schedulePromptCursorRefresh).toHaveBeenCalledWith(live);
 		value.handleAgentLifecycle(live, { type: "agent_end", messages: [], willRetry: true });
-		expect(value.scheduleSettledPromptCursorRefresh).not.toHaveBeenCalled();
+		expect(value.schedulePromptCursorRefresh).toHaveBeenCalledOnce();
 		value.handleAgentLifecycle(live, { type: "agent_end", messages: [], willRetry: false });
-		expect(value.scheduleSettledPromptCursorRefresh).toHaveBeenCalledOnce();
-		expect(value.scheduleSettledPromptCursorRefresh).toHaveBeenCalledWith(live);
+		expect(value.schedulePromptCursorRefresh).toHaveBeenCalledTimes(2);
+		expect(value.schedulePromptCursorRefresh).toHaveBeenLastCalledWith(live, { settleBindings: true });
 	});
 
 	it("broadcasts a cursor-enriched replacement after the settled event sequence advances", async () => {
@@ -417,7 +444,7 @@ describe("SessionManager snapshot memo", () => {
 		live.clients.add(client);
 		value.sessions.set(live.id, live);
 
-		value.scheduleSettledPromptCursorRefresh(live);
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
 		live.eventBuffer.push({ type: "agent_end" });
 		await vi.waitFor(() => expect(sends.length).toBe(1));
 		const frame = JSON.parse(sends[0]);
@@ -427,6 +454,106 @@ describe("SessionManager snapshot memo", () => {
 			_entryIdSource: "pi-transcript",
 		});
 		expect(live.messagesSnapshotCache.seq).toBe(1);
+	});
+
+	it("keeps the sole mid-turn cursor refresh when streaming events advance", async () => {
+		const messages = deferred<any>();
+		const cursors = deferred<any>();
+		const getMessages = vi.fn(() => messages.promise);
+		const getCursors = vi.fn(() => cursors.promise);
+		const sends: string[] = [];
+		const client = { readyState: 1, send: (payload: string) => sends.push(payload) };
+		const value = manager();
+		const live = session(getMessages, getCursors);
+		live.clients.add(client);
+		value.sessions.set(live.id, live);
+
+		value.schedulePromptCursorRefresh(live);
+		await vi.waitFor(() => expect(getMessages).toHaveBeenCalledOnce());
+		live.latestMessageUpdate = {
+			id: "assistant-message",
+			message: { id: "assistant-message", role: "assistant", content: "live answer" },
+		};
+		live.eventBuffer.push({ type: "message_update" });
+		messages.resolve({ success: true, data: [
+			{ id: "user-message", role: "user", content: "prompt" },
+		] });
+		cursors.resolve({ success: true, data: {
+			entries: [userEntry("pi-user", null, "prompt")],
+			leafId: "pi-user",
+			forkMessages: [{ entryId: "pi-user", text: "prompt" }],
+		} });
+
+		await vi.waitFor(() => expect(sends).toHaveLength(1));
+		const frame = JSON.parse(sends[0]);
+		expect(frame.data[0]).toMatchObject({ entryId: "pi-user", _entryIdSource: "pi-transcript" });
+		expect(frame.data[1]).toMatchObject({ content: "live answer" });
+		expect(getMessages).toHaveBeenCalledOnce();
+	});
+
+	it("fences a stale cursor refresh after a newer snapshot wins", async () => {
+		const oldMessages = deferred<any>();
+		const oldCursors = deferred<any>();
+		const newMessages = deferred<any>();
+		const newCursors = deferred<any>();
+		const messageReads = [oldMessages, newMessages];
+		const cursorReads = [oldCursors, newCursors];
+		const getMessages = vi.fn(() => messageReads.shift()!.promise);
+		const getCursors = vi.fn(() => cursorReads.shift()!.promise);
+		const sends: string[] = [];
+		const client = { readyState: 1, send: (payload: string) => sends.push(payload) };
+		const value = manager();
+		const live = session(getMessages, getCursors);
+		live.clients.add(client);
+		const recordId = appendIdentifiedSkillSidecarEntry(live.id, {
+			ts: 1,
+			modelText: "prompt",
+			originalText: "/pending",
+			skillExpansions: [],
+		});
+		assert.ok(recordId);
+		live.pendingSkillTranscriptBindings = [{
+			recordId,
+			promptId: "pending-prompt",
+			modelText: "prompt",
+			messageIdentity: { id: "user-message" },
+		}];
+		value.sessions.set(live.id, live);
+
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
+		await vi.waitFor(() => expect(getMessages).toHaveBeenCalledOnce());
+		live.eventBuffer.push({ type: "message_update" });
+		value.schedulePromptCursorRefresh(live);
+		await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2));
+
+		newMessages.resolve({ success: true, data: [
+			{ id: "user-message", role: "user", content: "prompt" },
+			{ id: "assistant-message", role: "assistant", content: "new answer" },
+		] });
+		newCursors.resolve({ success: true, data: {
+			entries: [userEntry("new-user", null, "prompt"), assistantEntry("new-answer", "new-user", "new answer")],
+			leafId: "new-answer",
+			forkMessages: [{ entryId: "new-user", text: "prompt" }],
+		} });
+		await vi.waitFor(() => expect(sends).toHaveLength(1));
+		const winningFrame = JSON.parse(sends[0]);
+		expect(winningFrame.data[0]).toMatchObject({ entryId: "new-user", _entryIdSource: "pi-transcript" });
+		expect(winningFrame.data[1]).toMatchObject({ content: "new answer" });
+
+		oldMessages.resolve({ success: true, data: [
+			{ id: "user-message", role: "user", content: "prompt" },
+		] });
+		oldCursors.resolve({ success: true, data: {
+			entries: [userEntry("old-user", null, "prompt")],
+			leafId: "old-user",
+			forkMessages: [{ entryId: "old-user", text: "prompt" }],
+		} });
+		await vi.waitFor(() => expect(readSkillSidecarEntries(live.id)[0]).toMatchObject({
+			recordId,
+			transcriptEntryId: "old-user",
+		}));
+		expect(sends).toHaveLength(1);
+		expect(live.pendingSkillTranscriptBindings).toHaveLength(0);
 	});
 
 	it("refreshes compaction messages and cursors as one fresh authoritative pair", async () => {
