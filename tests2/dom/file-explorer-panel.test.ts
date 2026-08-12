@@ -6,6 +6,7 @@ type Status = Record<string, unknown> & { path: string };
 type RouteHandler = (body: Record<string, unknown>) => unknown | Promise<unknown>;
 
 const mounted: HTMLElement[] = [];
+let mountAttempt = 0;
 const tick = async (ms = 0) => {
 	await new Promise<void>((resolve) => setTimeout(resolve, ms));
 	await Promise.resolve();
@@ -757,6 +758,7 @@ describe("built-in file explorer panel", () => {
 		click(collapse);
 		await tick();
 		expect(document.activeElement).toBe(collapse);
+		expect(collapse.getAttribute("aria-disabled")).toBe("true");
 		expect(row(root, "src").getAttribute("aria-expanded")).toBe("false");
 		expect(root.querySelectorAll('[role="treeitem"][tabindex="0"]')).toHaveLength(1);
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("All folders collapsed.");
@@ -835,7 +837,9 @@ describe("built-in file explorer panel", () => {
 
 		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
 		await tick();
-		document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+		expect(root.querySelector('[role="menu"]')).not.toBeNull();
+		click(document.body);
 		await tick();
 		expect(root.querySelector('[role="menu"]')).toBeNull();
 		expect(document.activeElement).toBe(row(root, "one.txt"));
@@ -876,52 +880,47 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("Couldn’t copy. Clipboard access is unavailable.");
 	});
 
-	it("keeps an opaque-shadow menu open through real pointer ordering and copies the action", async () => {
+	it("keeps path actions stable across a late lazy-tree render and lets the action click close first", async () => {
 		const writeText = vi.fn(async () => undefined);
 		Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+		const folderList = deferred<unknown>();
 		const fakeHost = host({
-			list: () => list([{ path: "folder/two.ts", name: "two.ts", kind: "file" }]),
+			list: ({ path }) => path === "folder"
+				? folderList.promise
+				: list([{ path: "folder", name: "folder", kind: "directory" }], [
+					{ path: "folder/deleted.ts", worktree: "D", deleted: true },
+				]),
 			read: () => ({ kind: "text", text: "preview" }),
 			diff: () => ({ kind: "empty" }),
 		});
-		const shadowHost = document.createElement("div");
-		const shadowRoot = shadowHost.attachShadow({ mode: "closed" });
-		const root = createFileExplorerPanel().render({ __sessionId: "shadow-path-actions" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]) as HTMLElement;
-		shadowRoot.append(root);
-		document.body.append(shadowHost);
-		mounted.push(shadowHost);
+		const root = mount(`late-list-path-actions-${++mountAttempt}`, fakeHost);
 		await tick();
 
-		const order: string[] = [];
-		let outerTarget: EventTarget | null = null;
-		let outerPath: EventTarget[] = [];
-		// happy-dom does not retarget closed-shadow events, so model the opaque host view
-		// at the real document-capture boundary before the panel installs its listener.
-		document.addEventListener("pointerdown", (event) => {
-			const fullPath = event.composedPath();
-			const hostIndex = fullPath.indexOf(shadowHost);
-			const opaquePath = hostIndex >= 0 ? fullPath.slice(hostIndex) : [shadowHost, document, window];
-			Object.defineProperty(event, "target", { configurable: true, get: () => shadowHost });
-			Object.defineProperty(event, "composedPath", { configurable: true, value: () => opaquePath });
-			order.push("document capture");
-			outerTarget = event.target;
-			outerPath = event.composedPath();
-		}, { capture: true, once: true });
-
-		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
+		const folder = row(root, "folder");
+		folder.focus();
+		click(folder);
+		await tick();
+		const deleted = row(root, "folder/deleted.ts");
+		deleted.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
 		await tick();
 		const copyPath = [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === "Copy relative path")!;
-		copyPath.addEventListener("pointerdown", () => order.push("menu target"), { once: true });
-		document.addEventListener("pointerdown", () => order.push("document bubble"), { once: true });
 
-		copyPath.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true }));
-		expect(order).toEqual(["document capture", "menu target", "document bubble"]);
-		expect(outerTarget).toBe(shadowHost);
-		expect(outerPath).not.toContain(copyPath);
+		folderList.resolve(list([]));
+		await vi.waitFor(() => expect(row(root, "folder").hasAttribute("aria-busy")).toBe(false));
 		expect(root.querySelector('[role="menu"]')).not.toBeNull();
-		click(copyPath);
+		expect(row(root, "folder/deleted.ts").classList.contains("is-context-target")).toBe(true);
+
+		const order: string[] = [];
+		copyPath.addEventListener("click", () => order.push(`item:${root.querySelector('[role="menu"]') === null ? "closed" : "open"}`), { once: true });
+		document.addEventListener("click", () => order.push(`document:${root.querySelector('[role="menu"]') === null ? "closed" : "open"}`), { once: true });
+		copyPath.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true }));
+		copyPath.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true, composed: true }));
+		copyPath.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }));
 		await tick();
-		expect(writeText).toHaveBeenCalledWith("folder/two.ts");
+
+		expect(order).toEqual(["item:closed", "document:closed"]);
+		expect(writeText).toHaveBeenCalledWith("folder/deleted.ts");
+		expect(document.activeElement).toBe(row(root, "folder"));
 	});
 
 	it("keeps narrow controls wrap-safe without fixed-height clipping", async () => {

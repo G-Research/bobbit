@@ -156,7 +156,7 @@ type ExplorerState = {
 	pathError?: PanelFailure;
 	search: SearchState;
 	menu?: { target: TreeEntry; invoker?: HTMLElement; pointer: boolean; x: number; y: number };
-	menuPointerDown?: (event: PointerEvent) => void;
+	menuDocumentClick?: (event: MouseEvent) => void;
 	copyMessage?: { text: string; error: boolean };
 	copyTimer?: number;
 	initialized: boolean;
@@ -566,11 +566,13 @@ function flattenRows(state: ExplorerState): Array<{ entry: TreeEntry; level: num
 
 function renderTree(state: ExplorerState): void {
 	const restoreFocus = state.tree.contains(document.activeElement);
-	closeContextMenu(state, false);
+	const menuInvokerPath = state.menu?.invoker?.closest<HTMLElement>("[role=treeitem][data-path]")?.dataset.path;
+	const finishRender = (): void => reconcileContextMenuAfterTreeRender(state, menuInvokerPath);
 	renderDiscoveryControls(state);
 	state.tree.replaceChildren();
 	if (state.search.query) {
 		renderSearchResults(state);
+		finishRender();
 		return;
 	}
 	state.tree.setAttribute("role", "tree");
@@ -579,10 +581,12 @@ function renderTree(state: ExplorerState): void {
 	const rootDirectory = state.directories.get("");
 	if (!rootDirectory || (rootDirectory.state === "loading" && rootDirectory.entries.length === 0)) {
 		state.tree.append(messageRow("loading", "Loading files…"));
+		finishRender();
 		return;
 	}
 	if (rootDirectory.state === "error" && rootDirectory.entries.length === 0) {
 		state.tree.append(errorRow(rootDirectory.error!, () => void refresh(state, true)));
+		finishRender();
 		return;
 	}
 	const rows = flattenRows(state);
@@ -635,7 +639,21 @@ function renderTree(state: ExplorerState): void {
 	renderChildren("", 1, state.tree);
 	if (rootDirectory.truncated) state.tree.append(messageRow("truncated", "Showing the first 1,000 entries."));
 	if (rootDirectory.state === "error") state.tree.prepend(errorRow(rootDirectory.error!, () => void refresh(state, true), true));
+	finishRender();
 	if (restoreFocus) requestAnimationFrame(() => focusPath(state, state.focused));
+}
+
+function reconcileContextMenuAfterTreeRender(state: ExplorerState, invokerPath?: string): void {
+	if (!state.menu) return;
+	const targetRow = state.tree.querySelector<HTMLElement>(`[data-path="${cssEscape(state.menu.target.path)}"]`);
+	if (!targetRow) {
+		closeContextMenu(state, false);
+		return;
+	}
+	targetRow.classList.add("is-context-target");
+	if (invokerPath !== undefined) {
+		state.menu.invoker = state.tree.querySelector<HTMLElement>(`[data-path="${cssEscape(invokerPath)}"]`) ?? state.menu.invoker;
+	}
 }
 
 function renderDiscoveryControls(state: ExplorerState): void {
@@ -651,7 +669,7 @@ function renderDiscoveryControls(state: ExplorerState): void {
 		: state.gitAvailable === undefined
 			? "Changed files are temporarily unavailable. Your preference is preserved."
 			: "Changed files only";
-	state.collapseButton.disabled = state.expanded.size === 0 || !!state.search.query;
+	state.collapseButton.setAttribute("aria-disabled", String(state.expanded.size === 0 || !!state.search.query));
 	state.feedback.replaceChildren();
 	if (state.copyMessage) {
 		const feedback = el("div", `bb-explorer-inline-feedback${state.copyMessage.error ? " is-error" : ""}`, state.copyMessage.text);
@@ -1270,12 +1288,8 @@ function openContextMenu(state: ExplorerState, target: TreeEntry, invoker?: HTML
 	}
 	menu.addEventListener("keydown", (event) => onContextMenuKeydown(state, event));
 	state.root.append(menu);
-	const insideMenuPointers = new WeakSet<Event>();
-	menu.addEventListener("pointerdown", (event) => insideMenuPointers.add(event));
-	state.menuPointerDown = (event) => {
-		if (!insideMenuPointers.has(event)) closeContextMenu(state, true);
-	};
-	document.addEventListener("pointerdown", state.menuPointerDown);
+	state.menuDocumentClick = () => closeContextMenu(state, true);
+	document.addEventListener("click", state.menuDocumentClick);
 	const width = menu.offsetWidth || 200;
 	const height = menu.offsetHeight || 70;
 	menu.style.left = `${Math.max(8, Math.min(state.menu.x, window.innerWidth - width - 8))}px`;
@@ -1301,8 +1315,8 @@ function onContextMenuKeydown(state: ExplorerState, event: KeyboardEvent): void 
 function closeContextMenu(state: ExplorerState, restoreFocus: boolean): void {
 	if (!state.menu) return;
 	const invoker = state.menu.invoker;
-	if (state.menuPointerDown) document.removeEventListener("pointerdown", state.menuPointerDown);
-	state.menuPointerDown = undefined;
+	if (state.menuDocumentClick) document.removeEventListener("click", state.menuDocumentClick);
+	state.menuDocumentClick = undefined;
 	state.root.querySelector(".bb-explorer-context-menu")?.remove();
 	state.tree.querySelector(".is-context-target")?.classList.remove("is-context-target");
 	state.menu = undefined;
@@ -1817,10 +1831,10 @@ function installStyles(): void {
 .bb-explorer-toolbar{display:flex;align-items:center;gap:.75rem;min-height:2.75rem;padding:.45rem .65rem;border-bottom:1px solid var(--border);background:var(--card)}
 .bb-explorer-heading{display:flex;align-items:baseline;gap:.5rem;min-width:0;flex:1}.bb-explorer-title{font-size:.875rem}.bb-explorer-subtitle{font-size:.7rem;color:var(--muted-foreground);white-space:nowrap}
 .bb-explorer-refresh{display:grid;place-items:center;width:1.85rem;height:1.85rem;padding:0;border:1px solid transparent;border-radius:.4rem;background:transparent;cursor:pointer}
-.bb-explorer-refresh:hover:not(:disabled){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-refresh:focus-visible,.bb-explorer-button:focus-visible,.bb-explorer-back:focus-visible,.bb-explorer-path-edit-button:focus-visible,.bb-explorer-control:focus-visible,.bb-explorer-crumb:focus-visible,.bb-explorer-menuitem:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.bb-explorer-refresh:disabled,.bb-explorer-control:disabled{opacity:.55}.bb-explorer-refresh.is-spinning svg{animation:bb-explorer-spin .8s linear infinite}
+.bb-explorer-refresh:hover:not(:disabled){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-refresh:focus-visible,.bb-explorer-button:focus-visible,.bb-explorer-back:focus-visible,.bb-explorer-path-edit-button:focus-visible,.bb-explorer-control:focus-visible,.bb-explorer-crumb:focus-visible,.bb-explorer-menuitem:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.bb-explorer-refresh:disabled,.bb-explorer-control:disabled,.bb-explorer-control[aria-disabled=true]{opacity:.55}.bb-explorer-refresh.is-spinning svg{animation:bb-explorer-spin .8s linear infinite}
 .bb-explorer-pathbar{min-height:2.25rem;display:flex;align-items:center;border-bottom:1px solid var(--border);background:var(--card);position:relative}.bb-explorer-breadcrumbs{display:flex;align-items:center;min-width:0;flex:1;overflow-x:auto;white-space:nowrap;padding:.25rem .2rem .25rem .5rem;scrollbar-width:thin}.bb-explorer-crumb,.bb-explorer-path-edit-button{border:0;background:transparent;border-radius:.35rem;cursor:pointer;height:1.7rem}.bb-explorer-crumb{max-width:14rem;min-width:3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:.15rem .35rem}.bb-explorer-crumb:hover,.bb-explorer-path-edit-button:hover{background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-crumb[aria-current]{font-weight:600}.bb-explorer-path-separator{color:var(--muted-foreground)}.bb-explorer-path-edit-button{display:grid;place-items:center;flex:0 0 2rem;margin-right:.3rem}.bb-explorer-path-edit{display:flex;align-items:center;gap:.35rem;min-width:0;width:100%;padding:.25rem .5rem}.bb-explorer-path-prefix{color:var(--muted-foreground);white-space:nowrap}.bb-explorer-path-input{min-width:0;flex:1;height:1.75rem;border:1px solid var(--border);border-radius:.35rem;background:var(--background);color:var(--foreground);padding:.2rem .4rem;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.bb-explorer-path-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-path-input[aria-invalid=true]{border-color:var(--negative)}.bb-explorer-path-help{position:absolute;z-index:5;top:calc(100% + 1px);left:.5rem;right:.5rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:0 0 .35rem .35rem;background:var(--card);color:var(--muted-foreground);font-size:.72rem;display:flex;align-items:center;gap:.5rem}.bb-explorer-path-help:not(.is-error){position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0)}.bb-explorer-path-help.is-error{color:var(--negative)}
 .bb-explorer-content{display:grid;grid-template-columns:minmax(210px,32%) minmax(0,1fr);flex:1;min-height:0}.bb-explorer-tree-pane{min-width:0;min-height:0;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--card)}
-.bb-explorer-tree-toolbar{display:flex;align-items:center;gap:.3rem;padding:.4rem .45rem;border-bottom:1px solid var(--border);flex-wrap:wrap}.bb-explorer-search{position:relative;display:flex;align-items:center;min-width:7.5rem;flex:1}.bb-explorer-search>svg{position:absolute;left:.45rem;width:.85rem;height:.85rem;color:var(--muted-foreground);pointer-events:none}.bb-explorer-search-input{width:100%;height:2rem;padding:.25rem 1.8rem .25rem 1.65rem;border:1px solid var(--border);border-radius:.4rem;background:transparent;color:var(--foreground);font:inherit;font-size:.75rem}.bb-explorer-search-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-search-input::-webkit-search-cancel-button{display:none}.bb-explorer-control{height:2rem;min-width:2rem;display:flex;align-items:center;justify-content:center;gap:.28rem;border:1px solid transparent;border-radius:.4rem;padding:0 .4rem;background:transparent;cursor:pointer}.bb-explorer-control:hover:not(:disabled){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-control[aria-pressed=true]{border-color:var(--primary);background:color-mix(in oklch,var(--primary) 13%,transparent);color:var(--primary)}.bb-explorer-clear-search{position:absolute;right:.1rem;padding:0;width:1.75rem;height:1.75rem}.bb-explorer-control-label{font-size:.7rem}.bb-explorer-feedback:empty{display:none}.bb-explorer-inline-feedback{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.3rem .55rem;border-bottom:1px solid var(--border);color:var(--positive);font-size:.72rem}.bb-explorer-inline-feedback.is-error{color:var(--negative)}.bb-explorer-tree{flex:1;min-height:0;overflow:auto;padding:.15rem 0 .5rem;outline:none}
+.bb-explorer-tree-toolbar{display:flex;align-items:center;gap:.3rem;padding:.4rem .45rem;border-bottom:1px solid var(--border);flex-wrap:wrap}.bb-explorer-search{position:relative;display:flex;align-items:center;min-width:7.5rem;flex:1}.bb-explorer-search>svg{position:absolute;left:.45rem;width:.85rem;height:.85rem;color:var(--muted-foreground);pointer-events:none}.bb-explorer-search-input{width:100%;height:2rem;padding:.25rem 1.8rem .25rem 1.65rem;border:1px solid var(--border);border-radius:.4rem;background:transparent;color:var(--foreground);font:inherit;font-size:.75rem}.bb-explorer-search-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-search-input::-webkit-search-cancel-button{display:none}.bb-explorer-control{height:2rem;min-width:2rem;display:flex;align-items:center;justify-content:center;gap:.28rem;border:1px solid transparent;border-radius:.4rem;padding:0 .4rem;background:transparent;cursor:pointer}.bb-explorer-control:hover:not(:disabled):not([aria-disabled=true]){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-control[aria-pressed=true]{border-color:var(--primary);background:color-mix(in oklch,var(--primary) 13%,transparent);color:var(--primary)}.bb-explorer-clear-search{position:absolute;right:.1rem;padding:0;width:1.75rem;height:1.75rem}.bb-explorer-control-label{font-size:.7rem}.bb-explorer-feedback:empty{display:none}.bb-explorer-inline-feedback{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.3rem .55rem;border-bottom:1px solid var(--border);color:var(--positive);font-size:.72rem}.bb-explorer-inline-feedback.is-error{color:var(--negative)}.bb-explorer-tree{flex:1;min-height:0;overflow:auto;padding:.15rem 0 .5rem;outline:none}
 .bb-explorer-row{--indent:calc((var(--tree-level) - 1)*.9rem);height:1.7rem;padding:0 .45rem 0 calc(.3rem + var(--indent));display:flex;align-items:center;gap:.18rem;min-width:max-content;width:100%;cursor:default;border-left:2px solid transparent;user-select:none}
 .bb-explorer-row:hover{background:color-mix(in oklch,var(--foreground) 6%,transparent)}.bb-explorer-row[aria-selected=true]{background:color-mix(in oklch,var(--primary) 13%,transparent);border-left-color:var(--primary)}.bb-explorer-row:focus{outline:none;background:color-mix(in oklch,var(--primary) 18%,transparent)}.bb-explorer-row:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in oklch,var(--primary) 65%,transparent)}.bb-explorer-row.is-context-target{box-shadow:inset 0 0 0 1px var(--primary)}
 .bb-explorer-search-result{min-height:2.5rem;padding:.3rem .55rem;display:flex;align-items:center;gap:.35rem;cursor:pointer}.bb-explorer-search-result:hover,.bb-explorer-search-result[aria-selected=true]{background:color-mix(in oklch,var(--primary) 13%,transparent)}.bb-explorer-search-result-text{display:flex;flex-direction:column;min-width:0;flex:1}.bb-explorer-search-result-name,.bb-explorer-search-result-parent{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bb-explorer-search-result-parent{font-size:.68rem;color:var(--muted-foreground)}
