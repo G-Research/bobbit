@@ -876,7 +876,7 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("Couldn’t copy. Clipboard access is unavailable.");
 	});
 
-	it("keeps a shadow-root menu open for an inside composed pointer event and copies the action", async () => {
+	it("keeps an opaque-shadow menu open through real pointer ordering and copies the action", async () => {
 		const writeText = vi.fn(async () => undefined);
 		Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 		const fakeHost = host({
@@ -885,19 +885,39 @@ describe("built-in file explorer panel", () => {
 			diff: () => ({ kind: "empty" }),
 		});
 		const shadowHost = document.createElement("div");
-		const shadowRoot = shadowHost.attachShadow({ mode: "open" });
+		const shadowRoot = shadowHost.attachShadow({ mode: "closed" });
 		const root = createFileExplorerPanel().render({ __sessionId: "shadow-path-actions" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]) as HTMLElement;
 		shadowRoot.append(root);
 		document.body.append(shadowHost);
 		mounted.push(shadowHost);
 		await tick();
 
+		const order: string[] = [];
+		let outerTarget: EventTarget | null = null;
+		let outerPath: EventTarget[] = [];
+		// happy-dom does not retarget closed-shadow events, so model the opaque host view
+		// at the real document-capture boundary before the panel installs its listener.
+		document.addEventListener("pointerdown", (event) => {
+			const fullPath = event.composedPath();
+			const hostIndex = fullPath.indexOf(shadowHost);
+			const opaquePath = hostIndex >= 0 ? fullPath.slice(hostIndex) : [shadowHost, document, window];
+			Object.defineProperty(event, "target", { configurable: true, get: () => shadowHost });
+			Object.defineProperty(event, "composedPath", { configurable: true, value: () => opaquePath });
+			order.push("document capture");
+			outerTarget = event.target;
+			outerPath = event.composedPath();
+		}, { capture: true, once: true });
+
 		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
 		await tick();
 		const copyPath = [...root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === "Copy relative path")!;
-		const insidePointer = new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true });
-		Object.defineProperty(insidePointer, "target", { configurable: true, get: () => shadowHost });
-		copyPath.dispatchEvent(insidePointer);
+		copyPath.addEventListener("pointerdown", () => order.push("menu target"), { once: true });
+		document.addEventListener("pointerdown", () => order.push("document bubble"), { once: true });
+
+		copyPath.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true }));
+		expect(order).toEqual(["document capture", "menu target", "document bubble"]);
+		expect(outerTarget).toBe(shadowHost);
+		expect(outerPath).not.toContain(copyPath);
 		expect(root.querySelector('[role="menu"]')).not.toBeNull();
 		click(copyPath);
 		await tick();

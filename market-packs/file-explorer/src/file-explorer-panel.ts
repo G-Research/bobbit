@@ -1270,11 +1270,12 @@ function openContextMenu(state: ExplorerState, target: TreeEntry, invoker?: HTML
 	}
 	menu.addEventListener("keydown", (event) => onContextMenuKeydown(state, event));
 	state.root.append(menu);
+	const insideMenuPointers = new WeakSet<Event>();
+	menu.addEventListener("pointerdown", (event) => insideMenuPointers.add(event));
 	state.menuPointerDown = (event) => {
-		const insideMenu = event.composedPath().includes(menu) || (event.target instanceof Node && menu.contains(event.target));
-		if (!insideMenu) closeContextMenu(state, true);
+		if (!insideMenuPointers.has(event)) closeContextMenu(state, true);
 	};
-	document.addEventListener("pointerdown", state.menuPointerDown, true);
+	document.addEventListener("pointerdown", state.menuPointerDown);
 	const width = menu.offsetWidth || 200;
 	const height = menu.offsetHeight || 70;
 	menu.style.left = `${Math.max(8, Math.min(state.menu.x, window.innerWidth - width - 8))}px`;
@@ -1300,7 +1301,7 @@ function onContextMenuKeydown(state: ExplorerState, event: KeyboardEvent): void 
 function closeContextMenu(state: ExplorerState, restoreFocus: boolean): void {
 	if (!state.menu) return;
 	const invoker = state.menu.invoker;
-	if (state.menuPointerDown) document.removeEventListener("pointerdown", state.menuPointerDown, true);
+	if (state.menuPointerDown) document.removeEventListener("pointerdown", state.menuPointerDown);
 	state.menuPointerDown = undefined;
 	state.root.querySelector(".bb-explorer-context-menu")?.remove();
 	state.tree.querySelector(".is-context-target")?.classList.remove("is-context-target");
