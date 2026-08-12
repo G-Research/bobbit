@@ -1,6 +1,6 @@
 # Session manager sidebar mock
 
-Interactive design mock for the alternate sidebar views:
+Interactive design mock for the alternate sidebar views. The normative implementation contract is [Session Manager Sidebar Views](../../session-manager-sidebar-views.md).
 
 - **By Project** — the existing project and goal tree.
 - **By Status** — mutually exclusive Pinned, Unread, and Read sections, sorted by latest activity.
