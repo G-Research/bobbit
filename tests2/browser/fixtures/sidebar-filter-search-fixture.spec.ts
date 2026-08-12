@@ -75,6 +75,25 @@ async function visibleSessionIds(page: Page): Promise<string[]> {
 		.filter(Boolean));
 }
 
+async function normalArchiveRequestCounts(page: Page): Promise<{ sessions: number; goals: number }> {
+	return page.evaluate(() => {
+		const requests = (window as any).__sidebarFilterSearchRequests as Array<{ url: string; method: string }>;
+		const isUnfiltered = (request: { url: string; method: string }, resource: "sessions" | "goals") => {
+			const url = new URL(request.url);
+			return request.method === "GET"
+				&& url.pathname.endsWith(`/api/${resource}`)
+				&& !url.searchParams.has("q")
+				&& (resource === "sessions"
+					? url.searchParams.get("include") === "archived"
+					: url.searchParams.get("archived") === "true");
+		};
+		return {
+			sessions: requests.filter(request => isUnfiltered(request, "sessions")).length,
+			goals: requests.filter(request => isUnfiltered(request, "goals")).length,
+		};
+	});
+}
+
 async function expectSessionVisible(page: Page, sessionId: string, message: string): Promise<void> {
 	await expect.poll(() => visibleSessionIds(page), { timeout: 5_000, message }).toContain(sessionId);
 }
@@ -190,6 +209,48 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await expect(page.getByTestId("sidebar-filter-archived").locator("input"), `${MARK}: Project Show Archived stays off while query is retained`).not.toBeChecked();
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery)).toBe("RemoteBeyondFirstPageNeedle");
 	});
+
+	for (const view of ["Project", "Status"] as const) {
+		test(`${view} Show Archived starts a normal archive load after remote search clears`, async ({ page }) => {
+			const ids = await fixtureIds(page);
+			if (view === "Status") {
+				await page.getByTestId("sidebar-view-status").evaluate((button: HTMLButtonElement) => button.click());
+			}
+			const searchInput = page.locator("input[data-search]");
+			// The staff section performs one eager archive-session lookup. Clear a
+			// no-preference search once to exercise production cache eviction and
+			// start the regression scenario with both normal archive caches fresh.
+			await searchInput.fill("RemoteBeyondFirstPageNeedle");
+			await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: ${view} setup search shows the remote-only archived row`);
+			await searchInput.press("Escape");
+			await expect(searchInput, `${MARK}: ${view} setup search clears`).toHaveValue("");
+			const baselineRequests = await normalArchiveRequestCounts(page);
+
+			await searchInput.fill("RemoteBeyondFirstPageNeedle");
+			await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: ${view} fresh-cache search shows the remote-only archived row`);
+			await page.getByTestId("sidebar-filters-button").click();
+			await page.getByTestId("sidebar-filter-archived").locator("input").check();
+			await expect.poll(() => normalArchiveRequestCounts(page), {
+				timeout: 5_000,
+				message: `${MARK}: ${view} toggle must stay on the current remote query while search is active`,
+			}).toEqual(baselineRequests);
+
+			await searchInput.click();
+			await searchInput.press("Escape");
+			await expect(searchInput, `${MARK}: ${view} search clears`).toHaveValue("");
+			await expect.poll(() => normalArchiveRequestCounts(page), {
+				timeout: 5_000,
+				message: `${MARK}: ${view} clear must fulfil deferred normal session and goal archive demand`,
+			}).toEqual({ sessions: baselineRequests.sessions + 1, goals: baselineRequests.goals + 1 });
+			await expect.poll(() => page.evaluate((activeView) => {
+				const fixtureState = (window as any).bobbitState;
+				return activeView === "Status" ? fixtureState.statusShowArchived : fixtureState.showArchived;
+			}, view), { timeout: 5_000 }).toBe(true);
+			await expectSessionVisible(page, ids.archivedSession, `${MARK}: ${view} shows a nonmatching row from the normal archive page`);
+			await expect(page.getByText("Load more archived sessions…", { exact: true }), `${MARK}: ${view} exposes normal session pagination`).toBeVisible();
+			await expect(page.getByText("Load more archived goals…", { exact: true }), `${MARK}: ${view} exposes normal goal pagination`).toBeVisible();
+		});
+	}
 
 	test("search expands retained collapsed goal ancestors ephemerally", async ({ page }) => {
 		const ids = await fixtureIds(page);

@@ -162,7 +162,13 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 			archivedDelegates: [], total: 1, hasMore: false, nextCursor: null,
 		});
 	}
+	if (route.startsWith("/api/sessions") && route.includes("include=archived")) {
+		return response({ sessions: fixtureArchivedSessions(), archivedDelegates: [], total: 51, hasMore: true, nextCursor: 50 });
+	}
 	if (route.startsWith("/api/sessions")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
+	if (route.startsWith("/api/goals") && route.includes("archived=true") && !route.includes("q=")) {
+		return response({ goals: [], total: 51, hasMore: true, nextCursor: 50, archivedSessions: [] });
+	}
 	if (route.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
 	if (route === "/api/staff" || route.startsWith("/api/staff?") || route === "/api/staff/orphaned") return response({ staff: [] });
 	if (route === "/api/preferences") return response({});

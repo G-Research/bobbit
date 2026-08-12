@@ -26,7 +26,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
 import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
-import { refreshSessions, retryLoadSessions, fetchRoles, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder, refreshStaffStateFromApi } from "./api.js";
+import { refreshSessions, retryLoadSessions, fetchRoles, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder, refreshStaffStateFromApi } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderTreeSessionNode, renderSessionRow, renderArchivedSessionRow, renderStaffSidebarActions, renderSessionTime, SESSION_ROW_PY, hasUnseenActivity, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
@@ -1104,7 +1104,15 @@ function _clearArchivedSearchDemand(): void {
 	state.archivedSearchDemand = false;
 	// Keep the shared archive cache while either independent view still requests
 	// it; tree expansion preferences remain owned by the existing archive state.
-	if (!sidebarNeedsArchivedSessions(state, false)) clearArchivedSessionsState();
+	if (!sidebarNeedsArchivedSessions(state, false)) {
+		clearArchivedSessionsState();
+		return;
+	}
+	// A Show Archived toggle made during search was deliberately routed to the
+	// remote query loader. Once search ends, fulfil that same shared demand from
+	// the normal paginated caches without duplicating an existing normal load.
+	if (!archivedSessionsLoaded()) void fetchArchivedSessions();
+	if (!archivedGoalsLoaded()) void fetchArchivedGoalsPaginated();
 }
 
 export function handleSidebarSearchInput(query: string): void {
