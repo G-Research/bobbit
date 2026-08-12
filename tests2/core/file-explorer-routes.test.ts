@@ -210,6 +210,36 @@ function failIfUsedFs(observed: string[]): ExplorerFsAdapter {
 	};
 }
 
+function rootWithoutIdentity(missing = false): StatLike {
+	return missing
+		? { ...directoryStat(), dev: undefined, ino: undefined }
+		: { ...directoryStat(), dev: 1, ino: 0 };
+}
+
+function zeroIdentityRootTreeFs(rootStats = rootWithoutIdentity()): ExplorerFsAdapter {
+	const nestedStats = fileStat(5, identityFor("folder/nested.txt"));
+	return {
+		realpath: async (target) => target,
+		lstat: async (target) => {
+			const relative = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+			if (relative === "") return rootStats;
+			if (relative === "folder") return directoryStat(identityFor("folder"));
+			if (relative === "folder/nested.txt") return nestedStats;
+			throw Object.assign(new Error("missing"), { code: "ENOENT" });
+		},
+		opendir: async (target) => {
+			const relative = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+			if (relative === "") return new ArrayDirectoryHandle([entry("folder", "directory")]);
+			if (relative === "folder") return new ArrayDirectoryHandle([entry("nested.txt", "file")]);
+			throw Object.assign(new Error("not a directory"), { code: "ENOTDIR" });
+		},
+		open: async (target) => {
+			if (target !== path.join(SESSION_ROOT, "folder", "nested.txt")) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+			return new BytesFileHandle(Buffer.from("hello"), nestedStats);
+		},
+	};
+}
+
 function presentGit(status: string, staged: string, finalDiff: BoundedGitResult): ScriptedGit {
 	return new ScriptedGit([
 		ok(""),
@@ -768,20 +798,120 @@ describe("file explorer rooted filesystem hardening", () => {
 		}
 	});
 
-	it("fails discovery safely when the filesystem cannot provide stable identity", async () => {
-		let opened = false;
-		const noIdentity: ExplorerFsAdapter = {
-			realpath: async (target) => target,
-			lstat: async () => ({ ...directoryStat(), dev: undefined, ino: undefined }),
-			opendir: async () => { opened = true; return new ArrayDirectoryHandle([]); },
-			open: async () => { throw new Error("unused"); },
-		};
-		const result = await createExplorerRoutes({ fs: noIdentity, git: neverGit() }).search(
-			{ workingDir: SESSION_ROOT },
-			{ body: { query: "file" } },
-		);
-		expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
-		expect(opened).toBe(false);
+	it("keeps stable contained browsing usable when the canonical root has no filesystem identity", async () => {
+		for (const rootStats of [rootWithoutIdentity(), rootWithoutIdentity(true)]) {
+			for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+				const routes = createRoutes({ fs: zeroIdentityRootTreeFs(rootStats), git: neverGit() });
+				expect(await routes.list(
+					{ workingDir: SESSION_ROOT },
+					{ body: { path: "" } },
+				)).toMatchObject({ ok: true, value: { entries: [{ path: "folder", kind: "directory" }] } });
+				expect(await routes.resolve(
+					{ workingDir: SESSION_ROOT },
+					{ body: { path: "folder/nested.txt" } },
+				)).toMatchObject({ ok: true, value: { path: "folder/nested.txt", kind: "file" } });
+				expect(await routes.search(
+					{ workingDir: SESSION_ROOT },
+					{ body: { query: "nested" } },
+				)).toMatchObject({ ok: true, value: { results: [{ path: "folder/nested.txt", kind: "file" }] } });
+				expect(await routes.read(
+					{ workingDir: SESSION_ROOT },
+					{ body: { path: "folder/nested.txt" } },
+				)).toMatchObject({ ok: true, value: { path: "folder/nested.txt", kind: "text", text: "hello" } });
+			}
+		}
+	});
+
+	it("rejects zero-identity canonical root changes and closes directory handles before reading names", async () => {
+		for (const changedRoot of [
+			{ path: path.resolve(SESSION_ROOT, "..", "outside"), code: "OUTSIDE_ROOT", retryable: false },
+			{ path: path.join(SESSION_ROOT, "replacement"), code: "PATH_CHANGED", retryable: true },
+		]) {
+			for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+				let substituted = false;
+				let reads = 0;
+				let closes = 0;
+				const fs: ExplorerFsAdapter = {
+					realpath: async (target) => substituted && target === SESSION_ROOT ? changedRoot.path : target,
+					lstat: async () => rootWithoutIdentity(),
+					opendir: async () => {
+						substituted = true;
+						return {
+							read: async () => { reads++; return entry("secret.txt", "file"); },
+							close: async () => { closes++; },
+						};
+					},
+					open: async () => { throw new Error("unused"); },
+				};
+				const result = await createRoutes({ fs, git: neverGit() }).list(
+					{ workingDir: SESSION_ROOT },
+					{ body: { path: "" } },
+				);
+				expect(result).toMatchObject({ ok: false, error: { code: changedRoot.code, retryable: changedRoot.retryable } });
+				expect(reads).toBe(0);
+				expect(closes).toBe(1);
+			}
+		}
+	});
+
+	it("rejects zero-identity root symlink and kind changes before reading names", async () => {
+		for (const replacement of [symlinkStat(identityFor("replacement")), fileStat(0, identityFor("replacement"))]) {
+			for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+				let substituted = false;
+				let reads = 0;
+				let closes = 0;
+				const fs: ExplorerFsAdapter = {
+					realpath: async (target) => target,
+					lstat: async () => substituted ? replacement : rootWithoutIdentity(),
+					opendir: async () => {
+						substituted = true;
+						return {
+							read: async () => { reads++; return entry("secret.txt", "file"); },
+							close: async () => { closes++; },
+						};
+					},
+					open: async () => { throw new Error("unused"); },
+				};
+				const result = await createRoutes({ fs, git: neverGit() }).list(
+					{ workingDir: SESSION_ROOT },
+					{ body: { path: "" } },
+				);
+				expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
+				expect(reads).toBe(0);
+				expect(closes).toBe(1);
+			}
+		}
+	});
+
+	it("rejects a canonical file escape under a zero-identity root before reading bytes", async () => {
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			let substituted = false;
+			let reads = 0;
+			let closes = 0;
+			const target = path.join(SESSION_ROOT, "secret.txt");
+			const targetStats = fileStat(6, identityFor("inside"));
+			const outside = path.resolve(SESSION_ROOT, "..", "outside", "secret.txt");
+			const fs: ExplorerFsAdapter = {
+				realpath: async (candidate) => substituted && candidate === target ? outside : candidate,
+				lstat: async (candidate) => candidate === SESSION_ROOT ? rootWithoutIdentity() : targetStats,
+				opendir: async () => { throw new Error("unused"); },
+				open: async () => {
+					substituted = true;
+					return {
+						stat: async () => targetStats,
+						read: async () => { reads++; return { bytesRead: 0 }; },
+						close: async () => { closes++; },
+					};
+				},
+			};
+			const result = await createRoutes({ fs, git: neverGit() }).read(
+				{ workingDir: SESSION_ROOT },
+				{ body: { path: "secret.txt" } },
+			);
+			expect(result).toMatchObject({ ok: false, error: { code: "OUTSIDE_ROOT", retryable: false } });
+			expect(reads).toBe(0);
+			expect(closes).toBe(1);
+		}
 	});
 
 	it("closes an opened file without descriptor identity before reading bytes", async () => {
@@ -921,7 +1051,8 @@ describe("file explorer rooted filesystem hardening", () => {
 			{ body: { path: "secret.txt" } },
 		);
 		expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
-		expect(flags).toBe(process.platform === "win32" ? "r" : expect.any(Number));
+		if (process.platform === "win32") expect(flags).toBe("r");
+		else expect(typeof flags).toBe("number");
 		expect(reads).toBe(0);
 		expect(closes).toBe(1);
 	});
