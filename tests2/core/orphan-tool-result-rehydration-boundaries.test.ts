@@ -747,12 +747,33 @@ describe("executable SessionManager rehydration boundaries", () => {
 			listener = next;
 			return () => { listener = undefined; };
 		});
-		bridge.promptWhenReady = vi.fn(async () => {
+		bridge.promptWhenReady = vi.fn(async (text: string) => {
 			bootEntered.resolve();
+			// A generic terminal sequence cannot prove which dispatch Pi observed.
+			// Emit the exact pending prompt echo before the late negative ack.
+			listener?.({
+				type: "message_end",
+				message: { id: "boot-continuation-echo", role: "user", content: text },
+			});
 			await rejectAck.promise;
 			throw new Error("Command timed out: prompt");
 		});
 		const ps = persisted("boot-continuation-terminal-before-rejection", file, { wasStreaming: true });
+		// Exercise the existing non-empty compatibility path. The sidecar reader has
+		// no completeness metadata for partially readable files; explicit zero-row
+		// restores alone enter the new fail-closed raw-text mode.
+		appendPromptAuthorDispatch(ps.id, {
+			promptId: "historical-boot-correlation",
+			dispatchedAt: 1,
+			modelText: "unrelated historical prompt",
+			source: "user",
+			author: { kind: "user", id: "user:local", label: "User" },
+		});
+		appendPromptAuthorSettlement(ps.id, {
+			promptId: "historical-boot-correlation",
+			settledAt: 2,
+			outcome: "echoed",
+		});
 		const manager = makeManager(ps, bridge);
 		vi.spyOn(console, "warn").mockImplementation(() => {});
 

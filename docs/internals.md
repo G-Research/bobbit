@@ -1352,7 +1352,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 
 ### Data flow
 
-1. **Server stores** `lastReadAt?: number` on `PersistedSession` (see `src/server/agent/session-store.ts`). It is included in `UpdatableSessionFields` so writes go through the normal `SessionStore.update()` path with disk persistence.
+1. **Server stores** `lastReadAt?: number` on `PersistedSession` through the normal session-store update path. Routine activity writes remain debounced, but `SessionManager.markSessionRead()` awaits the store's async flush before `POST /api/sessions/:id/mark-read` returns `{ ok: true }`. A persistence failure returns an error instead of falsely acknowledging a read, so every successful response is a durability barrier for an immediate graceful stop/start.
 2. **Server exposes** `lastReadAt` in session-list payloads - `GET /api/sessions` (via `listSessions()`) and the archived-sessions list (via `listArchivedSessions()`). The field is threaded through both the live and archived `SessionSummary` shapes in `session-manager.ts`. The single-session `GET /api/sessions/:id` endpoint and the WS `messages` frame (which carries chat transcript, not session metadata) do not include `lastReadAt` - the client only needs it for the sidebar list, which is hydrated from the list endpoint.
 3. **Client computes unseen-ness locally** in `src/app/render-helpers.ts::hasUnseenActivity` by comparing `session.lastActivity > (session.lastReadAt ?? 0)`. No round-trip is needed to render the dot.
 4. **On navigation**, the sidebar calls `markSessionVisited(sessionId)` which (a) updates an in-memory mirror so the dot disappears on the very next render, and (b) fires `POST /api/sessions/:id/mark-read` so other browsers learn on their next refresh. The endpoint is backed by `SessionManager.markSessionRead`, which uses `resolveStoreForId` so live, dormant, and archived sessions are all markable.
@@ -1368,27 +1368,23 @@ Two invariants live in `hasUnseenActivity` and must be preserved by any future r
 
 Existing users have a `bobbit-session-visited` map in `localStorage` from before the server-side feature. `migrateLegacyVisitedMap` in `src/app/render-helpers.ts` is invoked once post-auth from `src/app/main.ts`: it POSTs `mark-read` for each entry, then deletes the localStorage key. The migration is idempotent - re-running it is a no-op once the key is gone - and non-fatal: a network error leaves the legacy key intact for a retry on the next load. New users never have the key and skip the migration entirely.
 
-### `lastActivity` preservation across restart
+### `lastActivity` attribution across restart
 
-`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but three paths in `session-manager.ts` install rpc-event listeners that mutate `session.lastActivity` after re-attaching to a fresh `RpcBridge`:
+`lastReadAt` is useful only if `lastActivity` distinguishes new work from transport replay. A restored bridge can emit history, lifecycle, model, and thinking events on either side of the `switch_session` response. Response timing therefore cannot prove that a later frame is new: treating it as such stamps unrelated sessions with restart-time activity and makes previously read sessions look unread.
 
-- `restoreSession()` - server startup restores persisted sessions concurrently (CONCURRENCY=5).
-- The role-restart path - swaps the bridge after a role change.
-- The abort-restart path (`restoreFromAbort`) - swaps the bridge after a force-abort.
+**Origin transaction.** The activity attributor starts each prompt or steer attempt with a unique in-memory attempt token. Beginning is side-effect free: it neither changes `lastActivity` nor releases restore quarantine. The exact token commits only when its RPC returns a positive acknowledgement or when the manager correlates an exact, trusted, unambiguous terminal user `message_end` with that attempt. Commit advances activity once and releases quarantine. A negative acknowledgement or throw cancels only its exact pending attempt; if the terminal echo committed first, the later failure is a stale acknowledgement and cannot requeue accepted intent. Durable queue-row identity stays separate from attempt identity so a redrain cannot be accepted by an older callback.
 
-All three bridges emit `switch_session` history replay frames followed by lifecycle frames on resume (`agent_start`, `agent_idle`, `connection_state`, `state`, `session_title`, etc.). Without a guard, every one of those frames would call `session.lastActivity = Date.now()` and clobber the persisted value. The original guard - a `restoring` / `switchingSession` flag flipped to `false` after `switch_session` resolves - was insufficient because lifecycle frames continue to fire after the flag clears, and under concurrent restore every restored session ended up clustered at restart time with identical timestamps.
+Bridge replacement re-enters quarantine and cancels all pending tokens owned by the replaced attribution installation. Late acknowledgements from the old bridge are therefore inert. Cold restore, role and abort restart, dormant revival, continuation, and other replacement paths install the same attributor rather than implementing local timing rules.
 
-**Single source of truth**: the exported helper `isUserVisibleActivity(event)` at the top of `src/server/agent/session-manager.ts`. It returns `true` only for events that represent real new turn activity:
+**Replay ambiguity fence.** Pi does not always provide a stable message ID or timestamp, so an old cancelled or settled keyless occurrence can have the same text as a current retry. Both cancelled attempts and restored, already-settled occurrences without a stable key use one bounded fence. It retains only keyed digests of exact Pi-facing text—never raw prompt text—and is capped at 256 records and 64 KiB per session. If a record cannot be represented or either cap is exceeded, overflow becomes sticky across replacement and hydration. An explicit zero-row result from restored author-sidecar hydration also marks this shared ambiguity state sticky and fail-closed because the compatibility reader cannot distinguish a missing, wholly corrupt, future-version, legacy, or genuinely empty sidecar. Raw same-text user events then cannot accept a current attempt before acknowledgement; a positive RPC acknowledgement remains authoritative. The reader does not represent partial sidecar completeness, so a non-empty compatibility result must not be described as proof that every row survived. This spends bounded memory while preferring a recoverable retry over falsely attributing replay as new work.
 
-- `message_update`
-- `message_end`
-- `tool_execution_start`
-- `tool_execution_end`
-- `agent_end`
+**Event meaning.** The generic activity classifier excludes both `message_update` and `message_end` for `user` and `user-with-attachments` roles. The prompt transaction is the sole writer of a user prompt's activity timestamp: a user `message_update` may establish correlation and visible projection progress, but never commits the attempt, releases quarantine, settles its author-sidecar occurrence, or retires queue/steer recovery ownership. A positive RPC acknowledgement can still commit that transaction exactly once; an exact trusted terminal user `message_end` may instead commit it through manager correlation, then settle the occurrence and retire its exact recovery ownership. An ambiguous terminal projection remains buffered for a positive acknowledgement.
 
-Everything else returns `false`, including all lifecycle frames, `auto_compaction_*`, `process_exit`, container `died`/`recovered` events, and `gate_verification_*` frames. All three rpc-event listeners now wrap the `session.lastActivity = Date.now()` bump in `if (isUserVisibleActivity(event))`. The pre-existing `restoring` / `switchingSession` flags are retained for cost-tracking but no longer relied on for `lastActivity`. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+After a genuine prompt origin opens the boundary, assistant message progress/completion, tool execution, and a non-retryable final `agent_end` remain generic user-visible activity. Lifecycle/status/model/thinking frames, history hydration, and `{ type: "agent_end", willRetry: true }` are not.
 
-Locked by `tests/session-restore-last-activity.test.ts` - source-scan assertions verify all three sites import the helper, and behavioural tests verify (a) lifecycle frames don't bump, (b) real activity does bump, and (c) concurrent restore of N sessions with widely-varied pre-restart timestamps does not cluster them.
+Every activity write is strictly monotonic: the next value is at least the current clock value and greater than both the prior `lastActivity` and persisted `lastReadAt`. Genuine work therefore becomes unread even when read and activity events share a millisecond. Restore-only traffic preserves both timestamps; routine activity writes remain debounced. Notification policy remains separate, so team-member suppression and human-attention rules are unchanged.
+
+Core coverage exercises rejected direct prompts and steers, positive/negative acknowledgement races, exact keyed and keyless echoes, queue redrains, bridge replacement, bounded overflow, terminal settlement, and same-millisecond monotonicity. The restart journey marks sessions read, performs a graceful gateway restart, verifies exact persisted timestamps and indicators, then proves genuine new work becomes unread.
 
 ### Client must not mutate `lastActivity`
 
@@ -1402,17 +1398,19 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 
 | File | Role |
 |---|---|
-| `src/server/agent/session-store.ts` | `PersistedSession.lastReadAt` field + `UpdatableSessionFields` entry |
-| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `isUserVisibleActivity()` filter applied at `restoreSession`, role-restart, and abort-restart event listeners |
-| `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
+| `src/server/agent/session-store.ts` | Timestamp persistence, debounced activity writes, and `flushAsync()` durability barrier |
+| `src/server/agent/session-activity.ts` | Prompt transaction, restore quarantine, generic event classifier, and monotonic activity writer |
+| `src/server/agent/session-manager.ts` | Terminal user-event correlation, author-sidecar hydration, restore/restart wiring, durable `markSessionRead()`, and `lastReadAt` in session summaries |
+| `src/server/agent/session-setup.ts` | Fresh/continue/fork subscription wiring through the shared attributor |
+| `src/server/server.ts` | Awaited `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
 | `src/app/notification-policy.ts` | Shared notification predicates for unread state and one-shot idle-transition beeps |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
-| `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
-| `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
-| `tests/session-restore-last-activity.test.ts` | `isUserVisibleActivity` filter at all three restore sites; concurrent-restore non-clustering |
-| `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
+| `tests2/core/session-restore-last-activity.test.ts` | Restore quarantine, rejected and raced dispatches, monotonic timestamps, and mark-read durability |
+| `tests2/core/message-author-dispatch.test.ts` | Exact echo attribution, bounded digest fences, overflow, and terminal settlement |
+| `tests2/core/session-manager-direct-prompt-lifecycle.test.ts` | Direct/queued/steered acceptance, cancellation, and recovery ownership |
+| `tests2/browser/journeys/session-activity-restart.journey.spec.ts` | Navigation mark-read, graceful restart durability, exact timestamps/indicators, and genuine new activity |
 
 ---
 

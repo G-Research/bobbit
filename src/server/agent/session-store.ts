@@ -709,8 +709,10 @@ export class SessionStore {
 	 * activity debounce and enter the serialized async writer immediately; the
 	 * public `flush()`/`flushAsync()` paths retain shutdown durability.
 	 *
-	 * `lastActivity` / `lastReadAt` are intentionally excluded — they fire on
-	 * every event and benefit from coalescing.
+	 * `lastActivity` is intentionally excluded because genuine activity can be
+	 * high-frequency and benefits from coalescing. `lastReadAt` normally shares
+	 * that path, while the mark-read API explicitly awaits `flushAsync()` before
+	 * acknowledging so a successful read survives graceful restart.
 	 */
 	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",

@@ -133,6 +133,17 @@ import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "..
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
+import {
+	beginSessionPromptActivity,
+	cancelPendingSessionPromptActivity,
+	cancelSessionPromptActivity,
+	commitSessionPromptActivity,
+	installSessionActivityAttribution,
+	recordSessionEventActivity,
+	suppressSessionActivityUntilPrompt,
+	type SessionPromptActivityBoundary,
+} from "./session-activity.js";
+export { isUserVisibleActivity } from "./session-activity.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
 import type { ProjectContext } from "./project-context.js";
@@ -601,30 +612,6 @@ function redactDispatchFailureReason(reason: string, providerAuthFailure: boolea
 }
 
 /**
- * Returns true only for rpc events that represent genuine new user-visible
- * activity (a message, tool call, or end-of-turn). Lifecycle frames the
- * agent CLI emits automatically on resume (agent_start, agent_idle,
- * connection_state, state, session_title, etc.) return false so they don't
- * clobber the persisted `lastActivity` timestamp on restore / role-restart /
- * abort-restart paths.
- *
- * See goal `goal-fix-lastac-724b3421` for the bug this guards against.
- */
-export function isUserVisibleActivity(event: any): boolean {
-	if (!event || typeof event.type !== "string") return false;
-	switch (event.type) {
-		case "message_update":
-		case "message_end":
-		case "tool_execution_start":
-		case "tool_execution_end":
-		case "agent_end":
-			return true;
-		default:
-			return false;
-	}
-}
-
-/**
  * Build a user-visible system-prefix explaining that the previous turn
  * errored. Injected in front of the user's new text when SessionManager
  * implicitly unsticks a wedged session — orients the model to recover and
@@ -652,7 +639,10 @@ function isBlankContentBlockError(errMsg: string | undefined): boolean {
 export type { InFlightSteerRecord } from "./session-store.js";
 
 export interface PendingPromptAuthorRecord {
+	/** Durable sidecar/queue correlation id; retries may reuse it. */
 	promptId: string;
+	/** Explicit in-memory attempt identity. Restored records reuse their unique sidecar id. */
+	attemptId?: string;
 	dispatchedAt: number;
 	/** Exact Pi text exists only for current-process dispatches. Restored v2 rows use the digest. */
 	modelText?: string;
@@ -665,8 +655,12 @@ export interface PendingPromptAuthorRecord {
 
 interface LivePromptAuthorMessageBinding {
 	promptId: string;
+	/** Current-process attempt identity; restored bindings reuse their sidecar id. */
+	attemptId?: string;
 	author: MessageAuthor;
 	settled: boolean;
+	/** This digest-only binding survives the transient restore cursor because its keyless occurrence may replay late. */
+	ambiguityFence?: true;
 	/** Exact Pi text is retained only in memory for live occurrence matching. */
 	modelText?: string;
 	modelTextDigest?: string;
@@ -674,6 +668,23 @@ interface LivePromptAuthorMessageBinding {
 }
 
 type ReplayPromptAuthorBinding = LivePromptAuthorMessageBinding;
+
+export interface PromptAuthorTombstoneBudget {
+	maxCount: number;
+	maxBytes: number;
+}
+
+export interface PromptAuthorAmbiguityFences {
+	bindings: ReplayPromptAuthorBinding[];
+	residentBytes: number;
+	/** Once correlation history is dropped, raw/keyless pre-ack echoes fail closed. */
+	overflowed: boolean;
+}
+
+export const DEFAULT_PROMPT_AUTHOR_TOMBSTONE_BUDGET: Readonly<PromptAuthorTombstoneBudget> = {
+	maxCount: 256,
+	maxBytes: 64 * 1024,
+};
 
 export type ModelSelectionRequiredCondition = Readonly<{
 	code: "MODEL_SELECTION_REQUIRED";
@@ -902,9 +913,8 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
-	/** Monotonic counter bumped only by inbound agent events that prove the
-	 * agent observed/advanced a turn. Local status changes such as aborting do
-	 * not affect it, so prompt-dispatch recovery can distinguish those cases. */
+	/** Monotonic diagnostic count of inbound events that advance a canonical Pi
+	 * turn. Dispatch acceptance uses exact prompt activity boundaries instead. */
 	agentObservedTurnVersion?: number;
 	/** Last user prompt text, for retry on fresh-response errors */
 	lastPromptText?: string;
@@ -923,6 +933,10 @@ export interface SessionInfo {
 	 * replay occurrence is removed only at its terminal frame; its last-terminal
 	 * guard still makes duplicate keyless ends idempotent until the next start. */
 	promptAuthorReplayBindings?: ReplayPromptAuthorBinding[];
+	/** Bounded digest-only history of cancelled and settled-keyless occurrences used to fence late replay. */
+	promptAuthorAmbiguityFences?: PromptAuthorAmbiguityFences;
+	/** Test-only per-session admission budget; production uses the exported default. */
+	promptAuthorTombstoneBudget?: PromptAuthorTombstoneBudget;
 	/** Last keyless terminal occurrence within one live lifecycle boundary. */
 	lastKeylessPromptAuthorEnd?: ReplayPromptAuthorBinding;
 	/** Pending grant request from the guard extension's long-poll */
@@ -1115,6 +1129,9 @@ function resolveAcceptedPromptAuthor(source: PromptSource, explicit?: MessageAut
 }
 
 export interface PreparedPromptAuthorDispatch {
+	/** Unique identity for this one Pi RPC; never a durable queue-row id. */
+	attemptId: string;
+	/** Durable sidecar/queue correlation id, intentionally separate from attemptId. */
 	promptId: string;
 	/** Exact text for this one Pi RPC. Durable queues and recovery state keep the base text. */
 	piText: string;
@@ -1151,8 +1168,10 @@ export function preparePromptAuthorDispatch(
 	const piText = sidecarPersisted ? desiredPiText : baseModelText;
 	const modelPrefix = sidecarPersisted ? desiredPrefix : undefined;
 	const modelTextDigest = digestPromptModelText(piText);
+	const attemptId = promptAttemptId("attempt");
 	const pending: PendingPromptAuthorRecord = {
 		promptId,
+		attemptId,
 		dispatchedAt: now,
 		modelText: piText,
 		...(modelTextDigest === undefined ? {} : { modelTextDigest }),
@@ -1170,6 +1189,7 @@ export function preparePromptAuthorDispatch(
 	// terminal guard. Restore replay guards remain authoritative until replay ends.
 	session.lastKeylessPromptAuthorEnd = undefined;
 	return {
+		attemptId,
 		promptId,
 		piText,
 		...(modelPrefix === undefined ? {} : { modelPrefix }),
@@ -1178,19 +1198,117 @@ export function preparePromptAuthorDispatch(
 	};
 }
 
-function cancelPromptAuthorBinding(session: SessionInfo, promptId: string, now: number): void {
-	const idx = session.pendingPromptAuthors?.findIndex((record) => record.promptId === promptId) ?? -1;
-	if (idx !== -1) session.pendingPromptAuthors!.splice(idx, 1);
-	for (const envelope of session.pendingSkillExpansions ?? []) {
-		if (envelope.promptId === promptId) envelope.promptId = undefined;
+function promptAuthorAmbiguityFenceOwner(session: SessionInfo): PromptAuthorAmbiguityFences {
+	return session.promptAuthorAmbiguityFences ??= {
+		bindings: [],
+		residentBytes: 0,
+		overflowed: false,
+	};
+}
+
+function promptAuthorAmbiguityFenceBytes(binding: ReplayPromptAuthorBinding): number {
+	return Buffer.byteLength(JSON.stringify(binding), "utf8");
+}
+
+/** Single bounded admission boundary shared by live rejection and sidecar hydration. */
+function retainPromptAuthorAmbiguityFence(
+	session: SessionInfo,
+	pending: Pick<PendingPromptAuthorRecord, "promptId" | "attemptId" | "modelText" | "modelTextDigest" | "modelPrefix" | "author">,
+): void {
+	const owner = promptAuthorAmbiguityFenceOwner(session);
+	const attemptId = pending.attemptId ?? pending.promptId;
+	if (owner.bindings.some((binding) => (binding.attemptId ?? binding.promptId) === attemptId)) return;
+	const modelTextDigest = pending.modelTextDigest
+		?? (pending.modelText === undefined ? undefined : digestPromptModelText(pending.modelText));
+	// Raw prompt bodies are never retained. Without the keyed digest, membership
+	// is unknowable, so future ambiguous pre-ack echoes fail closed.
+	if (!modelTextDigest) {
+		owner.overflowed = true;
+		return;
 	}
+	const binding: ReplayPromptAuthorBinding = {
+		promptId: pending.promptId,
+		attemptId,
+		author: pending.author,
+		settled: true,
+		ambiguityFence: true,
+		modelTextDigest,
+		...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
+	};
+	const bytes = promptAuthorAmbiguityFenceBytes(binding);
+	const budget = session.promptAuthorTombstoneBudget ?? DEFAULT_PROMPT_AUTHOR_TOMBSTONE_BUDGET;
+	if (owner.bindings.length >= budget.maxCount || bytes > budget.maxBytes - owner.residentBytes) {
+		owner.overflowed = true;
+		return;
+	}
+	owner.bindings.push(binding);
+	owner.residentBytes += bytes;
+}
+
+function findPromptAuthorAmbiguityFence(
+	session: SessionInfo,
+	modelText: string,
+): ReplayPromptAuthorBinding | undefined {
+	const digest = digestPromptModelText(modelText);
+	if (!digest) return undefined;
+	return session.promptAuthorAmbiguityFences?.bindings.find(
+		(binding) => binding.modelTextDigest === digest,
+	);
+}
+
+function removePromptAuthorAmbiguityFence(
+	session: SessionInfo,
+	binding: ReplayPromptAuthorBinding,
+): void {
+	const owner = session.promptAuthorAmbiguityFences;
+	if (!owner) return;
+	const index = owner.bindings.findIndex((candidate) =>
+		(candidate.attemptId ?? candidate.promptId) === (binding.attemptId ?? binding.promptId));
+	if (index === -1) return;
+	const [removed] = owner.bindings.splice(index, 1);
+	owner.residentBytes = Math.max(0, owner.residentBytes - promptAuthorAmbiguityFenceBytes(removed));
+}
+
+/** Cancel one exact prepared attempt, or a restored attempt by its unique sidecar id. */
+function cancelPromptAuthorBinding(
+	session: SessionInfo,
+	target: PreparedPromptAuthorDispatch | string,
+	now: number,
+): boolean {
+	const pendingAuthors = session.pendingPromptAuthors;
+	const idx = typeof target === "string"
+		? (() => {
+			for (let candidate = (pendingAuthors?.length ?? 0) - 1; candidate >= 0; candidate--) {
+				if (pendingAuthors![candidate].promptId === target) return candidate;
+			}
+			return -1;
+		})()
+		: (pendingAuthors?.findIndex((candidate) => candidate === target.pending) ?? -1);
+	if (idx === -1) return false;
+
+	const [pending] = pendingAuthors!.splice(idx, 1);
+	const pendingAttemptId = pending.attemptId ?? pending.promptId;
+	for (const [messageKey, binding] of session.promptAuthorMessageBindings ?? []) {
+		if (!binding.settled && (binding.attemptId ?? binding.promptId) === pendingAttemptId) {
+			session.promptAuthorMessageBindings!.delete(messageKey);
+		}
+	}
+	for (const envelope of session.pendingSkillExpansions ?? []) {
+		if (envelope.promptId === pending.promptId) envelope.promptId = undefined;
+	}
+	retainPromptAuthorAmbiguityFence(session, pending);
+	cancelSessionPromptActivity(
+		session,
+		(pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY],
+	);
 	void appendPromptAuthorSettlement(session.id, {
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
-		promptId,
+		promptId: pending.promptId,
 		settledAt: now,
 		outcome: "cancelled",
 	});
+	return true;
 }
 
 export type SystemPromptSource = Exclude<PromptSource, "user" | "agent">;
@@ -1308,10 +1426,10 @@ export async function dispatchTrackedPrompt(
 	const source = opts.source ?? "system";
 	const now = opts.now ?? Date.now;
 	const promptId = `prompt:${randomUUID()}`;
-	const observedBeforeDispatch = session.agentObservedTurnVersion ?? 0;
 	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
 	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now());
+	const activityBoundary = beginPreparedPromptActivity(session, prepared);
 
 	try {
 		const response = opts.whenReady
@@ -1320,13 +1438,17 @@ export async function dispatchTrackedPrompt(
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
+		if (!acceptPreparedPromptDispatch(session, prepared, activityBoundary)) {
+			throw new Error("prompt dispatch was superseded before acknowledgement");
+		}
 		return response;
 	} catch (error) {
-		if ((session.agentObservedTurnVersion ?? 0) !== observedBeforeDispatch) {
-			console.warn(`[session-manager] tracked prompt for ${session.id} reported a failure after the agent observed the turn; treating the dispatch as accepted`);
+		if (activityBoundary?.state === "committed") {
+			console.warn(`[session-manager] tracked prompt for ${session.id} reported a failure after its correlated user echo; treating the dispatch as accepted`);
 			return { success: true };
 		}
-		cancelPromptAuthorBinding(session, promptId, now());
+		cancelSessionPromptActivity(session, activityBoundary);
+		cancelPromptAuthorBinding(session, prepared, now());
 		throw error;
 	}
 }
@@ -1368,6 +1490,10 @@ function authorForSteerRows(rows: QueuedMessage[]): MessageAuthor {
 function batchPromptId(prefix: string, rows: QueuedMessage[]): string {
 	const digest = createHash("sha256").update(rows.map((row) => row.id).join("\0")).digest("hex");
 	return `${prefix}:${digest}`;
+}
+
+function promptAttemptId(prefix: string): string {
+	return `${prefix}:${randomUUID()}`;
 }
 
 /** Helper: extract the exact model text used by author-sidecar correlation. */
@@ -1418,7 +1544,78 @@ function stripVisiblePromptEntryIdProvenance<T>(event: T): T {
 }
 
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
-type PromptAuthorEventBinding = { promptId: string; alreadySettled: boolean };
+const PROMPT_ACTIVITY_BOUNDARY = Symbol("prompt-activity-boundary");
+const PROMPT_AMBIGUOUS_ECHO = Symbol("prompt-ambiguous-echo");
+type PromptAuthorEventBinding = { promptId: string; attemptId?: string; alreadySettled: boolean };
+type BufferedPromptEcho = {
+	messageKey?: string;
+	messageId?: string;
+	messageTimestamp?: number;
+	modelText: string;
+};
+type ActivityBoundPromptAuthorRecord = PendingPromptAuthorRecord & {
+	[PROMPT_ACTIVITY_BOUNDARY]?: SessionPromptActivityBoundary;
+	[PROMPT_AMBIGUOUS_ECHO]?: BufferedPromptEcho;
+};
+
+function beginPreparedPromptActivity(
+	session: SessionInfo,
+	prepared: PreparedPromptAuthorDispatch,
+): SessionPromptActivityBoundary | undefined {
+	const boundary = beginSessionPromptActivity(session, prepared.attemptId);
+	(prepared.pending as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY] = boundary;
+	return boundary;
+}
+
+function acceptPreparedPromptDispatch(
+	session: SessionInfo,
+	prepared: PreparedPromptAuthorDispatch,
+	boundary: SessionPromptActivityBoundary | undefined,
+): boolean {
+	if (!commitSessionPromptActivity(session, boundary)) return false;
+	const pending = prepared.pending as ActivityBoundPromptAuthorRecord;
+	const buffered = pending[PROMPT_AMBIGUOUS_ECHO];
+	if (!buffered) return true;
+	delete pending[PROMPT_AMBIGUOUS_ECHO];
+	const pendingIndex = session.pendingPromptAuthors?.findIndex((record) => record === pending) ?? -1;
+	if (pendingIndex === -1) return true;
+	session.pendingPromptAuthors!.splice(pendingIndex, 1);
+	const settledBinding: LivePromptAuthorMessageBinding = {
+		promptId: pending.promptId,
+		attemptId: pending.attemptId,
+		author: pending.author,
+		settled: true,
+		modelText: buffered.modelText,
+		...(pending.modelTextDigest === undefined ? {} : { modelTextDigest: pending.modelTextDigest }),
+		...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
+	};
+	if (buffered.messageKey) {
+		if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
+		session.promptAuthorMessageBindings.set(buffered.messageKey, settledBinding);
+	} else {
+		session.lastKeylessPromptAuthorEnd = settledBinding;
+	}
+	void appendPromptAuthorSettlement(session.id, {
+		schemaVersion: 2,
+		type: "prompt-author-settlement",
+		promptId: pending.promptId,
+		settledAt: sessionManagerModuleClock.now(),
+		outcome: "echoed",
+		...(buffered.messageId ? { messageId: buffered.messageId } : {}),
+		...(buffered.messageTimestamp === undefined ? {} : { messageTimestamp: buffered.messageTimestamp }),
+	});
+	return true;
+}
+
+function commitCorrelatedPromptActivity(
+	session: SessionInfo,
+	pending: PendingPromptAuthorRecord | undefined,
+): boolean {
+	return commitSessionPromptActivity(
+		session,
+		(pending as ActivityBoundPromptAuthorRecord | undefined)?.[PROMPT_ACTIVITY_BOUNDARY],
+	);
+}
 
 /** Rebuild live correlation state before switch_session replays transcript events. */
 export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
@@ -1426,6 +1623,7 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		.filter((entry) => entry.settlement === undefined)
 		.map(({ promptId, dispatchedAt, modelText, modelTextDigest, modelPrefix, source, author }) => ({
 			promptId,
+			attemptId: promptId,
 			dispatchedAt,
 			...(modelText === undefined ? {} : { modelText }),
 			...(modelTextDigest === undefined ? {} : { modelTextDigest }),
@@ -1438,6 +1636,7 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		if (entry.settlement?.outcome !== "echoed") continue;
 		const binding: LivePromptAuthorMessageBinding = {
 			promptId: entry.promptId,
+			attemptId: entry.promptId,
 			author: entry.author,
 			settled: true,
 			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
@@ -1456,12 +1655,58 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		.filter((entry) => entry.settlement?.outcome !== "cancelled")
 		.map((entry) => ({
 			promptId: entry.promptId,
+			attemptId: entry.promptId,
 			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
 			...(entry.modelTextDigest === undefined ? {} : { modelTextDigest: entry.modelTextDigest }),
 			...(entry.modelPrefix === undefined ? {} : { modelPrefix: entry.modelPrefix }),
 			author: entry.author,
 			settled: entry.settlement?.outcome === "echoed",
 		}));
+	const previousFences = session.promptAuthorAmbiguityFences;
+	session.promptAuthorAmbiguityFences = {
+		bindings: [],
+		residentBytes: 0,
+		// Missing, wholly corrupt, future-version, legacy, and genuinely empty
+		// sidecars all arrive through the compatibility reader as zero rows. A
+		// restored generation with no bindings must therefore be treated like dropped
+		// ambiguity history: raw-text equality is not proof that a late replay belongs
+		// to a current dispatch. Positive RPC acknowledgement remains authoritative.
+		// The reader exposes no completeness metadata when at least one row survives a
+		// partial file, so that existing non-empty compatibility path is unchanged.
+		// This sticky bounded owner carries the zero-row trust decision across in-place
+		// role/abort replacements without retaining raw text.
+		overflowed: entries.length === 0 || previousFences?.overflowed === true,
+	};
+	// Preserve bounded live-process fences across bridge replacement. Dropping
+	// them here would reopen ABA when a late old-bridge echo follows hydration.
+	for (const binding of previousFences?.bindings ?? []) {
+		retainPromptAuthorAmbiguityFence(session, {
+			promptId: binding.promptId,
+			attemptId: binding.attemptId,
+			modelText: binding.modelText,
+			modelTextDigest: binding.modelTextDigest,
+			modelPrefix: binding.modelPrefix,
+			author: binding.author,
+		});
+	}
+	for (const entry of entries) {
+		const cancelled = entry.settlement?.outcome === "cancelled";
+		const settledKeyless = entry.settlement?.outcome === "echoed"
+			&& !entry.settlement.messageId
+			&& entry.settlement.messageTimestamp === undefined;
+		if (!cancelled && !settledKeyless) continue;
+		// The transient replay cursor is cleared as soon as switch_session responds,
+		// but Pi may emit a historical keyless occurrence later. Keep only its digest
+		// in the same bounded, sticky-fail-closed owner as cancelled attempts.
+		retainPromptAuthorAmbiguityFence(session, {
+			promptId: entry.promptId,
+			attemptId: entry.promptId,
+			modelText: entry.modelText,
+			modelTextDigest: entry.modelTextDigest,
+			modelPrefix: entry.modelPrefix,
+			author: entry.author,
+		});
+	}
 	session.lastKeylessPromptAuthorEnd = undefined;
 
 	// Settlement may have reached the durable sidecar just before a gateway
@@ -1550,22 +1795,72 @@ export function prepareVisibleAgentEvent(
 			promptAuthorBindingMatchesText(binding, modelText),
 		);
 	}
-	let pendingIndex = stableBinding && !stableBinding.settled
-		? (session.pendingPromptAuthors?.findIndex((record) => record.promptId === stableBinding!.promptId) ?? -1)
+	const reservedAttemptIds = new Set(
+		[...(session.promptAuthorMessageBindings?.values() ?? [])]
+			.filter((binding) => !binding.settled)
+			.map((binding) => binding.attemptId ?? binding.promptId),
+	);
+	let pendingIndex = !stableBinding && userRole && modelText
+		? (session.pendingPromptAuthors?.findIndex((record) =>
+			promptAuthorBindingMatchesText(record, modelText)
+				&& !reservedAttemptIds.has(record.attemptId ?? record.promptId)
+				&& (record as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY]?.state === "committed"
+		) ?? -1)
 		: -1;
-	if (!stableBinding && userRole && modelText && session.pendingPromptAuthors?.length) {
-		const reservedPromptIds = new Set(
-			[...(session.promptAuthorMessageBindings?.values() ?? [])]
-				.filter((binding) => !binding.settled)
-				.map((binding) => binding.promptId),
-		);
+	if (pendingIndex !== -1 && messageKey) {
+		const pending = session.pendingPromptAuthors![pendingIndex];
+		stableBinding = {
+			promptId: pending.promptId,
+			attemptId: pending.attemptId,
+			author: pending.author,
+			settled: false,
+			...(pending.modelText === undefined ? {} : { modelText: pending.modelText }),
+			...(pending.modelTextDigest === undefined ? {} : { modelTextDigest: pending.modelTextDigest }),
+			...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
+		};
+	}
+	let bufferedPending: ActivityBoundPromptAuthorRecord | undefined;
+	if (!stableBinding && pendingIndex === -1 && userRole && modelText) {
+		// A cancelled/restored predecessor may still arrive after switch_session's
+		// response. Pi does not echo a Bobbit nonce, so equal raw text is ambiguous
+		// until the current RPC is positively acknowledged. Before that boundary,
+		// bind the historical occurrence first rather than settling a newer attempt.
+		stableBinding = findPromptAuthorAmbiguityFence(session, modelText);
+		if (raw.type === "message_end" && (stableBinding
+			|| session.promptAuthorAmbiguityFences?.overflowed)) {
+			// Overflow means a matching predecessor may have been dropped. Preserve
+			// the current projection for a positive ack, but never let this raw-text
+			// echo commit activity or consume recovery intent before that ack.
+			bufferedPending = session.pendingPromptAuthors?.find((record) =>
+				promptAuthorBindingMatchesText(record, modelText)
+					&& !reservedAttemptIds.has(record.attemptId ?? record.promptId),
+			) as ActivityBoundPromptAuthorRecord | undefined;
+		}
+	}
+	if (stableBinding && messageKey && !session.promptAuthorMessageBindings?.has(messageKey)) {
+		if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
+		session.promptAuthorMessageBindings.set(messageKey, stableBinding);
+	}
+	if (stableBinding && !stableBinding.settled) {
+		pendingIndex = session.pendingPromptAuthors?.findIndex((record) =>
+			(record.attemptId ?? record.promptId) === (stableBinding!.attemptId ?? stableBinding!.promptId)
+		) ?? -1;
+	}
+	// Once tombstone history has overflowed, an uncorrelated raw-text frame may
+	// belong to a dropped predecessor. Positive RPC acknowledgement remains the
+	// only safe pre-ack boundary for both streaming updates and terminal echoes.
+	if (!stableBinding && !bufferedPending && pendingIndex === -1 && userRole && modelText
+		&& !session.promptAuthorAmbiguityFences?.overflowed
+		&& session.pendingPromptAuthors?.length) {
 		pendingIndex = session.pendingPromptAuthors.findIndex((record) =>
-			promptAuthorBindingMatchesText(record, modelText) && !reservedPromptIds.has(record.promptId),
+			promptAuthorBindingMatchesText(record, modelText)
+				&& !reservedAttemptIds.has(record.attemptId ?? record.promptId),
 		);
 		if (pendingIndex !== -1 && messageKey) {
 			const pending = session.pendingPromptAuthors[pendingIndex];
 			stableBinding = {
 				promptId: pending.promptId,
+				attemptId: pending.attemptId,
 				author: pending.author,
 				settled: false,
 				...(pending.modelText === undefined ? {} : { modelText: pending.modelText }),
@@ -1576,9 +1871,28 @@ export function prepareVisibleAgentEvent(
 			session.promptAuthorMessageBindings.set(messageKey, stableBinding);
 		}
 	}
+	if (!bufferedPending && raw.type === "message_end" && stableBinding?.ambiguityFence) {
+		// A preceding keyed message_update may already have promoted the historical
+		// digest fence to an exact message binding. Its terminal frame is still an
+		// ambiguous projection for a same-text current attempt until the RPC ack.
+		bufferedPending = session.pendingPromptAuthors?.find((record) =>
+			promptAuthorBindingMatchesText(record, modelText)
+				&& (record as ActivityBoundPromptAuthorRecord)[PROMPT_ACTIVITY_BOUNDARY]?.state === "pending",
+		) as ActivityBoundPromptAuthorRecord | undefined;
+	}
 
-	const selectedPromptBinding = stableBinding
-		?? (pendingIndex === -1 ? undefined : session.pendingPromptAuthors![pendingIndex]);
+	const selectedPending = pendingIndex === -1 ? undefined : session.pendingPromptAuthors![pendingIndex];
+	// A tombstone remains authoritative for acceptance until the RPC responds,
+	// while the exact current retry supplies the projection that a positive
+	// acknowledgement will finalize. This keeps rejected activity quarantined
+	// without leaking a predecessor's author into an accepted redriven echo.
+	const selectedPromptBinding = bufferedPending ?? stableBinding ?? selectedPending;
+	// Streaming user updates establish correlation and projection only. The exact
+	// terminal occurrence (or a positive RPC acknowledgement) is the acceptance
+	// boundary; an update followed by a rejected RPC must remain cancellable.
+	if (userRole && raw.type === "message_end" && selectedPending) {
+		commitCorrelatedPromptActivity(session, selectedPending);
+	}
 	const sessionAuthor = agentAuthorForSession(session, agentDeps);
 	if (selectedPromptBinding) {
 		author = selectedPromptBinding.author;
@@ -1602,20 +1916,41 @@ export function prepareVisibleAgentEvent(
 		promptAuthor: author,
 	});
 	const prepared = stripVisiblePromptEntryIdProvenance(normalized);
-	if (raw.type === "message_end" && stableBinding && session.promptAuthorReplayBindings) {
-		const replayIndex = session.promptAuthorReplayBindings.findIndex(
-			(binding) => binding.promptId === stableBinding!.promptId,
-		);
-		if (replayIndex !== -1) session.promptAuthorReplayBindings.splice(replayIndex, 1);
+	if (bufferedPending) {
+		const messageId = promptAuthorMessageId(message, raw);
+		bufferedPending[PROMPT_AMBIGUOUS_ECHO] = {
+			...(messageKey ? { messageKey } : {}),
+			...(messageId ? { messageId } : {}),
+			...(typeof message.timestamp === "number" ? { messageTimestamp: message.timestamp } : {}),
+			modelText,
+		};
+		// Prevent steer-ledger raw-text fallback from consuming current intent. A
+		// positive RPC acknowledgement finalizes this buffered occurrence instead.
+		if (!stableBinding && raw.type === "message_end") {
+			(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
+				promptId: bufferedPending.promptId,
+				attemptId: bufferedPending.attemptId,
+				alreadySettled: true,
+			} satisfies PromptAuthorEventBinding;
+		}
+	}
+	if (raw.type === "message_end" && stableBinding) {
+		const replayIndex = session.promptAuthorReplayBindings?.findIndex(
+			(binding) => (binding.attemptId ?? binding.promptId)
+				=== (stableBinding!.attemptId ?? stableBinding!.promptId),
+		) ?? -1;
+		if (replayIndex !== -1) session.promptAuthorReplayBindings!.splice(replayIndex, 1);
+		removePromptAuthorAmbiguityFence(session, stableBinding);
 	}
 	if (raw.type === "message_end" && stableBinding?.settled) {
 		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
 			promptId: stableBinding.promptId,
+			attemptId: stableBinding.attemptId,
 			alreadySettled: true,
 		} satisfies PromptAuthorEventBinding;
 		if (!messageKey) {
 			const hasConcurrentSameTextPrompt = session.pendingPromptAuthors?.some((record) =>
-				record.promptId !== stableBinding!.promptId
+				(record.attemptId ?? record.promptId) !== (stableBinding!.attemptId ?? stableBinding!.promptId)
 				&& promptAuthorBindingMatchesText(record, modelText),
 			) ?? false;
 			// A live guard protects one otherwise-indistinguishable duplicate. Once
@@ -1633,11 +1968,13 @@ export function prepareVisibleAgentEvent(
 		if (stableBinding) stableBinding.settled = true;
 		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
 			promptId: pending.promptId,
+			attemptId: pending.attemptId,
 			alreadySettled: false,
 		} satisfies PromptAuthorEventBinding;
 		if (!messageKey) {
 			session.lastKeylessPromptAuthorEnd = {
 				promptId: pending.promptId,
+				attemptId: pending.attemptId,
 				// A restored v2 pending row contains only a digest. The raw echo itself
 				// safely supplies memory-only exact text for duplicate terminal guards.
 				modelText,
@@ -2440,6 +2777,9 @@ export class SessionManager {
 	}
 
 	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
+		// Fence pending activity before any old-bridge stop can release a stale RPC
+		// acknowledgement. Object replacement alone cannot invalidate its WeakMap state.
+		cancelPendingSessionPromptActivity(session);
 		this._taskIdCache.delete(session.id);
 		session.lifecycleFenced = true;
 		session.lifecycleGeneration = replacingGeneration - 1;
@@ -3281,6 +3621,7 @@ export class SessionManager {
 			testPreparingDelayMs: this.testPreparingDelayMs,
 			worktreeSetupRuntime: this.worktreeSetupRuntime,
 			remoteGitPolicy: this.remoteGitPolicy,
+			now: () => this.clock.now(),
 			// Hierarchical goal-metadata resolver, bound to THIS project's GoalManager.
 			// The pipeline (tool activation, prompt order, bridge-install) resolves the
 			// effective (inherited) metadata for a session's goal through this single
@@ -5326,8 +5667,38 @@ export class SessionManager {
 		return preparePromptAuthorDispatch(session, promptId, baseModelText, source, author, this.clock.now());
 	}
 
-	private cancelPromptAuthorDispatch(session: SessionInfo, promptId: string): void {
-		cancelPromptAuthorBinding(session, promptId, this.clock.now());
+	private cancelPromptAuthorDispatch(
+		session: SessionInfo,
+		prepared: PreparedPromptAuthorDispatch,
+	): boolean {
+		return cancelPromptAuthorBinding(session, prepared, this.clock.now());
+	}
+
+	private cancelRestoredPromptAuthorDispatch(session: SessionInfo, promptId: string): boolean {
+		if (cancelPromptAuthorBinding(session, promptId, this.clock.now())) return true;
+		// A hard-abort synthetic agent_end can reconcile the durable steer ledger
+		// before replacement hydration has rebuilt pendingPromptAuthors. Settle the
+		// exact unresolved sidecar occurrence now so restore cannot later expose it
+		// as a live attempt or let replay consume a newer same-text retry.
+		const restored = readAuthorSidecar(session.id).find(
+			(binding) => binding.promptId === promptId && binding.settlement === undefined,
+		);
+		if (!restored) return false;
+		retainPromptAuthorAmbiguityFence(session, {
+			promptId: restored.promptId,
+			attemptId: restored.promptId,
+			modelText: restored.modelText,
+			modelTextDigest: restored.modelTextDigest,
+			modelPrefix: restored.modelPrefix,
+			author: restored.author,
+		});
+		return appendPromptAuthorSettlement(session.id, {
+			schemaVersion: 2,
+			type: "prompt-author-settlement",
+			promptId: restored.promptId,
+			settledAt: this.clock.now(),
+			outcome: "cancelled",
+		});
 	}
 
 	/**
@@ -5367,20 +5738,37 @@ export class SessionManager {
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, batchText, source, author);
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
+		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		try {
 			const steerResp = await session.rpcClient.steer(prepared.piText);
 			if ((steerResp as any)?.success === false) {
 				throw new Error((steerResp as any)?.error || "steer rejected");
 			}
+			if (acceptPreparedPromptDispatch(session, prepared, activityBoundary)
+				&& !session.pendingPromptAuthors?.includes(prepared.pending)) {
+				// A pre-ack ambiguous echo was finalized by the authoritative positive
+				// response. Retire this exact steer ledger row now; its event was
+				// deliberately prevented from consuming intent by raw text alone.
+				const acceptedLedgerIndex = session.inFlightSteerTexts.findIndex(
+					(record) => record.promptId === prepared.promptId,
+				);
+				if (acceptedLedgerIndex !== -1) {
+					session.inFlightSteerTexts.splice(acceptedLedgerIndex, 1);
+					this.persistInFlightSteerLedger(session);
+				}
+			}
 		} catch (err) {
+			if (activityBoundary?.state === "committed") {
+				console.warn(`[session-manager] steer for ${session.id} reported a failure after its correlated user echo; treating the dispatch as accepted`);
+				return;
+			}
 			// Splice this entry from the ledger only if this catch path still owns
 			// it. Abort/restart reconciliation can drain the same ledger while the
 			// steer RPC is pending; in that case the row has already been recovered
 			// exactly once and must not be enqueued again here.
 			const lidx = session.inFlightSteerTexts.findIndex((record) => record.promptId === promptId);
-			if (lidx !== -1) {
+			if (lidx !== -1 && this.cancelPromptAuthorDispatch(session, prepared)) {
 				session.inFlightSteerTexts.splice(lidx, 1);
-				this.cancelPromptAuthorDispatch(session, promptId);
 				for (const r of [...rows].reverse()) {
 					session.promptQueue.enqueueAtFront(r.text, {
 						isSteered: true,
@@ -5439,7 +5827,7 @@ export class SessionManager {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		for (const record of [...ledger].reverse()) {
-			this.cancelPromptAuthorDispatch(session, record.promptId);
+			this.cancelRestoredPromptAuthorDispatch(session, record.promptId);
 			session.promptQueue.enqueueAtFront(record.text, {
 				isSteered: true,
 				source: record.source,
@@ -5685,32 +6073,30 @@ export class SessionManager {
 		source: PromptSource = "user",
 		author: MessageAuthor = LOCAL_USER_AUTHOR,
 		durableQueueRowId?: string,
-		promptId = `prompt:${randomUUID()}`,
+		promptId = promptAttemptId("prompt"),
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
-		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
+		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
+		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
+		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const consumeDurableAcceptanceRow = () => {
 			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
 			this.clearRecoveredPromptDispatchOwnership(session, [durableQueueRowId]);
 			this.broadcastQueue(session);
 		};
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
-			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
-			if (observedTurnVersion === dispatchObservedTurnVersion) return false;
+			if (activityBoundary?.state !== "committed") return false;
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
-			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); treating the dispatch as accepted`);
+			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after its correlated user echo; treating the dispatch as accepted`);
 			consumeDurableAcceptanceRow();
 			session.recoverDrainAttempts = 0;
 			return true;
 		};
-
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
-		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		let recovered = false;
 		let cancelled = false;
 		try {
@@ -5723,18 +6109,20 @@ export class SessionManager {
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				if (acceptedBeforeAckFailure(reason)) return;
-				this.cancelPromptAuthorDispatch(session, promptId);
+				if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 				cancelled = true;
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
-			// The RPC accepted the intent; only now consume its durable acceptance row.
+			// The exact RPC attempt accepted the intent. A stale bridge response cannot
+			// consume a row already recovered by replacement reconciliation.
+			if (!acceptPreparedPromptDispatch(session, prepared, activityBoundary)) return;
 			consumeDurableAcceptanceRow();
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
 			if (!recovered && acceptedBeforeAckFailure(reason)) return;
-			if (!cancelled) this.cancelPromptAuthorDispatch(session, promptId);
+			if (!cancelled && !this.cancelPromptAuthorDispatch(session, prepared)) return;
 			if (!recovered) {
 				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
 			}
@@ -5796,7 +6184,6 @@ export class SessionManager {
 
 		// Optimistic status update to prevent double-dispatch race
 		this.markPromptDispatchStreaming(session);
-		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
 		// Snapshot the rows we're about to dispatch so we can re-enqueue them
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
@@ -5819,13 +6206,12 @@ export class SessionManager {
 		}
 
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
-			// Apply this fence before cancellation: the echo may already have settled
-			// the sidecar, and a later cancelled row must never overwrite acceptance.
-			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
-			if (observedTurnVersion === dispatchObservedTurnVersion) return false;
+			// Apply this exact-origin fence before cancellation: an echoed attempt is
+			// accepted even if its RPC acknowledgement subsequently fails.
+			if (activityBoundary?.state !== "committed") return false;
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
-			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after its correlated user echo; not recovering ${dispatchedRowsForRecovery.length} row(s)`);
 			this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 			return true;
 		};
@@ -5842,6 +6228,7 @@ export class SessionManager {
 		};
 
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
+		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const dispatchPromise = session.rpcClient.prompt(prepared.piText, next.images);
 		dispatchPromise
 			.then((resp: any) => {
@@ -5852,11 +6239,12 @@ export class SessionManager {
 				if (resp && resp.success === false) {
 					const reason = resp.error || "unknown";
 					if (acceptedBeforeAckFailure(reason)) return;
-					this.cancelPromptAuthorDispatch(session, promptId);
+					if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 					recoverDispatchedRows(reason);
-				} else {
+				} else if (acceptPreparedPromptDispatch(session, prepared, activityBoundary)) {
 					// Dispatch landed — clear the busy-guard retry budget and any
-					// ownership ledger for the dequeued durable row.
+					// ownership ledger for the dequeued durable row. A cancelled token
+					// identifies a stale bridge acknowledgement and owns no state.
 					this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 					session.recoverDrainAttempts = 0;
 				}
@@ -5864,7 +6252,7 @@ export class SessionManager {
 			.catch((err: any) => {
 				const reason = err?.message || String(err);
 				if (acceptedBeforeAckFailure(reason)) return;
-				this.cancelPromptAuthorDispatch(session, promptId);
+				if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}: ${safeReason}`);
@@ -8091,7 +8479,6 @@ export class SessionManager {
 		// Mark streaming as a second fence for the instant after coordinator release,
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
-		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 		const markAccepted = (): boolean => {
 			if (!this._sessionWriterIsCurrent(session)) return false;
 			session.restoreStartupWasStreaming = false;
@@ -8117,18 +8504,8 @@ export class SessionManager {
 			// rehydrates wasStreaming=true and safely tries again on the next boot.
 			return markAccepted();
 		} catch (err) {
-			// A terminal event proves Pi accepted and completed the continuation even
-			// when the command acknowledgement subsequently rejects or times out. Keep
-			// that completed lifecycle and clear the durable boot marker rather than
-			// scheduling the same continuation again after a later gateway restart.
-			if ((session.agentObservedTurnVersion ?? 0) !== dispatchObservedTurnVersion && markAccepted()) {
-				this._bootRepromptedSessions.delete(session.id);
-				const reason = err instanceof Error ? err.message : String(err);
-				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
-				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
-				console.warn(`[session-manager] Boot continuation for ${session.id} reported ${safeReason} after agent observed the turn; treating the dispatch as accepted`);
-				return true;
-			}
+			// dispatchTrackedSystemPrompt already treats an exact correlated user echo
+			// as acceptance. Unrelated lifecycle/replay cannot accept this attempt.
 			this._bootRepromptedSessions.delete(session.id);
 			if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
 				broadcastStatus(session, "idle");
@@ -8557,11 +8934,17 @@ export class SessionManager {
 		// so replayed update/end frames retain and settle the original identity.
 		const settledSteersPruned = restorePromptAuthorBindings(session, readAuthorSidecar(ps.id));
 
-		// Skip cost tracking during session restore (switch_session replays
-		// all historical message_update events which would double-count costs)
+		// Skip cost tracking and lifecycle effects during switch_session replay.
+		// Activity attribution has a stronger origin fence: it stays suppressed
+		// until Bobbit dispatches a genuine new prompt, so replay frames arriving
+		// after the switch response cannot corrupt the persisted timestamp.
 		let restoring = true;
 
 		const restoreStore = this.getSessionStore(ps.projectId);
+		installSessionActivityAttribution(session, restoreStore, {
+			now: () => this.clock.now(),
+			suppressUntilPrompt: true,
+		});
 		const unsub = rpcClient.onEvent((event: any) => {
 			// During restore, switch_session replays every persisted message as an
 			// rpc event. Bumping lastActivity here would clobber the pre-restart
@@ -8570,10 +8953,7 @@ export class SessionManager {
 			// switch succeeds and this replacement becomes canonical.
 			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
 			if (!restoring) {
-				if (isUserVisibleActivity(preparedEvent)) {
-					session.lastActivity = Date.now();
-					restoreStore.update(ps.id, { lastActivity: session.lastActivity });
-				}
+				recordSessionEventActivity(session, preparedEvent);
 				this.handleAgentLifecycle(session, preparedEvent);
 			} else {
 				// Preserve the narrow replay reconciliation that proves an accepted
@@ -10766,17 +11146,6 @@ export class SessionManager {
 			promptQueue: new PromptQueue(),
 		};
 
-		const unsub = rpcClient.onEvent((event: any) => {
-			session.lastActivity = this.clock.now();
-			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-			this.handleAgentLifecycle(session, preparedEvent);
-			this.emitAgentEvent(session, preparedEvent);
-			this.trackCostFromEvent(session, preparedEvent);
-		});
-		session.unsubscribe = unsub;
-
-		this.sessions.set(id, session);
-
 		// Resolve project from goal (if provided) or from opts.projectId — which the
 		// REST handler must have resolved via resolveProjectForRequest. No fallback.
 		let extProjectId = opts.goalId
@@ -10804,6 +11173,16 @@ export class SessionManager {
 			nonInteractive: true,
 			projectId: extProjectId,
 		});
+		installSessionActivityAttribution(session, extStore, { now: () => this.clock.now() });
+		const unsub = rpcClient.onEvent((event: any) => {
+			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
+			recordSessionEventActivity(session, preparedEvent);
+			this.handleAgentLifecycle(session, preparedEvent);
+			this.emitAgentEvent(session, preparedEvent);
+			this.trackCostFromEvent(session, preparedEvent);
+		});
+		session.unsubscribe = unsub;
+		this.sessions.set(id, session);
 
 		// Then update with agentSessionFile (tracked for terminate)
 		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
@@ -10947,11 +11326,16 @@ export class SessionManager {
 		return [...ids];
 	}
 
-	/** Record that the user viewed this session. Updates lastReadAt only — never lastActivity. */
-	markSessionRead(id: string): boolean {
+	/**
+	 * Record that the user viewed this session. The acknowledgement is a
+	 * durability barrier for this mutation only; routine activity remains
+	 * debounced and asynchronous.
+	 */
+	async markSessionRead(id: string): Promise<boolean> {
 		const store = this.resolveStoreForId(id);
 		if (!store?.get(id)) return false;
 		store.update(id, { lastReadAt: this.clock.now() });
+		await store.flushAsync();
 		return true;
 	}
 
@@ -11316,10 +11700,7 @@ export class SessionManager {
 			// failed assignment is process-locally invisible as well as metadata-safe.
 			if (!replacementCommitted) return;
 			const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-			if (isUserVisibleActivity(preparedEvent)) {
-				session.lastActivity = this.clock.now();
-				roleStore.update(id, { lastActivity: session.lastActivity });
-			}
+			recordSessionEventActivity(session, preparedEvent);
 			this.handleAgentLifecycle(session, preparedEvent);
 			this.emitAgentEvent(session, preparedEvent);
 			this.trackCostFromEvent(session, preparedEvent);
@@ -11377,6 +11758,10 @@ export class SessionManager {
 			// Persist the metadata before the irreversible old-process stop. If the
 			// stop rejects, restore the prior durable values and retain its listener.
 			roleStore.update(id, { role: role.name, accessory: role.accessory });
+			// The old SessionInfo remains canonical through the stop await. Cancel its
+			// pending activity transactions first so stop-triggered late RPC success
+			// cannot write activity or open the replacement's restore quarantine.
+			cancelPendingSessionPromptActivity(session);
 			try {
 				await oldRpcClient.stop();
 				oldBridgeStopped = true;
@@ -11429,6 +11814,9 @@ export class SessionManager {
 			);
 			this._writeModelNameFile(id, `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`);
 		}
+		// The replacement may still flush replay frames after switch_session's
+		// response. Keep them quarantined until the next explicit prompt dispatch.
+		suppressSessionActivityUntilPrompt(session);
 		replacementCommitted = true;
 
 		// assignRole owns the status fence until every concurrently queued role
@@ -13633,7 +14021,10 @@ export class SessionManager {
 			}
 		} catch { /* retain the durable transcript path */ }
 
-		// Kill the process
+		// Kill the process. Force-abort reuses this SessionInfo for the replacement,
+		// so cancel old-bridge activity transactions before stop can resolve a stale
+		// prompt acknowledgement against the still-canonical object.
+		cancelPendingSessionPromptActivity(session);
 		session.unsubscribe();
 		await session.rpcClient.stop();
 
@@ -13792,7 +14183,6 @@ export class SessionManager {
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
 			let replayingSession = false;
-			const abortStore = this.resolveStoreForSession(id);
 			const unsub = rpcClient.onEvent((event: any) => {
 				// Keep staged startup/replay invisible. During replay, prepare only for
 				// occurrence-aware steer reconciliation; skip all normal event side effects.
@@ -13804,10 +14194,7 @@ export class SessionManager {
 					return;
 				}
 				const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-				if (isUserVisibleActivity(preparedEvent)) {
-					session.lastActivity = this.clock.now();
-					abortStore.update(id, { lastActivity: session.lastActivity });
-				}
+				recordSessionEventActivity(session, preparedEvent);
 				this.handleAgentLifecycle(session, preparedEvent);
 				this.emitAgentEvent(session, preparedEvent);
 				this.trackCostFromEvent(session, preparedEvent);
@@ -13852,6 +14239,8 @@ export class SessionManager {
 				await rpcClient.stop().catch(() => {});
 				throw err;
 			}
+			// Preserve the pre-abort activity timestamp across any late replay.
+			suppressSessionActivityUntilPrompt(session);
 			switchingSession = false;
 
 			// Requeue only steers that the bounded replay did not prove durable.
