@@ -11,4 +11,4 @@ contents:
     - file-explorer-slash
 routes:
   module: lib/explorer-routes.mjs
-  names: [list, read, diff]
+  names: [list, resolve, search, read, diff]

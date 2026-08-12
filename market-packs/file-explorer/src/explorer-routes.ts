@@ -17,7 +17,16 @@ import {
 	parsePorcelainStatus,
 	parseStagedNameStatus,
 	READ_BYTE_LIMIT,
+	SEARCH_CONCURRENCY_LIMIT,
+	SEARCH_DEPTH_LIMIT,
+	SEARCH_DIRECTORY_LIMIT,
+	SEARCH_ENTRY_LIMIT,
+	SEARCH_QUERY_LIMIT,
+	SEARCH_RESULT_LIMIT,
+	SEARCH_TIMEOUT_MS,
 	sortExplorerEntries,
+	sortExplorerPaths,
+	stableLowercase,
 	STATUS_BYTE_LIMIT,
 	STATUS_RECORD_LIMIT,
 	synthesizeAddedDiff,
@@ -30,11 +39,13 @@ import {
 
 export type ExplorerErrorCode =
 	| "INVALID_PATH"
+	| "INVALID_QUERY"
 	| "NOT_FOUND"
 	| "NOT_DIRECTORY"
 	| "NOT_FILE"
 	| "UNSUPPORTED_FILE"
 	| "READ_FAILED"
+	| "SEARCH_FAILED"
 	| "FS_TIMEOUT"
 	| "GIT_TIMEOUT"
 	| "GIT_FAILED";
@@ -53,6 +64,23 @@ export interface ListValue {
 	entries: ExplorerEntry[];
 	truncated: boolean;
 	status?: GitSnapshot;
+}
+
+export interface ResolveValue {
+	path: string;
+	kind: "root" | ExplorerEntryKind;
+	chain: ExplorerEntry[];
+}
+
+export type SearchTruncationReason = "result-cap" | "entry-cap" | "directory-cap" | "depth-cap";
+
+export interface SearchValue {
+	query: string;
+	results: ExplorerEntry[];
+	count: number;
+	limit: number;
+	truncated: boolean;
+	truncationReason?: SearchTruncationReason;
 }
 
 export type ReadValue = FileContent & { path: string; limit: number };
@@ -112,6 +140,7 @@ export interface ExplorerDependencies {
 	fs: ExplorerFsAdapter;
 	git: ExplorerGitRunner;
 	fsTimeoutMs: number;
+	searchTimeoutMs: number;
 	gitTimeoutMs: number;
 }
 
@@ -279,6 +308,24 @@ function fsFailure<T>(error: unknown, operation: "list" | "read"): RouteResult<T
 	return failure("READ_FAILED", operation === "list" ? "The directory could not be read." : "The file could not be read.", code === "EBUSY" || code === "EMFILE" || code === "ENFILE");
 }
 
+function resolveFailure<T>(error: unknown): RouteResult<T> {
+	if (errno(error) === "ENOTDIR") return failure("NOT_DIRECTORY", "A parent path is not a directory.");
+	return fsFailure(error, "read");
+}
+
+class ExplorerSearchQueryError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ExplorerSearchQueryError";
+	}
+}
+
+function searchFailure<T>(error: unknown): RouteResult<T> {
+	if (error instanceof ExplorerSearchQueryError) return failure("INVALID_QUERY", error.message);
+	if (error instanceof FsDeadlineError) return failure("FS_TIMEOUT", "The search operation timed out.", true);
+	return failure("SEARCH_FAILED", "Session files could not be searched.", true);
+}
+
 function entryKind(entry: DirectoryEntryLike): ExplorerEntryKind {
 	if (entry.isDirectory()) return "directory";
 	if (entry.isFile()) return "file";
@@ -336,6 +383,140 @@ async function listDirectory(cwd: string, relativePath: string, deps: ExplorerDe
 	} finally {
 		if (closeHandle) await deadline.call(closeHandle());
 	}
+}
+
+function statKind(stat: StatLike): ExplorerEntryKind {
+	if (stat.isDirectory()) return "directory";
+	if (stat.isFile()) return "file";
+	if (stat.isSymbolicLink()) return "symlink";
+	return "other";
+}
+
+async function resolvePath(cwd: string, relativePath: string, deps: ExplorerDependencies): Promise<ResolveValue> {
+	if (relativePath === "") return { path: "", kind: "root", chain: [] };
+	const deadline = new FsDeadline(deps.fsTimeoutMs);
+	const segments = relativePath.split("/");
+	const chain: ExplorerEntry[] = [];
+	for (let index = 0; index < segments.length; index++) {
+		const entryPath = segments.slice(0, index + 1).join("/");
+		const kind = statKind(await deadline.call(deps.fs.lstat(absolutePath(cwd, entryPath))));
+		chain.push({ path: entryPath, name: segments[index], kind });
+		if (index < segments.length - 1 && kind !== "directory") {
+			throw Object.assign(new Error("parent path is not a directory"), { code: "ENOTDIR" });
+		}
+	}
+	return { path: relativePath, kind: chain.at(-1)!.kind, chain };
+}
+
+interface PendingSearchDirectory {
+	path: string;
+	depth: number;
+}
+
+interface SearchTraversalState {
+	inspectedEntries: number;
+	matches: ExplorerEntry[];
+	stop: boolean;
+	truncationReason?: SearchTruncationReason;
+}
+
+function markSearchTruncated(state: SearchTraversalState, reason: SearchTruncationReason): void {
+	state.truncationReason ??= reason;
+}
+
+async function scanSearchDirectory(
+	cwd: string,
+	directory: PendingSearchDirectory,
+	foldedQuery: string,
+	deadline: FsDeadline,
+	deps: ExplorerDependencies,
+	state: SearchTraversalState,
+): Promise<PendingSearchDirectory[]> {
+	let handle: DirectoryHandleLike | undefined;
+	let closeHandle: (() => Promise<void>) | undefined;
+	const children: PendingSearchDirectory[] = [];
+	try {
+		handle = await deadline.call(deps.fs.opendir(absolutePath(cwd, directory.path)), (late) => { void closeLate(late); });
+		closeHandle = makeHandleCloser(handle);
+		while (!state.stop) {
+			if (state.inspectedEntries >= SEARCH_ENTRY_LIMIT) {
+				markSearchTruncated(state, "entry-cap");
+				state.stop = true;
+				break;
+			}
+			// Reserve the shared inspection slot before starting an asynchronous read;
+			// concurrent workers can therefore never exceed the global entry budget.
+			state.inspectedEntries++;
+			const rawEntry = await deadline.call(handle.read(), () => { void closeHandle?.().catch(() => undefined); });
+			if (!rawEntry) {
+				state.inspectedEntries--;
+				break;
+			}
+			if (isGitMetadataSegment(rawEntry.name)) continue;
+			let entryPath: string;
+			try { entryPath = joinRelativePath(directory.path, rawEntry.name); }
+			catch { continue; }
+			const kind = entryKind(rawEntry);
+			const explorerEntry: ExplorerEntry = { path: entryPath, name: rawEntry.name, kind };
+			if (stableLowercase(entryPath).includes(foldedQuery)) {
+				state.matches.push(explorerEntry);
+				if (state.matches.length > SEARCH_RESULT_LIMIT) {
+					markSearchTruncated(state, "result-cap");
+					state.stop = true;
+				}
+			}
+			if (kind === "directory") {
+				const childDepth = directory.depth + 1;
+				if (childDepth >= SEARCH_DEPTH_LIMIT) markSearchTruncated(state, "depth-cap");
+				else children.push({ path: entryPath, depth: childDepth });
+			}
+		}
+		return children;
+	} finally {
+		if (closeHandle) await deadline.call(closeHandle());
+	}
+}
+
+async function searchFiles(cwd: string, query: string, deps: ExplorerDependencies): Promise<SearchValue> {
+	const foldedQuery = stableLowercase(query);
+	const deadline = new FsDeadline(deps.searchTimeoutMs);
+	const state: SearchTraversalState = { inspectedEntries: 0, matches: [], stop: false };
+	const queue: PendingSearchDirectory[] = [{ path: "", depth: 0 }];
+	let cursor = 0;
+	let claimedDirectories = 1;
+	while (cursor < queue.length && !state.stop) {
+		const depth = queue[cursor].depth;
+		const batch: PendingSearchDirectory[] = [];
+		while (cursor < queue.length && queue[cursor].depth === depth && batch.length < SEARCH_CONCURRENCY_LIMIT) {
+			batch.push(queue[cursor++]);
+		}
+		const settled = await Promise.allSettled(batch.map((directory) =>
+			scanSearchDirectory(cwd, directory, foldedQuery, deadline, deps, state),
+		));
+		const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (rejected) throw rejected.reason;
+		if (state.stop) break;
+		for (const result of settled) {
+			if (result.status !== "fulfilled") continue;
+			for (const child of result.value) {
+				if (claimedDirectories >= SEARCH_DIRECTORY_LIMIT) {
+					markSearchTruncated(state, "directory-cap");
+					continue;
+				}
+				claimedDirectories++;
+				queue.push(child);
+			}
+		}
+	}
+	const results = sortExplorerPaths(state.matches).slice(0, SEARCH_RESULT_LIMIT);
+	return {
+		query,
+		results,
+		count: results.length,
+		limit: SEARCH_RESULT_LIMIT,
+		truncated: state.truncationReason !== undefined,
+		...(state.truncationReason ? { truncationReason: state.truncationReason } : {}),
+	};
 }
 
 function gitFailureSnapshot(result: BoundedGitResult): Extract<GitSnapshot, { kind: "unavailable" }> {
@@ -448,6 +629,7 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 		fs: overrides.fs ?? nodeFsAdapter,
 		git: overrides.git ?? nodeGitRunner,
 		fsTimeoutMs: overrides.fsTimeoutMs ?? FS_TIMEOUT_MS,
+		searchTimeoutMs: overrides.searchTimeoutMs ?? SEARCH_TIMEOUT_MS,
 		gitTimeoutMs: overrides.gitTimeoutMs ?? GIT_TIMEOUT_MS,
 	};
 	return {
@@ -462,6 +644,28 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 				return { ok: true, value: { path: relativePath, ...listed, ...(status ? { status } : {}) } };
 			} catch (error) {
 				return fsFailure(error, "list");
+			}
+		},
+
+		resolve: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<ResolveValue>> => {
+			try {
+				const relativePath = normalizeRoutePath(bodyRecord(req).path, { allowRoot: true });
+				return { ok: true, value: await resolvePath(routeCwd(ctx), relativePath, deps) };
+			} catch (error) {
+				return resolveFailure(error);
+			}
+		},
+
+		search: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<SearchValue>> => {
+			try {
+				const rawQuery = bodyRecord(req).query;
+				if (typeof rawQuery !== "string") throw new ExplorerSearchQueryError("A search query is required.");
+				const query = rawQuery.trim();
+				if (!query || query.includes("\0")) throw new ExplorerSearchQueryError("Enter a non-empty search query.");
+				if (query.length > SEARCH_QUERY_LIMIT) throw new ExplorerSearchQueryError(`Search queries are limited to ${SEARCH_QUERY_LIMIT} characters.`);
+				return { ok: true, value: await searchFiles(routeCwd(ctx), query, deps) };
+			} catch (error) {
+				return searchFailure(error);
 			}
 		},
 
