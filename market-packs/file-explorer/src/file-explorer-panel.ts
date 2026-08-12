@@ -164,6 +164,9 @@ type ExplorerState = {
 	alertFrame?: number;
 	initialized: boolean;
 	initializing: boolean;
+	initializingLifecycle?: number;
+	initializationQueued: boolean;
+	lifecycleGeneration: number;
 	active: boolean;
 	narrow: boolean;
 	narrowPane: "tree" | "preview";
@@ -195,7 +198,7 @@ export default function createFileExplorerPanel() {
 			queueMicrotask(() => {
 				activate(state!);
 				subscribeToStatus(state!);
-				if (host?.capabilities?.callRoute && !state!.initialized && !state!.initializing) void initialize(state!);
+				requestInitialize(state!);
 			});
 			return state.root;
 		},
@@ -276,7 +279,8 @@ function createState(sid: string): ExplorerState {
 		refreshGeneration: 0, selectionGeneration: 0, navigationGeneration: 0,
 		location: { path: "", kind: "root" }, pathEditing: false, pathDraft: "", pathLoading: false,
 		search: { query: "", phase: "idle", results: [], activeIndex: -1, count: 0, truncated: false, generation: 0 },
-		initialized: false, initializing: false, active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
+		initialized: false, initializing: false, initializationQueued: false, lifecycleGeneration: 0,
+		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
 	refreshButton.addEventListener("click", () => void refresh(state!, true));
 	backButton.addEventListener("click", () => showTree(state!, true));
@@ -337,6 +341,8 @@ function activate(state: ExplorerState): void {
 
 function deactivate(state: ExplorerState): void {
 	state.active = false;
+	state.lifecycleGeneration += 1;
+	state.initializationQueued = false;
 	state.refreshGeneration += 1;
 	state.selectionGeneration += 1;
 	invalidateNavigation(state);
@@ -380,19 +386,45 @@ function deactivate(state: ExplorerState): void {
 	state.storeTimer = undefined;
 }
 
+function requestInitialize(state: ExplorerState): void {
+	if (!state.active || state.initialized || !state.host?.capabilities?.callRoute) return;
+	if (state.initializing) {
+		if (state.initializingLifecycle !== state.lifecycleGeneration) state.initializationQueued = true;
+		return;
+	}
+	void initialize(state);
+}
+
 async function initialize(state: ExplorerState): Promise<void> {
+	const lifecycle = state.lifecycleGeneration;
 	state.initializing = true;
+	state.initializingLifecycle = lifecycle;
 	try {
-		await restoreUiState(state);
-		await refresh(state, false);
+		await restoreUiState(state, lifecycle);
+		if (!ownsLifecycle(state, lifecycle)) return;
+		const completed = await refresh(state, false);
+		if (!ownsLifecycle(state, lifecycle)) return;
+		if (!completed) {
+			state.initializationQueued = true;
+			return;
+		}
 		state.initialized = true;
 	} finally {
 		state.initializing = false;
+		state.initializingLifecycle = undefined;
+		if (state.initializationQueued) {
+			state.initializationQueued = false;
+			requestInitialize(state);
+		}
 	}
-	if (state.pendingIdleRefresh) {
+	if (!state.initializing && state.initialized && state.pendingIdleRefresh) {
 		state.pendingIdleRefresh = false;
 		if (state.active) await refresh(state, false);
 	}
+}
+
+function ownsLifecycle(state: ExplorerState, lifecycle: number): boolean {
+	return state.active && state.lifecycleGeneration === lifecycle;
 }
 
 function subscribeToStatus(state: ExplorerState): void {
@@ -414,7 +446,7 @@ function subscribeToStatus(state: ExplorerState): void {
 	}
 }
 
-async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
+async function refresh(state: ExplorerState, announce: boolean): Promise<boolean> {
 	closeContextMenu(state, false);
 	invalidateNavigation(state);
 	const activeQuery = state.search.query;
@@ -442,7 +474,7 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
 			await loadDirectory(state, path, false, generation);
 		});
 	}
-	if (generation !== state.refreshGeneration) return;
+	if (generation !== state.refreshGeneration) return false;
 	pruneState(state);
 	renderTree(state);
 	if (state.selected) await loadSelectedContent(state, state.selected, true);
@@ -452,6 +484,7 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
 	if (activeQuery) scheduleSearch(state, true);
 	if (announce) setLive(state, rootOkay ? "Explorer refreshed." : "Explorer refresh failed.");
 	queueStore(state);
+	return true;
 }
 
 async function loadDirectory(state: ExplorerState, path: string, includeStatus: boolean, generation = state.refreshGeneration): Promise<boolean> {
@@ -1705,14 +1738,16 @@ function pruneState(state: ExplorerState): void {
 	if (!state.focused || !visible.includes(state.focused)) state.focused = nearestFocus(state.focused, visible);
 }
 
-async function restoreUiState(state: ExplorerState): Promise<void> {
+async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<void> {
 	if (!state.host?.capabilities?.store || !state.host.store) return;
+	const store = state.host.store;
 	try {
 		let stored: unknown;
-		if (state.host.store.read) {
-			const result = await state.host.store.read(`ui/${state.sid}`);
+		if (store.read) {
+			const result = await store.read(`ui/${state.sid}`);
 			if (result.state === "present") stored = result.value;
-		} else if (state.host.store.get) stored = await state.host.store.get(`ui/${state.sid}`);
+		} else if (store.get) stored = await store.get(`ui/${state.sid}`);
+		if (!ownsLifecycle(state, lifecycle)) return;
 		const value = recordOf(stored);
 		if (value?.version !== STORE_VERSION) return;
 		for (const candidate of arrayOf(value.expanded)) {
