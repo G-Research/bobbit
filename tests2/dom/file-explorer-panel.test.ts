@@ -102,7 +102,8 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("Read only");
 		expect(root.querySelector('[aria-label="Read-only file contents"]')).not.toBeNull();
 		expect([...root.querySelectorAll(".bb-explorer-line-number")].map((node) => node.textContent)).toEqual(["1", "2"]);
-		expect(root.querySelector("textarea, input, [contenteditable=true]")).toBeNull();
+		expect(root.querySelector("textarea, [contenteditable=true], input[aria-label=\"Relative path\"]")).toBeNull();
+		expect(root.querySelector('input[aria-label="Search files and folders"]')).not.toBeNull();
 		expect(fakeHost.callRoute).toHaveBeenCalledWith("list", expect.objectContaining({ body: { path: "src" } }));
 		expect(fakeHost.callRoute).toHaveBeenCalledWith("read", expect.objectContaining({ body: { path: "src/app.ts" } }));
 	});
@@ -417,6 +418,193 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector<HTMLElement>(".bb-explorer-preview-pane")?.hidden).toBe(true);
 		await tick(200);
 		expect(put).toHaveBeenCalledWith("ui/restored-narrow", expect.objectContaining({ version: 1, expanded: ["src"], selected: "src/restored.txt" }));
+		expect(root.querySelector('[aria-label="Current path"]')).not.toBeNull();
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "transient";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		root.remove();
+		await tick();
+		await tick();
+		const restoredRoot = mount("restored-narrow", fakeHost);
+		await tick();
+		expect(restoredRoot.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')?.value).toBe("");
+		expect(restoredRoot.querySelector('[role="listbox"]')).toBeNull();
+	});
+
+	it("navigates canonical paths with breadcrumbs and cancels invalid path edits without losing selection", async () => {
+		const fakeHost = host({
+			list: () => list([{ path: "keep.txt", name: "keep.txt", kind: "file" }]),
+			resolve: ({ path }) => path === "deep/nested/file.ts"
+				? { path, kind: "file", chain: [
+					{ path: "deep", name: "deep", kind: "directory" },
+					{ path: "deep/nested", name: "nested", kind: "directory" },
+					{ path, name: "file.ts", kind: "file" },
+				] }
+				: path === "deep" ? { path, kind: "directory", chain: [{ path: "deep", name: "deep", kind: "directory" }] }
+					: { path: "", kind: "root", chain: [] },
+			read: ({ path }) => ({ kind: "text", text: String(path) }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("path-navigation", fakeHost);
+		await tick();
+		click(row(root, "keep.txt"));
+		await tick();
+		const selectedBefore = root.querySelector('[aria-selected="true"]')?.getAttribute("data-path");
+
+		const edit = root.querySelector<HTMLButtonElement>('[aria-label="Edit path (Ctrl+L)"]')!;
+		edit.focus();
+		expect(edit.dispatchEvent(new KeyboardEvent("keydown", { key: "l", ctrlKey: true, bubbles: true, cancelable: true }))).toBe(false);
+		await tick();
+		let input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		expect(document.activeElement).toBe(input);
+		input.value = "../outside";
+		input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		key(input, "Enter");
+		await tick();
+		expect(root.textContent).toContain("Enter a canonical path relative to Session files.");
+		expect(root.querySelector('[aria-selected="true"]')?.getAttribute("data-path")).toBe(selectedBefore);
+		input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		key(input, "Escape");
+		await tick();
+		expect(root.querySelector('[aria-label="Relative path"]')).toBeNull();
+		expect(document.activeElement).toBe(root.querySelector('[aria-label="Edit path (Ctrl+L)"]'));
+
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "deep/nested/file.ts";
+		input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		key(input, "Enter");
+		await tick();
+		expect(row(root, "deep/nested/file.ts").getAttribute("aria-selected")).toBe("true");
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/deep/nested/file.ts");
+		expect(root.textContent).toContain("deep/nested/file.ts");
+		click(root.querySelector<HTMLButtonElement>('.bb-explorer-crumb[data-path="deep"]')!);
+		await tick();
+		expect(document.activeElement).toBe(row(root, "deep"));
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/deep");
+	});
+
+	it("debounces recursive search, fences stale responses, supports keyboard activation, and restores browse state on clear", async () => {
+		const stale = deferred<unknown>();
+		const fakeHost = host({
+			list: ({ path }) => path === "src"
+				? list([{ path: "src/original.txt", name: "original.txt", kind: "file" }])
+				: list([{ path: "src", name: "src", kind: "directory" }]),
+			search: ({ query }) => query === "old" ? stale.promise : {
+				query, count: 2, limit: 200, truncated: false, results: [
+					{ path: "api/index.ts", name: "index.ts", kind: "file" },
+					{ path: "web/index.ts", name: "index.ts", kind: "file" },
+				],
+			},
+			resolve: ({ path }) => ({ path, kind: "file", chain: [
+				{ path: String(path).split("/")[0], name: String(path).split("/")[0], kind: "directory" },
+				{ path, name: String(path).split("/").pop(), kind: "file" },
+			] }),
+			read: ({ path }) => ({ kind: "text", text: `opened ${path}` }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("recursive-search", fakeHost);
+		await tick();
+		click(row(root, "src"));
+		await tick();
+		click(row(root, "src/original.txt"));
+		await tick();
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "old";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		search.value = "index";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		expect(root.querySelector('[role="listbox"]')).not.toBeNull();
+		expect(root.querySelectorAll('[role="option"]')).toHaveLength(2);
+		expect(root.textContent).toContain("api");
+		expect(root.textContent).toContain("web");
+		stale.resolve({ query: "old", count: 1, limit: 200, truncated: false, results: [{ path: "stale.txt", name: "stale.txt", kind: "file" }] });
+		await tick();
+		expect(root.textContent).not.toContain("stale.txt");
+		key(search, "ArrowDown");
+		key(search, "Enter");
+		await tick();
+		expect(root.textContent).toContain("opened api/index.ts");
+		key(search, "Escape");
+		await tick();
+		expect(root.querySelector('[role="tree"]')).not.toBeNull();
+		expect(row(root, "src/original.txt").getAttribute("aria-selected")).toBe("true");
+		expect(root.textContent).toContain("opened src/original.txt");
+	});
+
+	it("filters changed paths, collapses all with a valid tree tab stop, and persists only the durable preference", async () => {
+		const put = vi.fn(async () => undefined);
+		const fakeHost = host({
+			list: ({ path }) => path === "src"
+				? list([{ path: "src/changed.ts", name: "changed.ts", kind: "file" }, { path: "src/clean.ts", name: "clean.ts", kind: "file" }])
+				: list([{ path: "src", name: "src", kind: "directory" }, { path: "clean.txt", name: "clean.txt", kind: "file" }], [
+					{ path: "src/changed.ts", index: "M" }, { path: "gone/deleted.ts", worktree: "D", deleted: true },
+				]),
+			read: () => ({ kind: "text", text: "preview" }),
+			diff: () => ({ kind: "empty" }),
+		}, { put });
+		const root = mount("changed-collapse", fakeHost);
+		await tick();
+		click(row(root, "src"));
+		await tick();
+		click(root.querySelector('[aria-label="Changed files only"]')!);
+		await tick();
+		expect(root.querySelector('[aria-label="Changed files only"]')?.getAttribute("aria-pressed")).toBe("true");
+		expect(row(root, "src/changed.ts")).not.toBeNull();
+		expect(root.querySelector('[data-path="src/clean.ts"]')).toBeNull();
+		expect(row(root, "gone")).not.toBeNull();
+		const collapse = root.querySelector<HTMLButtonElement>('[aria-label="Collapse all"]')!;
+		click(collapse);
+		await tick();
+		expect(row(root, "src").getAttribute("aria-expanded")).toBe("false");
+		expect(root.querySelectorAll('[role="treeitem"][tabindex="0"]')).toHaveLength(1);
+		expect(root.querySelector('[role="status"]')?.textContent).toBe("All folders collapsed.");
+		await tick(200);
+		expect(put).toHaveBeenLastCalledWith("ui/changed-collapse", expect.objectContaining({ changedOnly: true, expanded: [] }));
+		const lastStored = (put.mock.calls.at(-1) as unknown as [string, unknown] | undefined)?.[1];
+		expect(JSON.stringify(lastStored)).not.toContain("query");
+	});
+
+	it("opens row path actions by mouse and keyboard, copies both canonical values, and reports clipboard failure", async () => {
+		const writeText = vi.fn(async () => undefined);
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+		const fakeHost = host({
+			list: () => list([
+				{ path: "one.txt", name: "one.txt", kind: "file" },
+				{ path: "folder/two.ts", name: "two.ts", kind: "file" },
+			]),
+			read: ({ path }) => ({ kind: "text", text: String(path) }),
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("path-actions", fakeHost);
+		await tick();
+		click(row(root, "one.txt"));
+		await tick();
+		row(root, "folder/two.ts").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
+		await tick();
+		expect(root.querySelector('[role="menu"]')?.getAttribute("aria-label")).toBe("Path actions");
+		click([...root.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "Copy relative path")!);
+		await tick();
+		expect(writeText).toHaveBeenCalledWith("folder/two.ts");
+		expect(row(root, "one.txt").getAttribute("aria-selected")).toBe("true");
+
+		const selected = row(root, "one.txt");
+		selected.focus();
+		selected.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true }));
+		await tick();
+		click([...root.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "Copy filename")!);
+		await tick();
+		expect(writeText).toHaveBeenCalledWith("one.txt");
+		writeText.mockRejectedValueOnce(new Error("denied"));
+		selected.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true, cancelable: true }));
+		await tick();
+		click(root.querySelector('[role="menuitem"]')!);
+		await tick();
+		expect(root.textContent).toContain("Couldn’t copy. Clipboard access is unavailable.");
+		Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
 	});
 
 	it("maps structured route failures to safe, retryable panel errors", () => {
