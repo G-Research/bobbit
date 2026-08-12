@@ -1885,7 +1885,7 @@ contract:
 
 ```
 file-explorer/
-  pack.yaml                              # schema 2; entrypoints plus list/read/diff routes
+  pack.yaml                              # schema 2; entrypoints plus list/resolve/search/read/diff routes
   panels/file-explorer-panel.yaml        # singleton file-explorer.panel
   entrypoints/
     file-explorer-session-menu.yaml      # Open File Explorer
@@ -1896,8 +1896,9 @@ file-explorer/
 ```
 
 The launchers directly target the same singleton panel, so the existing panel workspace owns
-focus and reload restoration. The browser calls only `host.callRoute("list" | "read" | "diff")`,
-keeps relative expansion/selection/view state in `host.store`, and subscribes to
+focus and reload restoration. The browser calls only
+`host.callRoute("list" | "resolve" | "search" | "read" | "diff")`, keeps relative
+expansion/selection/view state in `host.store`, and subscribes to
 `host.session` status to refresh on the first observed `idle` and later non-idle→`idle`
 transitions. It imports no core app, UI,
 or server internals; the shared unified-diff parser under `src/shared/**` is bundled into the
