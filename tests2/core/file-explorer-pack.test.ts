@@ -53,7 +53,7 @@ describe("built-in file explorer pack shipping", () => {
 			},
 			routes: {
 				module: "lib/explorer-routes.mjs",
-				names: ["list", "read", "diff"],
+				names: ["list", "resolve", "search", "read", "diff"],
 			},
 		});
 		expect(entry.manifest.defaultDisabled).not.toBe(true);
@@ -85,6 +85,8 @@ describe("built-in file explorer pack shipping", () => {
 			target: { panelId: "file-explorer.panel" },
 		});
 		expect(enabled.hasRoute(undefined, "file-explorer", "list")).toBe(true);
+		expect(enabled.hasRoute(undefined, "file-explorer", "resolve")).toBe(true);
+		expect(enabled.hasRoute(undefined, "file-explorer", "search")).toBe(true);
 		expect(enabled.hasRoute(undefined, "file-explorer", "read")).toBe(true);
 		expect(enabled.hasRoute(undefined, "file-explorer", "diff")).toBe(true);
 		expect(enabled.hasRoute(undefined, "file-explorer", "write")).toBe(false);
