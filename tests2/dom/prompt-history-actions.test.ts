@@ -242,11 +242,15 @@ describe("history prompt trigger and canonical menu", () => {
 		expect(snapshots[0].labels).toEqual(["Fork before this point", "Copy prompt"]);
 	});
 
-	it("places the same trigger beside both legacy and author-labelled bubbles", async () => {
+	it("places prompt actions and timestamps in a right-aligned footer beneath every bubble", async () => {
 		const legacy = await renderList([durablePrompt("legacy")]);
 		const legacyTrigger = promptTriggers(legacy)[0];
+		const legacyFooter = legacyTrigger.closest(".prompt-metadata-row");
 		expect(legacyTrigger.closest(".user-message-container")).toBeNull();
-		expect(legacyTrigger.closest("user-message")).toBeTruthy();
+		expect(legacyFooter?.querySelector(".message-timestamp")).toBeTruthy();
+		expect(legacyFooter?.previousElementSibling?.classList.contains("user-message-container")).toBe(true);
+		expect(legacyFooter?.closest(".prompt-content-column")).toBeTruthy();
+		expect(legacyFooter?.closest(".prompt-row")).toBeTruthy();
 
 		document.body.innerHTML = "";
 		const labelled = await renderList([
@@ -254,8 +258,12 @@ describe("history prompt trigger and canonical menu", () => {
 			durablePrompt("system", "system", { author: { kind: "system", id: "system:bobbit", label: "Bobbit" } }),
 		]);
 		const labelledTrigger = promptTriggers(labelled)[0];
+		const labelledFooter = labelledTrigger.closest(".prompt-metadata-row");
 		expect(labelledTrigger.closest(".user-message-container")).toBeNull();
-		expect(labelledTrigger.closest(".prompt-row--labelled")).toBeTruthy();
+		expect(labelledFooter?.querySelector(".message-timestamp")).toBeTruthy();
+		expect(labelledFooter?.previousElementSibling?.classList.contains("prompt-bubble-shell")).toBe(true);
+		expect(labelledFooter?.closest(".prompt-content-column")).toBeTruthy();
+		expect(labelledFooter?.closest(".prompt-row--labelled")).toBeTruthy();
 	});
 
 	it("resets New worktree off on every open and never fires Fork while toggling", async () => {
