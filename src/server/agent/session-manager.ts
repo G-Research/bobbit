@@ -1032,6 +1032,8 @@ export interface SessionInfo {
 		seq: number;
 		promise: Promise<MessageSnapshotBaseResponse>;
 	};
+	/** Monotonic fence preventing an older cursor refresh from broadcasting after a newer one. */
+	promptCursorRefreshGeneration?: number;
 	/** Cursor ids aligned to one exact immutable get_messages base object. */
 	messagesSnapshotCursorProjection?: {
 		seq: number;
@@ -7943,14 +7945,26 @@ export class SessionManager {
 		if (typeof session.rpcClient.getTranscriptCursorSnapshot !== "function"
 			|| (session.clients.size === 0 && !session.pendingSkillTranscriptBindings?.length)) return;
 		const rpcClient = session.rpcClient;
+		const refreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
+		session.promptCursorRefreshGeneration = refreshGeneration;
 		queueMicrotask(() => {
-			if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+			if (this.sessions.get(session.id) !== session
+				|| session.rpcClient !== rpcClient
+				|| session.promptCursorRefreshGeneration !== refreshGeneration) return;
+			const refreshSeq = session.eventBuffer.lastSeq;
 			const pendingBindings = options.settleBindings
-				? session.pendingSkillTranscriptBindings?.splice(0) ?? []
+				? [...(session.pendingSkillTranscriptBindings ?? [])]
 				: [];
 			void this.getMessagesSnapshotBase(session).then((response) => {
 				if (!response.success || response.data === undefined) return;
-				if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+				if (this.sessions.get(session.id) !== session
+					|| session.rpcClient !== rpcClient
+					|| session.promptCursorRefreshGeneration !== refreshGeneration
+					|| session.eventBuffer.lastSeq !== refreshSeq) return;
+				if (options.settleBindings && pendingBindings.length > 0) {
+					session.pendingSkillTranscriptBindings = session.pendingSkillTranscriptBindings
+						?.filter((binding) => !pendingBindings.includes(binding));
+				}
 				const messages = Array.isArray(response.data)
 					? response.data
 					: response.data && typeof response.data === "object" && Array.isArray((response.data as any).messages)

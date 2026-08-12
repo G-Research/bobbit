@@ -456,6 +456,61 @@ describe("SessionManager snapshot memo", () => {
 		expect(live.messagesSnapshotCache.seq).toBe(1);
 	});
 
+	it("fences a stale cursor refresh after a newer snapshot wins", async () => {
+		const oldMessages = deferred<any>();
+		const oldCursors = deferred<any>();
+		const newMessages = deferred<any>();
+		const newCursors = deferred<any>();
+		const messageReads = [oldMessages, newMessages];
+		const cursorReads = [oldCursors, newCursors];
+		const getMessages = vi.fn(() => messageReads.shift()!.promise);
+		const getCursors = vi.fn(() => cursorReads.shift()!.promise);
+		const sends: string[] = [];
+		const client = { readyState: 1, send: (payload: string) => sends.push(payload) };
+		const value = manager();
+		const live = session(getMessages, getCursors);
+		live.clients.add(client);
+		live.pendingSkillTranscriptBindings = [{
+			recordId: "pending-record",
+			promptId: "pending-prompt",
+			modelText: "prompt",
+			messageIdentity: { id: "user-message" },
+		}];
+		value.sessions.set(live.id, live);
+
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
+		await vi.waitFor(() => expect(getMessages).toHaveBeenCalledOnce());
+		live.eventBuffer.push({ type: "message_update" });
+		value.schedulePromptCursorRefresh(live);
+		await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2));
+
+		newMessages.resolve({ success: true, data: [
+			{ id: "user-message", role: "user", content: "prompt" },
+			{ id: "assistant-message", role: "assistant", content: "new answer" },
+		] });
+		newCursors.resolve({ success: true, data: {
+			entries: [userEntry("new-user", null, "prompt"), assistantEntry("new-answer", "new-user", "new answer")],
+			leafId: "new-answer",
+			forkMessages: [{ entryId: "new-user", text: "prompt" }],
+		} });
+		await vi.waitFor(() => expect(sends).toHaveLength(1));
+		const winningFrame = JSON.parse(sends[0]);
+		expect(winningFrame.data[0]).toMatchObject({ entryId: "new-user", _entryIdSource: "pi-transcript" });
+		expect(winningFrame.data[1]).toMatchObject({ content: "new answer" });
+
+		oldMessages.resolve({ success: true, data: [
+			{ id: "user-message", role: "user", content: "prompt" },
+		] });
+		oldCursors.resolve({ success: true, data: {
+			entries: [userEntry("old-user", null, "prompt")],
+			leafId: "old-user",
+			forkMessages: [{ entryId: "old-user", text: "prompt" }],
+		} });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(sends).toHaveLength(1);
+		expect(live.pendingSkillTranscriptBindings).toHaveLength(1);
+	});
+
 	it("refreshes compaction messages and cursors as one fresh authoritative pair", async () => {
 		const visibleMessages = [
 			{ role: "user", content: "same prompt" },
