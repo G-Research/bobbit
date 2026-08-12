@@ -1,3 +1,5 @@
+import * as nodeFs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -79,6 +81,36 @@ class ArrayDirectoryHandle implements DirectoryHandleLike {
 	}
 }
 
+function identityFor(value: string): number {
+	let hash = 17;
+	for (const character of value) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+	return hash || 1;
+}
+
+function fileStat(size: number, identity = 2): StatLike {
+	return { size, dev: 1, ino: identity, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false };
+}
+
+function directoryStat(identity = 1): StatLike {
+	return { size: 0, dev: 1, ino: identity, isFile: () => false, isDirectory: () => true, isSymbolicLink: () => false };
+}
+
+function symlinkStat(identity = 3): StatLike {
+	return { size: 0, dev: 1, ino: identity, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => true };
+}
+
+function otherStat(identity = 4): StatLike {
+	return { size: 0, dev: 1, ino: identity, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => false };
+}
+
+function statForEntry(relativePath: string, value: DirectoryEntryLike): StatLike {
+	const identity = identityFor(relativePath);
+	if (value.isDirectory()) return directoryStat(identity);
+	if (value.isFile()) return fileStat(0, identity);
+	if (value.isSymbolicLink()) return symlinkStat(identity);
+	return otherStat(identity);
+}
+
 class SearchTreeFs implements ExplorerFsAdapter {
 	readonly opened: string[] = [];
 	active = 0;
@@ -89,8 +121,12 @@ class SearchTreeFs implements ExplorerFsAdapter {
 		private readonly failingDirectories = new Set<string>(),
 	) {}
 
+	private relative(target: string): string {
+		return path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+	}
+
 	async opendir(target: string): Promise<DirectoryHandleLike> {
-		const relativePath = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+		const relativePath = this.relative(target);
 		this.opened.push(relativePath);
 		if (this.failingDirectories.has(relativePath)) throw Object.assign(new Error("unavailable"), { code: "EACCES" });
 		const entries = this.directories.get(relativePath);
@@ -111,51 +147,52 @@ class SearchTreeFs implements ExplorerFsAdapter {
 	}
 
 	async open(): Promise<FileHandleLike> { throw new Error("unused"); }
-	async lstat(): Promise<StatLike> { throw new Error("unused"); }
+	async realpath(target: string): Promise<string> { return target; }
+	async lstat(target: string): Promise<StatLike> {
+		const relativePath = this.relative(target);
+		if (relativePath === "" || this.directories.has(relativePath)) return directoryStat(identityFor(relativePath || "root"));
+		const slash = relativePath.lastIndexOf("/");
+		const parent = slash < 0 ? "" : relativePath.slice(0, slash);
+		const name = slash < 0 ? relativePath : relativePath.slice(slash + 1);
+		const value = this.directories.get(parent)?.find((candidate) => candidate.name === name);
+		if (!value) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+		return statForEntry(relativePath, value);
+	}
 }
 
 class BytesFileHandle implements FileHandleLike {
 	closed = 0;
-	constructor(private readonly bytes: Uint8Array) {}
+	constructor(private readonly bytes: Uint8Array, private readonly stats = fileStat(bytes.byteLength)) {}
 	async read(buffer: Uint8Array, offset: number, length: number, position: number): Promise<{ bytesRead: number }> {
 		const chunk = this.bytes.subarray(position, position + length);
 		buffer.set(chunk, offset);
 		return { bytesRead: chunk.byteLength };
 	}
+	async stat(): Promise<StatLike> { return this.stats; }
 	async close(): Promise<void> {
 		this.closed++;
 	}
 }
 
-function fileStat(size: number): StatLike {
-	return { size, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false };
-}
-
-function directoryStat(): StatLike {
-	return { size: 0, isFile: () => false, isDirectory: () => true, isSymbolicLink: () => false };
-}
-
-function symlinkStat(): StatLike {
-	return { size: 0, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => true };
-}
-
-function otherStat(): StatLike {
-	return { size: 0, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => false };
-}
-
 function fsForFile(relativePath: string, bytes: Uint8Array, observedPaths: string[] = []): ExplorerFsAdapter {
 	const expected = path.join(SESSION_ROOT, ...relativePath.split("/"));
+	const segments = relativePath.split("/");
+	const parents = new Set(segments.slice(0, -1).map((_segment, index) => path.join(SESSION_ROOT, ...segments.slice(0, index + 1))));
+	const stats = fileStat(bytes.byteLength, identityFor(relativePath));
 	return {
 		opendir: async () => { throw Object.assign(new Error("not a directory"), { code: "ENOTDIR" }); },
+		realpath: async (target) => target,
 		lstat: async (target) => {
-			observedPaths.push(target);
+			if (target === SESSION_ROOT) return directoryStat(identityFor("root"));
+			if (parents.has(target)) return directoryStat(identityFor(path.relative(SESSION_ROOT, target)));
 			if (target !== expected) throw Object.assign(new Error("missing"), { code: "ENOENT" });
-			return fileStat(bytes.byteLength);
+			observedPaths.push(target);
+			return stats;
 		},
 		open: async (target) => {
 			observedPaths.push(target);
 			if (target !== expected) throw Object.assign(new Error("missing"), { code: "ENOENT" });
-			return new BytesFileHandle(bytes);
+			return new BytesFileHandle(bytes, stats);
 		},
 	};
 }
@@ -169,6 +206,7 @@ function failIfUsedFs(observed: string[]): ExplorerFsAdapter {
 		opendir: async () => { observed.push("opendir"); throw new Error("Filesystem must not be called"); },
 		lstat: async () => { observed.push("lstat"); throw new Error("Filesystem must not be called"); },
 		open: async () => { observed.push("open"); throw new Error("Filesystem must not be called"); },
+		realpath: async () => { observed.push("realpath"); throw new Error("Filesystem must not be called"); },
 	};
 }
 
@@ -192,7 +230,7 @@ function unbornGit(status: string): ScriptedGit {
 
 describe("file explorer list route", () => {
 	it("hides exact .git, keeps dotfiles, sorts directory-first, and reports leaf kinds", async () => {
-		const handle = new ArrayDirectoryHandle([
+		const rawEntries = [
 			entry("zeta.txt", "file"),
 			entry(".git", "directory"),
 			entry("beta", "directory"),
@@ -200,14 +238,22 @@ describe("file explorer list route", () => {
 			entry("alpha", "directory"),
 			entry("linked", "symlink"),
 			entry("socket", "other"),
-		]);
+		];
+		const handle = new ArrayDirectoryHandle(rawEntries);
+		const listed = new Map(rawEntries.map((value) => [value.name, value]));
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async (target) => {
 				expect(target).toBe(SESSION_ROOT);
 				return handle;
 			},
 			open: async () => { throw new Error("unused"); },
-			lstat: async () => { throw new Error("unused"); },
+			lstat: async (target) => {
+				if (target === SESSION_ROOT) return directoryStat(identityFor("root"));
+				const value = listed.get(path.basename(target));
+				if (!value) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+				return statForEntry(path.basename(target), value);
+			},
 		};
 		const result = await createExplorerRoutes({ fs, git: neverGit() }).list(
 			{ workingDir: SESSION_ROOT },
@@ -266,19 +312,22 @@ describe("file explorer list route", () => {
 				: [[path.join(SESSION_ROOT, ".GIT", "notes"), Buffer.from("ordinary dotfolder\n")] as [string, Buffer]]),
 		]);
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async (target) => {
 				expect(target).toBe(path.join(SESSION_ROOT, "nested", ".config"));
 				return new ArrayDirectoryHandle([entry(".settings", "file")]);
 			},
 			lstat: async (target) => {
+				if (target === SESSION_ROOT) return directoryStat(identityFor("root"));
 				const bytes = contents.get(target);
-				if (!bytes) throw Object.assign(new Error("missing"), { code: "ENOENT" });
-				return fileStat(bytes.byteLength);
+				if (bytes) return fileStat(bytes.byteLength, identityFor(target));
+				if (Array.from(contents.keys()).some((candidate) => candidate.startsWith(`${target}${path.sep}`))) return directoryStat(identityFor(target));
+				throw Object.assign(new Error("missing"), { code: "ENOENT" });
 			},
 			open: async (target) => {
 				const bytes = contents.get(target);
 				if (!bytes) throw Object.assign(new Error("missing"), { code: "ENOENT" });
-				return new BytesFileHandle(bytes);
+				return new BytesFileHandle(bytes, fileStat(bytes.byteLength, identityFor(target)));
 			},
 		};
 		const routes = createExplorerRoutes({ fs, git: neverGit() });
@@ -308,9 +357,12 @@ describe("file explorer list route", () => {
 			Array.from({ length: LIST_ENTRY_LIMIT + 1 }, (_, index) => entry(`file-${String(index).padStart(4, "0")}`, "file")),
 		);
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => handle,
 			open: async () => { throw new Error("unused"); },
-			lstat: async () => { throw new Error("unused"); },
+			lstat: async (target) => target === SESSION_ROOT
+				? directoryStat(identityFor("root"))
+				: fileStat(0, identityFor(path.basename(target))),
 		};
 		const result = await createExplorerRoutes({ fs, git: neverGit() }).list(
 			{ workingDir: SESSION_ROOT },
@@ -328,9 +380,10 @@ describe("file explorer list route", () => {
 		const git = new ScriptedGit([failed("exit", { stderr: "fatal: not a git repository", code: 128 })]);
 		const handles = [new ArrayDirectoryHandle([]), new ArrayDirectoryHandle([])];
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => handles.shift()!,
 			open: async () => { throw new Error("unused"); },
-			lstat: async () => { throw new Error("unused"); },
+			lstat: async (target) => directoryStat(identityFor(target)),
 		};
 		const routes = createExplorerRoutes({ fs, git });
 		const child = await routes.list({ workingDir: SESSION_ROOT }, { body: { path: "src", includeStatus: true } });
@@ -353,10 +406,12 @@ describe("file explorer resolve route", () => {
 		]);
 		const observed: string[] = [];
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => { throw new Error("resolve must not enumerate siblings"); },
 			open: async () => { throw new Error("unused"); },
 			lstat: async (target) => {
 				const relativePath = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+				if (relativePath === "") return directoryStat(identityFor("root"));
 				observed.push(relativePath);
 				const stat = kinds.get(relativePath);
 				if (!stat) throw Object.assign(new Error(`missing ${target}`), { code: "ENOENT" });
@@ -388,20 +443,22 @@ describe("file explorer resolve route", () => {
 				chain: [{ path: "deep" }, { path: "deep/nested" }, { path: "deep/nested/file.txt", kind: "file" }],
 			},
 		});
-		expect(observed).toEqual(["deep", "deep/nested", "deep", "deep/nested", "deep/nested/file.txt"]);
+		expect(new Set(observed)).toEqual(new Set(["deep", "deep/nested", "deep/nested/file.txt"]));
 	});
 
 	it("rejects invalid and .git paths before I/O and distinguishes missing and non-directory parents", async () => {
 		const observed: string[] = [];
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => { throw new Error("unused"); },
 			open: async () => { throw new Error("unused"); },
 			lstat: async (target) => {
 				const relativePath = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+				if (relativePath === "") return directoryStat(identityFor("root"));
 				observed.push(relativePath);
-				if (relativePath === "file") return fileStat(1);
-				if (relativePath === "link") return symlinkStat();
-				if (relativePath === "socket") return otherStat();
+				if (relativePath === "file") return fileStat(1, identityFor("file"));
+				if (relativePath === "link") return symlinkStat(identityFor("link"));
+				if (relativePath === "socket") return otherStat(identityFor("socket"));
 				throw Object.assign(new Error(`missing ${target}`), { code: "ENOENT" });
 			},
 		};
@@ -560,9 +617,10 @@ describe("file explorer recursive search route", () => {
 		const delayedOpen = new Promise<DirectoryHandleLike>((resolve) => { resolveOpen = resolve; });
 		const lateHandle = new ArrayDirectoryHandle([]);
 		const timeoutFs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => delayedOpen,
 			open: async () => { throw new Error("unused"); },
-			lstat: async () => { throw new Error("unused"); },
+			lstat: async (target) => directoryStat(identityFor(target)),
 		};
 		const pending = createExplorerRoutes({ fs: timeoutFs, git: neverGit(), searchTimeoutMs: 10 }).search(
 			{ workingDir: SESSION_ROOT },
@@ -577,9 +635,10 @@ describe("file explorer recursive search route", () => {
 		const delayedRead = new Promise<DirectoryEntryLike | null>((resolve) => { resolveRead = resolve; });
 		let readCloses = 0;
 		const slowReadFs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => ({ read: async () => delayedRead, close: async () => { readCloses++; } }),
 			open: async () => { throw new Error("unused"); },
-			lstat: async () => { throw new Error("unused"); },
+			lstat: async (target) => directoryStat(identityFor(target)),
 		};
 		const slowRead = createExplorerRoutes({ fs: slowReadFs, git: neverGit(), searchTimeoutMs: 10 }).search(
 			{ workingDir: SESSION_ROOT },
@@ -598,9 +657,10 @@ describe("file explorer filesystem bounds and route errors", () => {
 		const delayedOpen = new Promise<DirectoryHandleLike>((resolve) => { resolveOpen = resolve; });
 		const lateHandle = new ArrayDirectoryHandle([]);
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => delayedOpen,
 			open: async () => { throw new Error("unused"); },
-			lstat: async () => { throw new Error("unused"); },
+			lstat: async (target) => directoryStat(identityFor(target)),
 		};
 		const pending = createExplorerRoutes({ fs, git: neverGit(), fsTimeoutMs: 10 }).list(
 			{ workingDir: SESSION_ROOT },
@@ -619,13 +679,16 @@ describe("file explorer filesystem bounds and route errors", () => {
 		let resolveRead!: (value: { bytesRead: number }) => void;
 		const delayedRead = new Promise<{ bytesRead: number }>((resolve) => { resolveRead = resolve; });
 		let closes = 0;
+		const targetStats = fileStat(1, identityFor("slow.txt"));
 		const handle: FileHandleLike = {
 			read: async () => delayedRead,
+			stat: async () => targetStats,
 			close: async () => { closes++; },
 		};
 		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
 			opendir: async () => { throw new Error("unused"); },
-			lstat: async () => fileStat(1),
+			lstat: async (target) => target === SESSION_ROOT ? directoryStat(identityFor("root")) : targetStats,
 			open: async () => handle,
 		};
 		const result = await createExplorerRoutes({ fs, git: neverGit(), fsTimeoutMs: 10 }).read(
@@ -646,9 +709,11 @@ describe("file explorer filesystem bounds and route errors", () => {
 		const routesForStat = (statOrError: StatLike | Error) => createExplorerRoutes({
 			git: neverGit(),
 			fs: {
+				realpath: async (target) => target,
 				opendir: async () => { throw errors.missing; },
 				open: async () => { throw new Error("unused"); },
-				lstat: async () => {
+				lstat: async (target) => {
+					if (target === SESSION_ROOT) return directoryStat(identityFor("root"));
 					if (statOrError instanceof Error) throw statOrError;
 					return statOrError;
 				},
@@ -656,7 +721,7 @@ describe("file explorer filesystem bounds and route errors", () => {
 		});
 
 		expect(await routesForStat(fileStat(0)).read({ workingDir: SESSION_ROOT }, { body: { path: "../secret" } })).toMatchObject({ ok: false, error: { code: "INVALID_PATH" } });
-		expect(await routesForStat(fileStat(0)).list({ workingDir: SESSION_ROOT }, { body: { path: "missing" } })).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
+		expect(await routesForStat(errors.missing).list({ workingDir: SESSION_ROOT }, { body: { path: "missing" } })).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
 		expect(await routesForStat(directoryStat()).read({ workingDir: SESSION_ROOT }, { body: { path: "folder" } })).toMatchObject({ ok: false, error: { code: "NOT_FILE" } });
 		expect(await routesForStat(symlinkStat()).read({ workingDir: SESSION_ROOT }, { body: { path: "link" } })).toMatchObject({ ok: false, error: { code: "UNSUPPORTED_FILE" } });
 		const denied = await routesForStat(errors.denied).read({ workingDir: SESSION_ROOT }, { body: { path: "private" } });
@@ -677,11 +742,225 @@ describe("file explorer filesystem bounds and route errors", () => {
 				{ body: { path: testCase.name, root: path.resolve("caller-selected-root") } },
 			);
 			expect(result).toMatchObject({ ok: true, value: { path: testCase.name, ...testCase.expected } });
-			expect(paths).toEqual([
-				path.join(SESSION_ROOT, testCase.name),
-				path.join(SESSION_ROOT, testCase.name),
-			]);
+			const expectedPath = path.join(SESSION_ROOT, testCase.name);
+			expect(paths.length).toBeGreaterThan(2);
+			expect(paths.every((observed) => observed === expectedPath)).toBe(true);
 			expect(JSON.stringify(result)).not.toContain("caller-selected-root");
+		}
+	});
+});
+
+describe("file explorer rooted filesystem hardening", () => {
+	it("fails closed without a server-derived working directory before filesystem or Git I/O", async () => {
+		for (const createRoutes of [createExplorerRoutes, createPackagedExplorerRoutes]) {
+			const fsCalls: string[] = [];
+			const git = new ScriptedGit([]);
+			const routes = createRoutes({ fs: failIfUsedFs(fsCalls), git });
+			for (const result of await Promise.all([
+				routes.list({}, { body: { path: "" } }),
+				routes.resolve({}, { body: { path: "" } }),
+				routes.search({}, { body: { query: "file" } }),
+				routes.read({}, { body: { path: "file.txt" } }),
+				routes.diff({}, { body: { path: "file.txt" } }),
+			])) expect(result).toMatchObject({ ok: false, error: { code: "INVALID_PATH", retryable: false } });
+			expect(fsCalls).toEqual([]);
+			expect(git.calls).toEqual([]);
+		}
+	});
+
+	it("fails discovery safely when the filesystem cannot provide stable identity", async () => {
+		let opened = false;
+		const noIdentity: ExplorerFsAdapter = {
+			realpath: async (target) => target,
+			lstat: async () => ({ ...directoryStat(), dev: undefined, ino: undefined }),
+			opendir: async () => { opened = true; return new ArrayDirectoryHandle([]); },
+			open: async () => { throw new Error("unused"); },
+		};
+		const result = await createExplorerRoutes({ fs: noIdentity, git: neverGit() }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "file" } },
+		);
+		expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
+		expect(opened).toBe(false);
+	});
+
+	it("closes an opened file without descriptor identity before reading bytes", async () => {
+		let reads = 0;
+		let closes = 0;
+		const targetStats = fileStat(4, identityFor("target"));
+		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
+			opendir: async () => { throw new Error("unused"); },
+			lstat: async (target) => target === SESSION_ROOT ? directoryStat(identityFor("root")) : targetStats,
+			open: async () => ({
+				stat: async () => ({ ...targetStats, dev: undefined, ino: undefined }),
+				read: async () => { reads++; return { bytesRead: 0 }; },
+				close: async () => { closes++; },
+			}),
+		};
+		const result = await createExplorerRoutes({ fs, git: neverGit() }).read(
+			{ workingDir: SESSION_ROOT },
+			{ body: { path: "file.txt" } },
+		);
+		expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
+		expect(reads).toBe(0);
+		expect(closes).toBe(1);
+	});
+
+	it("rejects parent replacement before resolve can inspect an external child", async () => {
+		let pivotChecks = 0;
+		let externalInspections = 0;
+		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
+			opendir: async () => { throw new Error("unused"); },
+			open: async () => { throw new Error("unused"); },
+			lstat: async (target) => {
+				const relative = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+				if (!relative) return directoryStat(identityFor("root"));
+				if (relative === "pivot") return ++pivotChecks <= 3
+					? directoryStat(identityFor("pivot"))
+					: symlinkStat(identityFor("replacement"));
+				externalInspections++;
+				return fileStat(6, identityFor("external-secret"));
+			},
+		};
+		const result = await createExplorerRoutes({ fs, git: neverGit() }).resolve(
+			{ workingDir: SESSION_ROOT },
+			{ body: { path: "pivot/secret.txt" } },
+		);
+		expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
+		expect(externalInspections).toBe(0);
+	});
+
+	it("revalidates a queued search directory before opening it and closes the parent handle", async () => {
+		let pivotChecks = 0;
+		let pivotOpens = 0;
+		const rootHandle = new ArrayDirectoryHandle([entry("pivot", "directory")]);
+		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
+			open: async () => { throw new Error("unused"); },
+			opendir: async (target) => {
+				if (target === SESSION_ROOT) return rootHandle;
+				pivotOpens++;
+				throw new Error("external directory must not be opened");
+			},
+			lstat: async (target) => {
+				const relative = path.relative(SESSION_ROOT, target).split(path.sep).join("/");
+				if (!relative) return directoryStat(identityFor("root"));
+				return ++pivotChecks <= 3
+					? directoryStat(identityFor("pivot"))
+					: symlinkStat(identityFor("replacement"));
+			},
+		};
+		const result = await createExplorerRoutes({ fs, git: neverGit() }).search(
+			{ workingDir: SESSION_ROOT },
+			{ body: { query: "secret" } },
+		);
+		expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
+		expect(pivotOpens).toBe(0);
+		expect(rootHandle.closed).toBe(1);
+	});
+
+	it("closes a substituted directory before reading any external names", async () => {
+		let substituted = false;
+		let reads = 0;
+		let closes = 0;
+		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => substituted && target.endsWith(`${path.sep}pivot`)
+				? path.resolve(SESSION_ROOT, "..", "outside")
+				: target,
+			open: async () => { throw new Error("unused"); },
+			opendir: async () => {
+				substituted = true;
+				return {
+					read: async () => { reads++; return entry("secret.txt", "file"); },
+					close: async () => { closes++; },
+				};
+			},
+			lstat: async (target) => {
+				if (target === SESSION_ROOT) return directoryStat(identityFor("root"));
+				if (target.endsWith(`${path.sep}pivot`)) return directoryStat(identityFor("pivot"));
+				return directoryStat(identityFor("outside"));
+			},
+		};
+		const result = await createExplorerRoutes({ fs, git: neverGit() }).list(
+			{ workingDir: SESSION_ROOT },
+			{ body: { path: "pivot" } },
+		);
+		expect(result).toMatchObject({ ok: false, error: { code: "OUTSIDE_ROOT", retryable: false } });
+		expect(reads).toBe(0);
+		expect(closes).toBe(1);
+	});
+
+	it("uses a no-follow open when available and rejects a substituted descriptor before reading bytes", async () => {
+		let substituted = false;
+		let reads = 0;
+		let closes = 0;
+		let flags: string | number | undefined;
+		const expected = fileStat(6, identityFor("inside"));
+		const external = fileStat(6, identityFor("outside"));
+		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => target,
+			opendir: async () => { throw new Error("unused"); },
+			open: async (_target, usedFlags) => {
+				flags = usedFlags;
+				substituted = true;
+				return {
+					stat: async () => external,
+					read: async () => { reads++; return { bytesRead: 0 }; },
+					close: async () => { closes++; },
+				};
+			},
+			lstat: async (target) => {
+				if (target === SESSION_ROOT) return directoryStat(identityFor("root"));
+				return substituted ? symlinkStat(identityFor("replacement")) : expected;
+			},
+		};
+		const result = await createExplorerRoutes({ fs, git: neverGit() }).read(
+			{ workingDir: SESSION_ROOT },
+			{ body: { path: "secret.txt" } },
+		);
+		expect(result).toMatchObject({ ok: false, error: { code: "PATH_CHANGED", retryable: true } });
+		expect(flags).toBe(process.platform === "win32" ? "r" : expect.any(Number));
+		expect(reads).toBe(0);
+		expect(closes).toBe(1);
+	});
+
+	it.skipIf(process.platform === "win32")("rejects a real directory-to-symlink swap before reading the external directory", async () => {
+		const base = await nodeFs.mkdtemp(path.join(os.tmpdir(), "bobbit-explorer-root-"));
+		const root = path.join(base, "root");
+		const outside = path.join(base, "outside");
+		await nodeFs.mkdir(path.join(root, "pivot"), { recursive: true });
+		await nodeFs.mkdir(outside);
+		await nodeFs.writeFile(path.join(outside, "secret.txt"), "outside");
+		let reads = 0;
+		let closes = 0;
+		const adapter: ExplorerFsAdapter = {
+			realpath: (target) => nodeFs.realpath(target),
+			lstat: (target) => nodeFs.lstat(target),
+			open: (target, flags) => nodeFs.open(target, flags),
+			opendir: async (target) => {
+				if (target === path.join(root, "pivot")) {
+					await nodeFs.rename(target, `${target}-old`);
+					await nodeFs.symlink(outside, target, "dir");
+				}
+				const handle = await nodeFs.opendir(target);
+				return {
+					read: async () => { reads++; return handle.read(); },
+					close: async () => { closes++; await handle.close(); },
+				};
+			},
+		};
+		try {
+			const result = await createExplorerRoutes({ fs: adapter, git: neverGit() }).list(
+				{ workingDir: root },
+				{ body: { path: "pivot" } },
+			);
+			expect(result).toMatchObject({ ok: false, error: { code: "OUTSIDE_ROOT" } });
+			expect(reads).toBe(0);
+			expect(closes).toBe(1);
+		} finally {
+			await nodeFs.rm(base, { recursive: true, force: true });
 		}
 	});
 });
