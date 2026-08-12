@@ -156,6 +156,7 @@ type ExplorerState = {
 	pathError?: PanelFailure;
 	search: SearchState;
 	menu?: { target: TreeEntry; invoker?: HTMLElement; pointer: boolean; x: number; y: number };
+	menuPointerDown?: (event: PointerEvent) => void;
 	copyMessage?: { text: string; error: boolean };
 	copyTimer?: number;
 	initialized: boolean;
@@ -295,9 +296,6 @@ function createState(sid: string): ExplorerState {
 	tree.addEventListener("click", (event) => onTreeClick(state!, event));
 	tree.addEventListener("keydown", (event) => onTreeKeydown(state!, event));
 	tree.addEventListener("contextmenu", (event) => onTreeContextMenu(state!, event));
-	root.addEventListener("pointerdown", (event) => {
-		if (state!.menu && !(event.target as Element | null)?.closest("[role=menu]")) closeContextMenu(state!, false);
-	});
 	preview.addEventListener("click", (event) => onPreviewClick(state!, event));
 	renderPathBar(state);
 	renderTree(state);
@@ -481,7 +479,9 @@ function applyStatuses(state: ExplorerState, listValue: Record<string, unknown> 
 	state.statuses.clear();
 	state.ancestors.clear();
 	const git = recordOf(listValue?.git ?? listValue?.status);
-	state.gitAvailable = git ? git.kind !== "none" : undefined;
+	state.gitAvailable = git?.kind === "git" || git?.kind === "repository"
+		? true
+		: git?.kind === "none" ? false : undefined;
 	if (state.gitAvailable !== true) return;
 	const raw = arrayOf(git?.entries ?? git?.files ?? git?.statuses ?? listValue?.statuses ?? listValue?.statusEntries);
 	for (const item of raw) {
@@ -648,7 +648,9 @@ function renderDiscoveryControls(state: ExplorerState): void {
 	state.changedButton.setAttribute("aria-pressed", String(state.changedOnly));
 	state.changedButton.title = state.gitAvailable === false
 		? "Changed files are unavailable because this folder is not a Git worktree."
-		: "Changed files only";
+		: state.gitAvailable === undefined
+			? "Changed files are temporarily unavailable. Your preference is preserved."
+			: "Changed files only";
 	state.collapseButton.disabled = state.expanded.size === 0 || !!state.search.query;
 	state.feedback.replaceChildren();
 	if (state.copyMessage) {
@@ -864,7 +866,7 @@ function renderPathBar(state: ExplorerState): void {
 		input.setAttribute("aria-label", "Relative path");
 		input.setAttribute("aria-describedby", `bb-explorer-path-help-${hash(state.sid)}`);
 		input.setAttribute("aria-invalid", String(!!state.pathError));
-		input.disabled = state.pathLoading;
+		input.readOnly = state.pathLoading;
 		form.append(prefix, input);
 		state.pathBar.append(form);
 		const help = el("span", "bb-explorer-path-help", state.pathError?.message ?? "Enter a path relative to the session root.");
@@ -964,17 +966,23 @@ function enterPathEdit(state: ExplorerState, invoker?: HTMLElement | null): void
 function cancelPathEdit(state: ExplorerState, restoreFocus: boolean): void {
 	state.navigationGeneration += 1;
 	if (state.pathOrigin) state.location = { ...state.pathOrigin };
+	const invoker = state.pathInvoker;
 	state.pathEditing = false;
 	state.pathLoading = false;
 	state.pathError = undefined;
 	state.pathDraft = "";
 	state.pathOrigin = undefined;
+	state.pathInvoker = undefined;
 	renderPathBar(state);
-	if (restoreFocus) requestAnimationFrame(() => state.pathBar.querySelector<HTMLButtonElement>("[data-action=edit-path]")?.focus());
+	if (restoreFocus) requestAnimationFrame(() => {
+		if (invoker?.isConnected) invoker.focus();
+		else state.pathBar.querySelector<HTMLButtonElement>("[data-action=edit-path]")?.focus();
+	});
 }
 
 async function navigateToPath(state: ExplorerState, rawPath: string, source: "path" | "breadcrumb" | "search"): Promise<boolean> {
 	closeContextMenu(state, false);
+	if (source === "path" && state.pathLoading) return false;
 	const path = rawPath.trim();
 	if (safeRelative(path, true) === undefined || path.split("/").includes(".git")) {
 		if (source === "path") {
@@ -992,6 +1000,7 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 		state.pathLoading = true;
 		state.pathError = undefined;
 		renderPathBar(state);
+		requestAnimationFrame(() => state.pathBar.querySelector<HTMLInputElement>(".bb-explorer-path-input")?.focus());
 		setLive(state, `Opening ${path || "Session files"}…`);
 	}
 	try {
@@ -1005,7 +1014,11 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 			if (entry) state.discovered.set(entry.path, entry);
 		}
 		for (const parent of parentsOf(resolvedPath)) state.expanded.add(parent);
-		if (kind === "directory") state.expanded.add(resolvedPath);
+		if (kind === "directory" && state.directories.get(resolvedPath)?.state !== "ready") state.expanded.delete(resolvedPath);
+		if (state.changedOnly && state.gitAvailable === true && resolvedPath && !state.statuses.has(resolvedPath) && !state.ancestors.has(resolvedPath)) {
+			state.changedOnly = false;
+			setLive(state, "Showing all files so the requested path can be revealed.");
+		}
 		state.location = { path: resolvedPath, kind: kind as LocationKind };
 		if (kind === "root") {
 			state.focused = nearestFocus(state.focused, flattenRows(state).map((row) => row.entry.path));
@@ -1025,6 +1038,7 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 			state.pathLoading = false;
 			state.pathError = undefined;
 			state.pathOrigin = undefined;
+			state.pathInvoker = undefined;
 		}
 		renderPathBar(state);
 		renderTree(state);
@@ -1256,6 +1270,10 @@ function openContextMenu(state: ExplorerState, target: TreeEntry, invoker?: HTML
 	}
 	menu.addEventListener("keydown", (event) => onContextMenuKeydown(state, event));
 	state.root.append(menu);
+	state.menuPointerDown = (event) => {
+		if (!(event.target as Element | null)?.closest(".bb-explorer-context-menu")) closeContextMenu(state, true);
+	};
+	document.addEventListener("pointerdown", state.menuPointerDown, true);
 	const width = menu.offsetWidth || 200;
 	const height = menu.offsetHeight || 70;
 	menu.style.left = `${Math.max(8, Math.min(state.menu.x, window.innerWidth - width - 8))}px`;
@@ -1281,6 +1299,8 @@ function onContextMenuKeydown(state: ExplorerState, event: KeyboardEvent): void 
 function closeContextMenu(state: ExplorerState, restoreFocus: boolean): void {
 	if (!state.menu) return;
 	const invoker = state.menu.invoker;
+	if (state.menuPointerDown) document.removeEventListener("pointerdown", state.menuPointerDown, true);
+	state.menuPointerDown = undefined;
 	state.root.querySelector(".bb-explorer-context-menu")?.remove();
 	state.tree.querySelector(".is-context-target")?.classList.remove("is-context-target");
 	state.menu = undefined;
@@ -1589,14 +1609,17 @@ function pruneState(state: ExplorerState): void {
 		state.filePreview = idlePreview();
 		state.diffPreview = idlePreview();
 		state.narrowPane = "tree";
-		state.location = { path: "", kind: "root" };
 		renderPreview(state);
-		renderPathBar(state);
 	} else if (state.selected) {
 		state.selectedKind = all.get(state.selected)?.kind;
-		state.location = { path: state.selected, kind: state.selectedKind ?? "file" };
-		renderPathBar(state);
 	}
+	if (state.location.path) {
+		const locationEntry = all.get(state.location.path);
+		if (locationEntry) state.location = { path: locationEntry.path, kind: locationEntry.kind };
+		else if (state.selected && all.has(state.selected)) state.location = { path: state.selected, kind: all.get(state.selected)!.kind };
+		else state.location = { path: "", kind: "root" };
+	}
+	renderPathBar(state);
 	const visible = flattenRows(state).map((row) => row.entry.path);
 	if (!state.focused || !visible.includes(state.focused)) state.focused = nearestFocus(state.focused, visible);
 }
