@@ -339,10 +339,33 @@ function isContainedPath(candidate: string, root: string): boolean {
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function isSameCanonicalPath(left: string, right: string): boolean {
+	return path.relative(path.resolve(left), path.resolve(right)) === "";
+}
+
+// Some supported filesystems report zero or unavailable identity for their root.
+// Only that root may use the exact-canonical-path fallback; descendants and
+// opened file descriptors still require stable identity.
+function matchesClaim(claim: PathClaim, stats: StatLike): boolean {
+	if (!sameKind(claim.stats, stats)) return false;
+	return identityOf(claim.stats) === undefined
+		? claim === claim.root
+		: sameIdentity(claim.stats, stats);
+}
+
 async function currentStats(claim: PathClaim, deadline: FsDeadline, deps: ExplorerDependencies): Promise<StatLike> {
 	const stats = await deadline.call(deps.fs.lstat(claim.absolutePath));
-	if (!sameKind(claim.stats, stats) || !sameIdentity(claim.stats, stats)) {
+	if (!matchesClaim(claim, stats)) {
 		throw new RootedFsError("PATH_CHANGED", "filesystem identity changed during the operation");
+	}
+	if (identityOf(claim.stats) === undefined) {
+		const canonical = await deadline.call(deps.fs.realpath(claim.absolutePath));
+		if (!isContainedPath(canonical, claim.root.absolutePath)) {
+			throw new RootedFsError("OUTSIDE_ROOT", "filesystem path escaped the session root");
+		}
+		if (!isSameCanonicalPath(canonical, claim.absolutePath)) {
+			throw new RootedFsError("PATH_CHANGED", "canonical filesystem path changed during the operation");
+		}
 	}
 	return stats;
 }
@@ -360,8 +383,11 @@ async function assertCanonicalClaim(claim: PathClaim, deadline: FsDeadline, deps
 	if (!isContainedPath(canonical, claim.root.absolutePath)) {
 		throw new RootedFsError("OUTSIDE_ROOT", "filesystem path escaped the session root");
 	}
+	if (claim === claim.root && !isSameCanonicalPath(canonical, claim.absolutePath)) {
+		throw new RootedFsError("PATH_CHANGED", "canonical session root changed during the operation");
+	}
 	const canonicalStats = await deadline.call(deps.fs.lstat(canonical));
-	if (!sameKind(claim.stats, canonicalStats) || !sameIdentity(claim.stats, canonicalStats)) {
+	if (!matchesClaim(claim, canonicalStats)) {
 		throw new RootedFsError("PATH_CHANGED", "canonical filesystem identity changed during the operation");
 	}
 	await assertClaimCurrent(claim, deadline, deps);
@@ -371,7 +397,6 @@ async function bindRoot(cwd: string, deadline: FsDeadline, deps: ExplorerDepende
 	const canonical = await deadline.call(deps.fs.realpath(path.resolve(cwd)));
 	const stats = await deadline.call(deps.fs.lstat(canonical));
 	if (!stats.isDirectory() || stats.isSymbolicLink()) throw new RootedFsError("OUTSIDE_ROOT", "session root is not a real directory");
-	requireStableIdentity(stats);
 	const root = { absolutePath: canonical, stats } as PathClaim;
 	root.root = root;
 	await assertClaimCurrent(root, deadline, deps);
