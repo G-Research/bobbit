@@ -363,6 +363,53 @@ describe("built-in file explorer panel", () => {
 		expect(listCalls).toBe(2);
 	});
 
+	it("replaces initialization invalidated by an immediate detach and remount", async () => {
+		const staleList = deferred<unknown>();
+		const replacementList = deferred<unknown>();
+		const statusDispose = vi.fn();
+		let listCalls = 0;
+		const fakeHost = host({
+			list: () => {
+				listCalls += 1;
+				if (listCalls === 1) return staleList.promise;
+				if (listCalls === 2) return replacementList.promise;
+				throw new Error("Unexpected duplicate initialization");
+			},
+			read: () => ({ kind: "text", text: "value" }),
+			diff: () => ({ kind: "empty" }),
+		}, { statusDispose });
+		const sid = `init-remount-${++mountAttempt}`;
+		const root = mount(sid, fakeHost);
+		await tick();
+		expect(listCalls).toBe(1);
+		expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(1);
+
+		root.remove();
+		const remounted = mount(sid, fakeHost);
+		expect(remounted).toBe(root);
+		await tick();
+		expect(listCalls).toBe(1);
+		expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(2);
+		expect(statusDispose).toHaveBeenCalledTimes(1);
+
+		staleList.resolve(list([{ path: "stale.txt", name: "stale.txt", kind: "file" }]));
+		await tick();
+		await tick();
+		expect(listCalls).toBe(2);
+		expect(remounted.textContent).not.toContain("stale.txt");
+		expect(remounted.querySelector('[role="tree"]')?.getAttribute("aria-busy")).toBe("true");
+
+		replacementList.resolve(list([{ path: "ready.txt", name: "ready.txt", kind: "file" }]));
+		await tick();
+		await tick();
+		expect(row(remounted, "ready.txt")).not.toBeNull();
+		expect(remounted.textContent).not.toContain("stale.txt");
+		expect(remounted.querySelector('[role="tree"]')?.getAttribute("aria-busy")).toBe("false");
+		expect(listCalls).toBe(2);
+		expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(2);
+		expect(statusDispose).toHaveBeenCalledTimes(1);
+	});
+
 	it("ignores a late preview response after a newer file selection", async () => {
 		const slow = deferred<unknown>();
 		const fakeHost = host({
