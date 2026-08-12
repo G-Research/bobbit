@@ -4,6 +4,10 @@ import { describe, it } from "vitest";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { emitSessionEvent, SessionManager } from "../../src/server/agent/session-manager.ts";
 import { handleWebSocketConnection } from "../../src/server/ws/handler.ts";
+import {
+	LARGE_CONTENT_THRESHOLD,
+	truncateLargeToolContent,
+} from "../../src/server/agent/truncate-large-content.ts";
 import { parsePartialToolArguments, reconstructAssistantStreamDelta } from "../../src/shared/assistant-stream-delta.ts";
 
 class FakeWebSocket extends EventEmitter {
@@ -59,6 +63,28 @@ function makeToolUpdate(argumentsValue: Record<string, unknown>, type: "toolcall
 		assistantMessageEvent: {
 			type,
 			contentIndex: 0,
+			...(delta === undefined ? {} : { delta }),
+			partial: structuredClone(message),
+		},
+	};
+}
+
+function makeWriteUpdate(content: string, type: "toolcall_delta" | "toolcall_start", delta?: string, nextTool = false) {
+	const message = {
+		role: "assistant",
+		id: "stream-large-write",
+		content: [
+			{ type: "toolCall", id: "large-write", name: "write", arguments: { path: "large.txt", content } },
+			...(nextTool ? [{ type: "toolCall", id: "next-read", name: "read", arguments: { path: "large.txt" } }] : []),
+		],
+		timestamp: 1_735_000_000_000,
+	};
+	return {
+		type: "message_update",
+		message,
+		assistantMessageEvent: {
+			type,
+			contentIndex: nextTool ? 1 : 0,
 			...(delta === undefined ? {} : { delta }),
 			partial: structuredClone(message),
 		},
@@ -236,6 +262,65 @@ describe("assistant stream session broadcast", () => {
 			fragments.map((_, index) => parsePartialToolArguments(fragments.slice(0, index + 1).join(""))),
 		);
 		assert.equal(JSON.stringify(retained).includes("partialJson"), false, "raw replay must not retain transport chain state");
+	});
+
+	it("falls back safely at the write truncation boundary and resumes from a projected reconnect baseline", async () => {
+		const session: any = {
+			id: "sess-large-write",
+			projectId: "project-1",
+			status: "idle",
+			statusVersion: 1,
+			title: "Session",
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: { toArray: () => [] },
+			cwd: process.cwd(),
+			rpcClient: {},
+		};
+		const capable = await authenticate(session, { assistantStreamDelta: 1 });
+		capable.sent.length = 0;
+
+		emitSessionEvent(session, truncateLargeToolContent(makeWriteUpdate("", "toolcall_start")));
+		const endMarker = "LARGE_WRITE_TRANSITION_END";
+		const below = `${"x".repeat(1024)}${endMarker}${"x".repeat(LARGE_CONTENT_THRESHOLD - 4096 - endMarker.length)}`;
+		const initialDelta = `{"path":"large.txt","content":"${below}`;
+		const belowEvent = truncateLargeToolContent(makeWriteUpdate(below, "toolcall_delta", initialDelta));
+		emitSessionEvent(session, belowEvent);
+
+		let previous: any;
+		for (const frame of eventFrames(capable)) {
+			assert.equal(frame.data.assistantStreamDelta, 1);
+			const reconstructed = reconstructAssistantStreamDelta(frame.data, previous) as any;
+			assert.notStrictEqual(reconstructed, frame.data, "below-threshold compact frames must reconstruct");
+			previous = reconstructed.message;
+		}
+		assert.deepEqual(previous.content[0].arguments, belowEvent.message.content[0].arguments);
+		assert.equal(previous.content[0].partialJson, initialDelta);
+
+		capable.sent.length = 0;
+		const above = `${below}${"x".repeat(8192)}`;
+		const crossingEvent = truncateLargeToolContent(makeWriteUpdate(above, "toolcall_delta", "x".repeat(8192))) as any;
+		emitSessionEvent(session, crossingEvent);
+
+		const crossingFrame = eventFrames(capable)[0].data;
+		assert.equal(crossingFrame.assistantStreamDelta, undefined, "descriptor cutover must use the complete projected event when append-only reconstruction cannot converge");
+		assert.deepEqual(reconstructAssistantStreamDelta(crossingFrame, previous), crossingEvent);
+		assert.equal(crossingFrame.message.content[0].arguments.content._truncated, true);
+		assert.equal(crossingFrame.assistantMessageEvent.partial.content[0].arguments.content._truncated, true);
+		assert.ok(Buffer.byteLength(JSON.stringify(crossingFrame), "utf8") < LARGE_CONTENT_THRESHOLD);
+		assert.equal(JSON.stringify(crossingFrame).includes(endMarker), false);
+
+		(capable as any).assistantStreamDeltaNeedsBaseline = true;
+		capable.sent.length = 0;
+		const reconnectEvent = truncateLargeToolContent(makeWriteUpdate(above, "toolcall_start", undefined, true)) as any;
+		emitSessionEvent(session, reconnectEvent);
+
+		const reconnectFrame = eventFrames(capable)[0].data;
+		assert.equal(reconnectFrame.assistantStreamDelta, 1);
+		assert.equal(reconnectFrame.assistantMessageBaseline.content[0].arguments.content._truncated, true);
+		assert.equal(JSON.stringify(reconnectFrame).includes(endMarker), false);
+		assert.equal((capable as any).assistantStreamDeltaNeedsBaseline, false);
+		assert.deepEqual(reconstructAssistantStreamDelta(reconnectFrame), reconnectEvent);
 	});
 
 	it("gives a capable mid-tool attach a self-contained baseline without changing replay", async () => {
