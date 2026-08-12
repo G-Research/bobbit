@@ -176,6 +176,15 @@ test.describe("Journey: Sidebar status views", () => {
 		await search.fill("");
 		await expect(row(page, ids.readOld)).toHaveCount(0);
 
+		// Production Show Read suppresses idle/terminated rows only. Serialized
+		// archived rows remain visible when archives are enabled and Read is off.
+		await openFilters(page);
+		await expect(filterCheckbox(page, "read")).not.toBeChecked();
+		await filterCheckbox(page, "archived").check();
+		await closeFiltersWithEscape(page);
+		await expect(row(page, ids.archived)).toBeVisible();
+		await expect(row(page, ids.readOld)).toHaveCount(0);
+
 		// Live quick actions remain Modify, Terminate, Menu; Pin is menu-only and third.
 		await openSessionMenu(page, ids.unreadNew);
 		expect((await menuItemIds(page)).slice(0, 3)).toEqual(["modify", "terminate", "pin"]);
@@ -217,7 +226,7 @@ test.describe("Journey: Sidebar status views", () => {
 
 		// Archived visibility is Status-owned and rows/actions remain archive-safe.
 		await openFilters(page);
-		await filterCheckbox(page, "archived").check();
+		await expect(filterCheckbox(page, "archived")).toBeChecked();
 		await closeFiltersWithEscape(page);
 		await expect(row(page, ids.archived)).toBeVisible();
 		await expect(row(page, ids.archived)).toHaveCSS("filter", "grayscale(1)");

@@ -1,3 +1,4 @@
+import { isSessionReadFilterable } from "../shared/session-tags.js";
 import type { GatewaySession } from "./state.js";
 import type {
 	SessionContext,
@@ -120,7 +121,7 @@ export function selectSidebarStatusSections<TSession extends StatusSession = Sta
 			busy = input.isBusy(session);
 			if (!input.filters.showBusy && busy && !active) continue;
 			unread = input.isUnread(session);
-			if (!input.filters.showRead && !unread && !busy && !active) continue;
+			if (!input.filters.showRead && !unread && isSessionReadFilterable(session) && !active) continue;
 		}
 
 		if (input.isPinned(session)) {
