@@ -75,6 +75,15 @@
       }
     },
     {
+      "path": "tests2/browser/fixtures/sidebar-actions-menu-mobile-fixture.spec.ts",
+      "reason": "Independent mobile sidebar quick-action and hamburger-menu contract split from sidebar-actions-menu-fixture to keep both files below the strict 60-second per-spec wall cap without dropping assertions.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
       "reason": "Core lifecycle regression coverage proving durable flattened and legacy-inferred sandbox worktree ownership, fail-closed ambiguity, pre-mutation owner protection, nested-cwd teardown authority, borrower-safe cleanup, and rejection-safe per-owner FIFO serialization.",
       "execution": {
