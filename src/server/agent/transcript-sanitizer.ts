@@ -42,6 +42,11 @@ import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import {
+	activeTranscriptBranch,
+	parseTranscript,
+	type ParsedTranscriptLine,
+} from "./transcript-tree.js";
 
 /**
  * Compute the effective text of a pi-coding-agent message `content`.
@@ -110,75 +115,12 @@ export interface SanitizeResult {
 	rewritten: number;
 }
 
-interface ParsedTranscriptLine {
-	lineIndex: number;
-	entry: any;
-	id: string | null;
-	parentId: string | null;
-}
-
 interface ProjectedTranscriptRecord {
 	/** JSONL line containing this record (and owning it when retainedTailIndex is set). */
 	lineIndex: number;
 	/** Position inside the owning Pi 0.81 compaction's `retainedTail`, when embedded. */
 	retainedTailIndex?: number;
 	entry: any;
-}
-
-function parseTranscriptLines(lines: string[]): ParsedTranscriptLine[] {
-	const parsed: ParsedTranscriptLine[] = [];
-	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-		const trimmed = lines[lineIndex].trim();
-		if (!trimmed) continue;
-		try {
-			const entry = JSON.parse(trimmed);
-			if (!entry || typeof entry !== "object") continue;
-			parsed.push({
-				lineIndex,
-				entry,
-				id: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : null,
-				parentId: typeof entry.parentId === "string" && entry.parentId.length > 0 ? entry.parentId : null,
-			});
-		} catch {
-			// Malformed and non-JSON lines are opaque transcript data.
-		}
-	}
-	return parsed;
-}
-
-/**
- * Return the parent-linked branch ending at Pi's current leaf. Session headers
- * are not tree entries. Ordinarily the last parsed, id-bearing non-header
- * record is the leaf. Pi 0.81 harness JSONL can instead end in a `leaf` control
- * record whose `targetId` selects an earlier entry (or null for an empty
- * branch); the control record itself is not part of the active branch.
- * Missing targets/parents and cycles terminate the walk conservatively.
- */
-function activeTranscriptBranch(parsed: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
-	let leafId: string | null = null;
-	const byId = new Map<string, ParsedTranscriptLine>();
-	for (const record of parsed) {
-		if (!record.id || record.entry.type === "session") continue;
-		byId.set(record.id, record);
-		if (record.entry.type === "leaf") {
-			leafId = typeof record.entry.targetId === "string" && record.entry.targetId.length > 0
-				? record.entry.targetId
-				: null;
-		} else {
-			leafId = record.id;
-		}
-	}
-	if (!leafId) return [];
-
-	const reverseBranch: ParsedTranscriptLine[] = [];
-	const visited = new Set<string>();
-	let current: ParsedTranscriptLine | undefined = byId.get(leafId);
-	while (current?.id && !visited.has(current.id)) {
-		reverseBranch.push(current);
-		visited.add(current.id);
-		current = current.parentId ? byId.get(current.parentId) : undefined;
-	}
-	return reverseBranch.reverse();
 }
 
 function projectedContextBranch(branch: ParsedTranscriptLine[]): ProjectedTranscriptRecord[] {
@@ -277,7 +219,7 @@ function orphanToolResultLocations(branch: ParsedTranscriptLine[]): OrphanToolRe
 			continue;
 		}
 
-		const message = entry.message;
+		const message = entry.message as Record<string, any>;
 		if (message.role === "assistant") {
 			pendingToolCallIds = assistantToolCallIds(message.content);
 			continue;
@@ -320,7 +262,7 @@ function orphanToolResultLocations(branch: ParsedTranscriptLine[]): OrphanToolRe
 function repairOrphanToolResults(content: string): SanitizeResult {
 	if (!content) return { content, changed: false, rewritten: 0 };
 	const lines = content.split("\n");
-	const parsed = parseTranscriptLines(lines);
+	const parsed = parseTranscript(content);
 	const activeBranch = activeTranscriptBranch(parsed);
 	const orphanLocations = orphanToolResultLocations(activeBranch);
 	const removedLineIndexes = orphanLocations.lineIndexes;
@@ -343,7 +285,7 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	// more inactive branches. Repair every surviving direct child of the removed
 	// chain; limiting this pass to activeBranch would leave those branches with a
 	// dangling parentId and make them impossible for Pi to resume later.
-	for (const record of parsed) {
+	for (const record of parsed.records) {
 		if (removedLineIndexes.has(record.lineIndex)) continue;
 		let changed = false;
 

@@ -147,7 +147,13 @@ export async function launchSidebarSessionFork<TFork extends { id: string; cwd: 
 		const repoPath = await deps.resolveNewWorktreeRepoPath(input.projectRoot);
 		if (repoPath) worktreeOpts = { repoPath };
 	} else {
-		sessionCwd = input.persisted.worktreePath || input.persisted.cwd || input.projectRoot;
+		// A reuse fork intentionally borrows the live source's exact working
+		// directory. It carries no worktree registration coordinates; the launch
+		// request marks it as borrowed so the source remains the sole lifecycle owner.
+		sessionCwd = input.source.cwd
+			|| input.persisted.cwd
+			|| input.persisted.worktreePath
+			|| input.projectRoot;
 	}
 
 	const oldTranscriptCwds = Array.from(new Set([

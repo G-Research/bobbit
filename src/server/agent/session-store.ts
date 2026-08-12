@@ -130,6 +130,10 @@ export interface PersistedSession {
 	teamLeadSessionId?: string;
 	/** Path to the git worktree for this session */
 	worktreePath?: string;
+	/** This writable session uses another session's worktree but never owns its teardown. */
+	borrowsWorktree?: boolean;
+	/** Flattened session id of the sandbox worktree lifecycle owner. Provenance only. */
+	borrowedWorktreeOwnerSessionId?: string;
 	/** Assistant type: "goal" | "role" | "tool" */
 	assistantType?: string;
 	// Legacy boolean fields — kept for backward compat during migration
@@ -213,6 +217,8 @@ export type UpdatableSessionFields = Pick<
 	| "teamGoalId"
 	| "teamLeadSessionId"
 	| "worktreePath"
+	| "borrowsWorktree"
+	| "borrowedWorktreeOwnerSessionId"
 	| "assistantType"
 	| "goalAssistant"
 	| "roleAssistant"

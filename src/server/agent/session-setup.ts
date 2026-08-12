@@ -10,6 +10,7 @@
  *   delegate — await pipeline + first prompt + streaming confirmation
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
@@ -22,13 +23,26 @@ import { readAuthorSidecar } from "./author-sidecar.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
-import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
+import {
+	rebaseAgentTranscriptCwdMetadataFile as rebaseAgentTranscriptCwdMetadataFileLegacy,
+	rebaseTranscriptCwdMetadataContent,
+	sanitizeAgentTranscriptFile as sanitizeAgentTranscriptFileLegacy,
+	sanitizeTranscriptContent,
+	type RebaseTranscriptCwdMetadataOptions,
+	type SanitizeResult,
+} from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import type { PersistedSession, SessionStore } from "./session-store.js";
-import { sessionFsContextForAgentFile } from "./session-fs.js";
+import {
+	sessionFileRead,
+	sessionFileRenameAtomic,
+	sessionFileWriteAtomic,
+	sessionFsContextForAgentFile,
+	type SessionFsContext,
+} from "./session-fs.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -60,6 +74,61 @@ import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, providerFromModel, recoverAnthropicApiKeyRuntime } from "./host-tokens.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
+
+async function transformPreExistingTranscript(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	transform: (content: string) => SanitizeResult,
+	operation: string,
+): Promise<number> {
+	try {
+		const content = await sessionFileRead(ctx, filePath, sandboxManager);
+		if (!content) return 0;
+		const result = transform(content);
+		if (!result.changed) return 0;
+		await sessionFileWriteAtomic(ctx, filePath, result.content, sandboxManager);
+		return result.rewritten;
+	} catch (error) {
+		console.warn(`[session-setup] Failed to ${operation} ${filePath} in sandbox (non-fatal):`, error);
+		return 0;
+	}
+}
+
+async function rebaseAgentTranscriptCwdMetadataFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	options: RebaseTranscriptCwdMetadataOptions,
+): Promise<number> {
+	if (!ctx.sandboxed) {
+		return rebaseAgentTranscriptCwdMetadataFileLegacy(ctx, filePath, sandboxManager, options);
+	}
+	return transformPreExistingTranscript(
+		ctx,
+		filePath,
+		sandboxManager,
+		(content) => rebaseTranscriptCwdMetadataContent(content, options),
+		"rebase transcript cwd metadata",
+	);
+}
+
+async function sanitizeAgentTranscriptFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+): Promise<number> {
+	if (!ctx.sandboxed) {
+		return sanitizeAgentTranscriptFileLegacy(ctx, filePath, sandboxManager);
+	}
+	return transformPreExistingTranscript(
+		ctx,
+		filePath,
+		sandboxManager,
+		sanitizeTranscriptContent,
+		"sanitize transcript",
+	);
+}
 
 export interface PiExtensionDiagnostic {
 	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
@@ -230,7 +299,18 @@ export function applySandboxCwdOffset(containerBaseCwd: string, relativeOffset?:
 /** Compute a safe relative cwd offset, returning undefined when cwd is outside root. */
 export function relativeSandboxCwdOffset(rootPath?: string, cwd?: string): string | undefined {
 	if (!rootPath || !cwd) return undefined;
-	return normalizeSandboxCwdOffset(path.relative(rootPath, cwd));
+	let offsetRoot = rootPath;
+	let offsetCwd = cwd;
+	try {
+		// Resolve both existing paths before using either canonical spelling. This
+		// makes equivalent Windows long/8.3 aliases comparable while preserving
+		// the established lexical behavior when either path cannot be resolved.
+		const canonicalRoot = fs.realpathSync.native(rootPath);
+		const canonicalCwd = fs.realpathSync.native(cwd);
+		offsetRoot = canonicalRoot;
+		offsetCwd = canonicalCwd;
+	} catch { /* atomic lexical fallback */ }
+	return normalizeSandboxCwdOffset(path.relative(offsetRoot, offsetCwd));
 }
 
 // ── Interfaces ─────────────────────────────────────────────────────────────
@@ -265,6 +345,10 @@ export interface SessionSetupPlan {
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
+	/** Explicit no-teardown ownership marker for a writable borrowed worktree. */
+	borrowsWorktree?: boolean;
+	/** Flattened session id of the sandbox worktree lifecycle owner. */
+	borrowedWorktreeOwnerSessionId?: string;
 	repoPath?: string;
 	branch?: string;
 	repoWorktrees?: Record<string, string>;
@@ -485,8 +569,8 @@ function effectiveGoalId(plan: SessionSetupPlan): string | undefined {
  * same cwd the session will boot with.
  */
 export function offsetWorktreeCwd(plan: Pick<SessionSetupPlan, "repoPath" | "cwd">, worktreeCwd: string): string {
-	const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, plan.cwd) : "";
-	return relativeOffset && relativeOffset !== "." ? path.join(worktreeCwd, relativeOffset) : worktreeCwd;
+	const relativeOffset = relativeSandboxCwdOffset(plan.repoPath, plan.cwd);
+	return relativeOffset ? path.join(worktreeCwd, relativeOffset) : worktreeCwd;
 }
 
 /**
@@ -1074,6 +1158,8 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		assistantType: plan.assistantType,
 		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
+		borrowsWorktree: plan.borrowsWorktree,
+		borrowedWorktreeOwnerSessionId: plan.borrowedWorktreeOwnerSessionId,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
 		repoWorktrees: plan.repoWorktrees,
@@ -1337,8 +1423,7 @@ export async function executeWorktreeAsync(
 		// Apply subdirectory offset: if the session's original CWD (project rootPath) is a
 		// subdirectory of the repo, offset the working directory within the worktree.
 		const originalCwd = plan.cwd;
-		const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
-		const sandboxCwdOffset = normalizeSandboxCwdOffset(relativeOffset);
+		const sandboxCwdOffset = relativeSandboxCwdOffset(plan.repoPath, originalCwd);
 		if (sandboxCwdOffset) plan.sandboxCwdOffset = sandboxCwdOffset;
 		// Same offset the goalProvisioned hook was dispatched with above.
 		const offsetCwd = offsetWorktreeCwd(plan, worktreeCwd);
@@ -1486,24 +1571,23 @@ export async function executeWorktreeAsync(
 		// actual cwd-slug before issuing switch_session.
 		const { formatAgentSessionFilePath } = await import("./agent-session-path.js");
 		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
-		if (correctPath !== plan.preExistingAgentSessionFile) {
-			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
-			const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
-			// Preserve the source transcript's filesystem realm while moving it to
-			// the cwd-derived slot. The formatter returns the host mount path; a
-			// container-side source needs the corresponding container path instead.
-			const correctAgentPath = sourceFsCtx.sandboxed
-				? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
-				: correctPath;
-			const correctFsCtx = sessionFsContextForAgentFile(plan, correctAgentPath);
-			if (sourceFsCtx.sandboxed || correctFsCtx.sandboxed) {
-				// Container-side paths use the session filesystem abstraction. A
-				// host-absolute transcript owned by a sandboxed session deliberately
-				// remains host-side so it is never passed to docker exec as a host path.
-				await sessionFileCopy(sourceFsCtx, plan.preExistingAgentSessionFile, correctFsCtx, correctAgentPath, ctx.sandboxManager);
-				await sessionFileDelete(sourceFsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+		const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
+		// The formatter returns the host mount path. A container-coordinate clone
+		// stays in that realm through publication, rebase, persistence, and replay.
+		const correctAgentPath = sourceFsCtx.sandboxed
+			? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
+			: correctPath;
+		if (correctAgentPath !== plan.preExistingAgentSessionFile) {
+			if (sourceFsCtx.sandboxed) {
+				await sessionFileRenameAtomic(
+					sourceFsCtx,
+					plan.preExistingAgentSessionFile,
+					correctAgentPath,
+					ctx.sandboxManager,
+				);
 			} else {
-				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
+				// Legacy host-absolute sandbox transcripts and ordinary local sessions
+				// retain their established host move compatibility.
 				const fsp = await import("node:fs/promises");
 				await fsp.mkdir(path.dirname(correctAgentPath), { recursive: true });
 				try {
@@ -1627,6 +1711,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
+		borrowsWorktree: plan.borrowsWorktree,
+		borrowedWorktreeOwnerSessionId: plan.borrowedWorktreeOwnerSessionId,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn

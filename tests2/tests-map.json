@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
+      "reason": "Core lifecycle regression coverage proving durable flattened and legacy-inferred sandbox worktree ownership, fail-closed ambiguity, pre-mutation owner protection, nested-cwd teardown authority, borrower-safe cleanup, and rejection-safe per-owner FIFO serialization.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/worktree-cwd-offset.test.ts",
+      "reason": "Core regression coverage for atomic native-realpath worktree cwd offsets across Windows long and 8.3 aliases, nested projects, resolution failure, and traversal rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/review-large-payload-receipt.test.ts",
       "reason": "Core reproducing regression coverage proving a real 20-file review above 32 KiB emits a bounded payload-free v2 receipt that survives live and history truncation with exact identity, byte metadata, and an actionable automatic-open outcome.",
       "execution": {
@@ -2856,6 +2874,60 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/history-fork-transcript.test.ts",
+      "reason": "Core coverage for authoritative active-branch history-fork transcript validation, exact cut-before materialization, raw-record preservation, streaming cursor rejection, and immutable concurrent snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-fs-sandbox-publication.test.ts",
+      "reason": "Deterministic no-Docker coverage for canonical container-session path rejection, sandbox transcript publication through fixed container code, content-free argv, atomic concurrent winners, host symlink-swap isolation, strict path validation, and failure cleanup without host fallback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/history-fork-sidecar-identities.test.ts",
+      "reason": "Core coverage for fail-closed Pi transcript identity binding and history filtering of skill, file-mention, and compaction sidecars while preserving Bobbit-local ids.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/prompt-history-actions.test.ts",
+      "reason": "DOM coverage for eligible historic prompt filtering, canonical desktop/mobile actions, accessible help and toggle interactions, deduplicated dispatch, and exact visible prompt copying with clipboard feedback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/history-fork-api.test.ts",
+      "reason": "Integration coverage for authoritative persisted/recovered transcript resolution, malicious raw-path rejection, history-fork route validation, strict duplicate-author filtering, transcript and sidecar cuts, unchanged source state, canonical container-coordinate sandbox publication/rebase/rehydration, flattened ownership, controlled fork/session/project-delete FIFO races, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts",
+      "reason": "Browser journey covering desktop and mobile prompt actions, help and clipboard accessibility, toggle reset, stale-cursor failure, both fork worktree modes, exact transcript cuts, source preservation, reload, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -2985,6 +3057,10 @@
     },
     {
       "path": "tests2/browser/journeys/goal-dashboard-agent-dedupe.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts",
       "type": "smoke-journey"
     }
   ],

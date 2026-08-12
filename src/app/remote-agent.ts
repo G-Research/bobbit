@@ -1996,10 +1996,15 @@ export class RemoteAgent {
 					// container when it's null — so we must clear here first.
 					this._state.streamingMessage = null;
 
-					// Emit message_end for each message so AgentInterface re-renders
+					// Preserve the historical per-message replay contract for subscribers,
+					// then emit one bulk boundary after the entire reducer replacement. The
+					// boundary lets AgentInterface wait for MessageList/child commits before
+					// its final tail pin; metadata enrichment can otherwise grow historic
+					// user rows after the per-message updateComplete callbacks have run.
 					for (const m of this._state.messages) {
 						this.emit({ type: "message_end", message: m });
 					}
+					this.emit({ type: "messages_snapshot" } as any);
 					// Scan loaded messages for goal proposals (e.g. reconnecting to an existing session).
 					// If proposal checking is deferred (draft restores in progress),
 					// just flag that we have proposals to check later.

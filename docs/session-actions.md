@@ -2,7 +2,7 @@
 
 Unified session actions keep every per-session command behind one canonical model so the sidebar row menu, the open-session desktop header, and the open-session mobile header do not drift. The sidebar action set is the baseline, and the header renders the same descriptors both as direct buttons and through the same hamburger popover component.
 
-This feature sits in the browser app shell. It does not change session REST semantics; actions call the existing session, staff, routing, clipboard, prompt-inspector, refresh, fork, window-opening, and pack launcher helpers.
+This feature sits in the browser app shell. Canonicalizing the pre-existing session actions does not change their REST semantics; those actions call the established session, staff, routing, clipboard, prompt-inspector, refresh, fork, window-opening, and pack launcher helpers. Historic prompt actions extend the existing fork endpoint with a durable `entryId` so the server can apply a transcript boundary.
 
 ## Canonical model
 
@@ -121,6 +121,63 @@ Fork carries a trailing `New worktree` toggle through `trailingToggle`:
 
 The popover renders the toggle with `role="menuitemcheckbox"` and `aria-checked`. Tests cover focus, `Space`/`Enter` behavior on the toggle, and that toggling does not fire the Fork request.
 
+## Historic prompt actions
+
+Historic prompt actions apply the session Fork lifecycle at a durable transcript boundary instead of cloning the entire conversation. They live on message rows rather than in `buildSessionActions()`, but they mount the same `SidebarActionsPopover` used by session headers and sidebar rows. Reusing that component keeps row sizing, icons, typography, hover/focus states, positioning, focus movement, trailing-toggle behavior, dismissal, and reduced-motion handling aligned across desktop and mobile.
+
+### Eligible prompt rows
+
+An eligible prompt has one compact, always-visible `Actions for prompt` overflow button beside the user bubble on both desktop and mobile. There is no hover-only desktop action and no long-press alternative.
+
+The browser fails closed unless all of these are true:
+
+- the source passes the same live-fork rules as session-level Fork: live, interactive, writable, and not archived, terminated, delegated/child, or team-owned;
+- the row is an ordinary accountable `user` or `user-with-attachments` prompt, not an assistant or tool-result-only row;
+- the row is settled server data rather than synthetic, optimistic, permission, or pending UI state;
+- it carries a bounded `entryId` with Bobbit's `_entryIdSource: "pi-transcript"` provenance;
+- it is not the current durable user prompt while that turn is streaming.
+
+Older durable prompts remain actionable while a later optimistic or in-flight prompt is present. The current row becomes eligible after it settles. The server repeats source, cursor, user-role, active-branch, and in-flight validation; browser provenance never grants authority by itself.
+
+### Menu and keyboard behavior
+
+The prompt menu has exactly two rows, in order:
+
+1. **Fork from history**, with an adjacent `(?)` help stop and trailing **New worktree** toggle.
+2. **Copy prompt**.
+
+`MessageList` owns at most one prompt menu and body-mounts the canonical popover against the row trigger. Opening another row replaces the previous menu. Escape and outside-pointer dismissal restore trigger focus; Tab and route changes dismiss through the existing popover behavior. Arrow keys, Home/End, Enter/Space, responsive viewport clamping, and pointer/touch handling are inherited from the shared component.
+
+The `(?)` control is a sibling focus stop, not part of the Fork button. Its accessible name is `About Fork from history`, and its tooltip says exactly:
+
+> The new session will include the conversation up to, but not including, this prompt.
+
+Hover or focus reveals the explanation. Click/tap, Enter, or Space pins/toggles it so the same content is available on touch and by keyboard. Interacting with help neither selects Fork, changes the worktree toggle, nor dismisses the menu.
+
+### History worktree toggle
+
+The prompt menu's **New worktree** toggle is independent of the session-level Fork toggle:
+
+- it resets to off every time a prompt menu opens;
+- off means borrow the source session's exact live cwd/worktree and branch;
+- on means use the established fresh worktree/branch lifecycle;
+- click/tap or keyboard activation updates `aria-checked` and the accessible on/off label without selecting Fork or closing the menu;
+- selecting the Fork row sends the current value with the durable prompt cursor.
+
+Borrowing is intentionally different from owning. The new session is writable but receives no worktree teardown coordinates and is marked as a borrower, so its termination or recovery cannot remove, repair, or recreate the shared tree. For sandbox reuse, ownership is flattened to the final non-borrowing session so a fork of a borrower cannot become a teardown authority. No reset, cleanup, stash, registration, or source-agent unwind occurs. See [REST API — Fork session endpoint](rest-api.md#fork-session-endpoint) for the authoritative boundary and serialized lifecycle contract.
+
+### Copy prompt
+
+**Copy prompt** captures the row's original user-visible text when the menu opens; it never copies rendered DOM text. String content is copied unchanged, while structured content contributes only text blocks in source order. This preserves line breaks and the typed `/skill` and `@path` forms restored by transcript projection while excluding model-expanded skill/file content, private author prefixes, author chrome, attachment data and filenames, timestamps, and action labels.
+
+Attachment prompts therefore copy only their textual prompt. A textless attachment prompt still permits Fork when it has a valid cursor, but Copy reports failure rather than copying attachment metadata. Clipboard success shows `Prompt copied`; unavailable or rejected clipboard writes show `Couldn't copy prompt`.
+
+### Fork request, feedback, and navigation
+
+Selecting **Fork from history** sends only `{ entryId, newWorktree }` to the existing `POST /api/sessions/:id/fork` endpoint. It never sends a rendered message array/index and never prefills or resends the selected prompt. Prompt controls are disabled while the local/global session-creation guard is active, and the server independently reserves identical in-flight history requests.
+
+On success, the initiating client refreshes sessions and connects to the returned session as an existing session so retained history is fetched before navigation settles. Other clients remain on the live source. The destination ends immediately before the selected prompt; the source stays listed and unchanged. On validation, clipboard, launch, or connection failure, the initiating client stays on the source and shows the existing toast or connection-error feedback.
+
 ## Session links and routing
 
 Session `Copy link`, canonical `Open in new window`, and session-row middle-click actions use path-style URLs:
@@ -149,6 +206,9 @@ Goal links still use hash routes (`/#/goal/<goalId>`). The path-style behavior d
 
 Relevant coverage lives in:
 
+- `tests2/dom/prompt-history-actions.test.ts` — durable-row eligibility, desktop/mobile parity, canonical menu behavior, help/toggle accessibility, exact prompt copy, clipboard feedback, focus, dismissal, and duplicate suppression.
+- `tests2/integration/history-fork-api.test.ts` and `tests2/core/history-fork-transcript.test.ts` — authoritative cursor validation, exact cut, source immutability, context/sidecar filtering, worktree ownership, failure cleanup, and concurrent reservations.
+- `tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts` — desktop/touch prompt actions, help/copy/error feedback, both worktree modes, reload, source preservation, and destination transcript boundary.
 - `tests/e2e/ui/session-actions.spec.ts` — canonical id parity/order, staff/team labels and visibility, desktop and mobile header hamburgers opening the full action list, FLIP sources for all visible direct header buttons, hidden/non-interactive direct buttons while open, restoration on close, Fork toggle accessibility, and header action reachability.
 - `tests/e2e/ui/archived-session-actions.spec.ts` — archived sidebar and header menus on desktop/mobile, eligible and ineligible Continue visibility, exclusion of live/destructive/launcher actions, copy link, open-in-new-window, and row-selection preservation.
 - `tests/e2e/ui/copy-session-link.spec.ts` — path-style copy URL, direct `/session/<id>` load, hash canonicalization, reload behavior, and hash precedence.

@@ -165,6 +165,10 @@ export interface IRpcBridge {
 	abort(): Promise<any>;
 	getState(): Promise<any>;
 	getMessages(): Promise<any>;
+	/** Narrow read-only Pi session-tree plane used for authoritative sidecar binding. */
+	getTranscriptEntries?(): Promise<any>;
+	/** Read-only Pi transcript cursor/tree plane used to authorize history actions. */
+	getTranscriptCursorSnapshot?(): Promise<any>;
 	setModel(provider: string, modelId: string): Promise<any>;
 	setThinkingLevel(level: string): Promise<any>;
 	compact(timeoutMs?: number): Promise<any>;
@@ -872,6 +876,45 @@ export class RpcBridge {
 		const response = await this.sendCommand({ type: "get_messages" });
 		if (response?.success) return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
 		return response;
+	}
+
+	/** Read Pi's session tree without invoking any mutating fork operation. */
+	async getTranscriptEntries() {
+		const response = await this.sendCommand({ type: "get_entries" });
+		if (!response?.success) return response;
+		return {
+			success: true,
+			data: {
+				entries: response.data?.entries,
+				leafId: response.data?.leafId,
+			},
+		};
+	}
+
+	/**
+	 * Read Pi's immutable fork selector and session tree without invoking its
+	 * mutating fork RPC. The caller correlates these two views with get_messages;
+	 * malformed or unsuccessful responses remain failures rather than cursors.
+	 */
+	async getTranscriptCursorSnapshot() {
+		const [forkMessages, entries] = await Promise.all([
+			this.sendCommand({ type: "get_fork_messages" }),
+			this.sendCommand({ type: "get_entries" }),
+		]);
+		if (!forkMessages?.success || !entries?.success) {
+			return {
+				success: false,
+				error: forkMessages?.error ?? entries?.error ?? "Pi transcript cursor data is unavailable",
+			};
+		}
+		return {
+			success: true,
+			data: {
+				forkMessages: forkMessages.data?.messages,
+				entries: entries.data?.entries,
+				leafId: entries.data?.leafId,
+			},
+		};
 	}
 
 	async stop(): Promise<void> {
