@@ -86,6 +86,8 @@ export interface PersistedSession {
 	lastActivity: number;
 	/** Epoch ms when the user last viewed this session. 0 / undefined = never read. */
 	lastReadAt?: number;
+	/** Durable user-owned session metadata. Missing legacy values normalize to an empty array. */
+	user_tags?: string[];
 	/** Optional goal this session belongs to */
 	goalId?: string;
 	/** Whether the agent was actively streaming when the server last knew about it */
@@ -203,6 +205,7 @@ export type UpdatableSessionFields = Pick<
 	| "title"
 	| "lastActivity"
 	| "lastReadAt"
+	| "user_tags"
 	| "agentSessionFile"
 	| "goalId"
 	| "wasStreaming"
@@ -722,7 +725,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
-		"manualRetryRequired", "inFlightSteerTexts",
+		"manualRetryRequired", "inFlightSteerTexts", "user_tags",
 		"sidePanelWorkspace",
 	];
 
