@@ -495,6 +495,8 @@ export const state = {
 
 	// Search state
 	searchQuery: "",
+	/** Ephemeral archive demand owned by the shared sidebar search pipeline. */
+	archivedSearchDemand: false,
 
 	// Pagination for archived items
 	archivedGoalsCursor: null as number | null,

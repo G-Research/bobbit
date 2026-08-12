@@ -511,7 +511,7 @@ function renderMobileGoalForest(nodes: readonly SidebarTreeNode<GoalContext>[], 
 }
 
 function renderMobileArchivedTreeSection(projectTree: SidebarProjectTree): ReturnType<typeof html> | string {
-	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
+	if (!(state.showArchived || state.archivedSearchDemand) || !projectTree.archivedSectionNode) return "";
 	const project = projectTree.project;
 	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
@@ -699,7 +699,8 @@ function renderMobileLanding() {
 										if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
 										return sessionMatchesQuery(session);
 									});
-									const archivedSessionInput = state.showArchived
+									const showArchivedForProject = state.showArchived || state.archivedSearchDemand;
+									const archivedSessionInput = showArchivedForProject
 										? state.archivedSessions.filter(session => {
 											if (!query) return true;
 											if (retainedSearchSessionIds!.has(session.id)) return true;
@@ -715,7 +716,7 @@ function renderMobileLanding() {
 										sessions: liveSessionInput,
 										archivedSessions: archivedSessionInput,
 										staff: staffList,
-										showArchived: state.showArchived,
+										showArchived: showArchivedForProject,
 										filters: {
 											searchQuery: state.searchQuery,
 											bypassBusyReadFilters: bypassFilters,

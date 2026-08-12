@@ -56,7 +56,7 @@ async function loadFixture(page: Page): Promise<void> {
 	await expect(page.locator(".sidebar-edge"), `${MARK}: sidebar should render`).toBeVisible({ timeout: 10_000 });
 }
 
-async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "childSessionParent" | "firstClassChildSession" | "delegateChildSession" | "archivedDelegateChildSession" | "nestedMatchGoal" | "archivedSession", string>> {
+async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "childSessionParent" | "firstClassChildSession" | "delegateChildSession" | "archivedDelegateChildSession" | "nestedMatchGoal" | "archivedSession" | "remoteArchivedSession", string>> {
 	return page.evaluate(() => (window as any).__sidebarFilterSearchFixtureIds);
 }
 
@@ -143,7 +143,10 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("ReadStandaloneAlpha");
 		await expectSessionVisible(page, ids.readSession, `${MARK}: search input applies title filter`);
 		await expectSessionHidden(page, ids.busySession, `${MARK}: search input hides non-matching rows`);
-		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(true);
+		await expect.poll(() => page.evaluate(() => ({
+			projectArchived: (window as any).bobbitState.showArchived,
+			searchDemand: (window as any).bobbitState.archivedSearchDemand,
+		})), { timeout: 5_000 }).toEqual({ projectArchived: false, searchDemand: true });
 
 		await searchInput.fill("ArchivedEchoFixture");
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("ArchivedEchoFixture");
@@ -157,7 +160,35 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await expect(searchInput, `${MARK}: Escape clears the search input`).toHaveValue("");
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("");
 		expect(await searchInput.evaluate((el) => document.activeElement === el), `${MARK}: Escape blurs search input`).toBe(false);
-		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
+		await expect.poll(() => page.evaluate(() => ({
+			projectArchived: (window as any).bobbitState.showArchived,
+			searchDemand: (window as any).bobbitState.archivedSearchDemand,
+		})), { timeout: 5_000 }).toEqual({ projectArchived: false, searchDemand: false });
+	});
+
+	test("Status archive search keeps Project preference independent and remote q results current", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		await page.getByTestId("sidebar-view-status").evaluate((button: HTMLButtonElement) => button.click());
+		const searchInput = page.locator("input[data-search]");
+		await searchInput.fill("RemoteBeyondFirstPageNeedle");
+
+		await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: remote archived q result beyond the unfiltered page is shown`);
+		await expect.poll(() => page.evaluate(() => ({
+			projectArchived: (window as any).bobbitState.showArchived,
+			searchDemand: (window as any).bobbitState.archivedSearchDemand,
+		})), { timeout: 5_000 }).toEqual({ projectArchived: false, searchDemand: true });
+
+		await page.getByTestId("sidebar-filters-button").click();
+		await page.getByTestId("sidebar-filter-archived").locator("input").check();
+		await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: toggling Status archived must not invalidate the active remote q result`);
+		await expect.poll(() => page.evaluate(() =>
+			(window as any).__sidebarFilterSearchRequests.filter((request: any) => request.url.includes("/api/sessions") && request.url.includes("q=RemoteBeyondFirstPageNeedle")).length,
+		), { timeout: 5_000 }).toBeGreaterThan(0);
+
+		await page.getByTestId("sidebar-view-project").evaluate((button: HTMLButtonElement) => button.click());
+		await page.getByTestId("sidebar-filters-button").click();
+		await expect(page.getByTestId("sidebar-filter-archived").locator("input"), `${MARK}: Project Show Archived stays off while query is retained`).not.toBeChecked();
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery)).toBe("RemoteBeyondFirstPageNeedle");
 	});
 
 	test("search expands retained collapsed goal ancestors ephemerally", async ({ page }) => {

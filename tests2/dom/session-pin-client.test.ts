@@ -27,11 +27,13 @@ import { isPinned } from "../../src/shared/session-tags.js";
 type Deferred<T> = {
 	promise: Promise<T>;
 	resolve: (value: T) => void;
+	reject: (reason?: unknown) => void;
 };
 
 function deferred<T>(): Deferred<T> {
 	let resolve!: (value: T) => void;
-	return { promise: new Promise<T>((done) => { resolve = done; }), resolve };
+	let reject!: (reason?: unknown) => void;
+	return { promise: new Promise<T>((done, fail) => { resolve = done; reject = fail; }), resolve, reject };
 }
 
 function session(id: string, extra: Record<string, unknown> = {}): GatewaySession {
@@ -226,7 +228,7 @@ describe("session pin client mutation", () => {
 		expect(host.textContent).toContain("Couldn't pin session");
 	});
 
-	it("does not let a stale failure roll back a newer mutation, even after an intervening request completes", async () => {
+	it("serializes rapid mutations per session while preserving the newest optimistic intent", async () => {
 		state.gatewaySessions = [session("rapid", { user_tags: ["owner=me"] })];
 		const requests = [deferred<Response>(), deferred<Response>(), deferred<Response>()];
 		let requestIndex = 0;
@@ -234,25 +236,118 @@ describe("session pin client mutation", () => {
 
 		const oldest = setSessionPinned("rapid", true);
 		const intervening = setSessionPinned("rapid", false);
-		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(false);
+		const newest = setSessionPinned("rapid", true);
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(true);
+		expect(requestIndex).toBe(1);
+
+		requests[0].resolve(response({ error: "old failure" }, 500));
+		await oldest;
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(true);
+		expect(requestIndex).toBe(2);
 
 		requests[1].resolve(response({ user_tags: ["owner=intervening"] }));
 		await intervening;
-		const newest = setSessionPinned("rapid", true);
 		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(true);
+		expect(requestIndex).toBe(3);
 
-		requests[0].resolve(response({ error: "late failure" }, 500));
-		await oldest;
-		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(true);
 		requests[2].resolve(response({ user_tags: ["owner=authoritative", "pinned=true"] }));
 		await newest;
-
 		expect(tags(state.gatewaySessions[0])).toEqual(["owner=authoritative", "pinned=true"]);
 		expect(console.error).not.toHaveBeenCalled();
+	});
+
+	it("restores the original live and archived baseline when rapid Pin then Unpin both fail", async () => {
+		state.gatewaySessions = [session("rapid-fail", { user_tags: ["owner=live"] })];
+		state.archivedSessions = [session("rapid-fail", { archived: true, user_tags: ["owner=archive"] })];
+		const requests = [deferred<Response>(), deferred<Response>()];
+		let requestIndex = 0;
+		vi.stubGlobal("fetch", () => requests[requestIndex++].promise);
+
+		const pin = setSessionPinned("rapid-fail", true);
+		const unpin = setSessionPinned("rapid-fail", false);
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(false);
+		expect(requestIndex).toBe(1);
+
+		requests[0].reject(new Error("pin failed"));
+		await pin;
+		expect(requestIndex).toBe(2);
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(false);
+		requests[1].reject(new Error("unpin failed"));
+		await unpin;
+
+		expect(tags(state.gatewaySessions[0])).toEqual(["owner=live"]);
+		expect(tags(state.archivedSessions[0])).toEqual(["owner=archive"]);
+		expect(console.error).toHaveBeenCalledTimes(1);
+	});
+
+	it("restores the last committed success when the following rapid mutation fails", async () => {
+		state.gatewaySessions = [session("partial-fail", { user_tags: ["owner=initial"] })];
+		state.archivedSessions = [session("partial-fail", { archived: true, user_tags: ["owner=archive"] })];
+		const requests = [deferred<Response>(), deferred<Response>()];
+		let requestIndex = 0;
+		vi.stubGlobal("fetch", () => requests[requestIndex++].promise);
+
+		const pin = setSessionPinned("partial-fail", true);
+		const unpin = setSessionPinned("partial-fail", false);
+		requests[0].resolve(response({ user_tags: ["owner=server", "pinned=true"] }));
+		await pin;
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(false);
+		requests[1].reject(new Error("unpin failed"));
+		await unpin;
+
+		expect(tags(state.gatewaySessions[0])).toEqual(["owner=server", "pinned=true"]);
+		expect(tags(state.archivedSessions[0])).toEqual(["owner=server", "pinned=true"]);
 	});
 });
 
 describe("session tag push invalidation", () => {
+	it("defers stale push and list tags behind a newer local intent, then applies remote tags after idle", async () => {
+		state.gatewaySessions = [session("race", { user_tags: [] })];
+		state.archivedSessions = [session("race", { archived: true, user_tags: [] })];
+		const pinRequests = [deferred<Response>(), deferred<Response>()];
+		const staleRefresh = deferred<Response>();
+		let pinRequestIndex = 0;
+		vi.stubGlobal("fetch", (input: string | URL) => {
+			const url = new URL(String(input), window.location.origin);
+			if (url.pathname === "/api/sessions/race/pin") return pinRequests[pinRequestIndex++].promise;
+			if (url.pathname === "/api/sessions") return staleRefresh.promise;
+			if (url.pathname === "/api/goals") return Promise.resolve(response({ changed: false, generation: 1 }));
+			if (url.pathname === "/api/projects") return Promise.resolve(response({ projects: [] }));
+			return Promise.resolve(response({}));
+		});
+		vi.stubGlobal("WebSocket", FakeWebSocket);
+		commitGatewayConnection(window.location.origin, "test-token");
+		startSessionListPushSync();
+		const socket = FakeWebSocket.instance!;
+		socket.open();
+
+		const pin = setSessionPinned("race", true);
+		const unpin = setSessionPinned("race", false);
+		socket.message({ type: "sessions_changed", sessionId: "race", user_tags: ["pinned=true", "owner=stale-push"] });
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(false);
+		expect(isPinned(tags(state.archivedSessions[0]))).toBe(false);
+
+		staleRefresh.resolve(response({
+			sessions: [session("race", { user_tags: ["pinned=true", "owner=stale-list"] })],
+			archivedDelegates: [],
+			generation: 2,
+		}));
+		await vi.waitFor(() => expect(state.sessionsGeneration).toBe(2));
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(false);
+
+		pinRequests[0].resolve(response({ user_tags: ["pinned=true", "owner=pin-success"] }));
+		await pin;
+		expect(isPinned(tags(state.gatewaySessions[0]))).toBe(false);
+		pinRequests[1].resolve(response({ user_tags: ["owner=unpin-success"] }));
+		await unpin;
+		expect(tags(state.gatewaySessions[0])).toEqual(["owner=unpin-success"]);
+		expect(tags(state.archivedSessions[0])).toEqual(["owner=unpin-success"]);
+
+		socket.message({ type: "sessions_changed", sessionId: "race", user_tags: ["pinned=true", "owner=remote-after-idle"] });
+		expect(tags(state.gatewaySessions[0])).toEqual(["pinned=true", "owner=remote-after-idle"]);
+		expect(tags(state.archivedSessions[0])).toEqual(["pinned=true", "owner=remote-after-idle"]);
+	});
+
 	it("patches loaded live and archived rows from additive sessions_changed data and still refreshes", async () => {
 		state.gatewaySessions = [session("push", { user_tags: [] })];
 		state.archivedSessions = [session("push", { archived: true, user_tags: [] })];

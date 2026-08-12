@@ -9,7 +9,6 @@ import { icon } from "@mariozechner/mini-lit";
 import { Archive, Eye, Filter, Users, Zap } from "lucide";
 import { renderApp, state } from "../../app/state.js";
 import { shortcutHint } from "../../app/shortcut-registry.js";
-import { clearArchivedBySearch } from "../../app/sidebar.js";
 import {
 	clearArchivedSessionsState,
 	fetchArchivedGoalsPaginated,
@@ -36,11 +35,10 @@ function updateFilter(key: SidebarViewFilterKey, value: boolean): void {
 export function toggleShowArchived(): void {
 	const next = !activeFilters().showArchived;
 	updateFilter("showArchived", next);
-	clearArchivedBySearch();
 	if (next) {
 		void fetchArchivedSessions();
 		void fetchArchivedGoalsPaginated();
-	} else if (!sidebarNeedsArchivedSessions(state, Boolean(state.searchQuery.trim()))) {
+	} else if (!sidebarNeedsArchivedSessions(state, state.archivedSearchDemand)) {
 		clearArchivedSessionsState();
 	}
 	renderApp();

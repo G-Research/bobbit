@@ -1093,41 +1093,25 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 // SEARCH HANDLERS
 // ============================================================================
 
-/** Tracks whether archived visibility was auto-opened by search (vs manual toggle).
- * Manual filter changes cancel that ephemeral demand without changing the
- * persisted Project preference. */
-export function clearArchivedBySearch(): void {
-	if (_archivedBySearch) state.showArchived = false;
-	_archivedBySearch = false;
-}
-let _archivedBySearch = false;
-
-/** Ensure archived is visible for search without loading unfiltered archived pages. */
+/** Search archive demand is ephemeral and never mutates either view preference. */
 function _ensureArchivedForSearch(query: string): void {
-	if (!state.showArchived) {
-		state.showArchived = true;
-		_archivedBySearch = true;
-	}
+	state.archivedSearchDemand = true;
 	scheduleArchivedRemoteSearch(query);
 }
 
-/** If archived was auto-opened by search, close it. */
-function _revertArchivedIfSearchOpened(): void {
-	if (_archivedBySearch) {
-		state.showArchived = false;
-		_archivedBySearch = false;
-		// Search auto-open is ephemeral. Keep the shared archive cache while either
-		// view still requests archived rows; tree expansion preferences remain owned
-		// by the existing archive state module.
-		if (!sidebarNeedsArchivedSessions(state, false)) clearArchivedSessionsState();
-	}
+function _clearArchivedSearchDemand(): void {
+	if (!state.archivedSearchDemand) return;
+	state.archivedSearchDemand = false;
+	// Keep the shared archive cache while either independent view still requests
+	// it; tree expansion preferences remain owned by the existing archive state.
+	if (!sidebarNeedsArchivedSessions(state, false)) clearArchivedSessionsState();
 }
 
 export function handleSidebarSearchInput(query: string): void {
 	state.searchQuery = query;
 	if (!query.trim()) {
 		clearArchivedSearchState();
-		_revertArchivedIfSearchOpened();
+		_clearArchivedSearchDemand();
 		renderApp();
 		return;
 	}
@@ -1138,13 +1122,13 @@ export function handleSidebarSearchInput(query: string): void {
 export function handleSidebarSearchClear(): void {
 	state.searchQuery = "";
 	clearArchivedSearchState();
-	_revertArchivedIfSearchOpened();
+	_clearArchivedSearchDemand();
 	renderApp();
 }
 
 export function renderArchivedSearchControls(): TemplateResult | string {
 	const queryActive = !!state.searchQuery.trim();
-	if (!state.showArchived || !queryActive) return "";
+	if (!state.archivedSearchDemand || !queryActive) return "";
 	const loading = state.archivedSearchGoalsLoading || state.archivedSearchSessionsLoading;
 	const hasMore = state.archivedSearchGoalsHasMore || state.archivedSearchSessionsHasMore;
 	if (!loading && !hasMore) return "";
@@ -1495,7 +1479,7 @@ function nestedGoalChildren(node: GoalTreeNode, archived: boolean): GoalTreeNode
 
 /** Render the collapsible per-project Archived subsection (desktop variant). */
 function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
-	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
+	if (!(state.showArchived || state.archivedSearchDemand) || !projectTree.archivedSectionNode) return "";
 	const project = projectTree.project as Project;
 	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
@@ -2263,7 +2247,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 						` : ""}
 					`;
 				})}
-				${state.showArchived && sidebarTree.projects.some(project => project.archivedGoalForest.length > 0) ? html`
+				${(state.showArchived || state.archivedSearchDemand) && sidebarTree.projects.some(project => project.archivedGoalForest.length > 0) ? html`
 					<div class="w-7 border-t border-border/50 my-1.5"></div>
 					${sidebarTree.projects.flatMap(project => project.archivedGoalForest).map(node => renderCollapsedGoalNode(node, true))}
 				` : ""}

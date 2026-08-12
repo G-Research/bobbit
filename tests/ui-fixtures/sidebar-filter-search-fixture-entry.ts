@@ -29,6 +29,7 @@ const DELEGATE_CHILD_SESSION_ID = "sidebar-filter-delegate-child-session";
 const ARCHIVED_DELEGATE_CHILD_SESSION_ID = "sidebar-filter-archived-delegate-child-session";
 const NESTED_MATCH_GOAL_ID = "sidebar-filter-nested-match-goal";
 const ARCHIVED_SESSION_ID = "sidebar-filter-archived-session";
+const REMOTE_ARCHIVED_SESSION_ID = "sidebar-filter-remote-archived-session";
 const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
 const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 
@@ -92,6 +93,7 @@ const IDS = {
 	archivedDelegateChildSession: ARCHIVED_DELEGATE_CHILD_SESSION_ID,
 	nestedMatchGoal: `goal:${NESTED_MATCH_GOAL_ID}`,
 	archivedSession: ARCHIVED_SESSION_ID,
+	remoteArchivedSession: REMOTE_ARCHIVED_SESSION_ID,
 };
 
 class FixtureWebSocket {
@@ -143,6 +145,23 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	});
 	const route = mountedRoute(url);
 	if (route === "/api/projects") return response({ projects: [{ ...PROJECT }] });
+	if (route.startsWith("/api/sessions") && route.includes("q=RemoteBeyondFirstPageNeedle")) {
+		return response({
+			sessions: [{
+				id: REMOTE_ARCHIVED_SESSION_ID,
+				title: "RemoteBeyondFirstPageNeedle",
+				cwd: PROJECT.rootPath,
+				projectId: PROJECT_ID,
+				status: "archived",
+				createdAt: 1,
+				lastActivity: 1,
+				lastReadAt: 2,
+				clientCount: 0,
+				archived: true,
+			}],
+			archivedDelegates: [], total: 1, hasMore: false, nextCursor: null,
+		});
+	}
 	if (route.startsWith("/api/sessions")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
 	if (route.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
 	if (route === "/api/staff" || route.startsWith("/api/staff?") || route === "/api/staff/orphaned") return response({ staff: [] });
@@ -336,6 +355,11 @@ async function resetFixture(opts: { preserveFilterStorage?: boolean } = {}): Pro
 		localStorage.removeItem("bobbit-show-archived");
 		localStorage.removeItem("bobbit-show-busy");
 		localStorage.removeItem("bobbit-show-read");
+		localStorage.removeItem("bobbit-sidebar-session-view");
+		localStorage.removeItem("bobbit-status-show-archived");
+		localStorage.removeItem("bobbit-status-show-busy");
+		localStorage.removeItem("bobbit-status-show-read");
+		localStorage.removeItem("bobbit-status-show-teams");
 	}
 	localStorage.removeItem("bobbit-expanded-goals");
 	localStorage.removeItem("bobbit-sidebar-tree-state:v1");
@@ -361,8 +385,14 @@ async function resetFixture(opts: { preserveFilterStorage?: boolean } = {}): Pro
 		keyboardNavActiveId: null,
 		activeProjectId: PROJECT_ID,
 		sidebarCollapsed: false,
+		sidebarSessionView: "project",
+		statusShowArchived: false,
+		statusShowBusy: true,
+		statusShowRead: true,
+		statusShowTeams: false,
 		filtersPopoverOpen: false,
 		searchQuery: "",
+		archivedSearchDemand: false,
 		sessionsLoading: false,
 		sessionsError: "",
 		creatingSession: false,
