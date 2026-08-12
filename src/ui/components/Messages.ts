@@ -361,15 +361,18 @@ export class UserMessage extends LitElement {
 			? presentPromptAuthor(this.message.author)
 			: undefined;
 		if (!presentation) {
-			// Keep the historical all-human/legacy markup and compact geometry exact.
 			return html`
-				<div class="flex justify-start mx-2 sm:mx-4 my-1">
-					<div class="user-message-container py-2 px-3 sm:px-4">
-						${body}
-						${attachments}
+				<div class="prompt-row flex justify-start mx-2 sm:mx-4 my-1">
+					<div class="prompt-content-column">
+						<div class="user-message-container py-2 px-3 sm:px-4">
+							${body}
+							${attachments}
+						</div>
+						<div class="prompt-metadata-row">
+							${this._renderPromptActionsTrigger()}
+							<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
+						</div>
 					</div>
-					${this._renderPromptActionsTrigger()}
-					<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 				</div>
 			`;
 		}
@@ -414,15 +417,19 @@ export class UserMessage extends LitElement {
 		`;
 		return html`
 			<div class="prompt-row prompt-row--labelled flex justify-start mx-2 sm:mx-4 my-1">
-				<div class="prompt-bubble-shell">
-					${authorBadge}
-					<div class="user-message-container user-message-container--labelled py-2 px-3 sm:px-4">
-						${body}
-						${attachments}
+				<div class="prompt-content-column">
+					<div class="prompt-bubble-shell">
+						${authorBadge}
+						<div class="user-message-container user-message-container--labelled py-2 px-3 sm:px-4">
+							${body}
+							${attachments}
+						</div>
+					</div>
+					<div class="prompt-metadata-row">
+						${this._renderPromptActionsTrigger()}
+						<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 					</div>
 				</div>
-				${this._renderPromptActionsTrigger()}
-				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>
 		`;
 	}

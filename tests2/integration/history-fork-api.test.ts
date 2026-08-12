@@ -568,19 +568,23 @@ test.describe("history fork API", () => {
 		expect(gateway.sessionManager.getPersistedSession(unavailableId).agentSessionFile).toBe(maliciousStoredPath);
 	});
 
-	test("rejects the newest durable user cursor while the source is streaming", async ({ gateway }) => {
+	test("forks safely before the newest durable user cursor while the source is streaming", async ({ gateway }) => {
 		const sourceId = await createTrackedSession();
-		seedTranscript(gateway, sourceId, ordinaryHistory());
+		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
 		const source = gateway.sessionManager.getSession(sourceId);
 		const previousStatus = source.status;
 		source.status = "streaming";
 		try {
 			const response = await historyFork(gateway, sourceId, "selected-user");
-			expect(response.status).toBe(409);
-			expect(await responseJson(response)).toEqual({
-				error: "The current prompt cannot be forked until the turn finishes",
-				code: "HISTORY_FORK_CURSOR_IN_FLIGHT",
-			});
+			expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
+			const fork = await response.json();
+			sessions.add(fork.id);
+			const forkPersisted = gateway.sessionManager.getPersistedSession(fork.id);
+			const forkTranscript = fs.readFileSync(forkPersisted.agentSessionFile, "utf8");
+			expect(forkTranscript).toContain("retained prompt");
+			expect(forkTranscript).not.toContain("selected prompt");
+			expect(fs.readFileSync(seeded.file, "utf8")).toBe(seeded.content);
+			expect(source.status).toBe("streaming");
 		} finally {
 			source.status = previousStatus;
 		}

@@ -1001,7 +1001,7 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "ui.toggle-show-archived", label: "Toggle Show Archived", category: "UI",
+		id: "ui.toggle-show-archived", label: "Toggle show archived", category: "UI",
 		defaultBindings: [{ key: "a", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
 		handler: () => {
@@ -1010,7 +1010,7 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "ui.toggle-show-busy", label: "Toggle Show Busy", category: "UI",
+		id: "ui.toggle-show-busy", label: "Toggle show busy", category: "UI",
 		defaultBindings: [{ key: "b", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
 		handler: () => {
@@ -1019,7 +1019,7 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "ui.toggle-show-read", label: "Toggle Show Read", category: "UI",
+		id: "ui.toggle-show-read", label: "Toggle show read", category: "UI",
 		defaultBindings: [{ key: "r", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
 		handler: () => {

@@ -49,7 +49,7 @@ Archived menus contain only these built-in actions, in this order:
 
 1. `continue-archived` — `Continue in new session`, hidden unless the session is eligible.
 2. `copy-link` — `Copy link` for the path-style `/session/<sessionId>` URL.
-3. `view-system-prompt` — `View System Prompt` for the archived session id.
+3. `view-system-prompt` — `View system prompt` for the archived session id.
 4. `open-new-window` — `Open in new window` using the same path-style session URL.
 
 `Continue in new session` uses `canContinueArchivedSession()` for client-side visibility. It is shown only for archived/read-only sources that are not goal sessions, delegates, child/delegate rows, team sessions, team leads, or non-interactive sessions; whose `projectId` still resolves to a registered project; and whose transcript is available (`agentSessionFile` is present when supplied, and `transcriptAvailable` is not `false`). Ineligible sessions hide Continue rather than rendering a disabled item, while the other read-only actions remain available.
@@ -134,21 +134,20 @@ The browser fails closed unless all of these are true:
 - the source passes the same live-fork rules as session-level Fork: live, interactive, writable, and not archived, terminated, delegated/child, or team-owned;
 - the row is an ordinary accountable `user` or `user-with-attachments` prompt, not an assistant or tool-result-only row;
 - the row is settled server data rather than synthetic, optimistic, permission, or pending UI state;
-- it carries a bounded `entryId` with Bobbit's `_entryIdSource: "pi-transcript"` provenance;
-- it is not the current durable user prompt while that turn is streaming.
+- it carries a bounded `entryId` with Bobbit's `_entryIdSource: "pi-transcript"` provenance.
 
-Older durable prompts remain actionable while a later optimistic or in-flight prompt is present. The current row becomes eligible after it settles. The server repeats source, cursor, user-role, active-branch, and in-flight validation; browser provenance never grants authority by itself.
+Older durable prompts remain actionable while a later optimistic or in-flight prompt is present. At `agent_start`, Bobbit refreshes the authoritative transcript cursor projection so the current row becomes eligible during the turn. A final refresh remains as a fallback if persistence lags. The server repeats source, cursor, user-role, and active-branch validation; browser provenance never grants authority by itself.
 
 ### Menu and keyboard behavior
 
 The prompt menu has exactly two rows, in order:
 
-1. **Fork from history**, with an adjacent `(?)` help stop and trailing **New worktree** toggle.
+1. **Fork before this point**, with the explanation in the row tooltip and a trailing **New worktree** toggle.
 2. **Copy prompt**.
 
 `MessageList` owns at most one prompt menu and body-mounts the canonical popover against the row trigger. Opening another row replaces the previous menu. Escape and outside-pointer dismissal restore trigger focus; Tab and route changes dismiss through the existing popover behavior. Arrow keys, Home/End, Enter/Space, responsive viewport clamping, and pointer/touch handling are inherited from the shared component.
 
-The `(?)` control is a sibling focus stop, not part of the Fork button. Its accessible name is `About Fork from history`, and its tooltip says exactly:
+The **Fork before this point** row tooltip says exactly:
 
 > The new session will include the conversation up to, but not including, this prompt.
 
@@ -174,7 +173,7 @@ Attachment prompts therefore copy only their textual prompt. A textless attachme
 
 ### Fork request, feedback, and navigation
 
-Selecting **Fork from history** sends only `{ entryId, newWorktree }` to the existing `POST /api/sessions/:id/fork` endpoint. It never sends a rendered message array/index and never prefills or resends the selected prompt. Prompt controls are disabled while the local/global session-creation guard is active, and the server independently reserves identical in-flight history requests.
+Selecting **Fork before this point** sends only `{ entryId, newWorktree }` to the existing `POST /api/sessions/:id/fork` endpoint. It never sends a rendered message array/index and never prefills or resends the selected prompt. Prompt controls are disabled while the local/global session-creation guard is active, and the server independently reserves identical in-flight history requests.
 
 On success, the initiating client refreshes sessions and connects to the returned session as an existing session so retained history is fetched before navigation settles. Other clients remain on the live source. The destination ends immediately before the selected prompt; the source stays listed and unchanged. On validation, clipboard, launch, or connection failure, the initiating client stays on the source and shows the existing toast or connection-error feedback.
 

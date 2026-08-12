@@ -1032,6 +1032,8 @@ export interface SessionInfo {
 		seq: number;
 		promise: Promise<MessageSnapshotBaseResponse>;
 	};
+	/** Monotonic fence preventing an older cursor refresh from broadcasting after a newer one. */
+	promptCursorRefreshGeneration?: number;
 	/** Cursor ids aligned to one exact immutable get_messages base object. */
 	messagesSnapshotCursorProjection?: {
 		seq: number;
@@ -6427,6 +6429,9 @@ export class SessionManager {
 				manualRetryRequired: false,
 			});
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+			// Pi has durably appended the user prompt by agent_start. Refresh the
+			// authoritative cursor plane now so prompt actions appear during the turn.
+			this.schedulePromptCursorRefresh(session);
 			// Clear the inbox nudger's per-staff guard so a fresh batch can be
 			// delivered next time the staff goes idle with pending entries.
 			// Hook fires for every session that starts a turn; the nudger
@@ -6530,7 +6535,7 @@ export class SessionManager {
 			});
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
-			this.scheduleSettledPromptCursorRefresh(session);
+			this.schedulePromptCursorRefresh(session, { settleBindings: true });
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
@@ -7927,22 +7932,38 @@ export class SessionManager {
 	}
 
 	/**
-	 * Pi emits id-less message events before its append step. After the final
-	 * agent_end, schedule one authoritative read-only snapshot behind the current
-	 * event call stack so persistence and the event-buffer sequence are both
-	 * settled. Replacing from this snapshot enriches existing rows rather than
-	 * emitting a second user message.
+	 * Pi emits id-less message events before its append step. At agent_start the
+	 * prompt is durable, so schedule an authoritative read-only snapshot behind
+	 * the current event call stack and enrich the existing row with its cursor.
+	 * The final refresh also settles sidecar bindings and remains a fallback for
+	 * transient persistence lag at turn start.
 	 */
-	private scheduleSettledPromptCursorRefresh(session: SessionInfo): void {
+	private schedulePromptCursorRefresh(
+		session: SessionInfo,
+		options: { settleBindings?: boolean } = {},
+	): void {
 		if (typeof session.rpcClient.getTranscriptCursorSnapshot !== "function"
 			|| (session.clients.size === 0 && !session.pendingSkillTranscriptBindings?.length)) return;
 		const rpcClient = session.rpcClient;
+		const refreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
+		session.promptCursorRefreshGeneration = refreshGeneration;
 		queueMicrotask(() => {
 			if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
-			const pendingBindings = session.pendingSkillTranscriptBindings?.splice(0) ?? [];
+			// A newer refresh supersedes only the client replacement. A final-turn
+			// refresh must still settle its captured sidecar bindings from the exact
+			// authoritative snapshot pair, even if the next turn has already started.
+			if (!options.settleBindings
+				&& session.promptCursorRefreshGeneration !== refreshGeneration) return;
+			const pendingBindings = options.settleBindings
+				? [...(session.pendingSkillTranscriptBindings ?? [])]
+				: [];
 			void this.getMessagesSnapshotBase(session).then((response) => {
 				if (!response.success || response.data === undefined) return;
 				if (this.sessions.get(session.id) !== session || session.rpcClient !== rpcClient) return;
+				if (options.settleBindings && pendingBindings.length > 0) {
+					session.pendingSkillTranscriptBindings = session.pendingSkillTranscriptBindings
+						?.filter((binding) => !pendingBindings.includes(binding));
+				}
 				const messages = Array.isArray(response.data)
 					? response.data
 					: response.data && typeof response.data === "object" && Array.isArray((response.data as any).messages)
@@ -7969,6 +7990,7 @@ export class SessionManager {
 						appendSkillSidecarTranscriptBinding(session.id, binding.recordId, transcriptEntryId);
 					}
 				}
+				if (session.promptCursorRefreshGeneration !== refreshGeneration) return;
 				if (session.clients.size > 0) {
 					const data = this.buildVisibleMessageSnapshot(session.id, response.data);
 					broadcast(session.clients, { type: "messages", data: data as unknown[] });

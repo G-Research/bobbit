@@ -48,8 +48,6 @@ type HistoryPromptMessage = BobbitMessage<AgentMessage> & {
 
 export interface HistoryPromptEligibilityContext {
 	canForkSource: boolean;
-	isStreaming: boolean;
-	currentStreamingUserEntryId?: string;
 }
 
 /** Fail closed unless this is a server-settled, transcript-confirmed user prompt. */
@@ -61,11 +59,10 @@ export function isEligibleHistoryPrompt(
 	if (!context.canForkSource || !isAccountablePromptMessage(candidate)) return false;
 	if (candidate._pending === true) return false;
 	if (candidate._origin !== "server" || candidate._entryIdSource !== "pi-transcript") return false;
-	if (typeof candidate.entryId !== "string"
-		|| candidate.entryId.length === 0
-		|| candidate.entryId.length > HISTORY_ENTRY_ID_MAX_LENGTH
-		|| candidate.entryId.trim() !== candidate.entryId) return false;
-	return !(context.isStreaming && candidate.entryId === context.currentStreamingUserEntryId);
+	return typeof candidate.entryId === "string"
+		&& candidate.entryId.length > 0
+		&& candidate.entryId.length <= HISTORY_ENTRY_ID_MAX_LENGTH
+		&& candidate.entryId.trim() === candidate.entryId;
 }
 
 function durableUserEntryId(message: BobbitMessage<AgentMessage>): string | undefined {
@@ -251,26 +248,11 @@ export class MessageList extends LitElement {
 		super.updated(changedProperties);
 		const current = this._openPromptActions;
 		if (!current || (!changedProperties.has("messages")
-			&& !changedProperties.has("canForkSource")
-			&& !changedProperties.has("isStreaming"))) return;
-		const currentStreamingUserEntryId = this._currentStreamingUserEntryId();
+			&& !changedProperties.has("canForkSource"))) return;
 		const selected = this.messages.find((message) => durableUserEntryId(message) === current.entryId);
 		if (!selected || !isEligibleHistoryPrompt(selected, {
 			canForkSource: this.canForkSource,
-			isStreaming: this.isStreaming,
-			currentStreamingUserEntryId,
 		})) this._closePromptActions();
-	}
-
-	private _currentStreamingUserEntryId(): string | undefined {
-		if (!this.isStreaming) return undefined;
-		for (let index = this.messages.length - 1; index >= 0; index--) {
-			const message = this.messages[index];
-			// The final accountable row is the current turn. Do not scan past an
-			// optimistic or id-less row and misclassify the prior durable prompt.
-			if (isAccountablePromptMessage(message)) return durableUserEntryId(message);
-		}
-		return undefined;
 	}
 
 	private _closePromptActions(): void {
@@ -287,14 +269,10 @@ export class MessageList extends LitElement {
 		return [
 			{
 				id: "history-fork",
-				label: "Fork from history",
+				label: "Fork before this point",
+				title: HISTORY_FORK_HELP_TEXT,
 				icon: icon(GitFork, "sm"),
 				quick: false,
-				help: {
-					id: "history-fork-help",
-					ariaLabel: "About Fork from history",
-					text: HISTORY_FORK_HELP_TEXT,
-				},
 				trailingToggle: {
 					id: "history-fork-new-worktree",
 					checked: record.newWorktree,
@@ -332,8 +310,6 @@ export class MessageList extends LitElement {
 		const selected = this.messages.find((message) => durableUserEntryId(message) === entryId);
 		if (!selected || !isEligibleHistoryPrompt(selected, {
 			canForkSource: this.canForkSource,
-			isStreaming: this.isStreaming,
-			currentStreamingUserEntryId: this._currentStreamingUserEntryId(),
 		})) return;
 		if (this._openPromptActions?.entryId === entryId && this._openPromptActions.element.open) {
 			this._closePromptActions();
@@ -404,7 +380,6 @@ export class MessageList extends LitElement {
 		const items: Array<{ key: string; template: TemplateResult; eager?: boolean }> = [];
 		let i = 0;
 		const msgs = this.messages;
-		const currentStreamingUserEntryId = this._currentStreamingUserEntryId();
 
 		while (i < msgs.length) {
 			const msg = msgs[i];
@@ -494,8 +469,6 @@ export class MessageList extends LitElement {
 				const historyEntryId = durableUserEntryId(msg);
 				const showPromptActions = isEligibleHistoryPrompt(msg, {
 					canForkSource: this.canForkSource,
-					isStreaming: this.isStreaming,
-					currentStreamingUserEntryId,
 				});
 				items.push({
 					key: keyFor(msg),

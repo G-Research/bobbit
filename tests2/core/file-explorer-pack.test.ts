@@ -74,7 +74,7 @@ describe("built-in file explorer pack shipping", () => {
 		});
 		expect(enabled.getEntrypoint(undefined, "file-explorer", "file-explorer.session-menu")).toMatchObject({
 			kind: "session-menu",
-			label: "Open File Explorer",
+			label: "Open file explorer",
 			icon: "folder-tree",
 			target: { panelId: "file-explorer.panel" },
 		});
