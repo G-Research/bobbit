@@ -206,8 +206,8 @@ export function buildArchivedSessionActions(input: BuildArchivedSessionActionsIn
 		},
 		{
 			id: "view-system-prompt",
-			label: "View System Prompt",
-			title: "View System Prompt",
+			label: "View system prompt",
+			title: "View system prompt",
 			icon: icon(FileText, "xs"),
 			priority: ARCHIVED_BUILTIN_PRIORITIES["view-system-prompt"],
 			quick: false,
@@ -354,8 +354,8 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 		},
 		{
 			id: "view-system-prompt",
-			label: "View System Prompt",
-			title: "View System Prompt",
+			label: "View system prompt",
+			title: "View system prompt",
 			icon: icon(FileText, "xs"),
 			priority: BUILTIN_PRIORITIES["view-system-prompt"],
 			quick: false,

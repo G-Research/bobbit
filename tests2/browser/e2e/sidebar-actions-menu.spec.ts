@@ -691,7 +691,7 @@ test.describe("Sidebar actions menu", () => {
 		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
 		await expectQuickActionHiddenAndNonInteractive(sessionModify, "mobile sidebar modify quick action");
 		await expectQuickActionHiddenAndNonInteractive(sessionTerminate, "mobile sidebar terminate quick action");
-		expect(await menuLabels(page)).toEqual(expect.arrayContaining(["Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]));
+		expect(await menuLabels(page)).toEqual(expect.arrayContaining(["Refresh agent", "Fork", "Copy link", "View system prompt", "Open in new window"]));
 		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "session hamburger should not select/navigate its row" }).toBe(startingHash);
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);

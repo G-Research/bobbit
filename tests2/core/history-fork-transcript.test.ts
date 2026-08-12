@@ -46,8 +46,8 @@ function jsonl(entries: TranscriptEntry[], trailingNewline = true): string {
 	return entries.map((entry) => JSON.stringify(entry)).join("\n") + (trailingNewline ? "\n" : "");
 }
 
-function materialize(source: string, entryId: string, sourceStreaming = false) {
-	return materializeHistoryForkTranscript(source, entryId, { sourceStreaming });
+function materialize(source: string, entryId: string) {
+	return materializeHistoryForkTranscript(source, entryId);
 }
 
 function expectValidationError(
@@ -55,11 +55,10 @@ function expectValidationError(
 	entryId: string,
 	code: string,
 	status: number,
-	sourceStreaming = false,
 ): HistoryForkValidationError {
 	let thrown: unknown;
 	try {
-		materialize(source, entryId, sourceStreaming);
+		materialize(source, entryId);
 	} catch (error) {
 		thrown = error;
 	}
@@ -244,7 +243,7 @@ describe("history fork transcript materialization", () => {
 		expectValidationError(source, "selected", "HISTORY_FORK_CURSOR_NOT_USER", 422);
 	});
 
-	it("rejects only the newest ordinary user entry while streaming", () => {
+	it("cuts safely before the newest ordinary user entry while streaming", () => {
 		const source = jsonl([
 			session(),
 			user("older-user", null),
@@ -253,10 +252,15 @@ describe("history fork transcript materialization", () => {
 			assistant("partial-reply", "current-user"),
 		]);
 
-		const older = materialize(source, "older-user", true);
+		const older = materialize(source, "older-user");
 		assert.equal(older.content, `${JSON.stringify(session())}\n`);
-		expectValidationError(source, "current-user", "HISTORY_FORK_CURSOR_IN_FLIGHT", 409, true);
-		assert.equal(materialize(source, "current-user", false).selected.id, "current-user");
+		const current = materialize(source, "current-user");
+		assert.equal(current.selected.id, "current-user");
+		assert.equal(current.content, jsonl([
+			session(),
+			user("older-user", null),
+			assistant("older-reply", "older-user"),
+		]));
 	});
 
 	it.each([

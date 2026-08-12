@@ -1,7 +1,7 @@
 /**
  * Sidebar Filters popover — replaces the legacy "See Archived" button.
  *
- * Contains three toggle switches (Show Archived, Show Busy, Show Read), each
+ * Contains three toggle switches (Show archived, Show busy, Show read), each
  * persisted to localStorage and wired to keyboard shortcuts.
  *
  *   - bobbit-show-archived (default OFF)
@@ -27,7 +27,7 @@ import { safeSetItem } from "../../app/safe-storage.js";
 // Shared toggle handlers (used by both popover clicks and keyboard shortcuts)
 // ---------------------------------------------------------------------------
 
-/** Toggle Show Archived. Persists, lazy-loads/clears archived data, re-renders. */
+/** Toggle Show archived. Persists, lazy-loads/clears archived data, re-renders. */
 export function toggleShowArchived(): void {
 	state.showArchived = !state.showArchived;
 	safeSetItem("bobbit-show-archived", String(state.showArchived));
@@ -44,14 +44,14 @@ export function toggleShowArchived(): void {
 	renderApp();
 }
 
-/** Toggle Show Busy. Persists, re-renders. */
+/** Toggle Show busy. Persists, re-renders. */
 export function toggleShowBusy(): void {
 	state.showBusy = !state.showBusy;
 	safeSetItem("bobbit-show-busy", String(state.showBusy));
 	renderApp();
 }
 
-/** Toggle Show Read. Persists, re-renders. */
+/** Toggle Show read. Persists, re-renders. */
 export function toggleShowRead(): void {
 	state.showRead = !state.showRead;
 	safeSetItem("bobbit-show-read", String(state.showRead));
@@ -172,7 +172,7 @@ function _renderPopover(): TemplateResult | "" {
 			${_renderToggleRow({
 				id: "archived",
 				icon: Archive,
-				label: "Show Archived",
+				label: "Show archived",
 				shortcut: shortcutHint("ui.toggle-show-archived", { prefix: "", suffix: "" }) || "Alt+Shift+A",
 				checked: state.showArchived,
 				onToggle: toggleShowArchived,
@@ -180,7 +180,7 @@ function _renderPopover(): TemplateResult | "" {
 			${_renderToggleRow({
 				id: "busy",
 				icon: Zap,
-				label: "Show Busy",
+				label: "Show busy",
 				shortcut: shortcutHint("ui.toggle-show-busy", { prefix: "", suffix: "" }) || "Alt+Shift+B",
 				checked: state.showBusy,
 				onToggle: toggleShowBusy,
@@ -188,7 +188,7 @@ function _renderPopover(): TemplateResult | "" {
 			${_renderToggleRow({
 				id: "read",
 				icon: Eye,
-				label: "Show Read",
+				label: "Show read",
 				shortcut: shortcutHint("ui.toggle-show-read", { prefix: "", suffix: "" }) || "Alt+Shift+R",
 				checked: state.showRead,
 				onToggle: toggleShowRead,

@@ -173,13 +173,13 @@ test("session and goal menus preserve popover ordering and title contracts", asy
 	const ids = await loadFixture(page);
 
 	await openMenu(page, "session", ids.session);
-	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]);
+	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Refresh agent", "Fork", "Copy link", "View system prompt", "Open in new window"]);
 	await expect.poll(() => menuTitleMap(page)).toMatchObject({
 		modify: "Modify session. Edit the name, colour, and Role",
 		"refresh-agent": "Restart this agent with the latest prompt, tools, and auth state",
 		fork: "Create a new session from this session's history",
 		"copy-link": "Copy a link to this session",
-		"view-system-prompt": "View System Prompt",
+		"view-system-prompt": "View system prompt",
 		"open-new-window": "Open this session in a new browser window",
 	});
 	expect((await menuTitleMap(page)).terminate).toContain("Terminate this session");
@@ -355,7 +355,7 @@ test("mobile rows expose quick actions plus hamburger menus without row navigati
 	await openMenu(page, "session", ids.session);
 	await expectQuickActionHiddenAndNonInteractive(sessionModify, "mobile sidebar modify quick action");
 	await expectQuickActionHiddenAndNonInteractive(sessionTerminate, "mobile sidebar terminate quick action");
-	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Refresh agent", "Fork", "Copy link", "View System Prompt", "Open in new window"]);
+	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Refresh agent", "Fork", "Copy link", "View system prompt", "Open in new window"]);
 	await expect(item(page, "refresh-agent")).toBeVisible();
 	await expect(item(page, "fork")).toBeVisible();
 	await expect(item(page, "copy-link")).toBeVisible();

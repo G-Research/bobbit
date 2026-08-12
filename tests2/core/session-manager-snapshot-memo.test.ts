@@ -324,7 +324,7 @@ describe("SessionManager snapshot memo", () => {
 		});
 		expect(live.pendingSkillTranscriptBindings).toHaveLength(1);
 
-		value.scheduleSettledPromptCursorRefresh(live);
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
 		await vi.waitFor(() => expect(readSkillSidecarEntries(live.id)[0]).toMatchObject({
 			recordId,
 			transcriptEntryId: "pi-user",
@@ -365,15 +365,40 @@ describe("SessionManager snapshot memo", () => {
 			message: { role: "user", content: "duplicate", timestamp: 7 },
 		});
 
-		value.scheduleSettledPromptCursorRefresh(live);
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
 		await vi.waitFor(() => expect(getCursors).toHaveBeenCalledOnce());
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(readSkillSidecarEntries(live.id)[0]).not.toHaveProperty("transcriptEntryId");
 	});
 
-	it("schedules cursor enrichment only at the final agent lifecycle boundary", () => {
+	it("does not consume pending skill bindings during the agent-start cursor refresh", async () => {
+		const getCursors = vi.fn(async () => ({ success: true, data: {
+			entries: [userEntry("pi-user", null, "prompt")],
+			leafId: "pi-user",
+			forkMessages: [{ entryId: "pi-user", text: "prompt" }],
+		} }));
+		const value = manager();
+		const live = session(async () => ({ success: true, data: [
+			{ id: "inner-user", role: "user", content: "prompt" },
+		] }), getCursors);
+		live.pendingSkillTranscriptBindings = [{
+			recordId: "skill-record",
+			promptId: "prompt-id",
+			modelText: "prompt",
+			messageIdentity: { id: "inner-user" },
+		}];
+		value.sessions.set(live.id, live);
+
+		value.schedulePromptCursorRefresh(live);
+		await vi.waitFor(() => expect(getCursors).toHaveBeenCalledOnce());
+		expect(live.pendingSkillTranscriptBindings).toHaveLength(1);
+	});
+
+	it("schedules cursor enrichment at agent start and a settling fallback at final agent end", () => {
 		const value = manager();
 		value._sessionReplacementCoordinators = new Map();
+		value._bootRepromptedSessions = new Set();
+		value.clock = { now: () => 1 };
 		value._sessionWriterIsCurrent = () => true;
 		value._consumeSteerEcho = () => undefined;
 		value.resolveStoreForSession = () => ({
@@ -383,17 +408,19 @@ describe("SessionManager snapshot memo", () => {
 		value.resolveIdleWaiters = () => undefined;
 		value.drainQueue = () => undefined;
 		value._finishSessionSetup = async () => undefined;
-		value.scheduleSettledPromptCursorRefresh = vi.fn();
+		value.schedulePromptCursorRefresh = vi.fn();
 		const live = session(async () => ({ success: true, data: [] }));
 		live.status = "streaming";
 		live.promptQueue = { dequeueAllSteered: () => [] };
 		value.sessions.set(live.id, live);
 
+		value.handleAgentLifecycle(live, { type: "agent_start" });
+		expect(value.schedulePromptCursorRefresh).toHaveBeenCalledWith(live);
 		value.handleAgentLifecycle(live, { type: "agent_end", messages: [], willRetry: true });
-		expect(value.scheduleSettledPromptCursorRefresh).not.toHaveBeenCalled();
+		expect(value.schedulePromptCursorRefresh).toHaveBeenCalledOnce();
 		value.handleAgentLifecycle(live, { type: "agent_end", messages: [], willRetry: false });
-		expect(value.scheduleSettledPromptCursorRefresh).toHaveBeenCalledOnce();
-		expect(value.scheduleSettledPromptCursorRefresh).toHaveBeenCalledWith(live);
+		expect(value.schedulePromptCursorRefresh).toHaveBeenCalledTimes(2);
+		expect(value.schedulePromptCursorRefresh).toHaveBeenLastCalledWith(live, { settleBindings: true });
 	});
 
 	it("broadcasts a cursor-enriched replacement after the settled event sequence advances", async () => {
@@ -417,7 +444,7 @@ describe("SessionManager snapshot memo", () => {
 		live.clients.add(client);
 		value.sessions.set(live.id, live);
 
-		value.scheduleSettledPromptCursorRefresh(live);
+		value.schedulePromptCursorRefresh(live, { settleBindings: true });
 		live.eventBuffer.push({ type: "agent_end" });
 		await vi.waitFor(() => expect(sends.length).toBe(1));
 		const frame = JSON.parse(sends[0]);
