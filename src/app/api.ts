@@ -45,6 +45,7 @@ import { isInitialSessionsLoad } from "./session-load-state.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject } from "./headquarters.js";
 import { normalizeTags, removeTag, replaceTag } from "../shared/session-tags.js";
+import { sidebarNeedsArchivedSessions } from "./sidebar-view-preferences.js";
 
 function configApiProjectId(projectId?: string | null): string {
 	const selected = projectId || state.activeProjectId || HEADQUARTERS_PROJECT_ID;
@@ -333,7 +334,7 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 	}
 }
 
-type SessionWithUserTags = GatewaySession & { user_tags?: unknown };
+type SessionWithUserTags = Omit<GatewaySession, "user_tags"> & { user_tags?: unknown };
 type SessionTagsSnapshot = {
 	hadOwnProperty: boolean;
 	value: unknown;
@@ -835,8 +836,10 @@ export async function refreshSessions(): Promise<void> {
 			.catch(() => {});
 	}
 
-	// Lazy-load archived sessions + goals on initial load only if user had "Show archived" persisted
-	if (isInitial && state.showArchived && !_archivedSessionsLoaded) {
+	// Lazy-load archived sessions + goals on initial load when either independent
+	// view persisted Show Archived. A restored By Status view must not wait for a
+	// view switch before its archived rows become available.
+	if (isInitial && sidebarNeedsArchivedSessions(state) && !_archivedSessionsLoaded) {
 		fetchArchivedSessions();
 		fetchArchivedGoalsPaginated();
 	}

@@ -1163,6 +1163,22 @@ export function renderArchivedSearchControls(): TemplateResult | string {
 	`;
 }
 
+/** Shared normal archive pagination for Project and Status on desktop/mobile. */
+export function renderArchivedPaginationControls(showArchived: boolean, mobile = !isDesktop()): TemplateResult | string {
+	if (!showArchived || state.searchQuery.trim() || (!state.archivedGoalsHasMore && !state.archivedSessionsHasMore)) return "";
+	return html`
+		<div class="border-t border-border/30 ${mobile ? "my-0.5" : "my-1"} mx-2"></div>
+		<div class="flex flex-col gap-0.5 px-2">
+			${state.archivedGoalsHasMore ? html`
+				<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>
+			` : ""}
+			${state.archivedSessionsHasMore ? html`
+				<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>
+			` : ""}
+		</div>
+	`;
+}
+
 function _handleFullSearchClick(query: string): void {
 	// Navigate to #/search?q=query — uses hash directly since route may not be registered yet
 	window.location.hash = query ? `#/search?q=${encodeURIComponent(query)}` : "#/search";
@@ -1851,8 +1867,11 @@ export function renderSidebarStatusContent(
 		["read", sections.read],
 	] as const;
 	const count = sections.pinned.length + sections.unread.length + sections.read.length;
+	const archiveControls = html`${renderArchivedSearchControls()}${renderArchivedPaginationControls(
+		getSidebarViewFilters(state, "status").showArchived,
+	)}`;
 	if (count === 0) {
-		return html`<div class="sidebar-status-empty">No sessions match this search and filter.</div>${renderArchivedSearchControls()}`;
+		return html`<div class="sidebar-status-empty">No sessions match this search and filter.</div>${archiveControls}`;
 	}
 	return html`${entries.map(([key, rows]) => rows.length === 0 ? nothing : html`
 		<section
@@ -1863,7 +1882,7 @@ export function renderSidebarStatusContent(
 			${renderStatusHeading(key, rows.length)}
 			<div class="sidebar-status-rows">${rows.map(renderStatusCandidate)}</div>
 		</section>
-	`)}${renderArchivedSearchControls()}`;
+	`)}${archiveControls}`;
 }
 
 export function renderSidebar() {
@@ -1988,17 +2007,7 @@ export function renderSidebar() {
 							})}
 
 							${renderArchivedSearchControls()}
-							${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
-								<div class="border-t border-border/30 my-1 mx-2"></div>
-								<div class="flex flex-col gap-0.5 px-2">
-									${state.archivedGoalsHasMore ? html`
-										<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>
-									` : ""}
-									${state.archivedSessionsHasMore ? html`
-										<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>
-									` : ""}
-								</div>
-							` : ""}
+							${renderArchivedPaginationControls(state.showArchived, false)}
 						`}
 				${state.projects.length === 0 ? html`
 					${headquartersHiddenWithNoVisibleProjects() ? renderHiddenHeadquartersSidebarFallback() : html`
