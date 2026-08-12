@@ -20,6 +20,7 @@ test.describe.configure({ mode: "serial" });
 const CANONICAL_SESSION_ACTION_IDS = [
 	"modify",
 	"terminate",
+	"pin",
 	"refresh-agent",
 	"fork",
 	"copy-link",
@@ -202,10 +203,6 @@ function canonicalSessionActionIds(ids: readonly string[], expected = CANONICAL_
 	return ids.filter((id) => (expected as readonly string[]).includes(id));
 }
 
-function expectCanonicalOrder(ids: string[], expected = CANONICAL_SESSION_ACTION_IDS): void {
-	expect(canonicalSessionActionIds(ids, expected)).toEqual(expected.filter((id) => ids.includes(id)));
-}
-
 function expectCanonicalActionsPresentInPriorityOrder(ids: string[], expected = CANONICAL_SESSION_ACTION_IDS): void {
 	expect(canonicalSessionActionIds(ids, expected)).toEqual([...expected]);
 }
@@ -299,8 +296,10 @@ test.describe("unified session actions", () => {
 		expect(sidebarSourceIds, "sidebar session menus should keep quick-only FLIP sources").toEqual(["modify", "terminate"]);
 		await closePopover(page);
 
-		const headerIds = await headerActionIds(page);
-		expect(headerIds).toEqual(sidebarIds);
+		await openHeaderActions(page);
+		const headerMenuIds = await popoverActionIds(page);
+		expect(headerMenuIds, "header and sidebar menus should expose the exact same eligible actions in canonical order").toEqual(sidebarIds);
+		await closePopover(page);
 		expectCanonicalActionsPresentInPriorityOrder(sidebarIds);
 	});
 
@@ -473,7 +472,7 @@ test.describe("unified session actions", () => {
 		await closePopover(page);
 	});
 
-	test("constrained desktop header hamburger opens the full menu and FLIP-animates every visible direct action", async ({ page }) => {
+	test("constrained desktop keeps Pin menu-only while preserving the full menu and direct-action FLIP", async ({ page }) => {
 		await page.setViewportSize({ width: 1_000, height: 900 });
 		const sessionId = await createSession();
 		sessionsToDelete.add(sessionId);
@@ -481,10 +480,8 @@ test.describe("unified session actions", () => {
 		await openSession(page, sessionId);
 
 		const directIds = await visibleHeaderDirectActionIds(page);
-		expect(directIds.length, "constrained desktop should render more than two direct actions before overflowing the rest").toBeGreaterThan(2);
-		expect(directIds.length, "constrained desktop should not render every action directly").toBeLessThan(CANONICAL_SESSION_ACTION_IDS.length);
-		expectCanonicalOrder(directIds);
-		expect(directIds, "the constrained desktop reproducer must include a non-quick direct action").toContain("refresh-agent");
+		expect(directIds, "desktop direct actions should retain the pre-Pin set and order").toEqual(["modify", "terminate", "refresh-agent"]);
+		await expect(headerDirectAction(page, "pin"), "Pin must not leak into the live desktop header").toHaveCount(0);
 
 		await installActionAnimationRecorder(page, "__desktopHeaderActionAnimations");
 		await expect(headerTrigger(page), "overflow trigger should expose the complete header action menu").toBeVisible({ timeout: 5_000 });
@@ -494,6 +491,7 @@ test.describe("unified session actions", () => {
 			canonicalSessionActionIds(popoverIds),
 			"header hamburger popover should contain the full canonical session action list, including direct buttons",
 		).toEqual([...CANONICAL_SESSION_ACTION_IDS]);
+		await expect(popoverAction(page, "pin"), "Pin should retain its third built-in live menu position").toContainText("Pin session");
 		expect(await popoverSourceActionIds(page), "desktop header hamburger should capture every visible direct action as a FLIP source").toEqual(expect.arrayContaining(directIds));
 		await expectPopoverTranslateAnimationsForActionIds(
 			page,
@@ -509,6 +507,18 @@ test.describe("unified session actions", () => {
 		for (const actionId of directIds) {
 			await expect(headerDirectAction(page, actionId), `desktop header ${actionId} direct action should return after close`).toBeVisible({ timeout: 5_000 });
 		}
+
+		await openHeaderActions(page);
+		await popoverAction(page, "pin").click();
+		await expect.poll(() => page.evaluate((id) => {
+			const session = (window as any).bobbitState?.gatewaySessions?.find((candidate: { id?: string }) => candidate.id === id);
+			return session?.user_tags?.includes("pinned=true") === true;
+		}, sessionId), { message: "live Pin action should update the loaded session" }).toBe(true);
+		await expect(headerDirectAction(page, "pin"), "Unpin must also remain absent from the live desktop header").toHaveCount(0);
+		await openHeaderActions(page);
+		expect(canonicalSessionActionIds(await popoverActionIds(page))).toEqual([...CANONICAL_SESSION_ACTION_IDS]);
+		await expect(popoverAction(page, "pin"), "the same third menu item should become Unpin").toContainText("Unpin session");
+		await closePopover(page);
 	});
 
 	test("mobile session header shows icon-only quick actions and opens the remaining menu with FLIP sources", async ({ page }) => {

@@ -23,6 +23,7 @@ import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLi
 import { buildArchivedSessionActions, buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
+import { isSessionReadFilterable } from "../shared/session-tags.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
@@ -329,11 +330,8 @@ export function passesSidebarFilters(
 			|| session.isCompacting;
 		if (busy) return false;
 	}
-	if (!state.showRead) {
-		// Only filter out idle/done sessions with no unread activity.
-		// Busy sessions (if not already filtered above) always remain visible.
-		const idleLike = session.status === "idle" || session.status === "terminated";
-		if (idleLike && !hasUnseenActivity(session)) return false;
+	if (!state.showRead && isSessionReadFilterable(session) && !hasUnseenActivity(session)) {
+		return false;
 	}
 	return true;
 }
@@ -991,9 +989,11 @@ export function renderProjectArchivedSection(
 	`;
 }
 
-type RenderSessionTreeOptions = {
+export type RenderSessionTreeOptions = {
 	treeNode?: SidebarTreeNode<SessionContext> | SidebarTreeNode<TeamLeadContext>;
 	childGroupNodes?: SidebarTreeNode<SessionChildrenContext>[];
+	/** Render canonical row content without tree chevrons, recursion, or child discovery. */
+	flat?: boolean;
 };
 
 function isSessionChildrenNode(node: SidebarTreeNode): node is SidebarTreeNode<SessionChildrenContext> {
@@ -1014,6 +1014,7 @@ function isGoalTreeNode(node: SidebarTreeNode): node is SidebarTreeNode<GoalCont
 
 export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: RenderSessionTreeOptions | number) {
 	const treeOptions = typeof treeOptionsOrIndex === "number" ? undefined : treeOptionsOrIndex;
+	const flat = treeOptions?.flat === true;
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const connecting = state.connectingSessionId === session.id;
@@ -1021,14 +1022,19 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
-	// Check for children (live delegates + first-class child sessions + archived children)
-	const treeChildGroups = treeOptions?.childGroupNodes ?? treeOptions?.treeNode?.children.filter(isSessionChildrenNode);
-	const liveChildren = treeChildGroups
-		? treeChildGroups.filter(group => group.context.childClass === "first-class" || group.context.childClass === "delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
-		: visibleLiveChildrenForParent(session.id);
-	const archivedChildren = treeChildGroups
-		? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
-		: state.showArchived ? archivedChildrenForParent(session.id) : [];
+	// Flat Status rows deliberately suppress tree discovery and recursion while
+	// preserving this renderer's canonical identity, time, navigation and actions.
+	const treeChildGroups = flat ? [] : treeOptions?.childGroupNodes ?? treeOptions?.treeNode?.children.filter(isSessionChildrenNode);
+	const liveChildren = flat
+		? []
+		: treeChildGroups
+			? treeChildGroups.filter(group => group.context.childClass === "first-class" || group.context.childClass === "delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
+			: visibleLiveChildrenForParent(session.id);
+	const archivedChildren = flat
+		? []
+		: treeChildGroups
+			? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
+			: state.showArchived ? archivedChildrenForParent(session.id) : [];
 	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
 	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession) || !!treeChildGroups?.some(group => group.context.childClass === "first-class" && group.children.length > 0);
 	const hasArchivedChildGroup = archivedChildren.length > 0;
@@ -1043,8 +1049,11 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 	const rowPy = SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1" : "p-0.5";
 
-	const actions = buildSessionSidebarActions(session, displayTitle);
-	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
+	const buildActions = session.role === "team-lead"
+		? () => buildTeamLeadSidebarActions(session, displayTitle, session.goalId || session.teamGoalId)
+		: () => buildSessionSidebarActions(session, displayTitle);
+	const actions = buildActions();
+	const actionRefresh = buildActions;
 	const buttons = wrapSidebarRowActions(
 		html`${renderSidebarQuickActions(actions, { kind: "session", entityId: session.id, mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: resetSessionForkNewWorktree })}`,
 		mobile,
@@ -1075,7 +1084,7 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 			data-nav-id=${navId}
 			data-nav-active=${navActive ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
-				${navActive ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+				${navActive ? `bg-secondary text-foreground sidebar-session-active${hasChildren && !flat ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:var(--sidebar-chevron-w);"
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
@@ -1187,14 +1196,17 @@ export function renderTreeSessionNode(node: SidebarTreeNode<SessionContext>): Te
 // ============================================================================
 
 export function renderArchivedSessionRow(session: GatewaySession, extraChildren = false, treeOptions?: RenderSessionTreeOptions) {
+	const flat = treeOptions?.flat === true;
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
-	const treeChildGroups = treeOptions?.childGroupNodes ?? treeOptions?.treeNode?.children.filter(isSessionChildrenNode);
-	const delegates = treeChildGroups
-		? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
-		: archivedChildrenForParent(session.id);
-	const hasChildren = delegates.length > 0 || extraChildren;
+	const treeChildGroups = flat ? [] : treeOptions?.childGroupNodes ?? treeOptions?.treeNode?.children.filter(isSessionChildrenNode);
+	const delegates = flat
+		? []
+		: treeChildGroups
+			? treeChildGroups.filter(group => group.context.childClass === "archived-delegate").flatMap(group => group.children.filter(isSessionTreeNode).map(child => child.context.session as GatewaySession))
+			: archivedChildrenForParent(session.id);
+	const hasChildren = !flat && (delegates.length > 0 || extraChildren);
 	const treeExpanded = treeOptions?.treeNode?.kind === "team-lead"
 		? treeOptions.treeNode.expanded
 		: treeChildGroups?.some(group => group.context.childClass === "archived-delegate" && group.expanded);

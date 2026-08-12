@@ -17,12 +17,16 @@ for (const [name, grammar] of Object.entries({ bash, css, javascript, json, mark
 const STORE_VERSION = 1;
 const STORE_DELAY_MS = 180;
 const REFRESH_CONCURRENCY = 4;
+const SEARCH_DEBOUNCE_MS = 200;
+const COPY_FEEDBACK_MS = 2_000;
 const NARROW_WIDTH = 680;
 const states = new Map<string, ExplorerState>();
 
 type EntryKind = "directory" | "file" | "symlink" | "other";
+type LocationKind = "root" | EntryKind;
 type ViewMode = "file" | "diff";
 type LoadState = "idle" | "loading" | "ready" | "error";
+type SearchPhase = "idle" | "debounce" | "loading" | "ready" | "error";
 type RouteErrorCode = "INVALID_PATH" | "NOT_FOUND" | "NOT_DIRECTORY" | "NOT_FILE" | "UNSUPPORTED_FILE" | "READ_FAILED" | "FS_TIMEOUT" | "GIT_TIMEOUT" | "GIT_FAILED";
 
 type HostApi = {
@@ -83,6 +87,32 @@ type PreviewState = {
 	error?: PanelFailure;
 };
 
+type BrowseSnapshot = {
+	expanded: Set<string>;
+	focused: string;
+	selected?: string;
+	selectedKind?: EntryKind;
+	location: { path: string; kind: LocationKind };
+	view: ViewMode;
+	narrowPane: "tree" | "preview";
+	filePreview: PreviewState;
+	diffPreview: PreviewState;
+};
+
+type SearchState = {
+	query: string;
+	phase: SearchPhase;
+	results: TreeEntry[];
+	activeIndex: number;
+	count: number;
+	limit?: number;
+	truncated: boolean;
+	error?: PanelFailure;
+	generation: number;
+	timer?: number;
+	snapshot?: BrowseSnapshot;
+};
+
 type ExplorerState = {
 	sid: string;
 	root: HTMLElement;
@@ -90,14 +120,24 @@ type ExplorerState = {
 	tree: HTMLElement;
 	previewPane: HTMLElement;
 	preview: HTMLElement;
+	pathBar: HTMLElement;
+	searchInput: HTMLInputElement;
+	clearSearchButton: HTMLButtonElement;
+	changedButton: HTMLButtonElement;
+	collapseButton: HTMLButtonElement;
+	feedback: HTMLElement;
+	alert: HTMLElement;
 	backButton: HTMLButtonElement;
 	refreshButton: HTMLButtonElement;
 	live: HTMLElement;
 	host?: HostApi;
 	directories: Map<string, DirectoryState>;
+	discovered: Map<string, TreeEntry>;
 	expanded: Set<string>;
 	statuses: Map<string, StatusRecord>;
 	ancestors: Set<string>;
+	gitAvailable?: boolean;
+	changedOnly: boolean;
 	focused: string;
 	selected?: string;
 	selectedKind?: EntryKind;
@@ -106,8 +146,29 @@ type ExplorerState = {
 	diffPreview: PreviewState;
 	refreshGeneration: number;
 	selectionGeneration: number;
+	navigationGeneration: number;
+	pendingFocus?: { path: string; generation: number };
+	location: { path: string; kind: LocationKind };
+	pathEditing: boolean;
+	pathDraft: string;
+	pathOrigin?: { path: string; kind: LocationKind };
+	pathInvoker?: HTMLElement;
+	pathLoading: boolean;
+	pathError?: PanelFailure;
+	search: SearchState;
+	menu?: { target: TreeEntry; invoker?: HTMLElement; pointer: boolean; x: number; y: number };
+	menuDocumentClick?: (event: MouseEvent) => void;
+	copyMessage?: { text: string; error: boolean };
+	copyTimer?: number;
+	liveFrame?: number;
+	alertFrame?: number;
 	initialized: boolean;
 	initializing: boolean;
+	uiStateRestored: boolean;
+	durableMutationGeneration: number;
+	initializingLifecycle?: number;
+	initializationQueued: boolean;
+	lifecycleGeneration: number;
 	active: boolean;
 	narrow: boolean;
 	narrowPane: "tree" | "preview";
@@ -129,12 +190,17 @@ export default function createFileExplorerPanel() {
 			if (!state) {
 				state = createState(sid);
 				states.set(sid, state);
+			} else if (state.active && !state.root.isConnected) {
+				// The panel instance is cached by session. Reconcile a detached instance
+				// synchronously so a same-turn remount cannot expose transient search/path
+				// state while its MutationObserver cleanup is still queued.
+				deactivate(state);
 			}
 			state.host = host;
 			queueMicrotask(() => {
 				activate(state!);
 				subscribeToStatus(state!);
-				if (host?.capabilities?.callRoute && !state!.initialized && !state!.initializing) void initialize(state!);
+				requestInitialize(state!);
 			});
 			return state.root;
 		},
@@ -155,15 +221,41 @@ function createState(sid: string): ExplorerState {
 	refreshButton.dataset.testid = "file-explorer-refresh";
 	toolbar.append(titleWrap, refreshButton);
 
+	const pathBar = el("div", "bb-explorer-pathbar");
+	pathBar.dataset.testid = "file-explorer-pathbar";
+
 	const content = el("div", "bb-explorer-content");
 	const treePane = el("aside", "bb-explorer-tree-pane");
-	const treeHeader = el("div", "bb-explorer-section-title", "Files");
+	const controls = el("div", "bb-explorer-tree-toolbar");
+	controls.setAttribute("role", "toolbar");
+	controls.setAttribute("aria-label", "File explorer controls");
+	const searchWrap = el("div", "bb-explorer-search");
+	searchWrap.innerHTML = iconSvg("search");
+	const searchInput = el("input", "bb-explorer-search-input");
+	searchInput.type = "search";
+	searchInput.placeholder = "Search files and folders…";
+	searchInput.setAttribute("aria-label", "Search files and folders");
+	searchInput.setAttribute("role", "combobox");
+	searchInput.setAttribute("aria-autocomplete", "list");
+	searchInput.setAttribute("aria-controls", `bb-explorer-search-${hash(sid)}`);
+	searchInput.setAttribute("aria-expanded", "false");
+	const clearSearchButton = iconButton("x", "Clear search", "bb-explorer-control bb-explorer-clear-search");
+	clearSearchButton.hidden = true;
+	searchWrap.append(searchInput, clearSearchButton);
+	const changedButton = iconButton("filter", "Changed files only", "bb-explorer-control bb-explorer-changed");
+	changedButton.setAttribute("aria-pressed", "false");
+	changedButton.append(el("span", "bb-explorer-control-label", "Changed"));
+	const collapseButton = iconButton("collapse", "Collapse all", "bb-explorer-control bb-explorer-collapse");
+	collapseButton.append(el("span", "bb-explorer-control-label", "Collapse"));
+	controls.append(searchWrap, changedButton, collapseButton);
+	const feedback = el("div", "bb-explorer-feedback");
 	const tree = el("div", "bb-explorer-tree");
 	tree.dataset.testid = "file-explorer-tree";
+	tree.id = `bb-explorer-search-${hash(sid)}`;
 	tree.setAttribute("role", "tree");
 	tree.setAttribute("aria-label", "Files");
 	tree.setAttribute("aria-busy", "true");
-	treePane.append(treeHeader, tree);
+	treePane.append(controls, feedback, tree);
 
 	const previewPane = el("main", "bb-explorer-preview-pane");
 	const backButton = iconButton("arrow-left", "Back to files", "bb-explorer-back");
@@ -176,20 +268,50 @@ function createState(sid: string): ExplorerState {
 	const live = el("div", "bb-explorer-live");
 	live.setAttribute("role", "status");
 	live.setAttribute("aria-live", "polite");
-	root.append(toolbar, content, live);
+	const alert = el("div", "bb-explorer-live");
+	alert.setAttribute("role", "alert");
+	alert.setAttribute("aria-live", "assertive");
+	root.append(toolbar, pathBar, content, live, alert);
 
 	const state: ExplorerState = {
-		sid, root, treePane, tree, previewPane, preview, backButton, refreshButton, live,
-		directories: new Map(), expanded: new Set(), statuses: new Map(), ancestors: new Set(),
-		focused: "", view: "file", filePreview: idlePreview(), diffPreview: idlePreview(),
-		refreshGeneration: 0, selectionGeneration: 0, initialized: false, initializing: false,
+		sid, root, treePane, tree, previewPane, preview, pathBar, searchInput, clearSearchButton,
+		changedButton, collapseButton, feedback, alert, backButton, refreshButton, live,
+		directories: new Map(), discovered: new Map(), expanded: new Set(), statuses: new Map(), ancestors: new Set(),
+		changedOnly: false, focused: "", view: "file", filePreview: idlePreview(), diffPreview: idlePreview(),
+		refreshGeneration: 0, selectionGeneration: 0, navigationGeneration: 0,
+		location: { path: "", kind: "root" }, pathEditing: false, pathDraft: "", pathLoading: false,
+		search: { query: "", phase: "idle", results: [], activeIndex: -1, count: 0, truncated: false, generation: 0 },
+		initialized: false, initializing: false, uiStateRestored: false, durableMutationGeneration: 0, initializationQueued: false, lifecycleGeneration: 0,
 		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
 	refreshButton.addEventListener("click", () => void refresh(state!, true));
 	backButton.addEventListener("click", () => showTree(state!, true));
+	searchInput.addEventListener("input", () => onSearchInput(state!));
+	searchInput.addEventListener("keydown", (event) => onSearchKeydown(state!, event));
+	clearSearchButton.addEventListener("click", () => clearSearch(state!, true));
+	changedButton.addEventListener("click", () => toggleChangedOnly(state!));
+	collapseButton.addEventListener("click", () => collapseAll(state!));
+	pathBar.addEventListener("click", (event) => onPathBarClick(state!, event));
+	pathBar.addEventListener("input", (event) => {
+		const input = (event.target as Element | null)?.closest<HTMLInputElement>(".bb-explorer-path-input");
+		if (!input) return;
+		state!.pathDraft = input.value;
+		state!.pathError = undefined;
+		input.setAttribute("aria-invalid", "false");
+		state!.pathBar.querySelector(".bb-explorer-path-help")!.textContent = "Enter a path relative to the session root.";
+	});
+	pathBar.addEventListener("keydown", (event) => onPathBarKeydown(state!, event));
+	root.addEventListener("keydown", (event) => {
+		if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "l") {
+			event.preventDefault();
+			enterPathEdit(state!, event.target as HTMLElement | null);
+		}
+	});
 	tree.addEventListener("click", (event) => onTreeClick(state!, event));
 	tree.addEventListener("keydown", (event) => onTreeKeydown(state!, event));
+	tree.addEventListener("contextmenu", (event) => onTreeContextMenu(state!, event));
 	preview.addEventListener("click", (event) => onPreviewClick(state!, event));
+	renderPathBar(state);
 	renderTree(state);
 	renderPreview(state);
 	return state;
@@ -221,8 +343,36 @@ function activate(state: ExplorerState): void {
 
 function deactivate(state: ExplorerState): void {
 	state.active = false;
+	state.lifecycleGeneration += 1;
+	state.initializationQueued = false;
 	state.refreshGeneration += 1;
 	state.selectionGeneration += 1;
+	invalidateNavigation(state);
+	state.search.generation += 1;
+	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	state.search.timer = undefined;
+	if (state.copyTimer !== undefined) window.clearTimeout(state.copyTimer);
+	state.copyTimer = undefined;
+	if (state.liveFrame !== undefined) cancelAnimationFrame(state.liveFrame);
+	state.liveFrame = undefined;
+	if (state.alertFrame !== undefined) cancelAnimationFrame(state.alertFrame);
+	state.alertFrame = undefined;
+	state.live.textContent = "";
+	state.alert.textContent = "";
+	if (state.pathEditing) {
+		if (state.pathOrigin) state.location = { ...state.pathOrigin };
+		state.pathEditing = false;
+		state.pathLoading = false;
+		state.pathError = undefined;
+		state.pathDraft = "";
+		state.pathOrigin = undefined;
+		state.pathInvoker = undefined;
+		renderPathBar(state);
+	}
+	if (state.search.query) clearSearch(state, true);
+	state.copyMessage = undefined;
+	renderDiscoveryControls(state);
+	closeContextMenu(state, false);
 	state.refreshButton.disabled = false;
 	state.refreshButton.classList.remove("is-spinning");
 	state.tree.setAttribute("aria-busy", "false");
@@ -238,19 +388,48 @@ function deactivate(state: ExplorerState): void {
 	state.storeTimer = undefined;
 }
 
+function requestInitialize(state: ExplorerState): void {
+	if (!state.active || state.initialized || !state.host?.capabilities?.callRoute) return;
+	if (state.initializing) {
+		if (state.initializingLifecycle !== state.lifecycleGeneration) state.initializationQueued = true;
+		return;
+	}
+	void initialize(state);
+}
+
 async function initialize(state: ExplorerState): Promise<void> {
+	const lifecycle = state.lifecycleGeneration;
 	state.initializing = true;
+	state.initializingLifecycle = lifecycle;
 	try {
-		await restoreUiState(state);
-		await refresh(state, false);
+		if (!state.uiStateRestored) {
+			await restoreUiState(state, lifecycle);
+			if (!ownsLifecycle(state, lifecycle)) return;
+			state.uiStateRestored = true;
+		}
+		const completed = await refresh(state, false);
+		if (!ownsLifecycle(state, lifecycle)) return;
+		if (!completed) {
+			state.initializationQueued = true;
+			return;
+		}
 		state.initialized = true;
 	} finally {
 		state.initializing = false;
+		state.initializingLifecycle = undefined;
+		if (state.initializationQueued) {
+			state.initializationQueued = false;
+			requestInitialize(state);
+		}
 	}
-	if (state.pendingIdleRefresh) {
+	if (!state.initializing && state.initialized && state.pendingIdleRefresh) {
 		state.pendingIdleRefresh = false;
 		if (state.active) await refresh(state, false);
 	}
+}
+
+function ownsLifecycle(state: ExplorerState, lifecycle: number): boolean {
+	return state.active && state.lifecycleGeneration === lifecycle;
 }
 
 function subscribeToStatus(state: ExplorerState): void {
@@ -272,7 +451,21 @@ function subscribeToStatus(state: ExplorerState): void {
 	}
 }
 
-async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
+async function refresh(state: ExplorerState, announce: boolean): Promise<boolean> {
+	closeContextMenu(state, false);
+	invalidateNavigation(state);
+	const activeQuery = state.search.query;
+	state.search.generation += 1;
+	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	if (activeQuery) {
+		state.search.phase = "loading";
+		state.search.results = [];
+		state.search.activeIndex = -1;
+	}
+	if (state.pathLoading) {
+		state.pathLoading = false;
+		renderPathBar(state);
+	}
 	const generation = ++state.refreshGeneration;
 	state.refreshButton.disabled = true;
 	state.refreshButton.classList.add("is-spinning");
@@ -286,15 +479,17 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
 			await loadDirectory(state, path, false, generation);
 		});
 	}
-	if (generation !== state.refreshGeneration) return;
+	if (generation !== state.refreshGeneration) return false;
 	pruneState(state);
 	renderTree(state);
 	if (state.selected) await loadSelectedContent(state, state.selected, true);
 	state.refreshButton.disabled = false;
 	state.refreshButton.classList.remove("is-spinning");
 	state.tree.setAttribute("aria-busy", "false");
+	if (activeQuery) scheduleSearch(state, true);
 	if (announce) setLive(state, rootOkay ? "Explorer refreshed." : "Explorer refresh failed.");
-	queueStore(state);
+	queueStore(state, false);
+	return true;
 }
 
 async function loadDirectory(state: ExplorerState, path: string, includeStatus: boolean, generation = state.refreshGeneration): Promise<boolean> {
@@ -307,11 +502,18 @@ async function loadDirectory(state: ExplorerState, path: string, includeStatus: 
 		const object = recordOf(value);
 		const rawEntries = arrayOf(object?.entries ?? object?.children ?? value);
 		const entries = rawEntries.map(normalizeEntry).filter((entry): entry is TreeEntry => !!entry);
+		const truncated = object?.truncated === true;
 		state.directories.set(path, {
 			state: "ready",
 			entries: sortEntries(entries),
-			truncated: object?.truncated === true,
+			truncated,
 		});
+		if (!truncated) {
+			const listedPaths = new Set(entries.map((entry) => entry.path));
+			for (const discoveredPath of [...state.discovered.keys()]) {
+				if (parentOf(discoveredPath) === path && !listedPaths.has(discoveredPath)) state.discovered.delete(discoveredPath);
+			}
+		}
 		if (includeStatus) applyStatuses(state, object);
 		renderTree(state);
 		return true;
@@ -332,7 +534,10 @@ function applyStatuses(state: ExplorerState, listValue: Record<string, unknown> 
 	state.statuses.clear();
 	state.ancestors.clear();
 	const git = recordOf(listValue?.git ?? listValue?.status);
-	if (git?.kind === "none") return;
+	state.gitAvailable = git?.kind === "git" || git?.kind === "repository"
+		? true
+		: git?.kind === "none" ? false : undefined;
+	if (state.gitAvailable !== true) return;
 	const raw = arrayOf(git?.entries ?? git?.files ?? git?.statuses ?? listValue?.statuses ?? listValue?.statusEntries);
 	for (const item of raw) {
 		const status = normalizeStatus(item);
@@ -381,18 +586,25 @@ function normalizeStatus(input: unknown): StatusRecord | undefined {
 
 function visibleEntries(state: ExplorerState, parent: string): TreeEntry[] {
 	const listed = state.directories.get(parent)?.entries ?? [];
-	const merged = new Map(listed.map((entry) => [entry.path, entry]));
+	const merged = new Map<string, TreeEntry>();
+	for (const entry of state.discovered.values()) {
+		if (parentOf(entry.path) === parent) merged.set(entry.path, entry);
+	}
+	for (const entry of listed) merged.set(entry.path, entry);
 	for (const status of state.statuses.values()) {
-		if (!isDeleted(status)) continue;
 		const segments = status.path.split("/");
 		for (let index = 0; index < segments.length; index += 1) {
 			const path = segments.slice(0, index + 1).join("/");
 			const entryParent = segments.slice(0, index).join("/");
 			if (entryParent !== parent || merged.has(path)) continue;
-			merged.set(path, { path, name: segments[index], kind: index === segments.length - 1 ? "file" : "directory", virtual: true });
+			if (isDeleted(status) || state.changedOnly) {
+				merged.set(path, { path, name: segments[index], kind: index === segments.length - 1 ? "file" : "directory", virtual: true });
+			}
 		}
 	}
-	return sortEntries([...merged.values()]);
+	const entries = [...merged.values()];
+	if (!state.changedOnly || state.gitAvailable !== true) return sortEntries(entries);
+	return sortEntries(entries.filter((entry) => state.statuses.has(entry.path) || state.ancestors.has(entry.path)));
 }
 
 function flattenRows(state: ExplorerState): Array<{ entry: TreeEntry; level: number }> {
@@ -409,18 +621,35 @@ function flattenRows(state: ExplorerState): Array<{ entry: TreeEntry; level: num
 
 function renderTree(state: ExplorerState): void {
 	const restoreFocus = state.tree.contains(document.activeElement);
+	const menuInvokerPath = state.menu?.invoker?.closest<HTMLElement>("[role=treeitem][data-path]")?.dataset.path;
+	const finishRender = (): void => {
+		reconcileContextMenuAfterTreeRender(state, menuInvokerPath);
+		consumePendingFocus(state);
+	};
+	renderDiscoveryControls(state);
 	state.tree.replaceChildren();
+	if (state.search.query) {
+		renderSearchResults(state);
+		finishRender();
+		return;
+	}
+	state.tree.setAttribute("role", "tree");
+	state.tree.setAttribute("aria-label", "Files");
+	state.tree.removeAttribute("aria-activedescendant");
 	const rootDirectory = state.directories.get("");
+	state.tree.setAttribute("aria-busy", String(state.refreshButton.disabled || !rootDirectory || rootDirectory.state === "loading"));
 	if (!rootDirectory || (rootDirectory.state === "loading" && rootDirectory.entries.length === 0)) {
 		state.tree.append(messageRow("loading", "Loading files…"));
+		finishRender();
 		return;
 	}
 	if (rootDirectory.state === "error" && rootDirectory.entries.length === 0) {
 		state.tree.append(errorRow(rootDirectory.error!, () => void refresh(state, true)));
+		finishRender();
 		return;
 	}
 	const rows = flattenRows(state);
-	if (rows.length === 0) state.tree.append(messageRow("empty", "This folder is empty."));
+	if (rows.length === 0) state.tree.append(messageRow("empty", state.changedOnly && state.gitAvailable ? "No changed files. Working tree changes will appear here." : "This folder is empty."));
 	const renderChildren = (parent: string, level: number, container: HTMLElement): void => {
 		for (const entry of visibleEntries(state, parent)) {
 			const item = el("div", "bb-explorer-row");
@@ -469,7 +698,121 @@ function renderTree(state: ExplorerState): void {
 	renderChildren("", 1, state.tree);
 	if (rootDirectory.truncated) state.tree.append(messageRow("truncated", "Showing the first 1,000 entries."));
 	if (rootDirectory.state === "error") state.tree.prepend(errorRow(rootDirectory.error!, () => void refresh(state, true), true));
+	finishRender();
 	if (restoreFocus) requestAnimationFrame(() => focusPath(state, state.focused));
+}
+
+function consumePendingFocus(state: ExplorerState): void {
+	const pending = state.pendingFocus;
+	if (!pending) return;
+	if (pending.generation !== state.navigationGeneration) {
+		state.pendingFocus = undefined;
+		return;
+	}
+	if (!state.tree.querySelector(`[role=treeitem][data-path="${cssEscape(pending.path)}"]`)) return;
+	state.pendingFocus = undefined;
+	requestAnimationFrame(() => {
+		if (pending.generation !== state.navigationGeneration || state.focused !== pending.path) return;
+		focusPath(state, pending.path);
+	});
+}
+
+function reconcileContextMenuAfterTreeRender(state: ExplorerState, invokerPath?: string): void {
+	if (!state.menu) return;
+	const targetRow = state.tree.querySelector<HTMLElement>(`[data-path="${cssEscape(state.menu.target.path)}"]`);
+	if (!targetRow) {
+		closeContextMenu(state, false);
+		return;
+	}
+	targetRow.classList.add("is-context-target");
+	if (invokerPath !== undefined) {
+		state.menu.invoker = state.tree.querySelector<HTMLElement>(`[data-path="${cssEscape(invokerPath)}"]`) ?? state.menu.invoker;
+	}
+}
+
+function renderDiscoveryControls(state: ExplorerState): void {
+	state.searchInput.value = state.search.query;
+	state.searchInput.setAttribute("aria-expanded", String(!!state.search.query));
+	state.searchInput.setAttribute("aria-busy", String(state.search.phase === "loading"));
+	if (!state.search.query || state.search.activeIndex < 0) state.searchInput.removeAttribute("aria-activedescendant");
+	state.clearSearchButton.hidden = !state.search.query;
+	state.changedButton.disabled = state.gitAvailable !== true;
+	state.changedButton.setAttribute("aria-pressed", String(state.changedOnly));
+	state.changedButton.title = state.gitAvailable === false
+		? "Changed files are unavailable because this folder is not a Git worktree."
+		: state.gitAvailable === undefined
+			? "Changed files are temporarily unavailable. Your preference is preserved."
+			: "Changed files only";
+	state.collapseButton.setAttribute("aria-disabled", String(state.expanded.size === 0 || !!state.search.query));
+	state.feedback.replaceChildren();
+	if (state.copyMessage) {
+		const feedback = el("div", `bb-explorer-inline-feedback${state.copyMessage.error ? " is-error" : ""}`, state.copyMessage.text);
+		if (state.copyMessage.error) {
+			feedback.setAttribute("role", "alert");
+			const dismiss = textButton("Dismiss", "dismiss-copy");
+			dismiss.addEventListener("click", () => { state.copyMessage = undefined; renderDiscoveryControls(state); });
+			feedback.append(dismiss);
+		}
+		state.feedback.append(feedback);
+	}
+}
+
+function renderSearchResults(state: ExplorerState): void {
+	state.tree.setAttribute("role", "listbox");
+	state.tree.setAttribute("aria-label", `Search results for ${state.search.query}`);
+	state.tree.setAttribute("aria-busy", String(state.search.phase === "loading"));
+	if (state.search.phase === "debounce") return;
+	if (state.search.phase === "loading") {
+		state.tree.append(messageRow("loading", "Searching…"));
+		return;
+	}
+	if (state.search.phase === "error") {
+		const failure = state.search.error ?? { message: "Couldn’t search Session files.", retryable: false };
+		const row = messageRow("error", failure.message);
+		if (failure.retryable) {
+			const retry = textButton("Retry", "retry-search");
+			retry.addEventListener("click", () => scheduleSearch(state, true));
+			row.append(retry);
+		}
+		state.tree.append(row);
+		return;
+	}
+	if (state.search.results.length === 0) {
+		state.tree.append(messageRow("empty", `No files or folders match “${state.search.query}”.`));
+		return;
+	}
+	state.search.results.forEach((entry, index) => {
+		const option = el("div", "bb-explorer-search-result");
+		option.id = `${state.tree.id}-option-${index}`;
+		option.dataset.path = entry.path;
+		option.dataset.kind = entry.kind;
+		option.setAttribute("role", "option");
+		option.setAttribute("aria-selected", String(index === state.search.activeIndex));
+		option.setAttribute("aria-label", `${entry.name}, in ${parentOf(entry.path) || "Session files"}`);
+		option.title = entry.path;
+		const icon = el("span", `bb-explorer-icon kind-${entry.kind}`);
+		icon.setAttribute("aria-hidden", "true");
+		icon.innerHTML = iconSvg(iconForEntry(entry));
+		const text = el("span", "bb-explorer-search-result-text");
+		text.append(el("span", "bb-explorer-search-result-name", entry.name), el("span", "bb-explorer-search-result-parent", parentOf(entry.path) || "Session files"));
+		option.append(icon, text);
+		if (index === state.search.activeIndex && entry.kind === "file") {
+			const reveal = textButton("Reveal in tree", "reveal-search");
+			reveal.addEventListener("click", (event) => { event.stopPropagation(); void revealSearchResult(state, entry); });
+			option.append(reveal);
+		}
+		const status = state.statuses.get(entry.path);
+		if (status) option.append(renderBadges(status));
+		option.addEventListener("mousedown", (event) => event.preventDefault());
+		option.addEventListener("click", () => void activateSearchResult(state, index, true));
+		state.tree.append(option);
+	});
+	if (state.search.activeIndex >= 0) state.searchInput.setAttribute("aria-activedescendant", `${state.tree.id}-option-${state.search.activeIndex}`);
+	else state.searchInput.removeAttribute("aria-activedescendant");
+	const summary = messageRow("count", state.search.truncated
+		? `Showing the first ${state.search.limit ?? state.search.results.length} results. More matches exist. Refine your search.`
+		: `${state.search.count} ${state.search.count === 1 ? "result" : "results"}${state.changedOnly ? ". Search includes all files." : ""}`);
+	state.tree.prepend(summary);
 }
 
 function renderDirectoryMessage(state: ExplorerState, path: string, level: number, container: HTMLElement): void {
@@ -527,6 +870,9 @@ function normalizeStatusCode(code: string | undefined): string | undefined {
 }
 
 async function toggleDirectory(state: ExplorerState, entry: TreeEntry, focusChild = false): Promise<void> {
+	invalidateNavigation(state);
+	state.location = { path: entry.path, kind: "directory" };
+	renderPathBar(state);
 	if (state.expanded.has(entry.path)) {
 		state.expanded.delete(entry.path);
 		renderTree(state);
@@ -560,6 +906,12 @@ function onTreeClick(state: ExplorerState, event: Event): void {
 
 function onTreeKeydown(state: ExplorerState, event: KeyboardEvent): void {
 	const row = (event.target as Element | null)?.closest<HTMLElement>("[role=treeitem][data-path]");
+	if (row && ((event.shiftKey && event.key === "F10") || event.key === "ContextMenu")) {
+		event.preventDefault();
+		const entry = findVisibleEntry(state, row.dataset.path ?? "");
+		if (entry) openContextMenu(state, entry, row, false);
+		return;
+	}
 	if (!row) return;
 	const path = row.dataset.path ?? "";
 	const rows = flattenRows(state);
@@ -590,19 +942,525 @@ function onTreeKeydown(state: ExplorerState, event: KeyboardEvent): void {
 		default: return;
 	}
 	event.preventDefault();
-	if (target) focusPath(state, target);
+	if (target) {
+		markDurableMutation(state);
+		focusPath(state, target);
+	}
 }
 
-async function selectEntry(state: ExplorerState, entry: TreeEntry): Promise<void> {
+function renderPathBar(state: ExplorerState): void {
+	state.pathBar.replaceChildren();
+	if (state.pathEditing) {
+		const form = el("div", "bb-explorer-path-edit");
+		form.setAttribute("aria-busy", String(state.pathLoading));
+		const prefix = el("span", "bb-explorer-path-prefix", "Session files /");
+		prefix.setAttribute("aria-hidden", "true");
+		const input = el("input", "bb-explorer-path-input");
+		input.type = "text";
+		input.value = state.pathDraft;
+		input.placeholder = "e.g. src/server/server.ts";
+		input.setAttribute("aria-label", "Relative path");
+		input.setAttribute("aria-describedby", `bb-explorer-path-help-${hash(state.sid)}`);
+		input.setAttribute("aria-invalid", String(!!state.pathError));
+		input.readOnly = state.pathLoading;
+		form.append(prefix, input);
+		state.pathBar.append(form);
+		const help = el("span", "bb-explorer-path-help", state.pathError?.message ?? "Enter a path relative to the session root.");
+		help.id = `bb-explorer-path-help-${hash(state.sid)}`;
+		if (state.pathError) {
+			help.classList.add("is-error");
+			if (state.pathError.retryable) {
+				const retry = textButton("Retry", "retry-path");
+				help.append(retry);
+			}
+		}
+		state.pathBar.append(help);
+		return;
+	}
+	const nav = el("nav", "bb-explorer-breadcrumbs");
+	nav.setAttribute("aria-label", "Current path");
+	const segments = state.location.path ? state.location.path.split("/") : [];
+	const rootButton = el("button", "bb-explorer-crumb", "Session files");
+	rootButton.type = "button";
+	rootButton.dataset.path = "";
+	rootButton.setAttribute("aria-label", segments.length ? "Go to Session root" : "Session root");
+	if (!segments.length) rootButton.setAttribute("aria-current", "location");
+	nav.append(rootButton);
+	segments.forEach((segment, index) => {
+		const separator = el("span", "bb-explorer-path-separator", "/");
+		separator.setAttribute("aria-hidden", "true");
+		const button = el("button", "bb-explorer-crumb", segment);
+		button.type = "button";
+		button.dataset.path = segments.slice(0, index + 1).join("/");
+		button.title = segment;
+		const current = index === segments.length - 1;
+		button.setAttribute("aria-label", current ? `Current ${state.location.kind === "file" ? "file" : "item"}, ${segment}` : `Go to ${segment}`);
+		if (current) button.setAttribute("aria-current", "location");
+		nav.append(separator, button);
+	});
+	const edit = iconButton("edit", "Edit path (Ctrl+L)", "bb-explorer-path-edit-button");
+	edit.dataset.action = "edit-path";
+	state.pathBar.append(nav, edit);
+	requestAnimationFrame(() => nav.querySelector("[aria-current]")?.scrollIntoView?.({ inline: "nearest", block: "nearest" }));
+}
+
+function onPathBarClick(state: ExplorerState, event: Event): void {
+	const target = event.target as Element | null;
+	const retry = target?.closest<HTMLElement>("[data-action=retry-path]");
+	if (retry) { void navigateToPath(state, state.pathDraft, "path"); return; }
+	const crumb = target?.closest<HTMLButtonElement>("button.bb-explorer-crumb");
+	if (crumb) {
+		if (state.search.query) clearSearch(state, true);
+		void navigateToPath(state, crumb.dataset.path ?? "", "breadcrumb");
+		return;
+	}
+	if (target?.closest("[data-action=edit-path]") || target === state.pathBar || target?.classList.contains("bb-explorer-breadcrumbs")) enterPathEdit(state, target as HTMLElement | null);
+}
+
+function onPathBarKeydown(state: ExplorerState, event: KeyboardEvent): void {
+	const input = (event.target as Element | null)?.closest<HTMLInputElement>(".bb-explorer-path-input");
+	if (input) {
+		if (event.key === "Enter" && !state.pathLoading) {
+			event.preventDefault();
+			state.pathDraft = input.value;
+			void navigateToPath(state, input.value, "path");
+		} else if (event.key === "Escape") {
+			event.preventDefault();
+			cancelPathEdit(state, true);
+		} else if (event.key !== "Tab") {
+			state.pathDraft = input.value;
+			state.pathError = undefined;
+		}
+		return;
+	}
+	const crumb = (event.target as Element | null)?.closest<HTMLButtonElement>(".bb-explorer-crumb");
+	if (crumb && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+		const buttons = [...state.pathBar.querySelectorAll<HTMLButtonElement>(".bb-explorer-crumb")];
+		const index = buttons.indexOf(crumb);
+		buttons[index + (event.key === "ArrowRight" ? 1 : -1)]?.focus();
+		event.preventDefault();
+	}
+}
+
+function enterPathEdit(state: ExplorerState, invoker?: HTMLElement | null): void {
+	if (state.pathEditing) return;
+	if (state.search.query) clearSearch(state, true);
+	state.pathEditing = true;
+	state.pathDraft = state.location.path;
+	state.pathOrigin = { ...state.location };
+	state.pathInvoker = invoker?.closest<HTMLElement>("button") ?? undefined;
+	state.pathError = undefined;
+	state.pathLoading = false;
+	renderPathBar(state);
+	requestAnimationFrame(() => {
+		const input = state.pathBar.querySelector<HTMLInputElement>(".bb-explorer-path-input");
+		input?.focus();
+		input?.select();
+	});
+}
+
+function cancelPathEdit(state: ExplorerState, restoreFocus: boolean): void {
+	invalidateNavigation(state);
+	if (state.pathOrigin) state.location = { ...state.pathOrigin };
+	const invoker = state.pathInvoker;
+	state.pathEditing = false;
+	state.pathLoading = false;
+	state.pathError = undefined;
+	state.pathDraft = "";
+	state.pathOrigin = undefined;
+	state.pathInvoker = undefined;
+	renderPathBar(state);
+	if (restoreFocus) requestAnimationFrame(() => {
+		if (invoker?.isConnected) invoker.focus();
+		else state.pathBar.querySelector<HTMLButtonElement>("[data-action=edit-path]")?.focus();
+	});
+}
+
+async function navigateToPath(state: ExplorerState, rawPath: string, source: "path" | "breadcrumb" | "search"): Promise<boolean> {
+	closeContextMenu(state, false);
+	if (source === "path" && state.pathLoading) return false;
+	const path = rawPath;
+	if (safeRelative(path, true) === undefined || path.split("/").includes(".git")) {
+		if (source === "path") {
+			state.pathDraft = rawPath;
+			state.pathError = { code: "INVALID_PATH", message: "Enter a canonical path relative to Session files.", retryable: false };
+			renderPathBar(state);
+			requestAnimationFrame(() => state.pathBar.querySelector<HTMLInputElement>(".bb-explorer-path-input")?.focus());
+			setAlert(state, state.pathError.message);
+		}
+		return false;
+	}
+	const generation = beginNavigation(state);
+	if (source === "path") {
+		state.pathDraft = rawPath;
+		state.pathLoading = true;
+		state.pathError = undefined;
+		renderPathBar(state);
+		requestAnimationFrame(() => state.pathBar.querySelector<HTMLInputElement>(".bb-explorer-path-input")?.focus());
+		setLive(state, `Opening ${path || "Session files"}…`);
+	}
+	try {
+		const value = recordOf(await callValue(state, "resolve", { path })) ?? {};
+		if (generation !== state.navigationGeneration) return false;
+		const resolvedPath = safeRelative(value.path, true);
+		const kind = value.kind;
+		if (resolvedPath === undefined || !["root", "directory", "file", "symlink", "other"].includes(kind)) throw { code: "READ_FAILED" };
+		for (const rawEntry of arrayOf(value.chain)) {
+			const entry = normalizeEntry(rawEntry);
+			if (entry) state.discovered.set(entry.path, entry);
+		}
+		for (const parent of parentsOf(resolvedPath)) state.expanded.add(parent);
+		if (kind === "directory" && state.directories.get(resolvedPath)?.state !== "ready") state.expanded.delete(resolvedPath);
+		if (source !== "search" && state.changedOnly && state.gitAvailable === true && resolvedPath && !state.statuses.has(resolvedPath) && !state.ancestors.has(resolvedPath)) {
+			state.changedOnly = false;
+			setLive(state, "Showing all files so the requested path can be revealed.");
+		}
+		state.location = { path: resolvedPath, kind: kind as LocationKind };
+		if (source === "path") commitPathEdit(state);
+		if (kind === "root") {
+			state.focused = nearestFocus(state.focused, flattenRows(state).map((row) => row.entry.path));
+			if (state.narrow) showTree(state, false);
+		} else {
+			state.focused = resolvedPath;
+			if (source !== "search") state.pendingFocus = { path: resolvedPath, generation };
+			if (kind === "file") {
+				const entry = state.discovered.get(resolvedPath) ?? normalizeEntry({ path: resolvedPath, name: resolvedPath.split("/").pop(), kind });
+				if (entry) await selectEntry(state, entry, generation);
+				if (generation !== state.navigationGeneration || state.selected !== resolvedPath) return false;
+			} else {
+				if (state.narrow) showTree(state, false);
+				if (kind !== "directory") setLive(state, "This item cannot be opened. It can still be revealed in the tree.");
+			}
+		}
+		if (generation !== state.navigationGeneration) return false;
+		renderPathBar(state);
+		renderTree(state);
+		queueStore(state);
+		return true;
+	} catch (error) {
+		if (generation !== state.navigationGeneration) return false;
+		if (source === "path") {
+			state.pathLoading = false;
+			state.pathError = mapNavigationFailure(error);
+			renderPathBar(state);
+			requestAnimationFrame(() => state.pathBar.querySelector<HTMLInputElement>(".bb-explorer-path-input")?.focus());
+			setAlert(state, state.pathError.message);
+		} else setAlert(state, mapNavigationFailure(error).message);
+		return false;
+	}
+}
+
+function beginNavigation(state: ExplorerState): number {
+	state.pendingFocus = undefined;
+	return ++state.navigationGeneration;
+}
+
+function invalidateNavigation(state: ExplorerState): void {
+	state.pendingFocus = undefined;
+	state.navigationGeneration += 1;
+}
+
+function commitPathEdit(state: ExplorerState): void {
+	state.pathEditing = false;
+	state.pathLoading = false;
+	state.pathError = undefined;
+	state.pathDraft = "";
+	state.pathOrigin = undefined;
+	state.pathInvoker = undefined;
+	renderPathBar(state);
+}
+
+function mapNavigationFailure(error: unknown): PanelFailure {
+	const failure = mapRouteFailure(error, "Could not open this path.");
+	const messages: Record<string, string> = {
+		INVALID_PATH: "Enter a canonical path relative to Session files.",
+		NOT_FOUND: "No file or folder exists at this path.",
+		NOT_DIRECTORY: "This path is not a folder.",
+		UNSUPPORTED_FILE: "This item cannot be opened. It can still be revealed in the tree.",
+		FS_TIMEOUT: "Path lookup timed out.",
+		READ_FAILED: "Could not open this path.",
+	};
+	return { ...failure, message: failure.code ? messages[failure.code] ?? failure.message : failure.message };
+}
+
+function onSearchInput(state: ExplorerState): void {
+	if (state.pathEditing) cancelPathEdit(state, false);
+	const query = state.searchInput.value;
+	if (!state.search.query && query) state.search.snapshot = captureBrowseSnapshot(state);
+	state.search.query = query;
+	state.search.generation += 1;
+	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	state.search.results = [];
+	state.search.activeIndex = -1;
+	state.search.error = undefined;
+	if (!query) {
+		clearSearch(state, true);
+		return;
+	}
+	state.search.phase = "debounce";
+	renderTree(state);
+	state.search.timer = window.setTimeout(() => void runSearch(state, state.search.generation, query), SEARCH_DEBOUNCE_MS);
+}
+
+function scheduleSearch(state: ExplorerState, immediate: boolean): void {
+	if (!state.search.query) return;
+	state.search.generation += 1;
+	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	const generation = state.search.generation;
+	const query = state.search.query;
+	state.search.phase = immediate ? "loading" : "debounce";
+	state.search.results = [];
+	state.search.error = undefined;
+	renderTree(state);
+	if (immediate) void runSearch(state, generation, query);
+	else state.search.timer = window.setTimeout(() => void runSearch(state, generation, query), SEARCH_DEBOUNCE_MS);
+}
+
+async function runSearch(state: ExplorerState, generation: number, query: string): Promise<void> {
+	if (generation !== state.search.generation || query !== state.search.query) return;
+	state.search.phase = "loading";
+	renderTree(state);
+	setLive(state, "Searching Session files.");
+	try {
+		const value = recordOf(await callValue(state, "search", { query })) ?? {};
+		if (generation !== state.search.generation || query !== state.search.query) return;
+		state.search.results = arrayOf(value.results).map(normalizeEntry).filter((entry): entry is TreeEntry => !!entry);
+		state.search.count = typeof value.count === "number" ? value.count : state.search.results.length;
+		state.search.limit = typeof value.limit === "number" ? value.limit : undefined;
+		state.search.truncated = value.truncated === true;
+		state.search.activeIndex = -1;
+		state.search.phase = "ready";
+		renderTree(state);
+		setLive(state, `${state.search.count} ${state.search.count === 1 ? "result" : "results"} for ${query}.${state.search.truncated ? " Results truncated." : ""}`);
+	} catch (error) {
+		if (generation !== state.search.generation || query !== state.search.query) return;
+		const failure = mapRouteFailure(error, "Couldn’t search Session files.");
+		state.search.error = { ...failure, message: failure.code === "FS_TIMEOUT" ? "Search timed out." : "Couldn’t search Session files." };
+		state.search.phase = "error";
+		renderTree(state);
+		setAlert(state, state.search.error.message);
+	}
+}
+
+function onSearchKeydown(state: ExplorerState, event: KeyboardEvent): void {
+	const length = state.search.results.length;
+	if (event.key === "Escape" && state.search.query) {
+		event.preventDefault();
+		clearSearch(state, true);
+		state.searchInput.focus();
+		return;
+	}
+	if (!state.search.query || !length) return;
+	let next: number | undefined;
+	if (event.key === "ArrowDown") next = state.search.activeIndex < 0 ? 0 : (state.search.activeIndex + 1) % length;
+	else if (event.key === "ArrowUp") next = state.search.activeIndex < 0 ? length - 1 : (state.search.activeIndex - 1 + length) % length;
+	else if ((event.ctrlKey || event.metaKey) && event.key === "Home") next = 0;
+	else if ((event.ctrlKey || event.metaKey) && event.key === "End") next = length - 1;
+	else if (event.key === "Enter") {
+		event.preventDefault();
+		void activateSearchResult(state, state.search.activeIndex < 0 ? 0 : state.search.activeIndex, false);
+		return;
+	} else return;
+	event.preventDefault();
+	state.search.activeIndex = next;
+	renderTree(state);
+	state.searchInput.focus();
+}
+
+async function activateSearchResult(state: ExplorerState, index: number, pointer: boolean): Promise<void> {
+	const entry = state.search.results[index];
+	if (!entry) return;
+	state.search.activeIndex = index;
+	if (entry.kind === "file") {
+		await navigateToPath(state, entry.path, "search");
+		if (!pointer) state.searchInput.focus();
+		return;
+	}
+	await revealSearchResult(state, entry);
+}
+
+async function revealSearchResult(state: ExplorerState, entry: TreeEntry): Promise<void> {
+	clearSearch(state, true);
+	if (state.changedOnly && !state.statuses.has(entry.path) && !state.ancestors.has(entry.path)) {
+		state.changedOnly = false;
+		setLive(state, "Showing all files so the search result can be revealed.");
+		queueStore(state);
+	}
+	await navigateToPath(state, entry.path, "breadcrumb");
+}
+
+function captureBrowseSnapshot(state: ExplorerState): BrowseSnapshot {
+	return {
+		expanded: new Set(state.expanded), focused: state.focused, selected: state.selected, selectedKind: state.selectedKind,
+		location: { ...state.location }, view: state.view, narrowPane: state.narrowPane,
+		filePreview: { ...state.filePreview }, diffPreview: { ...state.diffPreview },
+	};
+}
+
+function clearSearch(state: ExplorerState, restore: boolean): void {
+	state.search.generation += 1;
+	invalidateNavigation(state);
+	state.selectionGeneration += 1;
+	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	const snapshot = state.search.snapshot;
+	let previewToReload: string | undefined;
+	if (restore && snapshot) {
+		state.expanded = new Set(snapshot.expanded);
+		state.focused = snapshot.focused;
+		state.selected = snapshot.selected;
+		state.selectedKind = snapshot.selectedKind;
+		state.location = { ...snapshot.location };
+		state.view = snapshot.view;
+		state.narrowPane = snapshot.narrowPane;
+		state.filePreview = { ...snapshot.filePreview };
+		state.diffPreview = { ...snapshot.diffPreview };
+		const status = state.selected ? state.statuses.get(state.selected) : undefined;
+		const activePreview = state.view === "diff" && isChanged(status) ? state.diffPreview : state.filePreview;
+		if (state.selected && activePreview.state === "loading" && activePreview.path === state.selected) {
+			previewToReload = state.selected;
+		}
+		applyNarrowPane(state);
+		renderPreview(state);
+		renderPathBar(state);
+	}
+	state.search.query = "";
+	state.search.phase = "idle";
+	state.search.results = [];
+	state.search.activeIndex = -1;
+	state.search.count = 0;
+	state.search.truncated = false;
+	state.search.error = undefined;
+	state.search.snapshot = undefined;
+	renderTree(state);
+	if (restore && snapshot) queueStore(state);
+	if (state.active && previewToReload) void loadSelectedContent(state, previewToReload, false);
+}
+
+function toggleChangedOnly(state: ExplorerState): void {
+	if (state.gitAvailable !== true) return;
+	closeContextMenu(state, false);
+	state.changedOnly = !state.changedOnly;
+	const paths = flattenRows(state).map((row) => row.entry.path);
+	state.focused = nearestFocus(state.focused, paths);
+	renderTree(state);
+	queueStore(state);
+	const count = state.statuses.size;
+	setLive(state, state.changedOnly ? `Showing changed files only, ${count} changed ${count === 1 ? "file" : "files"}.` : "Showing all files.");
+}
+
+function collapseAll(state: ExplorerState): void {
+	if (!state.expanded.size || state.search.query) return;
+	closeContextMenu(state, false);
+	state.expanded.clear();
+	const paths = flattenRows(state).map((row) => row.entry.path);
+	state.focused = nearestFocus(state.focused, paths);
+	renderTree(state);
+	queueStore(state);
+	setLive(state, "All folders collapsed.");
+}
+
+function onTreeContextMenu(state: ExplorerState, event: MouseEvent): void {
+	const row = (event.target as Element | null)?.closest<HTMLElement>("[role=treeitem][data-path]");
+	if (!row) return;
+	const entry = findVisibleEntry(state, row.dataset.path ?? "");
+	if (!entry) return;
+	event.preventDefault();
+	openContextMenu(state, entry, document.activeElement as HTMLElement | null, true, event.clientX, event.clientY);
+}
+
+function openContextMenu(state: ExplorerState, target: TreeEntry, invoker?: HTMLElement | null, pointer = false, x?: number, y?: number): void {
+	closeContextMenu(state, false);
+	const row = state.tree.querySelector<HTMLElement>(`[data-path="${cssEscape(target.path)}"]`);
+	const rect = row?.getBoundingClientRect();
+	state.menu = {
+		target, invoker: invoker ?? undefined, pointer,
+		x: x ?? rect?.left ?? 8, y: y ?? rect?.bottom ?? 8,
+	};
+	row?.classList.add("is-context-target");
+	const menu = el("div", "bb-explorer-context-menu");
+	menu.setAttribute("role", "menu");
+	menu.setAttribute("aria-label", "Path actions");
+	for (const [action, label] of [["copy-path", "Copy relative path"], ["copy-name", "Copy filename"]] as const) {
+		const item = el("button", "bb-explorer-menuitem", label);
+		item.type = "button";
+		item.setAttribute("role", "menuitem");
+		item.dataset.action = action;
+		item.addEventListener("click", () => void copyPathAction(state, action));
+		menu.append(item);
+	}
+	menu.addEventListener("keydown", (event) => onContextMenuKeydown(state, event));
+	state.root.append(menu);
+	state.menuDocumentClick = () => closeContextMenu(state, true);
+	document.addEventListener("click", state.menuDocumentClick);
+	const width = menu.offsetWidth || 200;
+	const height = menu.offsetHeight || 70;
+	menu.style.left = `${Math.max(8, Math.min(state.menu.x, window.innerWidth - width - 8))}px`;
+	menu.style.top = `${Math.max(8, Math.min(state.menu.y, window.innerHeight - height - 8))}px`;
+	requestAnimationFrame(() => menu.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus());
+}
+
+function onContextMenuKeydown(state: ExplorerState, event: KeyboardEvent): void {
+	const items = [...state.root.querySelectorAll<HTMLButtonElement>("[role=menuitem]")];
+	const index = items.indexOf(document.activeElement as HTMLButtonElement);
+	let next: number | undefined;
+	if (event.key === "ArrowDown") next = (index + 1) % items.length;
+	else if (event.key === "ArrowUp") next = (index - 1 + items.length) % items.length;
+	else if (event.key === "Home") next = 0;
+	else if (event.key === "End") next = items.length - 1;
+	else if (event.key === "Escape") { event.preventDefault(); closeContextMenu(state, true); return; }
+	else if (event.key === "Tab") { closeContextMenu(state, true); return; }
+	else return;
+	event.preventDefault();
+	items[next]?.focus();
+}
+
+function closeContextMenu(state: ExplorerState, restoreFocus: boolean): void {
+	if (!state.menu) return;
+	const invoker = state.menu.invoker;
+	if (state.menuDocumentClick) document.removeEventListener("click", state.menuDocumentClick);
+	state.menuDocumentClick = undefined;
+	state.root.querySelector(".bb-explorer-context-menu")?.remove();
+	state.tree.querySelector(".is-context-target")?.classList.remove("is-context-target");
+	state.menu = undefined;
+	if (restoreFocus) requestAnimationFrame(() => invoker?.isConnected && invoker.focus());
+}
+
+async function copyPathAction(state: ExplorerState, action: "copy-path" | "copy-name"): Promise<void> {
+	const menu = state.menu;
+	if (!menu) return;
+	const value = action === "copy-path" ? menu.target.path : menu.target.path.split("/").pop() ?? menu.target.name;
+	const invoker = menu.invoker;
+	closeContextMenu(state, false);
+	try {
+		if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+		await navigator.clipboard.writeText(value);
+		state.copyMessage = { text: action === "copy-path" ? "Relative path copied" : "Filename copied", error: false };
+		if (state.copyTimer !== undefined) window.clearTimeout(state.copyTimer);
+		state.copyTimer = window.setTimeout(() => { state.copyMessage = undefined; renderDiscoveryControls(state); }, COPY_FEEDBACK_MS);
+		setLive(state, state.copyMessage.text);
+	} catch {
+		state.copyMessage = { text: "Couldn’t copy. Clipboard access is unavailable.", error: true };
+	}
+	renderDiscoveryControls(state);
+	requestAnimationFrame(() => invoker?.isConnected && invoker.focus());
+}
+
+async function selectEntry(state: ExplorerState, entry: TreeEntry, navigationGeneration?: number): Promise<void> {
+	if (navigationGeneration === undefined) invalidateNavigation(state);
+	else if (navigationGeneration !== state.navigationGeneration) return;
 	state.selected = entry.path;
 	state.selectedKind = entry.kind;
 	state.focused = entry.path;
+	state.location = { path: entry.path, kind: entry.kind };
+	renderPathBar(state);
 	const status = state.statuses.get(entry.path);
 	state.view = isDeleted(status) ? "diff" : "file";
 	state.filePreview = idlePreview(entry.path);
 	state.diffPreview = idlePreview(entry.path);
 	if (state.narrow) {
-		state.lastFocusedElement = state.tree.querySelector(`[data-path="${cssEscape(entry.path)}"]`) as HTMLElement | null ?? undefined;
+		state.lastFocusedElement = state.search.query
+			? state.searchInput
+			: state.tree.querySelector(`[data-path="${cssEscape(entry.path)}"]`) as HTMLElement | null ?? undefined;
 		state.narrowPane = "preview";
 		applyNarrowPane(state);
 	}
@@ -857,12 +1715,17 @@ function applyNarrowPane(state: ExplorerState): void {
 }
 
 function pruneState(state: ExplorerState): void {
-	const all = new Map(flattenRows(state).map((row) => [row.entry.path, row.entry]));
+	const all = new Map<string, TreeEntry>();
+	for (const directory of state.directories.values()) for (const entry of directory.entries) all.set(entry.path, entry);
+	for (const entry of state.discovered.values()) all.set(entry.path, entry);
+	for (const status of state.statuses.values()) {
+		if (!all.has(status.path)) all.set(status.path, { path: status.path, name: status.path.split("/").pop()!, kind: "file", virtual: true });
+	}
 	for (const path of [...state.expanded]) {
 		const entry = all.get(path);
 		if (!entry || entry.kind !== "directory") state.expanded.delete(path);
 	}
-	if (state.selected && !all.has(state.selected) && !state.statuses.has(state.selected)) {
+	if (state.selected && !all.has(state.selected)) {
 		state.selected = undefined;
 		state.selectedKind = undefined;
 		state.filePreview = idlePreview();
@@ -870,19 +1733,31 @@ function pruneState(state: ExplorerState): void {
 		state.narrowPane = "tree";
 		renderPreview(state);
 	} else if (state.selected) {
-		state.selectedKind = all.get(state.selected)?.kind ?? (state.statuses.has(state.selected) ? "file" : undefined);
+		state.selectedKind = all.get(state.selected)?.kind;
 	}
-	if (!state.focused || !all.has(state.focused)) state.focused = nearestFocus(state.focused, [...all.keys()]);
+	if (state.location.path) {
+		const locationEntry = all.get(state.location.path);
+		if (locationEntry) state.location = { path: locationEntry.path, kind: locationEntry.kind };
+		else if (state.selected && all.has(state.selected)) state.location = { path: state.selected, kind: all.get(state.selected)!.kind };
+		else state.location = { path: "", kind: "root" };
+	}
+	renderPathBar(state);
+	const visible = flattenRows(state).map((row) => row.entry.path);
+	if (!state.focused || !visible.includes(state.focused)) state.focused = nearestFocus(state.focused, visible);
 }
 
-async function restoreUiState(state: ExplorerState): Promise<void> {
+async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<void> {
 	if (!state.host?.capabilities?.store || !state.host.store) return;
+	const store = state.host.store;
+	const mutationGeneration = state.durableMutationGeneration;
 	try {
 		let stored: unknown;
-		if (state.host.store.read) {
-			const result = await state.host.store.read(`ui/${state.sid}`);
+		if (store.read) {
+			const result = await store.read(`ui/${state.sid}`);
 			if (result.state === "present") stored = result.value;
-		} else if (state.host.store.get) stored = await state.host.store.get(`ui/${state.sid}`);
+		} else if (store.get) stored = await store.get(`ui/${state.sid}`);
+		if (!ownsLifecycle(state, lifecycle)) return;
+		if (mutationGeneration !== state.durableMutationGeneration) return;
 		const value = recordOf(stored);
 		if (value?.version !== STORE_VERSION) return;
 		for (const candidate of arrayOf(value.expanded)) {
@@ -894,12 +1769,18 @@ async function restoreUiState(state: ExplorerState): Promise<void> {
 		const focused = safeRelative(value.focused, false);
 		if (focused) state.focused = focused;
 		if (value.view === "file" || value.view === "diff") state.view = value.view;
+		state.changedOnly = value.changedOnly === true;
 	} catch {
 		// Persistence is best-effort and never blocks browsing.
 	}
 }
 
-function queueStore(state: ExplorerState): void {
+function markDurableMutation(state: ExplorerState): void {
+	state.durableMutationGeneration += 1;
+}
+
+function queueStore(state: ExplorerState, userMutation = true): void {
+	if (userMutation) markDurableMutation(state);
 	if (!state.host?.capabilities?.store || !state.host.store?.put) return;
 	if (state.storeTimer !== undefined) window.clearTimeout(state.storeTimer);
 	state.storeTimer = window.setTimeout(() => {
@@ -910,6 +1791,7 @@ function queueStore(state: ExplorerState): void {
 			...(state.selected && safeRelative(state.selected, false) ? { selected: state.selected } : {}),
 			...(state.focused && safeRelative(state.focused, false) ? { focused: state.focused } : {}),
 			view: state.view,
+			changedOnly: state.changedOnly,
 		};
 		void state.host?.store?.put?.(`ui/${state.sid}`, value).catch(() => undefined);
 	}, STORE_DELAY_MS);
@@ -986,7 +1868,22 @@ function focusPath(state: ExplorerState, path: string): void {
 function treeItemId(state: ExplorerState, path: string): string { return `bb-explorer-${hash(`${state.sid}:${path}`)}`; }
 function hash(value: string): string { let result = 2166136261; for (let index = 0; index < value.length; index += 1) result = Math.imul(result ^ value.charCodeAt(index), 16777619); return (result >>> 0).toString(36); }
 function cssEscape(value: string): string { return typeof globalThis.CSS?.escape === "function" ? CSS.escape(value) : value.replace(/["\\]/g, "\\$&"); }
-function setLive(state: ExplorerState, message: string): void { state.live.textContent = ""; requestAnimationFrame(() => { state.live.textContent = message; }); }
+function setLive(state: ExplorerState, message: string): void {
+	if (state.liveFrame !== undefined) cancelAnimationFrame(state.liveFrame);
+	state.live.textContent = "";
+	state.liveFrame = requestAnimationFrame(() => {
+		state.liveFrame = undefined;
+		if (state.active) state.live.textContent = message;
+	});
+}
+function setAlert(state: ExplorerState, message: string): void {
+	if (state.alertFrame !== undefined) cancelAnimationFrame(state.alertFrame);
+	state.alert.textContent = "";
+	state.alertFrame = requestAnimationFrame(() => {
+		state.alertFrame = undefined;
+		if (state.active) state.alert.textContent = message;
+	});
+}
 function escapeHtml(value: string): string { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 async function mapLimit<T>(values: T[], limit: number, action: (value: T) => Promise<void>): Promise<void> {
@@ -1025,6 +1922,9 @@ function iconForEntry(entry: TreeEntry): string {
 function iconSvg(name: string): string {
 	const paths: Record<string, string> = {
 		"refresh": '<path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/>',
+		"search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>', "x": '<path d="m6 6 12 12M18 6 6 18"/>',
+		"filter": '<path d="M4 5h16M7 12h10M10 19h4"/>', "collapse": '<path d="m7 9 5-5 5 5M7 15l5 5 5-5"/>',
+		"edit": '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>',
 		"arrow-left": '<path d="m15 18-6-6 6-6"/>', "chevron-right": '<path d="m9 18 6-6-6-6"/>', "chevron-down": '<path d="m6 9 6 6 6-6"/>',
 		"folder": '<path d="M3 6h5l2 2h11v10H3z"/>', "file": '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6"/>',
 		"file-text": '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M9 13h6M9 17h6"/>',
@@ -1060,11 +1960,13 @@ function installStyles(): void {
 .bb-explorer-toolbar{display:flex;align-items:center;gap:.75rem;min-height:2.75rem;padding:.45rem .65rem;border-bottom:1px solid var(--border);background:var(--card)}
 .bb-explorer-heading{display:flex;align-items:baseline;gap:.5rem;min-width:0;flex:1}.bb-explorer-title{font-size:.875rem}.bb-explorer-subtitle{font-size:.7rem;color:var(--muted-foreground);white-space:nowrap}
 .bb-explorer-refresh{display:grid;place-items:center;width:1.85rem;height:1.85rem;padding:0;border:1px solid transparent;border-radius:.4rem;background:transparent;cursor:pointer}
-.bb-explorer-refresh:hover:not(:disabled){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-refresh:focus-visible,.bb-explorer-button:focus-visible,.bb-explorer-back:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.bb-explorer-refresh:disabled{opacity:.55}.bb-explorer-refresh.is-spinning svg{animation:bb-explorer-spin .8s linear infinite}
+.bb-explorer-refresh:hover:not(:disabled){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-refresh:focus-visible,.bb-explorer-button:focus-visible,.bb-explorer-back:focus-visible,.bb-explorer-path-edit-button:focus-visible,.bb-explorer-control:focus-visible,.bb-explorer-crumb:focus-visible,.bb-explorer-menuitem:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.bb-explorer-refresh:disabled,.bb-explorer-control:disabled,.bb-explorer-control[aria-disabled=true]{opacity:.55}.bb-explorer-refresh.is-spinning svg{animation:bb-explorer-spin .8s linear infinite}
+.bb-explorer-pathbar{min-height:2.25rem;display:flex;align-items:center;border-bottom:1px solid var(--border);background:var(--card);position:relative}.bb-explorer-breadcrumbs{display:flex;align-items:center;min-width:0;flex:1;overflow-x:auto;white-space:nowrap;padding:.25rem .2rem .25rem .5rem;scrollbar-width:thin}.bb-explorer-crumb,.bb-explorer-path-edit-button{border:0;background:transparent;border-radius:.35rem;cursor:pointer;height:1.7rem}.bb-explorer-crumb{max-width:14rem;min-width:3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:.15rem .35rem}.bb-explorer-crumb:hover,.bb-explorer-path-edit-button:hover{background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-crumb[aria-current]{font-weight:600}.bb-explorer-path-separator{color:var(--muted-foreground)}.bb-explorer-path-edit-button{display:grid;place-items:center;flex:0 0 2rem;margin-right:.3rem}.bb-explorer-path-edit{display:flex;align-items:center;gap:.35rem;min-width:0;width:100%;padding:.25rem .5rem}.bb-explorer-path-prefix{color:var(--muted-foreground);white-space:nowrap}.bb-explorer-path-input{min-width:0;flex:1;height:1.75rem;border:1px solid var(--border);border-radius:.35rem;background:var(--background);color:var(--foreground);padding:.2rem .4rem;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.bb-explorer-path-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-path-input[aria-invalid=true]{border-color:var(--negative)}.bb-explorer-path-help{position:absolute;z-index:5;top:calc(100% + 1px);left:.5rem;right:.5rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:0 0 .35rem .35rem;background:var(--card);color:var(--muted-foreground);font-size:.72rem;display:flex;align-items:center;gap:.5rem}.bb-explorer-path-help:not(.is-error){position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0)}.bb-explorer-path-help.is-error{color:var(--negative)}
 .bb-explorer-content{display:grid;grid-template-columns:minmax(210px,32%) minmax(0,1fr);flex:1;min-height:0}.bb-explorer-tree-pane{min-width:0;min-height:0;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--card)}
-.bb-explorer-section-title{padding:.45rem .65rem .35rem;color:var(--muted-foreground);font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em}.bb-explorer-tree{flex:1;min-height:0;overflow:auto;padding:.15rem 0 .5rem;outline:none}
+.bb-explorer-tree-toolbar{display:flex;align-items:center;gap:.3rem;padding:.4rem .45rem;border-bottom:1px solid var(--border);flex-wrap:wrap}.bb-explorer-search{position:relative;display:flex;align-items:center;min-width:7.5rem;flex:1}.bb-explorer-search>svg{position:absolute;left:.45rem;width:.85rem;height:.85rem;color:var(--muted-foreground);pointer-events:none}.bb-explorer-search-input{width:100%;height:2rem;padding:.25rem 1.8rem .25rem 1.65rem;border:1px solid var(--border);border-radius:.4rem;background:transparent;color:var(--foreground);font:inherit;font-size:.75rem}.bb-explorer-search-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-search-input::-webkit-search-cancel-button{display:none}.bb-explorer-control{height:2rem;min-width:2rem;display:flex;align-items:center;justify-content:center;gap:.28rem;border:1px solid transparent;border-radius:.4rem;padding:0 .4rem;background:transparent;cursor:pointer}.bb-explorer-control:hover:not(:disabled):not([aria-disabled=true]){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-control[aria-pressed=true]{border-color:var(--primary);background:color-mix(in oklch,var(--primary) 13%,transparent);color:var(--primary)}.bb-explorer-clear-search{position:absolute;right:.1rem;padding:0;width:1.75rem;height:1.75rem}.bb-explorer-control-label{font-size:.7rem}.bb-explorer-feedback:empty{display:none}.bb-explorer-inline-feedback{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.3rem .55rem;border-bottom:1px solid var(--border);color:var(--positive);font-size:.72rem}.bb-explorer-inline-feedback.is-error{color:var(--negative)}.bb-explorer-tree{flex:1;min-height:0;overflow:auto;padding:.15rem 0 .5rem;outline:none}
 .bb-explorer-row{--indent:calc((var(--tree-level) - 1)*.9rem);height:1.7rem;padding:0 .45rem 0 calc(.3rem + var(--indent));display:flex;align-items:center;gap:.18rem;min-width:max-content;width:100%;cursor:default;border-left:2px solid transparent;user-select:none}
-.bb-explorer-row:hover{background:color-mix(in oklch,var(--foreground) 6%,transparent)}.bb-explorer-row[aria-selected=true]{background:color-mix(in oklch,var(--primary) 13%,transparent);border-left-color:var(--primary)}.bb-explorer-row:focus{outline:none;background:color-mix(in oklch,var(--primary) 18%,transparent)}.bb-explorer-row:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in oklch,var(--primary) 65%,transparent)}
+.bb-explorer-row:hover{background:color-mix(in oklch,var(--foreground) 6%,transparent)}.bb-explorer-row[aria-selected=true]{background:color-mix(in oklch,var(--primary) 13%,transparent);border-left-color:var(--primary)}.bb-explorer-row:focus{outline:none;background:color-mix(in oklch,var(--primary) 18%,transparent)}.bb-explorer-row:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in oklch,var(--primary) 65%,transparent)}.bb-explorer-row.is-context-target{box-shadow:inset 0 0 0 1px var(--primary)}
+.bb-explorer-search-result{min-height:2.5rem;padding:.3rem .55rem;display:flex;align-items:center;gap:.35rem;cursor:pointer}.bb-explorer-search-result:hover,.bb-explorer-search-result[aria-selected=true]{background:color-mix(in oklch,var(--primary) 13%,transparent)}.bb-explorer-search-result-text{display:flex;flex-direction:column;min-width:0;flex:1}.bb-explorer-search-result-name,.bb-explorer-search-result-parent{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bb-explorer-search-result-parent{font-size:.68rem;color:var(--muted-foreground)}
 .bb-explorer-twisty{width:.9rem;flex:0 0 .9rem;color:var(--muted-foreground)}.bb-explorer-twisty svg{width:.85rem;height:.85rem}.bb-explorer-icon{width:1rem;flex:0 0 1rem;color:var(--muted-foreground)}.bb-explorer-icon.kind-directory{color:var(--chart-3)}.bb-explorer-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:22rem}.bb-explorer-badges{display:flex;margin-left:auto;gap:.14rem;padding-left:.5rem}.bb-explorer-badge{min-width:.9rem;font-size:.68rem;font-weight:700;text-align:center}.status-modified{color:var(--warning)}.status-added,.status-untracked{color:var(--positive)}.status-deleted,.status-conflict{color:var(--negative)}.status-renamed,.status-copied{color:var(--info)}.bb-explorer-ancestor{margin-left:auto;color:var(--warning);font-size:1rem;line-height:1}
 .bb-explorer-tree-message{--indent:calc((var(--tree-level,1) - 1)*.9rem);padding:.42rem .6rem .42rem calc(1.75rem + var(--indent));color:var(--muted-foreground);font-size:.73rem;display:flex;align-items:center;gap:.5rem}.bb-explorer-tree-message.message-error{color:var(--negative)}.bb-explorer-tree-message.is-compact{border-bottom:1px solid var(--border)}
 .bb-explorer-button{border:1px solid var(--border);border-radius:.35rem;padding:.18rem .48rem;background:var(--background);cursor:pointer}.bb-explorer-button:hover{border-color:var(--primary);color:var(--primary)}
@@ -1073,8 +1975,9 @@ function installStyles(): void {
 .bb-explorer-preview-empty,.bb-explorer-preview-message{margin:auto;display:flex;flex-direction:column;align-items:center;gap:.35rem;text-align:center;color:var(--muted-foreground);padding:1.5rem}.bb-explorer-preview-empty svg{width:1.6rem;height:1.6rem}.bb-explorer-preview-empty strong,.bb-explorer-preview-message strong{color:var(--foreground);font-weight:500}.bb-explorer-preview-message.message-error strong{color:var(--negative)}
 .bb-explorer-code-scroll,.bb-explorer-diff-scroll{flex:1;min-height:0;overflow:auto;background:var(--background);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.75rem;line-height:1.5}.bb-explorer-code{min-width:max-content;padding:.35rem 0}.bb-explorer-code-line{display:grid;grid-template-columns:3.4rem minmax(0,1fr);min-height:1.12rem}.bb-explorer-line-number{position:sticky;left:0;text-align:right;padding-right:.8rem;color:var(--muted-foreground);background:var(--background);border-right:1px solid var(--border);user-select:none}.bb-explorer-line-code{white-space:pre;padding:0 .8rem}.hljs-keyword,.hljs-selector-tag,.hljs-literal{color:var(--chart-1)}.hljs-string,.hljs-attr{color:var(--chart-2)}.hljs-number,.hljs-symbol{color:var(--chart-3)}.hljs-comment,.hljs-quote{color:var(--muted-foreground);font-style:italic}.hljs-title,.hljs-function{color:var(--chart-4)}.hljs-variable,.hljs-template-variable{color:var(--chart-5)}
 .bb-explorer-diff-file{min-width:max-content;padding-bottom:.65rem}.bb-explorer-diff-file-header{position:sticky;top:0;z-index:2;padding:.4rem .65rem;background:var(--card);border-bottom:1px solid var(--border);font-weight:600}.bb-explorer-diff-meta,.bb-explorer-hunk{padding:.16rem .65rem;color:var(--muted-foreground);background:color-mix(in oklch,var(--info) 8%,transparent)}.bb-explorer-hunk{color:var(--info);margin-top:.2rem}.bb-explorer-diff-line{display:grid;grid-template-columns:3.2rem 3.2rem minmax(0,1fr);min-height:1.12rem}.bb-explorer-diff-number{text-align:right;padding-right:.55rem;color:var(--muted-foreground);border-right:1px solid color-mix(in oklch,var(--border) 70%,transparent);user-select:none}.bb-explorer-diff-code{white-space:pre;padding:0 .65rem}.bb-explorer-diff-line.diff-add{background:color-mix(in oklch,var(--positive) 12%,transparent)}.bb-explorer-diff-line.diff-remove{background:color-mix(in oklch,var(--negative) 12%,transparent)}.bb-explorer-diff-line.diff-add .bb-explorer-diff-code{color:var(--positive)}.bb-explorer-diff-line.diff-remove .bb-explorer-diff-code{color:var(--negative)}
+.bb-explorer-context-menu{position:fixed;z-index:1000;width:min(15rem,calc(100vw - 1rem));display:flex;flex-direction:column;gap:.125rem;padding:.25rem;border:1px solid var(--border);border-radius:.5rem;background:var(--popover,var(--background));box-shadow:0 .5rem 1.5rem color-mix(in oklch,var(--foreground) 16%,transparent)}.bb-explorer-menuitem{border:0;border-radius:.3rem;background:transparent;text-align:left;padding:.42rem .55rem;cursor:pointer}.bb-explorer-menuitem:hover,.bb-explorer-menuitem:focus{background:color-mix(in oklch,var(--primary) 12%,transparent);outline:none}
 .bb-explorer-live{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.bb-explorer.is-narrow .bb-explorer-content{display:flex}.bb-explorer.is-narrow .bb-explorer-tree-pane,.bb-explorer.is-narrow .bb-explorer-preview-pane{width:100%;border-right:0}.bb-explorer.is-narrow .bb-explorer-back:not([hidden]){display:flex}
-[hidden]{display:none!important}@keyframes bb-explorer-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.bb-explorer-refresh.is-spinning svg{animation:none}}
+[hidden]{display:none!important}@keyframes bb-explorer-spin{to{transform:rotate(360deg)}}@media (max-width:480px){.bb-explorer-subtitle{display:none}}@media (max-width:360px){.bb-explorer-control-label{display:none}}@media (max-width:300px){.bb-explorer-search{flex-basis:100%}.bb-explorer-tree-toolbar{justify-content:flex-end}.bb-explorer-search{order:-1}}@media (prefers-reduced-motion:reduce){.bb-explorer-refresh.is-spinning svg{animation:none}}
 `;
 	document.head.append(style);
 }

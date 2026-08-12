@@ -43,7 +43,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { SessionManager, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
+import { SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -3869,7 +3869,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5191,6 +5191,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
+	broadcastToUi: (event: any) => void,
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	configCascade: ConfigCascade,
@@ -7231,7 +7232,12 @@ async function handleApiRoute(
 
 	function* visibleArchivedRaw() {
 		for (const ctx of projectContextManager.visible()) {
-			for (const session of ctx.sessionStore.getArchived()) yield session;
+			for (const session of ctx.sessionStore.getArchived()) {
+				yield sessionManager.serializeSessionListTags(
+					{ ...session, status: "archived", isCompacting: false },
+					{ archived: true },
+				);
+			}
 		}
 	}
 
@@ -7287,7 +7293,13 @@ async function handleApiRoute(
 			for (const ctx of projectContextManager.visible()) {
 				const store = ctx.sessionStore;
 				for (const s of store.getArchived()) {
-					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
+					allArchived.push({
+						...sessionManager.serializeSessionListTags(
+							{ ...s, status: "archived", isCompacting: false },
+							{ archived: true },
+						),
+						colorIndex: colorStore.get(s.id),
+					} as any);
 				}
 			}
 			// Sort by archivedAt descending
@@ -8361,7 +8373,13 @@ async function handleApiRoute(
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
 				for (const s of ctx.sessionStore.getArchived()) {
-					sessionsForGoalQuery.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+					sessionsForGoalQuery.push({
+						...sessionManager.serializeSessionListTags(
+							{ ...s, status: "archived", isCompacting: false },
+							{ archived: true },
+						),
+						colorIndex: colorStore.get(s.id),
+					});
 				}
 			}
 			if (archivedQuery) {
@@ -8387,7 +8405,13 @@ async function handleApiRoute(
 				for (const s of ctx.sessionStore.getArchived()) {
 					if (!seenSessionIds.has(s.id) && (goalIdsInPage.has((s as any).teamGoalId) || goalIdsInPage.has((s as any).goalId))) {
 						seenSessionIds.add(s.id);
-						affiliatedSessions.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+						affiliatedSessions.push({
+							...sessionManager.serializeSessionListTags(
+								{ ...s, status: "archived", isCompacting: false },
+								{ archived: true },
+							),
+							colorIndex: colorStore.get(s.id),
+						});
 					}
 				}
 			}
@@ -15144,6 +15168,42 @@ async function handleApiRoute(
 			json({ output });
 		} catch {
 			json({ error: "Failed to get output" }, 500);
+		}
+		return;
+	}
+
+	// PUT /api/sessions/:id/pin — narrow durable Pin / Unpin mutation.
+	const pinMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/pin$/);
+	if (pinMatch && req.method === "PUT") {
+		let id: string;
+		try { id = decodeURIComponent(pinMatch[1]); }
+		catch { json({ error: "Invalid session ID" }, 400); return; }
+		const body = await readBody(req);
+		if (
+			!body
+			|| typeof body !== "object"
+			|| Array.isArray(body)
+			|| typeof body.pinned !== "boolean"
+			|| Object.keys(body).some(key => key !== "pinned")
+		) {
+			json({ error: "Body must be an object containing only boolean pinned" }, 400);
+			return;
+		}
+		try {
+			const user_tags = await sessionManager.setSessionPinned(id, body.pinned);
+			const projectId = sessionManager.getPersistedSession(id)?.projectId;
+			try {
+				broadcastToUi({ type: "sessions_changed", sessionId: id, projectId, user_tags });
+			} catch (err) {
+				console.error(`[broadcast] sessions_changed failed for ${id}:`, err);
+			}
+			json({ user_tags });
+		} catch (err) {
+			if (err instanceof SessionPinNotFoundError) {
+				json({ error: "Session not found" }, 404);
+				return;
+			}
+			jsonError(500, err);
 		}
 		return;
 	}

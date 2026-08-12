@@ -3,6 +3,13 @@ export const READ_BYTE_LIMIT = 1024 * 1024;
 export const DIFF_BYTE_LIMIT = 500 * 1024;
 export const STATUS_BYTE_LIMIT = 2 * 1024 * 1024;
 export const STATUS_RECORD_LIMIT = 20_000;
+export const SEARCH_RESULT_LIMIT = 200;
+export const SEARCH_ENTRY_LIMIT = 20_000;
+export const SEARCH_DIRECTORY_LIMIT = 5_000;
+export const SEARCH_CONCURRENCY_LIMIT = 4;
+export const SEARCH_DEPTH_LIMIT = 100;
+export const SEARCH_TIMEOUT_MS = 3_000;
+export const SEARCH_QUERY_LIMIT = 256;
 export const FS_TIMEOUT_MS = 3_000;
 export const GIT_TIMEOUT_MS = 5_000;
 
@@ -87,12 +94,16 @@ export function joinRelativePath(parent: string, name: string): string {
 	return normalizeRelativePath(parent ? `${parent}/${name}` : name);
 }
 
+export function stableLowercase(value: string): string {
+	return value.toLowerCase();
+}
+
 export function compareExplorerEntries(a: ExplorerEntry, b: ExplorerEntry): number {
 	const aDirectory = a.kind === "directory";
 	const bDirectory = b.kind === "directory";
 	if (aDirectory !== bDirectory) return aDirectory ? -1 : 1;
-	const aFolded = a.name.toLowerCase();
-	const bFolded = b.name.toLowerCase();
+	const aFolded = stableLowercase(a.name);
+	const bFolded = stableLowercase(b.name);
 	if (aFolded < bFolded) return -1;
 	if (aFolded > bFolded) return 1;
 	if (a.name < b.name) return -1;
@@ -102,6 +113,20 @@ export function compareExplorerEntries(a: ExplorerEntry, b: ExplorerEntry): numb
 
 export function sortExplorerEntries<T extends ExplorerEntry>(entries: readonly T[]): T[] {
 	return [...entries].sort(compareExplorerEntries);
+}
+
+/** Search results sort by their complete canonical path rather than tree kind so
+ * duplicate basenames remain deterministic and adjacent to their path context. */
+export function compareExplorerPaths(a: ExplorerEntry, b: ExplorerEntry): number {
+	const aFolded = stableLowercase(a.path);
+	const bFolded = stableLowercase(b.path);
+	if (aFolded < bFolded) return -1;
+	if (aFolded > bFolded) return 1;
+	return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+}
+
+export function sortExplorerPaths<T extends ExplorerEntry>(entries: readonly T[]): T[] {
+	return [...entries].sort(compareExplorerPaths);
 }
 
 function pathFromRepo(rawPath: string, repoPrefix: string): string | undefined {

@@ -135,7 +135,7 @@ describe("prompt author badge DOM", () => {
 		const list = await renderMessageList([prompt("human", USER)]);
 		expect(list.querySelector(".prompt-author-badge")).toBeNull();
 		expect(list.querySelector(".prompt-bubble-shell")).toBeNull();
-		expect(list.querySelector("user-message > div")?.className).toBe("flex justify-start mx-2 sm:mx-4 my-1");
+		expect(list.querySelector("user-message > div")?.className).toBe("prompt-row flex justify-start mx-2 sm:mx-4 my-1");
 	});
 
 	it("renders exact contextual User, exact System, and agent label/kind strings", async () => {

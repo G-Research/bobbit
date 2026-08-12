@@ -131,6 +131,8 @@ import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resol
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
+import { normalizeTags, removeTag, replaceTag } from "../../shared/session-tags.js";
+import { projectSessionListTags, type SessionListTagProjectionContext, type SessionListTagSource } from "./session-list-tags.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import {
@@ -241,6 +243,14 @@ export class CleanupArchivedSessionWorktreesRequestError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "CleanupArchivedSessionWorktreesRequestError";
+	}
+}
+
+export class SessionPinNotFoundError extends Error {
+	readonly statusCode = 404;
+	constructor(sessionId: string) {
+		super(`Session ${sessionId} not found`);
+		this.name = "SessionPinNotFoundError";
 	}
 }
 
@@ -2699,6 +2709,8 @@ export class SessionManager {
 	/** Session-to-task lookup memo, invalidated by ProjectContextManager's
 	 * topology-aware task generation. Cached absence is intentional. */
 	private _taskIdCache = new Map<string, { gen: number; taskId: string | undefined }>();
+	/** Per-session durable tag mutation queue. Preserves request admission order. */
+	private _pinMutationQueues = new Map<string, Promise<string[]>>();
 	/** Injected boot lag sampler. When absent, restoreSessions owns a temporary
 	 * real event-loop delay histogram for the duration of eager restoration. */
 	private readonly _bootRestoreLagSampler?: () => number;
@@ -11240,6 +11252,58 @@ export class SessionManager {
 		return Array.from(this.sessions.values());
 	}
 
+	private sessionListUnreadSources(): SessionListTagSource[] {
+		return Array.from(this.sessions.values()).map((session) => {
+			let persisted: PersistedSession | undefined;
+			try { persisted = this.resolveStoreForSession(session.id).get(session.id); } catch { /* transient store resolution */ }
+			return {
+				id: session.id,
+				status: session.status,
+				lastActivity: session.lastActivity,
+				lastReadAt: persisted?.lastReadAt,
+				isCompacting: session.isCompacting,
+				delegateOf: session.delegateOf,
+				goalId: session.goalId,
+				role: session.role,
+				teamGoalId: session.teamGoalId,
+				teamLeadSessionId: session.teamLeadSessionId,
+				lastTurnErrored: session.lastTurnErrored,
+				consecutiveErrorTurns: session.consecutiveErrorTurns,
+				archived: false,
+				projectId: persisted?.projectId ?? session.projectId,
+				user_tags: persisted?.user_tags,
+			};
+		});
+	}
+
+	/** Attach fresh derived server tags and normalized durable user tags to a list row. */
+	serializeSessionListTags<T extends SessionListTagSource>(
+		session: T,
+		overrides?: { archived?: boolean; allSessions?: readonly SessionListTagSource[] },
+	): T & { server_tags: string[]; user_tags: string[] } {
+		const effectiveGoalId = session.teamGoalId ?? session.goalId;
+		const allSessions = overrides?.allSessions ?? this.sessionListUnreadSources();
+		const active = effectiveGoalId
+			? (this._verificationHarness?.getActiveVerifications(effectiveGoalId) ?? [])
+			: [];
+		const gateStatusCache: SessionListTagProjectionContext["gateStatusCache"] = effectiveGoalId
+			? new Map([[effectiveGoalId, {
+				verifying: active.some(verification => verification.overallStatus === "running"),
+				awaitingHumanSignoff: active.some(verification =>
+					verification.overallStatus === "running"
+					&& verification.steps.some(step => step.awaitingHuman === true)),
+			}]])
+			: new Map();
+		return projectSessionListTags(session, {
+			allSessions,
+			goal: effectiveGoalId ? this.resolveGoal(effectiveGoalId) : undefined,
+			gateStatusCache,
+			archived: overrides?.archived,
+			projectId: session.projectId,
+			goalId: effectiveGoalId,
+		});
+	}
+
 	listSessions(): Array<{
 		id: string;
 		title: string;
@@ -11248,6 +11312,8 @@ export class SessionManager {
 		createdAt: number;
 		lastActivity: number;
 		lastReadAt?: number;
+		lastTurnErrored?: boolean;
+		consecutiveErrorTurns?: number;
 		clientCount: number;
 		isCompacting: boolean;
 		goalId?: string;
@@ -11278,7 +11344,10 @@ export class SessionManager {
 		repoPath?: string;
 		branch?: string;
 		repoWorktrees?: Record<string, string>;
+		server_tags: string[];
+		user_tags: string[];
 	}> {
+		const allSessions = this.sessionListUnreadSources();
 		return Array.from(this.sessions.values()).map((s) => {
 			let ps: PersistedSession | undefined;
 			try {
@@ -11286,7 +11355,7 @@ export class SessionManager {
 			} catch {
 				// Session can't be resolved (no projectId, not in any store) — use in-memory data only
 			}
-			return {
+			return this.serializeSessionListTags({
 				id: s.id,
 				title: s.title,
 				cwd: s.cwd,
@@ -11294,6 +11363,8 @@ export class SessionManager {
 				createdAt: s.createdAt,
 				lastActivity: s.lastActivity,
 				lastReadAt: ps?.lastReadAt,
+				lastTurnErrored: s.lastTurnErrored,
+				consecutiveErrorTurns: s.consecutiveErrorTurns,
 				clientCount: s.clients.size,
 				isCompacting: s.isCompacting,
 				goalId: s.goalId,
@@ -11325,7 +11396,8 @@ export class SessionManager {
 				repoPath: ps?.repoPath || s.repoPath,
 				branch: ps?.branch || s.branch,
 				repoWorktrees: ps?.repoWorktrees || (s.repoWorktrees ? Object.fromEntries(s.repoWorktrees.map(w => [w.repo, w.worktreePath])) : undefined),
-			};
+				user_tags: ps?.user_tags,
+			}, { allSessions });
 		});
 	}
 
@@ -11359,6 +11431,48 @@ export class SessionManager {
 		store.update(id, { lastReadAt: this.clock.now() });
 		await store.flushAsync();
 		return true;
+	}
+
+	/** Durably set the narrow pinned tag for live, dormant, terminated, or archived sessions. */
+	async setSessionPinned(id: string, pinned: boolean): Promise<string[]> {
+		const predecessor = this._pinMutationQueues.get(id) ?? Promise.resolve([]);
+		let operation!: Promise<string[]>;
+		operation = predecessor.catch(() => []).then(async () => {
+			const store = this.resolveStoreForId(id);
+			const persisted = store?.get(id);
+			if (!store || !persisted) throw new SessionPinNotFoundError(id);
+
+			// A failed durability fence must not leave its optimistic store mutation
+			// available to list callers or a later save. Preserve the raw legacy shape,
+			// including field absence, rather than restoring only normalized tags.
+			const userTagsWerePresent = Object.prototype.hasOwnProperty.call(persisted, "user_tags");
+			const previousUserTags = (persisted as PersistedSession & { user_tags?: unknown }).user_tags;
+			const current = normalizeTags(previousUserTags);
+			const user_tags = pinned
+				? replaceTag(current, "pinned", "true")
+				: removeTag(current, "pinned");
+			store.update(id, { user_tags });
+			try {
+				await store.flushAsync();
+			} catch (error) {
+				store.restoreUserTagsShape(id, userTagsWerePresent, previousUserTags);
+				try {
+					// Keep the per-ID queue fenced until the compensation has either been
+					// published or failed. In both cases memory already holds the baseline.
+					await store.flushAsync();
+				} catch (rollbackError) {
+					console.error(`[session ${id}] Failed to persist pin rollback:`, rollbackError);
+				}
+				throw error;
+			}
+			return normalizeTags(store.get(id)?.user_tags);
+		});
+		this._pinMutationQueues.set(id, operation);
+		try {
+			return await operation;
+		} finally {
+			if (this._pinMutationQueues.get(id) === operation) this._pinMutationQueues.delete(id);
+		}
 	}
 
 	setTitle(id: string, title: string, opts?: { markGenerated?: boolean }): boolean {
@@ -12500,11 +12614,18 @@ export class SessionManager {
 		sandboxed?: boolean;
 		archived: boolean;
 		archivedAt?: number;
+		projectId?: string;
+		server_tags: string[];
+		user_tags: string[];
 	}> {
 		const allArchived = this.projectContextManager
 			? [...this.projectContextManager.all()].flatMap(ctx => ctx.sessionStore.getArchived())
 			: (this._testStore?.getArchived() ?? []);
-		return allArchived.map((ps) => ({
+		const allSessions: SessionListTagSource[] = [
+			...this.sessionListUnreadSources(),
+			...allArchived.map(ps => ({ ...ps, status: "archived", isCompacting: false })),
+		];
+		return allArchived.map((ps) => this.serializeSessionListTags({
 			id: ps.id,
 			title: ps.title,
 			cwd: ps.cwd,
@@ -12532,7 +12653,9 @@ export class SessionManager {
 			sandboxed: ps.sandboxed,
 			archived: true,
 			archivedAt: ps.archivedAt,
-		}));
+			projectId: ps.projectId,
+			user_tags: ps.user_tags,
+		}, { archived: true, allSessions }));
 	}
 
 	/** Permanently purge a single archived session immediately. */
