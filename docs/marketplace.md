@@ -583,7 +583,7 @@ The shipped packs live in the repo at `market-packs/<name>/`, are built by `npm 
 
 ### File explorer activation and launch
 
-The **`file-explorer`** pack is enabled by default and appears in **Built-in (shipped)**. It has no roles, tools, or skills: two entrypoints open one singleton panel per session, and the panel reaches the pack's allowlisted `list`, `read`, and `diff` routes through `host.callRoute`. The session actions entry is **Open File Explorer** and the composer entry is `/files`; both focus the same restored panel.
+The **`file-explorer`** pack is enabled by default and appears in **Built-in (shipped)**. It has no roles, tools, or skills: two entrypoints open one singleton panel per session, and the panel reaches the pack's allowlisted `list`, `resolve`, `search`, `read`, and `diff` routes through `host.callRoute`. The session actions entry is **Open File Explorer** and the composer entry is `/files`; both focus the same restored panel.
 
 Disabling the pack removes both launchers through the normal entrypoint activation catalogue. Re-enabling it restores them immediately. The panel and routes remain non-toggleable support surfaces, consistent with the general activation model; there is no Uninstall or Update action because the pack updates with Bobbit. See [Built-in file explorer](file-explorer.md) for root selection, Git states, read-only behavior, and responsiveness limits.
 
