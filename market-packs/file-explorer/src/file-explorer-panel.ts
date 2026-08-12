@@ -1246,6 +1246,7 @@ function clearSearch(state: ExplorerState, restore: boolean): void {
 	state.selectionGeneration += 1;
 	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
 	const snapshot = state.search.snapshot;
+	let previewToReload: string | undefined;
 	if (restore && snapshot) {
 		state.expanded = new Set(snapshot.expanded);
 		state.focused = snapshot.focused;
@@ -1256,6 +1257,11 @@ function clearSearch(state: ExplorerState, restore: boolean): void {
 		state.narrowPane = snapshot.narrowPane;
 		state.filePreview = { ...snapshot.filePreview };
 		state.diffPreview = { ...snapshot.diffPreview };
+		const status = state.selected ? state.statuses.get(state.selected) : undefined;
+		const activePreview = state.view === "diff" && isChanged(status) ? state.diffPreview : state.filePreview;
+		if (state.selected && activePreview.state === "loading" && activePreview.path === state.selected) {
+			previewToReload = state.selected;
+		}
 		applyNarrowPane(state);
 		renderPreview(state);
 		renderPathBar(state);
@@ -1270,6 +1276,7 @@ function clearSearch(state: ExplorerState, restore: boolean): void {
 	state.search.snapshot = undefined;
 	renderTree(state);
 	if (restore && snapshot) queueStore(state);
+	if (state.active && previewToReload) void loadSelectedContent(state, previewToReload, false);
 }
 
 function toggleChangedOnly(state: ExplorerState): void {
