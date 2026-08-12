@@ -864,20 +864,26 @@ function partitionHeaderSessionActions(actions: SessionActionDescriptor[], mobil
 	directActions: SessionActionDescriptor[];
 	overflowActions: SessionActionDescriptor[];
 } {
-	const firstTrailingActionIndex = actions.findIndex((action) => !!action.trailingToggle);
-	const directLimit = firstTrailingActionIndex >= 0
-		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
-		: headerDirectSessionActionLimit();
 	if (mobile) {
 		return {
 			directActions: actions.filter((action) => action.quick),
 			overflowActions: actions,
 		};
 	}
-	const directCount = Math.min(actions.length, directLimit);
+
+	// Pin/Unpin is menu-only on every desktop header. Exclude it before applying
+	// the existing width and trailing-toggle limits so it cannot displace the
+	// pre-feature direct action set, while retaining it in the full overflow list.
+	const directCandidates = actions.filter((action) => action.id !== "pin");
+	const firstTrailingActionIndex = directCandidates.findIndex((action) => !!action.trailingToggle);
+	const directLimit = firstTrailingActionIndex >= 0
+		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
+		: headerDirectSessionActionLimit();
+	const directActions = directCandidates.slice(0, directLimit);
+	const directActionSet = new Set(directActions);
 	return {
-		directActions: actions.slice(0, directCount),
-		overflowActions: actions.slice(directCount),
+		directActions,
+		overflowActions: actions.filter((action) => !directActionSet.has(action)),
 	};
 }
 
