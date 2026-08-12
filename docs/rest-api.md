@@ -134,7 +134,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
+| `GET` | `/api/sessions` | List sessions. Every serialized row includes normalized `user_tags` and fresh derived `server_tags`. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) and [Session list tags and pinning](#session-list-tags-and-pinning). |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
 | `POST` | `/api/sessions/:id/fork` | Fork a live session. Body `{ newWorktree?: boolean, entryId?: string }`: omit `entryId` to clone the whole source JSONL, or supply a durable Pi prompt cursor to clone the active branch strictly before that prompt. See [Fork session endpoint](#fork-session-endpoint). |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
@@ -145,6 +145,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
 | `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. A processless target awaiting model recovery returns `409 { code: "MODEL_SELECTION_REQUIRED" }` before prompt or steer acceptance, so no queue or transcript work is created; select a replacement through the session picker/`set_model` path. The existing `409 { code: "GOAL_PAUSED" }` response still applies when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
+| `PUT` | `/api/sessions/:id/pin` | Set or remove the durable `pinned=true` user tag. The body must be exactly `{ "pinned": boolean }`; success returns `{ "user_tags": string[] }`. See [Session list tags and pinning](#session-list-tags-and-pinning). |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
@@ -240,6 +241,34 @@ With `limit`, the response shape is:
 ```
 
 `total`, `hasMore`, and `nextCursor` describe only the filtered archived corpus. `sessions` contains the current live sessions followed by the requested archived page, so clients that need only archived results should filter for `archived === true` or `status === "archived"`. `q` is applied before pagination so older matching archived sessions can be found without loading non-matching pages.
+
+### Session list tags and pinning
+
+Every serialized live or archived session-list row exposes two arrays:
+
+```ts
+{
+  server_tags: string[];
+  user_tags: string[];
+}
+```
+
+Legacy missing or malformed values serialize as empty `user_tags`. Valid tags use lowercase kebab-case keys in `key=value` form; normalization keeps the last valid value for each key and preserves unknown keys. `server_tags` is rebuilt for every list serialization from canonical state and is never persisted or accepted from clients. Its projection includes read, activity, archive, and team state, plus project and goal ids when present. This projection exists so clients can consume consistent metadata without becoming another writer of runtime state.
+
+`PUT /api/sessions/:id/pin` is the only user-tag mutation exposed by this feature:
+
+```http
+PUT /api/sessions/<id>/pin
+Content-Type: application/json
+
+{ "pinned": true }
+```
+
+Pin replaces any existing `pinned` value with one `pinned=true`; unpin removes that key. Both preserve unrelated user tags and leave server tags unchanged. The route works for live, dormant, terminated, and archived persisted sessions. Repeating a request is idempotent.
+
+The body must be an object containing only the boolean `pinned` field. Malformed JSON, extra fields, and other value types return `400`; an unknown session returns `404`. The route uses the normal API authentication boundary.
+
+Mutations for one session are serialized in admitted order while different sessions remain independent. The server waits for durable store flush before returning `200 { "user_tags": [...] }` and broadcasting `sessions_changed` with the same authoritative tags to authenticated UI clients. A failed write restores the prior in-memory tag shape, attempts to persist that compensation, returns `500`, and does not emit the success invalidation. This ordering prevents an acknowledged pin from disappearing after restart and prevents a later queued mutation from starting from failed optimistic state. See [Sidebar grouping](internals.md#sidebar-grouping) for the client reconciliation path and the [approved sidebar specification](design/session-manager-sidebar-views.md) for the normative product contract.
 
 ### Side-panel workspace
 
