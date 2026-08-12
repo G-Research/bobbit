@@ -761,7 +761,7 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 		} finally {
 			await deleteSession(sessionId);
 			await deleteProject(projectId);
-			rmSync(rootPath, { recursive: true, force: true });
+			rmSync(rootPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 		}
 	});
 
