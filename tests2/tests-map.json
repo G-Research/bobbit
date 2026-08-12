@@ -21,6 +21,69 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-tags.test.ts",
+      "reason": "Core coverage for session tag normalization, keyed mutation, projection, team classification, and legacy compatibility for sidebar status views.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/sidebar-status.test.ts",
+      "reason": "Core coverage for exclusive deterministic Pinned, Unread, and Read selection, visibility gates, team detection, search bypass, and live-over-archived deduplication.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/sidebar-view-preferences.test.ts",
+      "reason": "Core coverage for independent persisted Project and Status view/filter preferences, defaults, validation, and archive demand.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/notification-policy.test.ts",
+      "reason": "DOM coverage proving the sidebar notification wrapper remains aligned with the shared unread policy used by status classification and server projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/session-pin-client.test.ts",
+      "reason": "DOM coverage for canonical Pin/Unpin action order, optimistic mutation, sequencing, rollback, and additive session-list update handling.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/session-pin-api.test.ts",
+      "reason": "Integration coverage for live and archived pin API validation, idempotency, persistence, serialization, tag preservation, and sessions_changed propagation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-status.journey.spec.ts",
+      "reason": "Deterministic production-renderer browser journey covering Project preservation, Status grouping/order, independent filters, shared search, pin/read movement, archives, actions, Menu icon, shimmer/time treatment, reload, collapse, keyboard focus, and mobile behavior.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
       "reason": "Core lifecycle regression coverage proving durable flattened and legacy-inferred sandbox worktree ownership, fail-closed ambiguity, pre-mutation owner protection, nested-cwd teardown authority, borrower-safe cleanup, and rejection-safe per-owner FIFO serialization.",
       "execution": {
@@ -3037,6 +3100,10 @@
     },
     {
       "path": "tests2/browser/journeys/sidebar-nav.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-status.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
