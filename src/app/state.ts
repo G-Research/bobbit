@@ -6,6 +6,7 @@ import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 import { type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
+import { loadSidebarSessionView, loadSidebarStatusFilter } from "./sidebar-view-preferences.js";
 import {
 	clearSidebarTreePreference,
 	getSidebarTreePreference,
@@ -127,6 +128,10 @@ export interface GatewaySession {
 	/** Server-emitted: count of consecutive errored turns. Compared against
 	 *  `MAX_CONSECUTIVE_ERROR_TURNS` (3 today) by notification-policy.ts rule 3. */
 	consecutiveErrorTurns?: number;
+	/** Server-controlled projections of canonical session state. */
+	server_tags?: string[];
+	/** Durable user-owned session metadata. Legacy session payloads may omit it. */
+	user_tags?: string[];
 }
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
@@ -470,12 +475,17 @@ export const state = {
 	/** User-resizable sidebar width in px (expanded state). Clamped 180–480. */
 	sidebarWidth: loadSidebarWidth(),
 
-	/** Whether to show archived sessions in the sidebar */
+	/** Active session browsing view. Unknown persisted values safely resolve to By Project. */
+	sidebarSessionView: loadSidebarSessionView(),
+	/** By Project filters retain their production fields and storage keys. */
 	showArchived: safeGetItem("bobbit-show-archived") === "true",
-	/** Whether to show busy (streaming/aborting/preparing/starting/compacting) sessions. Default ON. */
 	showBusy: safeGetItem("bobbit-show-busy") !== "false",
-	/** Whether to show idle/done sessions without unread activity. Default ON. */
 	showRead: safeGetItem("bobbit-show-read") !== "false",
+	/** By Status owns an independent persisted filter set. */
+	statusShowArchived: loadSidebarStatusFilter("showArchived"),
+	statusShowBusy: loadSidebarStatusFilter("showBusy"),
+	statusShowRead: loadSidebarStatusFilter("showRead"),
+	statusShowTeams: loadSidebarStatusFilter("showTeams"),
 	/** Whether the sidebar filters popover is open */
 	filtersPopoverOpen: false,
 	/** Whether the archived section is expanded */
