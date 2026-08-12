@@ -1777,6 +1777,9 @@ export function buildSidebarStatusSections(
 	sidebarData = getSidebarData(),
 	viewport: "desktop" | "mobile" | "collapsed" = "desktop",
 ): SidebarStatusSections {
+	// Status can be the persisted startup view, so no Project staff section may
+	// render first. Reuse the guarded canonical loader before collecting staff.
+	ensureStaffLoaded();
 	const filters = getSidebarViewFilters(state, "status");
 	const { model } = buildSidebarTreeModelWithSearch(sidebarData, { view: "status", filters, viewport });
 	const query = state.searchQuery.trim().toLowerCase();

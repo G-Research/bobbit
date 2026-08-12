@@ -42,8 +42,13 @@ const IDS = {
 	busy: "status-busy",
 	teamLead: "status-team-lead",
 	teamMember: "status-team-member",
+	staffSession: "status-staff-session",
 	archived: "status-archived",
 } as const;
+
+const STAFF_ID = "status-staff-agent";
+const STAFF_NAME = "Async Status Staff";
+const STAFF_RUNTIME_TITLE = "Underlying Staff Runtime";
 
 const VIEW_KEYS = [
 	SIDEBAR_SESSION_VIEW_STORAGE_KEY,
@@ -56,6 +61,19 @@ const VIEW_KEYS = [
 const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
 const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 const persistedPinTags = new Map<string, string[]>();
+let staffResponseBarrier: Promise<void> = Promise.resolve();
+let releaseStaffResponse: (() => void) | null = null;
+
+function prepareStaffResponse(deferred: boolean): void {
+	if (!deferred) {
+		staffResponseBarrier = Promise.resolve();
+		releaseStaffResponse = null;
+		return;
+	}
+	staffResponseBarrier = new Promise<void>((resolve) => {
+		releaseStaffResponse = resolve;
+	});
+}
 
 class FixtureWebSocket {
 	static CONNECTING = 0;
@@ -113,7 +131,19 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	}
 	if (route.startsWith("/api/sessions")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
 	if (route.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
-	if (route === "/api/staff" || route.startsWith("/api/staff?") || route === "/api/staff/orphaned") return response({ staff: [] });
+	if (route === "/api/staff/orphaned") return response({ staff: [] });
+	if (route === "/api/staff" || route.startsWith("/api/staff?")) {
+		await staffResponseBarrier;
+		return response({ staff: [{
+			id: STAFF_ID,
+			name: STAFF_NAME,
+			description: "Loaded asynchronously for the Status startup journey",
+			state: "active",
+			currentSessionId: IDS.staffSession,
+			triggers: [],
+			projectId: PROJECT_ID,
+		}] });
+	}
 	if (route === "/api/preferences") return response({});
 	if (route.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
 	return response({ ok: true });
@@ -157,6 +187,7 @@ function fixtureSessions(): GatewaySession[] {
 		createSession({ id: IDS.busy, title: "Active Shimmer Session", status: "streaming", createdAt: 31, lastActivity: 3_100 }),
 		createSession({ id: IDS.teamLead, title: "Visible Team Lead", status: "idle", createdAt: 21, lastActivity: 2_100, role: "team-lead" }),
 		createSession({ id: IDS.teamMember, title: "Hidden Team Member", status: "idle", createdAt: 11, lastActivity: 1_100, role: "coder", teamLeadSessionId: IDS.teamLead }),
+		createSession({ id: IDS.staffSession, title: STAFF_RUNTIME_TITLE, status: "idle", createdAt: 6, lastActivity: 600 }),
 	];
 }
 
@@ -195,12 +226,23 @@ async function nextFrames(frames = 2): Promise<void> {
 	});
 }
 
-async function resetFixture(options: { preserveStorage?: boolean; preservePins?: boolean } = {}): Promise<void> {
+type FixtureSurface = "desktop" | "mobile" | "collapsed";
+
+async function resetFixture(options: {
+	preserveStorage?: boolean;
+	preservePins?: boolean;
+	initialView?: "project" | "status";
+	surface?: FixtureSurface;
+	deferStaff?: boolean;
+} = {}): Promise<void> {
 	commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, FIXTURE_GATEWAY_TOKEN);
 	(window as any).__sidebarStatusRequests = [];
 	installFixtureStyle();
 	if (!options.preserveStorage) VIEW_KEYS.forEach((key) => localStorage.removeItem(key));
 	if (!options.preservePins) persistedPinTags.clear();
+	if (options.initialView) localStorage.setItem(SIDEBAR_SESSION_VIEW_STORAGE_KEY, options.initialView);
+	if (options.surface === "collapsed") localStorage.setItem("bobbit-sidebar-collapsed", "true");
+	prepareStaffResponse(options.deferStaff === true);
 	loadPreferences();
 	setProjects([{ ...PROJECT }]);
 	setUngroupedExpanded(PROJECT_ID, true);
@@ -234,7 +276,8 @@ async function resetFixture(options: { preserveStorage?: boolean; preservePins?:
 		archivedSessionsTotal: 1,
 	});
 	window.history.replaceState({}, "", "#/settings");
-	renderFixture();
+	if (options.surface === "mobile") renderMobileStatusFixture();
+	else renderFixture();
 	await nextFrames();
 }
 
@@ -274,4 +317,8 @@ setRenderApp(renderFixture);
 (window as any).__reloadSidebarStatusJourney = simulateReload;
 (window as any).__markSidebarStatusSessionRead = markFixtureSessionRead;
 (window as any).__renderMobileSidebarStatusJourney = renderMobileStatusFixture;
+(window as any).__releaseSidebarStatusStaffResponse = () => {
+	releaseStaffResponse?.();
+	releaseStaffResponse = null;
+};
 (window as any).__sidebarStatusJourneyReady = true;

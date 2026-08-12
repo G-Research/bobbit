@@ -20,6 +20,7 @@ type FixtureIds = {
 	busy: string;
 	teamLead: string;
 	teamMember: string;
+	staffSession: string;
 	archived: string;
 };
 
@@ -43,13 +44,35 @@ test.beforeAll(() => {
 	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: DEPS });
 });
 
-async function loadFixture(page: Page): Promise<FixtureIds> {
-	await page.setViewportSize({ width: 1280, height: 900 });
+async function openFixture(page: Page, viewport = { width: 1280, height: 900 }): Promise<void> {
+	await page.setViewportSize(viewport);
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__sidebarStatusJourneyReady === true, null, { timeout: 15_000 });
+}
+
+async function loadFixture(page: Page): Promise<FixtureIds> {
+	await openFixture(page);
 	await page.evaluate(() => (window as any).__resetSidebarStatusJourney());
 	await expect(page.getByTestId("sidebar-expanded"), `${MARK}: desktop sidebar should render`).toBeVisible({ timeout: 10_000 });
+	return page.evaluate(() => (window as any).__sidebarStatusJourneyIds);
+}
+
+type PersistedStatusSurface = "desktop" | "mobile" | "collapsed";
+
+async function loadPersistedStatusFixture(page: Page, surface: PersistedStatusSurface): Promise<FixtureIds> {
+	await openFixture(page, surface === "mobile" ? { width: 390, height: 844 } : { width: 1280, height: 900 });
+	await page.evaluate((initialSurface) => (window as any).__resetSidebarStatusJourney({
+		initialView: "status",
+		surface: initialSurface,
+		deferStaff: true,
+	}), surface);
+	if (surface === "collapsed") {
+		await expect(page.getByTestId("sidebar-collapsed")).toBeVisible({ timeout: 10_000 });
+		expect(await page.evaluate(() => (window as any).__bobbitState.sidebarSessionView)).toBe("status");
+	} else {
+		await expect(page.getByTestId("sidebar-view-status")).toHaveAttribute("aria-pressed", "true", { timeout: 10_000 });
+	}
 	return page.evaluate(() => (window as any).__sidebarStatusJourneyIds);
 }
 
@@ -105,6 +128,40 @@ async function switchToStatus(page: Page): Promise<void> {
 	await expect(page.getByTestId("sidebar-view-status")).toHaveAttribute("aria-pressed", "true");
 }
 
+async function assertPersistedStatusStaffResolution(
+	page: Page,
+	ids: FixtureIds,
+	surface: PersistedStatusSurface,
+): Promise<void> {
+	await expect(page.getByTestId("project-header"), `${MARK}: persisted Status must not require Project rendering`).toHaveCount(0);
+	await expect.poll(() => page.evaluate(() =>
+		(window as any).__sidebarStatusRequests.filter((request: any) => request.route === "/api/staff" && request.method === "GET").length,
+	)).toBe(1);
+
+	const staffRows = page.locator(`[data-session-id="${ids.staffSession}"]`);
+	await expect(staffRows, `${MARK}: raw and synthesized staff rows must dedupe`).toHaveCount(1);
+	const staffRow = staffRows.first();
+	if (surface === "collapsed") {
+		await expect(staffRow).toHaveAttribute("title", "Underlying Staff Runtime");
+	} else {
+		await expect(staffRow.getByTestId("sidebar-session-title-text")).toHaveText("Underlying Staff Runtime");
+	}
+
+	await page.evaluate(() => (window as any).__releaseSidebarStatusStaffResponse());
+	await expect(staffRows, `${MARK}: async staff rerender must retain exactly one canonical row`).toHaveCount(1);
+	if (surface === "collapsed") {
+		await expect(staffRow).toHaveAttribute("title", "Async Status Staff");
+		await page.getByTitle(/Expand sidebar/).click();
+		await expect(page.getByTestId("sidebar-expanded")).toBeVisible();
+	} else {
+		await expect(staffRow.getByTestId("sidebar-session-title-text")).toHaveText("Async Status Staff");
+	}
+
+	await openSessionMenu(page, ids.staffSession);
+	await expect(page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="modify"]')).toHaveText(/Edit staff/);
+	await page.keyboard.press("Escape");
+}
+
 test.describe("Journey: Sidebar status views", () => {
 	test("desktop journey covers status grouping, independent filters, search, pin, read, archives, actions, focus, reload, and collapse", async ({ page }) => {
 		const ids = await loadFixture(page);
@@ -136,7 +193,7 @@ test.describe("Journey: Sidebar status views", () => {
 		)).toEqual(["pinned", "unread", "read"]);
 		await expect.poll(() => sessionIdsInSection(page, "pinned")).toEqual([ids.pinnedNew, ids.pinnedOld]);
 		await expect.poll(() => sessionIdsInSection(page, "unread")).toEqual([ids.unreadNew, ids.unreadOld]);
-		await expect.poll(() => sessionIdsInSection(page, "read")).toEqual([ids.readNew, ids.readOld, ids.busy, ids.teamLead]);
+		await expect.poll(() => sessionIdsInSection(page, "read")).toEqual([ids.readNew, ids.readOld, ids.busy, ids.teamLead, ids.staffSession]);
 		const allIds = await page.locator("[data-status-section] [data-session-id]").evaluateAll((elements) =>
 			elements.map((element) => (element as HTMLElement).dataset.sessionId),
 		);
@@ -246,6 +303,20 @@ test.describe("Journey: Sidebar status views", () => {
 		await expect(filterCheckbox(page, "teams")).toBeChecked();
 		await closeFiltersWithEscape(page);
 	});
+
+	test("persisted desktop Status resolves staff asynchronously without a Project render", async ({ page }) => {
+		const ids = await loadPersistedStatusFixture(page, "desktop");
+		await expect(page.getByTestId("sidebar-expanded")).toBeVisible();
+		await assertPersistedStatusStaffResolution(page, ids, "desktop");
+	});
+
+	for (const surface of ["mobile", "collapsed"] as const) {
+		test(`persisted ${surface} Status resolves staff asynchronously without a Project render`, async ({ page }) => {
+			const ids = await loadPersistedStatusFixture(page, surface);
+			if (surface === "collapsed") await expect(page.getByTestId("sidebar-collapsed")).toBeVisible();
+			await assertPersistedStatusStaffResolution(page, ids, surface);
+		});
+	}
 
 	test("mobile exposes status controls with always-visible actions and no row-click leakage", async ({ page }) => {
 		const ids = await loadFixture(page);
