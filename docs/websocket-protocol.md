@@ -35,7 +35,7 @@ The frame contains no session, project, or credential information and is sent be
 
 Gateway boot also returns HTTP `503` with `Retry-After: 1` for mounted HTTP routes until the same readiness boundary opens. Search indexing does not delay this boundary because its worker starts lazily; see [Search worker and persistence](search-worker-persistence.md#diagnostics-and-session-admission).
 
-Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Treat these messages as refresh triggers only; the session list REST response remains the source of truth.
+Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Every frame remains a refresh trigger and the session list REST response remains authoritative. A `sessions_changed` frame may additionally carry `sessionId` and `user_tags` so an idle client can patch a loaded row before refresh; a client with a newer queued pin intent defers that additive payload until its mutation queue settles.
 
 ## Frame size routing and limits
 
@@ -417,7 +417,7 @@ semantics and the shared clamp order.
 | `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
 | `session_created` | `sessionId`, `projectId?` | A visible session was created through REST, UI, or `host.agents`; clients should refresh the session list immediately. |
-| `sessions_changed` | `projectId?` | Broad session-list invalidation fallback; clients should refresh the session list. |
+| `sessions_changed` | `projectId?`, `sessionId?`, `user_tags?` | Broad session-list invalidation. Pin mutations include the authoritative normalized user tags for an immediate row patch; clients still refresh the session list. |
 | `session_removed` | `sessionId`, `projectId?`, `reason` | A session was terminated, archived, or purged; clients should remove or refresh the matching row promptly. |
 | `staff_changed` | `reason`, `staffId`, `projectId`, `previousProjectId?`, `sessionId?` | A staff record was created, updated, reassigned, or deleted through REST/tool paths. Clients should reload staff and orphaned-staff state before refreshing sessions so permanent staff-agent sessions are classified under Staff instead of regular Sessions. |
 | `client_joined` | `clientId` | Another client connected |

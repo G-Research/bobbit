@@ -86,6 +86,8 @@ export interface PersistedSession {
 	lastActivity: number;
 	/** Epoch ms when the user last viewed this session. 0 / undefined = never read. */
 	lastReadAt?: number;
+	/** Durable user-owned session metadata. Missing legacy values normalize to an empty array. */
+	user_tags?: string[];
 	/** Optional goal this session belongs to */
 	goalId?: string;
 	/** Whether the agent was actively streaming when the server last knew about it */
@@ -203,6 +205,7 @@ export type UpdatableSessionFields = Pick<
 	| "title"
 	| "lastActivity"
 	| "lastReadAt"
+	| "user_tags"
 	| "agentSessionFile"
 	| "goalId"
 	| "wasStreaming"
@@ -722,7 +725,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
-		"manualRetryRequired", "inFlightSteerTexts",
+		"manualRetryRequired", "inFlightSteerTexts", "user_tags",
 		"sidePanelWorkspace",
 	];
 
@@ -747,6 +750,25 @@ export class SessionStore {
 		if (updates.title !== undefined || updates.archived !== undefined || updates.role !== undefined || updates.goalId !== undefined) {
 			this.onIndexUpdate?.(existing);
 		}
+	}
+
+	/**
+	 * Restore the exact optional-field shape captured before a failed pin write.
+	 * Legacy records may omit `user_tags` or contain a malformed raw value, so a
+	 * normal typed update cannot faithfully compensate the mutation.
+	 */
+	restoreUserTagsShape(id: string, present: boolean, value: unknown): boolean {
+		const existing = this.sessions.get(id);
+		if (!existing) return false;
+		this.generation++;
+		if (present) {
+			(existing as unknown as { user_tags: unknown }).user_tags = value;
+		} else {
+			delete existing.user_tags;
+		}
+		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
+		this.saveNow();
+		return true;
 	}
 
 

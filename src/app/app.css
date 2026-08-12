@@ -294,6 +294,238 @@ bell-toggle button {
 	white-space: nowrap;
 }
 
+/* Session manager view controls. The row density, selector underline and
+ * section rhythm mirror the approved mock while canonical rows remain owned by
+ * render-helpers.ts. */
+.sidebar-view-controls {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: min(0.75em, 0.75rem);
+	min-height: 2.25em;
+	margin: 0 0.4167em 0.25em;
+	padding: 0 0.6667em 0.25em;
+	border-bottom: 1px solid color-mix(in oklch, var(--border) 65%, transparent);
+	flex: 0 0 auto;
+}
+
+.sidebar-session-mode-switch {
+	display: flex;
+	align-items: center;
+	gap: min(1em, 0.75rem);
+	min-width: 0;
+}
+
+.sidebar-session-mode-switch button,
+.sidebar-mode-filter {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.3333em;
+	min-width: 0;
+	white-space: nowrap;
+	color: var(--muted-foreground);
+	font-size: 0.75em;
+	font-weight: 500;
+	transition: color 120ms ease, background-color 120ms ease;
+}
+
+.sidebar-session-mode-switch button {
+	padding: 0.3333em 0;
+}
+
+.sidebar-session-mode-switch button:hover,
+.sidebar-session-mode-switch button[data-active="true"] {
+	color: var(--foreground);
+}
+
+.sidebar-session-mode-switch button[data-active="true"]::after {
+	content: "";
+	position: absolute;
+	inset-inline: 0;
+	bottom: -0.4167em;
+	height: 1px;
+	background: var(--primary);
+}
+
+.sidebar-session-mode-switch button:focus-visible,
+.sidebar-mode-filter:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+	border-radius: 0.25em;
+}
+
+.sidebar-view-control-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 auto;
+	width: 1em;
+	height: 1em;
+}
+
+.sidebar-view-control-icon svg {
+	width: 100%;
+	height: 100%;
+}
+
+.sidebar-mode-filter {
+	margin-inline-start: auto;
+	padding: 0.25em 0.4167em;
+	border-radius: 0.4167em;
+}
+
+.sidebar-mode-filter:hover,
+.sidebar-mode-filter[data-active="true"] {
+	background: var(--secondary);
+	color: var(--foreground);
+}
+
+.sidebar-view-controls--mobile {
+	margin-inline: 0.6667em;
+	min-height: 2.75em;
+	font-size: 1.0833em;
+}
+
+.sidebar-filters-popover {
+	position: fixed;
+	z-index: 50;
+	padding: 0.4167em;
+	border: 1px solid var(--border);
+	border-radius: 0.5833em;
+	background: var(--popover);
+	color: var(--popover-foreground);
+	box-shadow: 0 0.8333em 2.5em color-mix(in oklch, var(--foreground) 12%, transparent);
+}
+
+.sidebar-filter-title {
+	padding: 0.3333em 0.5em 0.4167em;
+	color: var(--muted-foreground);
+	font-size: 0.6667em;
+	font-weight: 650;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.sidebar-filter-row {
+	display: flex;
+	align-items: center;
+	gap: 0.6667em;
+	padding: 0.6667em 0.75em;
+	border-radius: 0.3333em;
+	cursor: pointer;
+	transition: background-color 120ms ease;
+}
+
+.sidebar-filter-row:hover {
+	background: color-mix(in oklch, var(--secondary) 50%, transparent);
+}
+
+.sidebar-filter-row:focus-within {
+	outline: 2px solid var(--ring);
+	outline-offset: -2px;
+}
+
+.sidebar-filter-row-icon {
+	display: inline-flex;
+	flex: 0 0 auto;
+	color: var(--muted-foreground);
+}
+
+.sidebar-filter-row-label {
+	flex: 1 1 auto;
+	min-width: 0;
+	color: var(--foreground);
+	font-size: 0.875rem;
+	font-weight: 500;
+}
+
+.sidebar-filter-shortcut {
+	flex: 0 0 auto;
+	color: var(--muted-foreground);
+	font-family: ui-monospace, monospace;
+	font-size: 0.75rem;
+	opacity: 0.7;
+}
+
+.sidebar-status-section {
+	display: flex;
+	flex-direction: column;
+	gap: 0.125em;
+}
+
+.sidebar-status-heading {
+	display: flex;
+	align-items: center;
+	gap: 0.4167em;
+	height: 2.0833em;
+	padding: 0 0.5833em;
+	color: var(--muted-foreground);
+	font-size: 0.6667em;
+	font-weight: 650;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+}
+
+.sidebar-status-heading::after {
+	content: "";
+	flex: 1 1 auto;
+	height: 1px;
+	background: color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.sidebar-status-heading-icon {
+	display: inline-flex;
+	width: 1em;
+	height: 1em;
+}
+
+.sidebar-status-heading-icon svg {
+	width: 100%;
+	height: 100%;
+}
+
+.sidebar-status-count {
+	padding: 0 0.5em;
+	border-radius: 999px;
+	background: var(--muted);
+	font-size: 0.6667rem;
+	letter-spacing: 0;
+}
+
+.sidebar-status-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 0.125em;
+}
+
+.sidebar-status-empty {
+	margin: 1em 0.5833em;
+	padding: 1.1667em 0.8333em;
+	border: 1px dashed var(--border);
+	border-radius: 0.5833em;
+	color: var(--muted-foreground);
+	font-size: 0.75em;
+	line-height: 1.45;
+	text-align: center;
+}
+
+@media (max-width: 360px) {
+	.sidebar-view-controls {
+		gap: 0.5em;
+		padding-inline: 0.4167em;
+	}
+
+	.sidebar-session-mode-switch {
+		gap: 0.5833em;
+	}
+
+	.sidebar-session-mode-switch .sidebar-view-control-icon {
+		display: none;
+	}
+}
+
 /*
  * Mobile header: when [data-mobile-header] is on the root container,
  * add top padding to the message scroll area so the first message

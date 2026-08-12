@@ -1,7 +1,6 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import "../ui/components/BellToggle.js";
 import "../ui/components/CommentableMarkdown.js";
-import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render, nothing } from "lit";
@@ -47,11 +46,10 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 import { openGatewayDialog, showQrCodeDialog, showSupportDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { HEADQUARTERS_ACCENT_COLOR, HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
+import { renderSidebar, renderSidebarViewControls, renderSidebarStatusContent, buildSidebarStatusSections, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, renderArchivedPaginationControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
-import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { setArchivedSectionExpanded, setUngroupedExpanded, sidebarTreeExpansionInput, toggleProjectExpanded } from "./sidebar-tree-state.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
@@ -513,7 +511,7 @@ function renderMobileGoalForest(nodes: readonly SidebarTreeNode<GoalContext>[], 
 }
 
 function renderMobileArchivedTreeSection(projectTree: SidebarProjectTree): ReturnType<typeof html> | string {
-	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
+	if (!(state.showArchived || state.archivedSearchDemand) || !projectTree.archivedSectionNode) return "";
 	const project = projectTree.project;
 	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
@@ -648,7 +646,14 @@ function renderMobileLanding() {
 					@search-clear=${() => { handleSidebarSearchClear(); }}
 					@full-search-click=${(e: CustomEvent) => { setHashRoute("search", e.detail.query); }}
 				></search-box>
-				${state.sessionsLoading
+				${renderSidebarViewControls("mobile")}
+				${state.sidebarSessionView === "status"
+					? (state.sessionsLoading
+						? html`<div class="text-center py-12 text-muted-foreground">Loading…</div>`
+						: state.sessionsError
+							? html`<div class="text-center py-12"><p class="text-red-500 mb-3">${state.sessionsError}</p><button class="text-muted-foreground underline" title="Retry" @click=${retryLoadSessions}>Retry</button></div>`
+							: renderSidebarStatusContent(buildSidebarStatusSections(sidebarData, "mobile")))
+					: state.sessionsLoading
 					? html`<div class="text-center py-12 text-muted-foreground">Loading…</div>`
 					: state.sessionsError
 						? html`<div class="text-center py-12">
@@ -694,7 +699,8 @@ function renderMobileLanding() {
 										if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
 										return sessionMatchesQuery(session);
 									});
-									const archivedSessionInput = state.showArchived
+									const showArchivedForProject = state.showArchived || state.archivedSearchDemand;
+									const archivedSessionInput = showArchivedForProject
 										? state.archivedSessions.filter(session => {
 											if (!query) return true;
 											if (retainedSearchSessionIds!.has(session.id)) return true;
@@ -710,7 +716,7 @@ function renderMobileLanding() {
 										sessions: liveSessionInput,
 										archivedSessions: archivedSessionInput,
 										staff: staffList,
-										showArchived: state.showArchived,
+										showArchived: showArchivedForProject,
 										filters: {
 											searchQuery: state.searchQuery,
 											bypassBusyReadFilters: bypassFilters,
@@ -813,13 +819,7 @@ function renderMobileLanding() {
 											`;
 										})}
 										${renderArchivedSearchControls()}
-										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
-											<div class="border-t border-border/30 my-0.5 mx-2"></div>
-											<div class="flex flex-col gap-0.5 px-2">
-												${state.archivedGoalsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>` : ""}
-												${state.archivedSessionsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>` : ""}
-											</div>
-										` : ""}</div>`;
+										${renderArchivedPaginationControls(state.showArchived, true)}</div>`;
 								})()}
 							`}
 			</div>
@@ -837,7 +837,6 @@ function renderMobileLanding() {
 				${icon(FolderPlus, "sm")}
 				<span>Add Project</span>
 			</button>` : ""}
-			${renderFiltersButton("mobile")}
 		</div>
 	`;
 }
@@ -865,20 +864,26 @@ function partitionHeaderSessionActions(actions: SessionActionDescriptor[], mobil
 	directActions: SessionActionDescriptor[];
 	overflowActions: SessionActionDescriptor[];
 } {
-	const firstTrailingActionIndex = actions.findIndex((action) => !!action.trailingToggle);
-	const directLimit = firstTrailingActionIndex >= 0
-		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
-		: headerDirectSessionActionLimit();
 	if (mobile) {
 		return {
 			directActions: actions.filter((action) => action.quick),
 			overflowActions: actions,
 		};
 	}
-	const directCount = Math.min(actions.length, directLimit);
+
+	// Pin/Unpin is menu-only on every desktop header. Exclude it before applying
+	// the existing width and trailing-toggle limits so it cannot displace the
+	// pre-feature direct action set, while retaining it in the full overflow list.
+	const directCandidates = actions.filter((action) => action.id !== "pin");
+	const firstTrailingActionIndex = directCandidates.findIndex((action) => !!action.trailingToggle);
+	const directLimit = firstTrailingActionIndex >= 0
+		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
+		: headerDirectSessionActionLimit();
+	const directActions = directCandidates.slice(0, directLimit);
+	const directActionSet = new Set(directActions);
 	return {
-		directActions: actions.slice(0, directCount),
-		overflowActions: actions.slice(directCount),
+		directActions,
+		overflowActions: actions.filter((action) => !directActionSet.has(action)),
 	};
 }
 
