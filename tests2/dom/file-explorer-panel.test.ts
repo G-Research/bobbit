@@ -765,6 +765,98 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("opened src/original.txt");
 	});
 
+	it("restarts an in-flight file preview when search clear restores its browse snapshot", async () => {
+		const originalRead = deferred<unknown>();
+		const restoredRead = deferred<unknown>();
+		let readCalls = 0;
+		const fakeHost = host({
+			list: ({ path }) => path === "src"
+				? list([{ path: "src/original.txt", name: "original.txt", kind: "file" }])
+				: list([{ path: "src", name: "src", kind: "directory" }]),
+			search: ({ query }) => ({ query, count: 0, limit: 200, truncated: false, results: [] }),
+			read: () => ++readCalls === 1 ? originalRead.promise : restoredRead.promise,
+			diff: () => ({ kind: "empty" }),
+		});
+		const root = mount("search-clear-loading-file", fakeHost);
+		await tick();
+		click(row(root, "src"));
+		await tick();
+		click(row(root, "src/original.txt"));
+		await tick();
+		expect(root.textContent).toContain("Loading file…");
+
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "missing";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		click(root.querySelector('[aria-label="Clear search"]')!);
+		await tick();
+
+		expect(readCalls).toBe(2);
+		expect(search.value).toBe("");
+		expect(row(root, "src").getAttribute("aria-expanded")).toBe("true");
+		expect(row(root, "src/original.txt").getAttribute("aria-selected")).toBe("true");
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/src/original.txt");
+		originalRead.resolve({ kind: "text", text: "stale original read" });
+		await tick();
+		expect(root.textContent).toContain("Loading file…");
+		expect(root.textContent).not.toContain("stale original read");
+
+		restoredRead.resolve({ kind: "text", text: "restored file preview" });
+		await tick();
+		expect(root.textContent).toContain("restored file preview");
+		expect(root.textContent).not.toContain("Loading file…");
+	});
+
+	it("restarts an in-flight diff preview when search clear restores its browse snapshot", async () => {
+		const originalDiff = deferred<unknown>();
+		const restoredDiff = deferred<unknown>();
+		let diffCalls = 0;
+		const fakeHost = host({
+			list: ({ path }) => path === "src"
+				? list([{ path: "src/changed.ts", name: "changed.ts", kind: "file" }])
+				: list([{ path: "src", name: "src", kind: "directory" }], [{ path: "src/changed.ts", index: "M" }]),
+			search: ({ query }) => ({ query, count: 0, limit: 200, truncated: false, results: [] }),
+			read: () => ({ kind: "text", text: "working tree file" }),
+			diff: () => ++diffCalls === 1 ? originalDiff.promise : restoredDiff.promise,
+		});
+		const root = mount("search-clear-loading-diff", fakeHost);
+		await tick();
+		click(row(root, "src"));
+		await tick();
+		click(row(root, "src/changed.ts"));
+		await tick();
+		click(root.querySelector('[data-action="view-diff"]')!);
+		await tick();
+		expect(root.textContent).toContain("Loading diff…");
+
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "missing";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		click(root.querySelector('[aria-label="Clear search"]')!);
+		await tick();
+
+		expect(diffCalls).toBe(2);
+		expect(search.value).toBe("");
+		expect(row(root, "src").getAttribute("aria-expanded")).toBe("true");
+		expect(row(root, "src/changed.ts").getAttribute("aria-selected")).toBe("true");
+		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/src/changed.ts");
+		expect(root.querySelector('[data-action="view-diff"]')?.getAttribute("aria-selected")).toBe("true");
+		originalDiff.resolve({ kind: "text", text: "stale original diff" });
+		await tick();
+		expect(root.textContent).toContain("Loading diff…");
+		expect(root.textContent).not.toContain("stale original diff");
+
+		restoredDiff.resolve({
+			kind: "text",
+			text: "diff --git a/src/changed.ts b/src/changed.ts\n--- a/src/changed.ts\n+++ b/src/changed.ts\n@@ -1 +1 @@\n-before\n+restored after clear\n",
+		});
+		await tick();
+		expect(root.textContent).toContain("+restored after clear");
+		expect(root.textContent).not.toContain("Loading diff…");
+	});
+
 	it("keeps Changed files only active while a clean search file is previewed and restores the filtered snapshot", async () => {
 		const put = vi.fn(async (_key: string, _value: unknown) => undefined);
 		const fakeHost = host({
