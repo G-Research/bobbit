@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, ChevronDown, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -29,7 +29,7 @@ import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
 import { refreshSessions, retryLoadSessions, fetchRoles, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder, refreshStaffStateFromApi } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderTreeSessionNode, renderStaffSidebarActions, renderSessionTime, SESSION_ROW_PY, hasUnseenActivity, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
+import { renderGoalGroup, renderTreeSessionNode, renderSessionRow, renderArchivedSessionRow, renderStaffSidebarActions, renderSessionTime, SESSION_ROW_PY, hasUnseenActivity, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
@@ -51,6 +51,9 @@ import {
 	sidebarTreeExpansionInput,
 } from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
+import { collectEligibleStatusSessions, selectSidebarStatusSections, type SidebarStatusSections, type StatusCandidate } from "./sidebar-status.js";
+import { getSidebarViewFilters, setSidebarView, sidebarNeedsArchivedSessions, type SidebarSessionView, type SidebarViewFilters } from "./sidebar-view-preferences.js";
+import { isPinned, isSessionBusy, sessionTeamKind } from "../shared/session-tags.js";
 
 export { isProjectExpanded, toggleProjectExpanded };
 
@@ -1090,10 +1093,13 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 // SEARCH HANDLERS
 // ============================================================================
 
-/** Tracks whether archived section was auto-opened by search (vs manual toggle).
- *  Exported so that a manual toggle from the Filters popover (or its keyboard shortcut)
- *  can take precedence and prevent search-clear from undoing the user's choice. */
-export function clearArchivedBySearch(): void { _archivedBySearch = false; }
+/** Tracks whether archived visibility was auto-opened by search (vs manual toggle).
+ * Manual filter changes cancel that ephemeral demand without changing the
+ * persisted Project preference. */
+export function clearArchivedBySearch(): void {
+	if (_archivedBySearch) state.showArchived = false;
+	_archivedBySearch = false;
+}
 let _archivedBySearch = false;
 
 /** Ensure archived is visible for search without loading unfiltered archived pages. */
@@ -1110,10 +1116,10 @@ function _revertArchivedIfSearchOpened(): void {
 	if (_archivedBySearch) {
 		state.showArchived = false;
 		_archivedBySearch = false;
-		// Search auto-open is ephemeral. Clearing it may unload fetched archived
-		// records, but it must never delete the user's persisted archived tree
-		// expansion choices.
-		clearArchivedSessionsState();
+		// Search auto-open is ephemeral. Keep the shared archive cache while either
+		// view still requests archived rows; tree expansion preferences remain owned
+		// by the existing archive state module.
+		if (!sidebarNeedsArchivedSessions(state, false)) clearArchivedSessionsState();
 	}
 }
 
@@ -1591,7 +1597,19 @@ export function buildSidebarTreeModel(sidebarData = getSidebarData()): SidebarTr
 	return buildSidebarTreeModelWithSearch(sidebarData).model;
 }
 
-function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { model: SidebarTreeModel; visibleSearchGoalIds: Set<string> | null } {
+export interface SidebarTreeVisibilityInput {
+	view?: SidebarSessionView;
+	filters?: SidebarViewFilters;
+	viewport?: "desktop" | "mobile" | "collapsed";
+}
+
+/** Shared production search/eligibility pipeline for both sidebar views. */
+export function buildSidebarTreeModelWithSearch(
+	sidebarData = getSidebarData(),
+	visibility: SidebarTreeVisibilityInput = {},
+): { model: SidebarTreeModel; visibleSearchGoalIds: Set<string> | null } {
+	const view = visibility.view ?? "project";
+	const filters = visibility.filters ?? getSidebarViewFilters(state, view);
 	const query = state.searchQuery.trim();
 	const q = query.toLowerCase();
 	const bypassFilters = Boolean(query);
@@ -1654,18 +1672,20 @@ function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { mode
 		sessions: sessionsForTree,
 		archivedSessions: archivedSessionsForTree,
 		staff: filteredStaff,
-		showArchived: state.showArchived,
+		showArchived: filters.showArchived || bypassFilters,
 		projectOrder: projects.map(p => p.id),
 		nestedDepthByProject: new Map(projects.map(p => [p.id, _getNestedDepthCap(p.id)])),
 		defaultNestedDepth: DEFAULT_NESTED_DEPTH_CAP,
-		viewport: state.sidebarCollapsed ? "collapsed" : "desktop",
+		viewport: visibility.viewport ?? (state.sidebarCollapsed ? "collapsed" : "desktop"),
 		layout: loadSidebarTreeLayoutPreference(),
 		filters: {
 			searchQuery: state.searchQuery,
 			activeSessionId: activeSessionId(),
-			passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id) || passesSidebarFilters(session as GatewaySession, active, bypass),
-			bypassBusyReadFilters: bypassFilters,
-			includeArchived: state.showArchived,
+			passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id)
+				|| view === "status"
+				|| passesSidebarFilters(session as GatewaySession, active, bypass),
+			bypassBusyReadFilters: bypassFilters || view === "status",
+			includeArchived: filters.showArchived || bypassFilters,
 		},
 		expansion: sidebarTreeExpansionInput(),
 	});
@@ -1673,7 +1693,7 @@ function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { mode
 }
 
 function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeModel {
-	const { model, visibleSearchGoalIds } = buildSidebarTreeModelWithSearch(sidebarData);
+	const { model, visibleSearchGoalIds } = buildSidebarTreeModelWithSearch(sidebarData, { view: "project" });
 	return visibleSearchGoalIds ? filterSidebarTreeModelGoalsForSearch(model, visibleSearchGoalIds) : model;
 }
 
@@ -1745,12 +1765,115 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 	`;
 }
 
+export function buildSidebarStatusSections(
+	sidebarData = getSidebarData(),
+	viewport: "desktop" | "mobile" | "collapsed" = "desktop",
+): SidebarStatusSections {
+	const filters = getSidebarViewFilters(state, "status");
+	const { model } = buildSidebarTreeModelWithSearch(sidebarData, { view: "status", filters, viewport });
+	const query = state.searchQuery.trim().toLowerCase();
+	const staff = (state.staffList || []).filter(agent => agent.state !== "retired");
+	const eligibleStaff = query ? filterStaffByQuery(staff, query) : staff;
+	const candidates = collectEligibleStatusSessions(model, eligibleStaff, synthStaffSessionRow);
+	return selectSidebarStatusSections({
+		candidates,
+		filters,
+		searchQuery: state.searchQuery,
+		activeSessionId: activeSessionId(),
+		isPinned: session => isPinned(session.user_tags),
+		isUnread: session => hasUnseenActivity(session),
+		isBusy: session => isSessionBusy(session),
+		isTeamMember: session => sessionTeamKind(session) === "member",
+	});
+}
+
+function switchSidebarView(view: SidebarSessionView): void {
+	if (state.sidebarSessionView === view) return;
+	setSidebarView(state, view);
+	const filters = getSidebarViewFilters(state, view);
+	if (filters.showArchived || state.searchQuery.trim()) {
+		void fetchArchivedSessions();
+		void fetchArchivedGoalsPaginated();
+	}
+	renderApp();
+}
+
+/** Shared compact selector/filter row used by desktop and mobile. */
+export function renderSidebarViewControls(variant: "desktop" | "mobile" = "desktop"): TemplateResult {
+	return html`
+		<div class="sidebar-view-controls ${variant === "mobile" ? "sidebar-view-controls--mobile" : ""}">
+			<div class="sidebar-session-mode-switch" role="group" aria-label="Session grouping">
+				<button
+					type="button"
+					data-testid="sidebar-view-project"
+					data-active=${state.sidebarSessionView === "project" ? "true" : "false"}
+					aria-pressed=${state.sidebarSessionView === "project" ? "true" : "false"}
+					@click=${() => switchSidebarView("project")}
+				><span class="sidebar-view-control-icon">${icon(FolderTree, "xs")}</span><span>By Project</span></button>
+				<button
+					type="button"
+					data-testid="sidebar-view-status"
+					data-active=${state.sidebarSessionView === "status" ? "true" : "false"}
+					aria-pressed=${state.sidebarSessionView === "status" ? "true" : "false"}
+					@click=${() => switchSidebarView("status")}
+				><span class="sidebar-view-control-icon">${icon(ListFilter, "xs")}</span><span>By Status</span></button>
+			</div>
+			${renderFiltersButton(variant)}
+		</div>
+	`;
+}
+
+function renderStatusHeading(key: "pinned" | "unread" | "read", count: number): TemplateResult {
+	const label = key === "pinned" ? "Pinned" : key === "unread" ? "Unread" : "Read";
+	const headingId = `sidebar-status-${key}-heading`;
+	return html`
+		<div class="sidebar-status-heading" id=${headingId}>
+			${key === "pinned" ? html`<span class="sidebar-status-heading-icon">${icon(Pin, "xs")}</span>` : nothing}
+			<span>${label}</span>
+			<span class="sidebar-status-count">${count}</span>
+		</div>
+	`;
+}
+
+function renderStatusCandidate(candidate: StatusCandidate): TemplateResult {
+	return candidate.archived
+		? renderArchivedSessionRow(candidate.session, false, { flat: true })
+		: renderSessionRow(candidate.session, { flat: true });
+}
+
+/** Canonical flat rows grouped into the three exact Status sections. */
+export function renderSidebarStatusContent(
+	sections = buildSidebarStatusSections(undefined, isDesktop() ? "desktop" : "mobile"),
+): TemplateResult {
+	const entries = [
+		["pinned", sections.pinned],
+		["unread", sections.unread],
+		["read", sections.read],
+	] as const;
+	const count = sections.pinned.length + sections.unread.length + sections.read.length;
+	if (count === 0) {
+		return html`<div class="sidebar-status-empty">No sessions match this search and filter.</div>${renderArchivedSearchControls()}`;
+	}
+	return html`${entries.map(([key, rows]) => rows.length === 0 ? nothing : html`
+		<section
+			class="sidebar-status-section"
+			aria-labelledby=${`sidebar-status-${key}-heading`}
+			data-status-section=${key}
+		>
+			${renderStatusHeading(key, rows.length)}
+			<div class="sidebar-status-rows">${rows.map(renderStatusCandidate)}</div>
+		</section>
+	`)}${renderArchivedSearchControls()}`;
+}
+
 export function renderSidebar() {
 	const sidebarData = getSidebarData();
 	const sidebarTree = buildDesktopSidebarTree(sidebarData);
 
 	if (state.sidebarCollapsed) {
-		return renderCollapsedSidebar(sidebarTree);
+		return state.sidebarSessionView === "status"
+			? renderCollapsedStatusSidebar(buildSidebarStatusSections(sidebarData, "collapsed"))
+			: renderCollapsedSidebar(sidebarTree);
 	}
 
 	const isRolesActive = isRouteActive("roles", "role-edit");
@@ -1833,7 +1956,13 @@ export function renderSidebar() {
 				></search-box>
 				<search-status-dot></search-status-dot>
 			</div>
+			${renderSidebarViewControls("desktop")}
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 pt-0 pb-2 px-0.5" data-project-reorder-list>
+				${state.sidebarSessionView === "status" ? (state.sessionsLoading
+					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`
+					: state.sessionsError
+						? html`<div class="text-center py-6"><p class="text-red-500 mb-2">${state.sessionsError}</p><button class="text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${retryLoadSessions}>Retry</button></div>`
+						: renderSidebarStatusContent(buildSidebarStatusSections(sidebarData))) : html`
 				${renderOrphanedStaffBanner()}
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`
@@ -1895,6 +2024,7 @@ export function renderSidebar() {
 						<span>Add Project</span>
 					</button>
 				`}
+				`}
 			</div>
 			<div class="sidebar-bottom-actions flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
@@ -1905,7 +2035,6 @@ export function renderSidebar() {
 					${icon(Settings, "sm")}
 					<span class="sidebar-bottom-action-text">Settings</span>
 				</button>`; })()}
-				${renderFiltersButton("desktop")}
 				<span class="flex-1"></span>
 				<button
 					class="flex items-center gap-1.5 px-2 py-2 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
@@ -1922,6 +2051,44 @@ export function renderSidebar() {
 // ============================================================================
 // COLLAPSED SIDEBAR
 // ============================================================================
+
+function renderCollapsedStatusSidebar(sections: SidebarStatusSections): TemplateResult {
+	const renderCompactCandidate = (candidate: StatusCandidate) => {
+		const session = candidate.session;
+		const active = activeSessionId() === session.id;
+		const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+		return html`
+			<button
+				data-session-id=${session.id}
+				data-nav-id=${`session:${session.id}`}
+				data-nav-active=${active ? "true" : "false"}
+				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"} ${candidate.archived ? "opacity-60" : ""}"
+				title=${displayTitle}
+				@click=${() => { if (!active) connectToSession(session.id, true, candidate.archived ? { readOnly: true } : undefined); }}
+			>
+				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(candidate.archived ? "terminated" : session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session), true)}</span>
+				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family:ui-monospace,monospace;line-height:1;font-size:.6667em;">${sessionAcronym(displayTitle)}</span>
+			</button>
+		`;
+	};
+	const groups = [
+		["Pinned", sections.pinned],
+		["Unread", sections.unread],
+		["Read", sections.read],
+	] as const;
+	return html`
+		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge sidebar-root" data-testid="sidebar-collapsed" style="background:var(--sidebar);">
+			<div class="sidebar-collapsed-scroll flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
+				${groups.map(([label, rows], index) => rows.length === 0 ? nothing : html`
+					${index > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5" role="separator" aria-label=${label}></div>` : html`<span class="sr-only">${label}</span>`}
+					<div role="group" aria-label=${`${label}, ${rows.length} sessions`}>${rows.map(renderCompactCandidate)}</div>
+				`)}
+				${sections.pinned.length + sections.unread.length + sections.read.length === 0 ? html`<span class="text-muted-foreground text-center" style="font-size:.6667em;">None</span>` : nothing}
+			</div>
+			<button class="p-2 mb-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors" @click=${toggleSidebar} title=${`Expand sidebar${shortcutHint("toggle-sidebar")}`}>${icon(PanelLeftOpen, "sm")}</button>
+		</div>
+	`;
+}
 
 function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 	// Trigger the staff fetch (no-op after first call) so the collapsed STAFF

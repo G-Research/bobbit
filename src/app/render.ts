@@ -1,7 +1,6 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import "../ui/components/BellToggle.js";
 import "../ui/components/CommentableMarkdown.js";
-import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render, nothing } from "lit";
@@ -47,7 +46,7 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 import { openGatewayDialog, showQrCodeDialog, showSupportDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { HEADQUARTERS_ACCENT_COLOR, HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
+import { renderSidebar, renderSidebarViewControls, renderSidebarStatusContent, buildSidebarStatusSections, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
@@ -648,7 +647,14 @@ function renderMobileLanding() {
 					@search-clear=${() => { handleSidebarSearchClear(); }}
 					@full-search-click=${(e: CustomEvent) => { setHashRoute("search", e.detail.query); }}
 				></search-box>
-				${state.sessionsLoading
+				${renderSidebarViewControls("mobile")}
+				${state.sidebarSessionView === "status"
+					? (state.sessionsLoading
+						? html`<div class="text-center py-12 text-muted-foreground">Loading…</div>`
+						: state.sessionsError
+							? html`<div class="text-center py-12"><p class="text-red-500 mb-3">${state.sessionsError}</p><button class="text-muted-foreground underline" title="Retry" @click=${retryLoadSessions}>Retry</button></div>`
+							: renderSidebarStatusContent(buildSidebarStatusSections(sidebarData, "mobile")))
+					: state.sessionsLoading
 					? html`<div class="text-center py-12 text-muted-foreground">Loading…</div>`
 					: state.sessionsError
 						? html`<div class="text-center py-12">
@@ -837,7 +843,6 @@ function renderMobileLanding() {
 				${icon(FolderPlus, "sm")}
 				<span>Add Project</span>
 			</button>` : ""}
-			${renderFiltersButton("mobile")}
 		</div>
 	`;
 }
