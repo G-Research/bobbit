@@ -160,8 +160,15 @@ type ExplorerState = {
 	menuDocumentClick?: (event: MouseEvent) => void;
 	copyMessage?: { text: string; error: boolean };
 	copyTimer?: number;
+	liveFrame?: number;
+	alertFrame?: number;
 	initialized: boolean;
 	initializing: boolean;
+	uiStateRestored: boolean;
+	durableMutationGeneration: number;
+	initializingLifecycle?: number;
+	initializationQueued: boolean;
+	lifecycleGeneration: number;
 	active: boolean;
 	narrow: boolean;
 	narrowPane: "tree" | "preview";
@@ -183,12 +190,17 @@ export default function createFileExplorerPanel() {
 			if (!state) {
 				state = createState(sid);
 				states.set(sid, state);
+			} else if (state.active && !state.root.isConnected) {
+				// The panel instance is cached by session. Reconcile a detached instance
+				// synchronously so a same-turn remount cannot expose transient search/path
+				// state while its MutationObserver cleanup is still queued.
+				deactivate(state);
 			}
 			state.host = host;
 			queueMicrotask(() => {
 				activate(state!);
 				subscribeToStatus(state!);
-				if (host?.capabilities?.callRoute && !state!.initialized && !state!.initializing) void initialize(state!);
+				requestInitialize(state!);
 			});
 			return state.root;
 		},
@@ -269,7 +281,8 @@ function createState(sid: string): ExplorerState {
 		refreshGeneration: 0, selectionGeneration: 0, navigationGeneration: 0,
 		location: { path: "", kind: "root" }, pathEditing: false, pathDraft: "", pathLoading: false,
 		search: { query: "", phase: "idle", results: [], activeIndex: -1, count: 0, truncated: false, generation: 0 },
-		initialized: false, initializing: false, active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
+		initialized: false, initializing: false, uiStateRestored: false, durableMutationGeneration: 0, initializationQueued: false, lifecycleGeneration: 0,
+		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
 	refreshButton.addEventListener("click", () => void refresh(state!, true));
 	backButton.addEventListener("click", () => showTree(state!, true));
@@ -330,12 +343,22 @@ function activate(state: ExplorerState): void {
 
 function deactivate(state: ExplorerState): void {
 	state.active = false;
+	state.lifecycleGeneration += 1;
+	state.initializationQueued = false;
 	state.refreshGeneration += 1;
 	state.selectionGeneration += 1;
 	invalidateNavigation(state);
 	state.search.generation += 1;
 	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	state.search.timer = undefined;
 	if (state.copyTimer !== undefined) window.clearTimeout(state.copyTimer);
+	state.copyTimer = undefined;
+	if (state.liveFrame !== undefined) cancelAnimationFrame(state.liveFrame);
+	state.liveFrame = undefined;
+	if (state.alertFrame !== undefined) cancelAnimationFrame(state.alertFrame);
+	state.alertFrame = undefined;
+	state.live.textContent = "";
+	state.alert.textContent = "";
 	if (state.pathEditing) {
 		if (state.pathOrigin) state.location = { ...state.pathOrigin };
 		state.pathEditing = false;
@@ -343,6 +366,7 @@ function deactivate(state: ExplorerState): void {
 		state.pathError = undefined;
 		state.pathDraft = "";
 		state.pathOrigin = undefined;
+		state.pathInvoker = undefined;
 		renderPathBar(state);
 	}
 	if (state.search.query) clearSearch(state, true);
@@ -364,19 +388,48 @@ function deactivate(state: ExplorerState): void {
 	state.storeTimer = undefined;
 }
 
+function requestInitialize(state: ExplorerState): void {
+	if (!state.active || state.initialized || !state.host?.capabilities?.callRoute) return;
+	if (state.initializing) {
+		if (state.initializingLifecycle !== state.lifecycleGeneration) state.initializationQueued = true;
+		return;
+	}
+	void initialize(state);
+}
+
 async function initialize(state: ExplorerState): Promise<void> {
+	const lifecycle = state.lifecycleGeneration;
 	state.initializing = true;
+	state.initializingLifecycle = lifecycle;
 	try {
-		await restoreUiState(state);
-		await refresh(state, false);
+		if (!state.uiStateRestored) {
+			await restoreUiState(state, lifecycle);
+			if (!ownsLifecycle(state, lifecycle)) return;
+			state.uiStateRestored = true;
+		}
+		const completed = await refresh(state, false);
+		if (!ownsLifecycle(state, lifecycle)) return;
+		if (!completed) {
+			state.initializationQueued = true;
+			return;
+		}
 		state.initialized = true;
 	} finally {
 		state.initializing = false;
+		state.initializingLifecycle = undefined;
+		if (state.initializationQueued) {
+			state.initializationQueued = false;
+			requestInitialize(state);
+		}
 	}
-	if (state.pendingIdleRefresh) {
+	if (!state.initializing && state.initialized && state.pendingIdleRefresh) {
 		state.pendingIdleRefresh = false;
 		if (state.active) await refresh(state, false);
 	}
+}
+
+function ownsLifecycle(state: ExplorerState, lifecycle: number): boolean {
+	return state.active && state.lifecycleGeneration === lifecycle;
 }
 
 function subscribeToStatus(state: ExplorerState): void {
@@ -398,7 +451,7 @@ function subscribeToStatus(state: ExplorerState): void {
 	}
 }
 
-async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
+async function refresh(state: ExplorerState, announce: boolean): Promise<boolean> {
 	closeContextMenu(state, false);
 	invalidateNavigation(state);
 	const activeQuery = state.search.query;
@@ -426,7 +479,7 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
 			await loadDirectory(state, path, false, generation);
 		});
 	}
-	if (generation !== state.refreshGeneration) return;
+	if (generation !== state.refreshGeneration) return false;
 	pruneState(state);
 	renderTree(state);
 	if (state.selected) await loadSelectedContent(state, state.selected, true);
@@ -435,7 +488,8 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<void> {
 	state.tree.setAttribute("aria-busy", "false");
 	if (activeQuery) scheduleSearch(state, true);
 	if (announce) setLive(state, rootOkay ? "Explorer refreshed." : "Explorer refresh failed.");
-	queueStore(state);
+	queueStore(state, false);
+	return true;
 }
 
 async function loadDirectory(state: ExplorerState, path: string, includeStatus: boolean, generation = state.refreshGeneration): Promise<boolean> {
@@ -888,7 +942,10 @@ function onTreeKeydown(state: ExplorerState, event: KeyboardEvent): void {
 		default: return;
 	}
 	event.preventDefault();
-	if (target) focusPath(state, target);
+	if (target) {
+		markDurableMutation(state);
+		focusPath(state, target);
+	}
 }
 
 function renderPathBar(state: ExplorerState): void {
@@ -1689,14 +1746,18 @@ function pruneState(state: ExplorerState): void {
 	if (!state.focused || !visible.includes(state.focused)) state.focused = nearestFocus(state.focused, visible);
 }
 
-async function restoreUiState(state: ExplorerState): Promise<void> {
+async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<void> {
 	if (!state.host?.capabilities?.store || !state.host.store) return;
+	const store = state.host.store;
+	const mutationGeneration = state.durableMutationGeneration;
 	try {
 		let stored: unknown;
-		if (state.host.store.read) {
-			const result = await state.host.store.read(`ui/${state.sid}`);
+		if (store.read) {
+			const result = await store.read(`ui/${state.sid}`);
 			if (result.state === "present") stored = result.value;
-		} else if (state.host.store.get) stored = await state.host.store.get(`ui/${state.sid}`);
+		} else if (store.get) stored = await store.get(`ui/${state.sid}`);
+		if (!ownsLifecycle(state, lifecycle)) return;
+		if (mutationGeneration !== state.durableMutationGeneration) return;
 		const value = recordOf(stored);
 		if (value?.version !== STORE_VERSION) return;
 		for (const candidate of arrayOf(value.expanded)) {
@@ -1714,7 +1775,12 @@ async function restoreUiState(state: ExplorerState): Promise<void> {
 	}
 }
 
-function queueStore(state: ExplorerState): void {
+function markDurableMutation(state: ExplorerState): void {
+	state.durableMutationGeneration += 1;
+}
+
+function queueStore(state: ExplorerState, userMutation = true): void {
+	if (userMutation) markDurableMutation(state);
 	if (!state.host?.capabilities?.store || !state.host.store?.put) return;
 	if (state.storeTimer !== undefined) window.clearTimeout(state.storeTimer);
 	state.storeTimer = window.setTimeout(() => {
@@ -1802,8 +1868,22 @@ function focusPath(state: ExplorerState, path: string): void {
 function treeItemId(state: ExplorerState, path: string): string { return `bb-explorer-${hash(`${state.sid}:${path}`)}`; }
 function hash(value: string): string { let result = 2166136261; for (let index = 0; index < value.length; index += 1) result = Math.imul(result ^ value.charCodeAt(index), 16777619); return (result >>> 0).toString(36); }
 function cssEscape(value: string): string { return typeof globalThis.CSS?.escape === "function" ? CSS.escape(value) : value.replace(/["\\]/g, "\\$&"); }
-function setLive(state: ExplorerState, message: string): void { state.live.textContent = ""; requestAnimationFrame(() => { state.live.textContent = message; }); }
-function setAlert(state: ExplorerState, message: string): void { state.alert.textContent = ""; requestAnimationFrame(() => { state.alert.textContent = message; }); }
+function setLive(state: ExplorerState, message: string): void {
+	if (state.liveFrame !== undefined) cancelAnimationFrame(state.liveFrame);
+	state.live.textContent = "";
+	state.liveFrame = requestAnimationFrame(() => {
+		state.liveFrame = undefined;
+		if (state.active) state.live.textContent = message;
+	});
+}
+function setAlert(state: ExplorerState, message: string): void {
+	if (state.alertFrame !== undefined) cancelAnimationFrame(state.alertFrame);
+	state.alert.textContent = "";
+	state.alertFrame = requestAnimationFrame(() => {
+		state.alertFrame = undefined;
+		if (state.active) state.alert.textContent = message;
+	});
+}
 function escapeHtml(value: string): string { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
 async function mapLimit<T>(values: T[], limit: number, action: (value: T) => Promise<void>): Promise<void> {
