@@ -583,6 +583,7 @@ function renderTree(state: ExplorerState): void {
 	state.tree.setAttribute("aria-label", "Files");
 	state.tree.removeAttribute("aria-activedescendant");
 	const rootDirectory = state.directories.get("");
+	state.tree.setAttribute("aria-busy", String(state.refreshButton.disabled || !rootDirectory || rootDirectory.state === "loading"));
 	if (!rootDirectory || (rootDirectory.state === "loading" && rootDirectory.entries.length === 0)) {
 		state.tree.append(messageRow("loading", "Loading files…"));
 		finishRender();
@@ -1053,7 +1054,7 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 		}
 		for (const parent of parentsOf(resolvedPath)) state.expanded.add(parent);
 		if (kind === "directory" && state.directories.get(resolvedPath)?.state !== "ready") state.expanded.delete(resolvedPath);
-		if (state.changedOnly && state.gitAvailable === true && resolvedPath && !state.statuses.has(resolvedPath) && !state.ancestors.has(resolvedPath)) {
+		if (source !== "search" && state.changedOnly && state.gitAvailable === true && resolvedPath && !state.statuses.has(resolvedPath) && !state.ancestors.has(resolvedPath)) {
 			state.changedOnly = false;
 			setLive(state, "Showing all files so the requested path can be revealed.");
 		}
@@ -1393,7 +1394,9 @@ async function selectEntry(state: ExplorerState, entry: TreeEntry, navigationGen
 	state.filePreview = idlePreview(entry.path);
 	state.diffPreview = idlePreview(entry.path);
 	if (state.narrow) {
-		state.lastFocusedElement = state.tree.querySelector(`[data-path="${cssEscape(entry.path)}"]`) as HTMLElement | null ?? undefined;
+		state.lastFocusedElement = state.search.query
+			? state.searchInput
+			: state.tree.querySelector(`[data-path="${cssEscape(entry.path)}"]`) as HTMLElement | null ?? undefined;
 		state.narrowPane = "preview";
 		applyNarrowPane(state);
 	}
