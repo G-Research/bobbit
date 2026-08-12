@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -47,6 +48,8 @@ export type ExplorerErrorCode =
 	| "READ_FAILED"
 	| "SEARCH_FAILED"
 	| "FS_TIMEOUT"
+	| "PATH_CHANGED"
+	| "OUTSIDE_ROOT"
 	| "GIT_TIMEOUT"
 	| "GIT_FAILED";
 
@@ -105,11 +108,14 @@ export interface DirectoryHandleLike {
 
 export interface FileHandleLike {
 	read(buffer: Uint8Array, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
+	stat(): Promise<StatLike>;
 	close(): Promise<void>;
 }
 
 export interface StatLike {
 	size: number;
+	dev?: number | bigint;
+	ino?: number | bigint;
 	isFile(): boolean;
 	isDirectory(): boolean;
 	isSymbolicLink(): boolean;
@@ -117,8 +123,9 @@ export interface StatLike {
 
 export interface ExplorerFsAdapter {
 	opendir(filePath: string): Promise<DirectoryHandleLike>;
-	open(filePath: string): Promise<FileHandleLike>;
+	open(filePath: string, flags: string | number): Promise<FileHandleLike>;
 	lstat(filePath: string): Promise<StatLike>;
+	realpath(filePath: string): Promise<string>;
 }
 
 export type BoundedGitResult =
@@ -193,8 +200,9 @@ class FsDeadline {
 
 const nodeFsAdapter: ExplorerFsAdapter = {
 	opendir: (filePath) => fs.opendir(filePath),
-	open: (filePath) => fs.open(filePath, "r"),
+	open: (filePath, flags) => fs.open(filePath, flags),
 	lstat: (filePath) => fs.lstat(filePath),
+	realpath: (filePath) => fs.realpath(filePath),
 };
 
 const SAFE_STDERR_LIMIT = 16 * 1024;
@@ -285,12 +293,124 @@ function normalizeRoutePath(value: unknown, options: { allowRoot?: boolean } = {
 	return relativePath;
 }
 
+class RootedFsError extends Error {
+	constructor(readonly code: "PATH_CHANGED" | "OUTSIDE_ROOT", message: string) {
+		super(message);
+		this.name = "RootedFsError";
+	}
+}
+
 function routeCwd(ctx: RouteContext): string {
-	return typeof ctx?.workingDir === "string" && ctx.workingDir.length > 0 ? ctx.workingDir : process.cwd();
+	if (typeof ctx?.workingDir !== "string" || ctx.workingDir.length === 0) throw new ExplorerPathError();
+	return ctx.workingDir;
 }
 
 function absolutePath(cwd: string, relativePath: string): string {
 	return relativePath ? path.join(cwd, ...relativePath.split("/")) : cwd;
+}
+
+interface PathClaim {
+	absolutePath: string;
+	stats: StatLike;
+	parent?: PathClaim;
+	root: PathClaim;
+}
+
+function identityOf(stats: StatLike): string | undefined {
+	if (stats.dev === undefined || stats.ino === undefined || String(stats.ino) === "0") return undefined;
+	return `${String(stats.dev)}:${String(stats.ino)}`;
+}
+
+function sameIdentity(left: StatLike, right: StatLike): boolean {
+	const identity = identityOf(left);
+	return identity !== undefined && identity === identityOf(right);
+}
+
+function sameKind(left: StatLike, right: StatLike): boolean {
+	return statKind(left) === statKind(right);
+}
+
+function requireStableIdentity(stats: StatLike): void {
+	if (identityOf(stats) === undefined) throw new RootedFsError("PATH_CHANGED", "stable filesystem identity is unavailable");
+}
+
+function isContainedPath(candidate: string, root: string): boolean {
+	const relative = path.relative(path.resolve(root), path.resolve(candidate));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function currentStats(claim: PathClaim, deadline: FsDeadline, deps: ExplorerDependencies): Promise<StatLike> {
+	const stats = await deadline.call(deps.fs.lstat(claim.absolutePath));
+	if (!sameKind(claim.stats, stats) || !sameIdentity(claim.stats, stats)) {
+		throw new RootedFsError("PATH_CHANGED", "filesystem identity changed during the operation");
+	}
+	return stats;
+}
+
+async function assertClaimCurrent(claim: PathClaim | undefined, deadline: FsDeadline, deps: ExplorerDependencies): Promise<void> {
+	if (!claim) return;
+	const claims = new Set<PathClaim>([claim.root]);
+	if (claim.parent) claims.add(claim.parent);
+	claims.add(claim);
+	for (const current of claims) await currentStats(current, deadline, deps);
+}
+
+async function assertCanonicalClaim(claim: PathClaim, deadline: FsDeadline, deps: ExplorerDependencies): Promise<void> {
+	const canonical = await deadline.call(deps.fs.realpath(claim.absolutePath));
+	if (!isContainedPath(canonical, claim.root.absolutePath)) {
+		throw new RootedFsError("OUTSIDE_ROOT", "filesystem path escaped the session root");
+	}
+	const canonicalStats = await deadline.call(deps.fs.lstat(canonical));
+	if (!sameKind(claim.stats, canonicalStats) || !sameIdentity(claim.stats, canonicalStats)) {
+		throw new RootedFsError("PATH_CHANGED", "canonical filesystem identity changed during the operation");
+	}
+	await assertClaimCurrent(claim, deadline, deps);
+}
+
+async function bindRoot(cwd: string, deadline: FsDeadline, deps: ExplorerDependencies): Promise<PathClaim> {
+	const canonical = await deadline.call(deps.fs.realpath(path.resolve(cwd)));
+	const stats = await deadline.call(deps.fs.lstat(canonical));
+	if (!stats.isDirectory() || stats.isSymbolicLink()) throw new RootedFsError("OUTSIDE_ROOT", "session root is not a real directory");
+	requireStableIdentity(stats);
+	const root = { absolutePath: canonical, stats } as PathClaim;
+	root.root = root;
+	await assertClaimCurrent(root, deadline, deps);
+	return root;
+}
+
+async function claimPath(
+	parent: PathClaim,
+	relativePath: string,
+	deadline: FsDeadline,
+	deps: ExplorerDependencies,
+	options: { canonicalizeFiles?: boolean } = {},
+): Promise<PathClaim> {
+	await assertClaimCurrent(parent, deadline, deps);
+	const absolute = absolutePath(parent.root.absolutePath, relativePath);
+	const stats = await deadline.call(deps.fs.lstat(absolute));
+	requireStableIdentity(stats);
+	await assertClaimCurrent(parent, deadline, deps);
+	const claim: PathClaim = { absolutePath: absolute, stats, parent, root: parent.root };
+	if (stats.isDirectory() || (stats.isFile() && options.canonicalizeFiles !== false)) await assertCanonicalClaim(claim, deadline, deps);
+	else await assertClaimCurrent(claim, deadline, deps);
+	return claim;
+}
+
+async function claimRelativePath(root: PathClaim, relativePath: string, deadline: FsDeadline, deps: ExplorerDependencies): Promise<PathClaim[]> {
+	if (relativePath === "") return [];
+	const segments = relativePath.split("/");
+	const claims: PathClaim[] = [];
+	let parent = root;
+	for (let index = 0; index < segments.length; index++) {
+		const entryPath = segments.slice(0, index + 1).join("/");
+		const claim = await claimPath(parent, entryPath, deadline, deps);
+		claims.push(claim);
+		if (index < segments.length - 1 && !claim.stats.isDirectory()) {
+			throw Object.assign(new Error("parent path is not a directory"), { code: "ENOTDIR" });
+		}
+		parent = claim;
+	}
+	return claims;
 }
 
 function errno(error: unknown): string | undefined {
@@ -302,6 +422,9 @@ function errno(error: unknown): string | undefined {
 function fsFailure<T>(error: unknown, operation: "list" | "read"): RouteResult<T> {
 	if (error instanceof ExplorerPathError) return failure("INVALID_PATH", error.message);
 	if (error instanceof FsDeadlineError) return failure("FS_TIMEOUT", "The filesystem operation timed out.", true);
+	if (error instanceof RootedFsError) return error.code === "OUTSIDE_ROOT"
+		? failure("OUTSIDE_ROOT", "The requested path is outside the session files.")
+		: failure("PATH_CHANGED", "Session files changed during the operation. Try again.", true);
 	const code = errno(error);
 	if (code === "ENOENT" || code === "ENOTDIR") return failure(code === "ENOTDIR" && operation === "list" ? "NOT_DIRECTORY" : "NOT_FOUND", "The requested path was not found.");
 	if (code === "EISDIR") return failure(operation === "list" ? "NOT_DIRECTORY" : "NOT_FILE", "The requested path is not a regular file.");
@@ -322,7 +445,11 @@ class ExplorerSearchQueryError extends Error {
 
 function searchFailure<T>(error: unknown): RouteResult<T> {
 	if (error instanceof ExplorerSearchQueryError) return failure("INVALID_QUERY", error.message);
+	if (error instanceof ExplorerPathError) return failure("INVALID_PATH", error.message);
 	if (error instanceof FsDeadlineError) return failure("FS_TIMEOUT", "The search operation timed out.", true);
+	if (error instanceof RootedFsError) return error.code === "OUTSIDE_ROOT"
+		? failure("OUTSIDE_ROOT", "The requested path is outside the session files.")
+		: failure("PATH_CHANGED", "Session files changed during the operation. Try again.", true);
 	return failure("SEARCH_FAILED", "Session files could not be searched.", true);
 }
 
@@ -357,17 +484,42 @@ function makeHandleCloser(handle: { close(): Promise<void> }): () => Promise<voi
 	};
 }
 
-async function listDirectory(cwd: string, relativePath: string, deps: ExplorerDependencies): Promise<{ entries: ExplorerEntry[]; truncated: boolean }> {
+async function openClaimedDirectory(claim: PathClaim, deadline: FsDeadline, deps: ExplorerDependencies): Promise<{ handle: DirectoryHandleLike; close: () => Promise<void> }> {
+	await assertClaimCurrent(claim, deadline, deps);
+	let handle: DirectoryHandleLike;
+	try {
+		handle = await deadline.call(deps.fs.opendir(claim.absolutePath), (late) => { void closeLate(late); });
+	} catch (operationError) {
+		// Prefer the safe identity failure when a namespace swap caused open to fail.
+		await assertClaimCurrent(claim, deadline, deps);
+		throw operationError;
+	}
+	const close = makeHandleCloser(handle);
+	try {
+		await assertCanonicalClaim(claim, deadline, deps);
+	} catch (error) {
+		await close();
+		throw error;
+	}
+	return { handle, close };
+}
+
+async function listDirectory(cwd: string, relativePath: string, deps: ExplorerDependencies): Promise<{ root: PathClaim; entries: ExplorerEntry[]; truncated: boolean }> {
 	const deadline = new FsDeadline(deps.fsTimeoutMs);
-	let handle: DirectoryHandleLike | undefined;
+	const root = await bindRoot(cwd, deadline, deps);
+	const claims = await claimRelativePath(root, relativePath, deadline, deps);
+	const directory = claims.at(-1) ?? root;
+	if (!directory.stats.isDirectory()) throw Object.assign(new Error("not a directory"), { code: "ENOTDIR" });
 	let closeHandle: (() => Promise<void>) | undefined;
 	try {
-		handle = await deadline.call(deps.fs.opendir(absolutePath(cwd, relativePath)), (late) => { void closeLate(late); });
-		closeHandle = makeHandleCloser(handle);
+		const opened = await openClaimedDirectory(directory, deadline, deps);
+		closeHandle = opened.close;
 		const entries: ExplorerEntry[] = [];
 		let truncated = false;
 		while (true) {
-			const entry = await deadline.call(handle.read(), () => { void closeHandle?.().catch(() => undefined); });
+			await assertClaimCurrent(directory, deadline, deps);
+			const entry = await deadline.call(opened.handle.read(), () => { void closeHandle?.().catch(() => undefined); });
+			await assertClaimCurrent(directory, deadline, deps);
 			if (!entry) break;
 			if (isGitMetadataSegment(entry.name)) continue;
 			let entryPath: string;
@@ -379,7 +531,7 @@ async function listDirectory(cwd: string, relativePath: string, deps: ExplorerDe
 			}
 			entries.push({ path: entryPath, name: entry.name, kind: entryKind(entry) });
 		}
-		return { entries: sortExplorerEntries(entries), truncated };
+		return { root, entries: sortExplorerEntries(entries), truncated };
 	} finally {
 		if (closeHandle) await deadline.call(closeHandle());
 	}
@@ -393,24 +545,23 @@ function statKind(stat: StatLike): ExplorerEntryKind {
 }
 
 async function resolvePath(cwd: string, relativePath: string, deps: ExplorerDependencies): Promise<ResolveValue> {
-	if (relativePath === "") return { path: "", kind: "root", chain: [] };
 	const deadline = new FsDeadline(deps.fsTimeoutMs);
+	const root = await bindRoot(cwd, deadline, deps);
+	if (relativePath === "") return { path: "", kind: "root", chain: [] };
+	const claims = await claimRelativePath(root, relativePath, deadline, deps);
 	const segments = relativePath.split("/");
-	const chain: ExplorerEntry[] = [];
-	for (let index = 0; index < segments.length; index++) {
-		const entryPath = segments.slice(0, index + 1).join("/");
-		const kind = statKind(await deadline.call(deps.fs.lstat(absolutePath(cwd, entryPath))));
-		chain.push({ path: entryPath, name: segments[index], kind });
-		if (index < segments.length - 1 && kind !== "directory") {
-			throw Object.assign(new Error("parent path is not a directory"), { code: "ENOTDIR" });
-		}
-	}
+	const chain = claims.map((claim, index): ExplorerEntry => ({
+		path: segments.slice(0, index + 1).join("/"),
+		name: segments[index],
+		kind: statKind(claim.stats),
+	}));
 	return { path: relativePath, kind: chain.at(-1)!.kind, chain };
 }
 
 interface PendingSearchDirectory {
 	path: string;
 	depth: number;
+	claim: PathClaim;
 }
 
 interface SearchTraversalState {
@@ -425,29 +576,27 @@ function markSearchTruncated(state: SearchTraversalState, reason: SearchTruncati
 }
 
 async function scanSearchDirectory(
-	cwd: string,
 	directory: PendingSearchDirectory,
 	foldedQuery: string,
 	deadline: FsDeadline,
 	deps: ExplorerDependencies,
 	state: SearchTraversalState,
 ): Promise<PendingSearchDirectory[]> {
-	let handle: DirectoryHandleLike | undefined;
 	let closeHandle: (() => Promise<void>) | undefined;
 	const children: PendingSearchDirectory[] = [];
 	try {
-		handle = await deadline.call(deps.fs.opendir(absolutePath(cwd, directory.path)), (late) => { void closeLate(late); });
-		closeHandle = makeHandleCloser(handle);
+		const opened = await openClaimedDirectory(directory.claim, deadline, deps);
+		closeHandle = opened.close;
 		while (!state.stop) {
 			if (state.inspectedEntries >= SEARCH_ENTRY_LIMIT) {
 				markSearchTruncated(state, "entry-cap");
 				state.stop = true;
 				break;
 			}
-			// Reserve the shared inspection slot before starting an asynchronous read;
-			// concurrent workers can therefore never exceed the global entry budget.
 			state.inspectedEntries++;
-			const rawEntry = await deadline.call(handle.read(), () => { void closeHandle?.().catch(() => undefined); });
+			await assertClaimCurrent(directory.claim, deadline, deps);
+			const rawEntry = await deadline.call(opened.handle.read(), () => { void closeHandle?.().catch(() => undefined); });
+			await assertClaimCurrent(directory.claim, deadline, deps);
 			if (!rawEntry) {
 				state.inspectedEntries--;
 				break;
@@ -456,7 +605,10 @@ async function scanSearchDirectory(
 			let entryPath: string;
 			try { entryPath = joinRelativePath(directory.path, rawEntry.name); }
 			catch { continue; }
-			const kind = entryKind(rawEntry);
+			// Dirent kinds are only hints. Bind every candidate to a fresh lstat
+			// before reporting or queueing it, then retain that claim until scan.
+			const childClaim = await claimPath(directory.claim, entryPath, deadline, deps, { canonicalizeFiles: false });
+			const kind = statKind(childClaim.stats);
 			const explorerEntry: ExplorerEntry = { path: entryPath, name: rawEntry.name, kind };
 			if (stableLowercase(entryPath).includes(foldedQuery)) {
 				state.matches.push(explorerEntry);
@@ -465,7 +617,7 @@ async function scanSearchDirectory(
 			if (kind === "directory") {
 				const childDepth = directory.depth + 1;
 				if (childDepth >= SEARCH_DEPTH_LIMIT) markSearchTruncated(state, "depth-cap");
-				else children.push({ path: entryPath, depth: childDepth });
+				else children.push({ path: entryPath, depth: childDepth, claim: childClaim });
 			}
 		}
 		return children;
@@ -477,8 +629,9 @@ async function scanSearchDirectory(
 async function searchFiles(cwd: string, query: string, deps: ExplorerDependencies): Promise<SearchValue> {
 	const foldedQuery = stableLowercase(query);
 	const deadline = new FsDeadline(deps.searchTimeoutMs);
+	const root = await bindRoot(cwd, deadline, deps);
 	const state: SearchTraversalState = { inspectedEntries: 0, matches: [], stop: false };
-	const queue: PendingSearchDirectory[] = [{ path: "", depth: 0 }];
+	const queue: PendingSearchDirectory[] = [{ path: "", depth: 0, claim: root }];
 	let cursor = 0;
 	let claimedDirectories = 1;
 	while (cursor < queue.length && !state.stop) {
@@ -488,7 +641,7 @@ async function searchFiles(cwd: string, query: string, deps: ExplorerDependencie
 			batch.push(queue[cursor++]);
 		}
 		const settled = await Promise.allSettled(batch.map((directory) =>
-			scanSearchDirectory(cwd, directory, foldedQuery, deadline, deps, state),
+			scanSearchDirectory(directory, foldedQuery, deadline, deps, state),
 		));
 		const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
 		if (rejected) throw rejected.reason;
@@ -574,17 +727,38 @@ export async function collectGitSnapshot(cwd: string, git: ExplorerGitRunner, ti
 
 async function readRegularFile(cwd: string, relativePath: string, limit: number, deps: ExplorerDependencies): Promise<FileContent> {
 	const deadline = new FsDeadline(deps.fsTimeoutMs);
-	const target = absolutePath(cwd, relativePath);
-	const stat = await deadline.call(deps.fs.lstat(target));
-	if (!stat.isFile()) {
-		if (stat.isDirectory()) throw Object.assign(new Error("not a file"), { code: "EISDIR" });
+	const root = await bindRoot(cwd, deadline, deps);
+	const claims = await claimRelativePath(root, relativePath, deadline, deps);
+	const target = claims.at(-1)!;
+	if (!target.stats.isFile()) {
+		if (target.stats.isDirectory()) throw Object.assign(new Error("not a file"), { code: "EISDIR" });
 		throw Object.assign(new Error("unsupported file"), { code: "EUNSUPPORTED" });
 	}
 	let handle: FileHandleLike | undefined;
 	let closeHandle: (() => Promise<void>) | undefined;
 	try {
-		handle = await deadline.call(deps.fs.open(target), (late) => { void closeLate(late); });
+		await assertClaimCurrent(target, deadline, deps);
+		const noFollow = (fsConstants as Record<string, number | undefined>).O_NOFOLLOW;
+		const flags = typeof noFollow === "number" && noFollow !== 0 ? fsConstants.O_RDONLY | noFollow : "r";
+		try {
+			handle = await deadline.call(deps.fs.open(target.absolutePath, flags), (late) => { void closeLate(late); });
+		} catch (operationError) {
+			await assertClaimCurrent(target, deadline, deps);
+			throw operationError;
+		}
 		closeHandle = makeHandleCloser(handle);
+		const descriptorStats = await deadline.call(handle.stat(), () => { void closeHandle?.().catch(() => undefined); });
+		requireStableIdentity(descriptorStats);
+		if (!descriptorStats.isFile() || descriptorStats.isSymbolicLink() || !sameIdentity(target.stats, descriptorStats)) {
+			throw new RootedFsError("PATH_CHANGED", "opened file identity differs from the authorized target");
+		}
+		await assertCanonicalClaim(target, deadline, deps);
+		const canonical = await deadline.call(deps.fs.realpath(target.absolutePath));
+		if (!isContainedPath(canonical, root.absolutePath)) throw new RootedFsError("OUTSIDE_ROOT", "opened file escaped the session root");
+		const canonicalStats = await deadline.call(deps.fs.lstat(canonical));
+		if (!canonicalStats.isFile() || canonicalStats.isSymbolicLink() || !sameIdentity(descriptorStats, canonicalStats)) {
+			throw new RootedFsError("PATH_CHANGED", "canonical file identity differs from the opened target");
+		}
 		const buffer = new Uint8Array(limit + 1);
 		let offset = 0;
 		while (offset < buffer.length) {
@@ -592,7 +766,7 @@ async function readRegularFile(cwd: string, relativePath: string, limit: number,
 			if (bytesRead <= 0) break;
 			offset += bytesRead;
 		}
-		return classifyFileBytes(buffer.subarray(0, offset), Math.max(stat.size, offset), limit);
+		return classifyFileBytes(buffer.subarray(0, offset), Math.max(descriptorStats.size, offset), limit);
 	} finally {
 		if (closeHandle) await deadline.call(closeHandle());
 	}
@@ -637,8 +811,9 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 				const cwd = routeCwd(ctx);
 				const listed = await listDirectory(cwd, relativePath, deps);
 				const includeStatus = body.includeStatus === true && relativePath === "";
-				const status = includeStatus ? await collectGitSnapshot(cwd, deps.git, deps.gitTimeoutMs) : undefined;
-				return { ok: true, value: { path: relativePath, ...listed, ...(status ? { status } : {}) } };
+				const status = includeStatus ? await collectGitSnapshot(listed.root.absolutePath, deps.git, deps.gitTimeoutMs) : undefined;
+				if (status) await assertClaimCurrent(listed.root, new FsDeadline(deps.fsTimeoutMs), deps);
+				return { ok: true, value: { path: relativePath, entries: listed.entries, truncated: listed.truncated, ...(status ? { status } : {}) } };
 			} catch (error) {
 				return fsFailure(error, "list");
 			}
@@ -678,10 +853,15 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 
 		diff: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<DiffValue>> => {
 			let relativePath: string;
-			try { relativePath = normalizeRoutePath(bodyRecord(req).path); }
-			catch (error) { return fsFailure(error, "read"); }
-			const cwd = routeCwd(ctx);
+			let root: PathClaim;
+			try {
+				relativePath = normalizeRoutePath(bodyRecord(req).path);
+				root = await bindRoot(routeCwd(ctx), new FsDeadline(deps.fsTimeoutMs), deps);
+			} catch (error) { return fsFailure(error, "read"); }
+			const cwd = root.absolutePath;
 			const snapshot = await collectGitSnapshot(cwd, deps.git, deps.gitTimeoutMs);
+			try { await assertClaimCurrent(root, new FsDeadline(deps.fsTimeoutMs), deps); }
+			catch (error) { return fsFailure(error, "read"); }
 			if (snapshot.kind === "none") return failure("GIT_FAILED", "A diff is unavailable outside a Git repository.");
 			if (snapshot.kind === "unavailable") return gitRouteFailure(snapshot);
 			const status = statusForPath(snapshot, relativePath);
@@ -694,6 +874,8 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 				["diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--find-copies", "--find-copies-harder", "--unified=3", "HEAD", "--", ...pathspecs],
 				{ cwd, timeoutMs: deps.gitTimeoutMs, maxStdoutBytes: DIFF_BYTE_LIMIT, maxStderrBytes: SAFE_STDERR_LIMIT },
 			);
+			try { await assertClaimCurrent(root, new FsDeadline(deps.fsTimeoutMs), deps); }
+			catch (error) { return fsFailure(error, "read"); }
 			if (!result.ok) {
 				if (result.reason === "too-large") return { ok: true, value: { path: relativePath, kind: "too-large", bytes: DIFF_BYTE_LIMIT + 1, limit: DIFF_BYTE_LIMIT } };
 				if (result.reason === "timeout") return failure("GIT_TIMEOUT", "The diff operation timed out.", true);
