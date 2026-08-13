@@ -61,7 +61,7 @@ describe("readHandoff", () => {
 	});
 
 	it("round-trips through TaskStore", async () => {
-		const store = new TaskStore(stateDir);
+		const store = new TaskStore(stateDir, undefined, { persistence: "json" });
 		const t: PersistedTask = {
 			id: "rt-1",
 			goalId: "g",
@@ -75,13 +75,17 @@ describe("readHandoff", () => {
 			},
 		};
 		store.put(t);
-		await store.flush();
+		await store.close();
 
 		// Re-read by constructing a new store on the same dir.
-		const store2 = new TaskStore(stateDir);
-		const got = store2.get("rt-1");
-		assert.ok(got);
-		assert.equal(got!.gitHandoff?.api.headSha, "b");
-		assert.equal(readHandoff(got!, "api").branch, "c");
+		const store2 = new TaskStore(stateDir, undefined, { persistence: "json" });
+		try {
+			const got = store2.get("rt-1");
+			assert.ok(got);
+			assert.equal(got!.gitHandoff?.api.headSha, "b");
+			assert.equal(readHandoff(got!, "api").branch, "c");
+		} finally {
+			await store2.close();
+		}
 	});
 });

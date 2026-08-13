@@ -23,6 +23,17 @@ function previewTab(sessionId: string, entry = "index.html") {
 	};
 }
 
+function reviewTab(sessionId: string, reviewId: string, title = "Review") {
+	return {
+		id: `review:${encodeURIComponent(reviewId)}`,
+		kind: "review",
+		title: `Review: ${title}`,
+		label: `Review: ${title}`,
+		source: { type: "review", sessionId, reviewId, title },
+		updatedAt: 1,
+	};
+}
+
 async function getWorkspace(sessionId: string) {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace`);
 	expect(resp.status).toBe(200);
@@ -147,6 +158,25 @@ test.describe("side-panel workspace API", () => {
 		expect(ordered.tabs.map((tab: any) => tab.id)).toEqual(["preview:entry:index.html", "proposal:goal"]);
 	});
 
+	test("review tabs use review identity and allow duplicate display titles", async () => {
+		const sessionId = await createSession();
+		cleanup.push(sessionId);
+		for (const reviewId of ["review-first", "review-second"]) {
+			const response = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/open`, {
+				method: "POST",
+				body: JSON.stringify({ tab: reviewTab(sessionId, reviewId, "Findings") }),
+			});
+			expect(response.status).toBe(200);
+		}
+
+		const workspace = await getWorkspace(sessionId);
+		expect(workspace.tabs.map((tab: any) => tab.id)).toEqual(["review:review-first", "review:review-second"]);
+		expect(workspace.tabs.map((tab: any) => tab.source)).toEqual([
+			{ type: "review", sessionId, reviewId: "review-first", title: "Findings" },
+			{ type: "review", sessionId, reviewId: "review-second", title: "Findings" },
+		]);
+	});
+
 	test("concurrent opens rebase on latest and both survive", async () => {
 		const sessionId = await createSession();
 		cleanup.push(sessionId);
@@ -217,7 +247,11 @@ test.describe("side-panel workspace API", () => {
 		expect(migrated.sizeMode).toBe("collapsed");
 		expect(migrated.metadata.migratedFromLocalStorageAt).toBeGreaterThan(0);
 		expect(migrated.tabs.map((tab: any) => tab.id)).toContain("proposal:goal");
-		expect(migrated.tabs.some((tab: any) => /^review:legacy-title-[0-9a-f]{16}$/.test(tab.id))).toBe(true);
+		const migratedReview = migrated.tabs.find((tab: any) => /^review:legacy-title-[0-9a-f]{16}$/.test(tab.id));
+		expect(migratedReview).toBeTruthy();
+		expect(migratedReview.source).toMatchObject({ type: "review", sessionId, title: "My Doc" });
+		expect(migratedReview.source.reviewId).toMatch(/^legacy-title-[0-9a-f]{16}$/);
+		expect(migratedReview.source.documentId).toBeUndefined();
 
 		const second = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace/migrate`, {
 			method: "POST",

@@ -3,6 +3,60 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.16.3
+
+Upgrading from v0.16.2. This release adds a command-line version flag and completes the automated release workflow fixes.
+
+### ✨ New Features
+
+* 🏷️ **Command-line version flag**: Run `bobbit --version` or `npx @gresearch/bobbit@latest --version` to print the installed Bobbit version and exit without starting the gateway or creating configuration state.
+
+### 🐛 Bug Fixes
+
+* 📦 **Reliable GitHub release creation**: The checkout-free release job now targets the repository explicitly, allowing it to create the GitHub release after npm publication and immutable tag creation.
+
+## v0.16.2
+
+Upgrading from v0.16.1. This release fixes automated release completion.
+
+### 🐛 Bug Fixes
+
+* 📦 **Reliable release completion**: Automated releases now handle a missing version tag correctly after npm publication, allowing the immutable source tag and GitHub release to be created as intended.
+
+## v0.16.1
+
+Upgrading from v0.15.1. This release adds shared Git and PR status, URL subpath hosting, keyboard steering, clearer workflow guidance, and broad improvements to authentication, recovery, and performance.
+
+### ✨ New Features
+
+* 🌐 **Host Bobbit under a URL path**: Gateways can now serve Bobbit under a path such as `/bobbit`, including the UI, API, sign-in, previews, and deep links. Use `--base-path` or `BOBBIT_BASE_PATH`, for example when adding Bobbit to a command centre.
+
+* 🔄 **Shared Git and PR status**: Sessions, goals, sidebar badges, and staff triggers now share the same GitHub state. Duplicate requests are combined and capped to reduce pressure on GitHub and gateway infrastructure. The last known state remains visible during temporary failures, with clear freshness and error indicators.
+
+* 🧭 **Clearer workflow failure guidance**: Workflow authors can add guidance for failed verification steps, giving Team Leads practical next steps when a check fails. Built-in workflows also produce more focused review findings and compare options during non-trivial design work.
+
+* ⌨️ **Keyboard steering**: Press `Ctrl+Enter` on Windows/Linux or `Cmd+Enter` on macOS to steer the active turn. Composer text and attachments are preserved if a session changes or preflight work is still finishing.
+
+* 🎀 **Ponytail accessory**: Staff and agent avatars can now use an animated centre-parted ponytail accessory in both full-size and inline views.
+
+### 🐛 Bug Fixes
+
+* ▶️ **Resume paused goals when starting a team**: Starting a team now resumes an eligible paused goal automatically instead of failing. Repeated or simultaneous requests are handled safely.
+
+* 🔐 **More reliable Anthropic sign-in**: Anthropic OAuth now handles refresh, cancellation, logout, rejected requests, and concurrent credential access more safely. Renewable host credentials are still kept out of sandboxes unless explicitly enabled.
+
+* 🖼️ **Reopen saved previews reliably**: Previews now reopen correctly after a reload or transcript compaction. This also fixes preview files with spaces, Unicode, emoji, percent signs, long names, and nested assets.
+
+* ⚡ **Faster sessions and UI**: Search indexing, recovery, streamed replies, installed-PWA checks, and avatar animations now do less repeated work. Pack scans are cached, and the launchers provide a configurable 8 GiB Node memory ceiling for larger workloads.
+
+* 🔄 **Better session and workflow recovery**: Workflow drafts and server-created IDs now survive delayed saves. Interrupted prompt queues can resume or show a clear Retry action, and restarted sessions keep provider, model, and thinking selections consistent.
+
+* 🛡️ **Safer background work and configuration**: Project and sandbox settings are written atomically and failures are reported clearly. Background jobs and verification steps now recover more reliably after restarts and include their final output before reporting completion.
+
+* 🌐 **Cross-origin saves**: Remote gateways and cross-origin reverse proxies now accept authenticated `PATCH` requests, so side-panel state and other settings save correctly without weakening trusted-origin checks.
+
+* 🧱 **Protect user-managed worktrees**: Startup and shutdown no longer repair or remove manually managed worktrees. Cleanup only removes archived session worktrees owned by the current Bobbit instance.
+
 ## v0.15.1
 
 Upgrading from v0.15.0. This release adds Claude Opus 5 support and dedicated verifiable bug reviews, while improving model-selection and multi-repository Git status reliability.

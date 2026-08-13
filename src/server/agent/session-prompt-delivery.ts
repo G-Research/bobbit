@@ -1,4 +1,10 @@
 import type { MessageAuthor } from "../../shared/message-author.js";
+import {
+	MODEL_SELECTION_REQUIRED,
+	isModelSelectionRequiredCondition,
+	modelSelectionRequiredMessage,
+	type SessionCondition,
+} from "../ws/protocol.js";
 import type { ErroredPromptRecoveryDecision, PromptSource } from "./session-manager.js";
 
 export type SessionPromptMode = "prompt" | "steer";
@@ -9,6 +15,7 @@ export interface DeliverableSessionLike {
 	nonInteractive?: boolean;
 	title?: string;
 	lastTurnErrored?: boolean;
+	condition?: SessionCondition;
 }
 
 export interface DeliverSessionPromptDeps {
@@ -94,6 +101,13 @@ export async function deliverSessionPrompt(
 	const session = deps.getSession(sessionId);
 	if (!session) {
 		throw new SessionPromptDeliveryError(`Session ${sessionId} is not live or was not found.`, "SESSION_NOT_FOUND", 404);
+	}
+	if (isModelSelectionRequiredCondition(session.condition)) {
+		throw new SessionPromptDeliveryError(
+			modelSelectionRequiredMessage(session.condition),
+			MODEL_SELECTION_REQUIRED,
+			409,
+		);
 	}
 	// A failed poisoned-history respawn deliberately leaves the old SessionInfo
 	// behind as a terminated rollback capsule. SessionManager.enqueuePrompt can
