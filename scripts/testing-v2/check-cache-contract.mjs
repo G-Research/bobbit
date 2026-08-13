@@ -37,7 +37,7 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 const TYPESCRIPT = join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
 const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
 const CACHE_NAMES = ["check-server.tsbuildinfo", "check-web.tsbuildinfo", "check-tests2.tsbuildinfo"];
-const EXPECTED_CHECK = "shx mkdir -p .profiles && tsc -p tsconfig.server.json --noEmit --incremental --tsBuildInfoFile .profiles/check-server.tsbuildinfo && tsc -p tsconfig.web.json --noEmit --incremental --tsBuildInfoFile .profiles/check-web.tsbuildinfo && tsc -p tsconfig.tests2.json --noEmit --incremental --tsBuildInfoFile .profiles/check-tests2.tsbuildinfo";
+const EXPECTED_CHECK = "shx mkdir -p .profiles && node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -p tsconfig.server.json --noEmit --incremental --tsBuildInfoFile .profiles/check-server.tsbuildinfo && node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -p tsconfig.web.json --noEmit --incremental --tsBuildInfoFile .profiles/check-web.tsbuildinfo && node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc -p tsconfig.tests2.json --noEmit --incremental --tsBuildInfoFile .profiles/check-tests2.tsbuildinfo";
 const fixtureOnly = process.argv.slice(2).includes("--fixture-only");
 // On Windows, prefer System32\tar.exe (bsdtar) over msys/Git Bash GNU tar.
 // GNU tar can interpret native drive paths as remote hosts; bsdtar accepts them.

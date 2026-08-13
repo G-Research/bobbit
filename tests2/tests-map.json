@@ -2813,6 +2813,15 @@
       }
     },
     {
+      "path": "tests2/core/typecheck-memory-policy.test.ts",
+      "reason": "Pins every sequential TypeScript check phase to a bounded 4 GiB heap without replacing caller NODE_OPTIONS.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/project-registry-root-paths.test.ts",
       "reason": "Cross-platform project registry path identity coverage for dialect-aware canonicalization, containment, and case evidence.",
       "execution": {
