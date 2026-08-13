@@ -475,7 +475,7 @@ async function fetchDashboardDescendants(goalId: string): Promise<void> {
 			dashboardDescendants = fenceStaleSchedulerRecovery(
 				Array.isArray(data?.goals) ? data.goals : [],
 				recoverySnapshotGeneration,
-			);
+			).goals;
 			renderApp();
 		}
 	} catch {

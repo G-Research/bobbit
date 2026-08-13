@@ -27,6 +27,9 @@ let resolveDescendantsResponse: ((response: Response) => void) | undefined;
 let holdGoalsResponse = false;
 let resolveGoalsResponse: ((response: Response) => void) | undefined;
 let goalsSnapshot: Goal[] = [];
+let goalsResponseForRequest: ((url: URL) => Response) | undefined;
+let goalsRequestPaths: string[] = [];
+let conditionalUnchangedGoalsResponses: number;
 let retryGoalId: string;
 
 const now = 1_783_682_557_000;
@@ -86,10 +89,12 @@ function installFetchStub(): void {
 		if (path === `/api/goals/${activeGoal.id}/verifications/active`) return Promise.resolve(jsonResponse({ verifications: [] }));
 		if (path === "/api/sessions") return Promise.resolve(jsonResponse({ sessions: [], generation: 1 }));
 		if (url.pathname === "/api/goals") {
+			goalsRequestPaths.push(path);
 			const snapshot = goalsSnapshot;
 			if (holdGoalsResponse) {
 				return new Promise<Response>(resolve => { resolveGoalsResponse = resolve; });
 			}
+			if (goalsResponseForRequest) return Promise.resolve(goalsResponseForRequest(url));
 			return Promise.resolve(jsonResponse({ goals: snapshot, generation: state.goalsGeneration + 1 }));
 		}
 		if (path === "/api/projects") return Promise.resolve(jsonResponse({ projects: state.projects }));
@@ -129,6 +134,9 @@ beforeEach(async () => {
 	holdGoalsResponse = false;
 	resolveGoalsResponse = undefined;
 	goalsSnapshot = [activeGoal];
+	goalsResponseForRequest = undefined;
+	goalsRequestPaths = [];
+	conditionalUnchangedGoalsResponses = 0;
 	retryGoalId = activeGoal.id;
 	installFetchStub();
 	vi.stubGlobal("WebSocket", class extends EventTarget {
@@ -230,6 +238,44 @@ describe("root scheduler recovery retry", () => {
 		await refreshSessions();
 		await nextFrame();
 		expect(state.goals[0]?.schedulerRecovery).toEqual(laterRecovery);
+		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeTruthy();
+	});
+
+	it("refetches a fenced generation so a post-consume recovery cannot be hidden by changed:false", async () => {
+		state.goalsGeneration = 7;
+		goalsRequestPaths = [];
+		holdGoalsResponse = true;
+		const staleRefresh = refreshSessions();
+		await Promise.resolve();
+		expect(goalsRequestPaths).toEqual(["/api/goals?since=7"]);
+
+		host.querySelector<HTMLButtonElement>("[data-testid='goal-scheduler-recovery-retry']")!.click();
+		await waitFor(() => state.goals[0]?.schedulerRecovery === undefined);
+
+		const newerRecovery = { ...activeGoal.schedulerRecovery!, code: "NEW_GENERATION", updatedAt: now + 2 };
+		const newerGoals = [{ ...activeGoal, schedulerRecovery: newerRecovery }];
+		// Although this request began before the consume, the server's response
+		// contains a newer recovery at generation 11. Fencing it must not make
+		// the client acknowledge generation 11 before reading it authoritatively.
+		resolveGoalsResponse!(jsonResponse({ goals: newerGoals, generation: 11 }));
+		await staleRefresh;
+		expect(state.goalsGeneration).toBe(7);
+		expect(state.goals[0]?.schedulerRecovery).toBeUndefined();
+
+		holdGoalsResponse = false;
+		goalsResponseForRequest = url => {
+			if (url.searchParams.get("since") === "11") {
+				conditionalUnchangedGoalsResponses++;
+				return jsonResponse({ changed: false, generation: 11 });
+			}
+			return jsonResponse({ goals: newerGoals, generation: 11 });
+		};
+		await refreshSessions();
+		await nextFrame();
+
+		expect(goalsRequestPaths.at(-1)).toBe("/api/goals?since=7");
+		expect(conditionalUnchangedGoalsResponses).toBe(0);
+		expect(state.goals[0]?.schedulerRecovery).toEqual(newerRecovery);
 		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeTruthy();
 	});
 

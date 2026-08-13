@@ -19,19 +19,28 @@ export function consumeSchedulerRecovery(goalId: string): void {
 }
 
 /** Remove only recovery records consumed after this snapshot began. */
+export interface SchedulerRecoveryFenceResult<T> {
+	goals: T[];
+	stripped: boolean;
+}
+
 export function fenceStaleSchedulerRecovery<T extends Pick<Goal, "id" | "schedulerRecovery">>(
 	goals: readonly T[],
 	snapshotGeneration: number,
-): T[] {
+): SchedulerRecoveryFenceResult<T> {
 	const staleGoalIds = new Set(
 		[...consumedAt]
 			.filter(([, consumedGeneration]) => consumedGeneration > snapshotGeneration)
 			.map(([goalId]) => goalId),
 	);
-	if (staleGoalIds.size === 0) return goals as T[];
-	return goals.map(goal => {
+	if (staleGoalIds.size === 0) return { goals: goals as T[], stripped: false };
+
+	let stripped = false;
+	const fencedGoals = goals.map(goal => {
 		if (!staleGoalIds.has(goal.id) || goal.schedulerRecovery === undefined) return goal;
+		stripped = true;
 		const { schedulerRecovery: _schedulerRecovery, ...withoutRecovery } = goal;
 		return withoutRecovery as T;
 	});
+	return { goals: fencedGoals, stripped };
 }

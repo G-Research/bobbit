@@ -826,10 +826,11 @@ export async function refreshSessions(): Promise<void> {
 			} else {
 				goalsChanged = true;
 				const prevGoalIds = new Set(state.goals.map((g) => g.id));
-				const incoming = fenceStaleSchedulerRecovery(
+				const fencedGoals = fenceStaleSchedulerRecovery(
 					(goalsData.goals || []) as Goal[],
 					recoverySnapshotGeneration,
 				);
+				const incoming = fencedGoals.goals;
 				// Merge instead of overwrite. The /api/goals endpoint returns only
 				// live goals by default; archived goals arrive via a separate
 				// fetchArchivedGoalsPaginated() call. A naive overwrite here
@@ -864,7 +865,10 @@ export async function refreshSessions(): Promise<void> {
 					}
 				}
 
-				if (goalsData.generation !== undefined) {
+				// A fenced response may have included a recovery created after its
+				// request began. Do not acknowledge its server generation: polling
+				// from it could return changed:false and hide that recovery forever.
+				if (goalsData.generation !== undefined && !fencedGoals.stripped) {
 					state.goalsGeneration = goalsData.generation;
 				}
 			}

@@ -3057,7 +3057,7 @@
     },
     {
       "path": "tests2/dom/goal-dashboard-root-recovery.test.ts",
-      "reason": "Focused DOM coverage for root and Plan scheduler recovery retries: successful reconciliation fences held pre-consume descendants and goals snapshots without suppressing later server recovery generations, while non-OK and network failures retain the recovery action.",
+      "reason": "Focused DOM coverage for root and Plan scheduler recovery retries: successful reconciliation fences held pre-consume descendants and goals snapshots, refetches fenced generations despite conditional changed:false replies so later server recovery generations surface, while non-OK and network failures retain the recovery action.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
