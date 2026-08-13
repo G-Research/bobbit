@@ -31,6 +31,29 @@ const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
 loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
 
 const managers: any[] = [];
+
+const FORCE_ABORT_FIXTURE_PROVIDER = "force-abort-fixture";
+const FORCE_ABORT_FIXTURE_MODEL_ID = "fixture-model";
+const FORCE_ABORT_FIXTURE_CUSTOM_PROVIDERS = [{
+	id: FORCE_ABORT_FIXTURE_PROVIDER,
+	name: FORCE_ABORT_FIXTURE_PROVIDER,
+	type: "manual",
+	baseUrl: "http://127.0.0.1:9",
+	models: [{ id: FORCE_ABORT_FIXTURE_MODEL_ID, name: "Force-abort fixture model" }],
+}];
+
+/** Supply the runtime-first respawn path with one deterministic selectable row. */
+function installForceAbortFixtureModel(manager: any): void {
+	manager.preferencesStore = {
+		get(key: string) {
+			return key === "customProviders" ? FORCE_ABORT_FIXTURE_CUSTOM_PROVIDERS : undefined;
+		},
+		getAll() {
+			return { customProviders: FORCE_ABORT_FIXTURE_CUSTOM_PROVIDERS };
+		},
+	};
+}
+
 afterEach(() => {
 	registerRpcBridgeFactory(null);
 	while (managers.length > 0) {
@@ -106,6 +129,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		registerRpcBridgeFactory(() => { throw new Error("no respawn in test"); });
 
 		const manager: any = new SessionManager();
+		installForceAbortFixtureModel(manager);
 		const persisted: any = {
 			id: "s-restricted",
 			allowedTools: opts.persistedAllowedTools,
@@ -116,7 +140,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		let captured: { allowed: any[] | undefined } | undefined;
 		manager.buildToolActivationArgs = (_id: string, allowedTools: any[] | undefined) => {
 			captured = { allowed: allowedTools };
-			return { args: [], env: {} };
+			return { args: [], env: {}, runtimeExtensions: [] };
 		};
 		managers.push(manager);
 
@@ -253,6 +277,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 	it("performs hard-abort terminal bookkeeping before replacement grant derivation", async () => {
 		registerRpcBridgeFactory(() => { throw new Error("stop after activation capture"); });
 		const manager: any = new SessionManager();
+		installForceAbortFixtureModel(manager);
 		const update = vi.fn(() => {});
 		const persisted: any = {
 			id: "s-hard-bookkeeping",
@@ -304,7 +329,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 
 		await manager.forceAbort(session.id, 20).catch(() => {
-			// This fixture intentionally has no selectable replacement model.
+			// This fixture intentionally stops once replacement activation is captured.
 		});
 		await vi.waitFor(() => assert.equal(manager.lifecycleHub.dispatch.mock.calls.length, 1));
 

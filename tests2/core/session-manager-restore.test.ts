@@ -46,6 +46,23 @@ function freshStore() {
 	return new SessionStore(stateDir);
 }
 
+/** Return a method body without coupling source guards to an arbitrary window size. */
+function extractMethodBody(source: string, declaration: string): string {
+	const declarationStart = source.indexOf(declaration);
+	assert.ok(declarationStart >= 0, `${declaration} declaration not found`);
+	const signatureEnd = source.indexOf("):", declarationStart);
+	assert.ok(signatureEnd >= 0, `${declaration} signature end not found`);
+	const bodyStart = source.indexOf("{", signatureEnd);
+	assert.ok(bodyStart >= 0, `${declaration} body not found`);
+
+	let depth = 1;
+	for (let i = bodyStart + 1; i < source.length; i++) {
+		if (source[i] === "{") depth++;
+		else if (source[i] === "}" && --depth === 0) return source.slice(bodyStart + 1, i);
+	}
+	throw new Error(`${declaration} body is unclosed`);
+}
+
 function makeSession(): PersistedSession {
 	return {
 		id: "sess-1",
@@ -280,19 +297,16 @@ describe("restoreSession source guard", () => {
 
 	it("respawn, force-abort, and delegate paths carry durable effective thinking", () => {
 		const src = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
-		const roleStart = src.indexOf("const respawnPersisted = this.resolveStoreForSession(id).get(id);");
-		const roleWindow = src.slice(roleStart, roleStart + 8_000);
-		assert.match(roleWindow, /respawnPersisted\?\.effectiveThinkingLevel/);
-		assert.match(roleWindow, /await this\.tryApplyDefaultThinkingLevel\(stagedSession\)/);
+		const roleBody = extractMethodBody(src, "private async _assignRoleStaged(");
+		assert.match(roleBody, /respawnPersisted\?\.effectiveThinkingLevel/);
+		assert.match(roleBody, /await this\.tryApplyDefaultThinkingLevel\(stagedSession\)/);
 
-		const forceStart = src.indexOf("const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);");
-		const forceWindow = src.slice(forceStart, forceStart + 8_000);
-		assert.match(forceWindow, /forceRespawnPersisted\?\.effectiveThinkingLevel/);
-		assert.match(forceWindow, /await this\.tryApplyDefaultThinkingLevel\(session\)/);
+		const forceBody = extractMethodBody(src, "private async _forceAbortOwned(");
+		assert.match(forceBody, /forceRespawnPersisted\?\.effectiveThinkingLevel/);
+		assert.match(forceBody, /await this\.tryApplyDefaultThinkingLevel\(session\)/);
 
-		const delegateStart = src.indexOf("async createDelegateSession(parentSessionId: string");
-		const delegateWindow = src.slice(delegateStart, delegateStart + 12_000);
-		assert.match(delegateWindow, /parentMeta\?\.effectiveThinkingLevel/);
-		assert.match(delegateWindow, /resolveCurrentCatalogThinkingLevel\(/);
+		const delegateBody = extractMethodBody(src, "async createDelegateSession(parentSessionId: string");
+		assert.match(delegateBody, /parentMeta\?\.effectiveThinkingLevel/);
+		assert.match(delegateBody, /resolveCurrentCatalogThinkingLevel\(/);
 	});
 });
