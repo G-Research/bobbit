@@ -444,9 +444,9 @@ semantics and the shared clamp order.
 | `gate_verification_complete` | `goalId`, `gateId`, `signalId`, `status` | All verification steps finished |
 | `gate_status_changed` | `goalId`, `gateId`, `status` | Gate status changed |
 | `gate_reset` | `goalId`, `gateId`, `affectedGateIds`, `changedGateIds`, `unchangedGateIds`, `reopen` | A gate reset invalidated the requested gate and downstream dependents. `reopen` is the lifecycle outcome described below. Clients should refresh gate summaries for all affected ids. |
-| `goal_state_changed` | `goalId` | Goal persistence changed. Treat as an invalidation and refresh goal-list state; reset-driven reopening emits this globally only when it performs `complete` → `in-progress`. |
-| `goal_setup_complete` | `goalId` | Goal worktree/team setup finished |
-| `goal_setup_error` | `goalId`, `error` | Goal setup failed |
+| `goal_state_changed` | `goalId` | A persisted goal state or setup-lifecycle transition changed. Treat it as an invalidation and refresh goal-list state, including retry transitions that clear stale setup errors and controls; reset-driven reopening emits this globally only when it performs `complete` → `in-progress`. |
+| `goal_setup_complete` | `goalId` | Worktree setup was verified ready. It does not guarantee that a Team Lead or team has started. |
+| `goal_setup_error` | `goalId`, `error` | Current setup failed; starting remains blocked until a retry or recovery reaches verified ready. |
 | `team_agent_spawned` | `goalId`, `sessionId`, `role`, `name` | Team agent was spawned |
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
 | `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |
