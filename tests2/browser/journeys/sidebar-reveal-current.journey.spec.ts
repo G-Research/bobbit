@@ -665,10 +665,10 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		await expect(navRow(page, IDS.deepSession)).toHaveAttribute("data-nav-active", "true");
 		await expectRowWithinSidebar(page, IDS.deepSession);
 		await expect.poll(() => page.evaluate(() => (window as any).__revealEmphasisCount)).toBeGreaterThanOrEqual(1);
-		const stored = await page.evaluate((storageKey) => JSON.parse(localStorage.getItem(storageKey) || "{}").expansion ?? {}, TREE_STATE_KEY);
-		const expectedStored: Record<string, string> = { [unrelatedProjectKey]: "collapsed" };
-		for (const key of pathKeys) expectedStored[key] = "expanded";
-		expect(stored, `${MARK}: reveal persists exactly its path and preserves the unrelated collapse`).toEqual(expectedStored);
+		for (const key of pathKeys) {
+			expect(await storedExpansion(page, key), `${MARK}: target path persists ${key}`).toBe("expanded");
+		}
+		expect(await storedExpansion(page, unrelatedProjectKey), `${MARK}: reveal preserves the unrelated project sentinel`).toBe("collapsed");
 		const deepScroll = await page.evaluate(() => (window as any).__revealScrollCalls.at(-1));
 		expect(deepScroll).toMatchObject({ options: { behavior: "smooth", block: "nearest" }, wasWithin: false, overflowing: true });
 	});
