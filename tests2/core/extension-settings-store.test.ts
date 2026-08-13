@@ -70,6 +70,21 @@ describe("extension settings store", () => {
 		expect(defensive.value).toEqual({ schema: 1, revision: 2, targets: { [targetKey]: { values: { endpoint: "https://healthy.example" } } } });
 	}));
 
+	it("adopts a legacy snapshot once before applying a first project mutation", () => {
+		const memFs = createMemFs();
+		const config = new ProjectConfigStore("/memfs/settings-config", memFs);
+		const store = new ExtensionSettingsStore(config, new ExtensionSettingsSecretStore("/memfs/settings-state", memFs));
+		const legacyValues = { endpoint: "https://legacy.example", limit: 3 };
+
+		store.compareAndSwap(ref, 0, { legacyValues, values: { limit: 7 } });
+		expect(store.getTarget(ref)).toEqual({ values: { endpoint: "https://legacy.example", limit: 7 } });
+
+		// The target now owns its values: a stale/global snapshot can neither
+		// overwrite a project value nor resurrect a deliberately cleared one.
+		store.compareAndSwap(ref, 1, { legacyValues: { endpoint: "https://stale.example", limit: 99 }, values: { endpoint: undefined } });
+		expect(store.getTarget(ref)).toEqual({ values: { limit: 7 } });
+	});
+
 	it("keeps credential bytes in the owner-only file and exposes only redacted public state", () => withTmpDir(configDir => {
 		const stateDir = path.join(configDir, "runtime-state");
 		const config = new ProjectConfigStore(configDir);

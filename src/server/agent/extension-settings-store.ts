@@ -61,6 +61,11 @@ export interface ExtensionSettingsMutation {
   enabled?: boolean;
   /** `undefined` clears a declared optional non-secret field. */
   values?: Readonly<Record<string, ExtensionSettingValue | undefined>>;
+  /**
+   * A trusted legacy snapshot captured by the settings owner. It is copied only
+   * when this mutation creates a target record, then the explicit mutation wins.
+   */
+  legacyValues?: Readonly<Record<string, ExtensionSettingValue>>;
   /** `undefined` clears a declared secret field. Never place these values in an API projection. */
   secrets?: ExtensionSettingsSecretChanges;
 }
@@ -170,6 +175,12 @@ function assertMutation(mutation: ExtensionSettingsMutation): void {
     if (!isPlainObject(mutation.values)) throw new ExtensionSettingsMutationError();
     for (const [key, value] of Object.entries(mutation.values)) {
       if (!isSafeSettingField(key) || (value !== undefined && !isPrimitiveValue(value))) throw new ExtensionSettingsMutationError();
+    }
+  }
+  if (mutation.legacyValues !== undefined) {
+    if (!isPlainObject(mutation.legacyValues)) throw new ExtensionSettingsMutationError();
+    for (const [key, value] of Object.entries(mutation.legacyValues)) {
+      if (!isSafeSettingField(key) || !isPrimitiveValue(value)) throw new ExtensionSettingsMutationError();
     }
   }
   if (mutation.secrets !== undefined) {
@@ -317,7 +328,9 @@ export class ExtensionSettingsStore {
 
     for (const mutation of mutations) {
       const key = extensionSettingsTargetKey(mutation.ref);
-      const next = cloneRecord(candidate.targets[key] ?? { values: {} });
+      // Legacy values become project-owned exactly once. Later mutations —
+      // including explicit clears — operate only on the durable project row.
+      const next = cloneRecord(candidate.targets[key] ?? { values: { ...(mutation.legacyValues ?? {}) } });
       if (mutation.enabled !== undefined) next.enabled = mutation.enabled;
       for (const [field, value] of Object.entries(mutation.values ?? {})) {
         if (value === undefined) delete next.values[field];

@@ -71,13 +71,21 @@ async function createProject(gateway: any, label: string): Promise<{ id: string;
 	return registerProject({ name: `hindsight-experience-${label}-${Date.now()}`, rootPath, seedWorkflows: false });
 }
 
-async function route(sessionId: string, name: string, body: Record<string, unknown> = {}): Promise<Response> {
+async function route(
+	sessionId: string,
+	name: string,
+	body: Record<string, unknown> = {},
+	headers: Record<string, string> = {},
+	tool?: string,
+): Promise<Response> {
 	return apiFetch(`/api/ext/route/${encodeURIComponent(name)}`, {
 		method: "POST",
-		headers: { "X-Bobbit-Session-Id": sessionId },
+		headers: { "X-Bobbit-Session-Id": sessionId, ...headers },
 		body: JSON.stringify({
 			sessionId,
-			surfaceToken: mintSurfaceToken({ sessionId, packId: PACK_ID, contributionId: "panel:hindsight.memory" }),
+			surfaceToken: mintSurfaceToken(tool
+			? { sessionId, packId: PACK_ID, contributionId: `hindsight/${tool}`, tool }
+			: { sessionId, packId: PACK_ID, contributionId: "panel:hindsight.memory" }),
 			init: { method: "POST", body },
 		}),
 	});
@@ -373,7 +381,7 @@ describe.serial("Hindsight experience API", () => {
 		expect(savedText).not.toContain(SECRET);
 
 		await grant(project.id, "service.manage");
-		const start = await route(sessionId, "runtime-control", { action: "start", consent: true });
+		const start = await route(sessionId, "runtime-control", { action: "start", consent: true }, operatorHeaders());
 		const startBody = await json(start);
 		expect(start.status).toBe(422);
 		expect(startBody).toMatchObject({ code: "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED" });
@@ -477,7 +485,27 @@ describe.serial("Hindsight experience API", () => {
 		const controlDenied = await route(sessionId, "runtime-control", { action: "stop" });
 		denied(controlDenied, await json(controlDenied), "service.manage");
 		await grant(project.id, "service.manage");
-		const controlled = await route(sessionId, "runtime-control", { action: "stop", consent: true });
+
+		// A bearer plus a valid tool-bound surface token is sufficient to invoke
+		// ordinary pack routes, but never to mutate runtime or migration state.
+		const bearerToolBound = await route(sessionId, "runtime-control", { action: "stop", consent: true }, {}, "hindsight_recall");
+		expect(bearerToolBound.status).toBe(403);
+		expect(await json(bearerToolBound)).toMatchObject({ code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" });
+
+		const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(project.id);
+		gateway.sessionManager.sandboxTokenStore.addSession(project.id, sessionId);
+		const sandboxDenied = await route(sessionId, "runtime-control", { action: "stop", consent: true }, { Authorization: `Bearer ${sandboxToken}` });
+		expect(sandboxDenied.status).toBe(403);
+		expect(await json(sandboxDenied)).toMatchObject({ code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" });
+		const migrationDenied = await route(sessionId, "migration-execute", {}, {});
+		expect(migrationDenied.status).toBe(403);
+		expect(await json(migrationDenied)).toMatchObject({ code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" });
+		const context = gateway.projectContextManager.getOrCreate(project.id);
+		expect(fs.existsSync(path.join(context.stateDir, "service-runtimes"))).toBe(false);
+
+		// The panel's existing signed cookie is the separate operator proof; body
+		// consent only confirms the requested control operation's shape.
+		const controlled = await route(sessionId, "runtime-control", { action: "stop", consent: true }, operatorHeaders());
 		expect(controlled.status).toBe(200);
 		expect((await json(controlled)).runtime).toMatchObject({ state: expect.any(String) });
 		await revoke(project.id, "service.manage");
