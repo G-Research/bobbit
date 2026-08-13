@@ -189,6 +189,10 @@ function isPanelTarget(t: PanelTarget | RouteTarget | SpawnLaunchTarget | Channe
  * unambiguous) and a clear error names the conflict.
  */
 export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, projectId?: string): void {
+	// Marketplace mutations register a fresh authoritative contribution snapshot.
+	// Supersede any older asynchronous reconcile so a late pre-toggle response
+	// cannot erase launchers that have just been re-enabled.
+	reconcileGeneration++;
 	const nextLaunchers = new Map<string, RegisteredLauncher>();
 	const nextRoutes = new Map<string, PackRouteEntry>();
 	// Track routeIds seen so a duplicate (even across packs) is rejected.

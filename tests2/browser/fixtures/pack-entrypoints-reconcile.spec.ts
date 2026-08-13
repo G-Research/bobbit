@@ -72,6 +72,21 @@ test.describe("pack-entrypoints registry (pack schema V1 §8.2)", () => {
 		expect(again.some((u: string) => u.includes("/api/ext/contributions"))).toBe(false);
 	});
 
+	test("marketplace registration wins over a pending stale reconcile", async ({ page }) => {
+		await gotoAndWait(page);
+		const launchers = await page.evaluate(async () => {
+			(window as any).__setContribDelay("A", 50);
+			(window as any).__setContributions([]);
+			const pending = (window as any).__startReconcile("A");
+			await (window as any).__flush();
+			(window as any).__setContributions((window as any).__thirdparty());
+			(window as any).__register("A");
+			await pending;
+			return (window as any).__launchers("session-menu");
+		});
+		expect(launchers).toEqual(expect.arrayContaining(["tp.navlaunch", "tp.menubtn", "tp.spawn"]));
+	});
+
 	test("lookupPackRoute resolves a third-party routeId after registration", async ({ page }) => {
 		await gotoAndWait(page);
 		const entry = await page.evaluate(async () => {
