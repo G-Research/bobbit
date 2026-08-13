@@ -2598,6 +2598,8 @@ export interface VerifierPromptReceipt {
 	rowId: string;
 	/** Resolves only when this exact row's RPC delivery is accepted. */
 	dispatched: Promise<void>;
+	/** Actual delivery path, updated when a direct attempt is busy-recovered. */
+	readonly mode: "direct" | "queued" | "busy-recovered";
 	/** Removes an undispatched row and fences a late dispatch acknowledgement. */
 	cancel(): boolean;
 }
@@ -2606,6 +2608,7 @@ type PendingVerifierPromptReceipt = {
 	resolve: () => void;
 	reject: (error: Error) => void;
 	cancelled: boolean;
+	mode: "direct" | "queued" | "busy-recovered";
 };
 
 export class SessionManager {
@@ -2760,19 +2763,60 @@ export class SessionManager {
 
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
 
-	private createVerifierPromptReceipt(sessionId: string, rowId: string): VerifierPromptReceipt {
+	/** The replacement coordinator owns the only queue that may accept prompts. */
+	private _promptQueueOwner(sessionId: string): SessionInfo | undefined {
+		return this._sessionReplacementCoordinators.get(sessionId)?.promptOwner ?? this.sessions.get(sessionId);
+	}
+
+	private createVerifierPromptReceipt(
+		sessionId: string,
+		rowId: string,
+		mode: PendingVerifierPromptReceipt["mode"],
+	): VerifierPromptReceipt {
 		let resolve!: () => void;
 		let reject!: (error: Error) => void;
 		const dispatched = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
-		const pending: PendingVerifierPromptReceipt = { resolve, reject, cancelled: false };
+		const pending: PendingVerifierPromptReceipt = { resolve, reject, cancelled: false, mode };
 		const receipts = this._verifierPromptReceipts.get(sessionId) ?? new Map<string, PendingVerifierPromptReceipt>();
 		receipts.set(rowId, pending);
 		this._verifierPromptReceipts.set(sessionId, receipts);
 		return {
 			rowId,
 			dispatched,
+			get mode() { return pending.mode; },
 			cancel: () => this.cancelVerifierPrompt(sessionId, rowId),
 		};
+	}
+
+	private markVerifierPromptBusyRecovered(sessionId: string, rowId: string): void {
+		const pending = this._verifierPromptReceipts.get(sessionId)?.get(rowId);
+		if (pending) pending.mode = "busy-recovered";
+	}
+
+	/** Remove only a verifier-owned row from the coordinator's canonical queue. */
+	private removeVerifierPromptRow(sessionId: string, rowId: string): boolean {
+		const owner = this._promptQueueOwner(sessionId);
+		const row = owner?.promptQueue.toArray().find(candidate => candidate.id === rowId);
+		if (!owner || row?.source !== "verification") return false;
+		const removed = owner.promptQueue.remove(rowId);
+		if (removed) this.broadcastQueue(owner);
+		return removed;
+	}
+
+	private abandonVerifierPrompt(sessionId: string, rowId: string, error: Error): void {
+		this.removeVerifierPromptRow(sessionId, rowId);
+		this.settleVerifierPromptReceipt(sessionId, rowId, error);
+	}
+
+	/** Purge verifier rows from the same canonical queue used for enqueue/cancel. */
+	private purgeVerifierPromptRows(sessionId: string, reason: string): void {
+		const owner = this._promptQueueOwner(sessionId);
+		if (owner) {
+			for (const row of owner.promptQueue.toArray()) {
+				if (row.source === "verification") this.removeVerifierPromptRow(sessionId, row.id);
+			}
+		}
+		this.cancelAllVerifierPromptReceipts(sessionId, reason);
 	}
 
 	private settleVerifierPromptReceipt(sessionId: string, rowId: string, error?: Error): void {
@@ -5235,13 +5279,16 @@ export class SessionManager {
 		// Replacement owns one durable acceptance queue while the live map may
 		// briefly contain a successor or no session at all. Attach this receipt to
 		// that owner so reconciliation carries the same row ID forward.
-		const session = this._sessionReplacementCoordinators.get(sessionId)?.promptOwner ?? this.sessions.get(sessionId);
+		const session = this._promptQueueOwner(sessionId);
 		if (!session) {
 			const rowId = randomUUID();
-			const receipt = this.createVerifierPromptReceipt(sessionId, rowId);
+			const receipt = this.createVerifierPromptReceipt(sessionId, rowId, "queued");
 			this.settleVerifierPromptReceipt(sessionId, rowId, new Error(`Verifier session ${sessionId} is unavailable`));
 			return receipt;
 		}
+		const direct = session.status === "idle"
+			&& session.promptQueue.isEmpty
+			&& !this._sessionReplacementCoordinators.has(sessionId);
 		const row = session.promptQueue.enqueue(text, {
 			source: "verification",
 			author: BOBBIT_SYSTEM_AUTHOR,
@@ -5249,7 +5296,7 @@ export class SessionManager {
 			coldStart: opts?.coldStart,
 			suppressTitleGen: opts?.suppressTitleGen ?? true,
 		});
-		const receipt = this.createVerifierPromptReceipt(sessionId, row.id);
+		const receipt = this.createVerifierPromptReceipt(sessionId, row.id, direct ? "direct" : "queued");
 		this.broadcastQueue(session);
 
 		// A terminal retry cap must not silently consume this step's full active
@@ -5259,7 +5306,7 @@ export class SessionManager {
 		if (session.lastTurnErrored
 			&& (session.consecutiveErrorTurns ?? 0) >= MAX_CONSECUTIVE_ERROR_TURNS
 			&& isReviewerBusyError(session.lastTurnErrorMessage || "")) {
-			this.settleVerifierPromptReceipt(sessionId, row.id, new Error(`Verifier prompt parked after reviewer contention: ${session.lastTurnErrorMessage}`));
+			this.abandonVerifierPrompt(sessionId, row.id, new Error(`Verifier prompt parked after reviewer contention: ${session.lastTurnErrorMessage}`));
 			return receipt;
 		}
 		if (session.status === "idle" && !this._sessionReplacementCoordinators.has(sessionId)) this.drainQueue(session);
@@ -5272,9 +5319,7 @@ export class SessionManager {
 		const pending = receipts?.get(rowId);
 		if (!pending) return false;
 		pending.cancelled = true;
-		const session = this.sessions.get(sessionId);
-		const removed = !!session?.promptQueue.remove(rowId);
-		if (removed && session) this.broadcastQueue(session);
+		const removed = this.removeVerifierPromptRow(sessionId, rowId);
 		this.settleVerifierPromptReceipt(sessionId, rowId);
 		return removed;
 	}
@@ -6127,6 +6172,11 @@ export class SessionManager {
 		}
 
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); preserving ${rows.length} row(s) at front`);
+		if (isReviewerBusyError(reason)) {
+			for (const row of rows) {
+				if (row.id && row.source === "verification") this.markVerifierPromptBusyRecovered(session.id, row.id);
+			}
+		}
 		// A coordinated poison redrive keeps its initiating row durable until the
 		// bridge accepts the RPC. On rejection, reuse that exact row instead of
 		// enqueueing a duplicate. Other dispatch paths retain the normal front
@@ -6221,7 +6271,9 @@ export class SessionManager {
 			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${safeReason}); deferring ${rows.length} row(s) to the next agent_end drain`);
 			if (isReviewerBusyError(reason)) {
 				for (const row of rows) {
-					if (row.id) this.settleVerifierPromptReceipt(session.id, row.id, new Error(`Verifier prompt parked after reviewer contention: ${reason}`));
+					if (row.id && row.source === "verification") {
+						this.abandonVerifierPrompt(session.id, row.id, new Error(`Verifier prompt parked after reviewer contention: ${reason}`));
+					}
 				}
 			}
 			return;
@@ -6429,6 +6481,13 @@ export class SessionManager {
 					this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 					session.recoverDrainAttempts = 0;
 					for (const rowId of dispatchedQueueRowIds) this.settleVerifierPromptReceipt(session.id, rowId);
+				} else {
+					// A replacement/cancellation can win after the provider accepts but before
+					// this stale bridge acknowledges. The row was dequeued already, so leaving
+					// its receipt pending would force the verifier harness to wait 60 seconds.
+					for (const rowId of dispatchedQueueRowIds) {
+						this.abandonVerifierPrompt(session.id, rowId, new Error(`Verifier prompt ${rowId} dispatch was superseded before acknowledgement`));
+					}
 				}
 			})
 			.catch((err: any) => {
@@ -7932,6 +7991,10 @@ export class SessionManager {
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 		this._fenceReplacedSession(session, token.generation);
+		// Verification restart-resume owns the next reviewer turn. Do not carry a
+		// pre-restart verifier row into the replacement bridge where it could race
+		// that harness-owned continuation; ordinary user/system rows are preserved.
+		this.purgeVerifierPromptRows(id, `Verifier session ${id} restarted before dispatch`);
 		try { await session.rpcClient.stop(); } catch { /* already dead */ }
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} respawn replacement was superseded after old bridge stop`);
@@ -8719,6 +8782,19 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
+		// A verifier's active signal is restored and re-driven by VerificationHarness.
+		// Replaying a persisted verifier row here can issue a stale kickoff/reminder
+		// before that owner reattaches. Keep all ordinary durable prompt rows intact.
+		const restoredQueue = (ps.messageQueue ?? []).filter(row => row.source !== "verification");
+		if (restoredQueue.length !== (ps.messageQueue ?? []).length) {
+			for (const row of ps.messageQueue ?? []) {
+				if (row.source === "verification") {
+					this.settleVerifierPromptReceipt(ps.id, row.id, new Error(`Verifier prompt ${row.id} was discarded during session restore`));
+				}
+			}
+			ps.messageQueue = restoredQueue;
+			this.resolveStoreForSession(ps.id).update(ps.id, { messageQueue: restoredQueue });
+		}
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -9106,7 +9182,7 @@ export class SessionManager {
 			accessory: ps.accessory,
 			preview: ps.preview,
 			allowedTools: restoredAllowedNames,
-			promptQueue: new PromptQueue(ps.messageQueue),
+			promptQueue: new PromptQueue(restoredQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
@@ -12516,11 +12592,7 @@ export class SessionManager {
 		// Fence verifier-owned queued prompts before any potentially slow final
 		// get_state/stop work. Their harness may be cancelling or re-signalling and
 		// must not wait for an unrelated teardown turn to settle.
-		this.cancelAllVerifierPromptReceipts(id, `Verifier session ${id} was terminated before dispatch`);
-		for (const row of session.promptQueue.toArray()) {
-			if (row.source === "verification") session.promptQueue.remove(row.id);
-		}
-		this.broadcastQueue(session);
+		this.purgeVerifierPromptRows(id, `Verifier session ${id} was terminated before dispatch`);
 
 		// Cancel any pending transient auto-retry so it doesn't fire after terminate
 		this.cancelPendingAutoRetry(session, "terminated");
