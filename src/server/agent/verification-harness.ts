@@ -981,8 +981,6 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
 import {
 	substituteVars as _substituteVars,
-	isTransientReviewError,
-	isTransientQaError,
 	isTransientVerifierReviewError,
 	isTransientVerifierQaError,
 	matchExpectFailure,

@@ -345,9 +345,14 @@ describe("verifier busy concurrency reproductions", () => {
 
 			const cleanupStarted = deferred<void>();
 			const releaseCleanup = deferred<void>();
+			const heldCommand = active.steps[0];
 			harness._killTrackedForSignal = async () => {
 				cleanupStarted.resolve();
 				await releaseCleanup.promise;
+				// Production only reports tracked cleanup settled after it durably
+				// records this exact command's kill completion. Mirror that contract:
+				// a bare `true` leaves the cancellation intentionally pending.
+				(heldCommand as any).killCompletedAt ??= Date.now();
 				return true;
 			};
 			harness._killPersistedCommandSteps = async () => true;
@@ -373,6 +378,7 @@ describe("verifier busy concurrency reproductions", () => {
 			harness.pendingResults.get(oldSessionId)?.({ verdict: true, summary: "STALE_LATE_VERDICT" });
 			assert.equal(lateVerdicts, 1, `${MARKER}: test must model the late old verdict`);
 			assert.equal(verificationWrites.length, 0, `${MARKER}: no cancellation or stale verdict may publish while command cleanup is held`);
+			assert.equal(harness.activeVerifications.has(oldSignal.id), true, `${MARKER}: cancellation must remain active until exact command cleanup completes`);
 
 			releaseCleanup.resolve();
 			await cancelling;
