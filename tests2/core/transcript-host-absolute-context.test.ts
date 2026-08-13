@@ -64,7 +64,11 @@ describe("sandboxed persisted host-absolute transcript paths", () => {
 		const source = fs.readFileSync(path.join(process.cwd(), "src", "server", "server.ts"), "utf-8");
 		assert.doesNotMatch(source, /SessionFsContext = \{ sandboxed: (?:targetPs|ps|extPs)\.sandboxed/);
 		assert.doesNotMatch(source, /const (?:srcCtx|dstCtx|copyCtx) = \{ sandboxed: !!ps\.sandboxed/);
-		assert.match(source, /readContent: \(\) => sessionFileRead\(ctx, targetPs\.agentSessionFile, sandboxManager\)/);
+		// The runtime-aware transcript route keeps Pi's persisted-file fallback on
+		// the host-aware filesystem context. Keep this separate from the SDK branch
+		// so a refactor cannot reintroduce sandbox I/O for host-absolute archives.
+		assert.match(source, /const ctx = sessionFsContextForAgentFile\(targetPs, targetPs\.agentSessionFile\)/);
+		assert.match(source, /sessionFileRead\(ctx, targetPs\.agentSessionFile!?\s*, sandboxManager\)/);
 		assert.match(source, /const srcCtx = sessionFsContextForAgentFile\(ps, sourceJsonl\)/);
 	});
 });
