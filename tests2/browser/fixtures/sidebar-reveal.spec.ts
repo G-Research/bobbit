@@ -7,10 +7,10 @@
  * Browser E2E for "Sidebar Reveal On Nav".
  *
  * On navigation to a session / goal route — both initial deep-links and in-app
- * hash changes — the sidebar must (1) expand the collapsed ancestor tree so the
- * target row renders, and (2) scroll the row into view with
- * `scrollIntoView({ block: "nearest" })`. Expansion is ephemeral: it never
- * overwrites an explicit user collapse.
+ * hash changes — the sidebar must (1) force-expand and persist the exact target
+ * ancestor path even when it was explicitly collapsed, without changing
+ * unrelated expansion state, and (2) scroll the row into view with
+ * `scrollIntoView({ block: "nearest" })`.
  */
 import { test, expect, type Page } from "../gateway-harness.js";
 import {
@@ -53,7 +53,7 @@ const createdSessionIds: string[] = [];
 const createdTeamGoalIds: string[] = [];
 const createdStaffIds: string[] = [];
 
-function treeKey(kind: "project-sessions" | "goal", id: string): string {
+function treeKey(kind: "project" | "project-sessions" | "goal", id: string): string {
 	return `sidebar-tree/v1/${kind}/${encodeURIComponent(id)}`;
 }
 
@@ -66,10 +66,14 @@ async function createChildGoal(projectId: string, parentGoalId: string, title: s
 	return (await resp.json()).id as string;
 }
 
-/** Seed a clean browser state before boot; optionally pre-store explicit
- *  expansion preferences (canonicalKey → "expanded" | "collapsed"). */
+/** Seed a clean browser state once before boot; optionally pre-store explicit
+ *  expansion preferences (canonicalKey → "expanded" | "collapsed"). The
+ *  session marker deliberately leaves persisted state untouched on reload. */
 async function seedBrowserState(page: Page, prefs: Record<string, "expanded" | "collapsed"> = {}): Promise<void> {
 	await page.addInitScript(({ treeStateKey, expansion }: { treeStateKey: string; expansion: Record<string, "expanded" | "collapsed"> }) => {
+		const seededKey = `${treeStateKey}:reveal-fixture-seeded`;
+		if (sessionStorage.getItem(seededKey) === "true") return;
+		sessionStorage.setItem(seededKey, "true");
 		localStorage.removeItem("bobbit-sidebar-collapsed");
 		localStorage.setItem("bobbit-show-archived", "false");
 		if (Object.keys(expansion).length > 0) {
@@ -91,12 +95,12 @@ function navRow(page: Page, navId: string) {
 	return page.locator(`[data-nav-id="${navId}"]`).first();
 }
 
-async function storedPreference(page: Page, canonicalKey: string): Promise<string | undefined> {
-	return page.evaluate(({ storageKey, canonicalKey }: { storageKey: string; canonicalKey: string }) => {
+async function storedExpansion(page: Page): Promise<Record<string, "expanded" | "collapsed">> {
+	return page.evaluate((storageKey: string) => {
 		const raw = localStorage.getItem(storageKey);
-		if (!raw) return undefined;
-		try { return JSON.parse(raw).expansion?.[canonicalKey]; } catch { return undefined; }
-	}, { storageKey: TREE_STATE_KEY, canonicalKey });
+		if (!raw) return {};
+		try { return JSON.parse(raw).expansion ?? {}; } catch { return {}; }
+	}, TREE_STATE_KEY);
 }
 
 type RowGeometry = {
@@ -290,29 +294,72 @@ test.describe("Sidebar reveal on nav", () => {
 		expect((await rowGeometry(page, lastNav)).scrollTop, "already-visible target must not move the sidebar scroll").toBe(scrollBefore);
 	});
 
-	test("ephemeral contract: off-path collapse is preserved, and an on-path explicit collapse is never overwritten", async ({ page }) => {
+	test("deep-link session overrides explicit ancestor collapses, persists the exact path, and preserves unrelated expansion", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 620 });
-		// Part A: explicitly collapse the (off-path) Sessions section AND the
-		// (on-path) parent goal, then deep-link to the sub-goal.
+		const projectKey = treeKey("project", fixture.projectId);
 		const sessionsKey = treeKey("project-sessions", fixture.projectId);
 		const parentGoalKey = treeKey("goal", fixture.parentGoalId);
-		await seedBrowserState(page, { [sessionsKey]: "collapsed" });
-		await openAppAtHash(page, `#/goal/${fixture.childGoalId}`);
-
-		// The sub-goal reveal expands the parent goal (on path) but must NOT
-		// touch the off-path Sessions section.
-		await expect(navRow(page, `goal:${fixture.childGoalId}`)).toBeVisible({ timeout: 15_000 });
-		await expect(navRow(page, `session:${fixture.standaloneSessionId}`), "off-path collapsed Sessions section stays collapsed").toBeHidden({ timeout: 10_000 });
-		expect(await storedPreference(page, sessionsKey), "off-path explicit collapse preserved").toBe("collapsed");
-
-		// Part B: explicitly collapse the parent goal (on path) and deep-link to
-		// the nested session. The reveal must NOT overwrite the explicit collapse,
-		// so the parent stays collapsed and the nested session row stays hidden.
-		await seedBrowserState(page, { [parentGoalKey]: "collapsed" });
+		const childGoalKey = treeKey("goal", fixture.childGoalId);
+		const expectedExpansion = {
+			[projectKey]: "expanded",
+			[sessionsKey]: "collapsed",
+			[parentGoalKey]: "expanded",
+			[childGoalKey]: "expanded",
+		} as const;
+		await seedBrowserState(page, {
+			[projectKey]: "collapsed",
+			[sessionsKey]: "collapsed",
+			[parentGoalKey]: "collapsed",
+			[childGoalKey]: "collapsed",
+		});
 		await openAppAtHash(page, `#/session/${fixture.nestedSessionId}`);
-		await expect(navRow(page, `goal:${fixture.parentGoalId}`)).toBeVisible({ timeout: 15_000 });
-		await expect(navRow(page, `session:${fixture.nestedSessionId}`), "on-path explicit collapse must keep the nested row hidden").toBeHidden({ timeout: 10_000 });
-		expect(await storedPreference(page, parentGoalKey), "on-path explicit collapse must not be overwritten").toBe("collapsed");
+
+		const sessionRow = navRow(page, `session:${fixture.nestedSessionId}`);
+		await expect(sessionRow, "deep-link must override every explicitly collapsed target ancestor").toBeVisible({ timeout: 15_000 });
+		await expect(sessionRow).toHaveAttribute("data-nav-active", "true", { timeout: 10_000 });
+		await expect(navRow(page, `session:${fixture.standaloneSessionId}`), "unrelated Sessions section stays collapsed").toBeHidden({ timeout: 10_000 });
+		await expect.poll(() => storedExpansion(page), { timeout: 10_000 }).toEqual(expectedExpansion);
+
+		await page.reload();
+		await expect(sessionRow, "persisted target path must survive reload").toBeVisible({ timeout: 20_000 });
+		await expect(sessionRow).toHaveAttribute("data-nav-active", "true", { timeout: 10_000 });
+		await expect(navRow(page, `session:${fixture.standaloneSessionId}`), "reload must not expand unrelated state").toBeHidden({ timeout: 10_000 });
+		expect(await storedExpansion(page)).toEqual(expectedExpansion);
+	});
+
+	test("in-app goal route overrides explicit ancestor collapses, persists the exact path, and preserves unrelated expansion", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 620 });
+		const projectKey = treeKey("project", fixture.projectId);
+		const sessionsKey = treeKey("project-sessions", fixture.projectId);
+		const parentGoalKey = treeKey("goal", fixture.parentGoalId);
+		const childGoalKey = treeKey("goal", fixture.childGoalId);
+		const expectedExpansion = {
+			[projectKey]: "expanded",
+			[sessionsKey]: "collapsed",
+			[parentGoalKey]: "expanded",
+			[childGoalKey]: "collapsed",
+		} as const;
+		await seedBrowserState(page, {
+			[projectKey]: "collapsed",
+			[sessionsKey]: "collapsed",
+			[parentGoalKey]: "collapsed",
+			[childGoalKey]: "collapsed",
+		});
+		await openApp(page);
+		await expect(navRow(page, `goal:${fixture.childGoalId}`), "target starts hidden behind explicit ancestor collapses").toBeHidden({ timeout: 15_000 });
+
+		await inAppNavigate(page, `#/goal/${fixture.childGoalId}`);
+		const childRow = navRow(page, `goal:${fixture.childGoalId}`);
+		await expect(childRow, "in-app navigation must override explicitly collapsed target ancestors").toBeVisible({ timeout: 15_000 });
+		await expect(navRow(page, `session:${fixture.nestedSessionId}`), "the target goal itself is not an ancestor and stays collapsed").toBeHidden({ timeout: 10_000 });
+		await expect(navRow(page, `session:${fixture.standaloneSessionId}`), "unrelated Sessions section stays collapsed").toBeHidden({ timeout: 10_000 });
+		await expect.poll(() => storedExpansion(page), { timeout: 10_000 }).toEqual(expectedExpansion);
+
+		await page.reload();
+		await expect(childRow, "persisted target path must survive reload").toBeVisible({ timeout: 20_000 });
+		await expect(navRow(page, `session:${fixture.nestedSessionId}`), "reload must retain the target goal's unrelated collapse").toBeHidden({ timeout: 10_000 });
+		await expect(navRow(page, `session:${fixture.standaloneSessionId}`), "reload must retain off-path collapse").toBeHidden({ timeout: 10_000 });
+		expect(await storedExpansion(page)).toEqual(expectedExpansion);
 	});
 
 	// Regression: team-lead sessions are `team-lead/<id>` tree nodes, not
@@ -337,13 +384,9 @@ test.describe("Sidebar reveal on nav", () => {
 	});
 
 	// Regression: staff sessions are excluded from the sidebar tree entirely and
-	// render only under the project-staff section (which defaults expanded), so
-	// there is NO tree node to look up. The project-staff section defaults
-	// expanded (per the ephemeral contract, the reveal must NOT rely on
-	// re-expanding an explicit collapse) so we instead force the staff row
-	// off-screen via overflow and assert the reveal SCROLLS it into view. Fails
-	// on current code (no node → attemptReveal never scrolls); passes after the
-	// staff-row fallback resolver locates the staff entry and reveals it.
+	// render only under the project-staff section, so there is NO tree node to
+	// look up. Force the staff row off-screen via overflow and assert the reveal
+	// scrolls it into view through the staff-row fallback resolver.
 	test("deep-link to a staff session scrolls the off-screen staff row into view", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 360 });
 		await seedBrowserState(page);

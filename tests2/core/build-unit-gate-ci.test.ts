@@ -100,6 +100,11 @@ describe("native CI qualification workflows", () => {
 
 		assert.ok(buildIndex >= 0, "workflow must build before qualification");
 		assert.ok(typeCheckIndex > buildIndex, "workflow must type-check after building");
+		assert.deepEqual(
+			steps[typeCheckIndex]?.env,
+			{ NODE_OPTIONS: "--max-old-space-size=4096" },
+			"type-checking must have enough heap for the complete tests2 program on native CI",
+		);
 		assert.equal(unitGates.length, 1, "workflow must run the unit suite once");
 		assert.equal(steps[typeCheckIndex + 1]?.name, "Unit gate", "unit gate must start immediately after type-checking");
 		assert.equal(unitGates[0]?.run, "npm run test:unit", "branch checks use the normal Vitest retry policy");
