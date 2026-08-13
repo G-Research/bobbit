@@ -120,9 +120,9 @@ function isTerminalOrArchived(session: GatewaySession | undefined): boolean {
 }
 
 function mergeSessionIntoCanonicalCache(session: GatewaySession): void {
-	const archived = session.archived === true || session.status === "archived";
-	const target = archived ? state.archivedSessions : state.gatewaySessions;
-	const other = archived ? state.gatewaySessions : state.archivedSessions;
+	const terminal = isTerminalOrArchived(session);
+	const target = terminal ? state.archivedSessions : state.gatewaySessions;
+	const other = terminal ? state.gatewaySessions : state.archivedSessions;
 	const index = target.findIndex(item => item.id === session.id);
 	if (index >= 0) target[index] = { ...target[index], ...session };
 	else target.push(session);
@@ -179,7 +179,9 @@ async function hydrateExplicitTarget(token: number, sessionId: string, view: Sid
 		]);
 		if (!explicitRevealIsCurrent(token, sessionId, view)) return false;
 	}
-	if (fetched) mergeSessionIntoCanonicalCache(fetched);
+	// Normalize the known target too: its exact endpoint may be temporarily
+	// unavailable even though the route's canonical cache still has placement.
+	mergeSessionIntoCanonicalCache(session);
 
 	// Walk only placement references. Missing parents/leads and goal ancestors
 	// are hydrated by their exact endpoints, then merged into the same caches.
@@ -198,6 +200,10 @@ async function hydrateExplicitTarget(token: number, sessionId: string, view: Sid
 				related = await fetchExactSession(relatedId) ?? undefined;
 				if (!explicitRevealIsCurrent(token, sessionId, view)) return false;
 				if (!related) continue;
+				mergeSessionIntoCanonicalCache(related);
+			} else if (isTerminalOrArchived(related)) {
+				// This queue walks stable ids rather than either cache array, so moving a
+				// terminal relationship record between caches cannot invalidate traversal.
 				mergeSessionIntoCanonicalCache(related);
 			}
 			for (const parentId of [related.parentSessionId, related.delegateOf, related.teamLeadSessionId]) {
