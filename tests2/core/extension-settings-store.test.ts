@@ -85,6 +85,54 @@ describe("extension settings store", () => {
 		expect(store.getTarget(ref)).toEqual({ values: { limit: 7 } });
 	});
 
+	it("keeps declared legacy secrets runtime-usable until one paired ownership mutation", () => {
+		const memFs = createMemFs();
+		const config = new ProjectConfigStore("/memfs/legacy-secret-config", memFs);
+		const secrets = new ExtensionSettingsSecretStore("/memfs/legacy-secret-state", memFs);
+		const store = new ExtensionSettingsStore(config, secrets);
+		const legacySecret = "legacy-runtime-credential";
+		const effective = store.getEffective(ref, { endpoint: "https://default.example" }, {
+			legacyValues: { endpoint: "https://legacy.example" },
+			legacySecrets: { credential: legacySecret },
+			secretFields: ["credential"],
+		});
+
+		expect(effective).toMatchObject({ hasProjectRecord: false, values: { endpoint: "https://legacy.example" }, secretSet: { credential: true } });
+		expect(JSON.stringify(effective)).not.toContain(legacySecret);
+		expect(store.getForRuntime(ref, { endpoint: "https://default.example" }, {
+			legacyValues: { endpoint: "https://legacy.example" },
+			legacySecrets: { credential: legacySecret },
+			secretFields: ["credential"],
+		})).toEqual({ endpoint: "https://legacy.example", credential: legacySecret });
+
+		store.compareAndSwap(ref, 0, {
+			legacyValues: { endpoint: "https://legacy.example" },
+			legacySecrets: { credential: legacySecret },
+			values: { endpoint: "https://project.example" },
+		});
+		expect(store.getTarget(ref)).toEqual({ values: { endpoint: "https://project.example" } });
+		expect(store.getForRuntime(ref, {}, { legacySecrets: { credential: "must-not-fallback" }, secretFields: ["credential"] }))
+			.toEqual({ endpoint: "https://project.example", credential: legacySecret });
+
+		store.compareAndSwap(ref, 1, { secrets: { credential: undefined } });
+		expect(store.getEffective(ref, {}, { legacySecrets: { credential: "must-not-fallback" }, secretFields: ["credential"] }))
+			.toMatchObject({ hasProjectRecord: true, secretSet: { credential: false } });
+		expect(store.getForRuntime(ref, {}, { legacySecrets: { credential: "must-not-fallback" }, secretFields: ["credential"] }))
+			.toEqual({ endpoint: "https://project.example" });
+
+		const clearStore = new ExtensionSettingsStore(
+			new ProjectConfigStore("/memfs/legacy-secret-clear-config", memFs),
+			new ExtensionSettingsSecretStore("/memfs/legacy-secret-clear-state", memFs),
+		);
+		clearStore.compareAndSwap(ref, 0, {
+			legacySecrets: { credential: legacySecret },
+			secrets: { credential: undefined },
+		});
+		expect(clearStore.getEffective(ref, {}, { legacySecrets: { credential: legacySecret }, secretFields: ["credential"] }))
+			.toMatchObject({ hasProjectRecord: true, secretSet: { credential: false } });
+		expect(clearStore.getForRuntime(ref, {}, { legacySecrets: { credential: legacySecret }, secretFields: ["credential"] })).toEqual({});
+	});
+
 	it("keeps credential bytes in the owner-only file and exposes only redacted public state", () => withTmpDir(configDir => {
 		const stateDir = path.join(configDir, "runtime-state");
 		const config = new ProjectConfigStore(configDir);

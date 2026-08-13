@@ -3039,18 +3039,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		try {
 			const store = context.extensionSettingsStore;
 			const hasProjectRecord = store.hasTargetRecord(ref);
-			const legacyValues = !hasProjectRecord ? readLegacyProviderValues(ref) : undefined;
+			const fields = (contribution as { settingsSchema?: { fields?: ExtensionSettingDefinition[] } }).settingsSchema?.fields ?? [];
+			const legacy = !hasProjectRecord ? readDeclaredLegacyProviderSettings(ref, fields) : undefined;
 			// Hindsight has typed EP-7 defaults even before an override exists. Other
-			// providers preserve the existing absent-state fallback when no legacy
-			// snapshot exists, while any present legacy snapshot is projected here.
+			// providers preserve the existing absent-state fallback when no declared
+			// legacy snapshot exists, while any declared snapshot is projected here.
 			const canonicalHindsightProvider = packId === "hindsight" && kind === "provider" && id === "memory";
-			if (!canonicalHindsightProvider && !hasProjectRecord && legacyValues === undefined) return { state: "absent" as const };
-			const schema = kind === "provider" ? (contribution as any).configSchema : contribution.config;
-			const secretFields = Object.entries(schema ?? {})
-				.filter(([, descriptor]) => !!descriptor && typeof descriptor === "object" && (descriptor as { type?: unknown }).type === "secret")
-				.map(([key]) => key);
+			if (!canonicalHindsightProvider && !hasProjectRecord && legacy === undefined) return { state: "absent" as const };
+			const secretFields = fields.filter(field => field.type === "secret").map(field => field.key);
 			const defaults = kind === "provider" ? ((contribution as any).config ?? {}) : {};
-			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: store.getForRuntime(ref, defaults, { legacyValues, secretFields }) };
+			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: store.getForRuntime(ref, defaults, { legacyValues: legacy?.values, legacySecrets: legacy?.secrets, secretFields }) };
 		} catch {
 			return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
 		}
@@ -5354,16 +5352,26 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 }
 
 /**
- * Read the old pack-scoped provider configuration once at the EP-7 boundary.
- * A value is inherited only until EP-7 creates its project-owned target row.
+ * Read the old pack-scoped provider configuration at the EP-7 boundary. Only
+ * fields still declared by the target participate: retired and unknown keys
+ * cannot enter a runtime, public projection, project.yaml, or secret owner.
  */
-function readLegacyProviderValues(ref: ExtensionSettingsTargetRef): Record<string, ExtensionSettingValue> | undefined {
+function readDeclaredLegacyProviderSettings(
+	ref: ExtensionSettingsTargetRef,
+	fields: readonly ExtensionSettingDefinition[],
+): { values: Record<string, ExtensionSettingValue>; secrets: Record<string, string> } | undefined {
 	if (ref.kind !== "provider") return undefined;
 	const legacy = getPackStore().readSync<Record<string, unknown>>(ref.packId, providerConfigStoreKey(ref.id));
 	if (legacy.state !== "present" || !legacy.value || typeof legacy.value !== "object" || Array.isArray(legacy.value)) return undefined;
-	return Object.fromEntries(Object.entries(legacy.value).filter(([, value]) =>
-		typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value),
-	)) as Record<string, ExtensionSettingValue>;
+	const values: Record<string, ExtensionSettingValue> = {};
+	const secrets: Record<string, string> = {};
+	for (const field of fields) {
+		const value = legacy.value[field.key];
+		if (value === undefined || !isValidExtensionSettingValue(field, value)) continue;
+		if (field.type === "secret" && typeof value === "string") secrets[field.key] = value;
+		else if (field.type !== "secret") values[field.key] = value;
+	}
+	return Object.keys(values).length > 0 || Object.keys(secrets).length > 0 ? { values, secrets } : undefined;
 }
 
 type ExtensionSettingsRuntimeLookup = (
@@ -5469,15 +5477,11 @@ async function handleApiRoute(
 		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
 		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
 	]);
-	// Legacy config predates EP-7's write-only secret owner. Retain only public
-	// fields when transferring its snapshot into project.yaml.
-	const publicLegacyProviderValues = (target: SettingsTarget): Record<string, ExtensionSettingValue> | undefined => {
-		if (target.ref.kind !== "provider") return undefined;
-		const legacyValues = readLegacyProviderValues(target.ref);
-		if (legacyValues === undefined) return undefined;
-		const secretFields = new Set(target.fields.filter(field => field.type === "secret").map(field => field.key));
-		return Object.fromEntries(Object.entries(legacyValues).filter(([field]) => !secretFields.has(field)));
-	};
+	// Legacy configuration remains usable only until a target becomes project
+	// owned. This single declaration-aware reader prevents retired and unknown
+	// keys from being projected, persisted, or offered to the runtime.
+	const declaredLegacyProviderSettings = (target: SettingsTarget) =>
+		target.ref.kind !== "provider" ? undefined : readDeclaredLegacyProviderSettings(target.ref, target.fields);
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -5666,8 +5670,8 @@ async function handleApiRoute(
 		const targets = settingsTargets(projectId).map(target => {
 			const secretFields = target.fields.filter(field => field.type === "secret").map(field => field.key);
 			const defaults = Object.fromEntries(target.fields.filter(field => field.default !== undefined).map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>;
-			const legacyValues = !store.hasTargetRecord(target.ref) ? readLegacyProviderValues(target.ref) : undefined;
-			const effective = store.getEffective(target.ref, defaults, { legacyValues, secretFields });
+			const legacy = !store.hasTargetRecord(target.ref) ? declaredLegacyProviderSettings(target) : undefined;
+			const effective = store.getEffective(target.ref, defaults, { legacyValues: legacy?.values, legacySecrets: legacy?.secrets, secretFields });
 			const missing = target.requiresConfig.filter(key => {
 				if (secretFields.includes(key)) return !effective.secretSet[key];
 				const value = effective.values[key];
@@ -9883,8 +9887,8 @@ async function handleApiRoute(
 				if (!isValidExtensionSettingValue(field, value)) { json({ error: "Invalid extension settings field value", code: "EXTENSION_SETTINGS_INVALID_FIELD_VALUE" }, 422); return; }
 				if (field.type === "secret") secrets[key] = value as string; else publicValues[key] = value as ExtensionSettingValue;
 			}
-			const legacyValues = !context.extensionSettingsStore.hasTargetRecord(ref)
-				? publicLegacyProviderValues(target)
+			const legacy = !context.extensionSettingsStore.hasTargetRecord(ref)
+				? declaredLegacyProviderSettings(target)
 				: undefined;
 			try {
 				// Settings targets are resolved from the installed-pack catalogue above,
@@ -9895,7 +9899,7 @@ async function handleApiRoute(
 						resolved.projectId,
 						{
 							...(Object.fromEntries(target.fields.filter(field => field.default !== undefined).map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>),
-							...legacyValues,
+							...legacy?.values,
 						},
 						publicValues,
 					)
@@ -9908,7 +9912,8 @@ async function handleApiRoute(
 					...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}),
 					...(Object.keys(publicValues).length ? { values: publicValues } : {}),
 					...(Object.keys(secrets).length ? { secrets } : {}),
-					...(legacyValues !== undefined ? { legacyValues } : {}),
+					...(legacy?.values !== undefined ? { legacyValues: legacy.values } : {}),
+					...(legacy?.secrets !== undefined ? { legacySecrets: legacy.secrets } : {}),
 				});
 				emitMutation(result, [ref], hindsightValidation?.ok ? hindsightValidation.warnings : []);
 			} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
@@ -9924,13 +9929,14 @@ async function handleApiRoute(
 		try {
 			const refs = packTargets.map(target => target.ref);
 			const result = context.extensionSettingsStore.compareAndSwapMany(packTargets.map(target => {
-				const legacyValues = !context.extensionSettingsStore.hasTargetRecord(target.ref)
-					? publicLegacyProviderValues(target)
+				const legacy = !context.extensionSettingsStore.hasTargetRecord(target.ref)
+					? declaredLegacyProviderSettings(target)
 					: undefined;
 				return {
 					ref: target.ref,
 					enabled: input.enabled as boolean,
-					...(legacyValues !== undefined ? { legacyValues } : {}),
+					...(legacy?.values !== undefined ? { legacyValues: legacy.values } : {}),
+					...(legacy?.secrets !== undefined ? { legacySecrets: legacy.secrets } : {}),
 				};
 			}), input.expectedRevision);
 			emitMutation(result, refs);
