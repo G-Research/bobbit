@@ -14,7 +14,9 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
+	createGoal,
 	createSession,
+	deleteGoal,
 	deleteSession,
 	connectWs,
 	WsConnection,
@@ -190,6 +192,65 @@ test("cost_update hydration preserves the complete manager-owned usage projectio
 		ws?.close();
 		manager.getSessionCostUpdate = getCostUpdate;
 		manager.withSessionCostInState = withCostInState;
+		await deleteSession(targetSessionId).catch(() => {});
+	}
+});
+
+test("session and task cost REST snapshots use the public usage projection", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	let goalId: string | undefined;
+	try {
+		const session = gateway.sessionManager.getSession(targetSessionId);
+		if (!session?.projectId) throw new Error("Test session has no project");
+		gateway.sessionManager.getCostTracker(session.projectId).recordAuthoritativeUsage(targetSessionId, {
+			sourceResultId: `rest-public-projection-${targetSessionId}`,
+			costBasis: "subscription-notional",
+			total: { inputTokens: 500, outputTokens: 125, cacheReadTokens: 250, cacheWriteTokens: 75, notionalCostUsd: 0.0125 },
+			modelUsage: {
+				"claude-agent-sdk/claude-sonnet-4-6": {
+					inputTokens: 500, outputTokens: 125, cacheReadTokens: 250, cacheWriteTokens: 75,
+					notionalCostUsd: 0.0125, contextTokens: 875, contextWindow: 200_000,
+				},
+			},
+		});
+
+		const sessionResponse = await apiFetch(`/api/sessions/${targetSessionId}/cost`);
+		expect(sessionResponse.status).toBe(200);
+		const sessionCost = await sessionResponse.json();
+		expect(sessionCost).toMatchObject({
+			inputTokens: 500,
+			totalCost: null,
+			notionalCostUsd: 0.0125,
+			costBasis: "subscription-notional",
+		});
+		expect(sessionCost).not.toHaveProperty("appliedSourceResultIds");
+
+		const goal = await createGoal({ title: "Public task cost projection" });
+		goalId = goal.id;
+		const taskResponse = await apiFetch(`/api/goals/${goalId}/tasks`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Expose public cost", type: "implementation" }),
+		});
+		expect(taskResponse.status).toBe(201);
+		const task = await taskResponse.json();
+		const assignResponse = await apiFetch(`/api/tasks/${task.id}/assign`, {
+			method: "POST",
+			body: JSON.stringify({ sessionId: targetSessionId }),
+		});
+		expect(assignResponse.status).toBe(200);
+
+		const taskCostResponse = await apiFetch(`/api/tasks/${task.id}/cost`);
+		expect(taskCostResponse.status).toBe(200);
+		const taskCost = await taskCostResponse.json();
+		expect(taskCost).toMatchObject({
+			inputTokens: 500,
+			totalCost: null,
+			notionalCostUsd: 0.0125,
+			costBasis: "subscription-notional",
+		});
+		expect(taskCost).not.toHaveProperty("appliedSourceResultIds");
+	} finally {
+		if (goalId) await deleteGoal(goalId).catch(() => {});
 		await deleteSession(targetSessionId).catch(() => {});
 	}
 });

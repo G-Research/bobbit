@@ -16582,7 +16582,7 @@ async function handleApiRoute(
 			json({ error: "Session not found or has no project" }, 404);
 			return;
 		}
-		const cost = sessionManager.getCostTracker(sessionForCost.projectId).getSessionCost(id);
+		const cost = sessionManager.getSessionCost(id);
 		if (!cost) {
 			json({ error: "No cost data for this session" }, 404);
 			return;
@@ -16678,7 +16678,7 @@ async function handleApiRoute(
 			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
-		const cost = sessionManager.getCostTracker(taskSession.projectId).getSessionCost(task.assignedSessionId);
+		const cost = sessionManager.getSessionCost(task.assignedSessionId);
 		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 		return;
 	}
