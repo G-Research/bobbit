@@ -14,7 +14,10 @@ export const SIDEBAR_TREE_STATE_STORAGE_KEY = "bobbit-sidebar-tree-state:v1";
 interface SidebarTreeExpansionStateV1 {
 	version: 1;
 	expansion: Record<string, SidebarTreePreference>;
+	explicitRevealDepthByProject?: Record<string, number>;
 }
+
+const MAX_EXPLICIT_REVEAL_DEPTH = 100;
 
 const LEGACY_EXPANDED_PROJECTS_KEY = "bobbit-expanded-projects";
 const LEGACY_EXPANDED_GOALS_KEY = "bobbit-expanded-goals";
@@ -26,6 +29,7 @@ const LEGACY_COLLAPSED_FIRST_CLASS_PARENTS_KEY = "bobbit-collapsed-first-class-p
 const LEGACY_EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
 
 const expansionPreferences = new Map<string, SidebarTreePreference>();
+const explicitRevealDepthByProject = new Map<string, number>();
 
 let hasLoadedState = false;
 
@@ -33,15 +37,34 @@ function isPreference(value: unknown): value is SidebarTreePreference {
 	return value === "expanded" || value === "collapsed";
 }
 
+function isExplicitRevealDepth(value: unknown): value is number {
+	return typeof value === "number"
+		&& Number.isFinite(value)
+		&& Number.isInteger(value)
+		&& value > 0
+		&& value <= MAX_EXPLICIT_REVEAL_DEPTH;
+}
+
 function parseStoredState(value: unknown): SidebarTreeExpansionStateV1 | undefined {
 	if (!value || typeof value !== "object") return undefined;
-	const candidate = value as { version?: unknown; expansion?: unknown };
+	const candidate = value as { version?: unknown; expansion?: unknown; explicitRevealDepthByProject?: unknown };
 	if (candidate.version !== 1 || !candidate.expansion || typeof candidate.expansion !== "object" || Array.isArray(candidate.expansion)) return undefined;
 	const expansion: Record<string, SidebarTreePreference> = {};
 	for (const [key, preference] of Object.entries(candidate.expansion as Record<string, unknown>)) {
 		if (isPreference(preference) && parseSidebarTreeKey(key)) expansion[key] = preference;
 	}
-	return { version: 1, expansion };
+	const explicitRevealDepthByProject: Record<string, number> = {};
+	const storedDepths = candidate.explicitRevealDepthByProject;
+	if (storedDepths && typeof storedDepths === "object" && !Array.isArray(storedDepths)) {
+		for (const [projectId, depth] of Object.entries(storedDepths as Record<string, unknown>)) {
+			if (projectId.length > 0 && isExplicitRevealDepth(depth)) explicitRevealDepthByProject[projectId] = depth;
+		}
+	}
+	return {
+		version: 1,
+		expansion,
+		...(Object.keys(explicitRevealDepthByProject).length > 0 ? { explicitRevealDepthByProject } : {}),
+	};
 }
 
 function readStoredState(): SidebarTreeExpansionStateV1 | undefined {
@@ -100,7 +123,13 @@ function migrateLegacyState(): boolean {
 
 function persistSidebarTreeState(): void {
 	const expansion = Object.fromEntries([...expansionPreferences.entries()].sort(([a], [b]) => a.localeCompare(b)));
-	safeSetItem(SIDEBAR_TREE_STATE_STORAGE_KEY, JSON.stringify({ version: 1, expansion } satisfies SidebarTreeExpansionStateV1));
+	const storedDepths = Object.fromEntries([...explicitRevealDepthByProject.entries()].sort(([a], [b]) => a.localeCompare(b)));
+	const stored: SidebarTreeExpansionStateV1 = {
+		version: 1,
+		expansion,
+		...(explicitRevealDepthByProject.size > 0 ? { explicitRevealDepthByProject: storedDepths } : {}),
+	};
+	safeSetItem(SIDEBAR_TREE_STATE_STORAGE_KEY, JSON.stringify(stored));
 }
 
 function loadSidebarTreeState(): void {
@@ -111,6 +140,9 @@ function loadSidebarTreeState(): void {
 	if (stored) {
 		for (const [key, preference] of Object.entries(stored.expansion)) {
 			expansionPreferences.set(key, preference);
+		}
+		for (const [projectId, depth] of Object.entries(stored.explicitRevealDepthByProject ?? {})) {
+			explicitRevealDepthByProject.set(projectId, depth);
 		}
 	}
 
@@ -174,6 +206,19 @@ export function collapseSidebarTreeNode(key: SidebarTreeNodeKey): void {
 export function clearSidebarTreePreference(key: SidebarTreeNodeKey): void {
 	if (!expansionPreferences.delete(preferenceKey(key))) return;
 	persistSidebarTreeState();
+}
+
+export function getSidebarExplicitRevealDepth(projectId: string): number | undefined {
+	return explicitRevealDepthByProject.get(projectId);
+}
+
+export function setSidebarExplicitRevealDepth(projectId: string, depth: number): boolean {
+	if (!projectId || !isExplicitRevealDepth(depth)) return false;
+	const current = explicitRevealDepthByProject.get(projectId);
+	if (current !== undefined && current >= depth) return false;
+	explicitRevealDepthByProject.set(projectId, depth);
+	persistSidebarTreeState();
+	return true;
 }
 
 export function sidebarTreeExpansionInput(): SidebarTreeExpansionInput {
