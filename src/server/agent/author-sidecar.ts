@@ -57,6 +57,13 @@ export interface PromptAuthorSettlementRecord {
 
 export type AuthorSidecarRecord = PromptAuthorDispatchRecord | PromptAuthorSettlementRecord;
 
+/** Non-serialized append evidence used only to break equal lifecycle timestamps. */
+const PROMPT_AUTHOR_LIFECYCLE_ORDER = Symbol("prompt-author-lifecycle-order");
+
+type OrderedPromptAuthorBinding = PromptAuthorBinding & {
+	[PROMPT_AUTHOR_LIFECYCLE_ORDER]?: number;
+};
+
 /** Callers still provide exact prompt text in memory; append immediately hashes it. */
 export interface PromptAuthorDispatchInput {
 	schemaVersion?: 1 | 2;
@@ -756,6 +763,48 @@ export function appendPromptAuthorSettlement(
 }
 
 /**
+ * Compare sidecar lifecycle evidence for one occurrence. Modern attempts are
+ * ordered by their dispatch epoch, never by accepted-message time. Settlement
+ * time and append order break ties so a synthetic terminal attempt cannot be
+ * shadowed by an older dispatch whose accepted timestamp happens to be later.
+ * Legacy bindings retain their historical dispatchedAt ordering.
+ */
+export function comparePromptAuthorLifecycleEvidence(
+	left: PromptAuthorBinding,
+	right: PromptAuthorBinding,
+): number {
+	const leftModern = left.intentId !== undefined || left.attemptId !== undefined || left.dispatchEpoch !== undefined;
+	const rightModern = right.intentId !== undefined || right.attemptId !== undefined || right.dispatchEpoch !== undefined;
+	if (leftModern && rightModern) {
+		const epoch = (left.dispatchEpoch ?? -1) - (right.dispatchEpoch ?? -1);
+		if (epoch !== 0) return epoch;
+		const lifecycle = (left.settlement?.settledAt ?? left.dispatchEpoch ?? left.dispatchedAt)
+			- (right.settlement?.settledAt ?? right.dispatchEpoch ?? right.dispatchedAt);
+		if (lifecycle !== 0) return lifecycle;
+	} else {
+		const dispatched = left.dispatchedAt - right.dispatchedAt;
+		if (dispatched !== 0) return dispatched;
+		const settled = (left.settlement?.settledAt ?? -1) - (right.settlement?.settledAt ?? -1);
+		if (settled !== 0) return settled;
+	}
+	return ((left as OrderedPromptAuthorBinding)[PROMPT_AUTHOR_LIFECYCLE_ORDER] ?? -1)
+		- ((right as OrderedPromptAuthorBinding)[PROMPT_AUTHOR_LIFECYCLE_ORDER] ?? -1);
+}
+
+/** Select the newest lifecycle row using the one canonical evidence ordering. */
+export function selectLatestPromptAuthorBinding(
+	bindings: readonly PromptAuthorBinding[],
+	predicate: (binding: PromptAuthorBinding) => boolean,
+): PromptAuthorBinding | undefined {
+	let latest: PromptAuthorBinding | undefined;
+	for (const binding of bindings) {
+		if (!predicate(binding)) continue;
+		if (!latest || comparePromptAuthorLifecycleEvidence(latest, binding) <= 0) latest = binding;
+	}
+	return latest;
+}
+
+/**
  * Fold sidecar evidence by attempt when present. Legacy prompt-id redispatches
  * retain their historical latest-wins behavior, while modern stale settlements
  * can no longer settle a replacement attempt for the same accepted intent.
@@ -763,10 +812,17 @@ export function appendPromptAuthorSettlement(
 export function foldAuthorSidecarRecords(records: AuthorSidecarRecord[]): PromptAuthorBinding[] {
 	const bindings = new Map<string, PromptAuthorBinding>();
 	const latestKeyByPromptId = new Map<string, string>();
-	for (const record of records) {
+	for (let recordIndex = 0; recordIndex < records.length; recordIndex += 1) {
+		const record = records[recordIndex];
 		if (isDispatchRecord(record)) {
 			const key = record.attemptId ? `attempt:${record.attemptId}` : `prompt:${record.promptId}`;
-			bindings.set(key, { ...record });
+			const binding: OrderedPromptAuthorBinding = { ...record };
+			Object.defineProperty(binding, PROMPT_AUTHOR_LIFECYCLE_ORDER, {
+				value: recordIndex,
+				writable: true,
+				configurable: true,
+			});
+			bindings.set(key, binding);
 			latestKeyByPromptId.set(record.promptId, key);
 			continue;
 		}
@@ -775,13 +831,14 @@ export function foldAuthorSidecarRecords(records: AuthorSidecarRecord[]): Prompt
 			? `attempt:${record.attemptId}`
 			: latestKeyByPromptId.get(record.promptId);
 		if (!key) continue;
-		const binding = bindings.get(key);
+		const binding = bindings.get(key) as OrderedPromptAuthorBinding | undefined;
 		if (!binding) continue;
 		// When both sides carry occurrence identity, contradictory evidence fails closed.
 		if (record.intentId && binding.intentId && record.intentId !== binding.intentId) continue;
 		binding.settlement = record;
+		binding[PROMPT_AUTHOR_LIFECYCLE_ORDER] = recordIndex;
 	}
-	return [...bindings.values()].sort((left, right) => left.dispatchedAt - right.dispatchedAt);
+	return [...bindings.values()].sort(comparePromptAuthorLifecycleEvidence);
 }
 
 /** Missing, corrupt, partial, and future-version sidecars safely read as absent rows. */
