@@ -130,28 +130,65 @@ describe("selectSidebarStatusSections", () => {
 		assert.deepEqual(ids(afterHiddenActivityChurn.unread), ["active-new", "active-old"], "hidden timestamps must not reorder shimmer-only rows");
 	});
 
-	it("applies Archived, teams, Busy, and Read gates with only Busy/Read active exemptions", () => {
+	it("keeps categorical archive/team filters active for the open row until an explicit reveal", () => {
 		const candidates = [
-			candidate("archived-active", { server_tags: ["read-state=unread"] }, true),
-			candidate("member-active", { server_tags: ["team-kind=member", "read-state=unread"] }),
-			candidate("busy", { server_tags: ["activity-state=busy", "read-state=unread"] }),
-			candidate("read", { server_tags: ["read-state=read"] }),
-			candidate("busy-read", { status: "streaming", server_tags: ["activity-state=busy", "read-state=read"] }),
-			candidate("unread", { server_tags: ["read-state=unread"] }),
+			candidate("active-archived-team", {
+				server_tags: ["team-kind=member", "activity-state=busy", "read-state=read"],
+			}, true),
+			candidate("active-live", {
+				server_tags: ["activity-state=busy", "read-state=read"],
+			}),
+			candidate("unread-visible", { server_tags: ["read-state=unread"] }),
 		];
-		const sections = select(candidates, {
-			activeSessionId: "member-active",
+
+		const categoricallyHidden = select(candidates, {
+			activeSessionId: "active-archived-team",
 			filters: { showArchived: false, showTeams: false, showBusy: false, showRead: false },
 		});
-		assert.deepEqual(ids(sections.unread), ["unread"]);
-		assert.deepEqual(ids(sections.read), []);
-		assert.deepEqual(ids(sections.pinned), []);
+		assert.deepEqual(ids(categoricallyHidden.unread), ["unread-visible"]);
+		assert.deepEqual(ids(categoricallyHidden.read), []);
 
-		const busyReadVisible = select(candidates, {
+		const busyReadExempt = select(candidates, {
+			activeSessionId: "active-live",
+			filters: { showArchived: false, showTeams: false, showBusy: false, showRead: false },
+		});
+		assert.deepEqual(ids(busyReadExempt.read), ["active-live"], "Busy/Read retain the established active-row exemption");
+	});
+
+	it("admits only the exact action-scoped reveal target through archive/team gates", () => {
+		const candidates = [
+			candidate("target", {
+				server_tags: ["team-kind=member", "activity-state=busy", "read-state=read"],
+			}, true),
+			candidate("archived-other", { server_tags: ["read-state=unread"] }, true),
+			candidate("member-other", { server_tags: ["team-kind=member", "read-state=unread"] }),
+			candidate("unread-visible", { server_tags: ["read-state=unread"] }),
+		];
+		const sections = select(candidates, {
+			activeSessionId: "target",
+			revealSessionId: "target",
+			filters: { showArchived: false, showTeams: false, showBusy: false, showRead: false },
+		} as Partial<Parameters<typeof selectSidebarStatusSections>[0]>);
+
+		assert.deepEqual(ids(sections.unread), ["unread-visible"]);
+		assert.deepEqual(ids(sections.read), ["target"]);
+		assert.deepEqual(ids(sections.pinned), []);
+		assert.equal(
+			[...sections.pinned, ...sections.unread, ...sections.read].some(value => value.session.id.endsWith("-other")),
+			false,
+			"the categorical exception must neither follow activeSessionId alone nor include unrelated rows",
+		);
+	});
+
+	it("does not apply the read filter to active-work states", () => {
+		const sections = select([
+			candidate("busy-read", { status: "streaming", server_tags: ["activity-state=busy", "read-state=read"] }),
+			candidate("read", { server_tags: ["read-state=read"] }),
+		], {
 			filters: { showArchived: false, showTeams: true, showBusy: true, showRead: false },
 		});
-		assert.equal(ids(busyReadVisible.read).includes("busy-read"), true, "active-work states are not read-filterable");
-		assert.equal(ids(busyReadVisible.read).includes("read"), false);
+		assert.equal(ids(sections.read).includes("busy-read"), true, "active-work states are not read-filterable");
+		assert.equal(ids(sections.read).includes("read"), false);
 	});
 
 	it("uses production read-filterability for archived and terminal records", () => {

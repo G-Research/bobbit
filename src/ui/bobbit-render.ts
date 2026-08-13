@@ -185,6 +185,8 @@ export interface IdleBlobOptions {
 	size?: number;
 	hueIndex?: number;
 	phaseIndex?: number;
+	/** Keep sprite pixels visible when they animate beyond the preview box. */
+	clip?: boolean;
 }
 
 // ============================================================================
@@ -638,7 +640,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
  * Only the sprite body is canvas-rendered; accessories use CSS box-shadow.
  */
 export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
-	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
+	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0, clip = true } = opts;
 	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
 	const naturalSize = 76;
 	const s = size / naturalSize;
@@ -662,7 +664,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 
 	return html`
 		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
-			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
+			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:${clip ? "hidden" : "visible"};transform:scale(${s.toFixed(3)});transform-origin:top left;">
 				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-idle-phase:${idlePhaseSec.toFixed(2)}s;">
 					<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>
 					<div class="bobbit-blob__crown"></div>

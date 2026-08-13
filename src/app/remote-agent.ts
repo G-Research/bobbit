@@ -786,8 +786,8 @@ export class RemoteAgent {
 	/** Callback fired when the server-side prompt queue changes. */
 	onQueueUpdate?: (queue: QueuedMessage[]) => void;
 	/** Callback fired when background process state changes. */
-	/** Callback fired when goal setup status changes (worktree ready or failed). */
-	onGoalSetupEvent?: () => void;
+	/** Callback fired when the shared goal worktree setup lifecycle changes. */
+	onGoalSetupEvent?: (goalId?: string) => void;
 	/** Callback fired when compaction state changes (start/end). */
 	onCompactionChange?: (isCompacting: boolean) => void;
 	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; terminalReason?: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null; spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string } | null; endTime?: number | null; process?: any }) => void;
@@ -2499,9 +2499,12 @@ export class RemoteAgent {
 				if ((msg as any).workspace) applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
 				break;
 
+			case "goal_setup_started":
+			case "goal_setup_preparing":
+			case "goal_setup_retrying":
 			case "goal_setup_complete":
 			case "goal_setup_error":
-				this.onGoalSetupEvent?.();
+				this.onGoalSetupEvent?.(typeof (msg as any).goalId === "string" ? (msg as any).goalId : undefined);
 				break;
 
 			case "goal_state_changed":

@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, ChevronDown, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, Mail, MailOpen, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, Crosshair, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, Mail, MailOpen, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -49,6 +49,8 @@ import {
 	setFirstClassParentExpanded,
 	setArchivedParentExpanded,
 	sidebarTreeExpansionInput,
+	getSidebarExplicitRevealDepth,
+	setSidebarExplicitRevealDepth,
 } from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
 import { collectEligibleStatusSessions, selectSidebarStatusSections, type SidebarStatusSections, type StatusCandidate } from "./sidebar-status.js";
@@ -1127,11 +1129,11 @@ export function handleSidebarSearchInput(query: string): void {
 	renderApp();
 }
 
-export function handleSidebarSearchClear(): void {
+export function handleSidebarSearchClear(shouldRender = true): void {
 	state.searchQuery = "";
 	clearArchivedSearchState();
 	_clearArchivedSearchDemand();
-	renderApp();
+	if (shouldRender) renderApp();
 }
 
 export function renderArchivedSearchControls(): TemplateResult | string {
@@ -1487,7 +1489,9 @@ function nestedGoalChildren(node: GoalTreeNode, archived: boolean): GoalTreeNode
 
 /** Render the collapsible per-project Archived subsection (desktop variant). */
 function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
-	if (!(state.showArchived || state.archivedSearchDemand) || !projectTree.archivedSectionNode) return "";
+	// The canonical model only creates this section when archived content is
+	// eligible. That includes the exact target of an explicit reveal action.
+	if (!projectTree.archivedSectionNode) return "";
 	const project = projectTree.project as Project;
 	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
@@ -1526,23 +1530,112 @@ function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 
 /**
  * Per-project key for the "Show N more child goals" expansion state.
- * When the user clicks the truncation row, we bump the depth cap by 5 to
- * surface the next layer of nesting. Persists in module memory for the
- * lifetime of the SPA — losing this on reload is fine, the cap default of
- * 5 is the documented limit anyway.
+ * Ordinary truncation-row expansion remains in memory; only the depth needed
+ * by an explicit session reveal is durable in the unified tree-state record.
  */
 const _expandedNestedDepthByProject: Map<string, number> = new Map();
 const DEFAULT_NESTED_DEPTH_CAP = 5;
 const NESTED_DEPTH_INCREMENT = 5;
 
 function _getNestedDepthCap(projectId: string): number {
-	return _expandedNestedDepthByProject.get(projectId) ?? DEFAULT_NESTED_DEPTH_CAP;
+	return Math.max(
+		DEFAULT_NESTED_DEPTH_CAP,
+		_expandedNestedDepthByProject.get(projectId) ?? 0,
+		getSidebarExplicitRevealDepth(projectId) ?? 0,
+	);
 }
 
 function _expandNestedDepth(projectId: string): void {
 	const cur = _getNestedDepthCap(projectId);
 	_expandedNestedDepthByProject.set(projectId, cur + NESTED_DEPTH_INCREMENT);
 	renderApp();
+}
+
+/**
+ * Materialize the hydrated goal ancestry for one explicit session reveal.
+ * This only raises the existing cap for the target's canonical project and
+ * leaves automatic route reveals and every unrelated project unchanged.
+ */
+export function materializeExplicitSidebarSessionDepth(sessionId: string): boolean {
+	const sessionsById = new Map(state.archivedSessions.map(session => [session.id, session]));
+	for (const session of state.gatewaySessions) sessionsById.set(session.id, session);
+	const target = sessionsById.get(sessionId);
+	if (!target) return false;
+
+	const goalsById = new Map(state.goals.map(goal => [goal.id, goal]));
+	const projectIds = new Set(state.projects.map(project => project.id));
+	const fallbackProjectId = state.projects[0]?.id;
+	const resolveGoalProjectId = (goalId: string): string | undefined => {
+		let goal = goalsById.get(goalId);
+		let resolved: string | undefined;
+		const seen = new Set<string>();
+		while (goal && !seen.has(goal.id)) {
+			seen.add(goal.id);
+			if (goal.projectId) {
+				if (!projectIds.has(goal.projectId)) return undefined;
+				resolved ??= goal.projectId;
+			}
+			goal = goal.parentGoalId ? goalsById.get(goal.parentGoalId) : undefined;
+		}
+		return resolved ?? fallbackProjectId;
+	};
+
+	// Placement can be inherited through a delegate/team/child parent, so walk
+	// those canonical references only. Hydration has already loaded this chain.
+	const relatedGoalIds: string[] = [];
+	const seenGoalIds = new Set<string>();
+	const sessionQueue = [sessionId];
+	const seenSessionIds = new Set<string>();
+	while (sessionQueue.length > 0) {
+		const relatedId = sessionQueue.shift()!;
+		if (seenSessionIds.has(relatedId)) continue;
+		seenSessionIds.add(relatedId);
+		const session = sessionsById.get(relatedId);
+		if (!session) continue;
+		for (const goalId of [session.goalId, session.teamGoalId]) {
+			if (goalId && !seenGoalIds.has(goalId)) {
+				seenGoalIds.add(goalId);
+				relatedGoalIds.push(goalId);
+			}
+		}
+		for (const parentId of [session.parentSessionId, session.delegateOf, session.teamLeadSessionId]) {
+			if (parentId && !seenSessionIds.has(parentId)) sessionQueue.push(parentId);
+		}
+	}
+	if (relatedGoalIds.length === 0) return false;
+
+	const preferredProjectId = projectIds.has(target.projectId ?? "")
+		? target.projectId
+		: relatedGoalIds.map(resolveGoalProjectId).find((id): id is string => Boolean(id));
+	if (!preferredProjectId) return false;
+
+	let requiredDepth = 0;
+	for (const goalId of relatedGoalIds) {
+		if (resolveGoalProjectId(goalId) !== preferredProjectId) continue;
+		let cursor = goalsById.get(goalId);
+		let depth = 0;
+		const seen = new Set<string>();
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			if (!cursor.parentGoalId) break;
+			const parent = goalsById.get(cursor.parentGoalId);
+			if (!parent || resolveGoalProjectId(parent.id) !== preferredProjectId) break;
+			depth++;
+			cursor = parent;
+		}
+		requiredDepth = Math.max(requiredDepth, depth);
+	}
+
+	// Persist only the target path's required bucket. A larger in-memory cap may
+	// have come from ordinary Show More clicks and must not become durable merely
+	// because the explicit target happens to fit within it.
+	let explicitCap = Math.max(
+		DEFAULT_NESTED_DEPTH_CAP,
+		getSidebarExplicitRevealDepth(preferredProjectId) ?? 0,
+	);
+	if (requiredDepth <= explicitCap) return false;
+	while (explicitCap < requiredDepth) explicitCap += NESTED_DEPTH_INCREMENT;
+	return setSidebarExplicitRevealDepth(preferredProjectId, explicitCap);
 }
 
 /** Render the "Show N more child goals…" affordance when the depth cap clipped. */
@@ -1605,6 +1698,45 @@ export function buildSidebarTreeModel(sidebarData = getSidebarData()): SidebarTr
 	return buildSidebarTreeModelWithSearch(sidebarData).model;
 }
 
+function revealedArchivedTreePopulation(sessionId: string): { sessions: GatewaySession[]; goalIds: Set<string> } {
+	const archivedById = new Map(state.archivedSessions.map(session => [session.id, session]));
+	const goalsById = new Map(state.goals.map(goal => [goal.id, goal]));
+	const sessionIds = new Set<string>();
+	const goalIds = new Set<string>();
+	const sessionQueue = [sessionId];
+	const goalQueue: string[] = [];
+
+	while (sessionQueue.length > 0 || goalQueue.length > 0) {
+		while (sessionQueue.length > 0) {
+			const sessionId = sessionQueue.pop()!;
+			if (sessionIds.has(sessionId)) continue;
+			const session = archivedById.get(sessionId);
+			if (!session) continue;
+			sessionIds.add(sessionId);
+			for (const parentId of [session.parentSessionId, session.delegateOf, session.teamLeadSessionId]) {
+				if (parentId && !sessionIds.has(parentId)) sessionQueue.push(parentId);
+			}
+			for (const goalId of [session.goalId, session.teamGoalId]) {
+				if (goalId && !goalIds.has(goalId)) goalQueue.push(goalId);
+			}
+		}
+		while (goalQueue.length > 0) {
+			const goalId = goalQueue.pop()!;
+			if (goalIds.has(goalId)) continue;
+			goalIds.add(goalId);
+			const goal = goalsById.get(goalId);
+			if (!goal) continue;
+			if (goal.parentGoalId && !goalIds.has(goal.parentGoalId)) goalQueue.push(goal.parentGoalId);
+			if (goal.spawnedBySessionId && !sessionIds.has(goal.spawnedBySessionId)) sessionQueue.push(goal.spawnedBySessionId);
+		}
+	}
+
+	return {
+		sessions: state.archivedSessions.filter(session => sessionIds.has(session.id)),
+		goalIds,
+	};
+}
+
 export interface SidebarTreeVisibilityInput {
 	view?: SidebarSessionView;
 	filters?: SidebarViewFilters;
@@ -1626,9 +1758,21 @@ export function buildSidebarTreeModelWithSearch(
 		? filterStaffByQuery(staffList.filter(s => s.state !== "retired"), q)
 		: staffList.filter(s => s.state !== "retired");
 	const liveSessionsNoStaff = state.gatewaySessions.filter(s => !sidebarData.staffSessionIds.has(s.id));
-	const goalsForTree: Goal[] = state.goals;
+	const activeId = activeSessionId();
+	if (state.sidebarRevealSessionId && state.sidebarRevealSessionId !== activeId) {
+		state.sidebarRevealSessionId = null;
+	}
+	const revealSessionId = state.sidebarRevealSessionId === activeId ? activeId : undefined;
+	const revealedArchived = revealSessionId
+		? state.archivedSessions.find(session => session.id === revealSessionId)
+		: undefined;
+	const narrowRevealArchive = Boolean(revealedArchived && !filters.showArchived && !bypassFilters);
+	const revealArchivePopulation = narrowRevealArchive && revealSessionId ? revealedArchivedTreePopulation(revealSessionId) : null;
+	const goalsForTree: Goal[] = revealArchivePopulation
+		? state.goals.filter(goal => !goal.archived || revealArchivePopulation.goalIds.has(goal.id))
+		: state.goals;
 	let sessionsForTree: GatewaySession[] = liveSessionsNoStaff;
-	let archivedSessionsForTree: GatewaySession[] = state.archivedSessions;
+	let archivedSessionsForTree: GatewaySession[] = revealArchivePopulation?.sessions ?? state.archivedSessions;
 	let visibleSearchGoalIds: Set<string> | null = null;
 
 	let retainedSearchSessionIds: Set<string> | null = null;
@@ -1680,7 +1824,7 @@ export function buildSidebarTreeModelWithSearch(
 		sessions: sessionsForTree,
 		archivedSessions: archivedSessionsForTree,
 		staff: filteredStaff,
-		showArchived: filters.showArchived || bypassFilters,
+		showArchived: filters.showArchived || bypassFilters || narrowRevealArchive,
 		projectOrder: projects.map(p => p.id),
 		nestedDepthByProject: new Map(projects.map(p => [p.id, _getNestedDepthCap(p.id)])),
 		defaultNestedDepth: DEFAULT_NESTED_DEPTH_CAP,
@@ -1693,7 +1837,7 @@ export function buildSidebarTreeModelWithSearch(
 				|| view === "status"
 				|| passesSidebarFilters(session as GatewaySession, active, bypass),
 			bypassBusyReadFilters: bypassFilters || view === "status",
-			includeArchived: filters.showArchived || bypassFilters,
+			includeArchived: filters.showArchived || bypassFilters || narrowRevealArchive,
 		},
 		expansion: sidebarTreeExpansionInput(),
 	});
@@ -1791,6 +1935,7 @@ export function buildSidebarStatusSections(
 		filters,
 		searchQuery: state.searchQuery,
 		activeSessionId: activeSessionId(),
+		revealSessionId: state.sidebarRevealSessionId,
 		isPinned: session => isPinned(session.user_tags),
 		isUnread: session => hasUnseenActivity(session),
 		isBusy: session => isSessionBusy(session),
@@ -1813,6 +1958,10 @@ function switchSidebarView(view: SidebarSessionView): void {
 
 /** Shared compact selector/filter row used by desktop and mobile. */
 export function renderSidebarViewControls(variant: "desktop" | "mobile" = "desktop"): TemplateResult {
+	const revealSessionId = activeSessionId();
+	const revealTooltip = revealSessionId
+		? "Reveal current session in sidebar"
+		: "Open a session to reveal it in the sidebar.";
 	return html`
 		<div class="sidebar-view-controls ${variant === "mobile" ? "sidebar-view-controls--mobile" : ""}">
 			<div class="sidebar-session-mode-switch" role="group" aria-label="Session grouping">
@@ -1832,6 +1981,22 @@ export function renderSidebarViewControls(variant: "desktop" | "mobile" = "deskt
 				><span class="sidebar-view-control-icon">${icon(ListFilter, "xs")}</span><span>By Status</span></button>
 			</div>
 			${renderFiltersButton(variant)}
+			${variant === "desktop" ? html`
+				<span class="sidebar-reveal-current-control" title=${revealTooltip}>
+					<button
+						type="button"
+						class="sidebar-reveal-current-button"
+						data-testid="sidebar-reveal-current-button"
+						aria-label="Reveal current session in sidebar"
+						title=${revealTooltip}
+						?disabled=${!revealSessionId}
+						@click=${() => {
+							if (!activeSessionId()) return;
+							void import("./sidebar-reveal.js").then(module => module.revealCurrentSidebarSession());
+						}}
+					><span class="sidebar-view-control-icon">${icon(Crosshair, "xs")}</span></button>
+				</span>
+			` : nothing}
 		</div>
 	`;
 }

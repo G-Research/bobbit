@@ -40,11 +40,11 @@ Given a session or goal route, `revealSidebarTargetForRoute(route)`:
    [Three session row kinds](#three-session-row-kinds-one-navid) below).
    Non-session/goal routes are a no-op.
 2. Runs the resolvers in order and takes the **first non-null result** — the
-   list of ancestor node-keys to expand ephemerally so the target row renders.
-   A goal covers its project and the full `parentGoalId` chain; a session covers
-   its project, the relevant section header, any parent-session child groups,
-   and every ancestor goal in the nesting chain (or, for staff, just the project
-   + staff section).
+   list of ancestor node-keys to force-expand and persist so the target row
+   renders. A goal covers its project and the full `parentGoalId` chain; a
+   session covers its project, the relevant section header, any parent-session
+   child groups, and every ancestor goal in the nesting chain (or, for staff,
+   just the project + staff section).
 3. Scrolls the target row into view once it exists in the DOM.
 
 ### Three session row kinds, one navId
@@ -89,33 +89,28 @@ ordered-resolver form closes both gaps without changing the member path.
 
 ## Design decisions (the WHY)
 
-### Ephemeral, non-destructive expansion
+### Persistent, path-scoped force expansion
 
-Reveal expands ancestors only through
-`expandSidebarTreeNode(key, { explicit: false })`. This is the *safe automatic*
-path in [`sidebar-tree-state.ts`](../src/app/sidebar-tree-state.ts): it
-early-returns when the node already has a stored preference and when the node's
-default is already expanded, and it never writes to
-`bobbit-sidebar-tree-state:v1`.
+Session and goal navigation is itself explicit reveal intent. Reveal therefore
+expands every resolved ancestor through
+`expandSidebarTreeNode(key, { explicit: true })`. This force-expands nodes even
+when they carry a stored collapsed preference and writes the resulting expanded
+preference to `bobbit-sidebar-tree-state:v1`, so the revealed path remains open
+after later renders and reloads.
 
-The reason is the ephemeral contract: revealing a target must never overwrite an
-explicit user *collapse*. If the user deliberately collapsed a project, deep-
-linking to a session inside it should still reveal the path (because navigation
-is an explicit intent), but the reveal path used here respects a stored collapse
-on any node *not* on the path to the target — those nodes are simply never
-touched. Using `setSidebarTreeExpanded` instead would persist a choice the user
-never made and would clobber their collapse preferences on the next poll or
-reload. See
-[Expansion defaults and persistence](sidebar-tree-state.md#expansion-defaults-and-persistence)
-for why explicit-vs-ephemeral is the mechanism that keeps user intent durable.
+The persistence remains narrowly scoped. Only ancestors of the target are
+walked through the `parentKey` chain (`ancestorsOf`), guarded by a `seen` set
+against pathological cycles. An unrelated project, section, goal, team, or
+session hierarchy is never passed to the expansion API, so its stored state is
+unchanged. For a staff row, which has no tree node to walk, the same pipeline
+force-expands only the `project` + `project-staff` keys returned by
+`resolveStaffAncestors`.
 
-Only ancestors of the target are walked — the `parentKey` chain (`ancestorsOf`),
-guarded by a `seen` set against any pathological cycle. Unrelated collapsed
-nodes stay collapsed. For the staff row the "ancestors" are the `project` +
-`project-staff` keys returned directly by `resolveStaffAncestors` (there is no
-node to walk), but they are expanded through the identical
-`expandSidebarTreeNode(key, { explicit: false })` path, so the non-destructive
-contract holds regardless of row kind.
+This applies equally to initial deep-links and in-app session/goal route changes.
+It intentionally differs from polling and discovery flows, which still use
+`expandSidebarTreeNode(key, { explicit: false })` to preserve prior explicit
+collapses. See
+[Expansion defaults and persistence](sidebar-tree-state.md#expansion-defaults-and-persistence).
 
 ### Exactly once per navigation — the `revealToken`
 
@@ -181,15 +176,14 @@ scroll would produce visible thrash.
 - **[Keyboard navigation](sidebar-keyboard-navigation.md)** is a separate model.
   Reveal never mutates `state.keyboardNavActiveId`, `data-nav-active`,
   `getVisibleNavOrder`, or the override-clear listener — it only reads the DOM
-  (via the shared `data-nav-id` contract) and flips ephemeral expansion prefs.
-  Keyboard nav moves a cursor through visible rows; reveal reacts to route
-  changes. They share the `data-nav-id="<kind>:<id>"` row tagging but are
-  otherwise independent.
-- **[Sidebar tree state](sidebar-tree-state.md)** owns the expansion model,
-  canonical keys, and the explicit-vs-ephemeral persistence contract that reveal
-  relies on. Reveal is a consumer of `expandSidebarTreeNode(..., { explicit:
-  false })`, the same non-destructive path `api.ts` and `createGoal()` use for
-  auto-expansion.
+  (via the shared `data-nav-id` contract) and persistently expands only the
+  resolved ancestor path. Keyboard nav moves a cursor through visible rows;
+  reveal reacts to route changes. They share the
+  `data-nav-id="<kind>:<id>"` row tagging but are otherwise independent.
+- **[Sidebar tree state](sidebar-tree-state.md)** owns the expansion model and
+  canonical keys. Route reveal consumes the persistent
+  `expandSidebarTreeNode(..., { explicit: true })` path, while polling and
+  discovery flows continue to use the non-destructive `explicit: false` path.
 
 ## Internals — file map
 
@@ -213,9 +207,9 @@ scroll would produce visible thrash.
 - [`src/app/render-helpers.ts`](../src/app/render-helpers.ts) — `tlNavId`, the
   `session:<id>` `data-nav-id` on the team-lead row.
 - [`src/app/sidebar-tree-state.ts`](../src/app/sidebar-tree-state.ts) —
-  `expandSidebarTreeNode(key, { explicit: false })`, the ephemeral expansion
-  path.
+  `expandSidebarTreeNode(key, { explicit: true })`, the persistent force-expand
+  operation applied to resolved route ancestors.
 - [`tests2/browser/fixtures/sidebar-reveal.spec.ts`](../tests2/browser/fixtures/sidebar-reveal.spec.ts)
   — deep-link session and sub-goal reveal, in-app off-screen scroll vs
-  no-jump-when-visible, the ephemeral-collapse contract, and the team-lead +
-  staff regression tests for the ordered-resolver fix.
+  no-jump-when-visible, path-scoped persistence, and the team-lead + staff
+  regression tests for the ordered-resolver fix.
