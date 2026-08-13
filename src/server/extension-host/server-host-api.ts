@@ -22,7 +22,7 @@
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 import type { PackStore } from "./pack-store.js";
-import type { ReadTranscriptOpts, StorePutOptions, StoreStats, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
+import type { ReadTranscriptOpts, StorePutOptions, StoreReadResult, StoreStats, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
 // SUB-GOAL C: the ambient `host.agents` capability is backed by the SAME shared
 // OrchestrationCore that services the agent-tool `/orchestrate/*` routes. The type
@@ -30,9 +30,9 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 // instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
 import type { DismissResult, OrchestrationCore } from "../agent/orchestration-core.js";
 
-/** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
 export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
+	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(key: string, value: T, opts?: StorePutOptions): Promise<void>;
 	list(prefix?: string): Promise<string[]>;
 	delete(key: string): Promise<boolean>;
@@ -251,6 +251,7 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	const onStoreWrite = opts.onStoreWrite;
 	const store: ServerHostStoreApi = {
 		get: (key) => requireStore().get(packId, key),
+		read: (key) => requireStore().read(packId, key),
 		put: async (key, value, putOpts) => {
 			await requireStore().put(packId, key, value, putOpts);
 			// Host-owned side-channel: notify the gateway of the write so it can drop

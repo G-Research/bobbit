@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { copyGitTemplate } from "../harness/git-template.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
@@ -28,6 +27,34 @@ let worktreeProject: { id: string; rootPath: string };
 let worktreeFixtureRoot = "";
 let restoreCommandRunner: (() => void) | undefined;
 const gitCalls: Array<{ cwd: string; args: string[] }> = [];
+const EVENT_WAIT_TIMEOUT_MS = 5_000;
+
+type CannedWorktreeAddSignal = {
+	repoPath: string;
+	promise: Promise<string>;
+	resolve: (worktreePath: string) => void;
+	cancel: () => void;
+};
+
+let pendingWorktreeAddSignal: CannedWorktreeAddSignal | undefined;
+
+function nextCannedWorktreeAdd(repoPath: string): CannedWorktreeAddSignal {
+	if (pendingWorktreeAddSignal) throw new Error("a canned worktree-add signal is already armed");
+	let resolvePromise!: (worktreePath: string) => void;
+	const signal: CannedWorktreeAddSignal = {
+		repoPath,
+		promise: new Promise(resolve => { resolvePromise = resolve; }),
+		resolve(worktreePath) {
+			if (pendingWorktreeAddSignal === signal) pendingWorktreeAddSignal = undefined;
+			resolvePromise(worktreePath);
+		},
+		cancel() {
+			if (pendingWorktreeAddSignal === signal) pendingWorktreeAddSignal = undefined;
+		},
+	};
+	pendingWorktreeAddSignal = signal;
+	return signal;
+}
 
 function directorySnapshot(directoryPath: string): { exists: boolean; entries: string[] } {
 	const exists = existsSync(directoryPath);
@@ -55,6 +82,11 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 	if (args[0] === "worktree" && args[1] === "add") {
 		const worktreePath = args[2] === "-b" ? args[4] : args[2];
 		mkdirWorktree(worktreePath);
+		if (args[3]?.startsWith("session/") && pendingWorktreeAddSignal?.repoPath === cwd) {
+			const signal = pendingWorktreeAddSignal;
+			pendingWorktreeAddSignal = undefined;
+			signal.resolve(worktreePath);
+		}
 		return "";
 	}
 	if (args[0] === "worktree" && args[1] === "remove") {
@@ -82,47 +114,110 @@ async function installCannedGitRunner(): Promise<void> {
 	restoreCommandRunner = () => Object.assign(runner, original);
 }
 
-async function waitForGenuineWorktree(gateway: any, sessionId: string, sourceRepo: string): Promise<void> {
-	const deadline = Date.now() + 5_000;
-	let observed: Record<string, unknown> = {};
-	while (Date.now() < deadline) {
+async function waitForCannedWorktree(
+	gateway: any,
+	sessionId: string,
+	sourceRepo: string,
+	worktreeAdded: CannedWorktreeAddSignal,
+): Promise<void> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		const addedPath = await Promise.race([
+			worktreeAdded.promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					const live = gateway.sessionManager.getSession(sessionId);
+					const observed = {
+						status: live?.status ?? null,
+						worktreePath: live?.worktreePath ?? null,
+						worktreeGitExists: live?.worktreePath ? existsSync(join(live.worktreePath, ".git")) : false,
+					};
+					reject(new Error(`timed out waiting for canned worktree add after ${EVENT_WAIT_TIMEOUT_MS}ms; observed=${JSON.stringify(observed)}`));
+				}, EVENT_WAIT_TIMEOUT_MS);
+				timer.unref();
+			}),
+		]);
 		const live = gateway.sessionManager.getSession(sessionId);
-		observed = {
+		const observed = {
 			status: live?.status ?? null,
 			worktreePath: live?.worktreePath ?? null,
 			worktreeGitExists: live?.worktreePath ? existsSync(join(live.worktreePath, ".git")) : false,
 		};
-		if (observed.worktreePath && observed.worktreePath !== sourceRepo && observed.worktreeGitExists) return;
-		await new Promise(resolve => setTimeout(resolve, 25));
+		expect(
+			observed.worktreePath === addedPath && observed.worktreePath !== sourceRepo && observed.worktreeGitExists === true,
+			`worktree:true with the canned Git runner must create a distinct marked worktree; observed=${JSON.stringify(observed)}`,
+		).toBe(true);
+	} finally {
+		if (timer) clearTimeout(timer);
+		worktreeAdded.cancel();
 	}
-	expect(
-		observed.worktreeGitExists === true,
-		`worktree:true against a committed fixture repository must create a distinct Git worktree; observed=${JSON.stringify(observed)}`,
-	).toBe(true);
+}
+
+function waitForIdleStatusSignal(gateway: any, sessionId: string): Promise<void> {
+	const live = gateway.sessionManager.getSession(sessionId);
+	if (!live) return Promise.reject(new Error(`live session ${sessionId} not found`));
+	if (live.status === "idle") return Promise.resolve();
+
+	return new Promise<void>((resolve, reject) => {
+		let settled = false;
+		let timer: NodeJS.Timeout | undefined;
+		const client = {
+			readyState: 1,
+			send(payload: string) {
+				const message = JSON.parse(payload);
+				if (message.type !== "session_status") return;
+				if (message.status === "idle") settle(resolve);
+				if (message.status === "terminated") settle(() => reject(new Error(`session ${sessionId} terminated before initial role setup completed`)));
+			},
+		};
+		const settle = (complete: () => void) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			live.clients.delete(client);
+			complete();
+		};
+		live.clients.add(client);
+		timer = setTimeout(() => {
+			const observed = {
+				status: live.status,
+				clientAttached: live.clients.has(client),
+			};
+			settle(() => reject(new Error(`timed out waiting for session ${sessionId} idle status after ${EVENT_WAIT_TIMEOUT_MS}ms; observed=${JSON.stringify(observed)}`)));
+		}, EVENT_WAIT_TIMEOUT_MS);
+		timer.unref();
+		// Registration and this re-check are synchronous, so an idle transition
+		// cannot occur between them without either being observed or read here.
+		if (live.status === "idle") settle(resolve);
+		if (live.status === "terminated") settle(() => reject(new Error(`session ${sessionId} terminated before initial role setup completed`)));
+	});
 }
 
 async function waitForInitialRoleConfiguration(gateway: any, sessionId: string): Promise<void> {
-	const deadline = Date.now() + 5_000;
-	let observed: Record<string, unknown> = {};
-	while (Date.now() < deadline) {
-		const live = gateway.sessionManager.getSession(sessionId);
-		const rolePrompt = String(gateway.sessionManager.getPromptParts(sessionId)?.rolePrompt ?? "");
-		observed = {
-			status: live?.status ?? null,
-			spawnPinnedModel: live?.spawnPinnedModel ?? null,
-			spawnPinnedThinkingLevel: live?.spawnPinnedThinkingLevel ?? null,
-			rolePromptReady: rolePrompt.includes(GENERAL_PROMPT_MARKER),
-		};
-		if (live?.status === "idle" && live.spawnPinnedModel === MODEL && live.spawnPinnedThinkingLevel === THINKING && observed.rolePromptReady) return;
-		await new Promise(resolve => setTimeout(resolve, 25));
-	}
-	expect(false, `resolved role configuration did not reach worktree initial spawn; observed=${JSON.stringify(observed)}`).toBe(true);
+	await waitForIdleStatusSignal(gateway, sessionId);
+	const live = gateway.sessionManager.getSession(sessionId);
+	const rolePrompt = String(gateway.sessionManager.getPromptParts(sessionId)?.rolePrompt ?? "");
+	const observed = {
+		status: live?.status ?? null,
+		spawnPinnedModel: live?.spawnPinnedModel ?? null,
+		spawnPinnedThinkingLevel: live?.spawnPinnedThinkingLevel ?? null,
+		rolePromptReady: rolePrompt.includes(GENERAL_PROMPT_MARKER),
+	};
+	expect(
+		live?.status === "idle"
+			&& live.spawnPinnedModel === MODEL
+			&& live.spawnPinnedThinkingLevel === THINKING
+			&& observed.rolePromptReady,
+		`resolved role configuration did not reach worktree initial spawn; observed=${JSON.stringify(observed)}`,
+	).toBe(true);
 }
 
 test.beforeAll(async ({ gateway }) => {
 	await installCannedGitRunner();
 	worktreeFixtureRoot = mkdtempSync(join(tmpdir(), "bobbit-default-role-worktree-"));
-	const repoRoot = copyGitTemplate(join(worktreeFixtureRoot, "repo"));
+	const repoRoot = join(worktreeFixtureRoot, "repo");
+	mkdirSync(repoRoot, { recursive: true });
+	writeFileSync(join(repoRoot, ".git"), "gitdir: canned\n");
 	worktreeProject = await registerProject({
 		name: `default-role-worktree-${process.pid}`,
 		rootPath: repoRoot,
@@ -156,7 +251,7 @@ test("unknown explicit role is rejected before worktree resolution or provisioni
 	let unexpectedSessionId: string | undefined;
 
 	try {
-		expect(existsSync(join(sourceRepo, ".git")), "fixture project must be a worktree-capable Git repository").toBe(true);
+		expect(existsSync(join(sourceRepo, ".git")), "fixture project must expose the minimal Git marker used by cannedGit").toBe(true);
 		const response = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: sourceRepo, projectId: worktreeProject.id, worktree: true, roleId: unknownRole }),
@@ -181,12 +276,13 @@ test("unknown explicit role is rejected before worktree resolution or provisioni
 	}
 });
 
-test("genuine worktree creation with omitted role gets the full resolved general configuration", async ({ gateway }) => {
+test("canned worktree creation with omitted role gets the full resolved general configuration", async ({ gateway }) => {
 	let created: CreatedSession | undefined;
 	const sourceRepo = worktreeProject.rootPath;
+	const worktreeAdded = nextCannedWorktreeAdd(sourceRepo);
 	try {
 		created = await createSession({ cwd: sourceRepo, projectId: worktreeProject.id, worktree: true });
-		await waitForGenuineWorktree(gateway, created.id, sourceRepo);
+		await waitForCannedWorktree(gateway, created.id, sourceRepo, worktreeAdded);
 		await expectRoleEverywhere(
 			gateway,
 			created,
@@ -202,6 +298,7 @@ test("genuine worktree creation with omitted role gets the full resolved general
 			accessory: generalOverride.accessory,
 		});
 	} finally {
+		worktreeAdded.cancel();
 		await purgeSession(created?.id);
 	}
 });

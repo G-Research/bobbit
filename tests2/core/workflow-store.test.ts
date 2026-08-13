@@ -40,8 +40,13 @@ function writeProjectYaml(obj: Record<string, unknown>): void {
 	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify(obj));
 }
 
+function makeStores(): { config: ProjectConfigStore; workflows: InlineWorkflowStore } {
+	const config = new ProjectConfigStore(configDir);
+	return { config, workflows: new InlineWorkflowStore(config) };
+}
+
 function makeStore(): InlineWorkflowStore {
-	return new InlineWorkflowStore(new ProjectConfigStore(configDir));
+	return makeStores().workflows;
 }
 
 /** Build a minimal project.yaml around a single workflow gate's verify[]. */
@@ -222,5 +227,57 @@ describe("InlineWorkflowStore — round-trip", () => {
 		const step = makeStore().getAll()[0].gates[0].verify![0];
 		assert.equal(step.label, "Approve design");
 		assert.equal(step.optionalLabel, undefined);
+	});
+
+	it("preserves exact multiline failure guidance for every verification step type", () => {
+		writeProjectYaml(projectFor([]));
+		const { config, workflows } = makeStores();
+		const guidance = "Inspect the retained log first.\n\n- Re-run the focused check.\n- Fix **product behavior**.";
+
+		workflows.put({
+			id: "wf",
+			name: "Test workflow",
+			description: "",
+			gates: [{
+				id: "g",
+				name: "Gate",
+				dependsOn: [],
+				verify: [
+					{ name: "command", type: "command", run: "npm test", failureGuidance: guidance },
+					{ name: "review", type: "llm-review", prompt: "Review.", failureGuidance: guidance },
+					{ name: "qa", type: "agent-qa", prompt: "Test.", failureGuidance: guidance },
+					{
+						name: "child",
+						type: "subgoal",
+						failureGuidance: guidance,
+						subgoal: { planId: "child", title: "Child", spec: "Implement child." },
+					},
+					{ name: "signoff", type: "human-signoff", prompt: "Approve.", label: "Approve", failureGuidance: guidance },
+				],
+			}],
+			createdAt: 0,
+			updatedAt: 0,
+		});
+
+		const serializedSteps = config.getWorkflows()!.wf.gates[0].verify!;
+		assert.deepEqual(serializedSteps.map(step => step.failureGuidance), Array(5).fill(guidance));
+
+		const reloadedSteps = makeStore().getAll()[0].gates[0].verify!;
+		assert.deepEqual(reloadedSteps.map(step => step.failureGuidance), Array(5).fill(guidance));
+	});
+
+	it("omits absent failure guidance and ignores non-string stored values during normalization", () => {
+		writeProjectYaml(projectFor([
+			{ name: "absent", type: "command", run: "true" },
+			{ name: "malformed", type: "command", run: "true", failureGuidance: 42 },
+		]));
+		const { config, workflows } = makeStores();
+		const loaded = workflows.getAll()[0];
+		assert.deepEqual(loaded.gates[0].verify!.map(step => step.failureGuidance), [undefined, undefined]);
+
+		workflows.put(loaded);
+		const serializedSteps = config.getWorkflows()!.wf.gates[0].verify!;
+		assert.equal(serializedSteps.some(step => "failureGuidance" in step), false);
+		assert.deepEqual(makeStore().getAll()[0].gates[0].verify!.map(step => step.failureGuidance), [undefined, undefined]);
 	});
 });

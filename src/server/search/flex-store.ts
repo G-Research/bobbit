@@ -21,8 +21,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { createHash } from "node:crypto";
 import { Document as FlexDocument } from "flexsearch";
+import { performance } from "node:perf_hooks";
+import { recordEventLoopOperation } from "../agent/cpu-diagnostics.js";
 import { isMessageAuthor, type MessageAuthorKind } from "../../shared/message-author.js";
 import { profileAsync } from "../agent/profiling.js";
 import { highlight } from "./snippet.js";
@@ -64,7 +65,7 @@ type FlexDocumentInstance = InstanceType<typeof FlexDocument>;
 
 // ── Constants ────────────────────────────────────────────────────────
 
-export const FLEX_VERSION = "0.8.158";
+export { FLEX_VERSION } from "./constants.js";
 
 /** Default `limit` when the caller omits one. */
 const DEFAULT_LIMIT = 20;
@@ -99,8 +100,12 @@ const SOURCE_ID_TO_TYPE: Record<Indexable["sourceId"], SearchResult["type"]> = {
 const META_FILE = "meta.json";
 const INDEX_SUBDIR = "index";
 export const FLEX_EXPORT_BUNDLE_FILE = "__index__.json";
+/** Legacy cache version; exports are no longer persisted. */
 export const FLEX_EXPORT_BUNDLE_VERSION = 1;
 const FLUSH_DEBOUNCE_MS = 500;
+const JOURNAL_FILE = "__docs__.journal";
+const SNAPSHOT_FILE = "__docs__.json";
+const JOURNAL_COMPACT_BYTES = 8 * 1024 * 1024;
 
 // ── Doc shape ────────────────────────────────────────────────────────
 
@@ -134,9 +139,18 @@ export interface FlexDoc {
 
 // ── Options ──────────────────────────────────────────────────────────
 
+export interface FlexStorePersistenceMetric {
+	label: string;
+	durationMs: number;
+	bytes: number;
+	phase: "serialize" | "write";
+}
+
 export interface FlexSearchStoreOpenOptions {
 	/** Directory holding the index (e.g. `.bobbit/state/search.flex`). */
 	dataDir: string;
+	/** Runs in the owning worker after each serialization/write boundary. */
+	onPersistenceMetric?: (metric: FlexStorePersistenceMetric) => void;
 }
 
 export interface FlexSearchStats {
@@ -182,21 +196,90 @@ interface ScoredDoc extends FlexDoc {
 	_score: number;
 }
 
+type MirrorOperation =
+	| { op: "upsert"; doc: FlexDoc }
+	| { op: "delete"; ids: string[] }
+	| { op: "clear" };
+
+/**
+ * The mirror is an append-only operation log plus an occasional snapshot.
+ * Sequences make a completed snapshot authoritative over any pre-compaction
+ * journal tail left behind if the process dies between the two atomic renames.
+ */
+const MIRROR_FORMAT_VERSION = 1;
+
+type VersionedJournalRecord = {
+	version: typeof MIRROR_FORMAT_VERSION;
+	sequence: number;
+	operation: MirrorOperation;
+};
+
+type MirrorSnapshot = {
+	version: typeof MIRROR_FORMAT_VERSION;
+	throughSequence: number;
+	docs: FlexDoc[];
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSequence(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isFlexDoc(value: unknown): value is FlexDoc {
+	return isRecord(value) && typeof value.id === "string";
+}
+
+function isMirrorOperation(value: unknown): value is MirrorOperation {
+	if (!isRecord(value) || typeof value.op !== "string") return false;
+	if (value.op === "clear") return true;
+	if (value.op === "delete") return Array.isArray(value.ids) && value.ids.every((id) => typeof id === "string");
+	return value.op === "upsert" && isFlexDoc(value.doc);
+}
+
+function parseVersionedJournalRecord(value: unknown): VersionedJournalRecord | null {
+	if (!isRecord(value) || value.version !== MIRROR_FORMAT_VERSION || !isSequence(value.sequence) || !isMirrorOperation(value.operation)) return null;
+	return { version: MIRROR_FORMAT_VERSION, sequence: value.sequence, operation: value.operation };
+}
+
+function parseMirrorSnapshot(value: unknown): MirrorSnapshot | null {
+	if (!isRecord(value) || value.version !== MIRROR_FORMAT_VERSION || !isSequence(value.throughSequence)) return null;
+	const docs = value.docs;
+	if (!Array.isArray(docs) || !docs.every(isFlexDoc)) return null;
+	return { version: MIRROR_FORMAT_VERSION, throughSequence: value.throughSequence, docs };
+}
+
 // ── Store ────────────────────────────────────────────────────────────
 
 export class FlexSearchStore {
 	readonly dataDir: string;
 	private _idx: FlexDocumentInstance;
 	private readonly _docs: Map<string, FlexDoc> = new Map();
+	/** Entry id → content hash for chunk parents, avoiding an O(n) scan. */
+	private readonly _parentHashes = new Map<string, string>();
+	/** Parent id → its currently materialized chunk ids, for correct O(1) cleanup. */
+	private readonly _parentDocIds = new Map<string, Set<string>>();
+	private _indexBuilt = false;
 	private _saveTimer: NodeJS.Timeout | null = null;
+	private _journal: string[] = [];
+	private _journalBytes = 0;
+	/** Highest operation sequence observed or assigned in this process. */
+	private _journalSequence = 0;
 	private _flushInFlight: Promise<void> | null = null;
 	private _flushAgain = false;
 	private _dirty = false;
+	/** Compaction requests and completed snapshots share the flush serialisation lane. */
+	private _snapshotRequest = 0;
+	private _snapshotWritten = 0;
 	private _closed = false;
 	private _atomicRename = atomicRename;
+	private readonly _onPersistenceMetric?: (metric: FlexStorePersistenceMetric) => void;
 
-	private constructor(dataDir: string) {
+	private constructor(dataDir: string, onPersistenceMetric?: (metric: FlexStorePersistenceMetric) => void) {
 		this.dataDir = dataDir;
+		this._onPersistenceMetric = onPersistenceMetric;
 		this._idx = FlexSearchStore._newIndex();
 	}
 
@@ -205,8 +288,11 @@ export class FlexSearchStore {
 			document: {
 				id: "id",
 				index: [
-					{ field: "title", tokenize: "forward", encoder: "LatinAdvanced", resolution: 9 },
-					{ field: "text", tokenize: "forward", encoder: "LatinAdvanced", resolution: 9 },
+							// `text` is deliberately exact-token only. The mirror remains the
+					// source of truth; lowering resolution and disabling Flex's duplicate
+					// document store reduces derived-index memory substantially.
+					{ field: "title", tokenize: "forward", encoder: "LatinAdvanced", resolution: 3 },
+					{ field: "text", tokenize: "strict", encoder: "LatinAdvanced", resolution: 3 },
 					// Identifier field: strict tokenization preserves whole tokens; a
 					// minimal encoder with disabled stemming/normalisation keeps
 					// exact symbol lookups intact.
@@ -217,7 +303,9 @@ export class FlexSearchStore {
 					{ field: "project_id" },
 					{ field: "archived_tag" },
 				],
-				store: true,
+				// Search always resolves hits against `_docs`, so Flex's stored copy
+				// only amplified the derived index.
+				store: false,
 			},
 			cache: 100,
 		});
@@ -225,7 +313,7 @@ export class FlexSearchStore {
 
 	static async open(opts: FlexSearchStoreOpenOptions): Promise<FlexSearchStore> {
 		await fs.promises.mkdir(path.join(opts.dataDir, INDEX_SUBDIR), { recursive: true });
-		const store = new FlexSearchStore(opts.dataDir);
+		const store = new FlexSearchStore(opts.dataDir, opts.onPersistenceMetric);
 		await store._loadFromDisk();
 		return store;
 	}
@@ -236,9 +324,11 @@ export class FlexSearchStore {
 		if (this._closed) throw new Error("FlexSearchStore: already closed");
 		for (const d of docs) {
 			const prepared = this._prepare(d);
-			this._docs.set(prepared.id, prepared);
-			// Document.update is upsert-safe (falls back to add if missing).
-			(this._idx.update as unknown as (id: string, d: unknown) => void)(prepared.id, prepared);
+			this._setDoc(prepared);
+			// Do not build derived state until a query needs it. Live updates are
+			// applied when it already exists, keeping query results current.
+			if (this._indexBuilt) (this._idx.update as unknown as (id: string, d: unknown) => void)(prepared.id, prepared);
+			this._appendJournal({ op: "upsert", doc: prepared });
 		}
 		this._scheduleSave();
 	}
@@ -248,18 +338,14 @@ export class FlexSearchStore {
 		if (ids.length === 0) return;
 		const idSet = new Set(ids);
 		// Remove direct rows.
-		for (const id of ids) {
-			if (this._docs.delete(id)) this._idx.remove(id);
-		}
+		for (const id of ids) this._deleteDoc(id);
 		// Cascade delete of any chunk rows whose parent_id matches.
 		const chunkVictims: string[] = [];
 		for (const [id, doc] of this._docs) {
 			if (doc.parent_id && idSet.has(doc.parent_id)) chunkVictims.push(id);
 		}
-		for (const id of chunkVictims) {
-			this._docs.delete(id);
-			this._idx.remove(id);
-		}
+		for (const id of chunkVictims) this._deleteDoc(id);
+		this._appendJournal({ op: "delete", ids: [...ids, ...chunkVictims] });
 		this._scheduleSave();
 	}
 
@@ -288,11 +374,11 @@ export class FlexSearchStore {
 			if (parentSet && (!d.parent_id || !parentSet.has(d.parent_id))) continue;
 			victims.push(id);
 		}
-		for (const id of victims) {
-			this._docs.delete(id);
-			this._idx.remove(id);
+		for (const id of victims) this._deleteDoc(id);
+		if (victims.length > 0) {
+			this._appendJournal({ op: "delete", ids: victims });
+			this._scheduleSave();
 		}
-		if (victims.length > 0) this._scheduleSave();
 	}
 
 	async clear(): Promise<void> {
@@ -307,7 +393,11 @@ export class FlexSearchStore {
 		// entry. (`Document.clear` exists but is inconsistently async, hence the
 		// recreate rather than calling it.)
 		this._idx = FlexSearchStore._newIndex();
+		this._indexBuilt = true;
 		this._docs.clear();
+		this._parentHashes.clear();
+		this._parentDocIds.clear();
+		this._appendJournal({ op: "clear" });
 		this._scheduleSave();
 	}
 
@@ -322,11 +412,7 @@ export class FlexSearchStore {
 	/** Return the contentHash of any doc whose `id === id` OR `parent_id === id`. */
 	getHashForEntry(entryId: string): string | null {
 		const direct = this._docs.get(entryId);
-		if (direct) return direct.content_hash;
-		for (const d of this._docs.values()) {
-			if (d.parent_id === entryId) return d.content_hash;
-		}
-		return null;
+		return direct?.content_hash ?? this._parentHashes.get(entryId) ?? null;
 	}
 
 	count(filter?: { source_id?: Indexable["sourceId"]; project_id?: string }): number {
@@ -360,6 +446,7 @@ export class FlexSearchStore {
 	async search(q: SearchQuery): Promise<SearchResults> {
 		const queryText = (q.q ?? "").trim();
 		if (queryText.length === 0) return { results: [], total: 0 };
+		await this._ensureIndex();
 
 		const limit = q.limit ?? DEFAULT_LIMIT;
 		const offset = q.offset ?? 0;
@@ -388,7 +475,7 @@ export class FlexSearchStore {
 		// Awaited form for any future async swap.
 		const perField = (await rawResults) as Array<{
 			field: string;
-			result: Array<{ id: string; doc?: FlexDoc }>;
+			result: Array<{ id: string; doc?: FlexDoc } | string | number>;
 		}>;
 
 		// Blend field scores → Σ fieldBoost[field] / (rank + 1).
@@ -399,10 +486,12 @@ export class FlexSearchStore {
 				(FIELD_BOOST as Record<string, number>)[group.field] ?? 1.0;
 			let rank = 0;
 			for (const hit of group.result ?? []) {
-				// Always use our mirror map for the authoritative doc —
-				// FlexSearch's `enrich` doc can return values re-encoded
-				// through field encoders (numeric weight coerced etc.).
-				const doc = this._docs.get(String(hit.id));
+				// `store:false` returns ids even with `enrich`; the mirror is
+				// authoritative in either shape.
+				const hitId = typeof hit === "string" || typeof hit === "number"
+					? String(hit)
+					: String(hit.id);
+				const doc = this._docs.get(hitId);
 				if (!doc) { rank++; continue; }
 				// Apply tag filters defensively — FlexSearch honours them,
 				// but we guard against unknown encodings.
@@ -496,10 +585,15 @@ export class FlexSearchStore {
 		return code === "ENOENT" || code === "EPERM" || code === "EBUSY";
 	}
 
-	/** Passthrough no-op. Kept for SearchService.compact() compatibility. */
+	/** Compact the append-only mirror into one atomic snapshot. */
 	async compact(): Promise<void> {
-		// FlexSearch has no compaction concept; force a flush instead.
-		await this._flushNow();
+		// Never write `${SNAPSHOT_FILE}.tmp` outside the flush lane: a debounce
+		// flush and an admin compaction otherwise race over the same temp path.
+		const request = ++this._snapshotRequest;
+		do {
+			this._dirty = true;
+			await this._flushNow();
+		} while (this._snapshotWritten < request);
 	}
 
 	/** Flush pending writes. Used by SearchService.close(). */
@@ -526,238 +620,254 @@ export class FlexSearchStore {
 		if (this._saveTimer) return;
 		this._saveTimer = setTimeout(() => {
 			this._saveTimer = null;
-			// Re-check `_closed`: the timer was scheduled while open, but
-			// `close()` may have run (and torn the dir down) before it fired.
-			// The unref()'d timer can still fire during teardown.
-			if (this._closed) return;
-			void this._flushNow().catch((err) =>
-				console.error("[search] flex persistence failed:", err),
-			);
+			if (!this._closed) void this._flushNow().catch((err) => console.error("[search] mirror persistence failed:", err));
 		}, FLUSH_DEBOUNCE_MS);
-		if (typeof this._saveTimer.unref === "function") this._saveTimer.unref();
+		this._saveTimer.unref?.();
 	}
 
 	private async _flushNow(): Promise<void> {
-		if (this._flushInFlight) {
-			this._flushAgain = true;
-			await this._flushInFlight;
-			if (!this._dirty) {
-				this._flushAgain = false;
-				return;
-			}
-		}
-		if (!this._dirty) {
-			this._flushAgain = false;
-			return;
-		}
-		this._flushAgain = false;
+		if (this._flushInFlight) { this._flushAgain = true; await this._flushInFlight; }
+		if (!this._dirty) return;
 		this._dirty = false;
-		let failed = false;
-		const task = this._doFlush().catch((err) => {
-			// Preserve the write obligation for a later debounce/explicit flush,
-			// but never recurse immediately on a persistent write failure.
-			failed = true;
-			this._dirty = true;
-			console.error("[search] flex flush error:", err);
-		});
+		const task = this._doFlush().catch((err) => { this._dirty = true; throw err; });
 		this._flushInFlight = task;
 		try { await task; } finally { this._flushInFlight = null; }
-		if (failed) {
-			this._flushAgain = false;
-			return;
-		}
-		if (this._flushAgain || this._dirty) {
-			this._flushAgain = false;
-			await this._flushNow();
-		}
+		if (this._flushAgain || this._dirty) { this._flushAgain = false; await this._flushNow(); }
 	}
 
 	private async _doFlush(): Promise<void> {
-		return profileAsync("flexStore._doFlush", () => this.__doFlush());
-	}
-
-	private async __doFlush(): Promise<void> {
-		try {
-			await this.__doFlushUnsafe();
-		} catch (err) {
-			// If we're already closed and the failure is the temp dir being
-			// removed underneath us (teardown race), swallow silently — the
-			// data we were flushing is about to be deleted anyway.
-			if (this._isBenignTeardownError(err)) return;
-			throw err;
-		}
-	}
-
-	private async __doFlushUnsafe(): Promise<void> {
-		const dir = path.join(this.dataDir, INDEX_SUBDIR);
-		await fs.promises.mkdir(dir, { recursive: true });
-		const written: string[] = [];
-
-		// Also persist our docs Map in its own file (so we can reconstruct
-		// on open even if FlexSearch's export format drifts across
-		// versions — a fallback that keeps `count()`, `list()`, and
-		// `deleteWhere` working).
-		const docsKey = "__docs__";
-		const docsFinal = path.join(dir, `${docsKey}.json`);
-		const docsTmp = `${docsFinal}.tmp`;
-		const serialisedDocs = JSON.stringify(Array.from(this._docs.values()));
-		const docsHash = createHash("sha256").update(serialisedDocs).digest("hex");
-		await fs.promises.writeFile(docsTmp, serialisedDocs, "utf-8");
-		await this._atomicRename(docsTmp, docsFinal);
-		written.push(`${docsKey}.json`);
-
-		const exportEntries: Array<[string, unknown]> = [];
-		await (this._idx.export as unknown as (
-			callback: (key: string, data: unknown) => Promise<void>,
-		) => Promise<void>)(async (key: string, data: unknown) => {
-			if (data === undefined || data === null) return;
-			let payloadData: unknown = typeof data === "string" ? safeParse(data) : data;
-			// FlexSearch exports the tag context as `[field, valueMapOrNull]`
-			// pairs; an empty/partially-empty index yields `null` values that
-			// crash `Document.import` on reload (`null.length`). Strip the
-			// null-valued entries before persisting; skip the file entirely
-			// when nothing meaningful remains.
-			if (isTagKey(key)) {
-				const parsed = typeof data === "string" ? safeParse(data) : data;
-				const sanitised = sanitiseTagImport(parsed);
-				if (sanitised === null) return;
-				payloadData = sanitised;
+		return profileAsync("flexStore.mirrorFlush", async () => {
+			try {
+				const dir = path.join(this.dataDir, INDEX_SUBDIR);
+				await fs.promises.mkdir(dir, { recursive: true });
+				const journal = this._journal.splice(0);
+				const journalBytes = this._journalBytes;
+				this._journalBytes = 0;
+				if (journal.length > 0) {
+					const serializeStartedAt = performance.now();
+					const serialized = journal.join("");
+					this._recordPersistenceMetric("mirror-journal", "serialize", performance.now() - serializeStartedAt, Buffer.byteLength(serialized));
+					const writeStartedAt = performance.now();
+					try {
+						await fs.promises.appendFile(path.join(dir, JOURNAL_FILE), serialized, "utf-8");
+					} catch (err) {
+						// The operations are not durable until append succeeds. Put them
+						// back so _flushNow's retry cannot silently lose a mutation.
+						this._journal.unshift(...journal);
+						this._journalBytes += journalBytes;
+						throw err;
+					}
+					this._recordPersistenceMetric("mirror-journal", "write", performance.now() - writeStartedAt, Buffer.byteLength(serialized));
+				}
+				let size = 0;
+				try { size = (await fs.promises.stat(path.join(dir, JOURNAL_FILE))).size; } catch { /* no journal */ }
+				// A bounded journal prevents unbounded recovery time. Compaction is
+				// deliberately worker-only and never serialises FlexSearch exports.
+				const snapshotRequest = this._snapshotRequest;
+				if (this._snapshotWritten < snapshotRequest || size >= JOURNAL_COMPACT_BYTES || (this._closed && journalBytes > 0)) {
+					await this._writeSnapshot(dir);
+					// A compact request carries no mutation of its own. The worker serializes
+					// requests, so every compact request that arrived while this snapshot
+					// was in flight observes this same mirror state. Mark them all fulfilled
+					// instead of launching a redundant second full serialization (which also
+					// made concurrent compact callers wait for an unnecessary snapshot).
+					this._snapshotWritten = Math.max(this._snapshotWritten, this._snapshotRequest, snapshotRequest);
+				}
+			} catch (err) {
+				if (this._isBenignTeardownError(err)) return;
+				throw err;
 			}
-			exportEntries.push([key, payloadData]);
 		});
+	}
 
-		const bundleFinal = path.join(dir, FLEX_EXPORT_BUNDLE_FILE);
-		const bundleTmp = `${bundleFinal}.tmp`;
-		const bundle = JSON.stringify({ version: FLEX_EXPORT_BUNDLE_VERSION, docsHash, exports: exportEntries });
-		await fs.promises.writeFile(bundleTmp, bundle, "utf-8");
-		await this._atomicRename(bundleTmp, bundleFinal);
-		written.push(FLEX_EXPORT_BUNDLE_FILE);
+	private async _writeSnapshot(dir: string): Promise<void> {
+		const final = path.join(dir, SNAPSHOT_FILE);
+		const tmp = `${final}.tmp`;
+		// Capture docs and their high-water mark without an await between them.
+		// A mutation that arrives during the following I/O gets a higher sequence
+		// and remains journaled; a mutation included here is covered by the
+		// snapshot even if its queued journal append has not run yet.
+		const snapshot: MirrorSnapshot = {
+			version: MIRROR_FORMAT_VERSION,
+			throughSequence: this._journalSequence,
+			docs: [...this._docs.values()],
+		};
+		const serializeStartedAt = performance.now();
+		const serialized = JSON.stringify(snapshot);
+		const bytes = Buffer.byteLength(serialized);
+		this._recordPersistenceMetric("mirror-snapshot", "serialize", performance.now() - serializeStartedAt, bytes);
+		const writeStartedAt = performance.now();
+		await fs.promises.writeFile(tmp, serialized, "utf-8");
+		await this._atomicRename(tmp, final);
+		this._recordPersistenceMetric("mirror-snapshot", "write", performance.now() - writeStartedAt, bytes);
+		// Never blindly truncate: after the snapshot rename, retain exactly the
+		// records newer than its high-water mark. This makes either side of a
+		// crash between the snapshot and journal renames recover equivalently.
+		await this._rewriteJournalAfterSnapshot(dir, snapshot.throughSequence);
+	}
 
-		// Sweep stale legacy export-key files after both bundle files are durable.
-		const present = new Set(written);
-		let entries: string[] = [];
-		try { entries = await fs.promises.readdir(dir); } catch { /* empty */ }
-		for (const f of entries) {
-			if (!f.endsWith(".json")) continue;
-			if (f.endsWith(".tmp")) continue;
-			if (present.has(f)) continue;
-			try { await fs.promises.unlink(path.join(dir, f)); } catch { /* best-effort */ }
-		}
+	private async _rewriteJournalAfterSnapshot(dir: string, throughSequence: number): Promise<void> {
+		const journal = path.join(dir, JOURNAL_FILE);
+		const retained: string[] = [];
+		try {
+			const raw = await fs.promises.readFile(journal, "utf-8");
+			for (const line of raw.split("\n")) {
+				if (!line) continue;
+				try {
+					const record = parseVersionedJournalRecord(JSON.parse(line));
+					if (record && record.sequence > throughSequence) retained.push(`${line}\n`);
+				} catch { /* corrupt records are already ignored during recovery */ }
+			}
+		} catch { /* no journal yet */ }
+
+		// Entries appended while snapshot I/O was in flight have not necessarily
+		// reached disk. Drop only queued entries already covered by the snapshot;
+		// the later entries stay queued and will be appended by the next flush.
+		this._journal = this._journal.filter((line) => {
+			try {
+				const record = parseVersionedJournalRecord(JSON.parse(line));
+				return record !== null && record.sequence > throughSequence;
+			} catch {
+				return false;
+			}
+		});
+		this._journalBytes = this._journal.reduce((total, line) => total + Buffer.byteLength(line), 0);
+
+		const serialized = retained.join("");
+		const journalTmp = `${journal}.tmp`;
+		await fs.promises.writeFile(journalTmp, serialized, "utf-8");
+		await this._atomicRename(journalTmp, journal);
 	}
 
 	private async _loadFromDisk(): Promise<void> {
 		const dir = path.join(this.dataDir, INDEX_SUBDIR);
-		let entries: string[] = [];
-		try { entries = await fs.promises.readdir(dir); } catch { return; }
-
-		const yieldToLoop = () => new Promise<void>((r) => setImmediate(r));
-
-		// First, reload our mirror docs map (source of truth for
-		// `count()`, `list()`, `deleteWhere`).
-		const docsFile = path.join(dir, "__docs__.json");
-		let loadedDocsHash: string | undefined;
+		let snapshotThroughSequence = 0;
 		try {
-			const raw = await fs.promises.readFile(docsFile, "utf-8");
-			loadedDocsHash = createHash("sha256").update(raw).digest("hex");
-			const parsed = JSON.parse(raw) as FlexDoc[];
-			for (const d of parsed) {
-				if (d && typeof d.id === "string") {
-					const prepared = this._prepare(d);
-					this._docs.set(prepared.id, prepared);
-				}
+			const raw = await fs.promises.readFile(path.join(dir, SNAPSHOT_FILE), "utf-8");
+			const parsed: unknown = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				// Pre-sequence snapshots were a bare document array. They have no
+				// high-water mark, so retain the old replay-all-journal behaviour.
+				for (const d of parsed) if (isFlexDoc(d)) this._setDoc(this._prepare(d));
+			} else {
+				const snapshot = parseMirrorSnapshot(parsed);
+				if (!snapshot) throw new Error("unsupported mirror snapshot");
+				snapshotThroughSequence = snapshot.throughSequence;
+				this._journalSequence = snapshotThroughSequence;
+				for (const d of snapshot.docs) if (isFlexDoc(d)) this._setDoc(this._prepare(d));
 			}
-		} catch {
-			// Missing / corrupt — caller detects via needsRebuild when meta
-			// has content but count() is 0.
-		}
-		await yieldToLoop();
-
-		// Replay either the versioned single-file export bundle or the legacy
-		// per-key files. The mirror remains a separate atomic recovery source.
-		let importFailures = 0;
-		let importSuccesses = 0;
-		const importEntry = async (key: string, data: unknown, source: string): Promise<void> => {
-			try {
-				if (isTagKey(key)) {
-					const tag = classifyTagImport(data);
-					if (tag.kind === "invalid") throw new Error("unrecognized tag payload");
-					if (tag.kind === "import") this._idx.import(key, tag.entries as never);
-				} else {
-					this._idx.import(key, data as never);
-				}
-				importSuccesses++;
-			} catch (err) {
-				importFailures++;
-				console.warn(`[search] Skipping corrupt index export ${source}:`, err);
-			}
-			await yieldToLoop();
-		};
-
-		if (entries.includes(FLEX_EXPORT_BUNDLE_FILE)) {
-			try {
-				const raw = await fs.promises.readFile(path.join(dir, FLEX_EXPORT_BUNDLE_FILE), "utf-8");
-				const bundle = JSON.parse(raw) as { version?: unknown; docsHash?: unknown; exports?: unknown };
-				if (bundle.version !== FLEX_EXPORT_BUNDLE_VERSION
-					|| typeof bundle.docsHash !== "string"
-					|| bundle.docsHash !== loadedDocsHash
-					|| !Array.isArray(bundle.exports)) {
-					throw new Error("unsupported, partial, or mirror-mismatched FlexSearch export bundle");
-				}
-				for (const entry of bundle.exports) {
-					if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
-						importFailures++;
-						console.warn("[search] Skipping malformed entry in FlexSearch export bundle");
-						continue;
-					}
-					await importEntry(entry[0], entry[1], `${FLEX_EXPORT_BUNDLE_FILE}:${entry[0]}`);
-				}
-			} catch (err) {
-				importFailures++;
-				console.warn(`[search] Skipping corrupt index export ${FLEX_EXPORT_BUNDLE_FILE}:`, err);
-			}
-		} else {
-			// Backward-compatible legacy reader. The next dirty flush migrates these
-			// files into the versioned bundle and sweeps the old per-key exports.
-			const legacyFiles = entries
-				.filter((file) => file.endsWith(".json") && !file.endsWith(".tmp") && file !== "__docs__.json")
-				.sort((a, b) => legacyImportOrder(a) - legacyImportOrder(b) || a.localeCompare(b));
-			for (const file of legacyFiles) {
-				const key = unsanitiseKey(file.slice(0, -".json".length));
+		} catch { /* fresh or corrupt mirror; normal rebuild path handles it */ }
+		try {
+			const raw = await fs.promises.readFile(path.join(dir, JOURNAL_FILE), "utf-8");
+			let lastReplayedSequence = snapshotThroughSequence;
+			for (const line of raw.split("\n")) {
+				if (!line) continue;
 				try {
-					const raw = await fs.promises.readFile(path.join(dir, file), "utf-8");
-					await importEntry(key, safeParse(raw), file);
-				} catch (err) {
-					importFailures++;
-					console.warn(`[search] Skipping corrupt index export ${file}:`, err);
+					const parsed: unknown = JSON.parse(line);
+					const record = parseVersionedJournalRecord(parsed);
+					if (record) {
+						this._journalSequence = Math.max(this._journalSequence, record.sequence);
+						// Records at or before the snapshot high-water mark are already
+						// represented in it. Reject duplicate/out-of-order newer records
+						// as well; normal writes are strictly monotonic.
+						if (record.sequence <= snapshotThroughSequence || record.sequence <= lastReplayedSequence) continue;
+						this._applyJournal(record.operation);
+						lastReplayedSequence = record.sequence;
+					} else if (isMirrorOperation(parsed)) {
+						// Legacy journals had bare operations and therefore no sequence.
+						this._applyJournal(parsed);
+					} else {
+						throw new Error("invalid mirror journal record");
+					}
+				} catch { console.warn("[search] Ignoring corrupt mirror journal record"); }
+			}
+		} catch { /* no journal */ }
+		// Legacy exports are derived cache data. Remove them (and interrupted
+		// temp files) without attempting an expensive import/re-export cycle.
+		try {
+			for (const name of await fs.promises.readdir(dir)) {
+				if (name === SNAPSHOT_FILE || name === JOURNAL_FILE) continue;
+				if (name === FLEX_EXPORT_BUNDLE_FILE || name.endsWith(".tmp") || /\.(map|reg|tag|doc)\.json$/.test(name)) {
+					await fs.promises.rm(path.join(dir, name), { force: true });
 				}
 			}
-		}
+		} catch { /* best effort migration cleanup */ }
+	}
 
-		// If the replay files were all present and parsed cleanly, trust
-		// the in-memory index. Re-adding every mirror doc on the happy path
-		// used to freeze the event loop for many seconds on large indexes.
-		//
-		// Any import failure forces a full rebuild from the mirror. A
-		// partial replay leaves the in-memory index incoherent (e.g. doc
-		// store loaded but tag index missing entries), and the next
-		// debounced flush would silently overwrite the on-disk export
-		// with that incomplete state — search filters would degrade
-		// without any further warning. Drop the partial index entirely
-		// and rebuild from `__docs__.json`, which is our source of truth.
-		if ((importFailures > 0 || importSuccesses === 0) && this._docs.size > 0) {
-			this._dirty = true;
-			console.warn(
-				`[search] Rebuilding in-memory index from mirror (${this._docs.size} docs) — ${importFailures} export entry(s) failed to import (${importSuccesses} succeeded); partial state discarded`,
-			);
-			this._idx = FlexSearchStore._newIndex();
-			let n = 0;
-			for (const d of this._docs.values()) {
-				try { (this._idx.add as unknown as (id: string, d: unknown) => void)(d.id, d); } catch { /* non-fatal */ }
-				// Yield every 500 docs so the event loop isn't monopolized
-				// during a worst-case rebuild.
-				if (++n % 500 === 0) await yieldToLoop();
-			}
+	private async _ensureIndex(): Promise<void> {
+		if (this._indexBuilt) return;
+		this._idx = FlexSearchStore._newIndex();
+		let n = 0;
+		for (const doc of this._docs.values()) {
+			(this._idx.add as unknown as (id: string, d: unknown) => void)(doc.id, doc);
+			if (++n % 500 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
 		}
+		this._indexBuilt = true;
+	}
+
+	private _setDoc(doc: FlexDoc): void {
+		const previous = this._docs.get(doc.id);
+		if (previous?.parent_id) this._untrackParentDoc(previous.parent_id, previous.id);
+		this._docs.set(doc.id, doc);
+		if (doc.parent_id) this._trackParentDoc(doc);
+	}
+
+	private _deleteDoc(id: string): boolean {
+		const doc = this._docs.get(id);
+		if (!doc) return false;
+		this._docs.delete(id);
+		if (doc.parent_id) this._untrackParentDoc(doc.parent_id, id);
+		if (this._indexBuilt) this._idx.remove(id);
+		return true;
+	}
+
+	private _trackParentDoc(doc: FlexDoc): void {
+		const parentId = doc.parent_id!;
+		let ids = this._parentDocIds.get(parentId);
+		if (!ids) this._parentDocIds.set(parentId, ids = new Set());
+		ids.add(doc.id);
+		this._parentHashes.set(parentId, doc.content_hash);
+	}
+
+	private _untrackParentDoc(parentId: string, docId: string): void {
+		const ids = this._parentDocIds.get(parentId);
+		if (!ids) return;
+		ids.delete(docId);
+		if (ids.size === 0) {
+			this._parentDocIds.delete(parentId);
+			this._parentHashes.delete(parentId);
+			return;
+		}
+		const replacementId = ids.values().next().value as string;
+		const replacement = this._docs.get(replacementId);
+		if (replacement) this._parentHashes.set(parentId, replacement.content_hash);
+	}
+
+
+	private _appendJournal(op: MirrorOperation): void {
+		const serializeStartedAt = performance.now();
+		const record: VersionedJournalRecord = {
+			version: MIRROR_FORMAT_VERSION,
+			sequence: ++this._journalSequence,
+			operation: op,
+		};
+		const line = JSON.stringify(record) + "\n";
+		this._recordPersistenceMetric("mirror-record", "serialize", performance.now() - serializeStartedAt, Buffer.byteLength(line));
+		this._journal.push(line);
+		this._journalBytes += Buffer.byteLength(line);
+	}
+
+	private _recordPersistenceMetric(label: string, phase: FlexStorePersistenceMetric["phase"], durationMs: number, bytes: number): void {
+		// This store is only owned by the search worker. Attribute synchronous
+		// serialization to that worker's event loop, never the gateway's.
+		if (phase === "serialize") recordEventLoopOperation(`search:${label}:serialize`, durationMs, { bytes });
+		this._onPersistenceMetric?.({ label, phase, durationMs, bytes });
+	}
+
+	private _applyJournal(op: MirrorOperation): void {
+		if (op.op === "clear") { this._docs.clear(); this._parentHashes.clear(); this._parentDocIds.clear(); return; }
+		if (op.op === "delete") { for (const id of op.ids) this._deleteDoc(id); return; }
+		this._setDoc(this._prepare(op.doc));
 	}
 
 	// ── Prepare ──────────────────────────────────────────────────────
@@ -847,11 +957,6 @@ function titleFromText(text: string): string {
 	return text.slice(0, 80) + "…";
 }
 
-function safeParse(raw: string): unknown {
-	try { return JSON.parse(raw); }
-	catch { return raw; }
-}
-
 /**
  * True for FlexSearch export keys that hold the document tag context
  * (e.g. `1.tag`, `<field>.1.tag`). The reference segment is the last
@@ -919,17 +1024,4 @@ export function classifyTagImport(data: unknown): TagImportClassification {
 	}
 	const populated = data.filter((entry) => (entry as unknown[])[1] != null);
 	return populated.length > 0 ? { kind: "import", entries: populated } : { kind: "empty" };
-}
-
-// Legacy FlexSearch per-key files must replay maps before registries/tags/docs.
-function legacyImportOrder(file: string): number {
-	const key = unsanitiseKey(file.slice(0, -".json".length));
-	if (key.endsWith(".map")) return 0;
-	if (key.endsWith(".reg")) return 1;
-	if (key.endsWith(".tag")) return 2;
-	if (key.endsWith(".doc")) return 3;
-	return 4;
-}
-function unsanitiseKey(key: string): string {
-	try { return decodeURIComponent(key); } catch { return key; }
 }

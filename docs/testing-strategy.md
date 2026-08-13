@@ -1,11 +1,6 @@
 # Testing Strategy — Test Suite v2
 
-> **Current operating model.** `npm run test:unit`, `npm run test:browser`, and
-> `npm run test:e2e` are separate implementation-gate phases with one shared
-> cross-suite isolation contract. Migration plans and measurements under
-> [`docs/testing-v2/`](testing-v2/) are historical unless they explicitly identify
-> themselves as current. Start with [cross-OS test authoring](testing-v2/cross-os-test-authoring.md)
-> and the [unit-stage reference](testing-v2/unit-gate.md).
+> **Current operating model.** `npm run test:affected` is the default local unit-feedback command. `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e` remain the separate authoritative implementation-gate phases with one shared cross-suite isolation contract. Migration plans and measurements under [`docs/testing-v2/`](testing-v2/) are historical unless they explicitly identify themselves as current. Start with [cross-OS test authoring](testing-v2/cross-os-test-authoring.md), the [unit-stage reference](testing-v2/unit-gate.md), and the [affected-runner reference](../scripts/affected/README.md).
 
 ## The phase invariant (read this first)
 
@@ -22,6 +17,16 @@ suite. The commands in `.bobbit/config/project.yaml` route to these canonical ph
 There is no scheduled daily lane. The map's `daily` value is retained as an internal
 real-fidelity taxonomy consumed by `test:e2e:v2`; it is not a `test:daily` command.
 
+### Fast feedback is additive
+
+The affected runner is not a fourth gate phase. It maps the effective Git diff—committed, staged, unstaged, and untracked—to one of three unit plans: known docs `SKIP-ALL`, a cache-eligible bounded closure, or cache-bypassing `RUN-ALL`. Git records are collected before graph construction so declared non-code deletes and rename old sides retain tombstone ownership. Tombstones do not reconstruct old executable import closures: unknown or removed executable inputs fail closed to `RUN-ALL`. Declared shipped Markdown remains graph-owned and cannot become a docs skip; only ordinary unclaimed documentation may skip. Dependency/lockfile and TypeScript/Vitest execution boundaries also run the complete unit inventory. Browser selection is advisory; E2E is not selectively executed.
+
+Affected testing is local developer feedback only and does not run in CI. The cross-platform build, type-check, and full `test:unit` job runs on PRs and pushes to the primary branch. Full browser/E2E workflow gates are unchanged. `.profiles/test-cache/` contains checkout-local PASS optimization state and must never be uploaded, restored, shared between CI jobs, or treated as merge evidence. Any periodic or nightly qualification also uses the full gate commands.
+
+Historical correctness qualification builds each plan from exact revision files, revision-local execution ownership, and that revision's unit inventory. It audits current selector declarations against the old tree: safely absent future declarations are ignored, live unresolved/dynamic unit consumers are quarantined into bounded plans, and unreconcilable graph or ownership drift runs the full historical inventory. Selector or classification errors after graph construction fail qualification rather than being reported as a successful fallback. Changed and baseline full reports must each exactly match their own revision's authoritative unit inventory, while native `--changed` evidence may be a valid subset. Missing, partial, crashed, or contradictory reports fail closed.
+
+See the [affected-runner safety model](../scripts/affected/README.md#plan-and-output-contract) for semantic package rules, non-code dependency ownership, cache invalidation, and proof commands.
+
 **Execution membership is the invariant.** Every materialized test has explicit
 runner, tier, and project metadata in `tests2/tests-map.json`. New tests land in
 `tests2/`; `*.test.ts` uses Vitest and `*.spec.ts` uses Playwright. The guard, parity
@@ -29,13 +34,14 @@ tooling, and `npm run test:unit:inventory` reject orphaned files, duplicate or m
 ownership, and lost declaration semantics.
 
 The unit phase uses one Vitest coordinator with a fixed three-worker cap.
-`VITEST_MAX_WORKERS` may lower the cap only. The normal developer configuration has
-`retry: 3`, but qualification runs `npm run test:unit -- --retry=0`. Browser and
-E2E Groups B–D also normally use `retries: 3`; Group A is retryless because its
-`tsx --test` runner has no retry control. All four tier-1 projects install the
-subprocess guard and enforce a hard 25-second solo file budget. See [Unit gate
-operating model](testing-v2/unit-gate.md) for cache, proof-mode, E2E ownership,
-and audit details.
+`VITEST_MAX_WORKERS` may lower the cap only. The normal `retry: 3` / `retries: 3`
+defaults protect developer and workflow runs; qualification uses the exact
+`BOBBIT_V2_RETRY_FREE=1` repository wrappers and requires zero observed retries.
+That flag makes the unit configuration and Browser/E2E Groups B–D retry-free;
+Group A is retryless because its `tsx --test` runner has no retry control. All four
+tier-1 projects install the subprocess guard and enforce a hard 25-second solo file
+budget. See [Unit gate operating model](testing-v2/unit-gate.md) for cache,
+proof-mode, E2E ownership, and audit details.
 
 ## Cross-suite reliability foundation
 
@@ -75,7 +81,7 @@ blind reloads, or weaker assertions; repair ownership or readiness instead. See
 
 | Tier | Projects/buckets | Runner |
 |------|------------------|--------|
-| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3; qualification uses `--retry=0` |
+| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3; qualification uses `BOBBIT_V2_RETRY_FREE=1` |
 | browser | `v2-browser` | Playwright |
 | E2E real fidelity | tests-map `daily`, including conditional `v2-e2e-vitest` | `run-e2e-v2.mjs` Groups A–D |
 | manual integration | `manual-integration` | Playwright manual config |
@@ -851,19 +857,22 @@ parent, or checkout state is never teardown input.
 
 ### Measurement protocol
 
-Use the canonical phase commands when validating a change. Qualification must
-show first-attempt success, not a normal developer retry:
+Use affected selection for iteration, then the canonical phase commands when validating a change. Qualification must show first-attempt success, not a normal developer retry:
 
 ```bash
-npm run test:unit -- --retry=0
-BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0
+npm run test:affected
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
+BOBBIT_V2_RETRY_FREE=1 npm run test:browser
 BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
 ```
+
+For selector maintenance, `npm run test:affected:proof` is a fast selection-only historical report; it is not correctness evidence. `npm run test:affected:correctness` is the expensive isolated qualification: per pinned sample it installs a detached historical checkout, records Vitest `--changed` observations, runs the complete retry-free unit suite, attributes changed-run failures against a clean baseline when necessary, and fails on under-selection. Over-selection is reported and allowed. Run the multi-sample qualification manually or periodically, while fast unit tests pin comparison, report, environment, and cleanup contracts.
 
 PowerShell qualification uses the same retry-free control:
 
 ```powershell
-$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:browser -- --retries=0
+$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:unit
+$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:browser
 $env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:e2e
 ```
 

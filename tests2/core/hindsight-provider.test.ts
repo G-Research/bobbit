@@ -12,12 +12,12 @@
 // recallScope tag filter, retry-queue retry/cap/drain, status/provider store
 // sharing, and the recall block shape. See docs/design/hindsight-pack-external.md §9.2.
 
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 
 import provider, { __setClientFactory } from "../../market-packs/hindsight/src/provider.ts";
 import { routes } from "../../market-packs/hindsight/src/routes.ts";
-import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY } from "../../market-packs/hindsight/src/shared.ts";
+import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY, type StoreReadResult } from "../../market-packs/hindsight/src/shared.ts";
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 function makeStore() {
@@ -25,6 +25,9 @@ function makeStore() {
 	return {
 		map,
 		get: async <T = unknown>(k: string): Promise<T | null> => (map.has(k) ? (structuredClone(map.get(k)) as T) : null),
+		read: async <T = unknown>(k: string): Promise<StoreReadResult<T>> => map.has(k)
+			? ({ state: "present" as const, value: structuredClone(map.get(k)) as T })
+			: ({ state: "absent" as const }),
 		put: async <T = unknown>(k: string, v: T): Promise<void> => {
 			map.set(k, structuredClone(v));
 		},
@@ -127,6 +130,32 @@ test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constru
 	}
 });
 
+test("autoRecall and autoRetain disable their respective client-backed hooks", async () => {
+	let factoryCalls = 0;
+	__setClientFactory(() => {
+		factoryCalls++;
+		return makeClient().client;
+	});
+	try {
+		const store = makeStore();
+		const base = {
+			config: { ...ACTIVE, autoRecall: false, autoRetain: false },
+			host: { store },
+			prompt: "do not recall or retain this",
+			response: "no remote call",
+			summary: "do not compact this",
+		};
+		assert.deepEqual(await provider.sessionSetup(base), { blocks: [] });
+		assert.deepEqual(await provider.beforePrompt(base), { blocks: [] });
+		assert.deepEqual(await provider.afterTurn(base), { blocks: [] });
+		assert.deepEqual(await provider.beforeCompact(base), { blocks: [] });
+		assert.equal(factoryCalls, 0);
+		assert.equal(store.map.size, 0);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("recall block shape: memories ⇒ one memory block; empty ⇒ no block", async () => {
 	const { client, calls, state } = makeClient();
 	__setClientFactory(() => client);
@@ -147,6 +176,29 @@ test("recall block shape: memories ⇒ one memory block; empty ⇒ no block", as
 		state.memories = [];
 		const out2 = await provider.beforePrompt(c);
 		assert.deepEqual(out2.blocks, []);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("recall failure records a diagnostic and a later healthy call recovers", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const c = { config: { ...ACTIVE }, host: { store }, prompt: "recoverable recall" };
+		state.failRecall = true;
+		assert.deepEqual(await provider.beforePrompt(c), { blocks: [] });
+		const diagnostic = await store.get<{ message: string; ts: number }>(LAST_ERROR_KEY);
+		assert.deepEqual(
+			diagnostic && { message: diagnostic.message, ts: typeof diagnostic.ts },
+			{ message: "recall failed", ts: "number" },
+		);
+
+		state.failRecall = false;
+		state.memories = [{ text: "recall recovered" }];
+		const recovered = await provider.beforePrompt(c);
+		assert.equal(recovered.blocks[0]?.content, "- recall recovered");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -267,12 +319,12 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 	const remoteCanary = "remote-retain-secret-canary";
 	const storeCanary = "queue-read-secret-canary";
 	const store = makeStore();
-	const durableGet = store.get;
+	const durableRead = store.read;
 	const durablePut = store.put;
 	let queuePutCalls = 0;
-	store.get = async <T = unknown>(key: string): Promise<T | null> => {
-		if (key === QUEUE_KEY) throw new Error(storeCanary);
-		return durableGet<T>(key);
+	store.read = async <T = unknown>(key: string): Promise<StoreReadResult<T>> => {
+		if (key === QUEUE_KEY) return { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: storeCanary } } as StoreReadResult<T>;
+		return durableRead<T>(key);
 	};
 	store.put = async <T = unknown>(key: string, value: T): Promise<void> => {
 		if (key === QUEUE_KEY) queuePutCalls++;
@@ -304,8 +356,88 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
 		assert.equal(queuePutCalls, 0, "a failed read must not replace the unknown queue snapshot");
 		assert.equal(store.map.has(QUEUE_KEY), false, "no retry queue snapshot is written after a failed read");
-		assert.equal(store.map.has(LAST_ERROR_KEY), false, "the unsaved remote error is not recorded");
+		const persistedDiagnostic = await store.get<{ message: string; ts: number }>(LAST_ERROR_KEY);
+		assert.deepEqual(
+			persistedDiagnostic && { message: persistedDiagnostic.message, ts: typeof persistedDiagnostic.ts },
+			{ message: "HINDSIGHT_QUEUE_UNAVAILABLE", ts: "number" },
+			"the unknown queue state remains visibly diagnosable without storing either failure detail",
+		);
 		assert.doesNotMatch(JSON.stringify([...store.map.entries()]), new RegExp(`${remoteCanary}|${storeCanary}`));
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("unknown queue blocks both drains and status never reports it as empty", async () => {
+	const store = makeStore();
+	await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+	await store.put(QUEUE_KEY, [{ content: "must-not-drain", tags: { kind: "turn" }, ts: 1 }]);
+	const durableRead = store.read;
+	const canary = "queue-read-secret-canary";
+	store.read = async <T = unknown>(key: string): Promise<StoreReadResult<T>> => key === QUEUE_KEY
+		? { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: canary } } as StoreReadResult<T>
+		: durableRead<T>(key);
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		// No turn summary: this isolates the head drain from a new retain.
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store } });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store } });
+		assert.equal(calls.retain.length, 0, "unknown queue must not issue remote drain retains");
+		assert.deepEqual(await store.get(QUEUE_KEY), [{ content: "must-not-drain", tags: { kind: "turn" }, ts: 1 }]);
+
+		const status = await routes.status({ host: { store } } as never) as Record<string, unknown>;
+		assert.equal(status.queueDepth, null, "unknown durable state is not an empty queue");
+		assert.equal(status.queueState, "unavailable");
+		assert.deepEqual(status.queueError, { code: "STORE_READ_IO", retryable: true });
+		assert.doesNotMatch(JSON.stringify(status), new RegExp(canary));
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("status preserves a valid stored empty queue", async () => {
+	const store = makeStore();
+	await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+	await store.put(QUEUE_KEY, []);
+	__setClientFactory(() => makeClient().client);
+	try {
+		const status = await routes.status({ host: { store } } as never) as Record<string, unknown>;
+		assert.equal(status.queueDepth, 0);
+		assert.equal(status.queueState, "available");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("unreadable config is visible, sanitized, and cannot be overwritten", async () => {
+	const store = makeStore();
+	const durableRead = store.read;
+	const durablePut = store.put;
+	const canary = "config-read-secret-canary";
+	let configWrites = 0;
+	store.read = async <T = unknown>(key: string): Promise<StoreReadResult<T>> => key === CONFIG_KEY
+		? { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: canary } } as StoreReadResult<T>
+		: durableRead<T>(key);
+	store.put = async <T>(key: string, value: T) => {
+		if (key === CONFIG_KEY) configWrites++;
+		return durablePut(key, value);
+	};
+	let clientCalls = 0;
+	__setClientFactory(() => {
+		clientCalls++;
+		return makeClient().client;
+	});
+	try {
+		const get = await routes.config({ host: { store } } as never, { method: "GET" } as never) as Record<string, unknown>;
+		const set = await routes.config({ host: { store } } as never, { method: "POST", body: { bank: "new-bank" } } as never) as Record<string, unknown>;
+		const recall = await routes.recall({ host: { store } } as never, { body: { query: "do not call remote" } } as never) as Record<string, unknown>;
+		assert.equal(get.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
+		assert.equal(set.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
+		assert.equal(recall.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
+		assert.equal(configWrites, 0);
+		assert.equal(clientCalls, 0);
+		assert.doesNotMatch(JSON.stringify([get, set, recall]), new RegExp(canary));
 	} finally {
 		__setClientFactory(null);
 	}

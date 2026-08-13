@@ -2,7 +2,7 @@
 
 > ⚠️ **Historical — superseded.** This document describes the **previous** semantic-search architecture (Nomic embeddings + LanceDB) that was replaced for portability reasons. The current engine is FlexSearch (pure-JS, BM25-style lexical ranking, no native binaries, no model downloads).
 >
-> For the current design, see **[docs/design/portable-search.md](portable-search.md)**. For the runtime quick reference, see **[docs/internals.md — Semantic search](../internals.md#semantic-search)**.
+> For the current architecture and ranking reference, see **[docs/internals.md — Semantic search](../internals.md#semantic-search)**. For runtime persistence and recovery, see **[Search worker and persistence](../search-worker-persistence.md)**. [Portable Search](portable-search.md) records the superseded transition design and portability rationale.
 >
 > The `IndexSource` / `Indexable` / `SearchQuery` / `SearchResult` abstractions described below are still authoritative — only the storage/ranking backend changed.
 

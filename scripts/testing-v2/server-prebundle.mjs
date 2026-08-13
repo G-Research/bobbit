@@ -13,6 +13,9 @@ import {
 import { dirname, extname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { bundledRepoSourceFiles, normalizeRepoSourcePath } from "./repo-source-closure.mjs";
+
+export { bundledRepoSourceFiles, resolveBundledSource, serverRuntimeRepoSourceFiles } from "./repo-source-closure.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -33,13 +36,7 @@ function toPosixPath(file) {
  * Normalize a source path for manifest lookup. Windows paths are compared
  * case-insensitively even when a config is inspected from a non-Windows host.
  */
-export function normalizeServerSourcePath(file) {
-	const withoutQuery = file.replace(/[?#].*$/, "");
-	const normalized = toPosixPath(withoutQuery)
-		.replace(/^\/@fs\/(?=[A-Za-z]:\/)/, "")
-		.replace(/^\/(?=[A-Za-z]:\/)/, "");
-	return /^[A-Za-z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
-}
+export const normalizeServerSourcePath = normalizeRepoSourcePath;
 
 function walkFiles(root, filter = /\.(?:ts|js|json)$/) {
 	const out = [];
@@ -116,61 +113,6 @@ function prebundleSourceEntries(repoRoot) {
 	];
 }
 
-const BUNDLED_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
-const BUNDLED_IMPORT_RE = /(?:\b(?:import|export)\s+(?:[^"'`;]*?\s+from\s*)?|\brequire\s*\(|\bimport\s*\()\s*(["'`])([^"'`]+)\1/gms;
-
-function resolveBundledSource(specifier, importer, repoRoot) {
-	if (!specifier.startsWith(".")) return undefined;
-	const unresolved = resolve(dirname(importer), specifier.replace(/[?#].*$/, ""));
-	const extension = extname(unresolved);
-	const candidates = [unresolved];
-	if (extension) {
-		const stem = unresolved.slice(0, -extension.length);
-		if (extension === ".js" || extension === ".jsx") candidates.push(`${stem}.ts`, `${stem}.tsx`);
-		else if (extension === ".mjs") candidates.push(`${stem}.mts`);
-		else if (extension === ".cjs") candidates.push(`${stem}.cts`);
-	} else {
-		for (const candidateExtension of BUNDLED_SOURCE_EXTENSIONS) candidates.push(`${unresolved}${candidateExtension}`);
-		for (const candidateExtension of BUNDLED_SOURCE_EXTENSIONS) candidates.push(join(unresolved, `index${candidateExtension}`));
-	}
-	for (const candidate of candidates) {
-		const repoRelative = relative(repoRoot, candidate);
-		if (repoRelative.startsWith("..") || isAbsolute(repoRelative)) continue;
-		try {
-			if (statSync(candidate).isFile()) return candidate;
-		} catch (error) {
-			if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
-		}
-	}
-	return undefined;
-}
-
-/**
- * Follow only repo-local imports that esbuild can bundle. This keeps the key
- * complete when server modules reach into src/shared (or a future source
- * family) without invalidating the cache for unrelated UI and test sources.
- */
-function bundledRepoSourceFiles(repoRoot, roots) {
-	const pending = [...roots];
-	const discovered = new Map();
-	while (pending.length > 0) {
-		const file = pending.pop();
-		const key = normalizeServerSourcePath(relative(repoRoot, file));
-		if (discovered.has(key)) continue;
-		discovered.set(key, file);
-		if (extname(file) === ".json") continue;
-		const source = readFileSync(file, "utf8");
-		BUNDLED_IMPORT_RE.lastIndex = 0;
-		for (const match of source.matchAll(BUNDLED_IMPORT_RE)) {
-			const dependency = resolveBundledSource(match[2], file, repoRoot);
-			if (dependency) pending.push(dependency);
-		}
-	}
-	return [...discovered.entries()]
-		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([, file]) => file);
-}
-
 export function computeServerPrebundleKey(repoRoot = REPO_ROOT) {
 	const hash = createHash("sha256");
 	const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
@@ -178,6 +120,7 @@ export function computeServerPrebundleKey(repoRoot = REPO_ROOT) {
 		...bundledRepoSourceFiles(repoRoot, [runtimeEntry, ...prebundleSourceEntries(repoRoot)]),
 		join(repoRoot, "tsconfig.server.json"),
 		join(repoRoot, "package-lock.json"),
+		join(HERE, "repo-source-closure.mjs"),
 		fileURLToPath(import.meta.url),
 	];
 	for (const file of files) {

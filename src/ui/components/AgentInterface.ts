@@ -44,18 +44,19 @@ import "./Messages.js"; // Import for side effects to register the custom elemen
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
-import { state as appState, renderApp, type GatewaySession } from "../../app/state.js";
+import { state as appState, renderApp, type GatewaySession, type RemoteStateMetadata } from "../../app/state.js";
 import {
 	resolvePromptAuthorAppearance,
 	type PromptAuthorAppearance,
 } from "../../app/message-author-appearance.js";
 import { sessionColorMap } from "../../app/session-colors.js";
 import { copyTextToClipboard } from "../../app/api.js";
+import { showHeaderToast } from "../../app/header-toast.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
-import { canContinueArchivedSession, continueArchivedSession } from "../../app/session-actions.js";
+import { canContinueArchivedSession, canForkSession, continueArchivedSession } from "../../app/session-actions.js";
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { formatCost, formatTokenCount, formatModelCost } from "../utils/format.js";
@@ -65,6 +66,15 @@ import type { UserMessageWithAttachments } from "./Messages.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 import type { GitRepoKnown } from "../../app/git-status-refresh.js";
 import { selectPromptAuthorDisplayMode } from "../message-author-presentation.js";
+
+interface PromptHistoryForkDetail {
+	entryId: string;
+	newWorktree: boolean;
+}
+
+interface PromptCopyDetail {
+	promptText: string;
+}
 
 @customElement("agent-interface")
 export class AgentInterface extends LitElement {
@@ -109,6 +119,9 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) gitRepoKnown: GitRepoKnown = 'unknown';
 	/** True when the server returned Phase A data but porcelain timed out. */
 	@property({ type: Boolean }) partial = false;
+	/** Safe freshness metadata for the independent Git and PR coordinator records. */
+	@property({ attribute: false }) remoteGitSnapshot?: RemoteStateMetadata;
+	@property({ attribute: false }) remotePrSnapshot?: RemoteStateMetadata;
 	// PR status properties for goal-linked sessions
 	@property() prState?: string;
 	@property() prUrl?: string;
@@ -264,6 +277,7 @@ export class AgentInterface extends LitElement {
 	private _contextPopoverOpen = false;
 	private _costPopoverOpen = false;
 	private _permissionGrantClickLocked = false;
+	private _historyForkPending = false;
 
 	// --- Scroll-lock state — vanilla-TS port of `use-stick-to-bottom`
 	// (https://github.com/stackblitz-labs/use-stick-to-bottom, 731⭐, powers
@@ -455,6 +469,57 @@ export class AgentInterface extends LitElement {
 			this._cwdCopyResetTimer = undefined;
 		}, 1500);
 	}
+
+	private _historyForkSource(): GatewaySession | undefined {
+		const sessionId = this.session?.sessionId;
+		if (!sessionId) return undefined;
+		const source = appState.gatewaySessions.find((candidate) => candidate.id === sessionId);
+		if (!source) return undefined;
+		const effective: GatewaySession = {
+			...source,
+			readOnly: source.readOnly || this.readOnly,
+			nonInteractive: source.nonInteractive || this.nonInteractive,
+		};
+		return canForkSession(effective) ? source : undefined;
+	}
+
+	private _handlePromptCopy = async (event: CustomEvent<PromptCopyDetail>): Promise<void> => {
+		event.stopPropagation();
+		const promptText = event.detail?.promptText;
+		const copied = typeof promptText === "string"
+			&& promptText.length > 0
+			&& await copyTextToClipboard(promptText);
+		showHeaderToast(copied ? "Prompt copied" : "Couldn't copy prompt");
+	};
+
+	private _handlePromptHistoryFork = async (event: CustomEvent<PromptHistoryForkDetail>): Promise<void> => {
+		event.stopPropagation();
+		if (this._historyForkPending || appState.creatingSession) return;
+		const entryId = event.detail?.entryId;
+		if (typeof entryId !== "string"
+			|| entryId.length === 0
+			|| entryId.length > 256
+			|| entryId.trim() !== entryId
+			|| typeof event.detail?.newWorktree !== "boolean") return;
+		const source = this._historyForkSource();
+		if (!source) {
+			showHeaderToast("This session can no longer be forked");
+			return;
+		}
+		this._historyForkPending = true;
+		this.requestUpdate();
+		try {
+			// Avoid an eager AgentInterface -> session-manager -> ChatPanel cycle.
+			const { forkSession } = await import("../../app/session-manager.js");
+			await forkSession(source, {
+				entryId,
+				newWorktree: event.detail.newWorktree,
+			});
+		} finally {
+			this._historyForkPending = false;
+			this.requestUpdate();
+		}
+	};
 
 	/**
 	 * Window-level Escape handler. Aborts the streaming agent regardless of
@@ -827,6 +892,26 @@ export class AgentInterface extends LitElement {
 		});
 	}
 
+	/**
+	 * A full snapshot commits through AgentInterface, MessageList, and then its
+	 * keyed message children. Parent `updateComplete` alone can run before cursor
+	 * enrichment exposes prompt-action controls in historic user rows, leaving
+	 * their late layout growth below a formerly pinned viewport. Wait for the
+	 * list commit and two paint frames, then perform one authoritative final pin.
+	 */
+	private async _updateAndPinAfterSnapshot(): Promise<void> {
+		const sourceSession = this.session;
+		this.requestUpdate();
+		await this.updateComplete;
+		if (this.session !== sourceSession) return;
+		const messageList = this.querySelector("message-list") as (HTMLElement & { updateComplete?: Promise<unknown> }) | null;
+		if (messageList?.updateComplete) await messageList.updateComplete;
+		await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		if (this.session !== sourceSession) return;
+		this._pinIfSticking();
+		this._refreshJumpButton();
+	}
+
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
@@ -888,8 +973,8 @@ export class AgentInterface extends LitElement {
 			// during the same task is recognised as a resize-driven scroll
 			// (the deferred handler bails). Overscroll-clamps `scrollTop` if
 			// the browser left it above target after a rapid shrink-then-grow.
-			// On positive delta + sticky intent, pin synchronously. On
-			// negative delta within the near-bottom band, re-engage stick.
+			// Any signed delta preserves an existing sticky intent; a negative
+			// delta within the near-bottom band can also re-engage stick.
 			this._resizeObserver = new ResizeObserver(() => {
 				if (!this._scrollContainer) return;
 				const el = this._scrollContainer;
@@ -928,9 +1013,14 @@ export class AgentInterface extends LitElement {
 						this._scrollToBottomNow({ animate: false });
 					}
 				} else {
-					// Negative shrink — if we're now in the near-bottom band
-					// and the user hasn't explicitly escaped, re-engage stick.
-					if (this._isNearBottom() && !this._escapedFromLock) {
+					// A keyed snapshot can shrink in several late child commits. Browser
+					// scroll anchoring may move scrollTop upward at the same time, so the
+					// resulting geometry is not necessarily near-bottom even though user
+					// intent is still sticky. Preserve that explicit intent for shrink as
+					// well as growth; only a user escape may suppress the re-pin.
+					if (this._isAtBottom && !this._escapedFromLock) {
+						this._scrollToBottomNow({ animate: false });
+					} else if (this._isNearBottom() && !this._escapedFromLock) {
 						this._isAtBottom = true;
 						this._refreshJumpButton();
 						// Apply the post-collapse clamp inherited from the old
@@ -946,6 +1036,10 @@ export class AgentInterface extends LitElement {
 				}
 			});
 
+			// This is the outer transcript wrapper from render(), not the
+			// <message-list> child. It contains both the stable message list and
+			// <streaming-message-container>, so token-driven stream growth reaches
+			// this observer without requiring an AgentInterface render.
 			const contentContainer = this._scrollContainer.querySelector(".max-w-5xl");
 			if (contentContainer) {
 				this._resizeObserver.observe(contentContainer);
@@ -1145,6 +1239,14 @@ export class AgentInterface extends LitElement {
 
 		this._unsubscribeSession = this.session.subscribe(async (ev: AgentEvent) => {
 			// Handle custom events not in AgentEvent union
+			if ((ev as any).type === "messages_snapshot") {
+				// The reducer replacement already cleared stale streaming state. Sync
+				// the detached streaming container once, then pin after the keyed
+				// message children have committed their cursor-action layout.
+				if (this._streamingContainer) this._streamingContainer.setMessage(null, true);
+				await this._updateAndPinAfterSnapshot();
+				return;
+			}
 			if ((ev as any).type === "compaction_start") {
 				if (this._streamingContainer) this._streamingContainer.startCompacting();
 				this._updateAndPin();
@@ -1156,6 +1258,14 @@ export class AgentInterface extends LitElement {
 				return;
 			}
 			if ((ev as any).type === "state_update") {
+				// Update the send fence synchronously with authoritative state. Waiting
+				// for Lit's next render would leave a small window where Enter could emit
+				// message-send and tombstone the draft before the defensive onSend check.
+				if (this._messageEditor) {
+					this._messageEditor.blockedSendReason = (this.session?.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED"
+						? "Choose a replacement model before sending."
+						: undefined;
+				}
 				// Server state refresh (e.g. after compaction or reconnect) —
 				// re-render stats and re-pin once layout commits. Content may
 				// have been bulk-replaced without triggering a ResizeObserver
@@ -1239,10 +1349,11 @@ export class AgentInterface extends LitElement {
 						this._streamingContainer.turnStartTime = (this.session?.state as any).turnStartTime ?? null;
 						this._streamingContainer.setMessage(ev.message, !isStreaming);
 					}
-					// message_update doesn't go through Lit's `requestUpdate` (the
-					// streaming container manages its own DOM), so route through
-					// updateComplete + _pinIfSticking to follow growth.
-					this._updateAndPin();
+					// StreamingMessageContainer batches its own renders via rAF. Do not
+					// request an AgentInterface update here: that re-renders the whole
+					// transcript for every cumulative token frame. AgentInterface's
+					// ResizeObserver watches the outer transcript wrapper containing this
+					// stream container and owns follow-tail pinning when it grows.
 					break;
 			}
 		});
@@ -1541,6 +1652,13 @@ export class AgentInterface extends LitElement {
 		if (!input.trim() && (!attachments || attachments.length === 0)) return;
 		const session = this.session;
 		if (!session) throw new Error("No session set on AgentInterface");
+		// Defensive backstop for programmatic callers. The editor performs the
+		// user-visible synchronous fence before message-send; this check must still
+		// precede /compact and every composer/attachment clear path.
+		if ((session.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED") {
+			this._messageEditor?.showBlockedSendError("Choose a replacement model before sending.");
+			return;
+		}
 
 		// Handle /compact slash command
 		if (input.trim().toLowerCase() === "/compact") {
@@ -1653,6 +1771,7 @@ export class AgentInterface extends LitElement {
 		if (!text.trim()) return false;
 		const session = this.session;
 		if (!session) throw new Error("No session set on AgentInterface");
+		if ((session.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED") return false;
 		if (!session.state.model) throw new Error("No model set on AgentInterface");
 
 		const isStreaming = session.state.isStreaming;
@@ -1729,14 +1848,15 @@ export class AgentInterface extends LitElement {
 
 	/** Apply one picker choice as an exact model/effective-thinking tuple. */
 	private _applyModelSelection(session: any, model: any): void {
+		if (session.state?.modelSelectionPending) return;
 		const effectiveThinking = clampThinkingLevel(session.state?.thinkingLevel, model as any) ?? "off";
-		// Stage the clamped value before calling through application wrappers that
-		// still forward only the model argument. RemoteAgent uses this optimistic
-		// effective state to keep the request combined.
-		session.state.thinkingLevel = effectiveThinking;
+		const requiresRecovery = session.state?.condition?.code === "MODEL_SELECTION_REQUIRED";
+		// Normal selection stays optimistic. Recovery keeps the retired tuple visible
+		// until the server verifies and explicitly publishes the replacement.
+		if (!requiresRecovery) session.state.thinkingLevel = effectiveThinking;
 		if (typeof session.setModel === "function") {
 			session.setModel(model, effectiveThinking);
-		} else {
+		} else if (!requiresRecovery) {
 			session.state.model = model;
 		}
 	}
@@ -1767,6 +1887,54 @@ export class AgentInterface extends LitElement {
 			else session?.abort?.();
 			this.requestUpdate();
 		}
+	}
+
+	private renderModelSelectionRequired(condition: any) {
+		if (condition?.code !== "MODEL_SELECTION_REQUIRED"
+			|| typeof condition.provider !== "string"
+			|| typeof condition.modelId !== "string") return nothing;
+		const session = this.session as any;
+		const sessionState = session?.state as any;
+		const pending = !!sessionState?.modelSelectionPending;
+		const error = typeof sessionState?.modelSelectionError === "string"
+			? sessionState.modelSelectionError
+			: "";
+		return html`
+			<div
+				class="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm"
+				role="alert"
+				data-testid="model-selection-required-banner"
+				data-provider=${condition.provider}
+				data-model-id=${condition.modelId}
+			>
+				<div class="flex items-start gap-3">
+					<div class="shrink-0 text-warning mt-0.5">${icon(AlertTriangle, "sm")}</div>
+					<div class="min-w-0 flex-1">
+						<div class="font-medium text-foreground">Choose a model to continue</div>
+						<div class="mt-1 text-muted-foreground">
+							The saved model <code class="font-mono text-foreground">${condition.provider}/${condition.modelId}</code>
+							is no longer available. Your conversation is safe. Choose another model to continue.
+						</div>
+						${error ? html`<div class="mt-2 text-destructive" data-testid="model-selection-recovery-error">${error}</div>` : nothing}
+						<div class="mt-3">
+							<button
+								type="button"
+								class="px-2.5 py-1 rounded border border-border bg-card hover:bg-secondary text-foreground text-xs disabled:opacity-50"
+								data-testid="choose-replacement-model"
+								aria-label="Choose replacement model"
+								?disabled=${pending || !this.enableModelSelector || !sessionState?.model}
+								@click=${() => {
+									void openModelSelector(sessionState.model, (model) => {
+										this._applyModelSelection(session, model);
+										this.requestUpdate();
+									});
+								}}
+							>${pending ? "Switching…" : "Choose replacement model"}</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		`;
 	}
 
 	private renderProviderAuthRequired(auth: any) {
@@ -1943,12 +2111,15 @@ export class AgentInterface extends LitElement {
 			...visibleMessages,
 			...Array.from(this._preCompactionPromptAuthorSlices.values()).flat(),
 		]);
+		const canForkSource = !!this._historyForkSource();
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${visibleMessages}
 					.sessionId=${this.session?.sessionId ?? ""}
+					.canForkSource=${canForkSource}
+					.promptActionsBusy=${this._historyForkPending || appState.creatingSession}
 					.tools=${state.tools}
 					.pendingToolCalls=${this.session ? this.session.state.pendingToolCalls : new Set<string>()}
 					.isStreaming=${state.isStreaming}
@@ -1972,6 +2143,8 @@ export class AgentInterface extends LitElement {
 					.onRetry=${!state.isStreaming && typeof (this.session as any)?.retry === 'function'
 						? () => (this.session as any).retry()
 						: undefined}
+					@prompt-history-fork=${this._handlePromptHistoryFork}
+					@prompt-copy=${this._handlePromptCopy}
 					@permission-mode-change=${(e: CustomEvent) => {
 						const { id, mode } = e.detail;
 						this._patchPermissionRow(id, { mode });
@@ -2002,6 +2175,8 @@ export class AgentInterface extends LitElement {
 					.onCostClick=${this.onCostClick}
 					.turnStartTime=${(state as any).turnStartTime ?? null}
 				></streaming-message-container>
+
+				${this.renderModelSelectionRequired((state as any).condition)}
 
 				${this.renderProviderAuthRequired((state as any).providerAuthRequired)}
 
@@ -2153,6 +2328,8 @@ export class AgentInterface extends LitElement {
 		}
 
 		const session = this.session!;
+		const modelSelectionRequired = (state as any).condition?.code === "MODEL_SELECTION_REQUIRED";
+		const modelSelectionPending = !!(state as any).modelSelectionPending;
 		const supportsThinking = (state.model as any)?.reasoning === true;
 
 		// The dropdown popover always shows full labels; on mobile (<640px) the trigger
@@ -2172,7 +2349,7 @@ export class AgentInterface extends LitElement {
 			: ["off", "minimal", "low", "medium", "high"];
 		const thinkingTitle = fullLabels[(state.thinkingLevel as ThinkingLevel) ?? "off"] ?? fullLabels.off;
 
-		const thinkingSelect = supportsThinking && this.enableThinkingSelector
+		const thinkingSelect = supportsThinking && this.enableThinkingSelector && !modelSelectionRequired
 			// Outer button gap (label → chevron) tightened to 2px; inner span gap
 			// (brain icon → label) stays at 4px so the icon doesn't crowd the text.
 			? html`<span class="thinking-select-compact [&_button]:!gap-0.5 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
@@ -2194,7 +2371,9 @@ export class AgentInterface extends LitElement {
 			? Button({
 				variant: "ghost",
 				size: "sm",
+				disabled: modelSelectionPending,
 				onClick: () => {
+					if (modelSelectionPending) return;
 					void openModelSelector(state.model, (model) => {
 						this._applyModelSelection(session, model);
 					});
@@ -2455,6 +2634,8 @@ export class AgentInterface extends LitElement {
 								.repos=${(this.gitStatus as { repos?: Record<string, unknown> } | null | undefined)?.repos as any}
 								.loading=${this.gitStatusLoading}
 								.partial=${this.partial}
+								.remoteGitSnapshot=${this.remoteGitSnapshot}
+								.remotePrSnapshot=${this.remotePrSnapshot}
 								.prState=${this.prState}
 								.prUrl=${this.prUrl}
 								.prNumber=${this.prNumber}
@@ -2517,10 +2698,13 @@ export class AgentInterface extends LitElement {
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}
 							.showAttachmentButton=${this.enableAttachments}
-							.showModelSelector=${this.enableModelSelector}
-							.showThinkingSelector=${this.enableThinkingSelector}
+							.showModelSelector=${this.enableModelSelector && !(state as any).modelSelectionPending}
+							.showThinkingSelector=${this.enableThinkingSelector && (state as any).condition?.code !== "MODEL_SELECTION_REQUIRED"}
 							.queuedMessages=${this._serverQueue}
 							.attachments=${this._attachments}
+							.blockedSendReason=${(state as any).condition?.code === "MODEL_SELECTION_REQUIRED"
+								? "Choose a replacement model before sending."
+								: undefined}
 							.onFilesChange=${(files: Attachment[]) => {
 								this._setAttachmentDraft(files);
 							}}
@@ -2552,13 +2736,13 @@ export class AgentInterface extends LitElement {
 									(session as any).reorderQueue(messageIds);
 								}
 							}}
-							.onModelSelect=${() => {
+							.onModelSelect=${(state as any).modelSelectionPending ? undefined : () => {
 								void openModelSelector(state.model, (model) => {
 									this._applyModelSelection(session, model);
 								});
 							}}
 							.onThinkingChange=${
-								this.enableThinkingSelector
+								this.enableThinkingSelector && (state as any).condition?.code !== "MODEL_SELECTION_REQUIRED"
 									? (level: ThinkingLevel) => {
 											if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(level);
 											else session.state.thinkingLevel = level;

@@ -6,6 +6,7 @@ import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 import { type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
+import { loadSidebarSessionView, loadSidebarStatusCollapsedSections, loadSidebarStatusFilter } from "./sidebar-view-preferences.js";
 import {
 	clearSidebarTreePreference,
 	getSidebarTreePreference,
@@ -31,6 +32,28 @@ import {
 // ============================================================================
 // TYPES
 // ============================================================================
+
+export type RemoteStateError = "offline" | "auth" | "rate_limited" | "unavailable";
+
+/** Safe, server-owned freshness metadata accompanying a remote-state value. */
+export interface RemoteStateMetadata {
+	observedAt?: number | string;
+	refreshedAt?: number | string;
+	ageMs?: number;
+	stale?: boolean;
+	source?: string;
+	lastError?: RemoteStateError;
+}
+
+/** Sidebar-compatible PR fast state with coordinator freshness metadata. */
+export interface RemotePrStatus extends RemoteStateMetadata {
+	state: string;
+	url?: string;
+	number?: number;
+	reviewDecision?: string | null;
+	mergeable?: string;
+	viewerCanMergeAsAdmin?: boolean;
+}
 
 export interface Project {
   id: string;
@@ -105,6 +128,10 @@ export interface GatewaySession {
 	/** Server-emitted: count of consecutive errored turns. Compared against
 	 *  `MAX_CONSECUTIVE_ERROR_TURNS` (3 today) by notification-policy.ts rule 3. */
 	consecutiveErrorTurns?: number;
+	/** Server-controlled projections of canonical session state. */
+	server_tags?: string[];
+	/** Durable user-owned session metadata. Legacy session payloads may omit it. */
+	user_tags?: string[];
 }
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
@@ -177,11 +204,12 @@ export interface Goal {
 			metadata?: Record<string, string>;
 			verify?: Array<{
 				name: string;
-				type: "command" | "llm-review";
+				type: "command" | "llm-review" | "agent-qa" | "human-signoff";
 				run?: string;
 				prompt?: string;
 				expect?: "success" | "failure";
 				timeout?: number;
+				failureGuidance?: string;
 			}>;
 		}>;
 	};
@@ -192,6 +220,8 @@ export type AppView = "disconnected" | "gateway-starting" | "authenticated";
 export type ReviewDecision = "approve" | "reject";
 
 export interface ReviewInlineCommentPayload {
+	/** Stable file identity for grouped reviews. Legacy callers may omit it. */
+	fileId?: string;
 	documentTitle: string;
 	quote: string;
 	comment: string;
@@ -233,10 +263,28 @@ export type ReviewSource =
 		stepLabel?: string;
 	};
 
+export interface ReviewFileModel {
+	fileId: string;
+	title: string;
+	markdown: string;
+}
+
+export interface ReviewGroupModel {
+	reviewId: string;
+	title: string;
+	files: ReviewFileModel[];
+	activeFileId: string;
+	source: ReviewSource;
+}
+
+/** Compatibility model for one-document and sign-off review callers. */
 export interface ReviewDocumentModel {
 	title: string;
 	markdown: string;
 	source?: ReviewSource;
+	documentId?: string;
+	fileId?: string;
+	reviewId?: string;
 }
 
 // ============================================================================
@@ -400,8 +448,8 @@ export const state = {
 			awaitingSignoffCount?: number;
 		}>;
 	}>(),
-	/** PR status cache: goalId → { state, url, number, reviewDecision } */
-	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string; viewerCanMergeAsAdmin?: boolean }>(),
+	/** PR status cache: goalId → server-authoritative fast state plus safe snapshot metadata. */
+	prStatusCache: new Map<string, RemotePrStatus>(),
 	sessionsLoading: false,
 	sessionsError: "",
 	creatingSession: false,
@@ -427,12 +475,19 @@ export const state = {
 	/** User-resizable sidebar width in px (expanded state). Clamped 180–480. */
 	sidebarWidth: loadSidebarWidth(),
 
-	/** Whether to show archived sessions in the sidebar */
+	/** Active session browsing view. Unknown persisted values safely resolve to By Project. */
+	sidebarSessionView: loadSidebarSessionView(),
+	/** By Project filters retain their production fields and storage keys. */
 	showArchived: safeGetItem("bobbit-show-archived") === "true",
-	/** Whether to show busy (streaming/aborting/preparing/starting/compacting) sessions. Default ON. */
 	showBusy: safeGetItem("bobbit-show-busy") !== "false",
-	/** Whether to show idle/done sessions without unread activity. Default ON. */
 	showRead: safeGetItem("bobbit-show-read") !== "false",
+	/** By Status owns an independent persisted filter set. */
+	statusShowArchived: loadSidebarStatusFilter("showArchived"),
+	statusShowBusy: loadSidebarStatusFilter("showBusy"),
+	statusShowRead: loadSidebarStatusFilter("showRead"),
+	statusShowTeams: loadSidebarStatusFilter("showTeams"),
+	/** Independently persisted expansion state for the three By Status groups. */
+	statusCollapsedSections: loadSidebarStatusCollapsedSections(),
 	/** Whether the sidebar filters popover is open */
 	filtersPopoverOpen: false,
 	/** Whether the archived section is expanded */
@@ -442,6 +497,8 @@ export const state = {
 
 	// Search state
 	searchQuery: "",
+	/** Ephemeral archive demand owned by the shared sidebar search pipeline. */
+	archivedSearchDemand: false,
 
 	// Pagination for archived items
 	archivedGoalsCursor: null as number | null,
@@ -549,7 +606,13 @@ export const state = {
 	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
 	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 
-	// Review pane state (agent-initiated markdown and verification sign-off documents)
+	// Review pane state. Groups are persisted per owning session; only the
+	// selected session is hydrated into `reviewGroups` and the compatibility
+	// one-document mirrors below.
+	reviewGroupsBySession: {} as Record<string, ReviewGroupModel[]>,
+	reviewGroups: new Map() as Map<string, ReviewGroupModel>,
+	reviewActiveReviewId: "" as string,
+	// Compatibility mirrors for the original one-document/sign-off surface.
 	reviewDocuments: new Map() as Map<string, ReviewDocumentModel>,
 	reviewActiveTab: "" as string,
 	reviewPanelOpen: false,

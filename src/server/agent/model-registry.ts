@@ -18,23 +18,22 @@ import path from "node:path";
 // registry composes that snapshot with AI Gateway and local-provider discovery,
 // while credential refresh remains owned by the spawned coding-agent runtime.
 import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import {
-	inferMeta,
+	discoverAigwModels,
 	discoverGatewayModels,
-	getGatewayApiKeyExpression,
 	gatewayHasConfiguredApiKey,
-	listGateways,
-	isExclusiveMode,
-	isClaudeId,
-	stripProviderPrefix,
-	bedrockRoutesForType,
 	getAigwUrl,
+	getGatewayApiKeyExpression,
+	inferMeta,
+	isExclusiveMode,
+	listGateways,
 	resolveGatewayCredential,
 	type ModelGateway,
 } from "./aigw-manager.js";
-import { getOpenAIModelAdditions } from "./openai-model-additions.js";
+import { inspectAigwTargetRealm, type AigwTargetRealm } from "./aigw-models-json.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
@@ -115,6 +114,7 @@ export interface CustomProviderConfig {
 // ── Cache ──────────────────────────────────────────────────────────
 
 let cachedModels: ApiModel[] | null = null;
+let cachedDynamicModels = new Map<string, ApiModel[]>();
 let cacheExpiry = 0;
 let cacheConfigVersion = 0;
 
@@ -130,6 +130,7 @@ let cacheConfigVersion = 0;
  */
 export function invalidateModelCache(): void {
 	cachedModels = null;
+	cachedDynamicModels = new Map();
 	cacheExpiry = 0;
 }
 
@@ -141,49 +142,25 @@ export function invalidateModelCache(): void {
  * bar and thinking selector consume.
  */
 export interface ResolvedModelStateMeta {
-	contextWindow: number;
-	maxTokens: number;
-	reasoning: boolean;
-	/** Present only when upstream metadata provides it (omitted otherwise). */
+	contextWindow?: number;
+	maxTokens?: number;
+	reasoning?: boolean;
+	/** Present only when authoritative metadata provides it. */
 	thinkingLevelMap?: Record<string, string | null>;
-	input: ("text" | "image")[];
-	/**
-	 * Which resolution tier produced this metadata:
-	 *   - `cache` / `catalog`: authoritative — safe to overwrite live frame fields
-	 *     (fixes stale/incorrect frames, e.g. Fable's 1M context + max thinking).
-	 *   - `inferred`: last-resort defaults from `inferMeta`. Callers holding more
-	 *     accurate live fields (custom/aigw/unknown providers) should PRESERVE the
-	 *     live values rather than clobber them with these inferred defaults.
-	 */
-	source: "cache" | "catalog" | "inferred";
+	input?: ("text" | "image")[];
+	/** `unavailable` carries identity only; callers must not fabricate capabilities. */
+	source: "cache" | "catalog" | "unavailable";
 }
 
 /**
- * SINGLE SOURCE OF TRUTH for the metadata embedded in live model-state frames.
+ * Resolve authoritative metadata for a live model-state frame.
  *
- * Every `state.model` broadcast (model select, spawn-pin, role/default pin,
- * fallback, archived rehydration) must route through here so the values the
- * client renders after selecting a model MATCH what the ModelSelector dropdown
- * shows (which is built from `getAvailableModels` / `assembleModels`). Deriving
- * live state from `inferMeta` alone clobbers the correct merged pi-ai metadata
- * (e.g. Claude Fable 5's 1M context, `reasoning:true`, and
- * `thinkingLevelMap {off:null, xhigh:"xhigh", max:"max"}`).
- *
- * Resolution order (first hit wins):
- *   1. Registry cache (`cachedModels`) keyed by exact provider+id — the same
- *      merged list `getAvailableModels` returns. The 5s TTL is intentionally
- *      IGNORED: model metadata is static per id, so a stale cache entry is
- *      strictly better than dropping to inferMeta. Synchronous, so it serves
- *      the sync broadcast sites (e.g. sendFallbackModelState).
- *   2. pi-ai catalog via `getBuiltinModel(provider, id)` for known upstream providers
- *      (skip empty / `aigw` / `custom`; aigw strips prefixes and merges no
- *      thinkingLevelMap, so it legitimately falls through to inferMeta). Any
- *      missing numeric is filled from inferMeta.
- *   3. `inferMeta(id)` — last resort for genuinely-unknown models. Carries no
- *      thinkingLevelMap (the client then falls back to the family heuristic).
+ * The last assembled cache is checked first, even after its TTL, so temporary
+ * custom/AIGW discovery failures do not discard trustworthy metadata. Direct Pi
+ * providers then use the exact built-in row. Unknown tuples are explicitly
+ * unavailable and carry no guessed capability fields.
  */
 export function resolveModelStateMeta(provider: string | undefined, modelId: string): ResolvedModelStateMeta {
-	// Tier 1: registry cache (ignore TTL — metadata is static per id).
 	if (cachedModels) {
 		const hit = cachedModels.find(m => m.provider === provider && m.id === modelId);
 		if (hit) {
@@ -198,47 +175,26 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 		}
 	}
 
-	// Tier 2: pi-ai catalog for known upstream providers (not aigw / custom).
 	const normalizedProvider = (provider ?? "").toLowerCase();
 	if (normalizedProvider && normalizedProvider !== "aigw" && normalizedProvider !== "custom") {
 		try {
-			const model = getBuiltinModel(normalizedProvider as any, modelId as any) as {
-				contextWindow?: number; maxTokens?: number; reasoning?: boolean;
-				thinkingLevelMap?: Record<string, string | null>; input?: ("text" | "image")[];
-			} | undefined;
+			const model = getBuiltinModel(normalizedProvider as any, modelId as any);
 			if (model) {
-				const inferred = inferMeta(modelId);
-				const contextWindow = typeof model.contextWindow === "number" && model.contextWindow > 0 ? model.contextWindow : inferred.contextWindow;
-				const maxTokens = typeof model.maxTokens === "number" && model.maxTokens > 0 ? model.maxTokens : inferred.maxTokens;
-				const input = (model.input && model.input.length > 0 ? model.input : inferred.input) as ("text" | "image")[];
 				return {
-					contextWindow,
-					maxTokens,
-					reasoning: model.reasoning ?? inferred.reasoning,
-					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
-					input,
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
+					reasoning: model.reasoning,
+					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap as Record<string, string | null> } : {}),
+					input: model.input as ("text" | "image")[],
 					source: "catalog",
 				};
 			}
 		} catch {
-			// Unknown provider/id — fall through to inferMeta.
+			// Unknown provider/id is represented conservatively below.
 		}
 	}
 
-	// Tier 3: inferMeta. Marked `inferred` so live-frame callers preserve any
-	// more-accurate live metadata instead of clobbering it. inferMeta usually
-	// carries no thinkingLevelMap (client then applies the family heuristic), but
-	// a few routed families (e.g. GPT 5.6 Luna/Sol/Terra) attach an explicit map
-	// so extended `xhigh`/`max` thinking survives the fallback path.
-	const meta = inferMeta(modelId);
-	return {
-		contextWindow: meta.contextWindow,
-		maxTokens: meta.maxTokens,
-		reasoning: meta.reasoning,
-		...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
-		input: meta.input,
-		source: "inferred",
-	};
+	return { source: "unavailable" };
 }
 
 /**
@@ -256,11 +212,12 @@ export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiMo
 		return cachedModels;
 	}
 
-	const result = await assembleModels(prefs);
-	cachedModels = result;
+	const result = await assembleModels(prefs, cachedDynamicModels);
+	cachedModels = result.models;
+	cachedDynamicModels = result.dynamicModels;
 	cacheExpiry = now + 5000;
 	cacheConfigVersion = currentVersion;
-	return result;
+	return result.models;
 }
 
 /**
@@ -287,20 +244,6 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 
 // ── Model Assembly ─────────────────────────────────────────────────
 
-function shouldRaiseBuiltInMeta(modelId: string, explicitValue: number | undefined, inferredValue: number): boolean {
-	if (!explicitValue || inferredValue <= explicitValue) return false;
-	// Bobbit intentionally patches stale Claude Sonnet/Opus metadata upward (see
-	// writeContextWindowOverrides). Do not use generic inference to inflate newer
-	// OpenAI built-ins; pi-ai's provider-specific metadata is authoritative there.
-	return /claude-(?:opus|sonnet)/i.test(modelId);
-}
-
-function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: number): number {
-	const explicit = typeof explicitValue === "number" && explicitValue > 0 ? explicitValue : undefined;
-	if (shouldRaiseBuiltInMeta(modelId, explicit, inferredValue)) return inferredValue;
-	return explicit ?? inferredValue;
-}
-
 function comparableAigwUrl(value: unknown): string | undefined {
 	if (typeof value !== "string" || !value.trim()) return undefined;
 	try {
@@ -318,6 +261,13 @@ function comparableGatewayUrl(gateway: ModelGateway): string | undefined {
 	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
 }
 
+function registryGateways(prefs: PreferencesStore): ModelGateway[] {
+	const gateways = listGateways(prefs);
+	if (Object.prototype.hasOwnProperty.call(prefs.getAll(), "modelGateways")) return gateways;
+	const legacyUrl = getAigwUrl(prefs);
+	return legacyUrl ? [{ id: "legacy-aigw", name: "aigw", url: legacyUrl, type: "aigw", enabled: true }] : gateways;
+}
+
 /**
  * Keep last-known models only for the same named provider and endpoint. A
  * transient outage must not make the picker empty, but neither may a stale
@@ -330,27 +280,16 @@ function readRetainedGatewayModels(gateway: ModelGateway, hasCredential: boolean
 		const activeUrl = comparableGatewayUrl(gateway);
 		const retainedUrl = comparableAigwUrl(provider?.baseUrl);
 		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) return [];
-		let gatewayOrigin: string | undefined;
-		try { gatewayOrigin = new URL(gateway.url).origin; }
-		catch { return []; }
-
+		const gatewayOrigin = new URL(gateway.url).origin;
 		return provider.models.flatMap((model: any): ApiModel[] => {
 			if (!model || typeof model.id !== "string" || !model.id) return [];
 			const api = typeof model.api === "string" ? model.api : provider.api;
 			const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : provider.baseUrl;
 			if (typeof api !== "string" || typeof baseUrl !== "string") return [];
-			// A catalog retained while the gateway was anonymous can include a
-			// cross-origin well-known endpoint. Once a key is configured, it must
-			// not become a selectable path that could receive that new credential.
-			try {
-				if (hasCredential && new URL(baseUrl).origin !== gatewayOrigin) return [];
-			} catch {
-				return [];
-			}
+			if (hasCredential && new URL(baseUrl).origin !== gatewayOrigin) return [];
 			const input = Array.isArray(model.input)
 				? model.input.filter((item: unknown): item is "text" | "image" => item === "text" || item === "image")
 				: [];
-
 			return [{
 				id: model.id,
 				name: typeof model.name === "string" && model.name ? model.name : model.id,
@@ -376,20 +315,100 @@ function readRetainedGatewayModels(gateway: ModelGateway, hasCredential: boolean
 	}
 }
 
-function registryGateways(prefs: PreferencesStore): ModelGateway[] {
-	const gateways = listGateways(prefs);
-	// `modelGateways: []` is deliberately authoritative. This compatibility path
-	// exists only for direct registry callers before boot has migrated an old
-	// single-AIGW preference record.
-	if (Object.prototype.hasOwnProperty.call(prefs.getAll(), "modelGateways")) return gateways;
-	const legacyUrl = getAigwUrl(prefs);
-	return legacyUrl ? [{ id: "legacy-aigw", name: "aigw", url: legacyUrl, type: "aigw", enabled: true }] : gateways;
+interface ComposedAigwModels {
+	/** A structurally valid target source exists; an empty model list is authoritative. */
+	available: boolean;
+	models: ApiModel[];
 }
 
-async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
+/**
+ * Load the exact model rows Pi composes from the active models.json. This keeps
+ * defaults, overrides, compatibility merging, and duplicate-ID behavior owned
+ * by Pi rather than reproducing another metadata composer in Bobbit.
+ */
+async function composeAigwTargetModels(
+	provider: Record<string, unknown>,
+	preservePublishedProvenance = false,
+): Promise<ComposedAigwModels> {
+	try {
+		const runtime = await ModelRuntime.create({
+			modelsPath: path.join(globalAgentDir(), "models.json"),
+			authPath: globalAuthPath(),
+			allowModelNetwork: false,
+		});
+		if (runtime.getError()) return { available: false, models: [] };
+		const published = new Map<string, string>();
+		if (preservePublishedProvenance && Array.isArray(provider.models)) {
+			for (const definition of provider.models) {
+				if (
+					definition && typeof definition === "object"
+					&& typeof (definition as any).id === "string"
+					&& typeof (definition as any).upstreamProvider === "string"
+				) published.set((definition as any).id, (definition as any).upstreamProvider);
+			}
+		}
+		const models = runtime.getModels()
+			.filter((model) => model.provider === "aigw")
+			.map((model) => {
+				const row = { ...model, authenticated: true } as ApiModel;
+				if (row.headers === undefined) delete row.headers;
+				const upstreamProvider = published.get(row.id);
+				if (upstreamProvider) row.upstreamProvider = upstreamProvider;
+				return row;
+			});
+		return { available: true, models };
+	} catch {
+		return { available: false, models: [] };
+	}
+}
+
+/** Read and classify models.json without normalizing or writing user-owned bytes. */
+function readAigwTargetRealm(): AigwTargetRealm {
+	try {
+		const modelsPath = path.join(globalAgentDir(), "models.json");
+		const source = fs.existsSync(modelsPath) ? fs.readFileSync(modelsPath, "utf-8") : undefined;
+		return inspectAigwTargetRealm(source);
+	} catch (error) {
+		return { kind: "invalid", reason: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function readManagedRetainedAigwModels(
+	configuredUrl: string,
+	realm: Extract<AigwTargetRealm, { kind: "managed" }>,
+): Promise<ComposedAigwModels> {
+	const activeUrl = comparableAigwUrl(configuredUrl);
+	const retainedUrl = comparableAigwUrl(realm.provider.baseUrl);
+	if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl) return { available: false, models: [] };
+	return composeAigwTargetModels(realm.provider, true);
+}
+
+interface AssembledModelCatalog {
+	models: ApiModel[];
+	/** Exact rows grouped by their unchanged refresh identity for failure-only retention. */
+	dynamicModels: Map<string, ApiModel[]>;
+}
+
+function customSourceKey(config: CustomProviderConfig): string {
+	return `custom:${JSON.stringify([
+		config.id,
+		config.name,
+		config.type,
+		config.baseUrl,
+		config.apiKey,
+		config.models?.map((model) => [model.id, model.name]),
+	])}`;
+}
+
+async function assembleModels(
+	prefs: PreferencesStore,
+	previousDynamicModels: ReadonlyMap<string, ApiModel[]>,
+): Promise<AssembledModelCatalog> {
 	const results: ApiModel[] = [];
+	const dynamicModels = new Map<string, ApiModel[]>();
 	const gateways = registryGateways(prefs);
 	const enabledGateways = gateways.filter((gateway) => gateway.enabled);
+	const aigwUrl = enabledGateways.find((gateway) => gateway.type === "aigw")?.url;
 
 	// Exclusivity is derived from enabled enterprise AIGWs. OpenAI-compatible
 	// gateways and built-ins share the picker unless an AIGW is the configured
@@ -403,29 +422,12 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 			for (const providerId of providers) {
 				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
-				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
-				const mergedModels = [
-					...models,
-					...bobbitAdditions.filter(addition => !models.some(m => m.id === addition.id)),
-				];
-				for (const m of mergedModels) {
-					const meta = inferMeta(m.id);
+				for (const m of models) {
 					results.push({
-						id: m.id,
-						name: m.name,
+						...m,
 						provider: providerId as string,
-						api: m.api as string,
-						baseUrl: m.baseUrl,
-						contextWindow: builtInNumber(m.id, m.contextWindow, meta.contextWindow),
-						maxTokens: builtInNumber(m.id, m.maxTokens, meta.maxTokens),
-						reasoning: meta.reasoning || m.reasoning || false,
-						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap as Record<string, string | null> } : {}),
-						input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],
-						cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						...((m as any).headers ? { headers: (m as any).headers } : {}),
-						...((m as any).compat ? { compat: (m as any).compat } : {}),
 						authenticated: isAuth,
-					});
+					} as ApiModel);
 				}
 			}
 		} catch (err) {
@@ -445,83 +447,126 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		}
 	}
 
-	// 2. Gateway models. In exclusive mode the enterprise AIGW is the only
-	// contributing remote provider; otherwise every enabled named gateway is
-	// independently discovered.
+	// 2. AI Gateway models (if configured). Selection reflects the provider Pi
+	// will actually load: an unmarked user block is authoritative over discovery,
+	// while malformed/ambiguous target configuration fails closed.
+	if (aigwUrl) {
+		const sourceKey = `aigw:${comparableAigwUrl(aigwUrl) ?? aigwUrl}`;
+		const targetRealm = readAigwTargetRealm();
+		let sourceModels: ApiModel[] | undefined;
+		if (targetRealm.kind === "unmarked-user") {
+			const composed = await composeAigwTargetModels(targetRealm.provider);
+			sourceModels = composed.available ? composed.models : [];
+		} else if (targetRealm.kind === "invalid") {
+			console.error(`[model-registry] AIGW target realm is unavailable: ${targetRealm.reason}`);
+			sourceModels = [];
+		} else {
+			try {
+				const gateway = enabledGateways.find((candidate) => candidate.type === "aigw");
+				const credential = gateway
+					? await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name)
+					: undefined;
+				const aigwModels = await discoverAigwModels(aigwUrl, credential);
+				sourceModels = [];
+				for (const m of aigwModels) {
+					if (!m.baseUrl || !m.cost) {
+						console.error(`[model-registry] Omitting incomplete AIGW metadata for ${m.id}`);
+						continue;
+					}
+					sourceModels.push({
+						id: m.wireId ?? m.id,
+						name: m.name,
+						provider: "aigw",
+						...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
+						api: m.api,
+						baseUrl: m.baseUrl,
+						contextWindow: m.contextWindow,
+						maxTokens: m.maxTokens,
+						reasoning: m.reasoning,
+						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
+						input: m.input,
+						cost: m.cost,
+						...(m.compat ? { compat: m.compat } : {}),
+						authenticated: true,
+					});
+				}
+			} catch (err) {
+				console.error("[model-registry] Failed to discover AI Gateway models:", err);
+				// Only Bobbit's marked publication can backstop its discovery source.
+				// An absent target keeps the prior exact discovery snapshot; user-owned
+				// targets were handled above and can never be bypassed by that cache.
+				const retained = targetRealm.kind === "managed"
+					? await readManagedRetainedAigwModels(aigwUrl, targetRealm)
+					: { available: false, models: [] };
+				sourceModels = retained.available ? retained.models : previousDynamicModels.get(sourceKey);
+			}
+		}
+		if (sourceModels) {
+			if (targetRealm.kind === "managed" || targetRealm.kind === "absent") {
+				dynamicModels.set(sourceKey, sourceModels);
+			}
+			results.push(...sourceModels);
+		}
+	}
+
+	// 2b. OpenAI-compatible gateways have no user-owned AIGW target realm. Their
+	// per-gateway publication is the retained catalog when discovery is unavailable.
 	for (const gateway of enabledGateways) {
-		if (exclusive && gateway.type !== "aigw") continue;
+		if (gateway.type === "aigw" || exclusive) continue;
 		try {
-			// Resolve the stored expression immediately before the outbound request.
-			// A resolver failure must abort discovery rather than probing unauthenticated.
 			const credential = await resolveGatewayCredential(
 				getGatewayApiKeyExpression(prefs, gateway.id),
 				gateway.name,
 			);
 			const discovered = await discoverGatewayModels(gateway, credential);
-			for (const m of discovered) {
-				// Well-known AIGW fields are authoritative. They already contain the
-				// wire id and exact per-model routing emitted to models.json.
-				if (m.api && m.baseUrl) {
-					results.push({
-						id: m.wireId ?? m.id,
-						name: m.name,
-						provider: gateway.name,
-						...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-						api: m.api,
-						baseUrl: m.baseUrl,
-						contextWindow: m.contextWindow || 0,
-						maxTokens: m.maxTokens || 0,
-						reasoning: m.reasoning || false,
-						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
-						input: m.input || ["text"],
-						cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						...(m.compat ? { compat: m.compat as Record<string, unknown> } : {}),
-						authenticated: true,
-					});
-					continue;
-				}
-
-				// Only AIGW records apply the legacy Claude → Bedrock route. An
-				// OpenAI-compatible `claude-local` is deliberately emitted raw.
-				const bedrock = bedrockRoutesForType(gateway.type) && isClaudeId(m.id);
-				const id = bedrock ? stripProviderPrefix(m.id) : m.id;
-				const meta = inferMeta(id);
+			for (const model of discovered) {
+				const meta = inferMeta(model.id);
 				results.push({
-					id,
-					name: m.name,
+					id: model.id,
+					name: model.name,
 					provider: gateway.name,
-					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-					api: bedrock ? "bedrock-converse-stream" : (m.api || "openai-completions"),
-					baseUrl: m.baseUrl || comparableGatewayUrl(gateway) || gateway.url,
-					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
-					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
-					reasoning: meta.reasoning || m.reasoning || false,
-					...(meta.thinkingLevelMap ?? m.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap ?? m.thinkingLevelMap } : {}),
+					api: "openai-completions",
+					baseUrl: model.baseUrl || comparableGatewayUrl(gateway) || gateway.url,
+					contextWindow: Math.max(meta.contextWindow, model.contextWindow || 0),
+					maxTokens: Math.max(meta.maxTokens, model.maxTokens || 0),
+					reasoning: meta.reasoning || model.reasoning || false,
+					...(meta.thinkingLevelMap ?? model.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap ?? model.thinkingLevelMap } : {}),
 					input: meta.input || ["text"],
-					cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					authenticated: true,
 				});
 			}
-		} catch (err) {
-			console.error(`[model-registry] Failed to discover gateway "${gateway.name}" models:`, err);
-			// Discovery failure is distinct from a successful empty response: retain
-			// the exact provider+URL catalog for restore and spawn validation. A
-			// configured key additionally restricts retained rows to its own origin.
+		} catch (error) {
+			console.error(`[model-registry] Failed to discover gateway "${gateway.name}" models:`, error);
 			results.push(...readRetainedGatewayModels(gateway, gatewayHasConfiguredApiKey(prefs, gateway.id)));
 		}
 	}
 
-	// 3. Custom local providers
-	try {
-		const customModels = await discoverCustomProviderModels(prefs);
-		results.push(...customModels);
-	} catch (err) {
-		console.error("[model-registry] Failed to discover custom providers:", err);
+	// 3. Custom local providers. Each configured source reports failure separately,
+	// so a successful empty catalog removes old rows while a transport failure can
+	// retain the complete prior exact rows for that unchanged source only.
+	const configs = (prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [];
+	for (const config of configs) {
+		const sourceKey = customSourceKey(config);
+		let sourceModels: ApiModel[] | undefined;
+		try {
+			sourceModels = await discoverFromSingleConfig(config);
+		} catch (err) {
+			console.error(`[model-registry] Failed to discover from ${config.name}:`, err);
+			sourceModels = previousDynamicModels.get(sourceKey);
+		}
+		if (sourceModels) {
+			const selectableModels = sourceModels.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER);
+			dynamicModels.set(sourceKey, selectableModels);
+			results.push(...selectableModels);
+		}
 	}
 
-	// Enforce the exact deferred-provider boundary across every catalog source,
-	// including a custom provider alias. Never inspect model IDs here.
-	return results.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER);
+	// Enforce the exact deferred-provider boundary across every catalog source.
+	return {
+		models: results.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER),
+		dynamicModels,
+	};
 }
 
 // ── Authentication Detection ───────────────────────────────────────
@@ -647,22 +692,15 @@ function hasOAuthCredentials(provider?: string): boolean {
 
 /** Discover models from a single custom provider config (without persisting anything). */
 export async function discoverModelsForConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
-	return discoverFromSingleConfig(config);
-}
-
-async function discoverCustomProviderModels(prefs: PreferencesStore): Promise<ApiModel[]> {
-	const configs = (prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [];
-	const results: ApiModel[] = [];
-
-	for (const config of configs) {
-		try {
-			const models = await discoverFromSingleConfig(config);
-			results.push(...models);
-		} catch (err) {
-			console.error(`[model-registry] Failed to discover from ${config.name}:`, err);
-		}
+	try {
+		return await discoverFromSingleConfig(config);
+	} catch (err) {
+		// Preserve the standalone discovery API's established empty-on-failure
+		// contract. Registry assembly calls the throwing primitive below so it can
+		// distinguish refresh failure from an authoritative empty response.
+		console.error(`[model-registry] Failed to discover from ${config.name}:`, err);
+		return [];
 	}
-	return results;
 }
 
 async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
@@ -694,103 +732,92 @@ async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<A
 }
 
 async function discoverOllamaModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
-	try {
-		const { Ollama } = await import("ollama");
-		const ollama = new Ollama({ host: config.baseUrl });
-		const { models } = await ollama.list();
+	const { Ollama } = await import("ollama");
+	const ollama = new Ollama({ host: config.baseUrl });
+	const { models } = await ollama.list();
 
-		const results: ApiModel[] = [];
-		for (const model of models) {
-			try {
-				const details = await ollama.show({ model: model.name });
-				const capabilities: string[] = (details as any).capabilities || [];
-				if (!capabilities.includes("tools")) continue;
+	const results: ApiModel[] = [];
+	let inspectionError: unknown;
+	for (const model of models) {
+		try {
+			const details = await ollama.show({ model: model.name });
+			const capabilities: string[] = (details as any).capabilities || [];
+			if (!capabilities.includes("tools")) continue;
 
-				const modelInfo: any = details.model_info || {};
-				const architecture = modelInfo["general.architecture"] || "";
-				const contextKey = `${architecture}.context_length`;
-				const contextWindow = parseInt(modelInfo[contextKey] || "8192", 10);
-				const maxTokens = contextWindow * 10;
+			const modelInfo: any = details.model_info || {};
+			const architecture = modelInfo["general.architecture"] || "";
+			const contextKey = `${architecture}.context_length`;
+			const contextWindow = parseInt(modelInfo[contextKey] || "8192", 10);
+			const maxTokens = contextWindow * 10;
 
-				results.push({
-					id: model.name,
-					name: model.name,
-					provider: config.name || config.id,
-					api: "openai-completions",
-					baseUrl: `${config.baseUrl}/v1`,
-					contextWindow,
-					maxTokens,
-					reasoning: capabilities.includes("thinking"),
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					authenticated: true,
-				});
-			} catch {
-				// Skip models we can't inspect
-			}
-		}
-		return results;
-	} catch (err) {
-		console.error(`[model-registry] Ollama discovery failed for ${config.baseUrl}:`, err);
-		return [];
-	}
-}
-
-async function discoverLMStudioModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
-	try {
-		const { LMStudioClient } = await import("@lmstudio/sdk");
-		const url = new URL(config.baseUrl);
-		const port = url.port ? parseInt(url.port, 10) : 1234;
-		const client = new LMStudioClient({ baseUrl: `ws://${url.hostname}:${port}` });
-		const models = await client.system.listDownloadedModels();
-
-		return models
-			.filter((m: any) => m.type === "llm")
-			.map((m: any) => ({
-				id: m.path,
-				name: m.displayName || m.path,
-				provider: config.name || config.id,
-				api: "openai-completions",
-				baseUrl: `${config.baseUrl}/v1`,
-				contextWindow: m.maxContextLength || 8192,
-				maxTokens: m.maxContextLength || 8192,
-				reasoning: m.trainedForToolUse || false,
-				input: (m.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				authenticated: true,
-			}));
-	} catch (err) {
-		console.error(`[model-registry] LM Studio discovery failed for ${config.baseUrl}:`, err);
-		return [];
-	}
-}
-
-async function discoverOpenAICompatModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
-	try {
-		const data = await httpGetJson(`${config.baseUrl}/v1/models`, config.apiKey, 5000);
-		if (!data?.data || !Array.isArray(data.data)) return [];
-
-		return data.data.map((m: any) => {
-			const contextWindow = m.context_length || m.max_model_len || 8192;
-			const maxTokens = m.max_tokens || Math.min(contextWindow, 4096);
-			return {
-				id: m.id,
-				name: m.id,
+			results.push({
+				id: model.name,
+				name: model.name,
 				provider: config.name || config.id,
 				api: "openai-completions",
 				baseUrl: `${config.baseUrl}/v1`,
 				contextWindow,
 				maxTokens,
-				reasoning: false,
-				input: ["text"] as ("text" | "image")[],
+				reasoning: capabilities.includes("thinking"),
+				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				authenticated: true,
-			};
-		});
-	} catch (err) {
-		console.error(`[model-registry] OpenAI-compat discovery failed for ${config.baseUrl}:`, err);
-		return [];
+			});
+		} catch (err) {
+			// A partial inspection is not an authoritative source refresh. Preserve
+			// the prior complete source snapshot rather than silently deleting rows.
+			inspectionError ??= err;
+		}
 	}
+	if (inspectionError) throw inspectionError;
+	return results;
+}
+
+async function discoverLMStudioModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
+	const { LMStudioClient } = await import("@lmstudio/sdk");
+	const url = new URL(config.baseUrl);
+	const port = url.port ? parseInt(url.port, 10) : 1234;
+	const client = new LMStudioClient({ baseUrl: `ws://${url.hostname}:${port}` });
+	const models = await client.system.listDownloadedModels();
+
+	return models
+		.filter((m: any) => m.type === "llm")
+		.map((m: any) => ({
+			id: m.path,
+			name: m.displayName || m.path,
+			provider: config.name || config.id,
+			api: "openai-completions",
+			baseUrl: `${config.baseUrl}/v1`,
+			contextWindow: m.maxContextLength || 8192,
+			maxTokens: m.maxContextLength || 8192,
+			reasoning: m.trainedForToolUse || false,
+			input: (m.vision ? ["text", "image"] : ["text"]) as ("text" | "image")[],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			authenticated: true,
+		}));
+}
+
+async function discoverOpenAICompatModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
+	const data = await httpGetJson(`${config.baseUrl}/v1/models`, config.apiKey, 5000);
+	if (!data?.data || !Array.isArray(data.data)) return [];
+
+	return data.data.map((m: any) => {
+		const contextWindow = m.context_length || m.max_model_len || 8192;
+		const maxTokens = m.max_tokens || Math.min(contextWindow, 4096);
+		return {
+			id: m.id,
+			name: m.id,
+			provider: config.name || config.id,
+			api: "openai-completions",
+			baseUrl: `${config.baseUrl}/v1`,
+			contextWindow,
+			maxTokens,
+			reasoning: false,
+			input: ["text"] as ("text" | "image")[],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			authenticated: true,
+		};
+	});
 }
 
 // ── HTTP helper ────────────────────────────────────────────────────

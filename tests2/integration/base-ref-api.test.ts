@@ -173,11 +173,14 @@ test.afterEach(({ gateway }) => {
 	store?.remove("sandbox");
 });
 
-test.afterAll(() => {
+test.afterAll(async () => {
 	const pcm = fixtureGateway?.projectContextManager;
 	const registry = pcm?.getRegistry();
 	for (const id of cleanupProjectIds.splice(0).reverse()) {
-		pcm?.remove(id);
+		// remove() is the context shutdown barrier. Await it before unregistering
+		// or a following isolate:false suite can snapshot this closing fixture.
+		await pcm?.remove(id);
+		expect([...pcm.visible()].some((context: any) => context.project.id === id)).toBe(false);
 		try { registry?.remove(id); } catch { /* already removed */ }
 	}
 	for (const root of cleanupRoots) cleanupDir(root);

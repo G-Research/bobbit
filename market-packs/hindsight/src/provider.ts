@@ -128,7 +128,12 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 
 /** Retry the queue HEAD (one entry) before the turn's own retain. */
 async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig): Promise<void> {
-	const q = await loadQueue(store);
+	const loaded = await loadQueue(store);
+	if (!loaded.loaded) {
+		await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE"));
+		return;
+	}
+	const q = loaded.queue;
 	if (q.length === 0) return;
 	const head = q[0];
 	try {
@@ -146,7 +151,12 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig): Promise<v
 
 /** Best-effort ONE-PASS drain of the whole queue (sessionShutdown). */
 async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig): Promise<void> {
-	const q = await loadQueue(store);
+	const loaded = await loadQueue(store);
+	if (!loaded.loaded) {
+		await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE"));
+		return;
+	}
+	const q = loaded.queue;
 	if (q.length === 0) return;
 	let client;
 	try {

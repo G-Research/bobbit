@@ -1,131 +1,35 @@
 name: read_session
-description: "Paginated, regex-filterable transcript read of another session"
-summary: "Read another session's transcript, paginated"
-params: [session_id, offset?, limit?, pattern?, context?, verbose?, include_tool_results?]
+description: "List compact message diagnostics, then inspect one exact message or result"
+summary: "List or inspect another session's messages"
+params: [operation, session_id, offset?, limit?, pattern?, case_sensitive?, context?, message_index?, result_index?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Agent
 renderer: src/ui/tools/renderers/ReadSessionRenderer.ts
 docs: |-
-  Read transcripts in a token-efficient way. `offset`/`limit` paginate; negative `offset` indexes from end (-1 = last). `pattern` filters to a regex match list before paginating; `context` expands ±N neighbours around each match. By default, tool result bodies are omitted and replaced with compact metadata placeholders. Either `verbose: true` or `include_tool_results: true` requires an explicit `limit <= 10`; fetch additional raw content in smaller batches and watch token consumption.
+  Use `operation: "list"` for compact, paginated message diagnostics. Choose one message or result index, then use `operation: "inspect"` for that exact target.
 detail_docs: >-
-  ## Purpose
+  ## Workflow
 
 
-  Read the conversation transcript of another Bobbit session on the same
-  gateway — a peer team agent, a delegate session, a session from another
-  project, or an archived session. The tool resolves the session's JSONL file
-  server-side so callers never deal with paths, sandbox remapping, or
-  filesystem permissions.
+  1. Call `operation: "list"` with a session id. Use `offset` and `limit` for
+  pagination; negative offsets index from the end. Optional `pattern`,
+  `case_sensitive`, and `context` narrow the compact list.
+
+  2. Choose one zero-based `message_index` and, when needed, one zero-based
+  `result_index` from that message.
+
+  3. Call `operation: "inspect"` with that exact index. Message inspection
+  returns one sanitized semantic message and result metadata. Adding
+  `result_index` returns only a bounded excerpt of that result. Continue a
+  truncated result with its `nextOffset` as `offset`; result excerpts default
+  to 2,000 characters and accept at most 8,000.
 
 
-  ## Parameters
-
-
-  | Name | Type | Required | Description |
-
-  |------|------|----------|-------------|
-
-  | `session_id` | string | yes | Target session ID. |
-
-  | `offset` | number | no | Default `0`. Negative indexes from the end (Python-style). `-1` is the last message; `-20` is the start of the last 20. |
-
-  | `limit` | number | no | Ordinary reads default to `20` and accept `[1, 200]`. Either context-heavy flag requires an explicit integer in `[1, 10]`. |
-
-  | `pattern` | string | no | Regex to filter messages. Matches against the flattened text (text blocks + tool inputs + tool results). |
-
-  | `case_sensitive` | boolean | no | Default `false`. |
-
-  | `context` | number | no | `0..5`. Only meaningful with `pattern`. Expands each match by ±N neighbours; the deduplicated match-with-context list is what `offset`/`limit` then paginate. |
-
-  | `verbose` | boolean | no | Default `false`. Returns full content blocks; requires explicit `limit <= 10`. Tool result bodies remain omitted unless separately enabled. |
-
-  | `include_tool_results` | boolean | no | Default `false`. Includes raw tool result bodies/previews; requires explicit `limit <= 10`. Subject to the 32 KB tool-result cap (with lazy-load). |
-
-
-  ## Context-heavy reads
-
-
-  This agent-tool policy rejects `verbose: true` or
-  `include_tool_results: true` when `limit` is omitted or exceeds `10`, even
-  though ordinary reads default to `20`. Narrow first, then fetch full content
-  in batches of at most 10 while monitoring token consumption. The REST API's
-  existing paging behavior is unchanged.
-
-
-  ## Indexing & filter semantics
-
-
-  - **Indexing** is 0-based in transcript order. Negative `offset` resolves
-  Python-style: `offset=-1, limit=1` is the last message; `offset=-20,
-  limit=20` is the last 20 messages. Out-of-range windows return `messages:
-  []` with `total` populated — never an error.
-
-  - **When `pattern` is set**, the `offset`/`limit` window applies over the
-  deduplicated match-with-context list, **not** the raw transcript. The
-  `matchCount` field reports how many true hits exist (pre-context
-  expansion).
-
-
-  ## Output envelope
-
-
-  ```json
-
-  {
-    "total": 142,
-    "matchCount": 17,
-    "returned": 20,
-    "offsetStart": 122,
-    "offsetEnd": 141,
-    "messages": [
-      {
-        "index": 122,
-        "role": "assistant",
-        "ts": "2026-05-04T12:34:56Z",
-        "text": "compact text up to ~800 chars",
-        "toolUses":    [{ "name": "bash", "inputPreview": "{\"cmd\":\"…\"}" }],
-        "toolResults": [{ "name": "bash", "omitted": true, "status": "ok", "size": { "type": "string", "chars": 1200, "lines": 42, "bytes": 1200 } }]
-      }
-    ]
-  }
-
-  ```
-
-
-  In `verbose: true` mode each message carries a full `content` array of
-  `{ type, text|tool_use|tool_result, … }` blocks instead of `text` /
-  `toolUses` / `toolResults`. By default, verbose `tool_result` blocks use
-  `contentOmitted: true`, a stable omission marker in `content`, and
-  `resultSize` metadata instead of the raw body. Pass
-  `include_tool_results: true` to include raw result content.
-
-
-  When `messages` is empty, both `offsetStart` and `offsetEnd` are `-1`.
-
-  `matchCount` is omitted when no `pattern` is supplied.
-
-
-  ## Errors
-
-
-  All errors return structured codes (not prose):
-
-
-  | Code | HTTP | Cause |
-
-  |------|------|-------|
-
-  | `session_not_found` | 404 | No session with that id. |
-
-  | `transcript_unavailable` | 404 | Session exists but its `agentSessionFile` is missing or empty. |
-
-  | `invalid_regex` | 400 | `pattern` failed to compile. |
-
-  | `invalid_params` | 400 | REST parameter validation failed (`limit` outside `[1, 200]`, `context` outside `[0, 5]`, etc.). |
-
-  | `CONTEXT_HEAVY_LIMIT_REQUIRED` | tool layer | A context-heavy flag lacks an explicit integer `limit` in `[1, 10]`; no request is sent. |
+  List output never contains result bodies or provider signatures. Result
+  metadata includes normalized status plus complete character, line, and UTF-8
+  byte sizes.
 
 
   ## Examples
@@ -133,23 +37,16 @@ detail_docs: >-
 
   ```
 
-  # Tail the last 20 messages
+  read_session(operation="list", session_id="abc-123", offset=-20, limit=20)
 
-  read_session(session_id="abc-123", offset=-20, limit=20)
+  read_session(operation="list", session_id="abc-123", pattern="error", context=1)
 
+  read_session(operation="inspect", session_id="abc-123", message_index=42)
 
-  # Find the last 5 errors
-
-  read_session(session_id="abc-123", pattern="error", offset=-5, limit=5)
-
-
-  # Show context around each "TypeError"
-
-  read_session(session_id="abc-123", pattern="TypeError", context=2)
-
-
-  # Inspect one raw tool output after narrowing to a specific message
-
-  read_session(session_id="abc-123", offset=42, limit=1, verbose=true, include_tool_results=true)
+  read_session(operation="inspect", session_id="abc-123", message_index=42, result_index=0, offset=0, limit=2000)
 
   ```
+
+
+  Invalid regexes, indexes, bounds, and mixed list/inspect parameters return
+  concise structured errors.

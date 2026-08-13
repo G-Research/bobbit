@@ -66,6 +66,18 @@ body {
 }
 
 /* src/ui/components/review/review-pane.css */
+.goal-tab-pill {
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.goal-tab-pill-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+.goal-tab-close {
+  flex: 0 0 16px;
+}
 .review-pane {
   display: flex;
   flex-direction: column;
@@ -75,18 +87,25 @@ body {
   color: var(--foreground, #1a1a1a);
 }
 .review-tab-bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 2px;
+  min-width: 0;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border, #e0e0e0);
-  overflow-x: auto;
+  overflow: hidden;
   flex-shrink: 0;
   background: var(--background, #fff);
 }
 .review-tab {
   display: inline-flex;
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: 128px;
+  max-width: 168px;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 4px 12px;
   border: 1px solid transparent;
@@ -97,6 +116,7 @@ body {
   font-family: inherit;
   cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
   transition: background 0.15s, color 0.15s;
 }
 .review-tab:hover {
@@ -110,9 +130,12 @@ body {
   font-weight: 500;
 }
 .review-tab-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 120px;
+  white-space: nowrap;
 }
 .review-tab-close {
   display: inline-flex;
@@ -152,25 +175,64 @@ body {
   font-weight: 600;
   line-height: 1;
 }
-.review-tab-overflow-container {
-  position: relative;
-}
 .review-tab-overflow-trigger {
+  flex: 0 0 40px;
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
   font-weight: 700;
   letter-spacing: 1px;
 }
-.review-tab-overflow {
+.review-tab-measurements {
   position: absolute;
-  top: 100%;
-  right: 0;
+  inset: 0 auto auto 0;
+  display: flex;
+  gap: 2px;
+  visibility: hidden;
+  pointer-events: none;
+  contain: layout style;
+}
+.review-tab-measure,
+.review-tab-overflow-measure {
+  box-sizing: border-box;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: max-content;
+  min-width: 128px;
+  max-width: 168px;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-family: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.review-tab-overflow-measure {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+}
+.review-tab-overflow {
+  position: fixed;
+  inset: auto;
   z-index: 100;
-  min-width: 180px;
-  margin-top: 4px;
+  box-sizing: border-box;
+  width: min(240px, calc(100vw - 16px));
+  max-height: min(360px, calc(100vh - 16px));
+  margin: 0;
   padding: 4px;
+  overflow-y: auto;
   background: var(--background, #fff);
+  color: var(--foreground, #1a1a1a);
   border: 1px solid var(--border, #e0e0e0);
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+.review-tab-overflow::backdrop {
+  background: transparent;
 }
 .review-tab-overflow-item {
   display: flex;
@@ -178,6 +240,7 @@ body {
   justify-content: space-between;
   gap: 8px;
   width: 100%;
+  min-width: 0;
   padding: 6px 12px;
   border: none;
   border-radius: 4px;

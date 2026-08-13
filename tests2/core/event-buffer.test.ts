@@ -26,11 +26,14 @@ describe("EventBuffer", () => {
 			assert.equal(buf.size, 0);
 			assert.deepEqual(buf.getAll(), []);
 			assert.equal(buf.lastSeq, 0);
+			assert.equal(buf.retainedBytes, 0);
+			assert.equal(buf.maxBytes, EventBuffer.DEFAULT_MAX_BYTES);
 		});
 
-		it("creates an empty buffer with custom capacity", () => {
-			const buf = new EventBuffer(5);
+		it("creates an empty buffer with custom count and byte capacities", () => {
+			const buf = new EventBuffer(5, 4096);
 			assert.equal(buf.size, 0);
+			assert.equal(buf.maxBytes, 4096);
 		});
 	});
 
@@ -119,16 +122,20 @@ describe("EventBuffer", () => {
 	});
 
 	describe("clear", () => {
-		it("empties the buffer and resets seq", () => {
-			const buf = new EventBuffer(10);
+		it("empties the buffer and resets seq and retained bytes", () => {
+			const buf = new EventBuffer(10, 4096);
 			buf.push("a");
 			buf.push("b");
+			assert.ok(buf.retainedBytes > 0);
 			buf.clear();
 			assert.equal(buf.size, 0);
 			assert.deepEqual(buf.getAll(), []);
+			assert.equal(buf.retainedBytes, 0);
+			assert.equal(buf.maxBytes, 4096);
 			assert.equal(buf.lastSeq, 0);
 			const entry = buf.push("x");
 			assert.equal(entry.seq, 1);
+			assert.ok(buf.retainedBytes > 0);
 		});
 
 		it("allows adding events after clear", () => {
@@ -156,6 +163,65 @@ describe("EventBuffer", () => {
 			assert.equal(buf.size, 3);
 		});
 	});
+});
+
+// ── Serialized-byte retention bound ─────────────────────────────────────────
+
+test("EventBuffer caches serialized UTF-8 bytes for retained entries", () => {
+	const buf = new EventBuffer(10, 4096);
+	const entry = buf.push({ text: "four bytes: 😀" });
+	assert.equal(buf.retainedBytes, Buffer.byteLength(JSON.stringify(entry), "utf8"));
+	assert.ok(buf.retainedBytes <= buf.maxBytes);
+});
+
+test("EventBuffer evicts only oldest mixed-size entries until the byte budget holds", () => {
+	const buf = new EventBuffer(10, 260);
+	buf.push({ id: "small-a", payload: "x".repeat(20) });
+	buf.push({ id: "large", payload: "x".repeat(100) });
+	buf.push({ id: "small-b", payload: "x".repeat(20) });
+
+	assert.deepEqual(events(buf).map((event: any) => event.id), ["large", "small-b"]);
+	assert.ok(buf.retainedBytes <= buf.maxBytes);
+});
+
+test("EventBuffer byte eviction applies before the count limit", () => {
+	const buf = new EventBuffer(10, 250);
+	buf.push({ id: "first", payload: "x".repeat(80) });
+	buf.push({ id: "second", payload: "x".repeat(80) });
+
+	assert.equal(buf.size, 1);
+	assert.deepEqual(events(buf).map((event: any) => event.id), ["second"]);
+	assert.ok(buf.retainedBytes > 0 && buf.retainedBytes <= 250);
+});
+
+test("EventBuffer byte eviction advances the safe resume floor", () => {
+	const buf = new EventBuffer(10, 250);
+	buf.push({ id: "first", payload: "x".repeat(80) });
+	buf.push({ id: "second", payload: "x".repeat(80) });
+
+	assert.deepEqual(buf.getAll().map(entry => entry.seq), [2]);
+	assert.equal(buf.canResumeFrom(0), false, "seq 1 was evicted");
+	assert.equal(buf.canResumeFrom(1), true, "seq 2 is retained");
+	assert.deepEqual(buf.since(1).map(entry => entry.seq), [2]);
+});
+
+test("EventBuffer drops an oversized event and invalidates replay across its seq", () => {
+	const buf = new EventBuffer(10, 128);
+	buf.push({ id: "before" });
+	const oversized = buf.push({ id: "oversized", payload: "x".repeat(500) });
+
+	assert.equal(oversized.seq, 2);
+	assert.equal(buf.lastSeq, 2);
+	assert.equal(buf.size, 0);
+	assert.equal(buf.retainedBytes, 0);
+	assert.equal(buf.canResumeFrom(1), false, "the dropped seq cannot be resumed across");
+	assert.equal(buf.canResumeFrom(2), true, "a client that saw the live event is caught up");
+
+	const after = buf.push({ id: "after" });
+	assert.equal(after.seq, 3);
+	assert.deepEqual(buf.getAll().map(entry => entry.seq), [3]);
+	assert.equal(buf.canResumeFrom(1), false, "later retention must not hide the dropped gap");
+	assert.equal(buf.canResumeFrom(2), true);
 });
 
 // ── Sequence / timestamp / resume-catch-up contract ─────────────────────────
@@ -234,6 +300,19 @@ test("EventBuffer.pushFrame seqs are monotonic and consumed even with no pushes"
 	assert.equal(c.seq, 3);
 	assert.equal(buf.size, 0);
 	assert.equal(buf.lastSeq, 3);
+});
+
+test("EventBuffer.pushFrame makes cursors before the unretained seq resume through snapshot", () => {
+	const buf = new EventBuffer();
+	buf.push({ type: "before" }); // seq 1, retained
+	const frame = buf.pushFrame(); // seq 2, intentionally not retained
+	buf.push({ type: "after" }); // seq 3, retained
+
+	assert.equal(frame.seq, 2);
+	assert.deepEqual(buf.getAll().map(entry => entry.seq), [1, 3]);
+	assert.equal(buf.canResumeFrom(1), false, "cursor predating unretained seq 2 must not replay seq 3 across a hole");
+	assert.equal(buf.canResumeFrom(2), true, "a client that saw the top-level seq 2 frame may replay seq 3");
+	assert.deepEqual(buf.since(2).map(entry => entry.seq), [3]);
 });
 
 // ── seedNextSeq (restart frame-of-reference preservation) ───────────────────

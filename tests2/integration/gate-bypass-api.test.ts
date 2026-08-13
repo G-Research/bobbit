@@ -11,6 +11,8 @@
  *
  * Mirrors tests/e2e/gate-reset-api.spec.ts harness/import patterns.
  */
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -21,7 +23,7 @@ import {
 	defaultProjectId,
 	deleteGoal,
 	deleteSession,
-	gitCwd,
+	nonGitCwd,
 	startTeam,
 	teardownTeam,
 	type WsConnection,
@@ -30,6 +32,10 @@ import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
 function workflowId(prefix: string): string {
 	return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function goalCwd(tag: string): string {
+	return mkdtempSync(join(nonGitCwd(), `gate-bypass-${tag}-${process.pid}-`));
 }
 
 async function createWorkflow(id: string, gates: Array<Record<string, unknown>>): Promise<void> {
@@ -98,7 +104,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Happy ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Happy ${Date.now()}`, cwd: goalCwd("happy"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		let sessionId: string | undefined;
 		let conn: WsConnection | undefined;
@@ -140,7 +146,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass ReadModel ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass ReadModel ${Date.now()}`, cwd: goalCwd("read-model"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
@@ -164,7 +170,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Reset ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Reset ${Date.now()}`, cwd: goalCwd("reset"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
@@ -186,7 +192,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 			{ id: "child", name: "Child", dependsOn: ["root"], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Dep ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Dep ${Date.now()}`, cwd: goalCwd("dependent"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
@@ -207,7 +213,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Validate ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Validate ${Date.now()}`, cwd: goalCwd("validation"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
@@ -248,7 +254,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass 404 ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass 404 ${Date.now()}`, cwd: goalCwd("not-found"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
@@ -268,7 +274,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Sandbox ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Sandbox ${Date.now()}`, cwd: goalCwd("sandbox"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
@@ -294,7 +300,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Archived ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Archived ${Date.now()}`, cwd: goalCwd("archived"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
@@ -321,7 +327,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Sandbox Complete ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: true, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Sandbox Complete ${Date.now()}`, cwd: goalCwd("sandbox-complete"), workflowId: wf, worktree: false, team: true, autoStartTeam: false });
 		const goalId = goal.id;
 		let teamLeadId: string | undefined;
 		try {
@@ -359,7 +365,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
 		]);
-		const goal = await createGoal({ title: `Gate Bypass Complete ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: true, autoStartTeam: false });
+		const goal = await createGoal({ title: `Gate Bypass Complete ${Date.now()}`, cwd: goalCwd("complete"), workflowId: wf, worktree: false, team: true, autoStartTeam: false });
 		const goalId = goal.id;
 		let teamLeadId: string | undefined;
 		try {

@@ -2,7 +2,7 @@
 // Source: tests/pi-extension-discovery.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -171,6 +171,36 @@ describe("pi extension discovery", () => {
 			assert.deepEqual(syncRow.discovery.tools, [{ name: "sync_tool" }]);
 			assert.equal(syncCalls.length, 1);
 		} finally {
+			cleanupTempDir(dir);
+		}
+	});
+
+	it("prebinds async discovery before installing an isolated filesystem fixture", async () => {
+		const source = fs.readFileSync(new URL("../../src/server/agent/pi-extension-contributions.ts", import.meta.url), "utf-8");
+		assert.match(source, /import\s*{\s*discoverPiExtensionTools,\s*discoverPiExtensionToolsSync,/);
+		assert.doesNotMatch(source, /await\s+import\(\s*["']\.\/pi-extension-discovery\.js["']\s*\)/);
+
+		const dir = tempDir();
+		const packRoot = path.join(dir, "pack");
+		write(path.join(packRoot, "pi-extensions", "demo", "extension.js"), "throw new Error('must not execute in unit');\n");
+		const fixtureRoot = path.resolve(packRoot);
+		const realpathSync = fs.realpathSync.bind(fs);
+		const fixtureRealpath = vi.spyOn(fs, "realpathSync").mockImplementation(((target: fs.PathLike, options?: Parameters<typeof fs.realpathSync>[1]) => {
+			const targetPath = path.resolve(String(target));
+			assert.ok(targetPath === fixtureRoot || targetPath.startsWith(`${fixtureRoot}${path.sep}`), `fixture must not resolve ${targetPath}`);
+			return realpathSync(target, options);
+		}) as typeof fs.realpathSync);
+		try {
+			const calls: PiExtensionDiscoveryProbeRequest[] = [];
+			const [row] = await loadPiExtensionContributionsWithDiscovery(packRoot, manifest(["demo"]), {
+				trustAccepted: true,
+				discoveryBackend: okBackend([{ name: "prebound_tool" }], calls),
+			});
+			assert.equal(row.discovery.status, "ok");
+			assert.deepEqual(row.discovery.tools, [{ name: "prebound_tool" }]);
+			assert.equal(calls.length, 1);
+		} finally {
+			fixtureRealpath.mockRestore();
 			cleanupTempDir(dir);
 		}
 	});

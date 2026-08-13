@@ -63,16 +63,33 @@ export type DisabledEntrypointsLookup = (
  *  filter evaluates. Absent / returns undefined ⇒ no overrides (schema defaults
  *  only). Must be synchronous: `listProviders` feeds the sync session-setup
  *  bridge-injection decision. */
+/** Explicit durable config lookup result. `error` is deliberately distinct from
+ * `absent`: a provider must not start with defaults when its stored config is
+ * unreadable. The diagnostic is an already-sanitized StoreRead diagnostic. */
+export type ProviderConfigOverrideReadResult =
+	| { state: "absent" }
+	| { state: "present"; value: Record<string, unknown> }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
+/** Legacy record/undefined returns remain accepted while callers migrate. */
+export type ProviderConfigOverrideLookupResult =
+	| ProviderConfigOverrideReadResult
+	| Record<string, unknown>
+	| undefined;
+
 export type ProviderConfigOverrideLookup = (
 	scope: PackScope,
 	projectId: string | undefined,
 	packId: string,
 	providerId: string,
-) => Record<string, unknown> | undefined;
+) => ProviderConfigOverrideLookupResult;
 
 interface IndexedScope {
 	list: PackContributions[];
 	byId: Map<string, PackContributions>;
+	/** Never retain an index built from unreadable durable config: the next
+	 * lookup must retry rather than leaving a provider permanently stale. */
+	retryableConfigError: boolean;
 }
 
 const DEFAULT_KEY = "\u0000default";
@@ -137,7 +154,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		const hit = this.cache.get(key);
 		if (hit) return hit;
 		const built = this.build(projectId);
-		this.cache.set(key, built);
+		if (!built.retryableConfigError) this.cache.set(key, built);
 		return built;
 	}
 
@@ -156,6 +173,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		// 2. Load + activation-filter each winning pack. Intra-pack hard conflicts
 		//    (dup panel/entrypoint/route name) reject that pack (drop + loud error).
 		const loaded: PackContributions[] = [];
+		let retryableConfigError = false;
 		for (const e of winning.values()) {
 			let contrib: PackContributions;
 			try {
@@ -187,7 +205,17 @@ export class PackContributionRegistry implements PackContributionResolver {
 			for (const p of contrib.providers) {
 				if (disabledProviders?.has(p.listName)) continue; // DisabledRefs kill-switch
 				const defaults = p.config ?? {};
-				const overrides = this.providerConfigOverrides?.(e.scope, projectId, contrib.packId, p.id);
+				const configRead = this.providerConfigOverrides?.(e.scope, projectId, contrib.packId, p.id);
+				const normalized = normalizeProviderConfigRead(configRead);
+				if (normalized.state === "error") {
+					// Fail closed: an unreadable durable config is not the same as an
+					// absent config. Do not activate with defaults or cache this result;
+					// subsequent registry calls deliberately retry the store read.
+					retryableConfigError = true;
+					console.warn(`[pack-contributions] provider config unavailable packId=${contrib.packId} providerId=${p.id} code=${safeDiagnosticCode(normalized.diagnostic)}`);
+					continue;
+				}
+				const overrides = normalized.state === "present" ? normalized.value : undefined;
 				const hasOverrides = !!overrides && Object.keys(overrides).length > 0;
 				const effective = hasOverrides ? { ...defaults, ...overrides } : defaults;
 				const provider = hasOverrides ? { ...p, config: effective } : p;
@@ -241,7 +269,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 		const byId = new Map<string, PackContributions>();
 		for (const pack of filtered) byId.set(pack.packId, pack);
-		return { list: filtered, byId };
+		return { list: filtered, byId, retryableConfigError };
 	}
 }
 
@@ -255,6 +283,52 @@ function authorizeChannelCapabilities(_entry: PackEntry, channels: ChannelContri
 /** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE
  *  flat config — every required key present and, for a string, non-empty after
  *  trimming. No `activation` (or empty `requiresConfig`) ⇒ unconditionally active. */
+function normalizeProviderConfigRead(value: ProviderConfigOverrideLookupResult): ProviderConfigOverrideReadResult {
+	if (!value) return { state: "absent" };
+	if (typeof value === "object" && "state" in value) {
+		const state = (value as { state?: unknown }).state;
+		if (state === "absent") return { state };
+		if (state === "error") {
+			const diagnostic = (value as { diagnostic?: unknown }).diagnostic;
+			return isStoreReadDiagnostic(diagnostic)
+				? { state, diagnostic }
+				: { state, diagnostic: { code: "STORE_READ_UNAVAILABLE", retryable: true } };
+		}
+		if (state === "present") {
+			const present = (value as { value?: unknown }).value;
+			if (isFlatConfig(present)) return { state, value: present };
+			return { state: "error", diagnostic: { code: "STORE_READ_INVALID_CONFIG", retryable: false } };
+		}
+	}
+	// Compatibility for pre-UH-1 registry callers which returned an override
+	// record directly. Records containing a `state` field are still config values
+	// unless that field is one of the recognized result tags above.
+	return isFlatConfig(value)
+		? { state: "present", value }
+		: { state: "error", diagnostic: { code: "STORE_READ_INVALID_CONFIG", retryable: false } };
+}
+
+function isStoreReadDiagnostic(value: unknown): value is { code: string; retryable: boolean } {
+	return !!value && typeof value === "object"
+		&& typeof (value as { code?: unknown }).code === "string"
+		&& typeof (value as { retryable?: unknown }).retryable === "boolean";
+}
+
+function isFlatConfig(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Only expose a stable identifier in lifecycle diagnostics, never a filesystem
+ * path or raw error text potentially carried by a failed storage backend. */
+function safeDiagnosticCode(diagnostic: unknown): string {
+	const code = diagnostic && typeof diagnostic === "object"
+		? (diagnostic as { code?: unknown }).code
+		: undefined;
+	return typeof code === "string" && /^[A-Z0-9_]{1,80}$/.test(code)
+		? code
+		: "STORE_READ_UNAVAILABLE";
+}
+
 function providerActivationSatisfied(provider: ProviderContribution): boolean {
 	const required = provider.activation?.requiresConfig;
 	if (!required || required.length === 0) return true;

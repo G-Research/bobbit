@@ -95,6 +95,26 @@ describe("adaptReadyToMergeVerify", () => {
 		assert.match(out[1].run ?? "", /^echo 'child goal —/);
 	});
 
+	it("preserves only type-independent failure guidance on rewritten steps", () => {
+		const guidance = "Inspect the retained merge diagnostics before retrying.";
+		const verify: VerifyStep[] = [{
+			name: "PR raised",
+			type: "llm-review",
+			prompt: "This conflicting prompt must not survive the command rewrite.",
+			role: "reviewer",
+			description: "Original step description",
+			failureGuidance: guidance,
+		}];
+
+		const out = adaptReadyToMergeVerify(verify, { parentBranch: PARENT_BRANCH });
+		assert.deepEqual(out[0], {
+			name: "PR raised",
+			type: "command",
+			run: "echo 'child goal — only the root goal raises a PR'",
+			failureGuidance: guidance,
+		});
+	});
+
 	it("preserves step count (replace-not-drop)", () => {
 		const out = adaptReadyToMergeVerify(ROOT_RTM_VERIFY, { parentBranch: PARENT_BRANCH });
 		assert.equal(out.length, ROOT_RTM_VERIFY.length);

@@ -43,7 +43,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Channel** | `channels/<name>.yaml` (listed in `contents.channels`) | Browser `HostChannel` + Gateway handler | `host.channels.{open,attach,list}` |
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
-| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list,delete,deletePrefix,stats}` (pack-namespaced) |
+| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
 | **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
@@ -363,8 +363,9 @@ The server-side `ctx.host` carries:
 
 - `ctx.host.version` / `ctx.host.contractVersion` — the frozen contract revisions.
 - `ctx.host.capabilities` — the **single source of truth** for what is implemented.
-- `ctx.host.store.{get,put,list,delete,deletePrefix,stats}` — pack-namespaced
-  persistence, scoped to the **server-derived** `packId` (you never pass an id).
+- `ctx.host.store.{get,read,put,list,delete,deletePrefix,stats}` — pack-namespaced
+  persistence, scoped to the **server-derived** `packId` (you never pass an id). `read`
+  returns a tri-state durable-read outcome; `get` is the legacy, lossy read.
 - `ctx.host.session.{readTranscript,readToolCall}` — own-session reads through the adapter.
 - `ctx.host.agents.{spawn,prompt,dismiss,list,read,status}` — launch + orchestrate child
   agents owned by the bound session (poll-based, ambient). See [`host.agents`](#hostagents--launch-and-orchestrate-child-agents).
@@ -530,12 +531,60 @@ namespace is the server-derived `packId`. Read/write it from any surface that ho
 
 ```js
 await host.store.put(artifactId, { type: "html", html });   // value is JSON-serialized
-const payload = await host.store.get(artifactId);            // null if absent
+const payload = await host.store.get(artifactId);            // legacy: null for absent or unreadable
 const keys = await host.store.list("draft-");                // optional prefix filter
 const stats = await host.store.stats("draft-");              // { keys, bytes }
 await host.store.delete(artifactId);                         // true if a key was removed
 await host.store.deletePrefix("draft-");                     // count of removed keys
 ```
+
+#### Durable reads: distinguish absence from an unknown value
+
+Use `host.store.read(key)` whenever a read controls a mutation, retry decision, activation, or
+operator-visible state. It returns a tagged result instead of collapsing every failure to `null`:
+
+```js
+const stored = await host.store.read("job-state");
+switch (stored.state) {
+  case "absent":
+    // It is safe to create the initial state.
+    break;
+  case "present":
+    // Use stored.value. A stored null is still present.
+    break;
+  case "error":
+    // Do not overwrite or report an empty state. Surface/retry deliberately.
+    if (stored.diagnostic.retryable) {
+      // Retry later.
+    }
+    break;
+}
+```
+
+Only a proven filesystem `ENOENT` produces `{ state: "absent" }`. Permission and I/O failures,
+a malformed current envelope, and an envelope from a newer host all produce `{ state: "error",
+diagnostic }`. Diagnostics are a small, path-free and value-free contract: I/O errors are
+retryable; corrupt data and an unsupported envelope version are not. The stable codes are
+`STORE_READ_IO`, `STORE_READ_CORRUPT`, `STORE_READ_CORRUPT_QUARANTINE_FULL`, and
+`STORE_READ_UNSUPPORTED_VERSION`; a corrupt-data diagnostic can also say whether recovery captured
+the data. Do not display raw storage exceptions or persisted values as diagnostics.
+
+`get` remains for compatibility and intentionally stays lossy: it returns `null` for an absent key
+and for every unreadable outcome. Existing read-only UI can continue to use it, but code must not
+use it to decide that durable state is empty, missing, or safe to replace. This is especially
+important because a stored `null` is `present` from `read` but indistinguishable through `get`.
+
+The server-side `PackStore` offers the same result shape synchronously as `readSync`. It is for
+server-owned synchronous decisions such as provider activation; pack code receives asynchronous
+`host.store.read` instead. Both preserve the distinction so a failed activation read cannot start a
+provider with defaults.
+
+For a malformed current envelope, the store retains at most one recovery copy for that key rather
+than accumulating timestamped sidecars. The asynchronous read serializes recovery and can move the
+bad primary into that slot. A synchronous read captures the same bounded evidence but keeps the
+live pathname until a later serialized asynchronous read can safely complete recovery; this avoids
+deleting a concurrent atomic write. Transient read failures and unsupported future envelopes are
+never quarantined or removed, so retrying or upgrading remains possible.
 
 Large independent namespaces can use server-owned quota scopes:
 
@@ -545,11 +594,12 @@ await host.store.put(`reviews/${jobId}/final/payload`, payload, {
 });
 ```
 
-Server modules, routes, and providers run through `ModuleHost` workers, so `host.store.*`
-methods are proxied back to the parent gateway process. The proxy forwards the optional
-third `host.store.put(key, value, opts)` argument unchanged; scoped quota options therefore
-reach the parent `ServerHostApi` / `PackStore` instead of falling back to an unscoped write.
-Authorization and server-derived `packId` binding remain parent-side.
+Server modules, routes, and providers run through confined `ModuleHost` workers, so
+`host.store.*` methods — including `read` and its tagged result — are proxied back to the parent
+gateway process. The proxy forwards the optional third `host.store.put(key, value, opts)` argument
+unchanged; scoped quota options therefore reach the parent `ServerHostApi` / `PackStore` instead of
+falling back to an unscoped write. Authorization, server-derived `packId` binding, and file access
+remain parent-side.
 
 - **Backend:** one JSON file per key under `<state>/ext-store/<packId>/<encodedKey>.json`. Keys
   are percent-encoded and the resolved path is re-validated to stay inside the `packId` dir.
@@ -1201,7 +1251,7 @@ is not loaded).
 # entrypoints/viewer-open.yaml
 id: my-pack.open
 kind: composer-slash          # composer-slash | session-menu
-label: My Viewer              # required for launcher kinds
+label: My viewer              # required for launcher kinds; use sentence case
 icon: zap                     # optional; stable launcher icon id
 target:
   route: my-pack              # OR { panelId: ... }
@@ -1215,6 +1265,7 @@ stable ids are:
 |---|---|---|
 | `zap` | Lightning bolt | Default / generic launcher |
 | `terminal` | Terminal | Terminal or shell launchers |
+| `folder-tree` | Folder tree | File and workspace browsers |
 | `git-pull-request` | Pull request | PR review / PR walkthrough launchers |
 
 `icon` is available only on launcher kinds (`composer-slash` and `session-menu`). Route-only
@@ -1234,7 +1285,7 @@ First-party launcher examples:
 # market-packs/terminal/entrypoints/terminal-session-menu.yaml
 id: terminal.session-menu
 kind: session-menu
-label: Open Terminal
+label: Open terminal
 icon: terminal
 target:
   action: channel-panel
@@ -1246,10 +1297,20 @@ target:
 ```
 
 ```yaml
+# market-packs/file-explorer/entrypoints/file-explorer-session-menu.yaml
+id: file-explorer.session-menu
+kind: session-menu
+label: Open file explorer
+icon: folder-tree
+target:
+  panelId: file-explorer.panel
+```
+
+```yaml
 # market-packs/pr-walkthrough/entrypoints/pr-walkthrough-session-menu.yaml
 id: pr-walkthrough.session-menu
 kind: session-menu
-label: PR Walkthrough
+label: PR walkthrough
 icon: git-pull-request
 target:
   action: spawn
@@ -1287,7 +1348,7 @@ host.ui.navigate({ route: "artifacts", params: { artifactId } });
 # entrypoints/reviewer-launch.yaml
 id: my-pack.launch
 kind: session-menu            # any launcher kind
-label: Run Reviewer
+label: Run reviewer
 target:
   action: spawn               # discriminates a SpawnLaunchTarget
   route: run                  # pack route name; called POST with an empty body
@@ -1480,7 +1541,9 @@ The `LifecycleHub` resolves enabled providers via
 `PackContributionRegistry.listProviders(projectId)`, runs a named hook on the Extension Host
 worker tier with a per-provider timeout, collects the returned `ContextBlock`s, applies token
 budgets, fences the content, and records a trace. See [docs/lifecycle-hub.md](lifecycle-hub.md)
-for the full Hub contract.
+for the full Hub contract. Provider hook contexts may also include the optional, advisory,
+read-only `scopeContext` snapshot; its fields, privacy boundary, and missing-data semantics are
+specified only in [Lifecycle Hub — `scopeContext`](lifecycle-hub.md#scopecontext-bounded-advisory-scope).
 
 **The `sessionSetup` hook is now wired into the session runtime.** When a new session is
 created, the Hub dispatches `sessionSetup` and the returned blocks render as a final
@@ -1538,8 +1601,8 @@ path from routes/actions). Each handler is `async (ctx) => ({ blocks: [...] })` 
 export default {
   async sessionSetup(ctx) {
     // ctx carries: sessionId, projectId, scope, cwd, goalId?, roleName?, prompt?, turn?,
-    //   budget.maxTokens (this provider's clamped allowance), config (the YAML `config`),
-    //   and gateway { baseUrl, token } for calling back into the gateway.
+    //   optional advisory scopeContext (see Lifecycle Hub), budget.maxTokens (this provider's
+    //   clamped allowance), config (the YAML `config`), and gateway { baseUrl, token }.
     return {
       blocks: [{
         id: "recent-decisions",
@@ -1814,6 +1877,51 @@ panel rehydrated from `store.get`. Real parity needs real libraries, so `highlig
 render inside a `sandbox="allow-scripts"` iframe. Tests:
 `tests/artifacts-pack-viewer.test.ts` (node) + `tests/e2e/ui/artifacts-pack.spec.ts` (browser).
 
+## Worked example: the file explorer first-party pack
+
+`market-packs/file-explorer/` is a production **no-tools pack**. It opens a read-only browser at
+the bound session's working directory without adding a general filesystem API to the Host
+contract:
+
+```
+file-explorer/
+  pack.yaml                              # schema 2; entrypoints plus list/resolve/search/read/diff routes
+  panels/file-explorer-panel.yaml        # singleton file-explorer.panel
+  entrypoints/
+    file-explorer-session-menu.yaml      # Open file explorer
+    file-explorer-slash.yaml             # /files
+  lib/
+    file-explorer-panel.js               # built browser panel
+    explorer-routes.mjs                  # built trusted server route module
+```
+
+The launchers directly target the same singleton panel, so the existing panel workspace owns
+focus and reload restoration. The browser calls only
+`host.callRoute("list" | "resolve" | "search" | "read" | "diff")`, keeps relative
+expansion/selection/view state in `host.store`, and subscribes to
+`host.session` status to refresh on the first observed `idle` and later non-idle→`idle`
+transitions. It imports no core app, UI,
+or server internals; the shared unified-diff parser under `src/shared/**` is bundled into the
+panel.
+
+The route request deliberately has no root or cwd field. The gateway derives the worker cwd and
+`ctx.workingDir` from the bound session (worktree first, then recorded cwd), and the pack accepts
+only canonical relative paths. This is product-level root selection, not a new confinement
+boundary: the server bundle runs as trusted code in the normal confined worker with ambient
+`node:fs` and `node:child_process`, exactly like other trusted pack server modules. It adds its
+own count, byte, record, and operation deadlines because the generic worker deadline does not
+make an unbounded directory, file, or Git result responsive enough for an interactive tree.
+
+Stateless routes are intentional here. Reads are user-paced, Git status is recomputed on refresh,
+and the existing session event bus supplies the only automatic lifecycle trigger. A channel
+would add framing, correlation, reattach, replay, and cleanup state without providing a stream the
+feature needs. Compare this with the built-in terminal, where `host.channels` is appropriate
+because a PTY is inherently long-lived and bidirectional.
+
+The full user and maintainer contract—including Git badge semantics, complete
+working-tree-versus-`HEAD` diffs, relative paths, read-only scope, and exact limits—is in
+[Built-in file explorer](file-explorer.md).
+
 ## Worked example: the PR walkthrough first-party pack
 
 `market-packs/pr-walkthrough/` is the maximal production example: the guided PR review feature
@@ -1825,9 +1933,10 @@ Marketplace installed catalogue expands that group into concrete toggles such as
 `read_pr_walkthrough_submission_status`, `finalize_pr_walkthrough_submission`, and
 compatibility `submit_pr_walkthrough_yaml`.
 
-No-tools pack behavior is still supported and tested by fixture/litmus packs such as
-`tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`. PR walkthrough is now the
-example for combining pack-bound UI surfaces with normal role/tool-policy-resolved tools.
+The built-in `file-explorer` pack is the production no-tools example: its pack-bound panel,
+entrypoints, routes, store, and session events need no carrier tool. Fixture/litmus packs retain
+focused contract coverage. PR walkthrough remains the example for combining pack-bound UI
+surfaces with normal role/tool-policy-resolved tools.
 
 ```
 pr-walkthrough/
@@ -1886,17 +1995,21 @@ There is no owner-transcript `readToolCall` scan and no manual Load path.
 ## First-party packs dogfood the Host API
 
 The Extension Host is not just for third-party packs: **Bobbit ships some of its own features as
-packs**, resolved through the exact same `PackResolver` + Host API + activation system. The first
-such feature is **`pr-walkthrough`**, which is now delivered *solely* as a built-in first-party
-pack — its bespoke built-in viewer, viewer-feed routes, and UI launch wiring have been **deleted**,
-so the pack is the only provider. (See [docs/marketplace.md](marketplace.md#built-in-first-party-packs)
-for how built-in packs are shipped, resolved in place, and disabled.)
+packs**, resolved through the exact same `PackResolver`, Host API, and activation system. See
+[Marketplace](marketplace.md#built-in-first-party-packs) for how built-in packs are shipped,
+resolved in place, and disabled.
 
-Why do this? It makes the pack contract **load-bearing for production code**, not just for tests —
-if the Host API can't express a real shipped feature, the gap shows up in the app, not in a litmus.
-The built-in `terminal` pack does the same for `host.channels`: xterm UI, session launchers,
-reattach, kill/restart, and PTY execution all run through the generic channel contract, proving no
-terminal-specific `host.terminal` escape hatch is needed.
+Why do this? It makes the pack contract **load-bearing for production code**, not just for tests:
+if the Host API cannot express a shipped feature, the gap appears in the app rather than only in a
+litmus. The built-in packs exercise different parts of the contract without bespoke escape hatches:
+
+- `file-explorer` uses a no-tools singleton panel, direct launchers, stateless routes, a pack store,
+  and session status events;
+- `terminal` uses `host.channels` for xterm UI, session launchers, reattach, kill/restart, and PTY
+  execution, with no terminal-specific `host.terminal`; and
+- `pr-walkthrough` combines a panel, routes, durable store state, a provider, agent tools, and
+  `host.agents` child launch. Its bespoke viewer, viewer-feed routes, and UI launch wiring were
+  deleted, so the pack is the sole provider.
 
 Two pieces of the PR Walkthrough migration are worth understanding when authoring your own
 ambitious pack:

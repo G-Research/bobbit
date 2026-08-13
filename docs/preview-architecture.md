@@ -85,11 +85,11 @@ Preview tab identity:
   set in the slide-pane header. There is no desktop-only preview
   capability.
 
-Reopen failures stay local to the tab/card: missing file snapshots
-disable with "File no longer available", parse or fetch errors leave the
-button retryable and log `[PreviewRenderer] reopen failed`, and
-background tab-remount failures log `[panel-workspace] preview tab
-restore failed` without changing preview serving semantics.
+Reopen failures stay local to the tab/card. Terminal historical-snapshot
+failures explain what is no longer available; only transport or other server
+failures remain retryable and log `[PreviewRenderer] reopen failed`.
+Background tab-remount failures log `[panel-workspace] preview tab restore
+failed` without changing preview serving semantics.
 
 ### Immutable preview artifacts
 
@@ -154,8 +154,8 @@ between multiple preview tabs without re-mounting on every click. The
 active tab's `artifactId` is read off the panel-tab itself, not mirrored
 into global state, so SSE / bootstrap updates of `state.previewPanelEntry`
 can never desync the iframe `src` from the visible tab. The live mount
-slot remains the source for tabs without an `artifactId` (assistant /
-live preview).
+slot remains only as the fallback for tabs without an `artifactId`; a current
+or assistant-owned tab with an artifact still uses the stable artifact route.
 
 ### Reopen-tab decision flow
 
@@ -168,6 +168,35 @@ When the user clicks **Open** on a historical `preview_open` tool card
 | v3 without `artifactId`, with `html` / `file` original params | `POST /api/preview/mount {html\|file}` | Remount the original; the POST response's `artifactId` and `contentHash` are attached to the tab. Same collapse rule. |
 | v3 without `artifactId` and no remount body | None (recorded entry / mtime / url) | Select the recorded entry; iframe points at the existing mount path. Best-effort. |
 | Legacy v1 / v2 | `POST /api/preview/mount {html\|file}` | Stays historical even when the response includes `contentHash`. |
+
+### Historical snapshot resolution and failures
+
+A chat transcript is not a positional copy of the agent runtime transcript.
+The client can insert synthetic rows, including compaction placeholders, that
+do not exist in `rpcClient.getMessages()`. Therefore a client-side message
+index can diverge from the runtime index after compaction; using it to retrieve
+a truncated historical snapshot can select unrelated content.
+
+For a truncated snapshot, `PreviewRenderer` instead requests the full block by
+its tool-call identity and the marker's content-block index through
+[`GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`](rest-api.md#tool-content-identity-resolution),
+with `expected=preview-snapshot`. The server resolves the identity in the
+runtime transcript, verifies the requested result/call and block, and refuses
+a non-marker mismatch. This identity lookup is limited to retrieving the
+transcript payload; it does not change the snapshot marker format, parser
+validation, mount behaviour, or artifact restore semantics. The generic
+**Load full content** consumer uses the same identity route for the same
+reason.
+
+The card presents these actionable states:
+
+| State | Meaning and action |
+|---|---|
+| **Snapshot not captured** | The completed historical result has no snapshot block; reopening is unavailable. |
+| **Transcript block unavailable** | The tool call or block no longer exists in the runtime transcript; reopening is unavailable. |
+| **Malformed snapshot marker** | The fetched block is not a valid v1, v2, or v3 marker; reopening is unavailable. This includes an identity/block mismatch refused by the server. |
+| **Artifact evicted — rerun preview_open** | The v3 artifact was removed; rerun `preview_open` to create a new artifact. |
+| **Failed — retry** | A transient fetch, session-patch, mount, or artifact-service failure occurred; the button remains enabled to retry. |
 
 ### Restart restore
 
@@ -185,8 +214,9 @@ small metadata to render after restart:
 On gateway restart, `sidePanelWorkspace` is loaded with the session. When the
 browser reloads or returns to the session, the side-panel shell renders the
 active preview tab and the iframe derives `entry`, `mtime`, and `artifactId` from
-that tab before transient preview mirrors are repopulated. Live tabs point at
-`/preview/<sid>/<entry>?mtime=<n>`; artifact-backed historical tabs point at
+that tab before transient preview mirrors are repopulated. Tabs without an
+artifact point at `/preview/<sid>/<entry>?mtime=<n>`; every artifact-backed tab,
+including the current/live identity, points at
 `/preview/<sid>/_artifact/<artifactId>/<entry>?mtime=<n>`.
 
 Bootstrap (`GET /api/preview/mount`) and `preview-changed` SSE metadata may later
@@ -571,47 +601,59 @@ __preview_snapshot_v3__
 {"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
 ```
 
-≤ 250 bytes per block, regardless of HTML size. All of `entry`,
-`contentHash`, and `artifactId` are **optional** — the builder
-(`buildPreviewSnapshotV3Block`) tries progressively more compact
-payloads (long URL with full path, short URL with `entry` filename as
-`path`, alias keys like `aid` for `artifactId`) and emits whichever
-complete variant still fits the 250-byte cap. If even the compact form
-blows the cap, the builder falls back to the bare
-`{kind, url, path}` payload without identity fields. The cap is fixed
-by `tests/e2e/preview-token-cost.spec.ts` and must not be raised to
-make room for larger payloads.
+The complete block is at most **250 UTF-8 bytes**, regardless of HTML size.
+The cap is fixed by `tests/e2e/preview-token-cost.spec.ts` and must not be
+raised. The builder tries compatibility-preserving, lossless forms in order:
+the normal full route, then compact forms that remove duplicated route/path
+data and use `aid` or `a` for the artifact id. A valid supplied `contentHash`
+or artifact identity is replay metadata, not expendable space: neither is
+silently dropped to make a marker fit. If no lossless form fits, the builder
+throws `PREVIEW_SNAPSHOT_CAP`, naming the filename and the byte-budget reason,
+rather than writing a truncated or dead marker.
 
-`artifactId` is what makes historical reopen byte-accurate after the
-user has overwritten the original source file: the renderer prefers
-`POST /api/preview/artifacts/<artifactId>/restore` over re-reading
-`html` / `file` params. See ["Immutable preview artifacts"](#immutable-preview-artifacts)
-for the store layout and validation contract.
+**Raw entry contract.** `entry` is a raw, accepted single filename, not a
+percent-encoded route segment. It is non-empty and at most 255 string code
+units, not `.` or `..`, and contains no slash, backslash, or ASCII control
+character. The
+writer encodes it exactly once when it writes a full route; the reader keeps
+it raw and encodes it exactly once when it reconstructs a compact route. Thus
+literal-percent names such as `100%.html` and `%41.html`, Unicode names, and
+URL-significant characters resolve to their original files rather than a
+decoded or double-encoded name. Compaction compares raw or encoded URL suffixes
+consistently, so every accepted filename can use the compact form.
 
-The renderer parses the marker via `parseSnapshot()` and uses `url` /
-`path`, optional `entry`, optional `contentHash`, optional `artifactId`,
-and the original tool params to drive the **Open** button on tool
-cards. Opening a card selects a source-derived preview tab immediately,
-keyed by filename via `previewEntryTabId(entry)` / `previewVersionedTabId(entry, N)`.
-The restore source preference is `artifactId` → original `html` / `file`
-params → recorded entry/mtime (best-effort). When the marker omitted
-`contentHash` to preserve the 250-byte cap, a successful remount `POST`
-returns the hash; the renderer attaches it to the tab so same-content
-collapse can still fire.
+The usual compact form is `url: "/preview/<sid>/"` with a safe raw `entry`.
+`path` is optional in v3 and can be omitted when it only duplicates `entry`.
+For a long filename, the final compact form can also omit `entry`, but only
+when both valid `contentHash` and artifact identity remain. That form is valid
+only beside the parameters from its own `preview_open` call: the renderer
+recovers the trusted raw basename from `file` (or `inline.html` for `html`),
+then validates and reconstructs the route. A standalone compact marker without
+a safe entry remains malformed rather than guessing a file.
 
-**`path` is host-invariant.** The field carries the project-root-relative
-`<sessionId>/<entry>` identifier (forward slashes on every OS), not the
-host-absolute path on disk. The single source of truth is
-`MountResult.relPath` in `src/server/preview/mount.ts`; the agent tool in
-`defaults/tools/html/extension.ts` prefers `relPath` over the legacy
-host-absolute `path` when calling `buildPreviewSnapshotV3Block`. Bounding the
-payload by content shape (rather than by where `bobbitStateDir()` happens to
-live on disk) is what keeps the 250 B per-block cap holding on macOS
-(`/private/var/folders/...`) and Windows E2E harness paths, even when the
-optional `contentHash` fits. Archived sessions that recorded the legacy
-host-absolute form still parse — `parseSnapshot` only requires a non-empty
-string — but new blocks always use the relative form. Per-block size is pinned by
-`tests/e2e/preview-token-cost.spec.ts`.
+The parser accepts current and historical spellings: `entry` or `e`, and
+`artifactId`, `artifact_id`, `aid`, or `a`. `path`, when present, must be a
+non-empty string and is retained as context; route resolution uses the
+validated URL plus entry. Existing full routes, including same-origin and
+base-path-prefixed forms, remain readable. A compact directory URL is marker
+encoding only: the reader reconstructs `/preview/<sid>/<encoded-entry>` and
+passes it through the same strict preview-route validator, never treating an
+arbitrary mounted or public URL as valid.
+
+`artifactId` is what makes historical reopen byte-accurate after the user has
+overwritten the original source file: the renderer prefers
+`POST /api/preview/artifacts/<artifactId>/restore` over re-reading `html` /
+`file` params. See ["Immutable preview artifacts"](#immutable-preview-artifacts)
+for the store layout and validation contract, and [the REST API preview
+reference](rest-api.md#historical-preview_open-snapshot-markers) for the wire
+contract.
+
+**`path` is host-invariant when emitted.** New markers use the
+project-root-relative `<sessionId>/<entry>` identifier (forward slashes on
+every OS), not a host-absolute path. The tool prefers `MountResult.relPath`
+over the legacy `path` response, which keeps the cap independent of the
+location of `bobbitStateDir()`. Archived sessions with an absolute path still
+parse for read compatibility.
 
 **Legacy markers** are preserved in the parser **only** for archived
 sessions:
@@ -620,7 +662,7 @@ sessions:
 |---|---|---|
 | `__preview_snapshot_v1__` | raw inline HTML | Create/select a historical preview tab and remount via `POST /api/preview/mount {html}`; the tab stays historical (does not collapse into the current filename tab) even when the remount response includes `contentHash` or `artifactId` |
 | `__preview_snapshot_v2__` | `{kind:"file",path}` | Create/select a historical preview tab and remount via `POST /api/preview/mount {file}`; same historical-only rule as v1 |
-| `__preview_snapshot_v3__` | `{kind:"preview",url,path,entry?,contentHash?,artifactId?}` | Create/select a tab keyed by filename. Prefer `POST /api/preview/artifacts/<artifactId>/restore` when present, else remount from original `html`/`file` params, else select by recorded entry/mtime. Collapse to the current filename tab when `contentHash` already matches; otherwise open / select `preview:entry:<file>:v:N`. |
+| `__preview_snapshot_v3__` | `{kind:"preview",url,path?,entry?,contentHash?,artifactId?}`; reader also accepts `e` and `artifact_id`/`aid`/`a` aliases | Create/select a tab keyed by filename. Prefer `POST /api/preview/artifacts/<artifactId>/restore` when present, else remount from original `html`/`file` params, else select by recorded entry/mtime. Collapse to the current filename tab when `contentHash` already matches; otherwise open / select `preview:entry:<file>:v:N`. |
 
 The v1/v2 builder functions have been deleted — no new code path emits them.
 The marker constants are tagged `Read-only legacy support … Do not extend`
@@ -646,13 +688,19 @@ contracts differ:
 
 ### Inline chat-card path
 
-`WriteRenderer` delegates `.html` and `.htm` writes to `HtmlRenderer`, including
-historical completed calls. During streaming, prepared HTML is applied through
-the existing debounced `document.open()` / `write()` / `close()` path; completion
-switches to the declarative `srcdoc` binding. A successful HTML edit fetches the
-resulting file snapshot and delegates to the same completed renderer. Thus write,
-edit, streaming, and completed cards share one preparation helper rather than
-separate theme implementations.
+`WriteRenderer` checks for the transport truncation descriptor before extension
+dispatch. Truncated `.html`, `.htm`, and `.svg` writes therefore stay on the
+generic code-preview path instead of passing an object to a source-string
+renderer; completed calls also retain the generic **Load full content** control.
+Ordinary source strings keep their normal extension dispatch: `.html` and `.htm`
+writes delegate to `HtmlRenderer`, including historical completed calls, while
+`.svg` writes delegate to `SvgRenderer`. During HTML streaming, prepared source
+is applied through the existing debounced `document.open()` / `write()` /
+`close()` path; completion switches to the declarative `srcdoc` binding. A
+successful `.html` or `.htm` edit fetches the resulting file snapshot and
+delegates to the same completed `HtmlRenderer`. Thus ordinary writes, successful
+edits, streaming, and completed HTML cards share one preparation helper rather
+than separate theme implementations.
 
 The helper parses authored input inertly with the browser HTML parser, inserts a
 parsed copy of the canonical bridge as the first node in `<head>`, and serializes the
@@ -817,8 +865,9 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `src/shared/preview-bridge-scripts.ts` | Canonical live theme bridge plus the side-panel-only swipe bridge |
 | `src/ui/tools/renderers/prepare-inline-html.ts` | Parser-backed, early theme-bridge preparation for inline `srcdoc` HTML |
 | `src/ui/tools/renderers/HtmlRenderer.ts` | Completed and streaming inline iframe lifecycle; original-source disclosure and themed chrome |
-| `src/ui/tools/renderers/WriteRenderer.ts`, `EditRenderer.ts` | `.html` / `.htm` write and successful-edit delegation into `HtmlRenderer` |
-| `defaults/tools/html/extension.ts` | `preview_open` tool — POSTs to `/api/preview/mount`, stamps v3 marker with optional `contentHash` |
+| `src/ui/tools/renderers/WriteRenderer.ts` | Descriptor-first generic preview and full-content loading for truncated `.html` / `.htm` / `.svg` writes; source-string delegation to `HtmlRenderer` or `SvgRenderer` |
+| `src/ui/tools/renderers/EditRenderer.ts` | Successful `.html` / `.htm` edit snapshot loading and completed delegation into `HtmlRenderer` |
+| `defaults/tools/html/extension.ts` | `preview_open` tool — POSTs to `/api/preview/mount`, stamps a lossless v3 marker or reports `PREVIEW_SNAPSHOT_CAP` |
 | `defaults/tools/html/snapshot.ts` | Marker constants, `buildPreviewSnapshotV3Block`, `parseSnapshot`, 250-byte v3 cap |
 | `src/server/preview/artifacts.ts` | Immutable artifact store — capture, restore, hash-based dedupe, orphan sweep |
 | `src/ui/tools/renderers/PreviewRenderer.ts` | Open button on tool cards; artifact restore → source remount → recorded-entry fallback; live-hash remount skip; filename-keyed tab dispatch |
@@ -830,10 +879,10 @@ back the preview tree sees the same bytes the gateway just wrote.
 
 ## Acceptance properties
 
-- Tool result is constant ≤250 bytes regardless of HTML size — no HTML in the
-  conversation transcript. Optional v3 `entry`, `contentHash`, and
-  `artifactId` fields are omitted (or compacted via the builder's progressive
-  fallback) rather than raising the cap.
+- Tool result is constant ≤250 UTF-8 bytes regardless of HTML size — no HTML
+  in the conversation transcript. The builder compacts duplicated route/path
+  data and artifact-id keys, never valid `contentHash` or artifact identity;
+  an impossible lossless marker fails explicitly with `PREVIEW_SNAPSHOT_CAP`.
 - Mount `POST` / `GET` responses and bootstrap/live `preview-changed` SSE events
   expose a 64-hex `contentHash` for the current mounted preview tree, plus an
   `artifactId` when a captured artifact matches the current content.

@@ -1,15 +1,17 @@
 ---
 name: release
-description: Cut a Bobbit release — preflight checks, version bump, signed tag (CI publishes the root to npm via OIDC on tag push), optional binary sub-packages, GitHub release with generated notes.
+description: Cut a Bobbit release — preflight checks, version bump and release notes in a release PR; merging it makes CI publish to npm via OIDC, tag the commit, and create the GitHub release. Optional binary sub-packages stay manual.
 argument-hint: [major|minor|patch|<explicit-version>]
 ---
 
-Drive an end-to-end release of Bobbit. The maintainer (human) must be at the
-keyboard to sign the tag, and for `npm login` / OTP prompts **only when
-republishing binary sub-packages** — pause and ask when the flow needs them.
-The root `@gresearch/bobbit` package publishes automatically via CI (npm
-trusted publishing / OIDC) when the signed tag is pushed; **never** run a
-manual root `npm publish`.
+Drive an end-to-end release of Bobbit. The human's job is the **release PR**:
+version bump + release notes, reviewed and squash-merged. Merging it is what
+releases — `.github/workflows/release-publish.yml` builds and tests an immutable
+tarball without publish authority, publishes that exact tarball to npm
+(trusted publishing / OIDC, with provenance), creates the tag, and creates the
+GitHub release. **Never** create the release tag, run a root `npm publish`, or
+create the GitHub release by hand. `npm login` / OTP is needed **only when
+republishing binary sub-packages** — pause and ask when the flow needs it.
 
 Single source of truth for release mechanics: [`docs/releasing.md`](../../../docs/releasing.md).
 This skill orchestrates that doc + version bump + notes + GitHub release.
@@ -54,7 +56,7 @@ so the session/primary worktree state is irrelevant. What matters is that
 - `origin/main` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
 - `npm whoami` fails **and** step 3 will republish binary sub-packages — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for those sub-package publishes). The root `@gresearch/bobbit` publish needs no npm login — it goes through CI/OIDC.
 - `gh auth status` not logged in — ask them to run `gh auth login`.
-- No GPG/SSH signing key configured — confirm whether to proceed with **unsigned** tag or wait until they set one up. Default to waiting.
+- No GPG/SSH signing key configured — this only affects the release **commit**, not the tag (CI creates the tag and it is not signed). Confirm whether to proceed with an unsigned commit or wait. Default to waiting.
 
 ## 1. Decide the new version
 
@@ -99,9 +101,7 @@ Run, in this order, and **stop on any failure**:
 
 ```bash
 npm ci                          # clean install, lockfile authoritative
-npm audit --omit=dev            # zero vulnerabilities in root runtime deps
 npm run build                   # full build; emits declarations used by test type-checks
-npm run audit:packed-consumer   # zero vulnerabilities in a fresh tarball consumer
 npm run check                   # type-check server + web + tests against fresh dist
 npm run test:unit               # fast unit suite
 npm run test:browser            # Playwright browser journeys
@@ -109,13 +109,12 @@ npm run test:e2e                # API + worktree/Docker/MCP/restart E2E
 ```
 
 Rules:
-- **Both audits must show 0 vulnerabilities** at every severity. The packed-consumer command installs the just-built tarball under normal npm settings because a clean root audit cannot see dependency-owned shrinkwrap findings. Any finding blocks publish; there are no release exceptions.
-- Registry advisory availability is deliberately release-only, not part of normal unit, browser, or E2E gates. If the advisory service or clean consumer install is unavailable, stop the release rather than skipping the packed-consumer audit.
+- Runtime registry audits are deliberately outside the release process. Do not run `npm audit` or `audit:packed-consumer` as release gates; mutable advisory data must not change eligibility for an unchanged commit.
 - Don't skip browser or E2E tests "because they're slow" — releases are the one place flakes bite users.
-- Build must precede both `audit:packed-consumer` and `check`: the audit packs built output, while `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations.
+- Build must precede `check` because `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations.
 - If any test fails, the failure is the bug. Fix it or abort the release; do not retry hoping it's flaky.
 
-Long-running steps (`build`, `audit:packed-consumer`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
+Long-running steps (`build`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
 
 ## 3. Decide whether to bump the binary sub-packages
 
@@ -138,11 +137,40 @@ git diff v<prev>..HEAD -- binaries.versions.json
 npm version <new-version> --no-git-tag-version
 ```
 
-`--no-git-tag-version` because we want a signed tag, not the unsigned one `npm version` would otherwise create. **Don't commit yet** — the release notes (§5) are a tracked file and ship in the *same* `chore(release)` commit as the version bump (that's how prior releases do it, e.g. v0.11.0 bundled `RELEASE_NOTES_v0.11.0.md` with `package.json`). Leave the bumped `package.json` / `package-lock.json` (and any `binaries/*` edits from §3) staged-but-uncommitted until §5.
+`--no-git-tag-version` because the release tag is created by CI at the merge
+commit, not locally — a local tag here would point at a commit that never
+lands on `main`. **Don't commit yet** — the release notes (§5) ship in the *same* `chore(release)` commit as the version bump. Leave the bumped `package.json` / `package-lock.json` (and any `binaries/*` edits from §3) staged-but-uncommitted until §5.
 
 ## 5. Generate release notes — then commit
 
-Write `RELEASE_NOTES_v<new-version>.md`. Match the format of the most recent existing `RELEASE_NOTES_v*.md` — short intro, then `## ✨ New Features` and `## 🐛 Bug Fixes` sections, emoji-prefixed bullets with bold lead-ins, friendly tone, no marketing fluff. End with the standard Bobbit footer.
+**Prepend** a new section to `CHANGELOG.md`, directly under the file's intro and
+above the previous release. Newest first — the release workflow rejects a
+changelog whose top section is not the version being released.
+
+```markdown
+## v<new-version>
+
+Short intro naming the previous version.
+
+### ✨ New Features
+
+* 🎯 **Bold lead-in**: what changed and why it matters to a user.
+
+### 🐛 Bug Fixes
+
+* 🧩 **Bold lead-in**: what was broken and what now happens instead.
+```
+
+Match the tone of the entries already in the file — friendly, concrete, no
+marketing fluff. Headings inside an entry are `###` or deeper; `##` is reserved
+for version headings, and the workflow splits on it.
+
+**Never edit an existing entry.** The run compares `CHANGELOG.md` against the
+parent commit and refuses any change to an already-released section — those are
+the record of what shipped.
+
+Show the drafted section to the user and iterate before committing; these notes
+become the public GitHub release.
 
 How to build the input:
 
@@ -159,7 +187,7 @@ Show the draft to the user via `review_open` before committing. Iterate until th
 Once the user approves the notes, commit the version bump and the notes together as a single `chore(release)` commit:
 
 ```bash
-git add package.json package-lock.json RELEASE_NOTES_v<new-version>.md
+git add package.json package-lock.json CHANGELOG.md
 # include binaries/* package.json edits if §3 changed them
 git commit -m "chore(release): v<new-version>" \
   --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>" \
@@ -177,7 +205,19 @@ GitHub release all agree.
 
 Direct pushes to `main` are blocked by repository rules, and squash is the
 only enabled merge strategy. Push the detached HEAD to a release branch and
-open a PR:
+open a PR.
+
+**The release branch must live in `G-Research/bobbit`, never in a fork.** The
+release contract requires the merged PR to come from this repository, and both
+the pre-merge check and the release run reject a fork PR. If `git push origin`
+below is rejected, you do not have push access to the repository — stop and
+hand the release to a maintainer who does, rather than pushing the branch to a
+fork.
+
+The `Release contract` check on the PR enforces the branch name, the title, the
+lockfile, the notes and the binary sub-package pins **before** the merge. Treat
+a failure there as a blocker to fix on this branch: after the merge the same
+rules run again, but by then a failure has already spent the version number.
 
 ```bash
 RELBRANCH="release/v<new-version>"
@@ -208,11 +248,11 @@ be the commit that lands on `main`.
 
 **The root `@gresearch/bobbit` package is NOT published here.** It publishes automatically
 via the `.github/workflows/release-publish.yml` workflow (npm trusted publishing
-/ OIDC, with provenance) when the signed tag is pushed in §8 — there is no manual
+/ OIDC, with provenance) when the release PR is merged in §8 — there is no manual
 root `npm publish`. Skip straight to §8 unless step 3 bumped the binary
 sub-packages.
 
-If step 3 bumped binaries, publish the sub-packages now — **before** the tag push
+If step 3 bumped binaries, publish the sub-packages now — **before** the merge
 in §8, so they are on npm before the root that pins them. **Pause and confirm with
 the user** first; npm publishes are irreversible (you can `unpublish` for 72h but
 the version number is burned either way). Use `ask_user_choices` with the exact
@@ -231,10 +271,24 @@ Notes:
 - npm will prompt for OTP — that's the maintainer's job; just wait.
 - If publish fails after some sub-packages went through, **do not** try to bump+republish under a new version. Re-run `npm publish` on the remaining packages with the same version once the issue is fixed.
 
-## 8. Squash-merge the release PR, then tag it (this triggers the npm publish)
+## 8. Squash-merge the release PR (the merge is the release)
 
-Once the release PR is fully green and mergeable, squash-merge it.
-Pin the subject and co-author trailer explicitly:
+**STOP. Merging is the publish.** The squash merge pushes the release commit to
+`main`, and that push is the release trigger:
+`.github/workflows/release-publish.yml` validates, builds, type-checks, and packs
+the commit without OIDC authority, then publishes the verified tarball without
+running lifecycle scripts, creates the `v<new-version>` tag, and creates the
+GitHub release. Nothing after this point is reversible — npm version
+numbers are immutable and release tags cannot be moved or deleted.
+
+**Pause here and confirm with the user before running any command in this
+section.** Use `ask_user_choices` with the exact `gh pr merge` command shown
+below. Do not run it until they have said yes.
+
+**Do not create the tag by hand** — CI does it.
+
+Once the release PR is fully green and mergeable, and the user has confirmed,
+squash-merge it. Pin the subject and co-author trailer explicitly:
 
 ```bash
 gh pr merge "$PR" \
@@ -247,36 +301,34 @@ git fetch origin main --tags
 git merge-base --is-ancestor "$MERGE_SHA" origin/main
 git show "$MERGE_SHA":package.json | grep '"version": "<new-version>"'
 git diff --exit-code HEAD "$MERGE_SHA" -- \
-  package.json package-lock.json RELEASE_NOTES_v<new-version>.md
+  package.json package-lock.json CHANGELOG.md
 ```
 
-Tag the PR's exact squash commit, not the current `origin/main` tip (another
-PR may have merged immediately afterward). **Pushing the tag triggers the root
-npm publish** (`.github/workflows/release-publish.yml`) and is irreversible —
-pause and confirm with the user before the `git push`:
+The workflow only accepts a release commit that satisfies every one of these, so
+keep §6's branch and title conventions exactly:
+
+- produced by a merged PR from `release/v<new-version>` in this repository into `main`
+- PR title `chore(release): v<new-version>`
+- `package.json` and `package-lock.json` both at `<new-version>`, bumped by *this* commit
+- a substantial `## v<new-version>` section at the top of `CHANGELOG.md`, with no edits to earlier entries
+- `<new-version>` not already on npm
+
+Watch the run for **this commit** — every push to `main` starts a run of this
+workflow, so `--limit 1` can hand you an unrelated one:
 
 ```bash
-git tag -s v<new-version> "$MERGE_SHA" -m "Bobbit v<new-version>"
-git tag -v v<new-version>
-git push origin v<new-version>       # -> release-publish.yml publishes @gresearch/bobbit to npm (OIDC + provenance)
+gh run watch "$(gh run list --workflow release-publish.yml --commit "$MERGE_SHA" --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
 ```
 
-If the user explicitly opted out of signing in step 0, use `git tag -a`
-instead and inspect it with `git show --no-patch v<new-version>`.
-
-Then watch the publish workflow and confirm it succeeds before moving on:
-
-```bash
-gh run watch "$(gh run list --workflow release-publish.yml --branch v<new-version> --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
-```
-
-If the publish job fails (e.g. transient registry error), **re-run the same
-workflow run** for the same version — do not bump the version or re-tag; the
-tag is already public and the version number is immutable.
+If a step fails (e.g. transient registry error), use **Re-run all jobs** on the
+same workflow run — not **Re-run failed jobs**. A fresh validation pass safely
+re-checks npm provenance before deciding whether publication is still needed.
+Never create a tag by hand to work around a failed run. If the run is unusable entirely,
+cut the next patch version through a fresh release PR; there is no manual
+dispatch to release an arbitrary commit, deliberately.
 
 If merging fails, stop and repair the same release PR. Do not change the
-version, create a second release commit, force-push `main`, or tag the
-detached pre-merge commit.
+version, create a second release commit, or force-push `main`.
 
 **Refresh the running dev server** so it picks up the release commit (its
 local `main` is now behind remote):
@@ -286,18 +338,19 @@ cd "$PRIMARY" && git pull origin main    # fast-forward the primary worktree on 
 # then restart the dev server if needed (npm run restart-server)
 ```
 
-## 9. Create the GitHub release
+## 9. Verify the GitHub release
+
+The workflow already created the tag and the GitHub release: this version's
+`CHANGELOG.md` entry first, with GitHub's generated list of merged pull
+requests appended beneath it, marked `--prerelease` when the version carries a
+`-rc`/`-beta`/`-alpha` suffix. Confirm rather than create:
 
 ```bash
-gh release create v<new-version> \
-  --title "Bobbit v<new-version>" \
-  --notes-file RELEASE_NOTES_v<new-version>.md \
-  --verify-tag
+gh release view v<new-version> --json url,isPrerelease,tagName
 ```
 
-`--verify-tag` ensures gh refuses to create the release if the tag doesn't already exist on the remote (catches push-skipped-by-mistake).
-
-If this is a pre-release (version contains `-beta`, `-rc`, `-alpha`), add `--prerelease`.
+If it is missing while the npm publish succeeded, re-run the workflow run —
+do not create the release by hand.
 
 ## 10. Post-release smoke
 
@@ -332,16 +385,17 @@ Report to the user:
 - Version + tag + GitHub release URL (`gh release view v<new-version> --json url -q .url`)
 - npm package URL (`https://www.npmjs.com/package/@gresearch/bobbit/v/<new-version>`) — provenance is attached automatically by CI
 - Whether binaries were republished, and which versions
-- Root and packed-consumer audit results (both must be clean)
+- Required build, type-check, unit, browser, and E2E gate results
 
 ## Rules / best practices
 
-- **Signed tag, always.** Use `git tag -s`. Only fall back to `-a` if the maintainer explicitly opted out in step 0.
+- **Never tag by hand.** CI creates the immutable public source tag. Safe reruns are authorized by npm's verified provenance for this workflow and commit, not by the repository-wide GitHub Actions tag bypass.
 - **Signed commit if a signing key is configured.** Add `-S` to `git commit`. Never override `user.name` / `user.email`; never silently disable signing.
-- **The root publish is CI-only.** It runs via `release-publish.yml` (OIDC trusted publishing) on the tag push, with provenance automatic. Never run a manual root `npm publish`.
+- **Publish, tag, and GitHub release are CI-only.** They run via `release-publish.yml` (OIDC trusted publishing) on the merge to `main`, with provenance automatic. Never run them manually.
 - **OTP is the human's job** — but only for the binary sub-package publishes. Pause and let them type it; don't try to read it from anywhere. The root publish uses no OTP.
-- **Never `npm publish --force`.** If a sub-package republish is genuinely needed, bump the patch version and republish cleanly. If the CI root publish fails, re-run the same workflow run for the same version.
+- **Never `npm publish --force`.** If a sub-package republish is genuinely needed, bump the patch version and republish cleanly. If the CI root publish fails, re-run all jobs in the same workflow run for the same version.
 - **Never delete a tag that's been pushed.** If you tagged wrong, bump the version and tag again — published version numbers are immutable.
-- **Use the required squash-merge PR flow.** Never tag the detached release commit; tag the PR's exact `mergeCommit` SHA after verifying its package version and release files.
-- **One release at a time.** Don't start a second version bump while the previous tag/publish is in flight.
+- **Use the required squash-merge PR flow.** Merging the release PR is what publishes; verify the merged commit carries the intended version and release files.
+- **One release at a time.** Never merge a second release PR while the previous release run is still going: publish jobs serialise on `release-publish-root`, and GitHub keeps at most one pending job per group. After taking the lock, the job requires the npm dist-tag to match the state verification approved; tagging happens only after publication. Wait for the run to finish.
+- **An already-published version fails closed.** It proceeds only when npm's verified provenance identifies this workflow and commit. Otherwise confirm what was published and release the next version.
 - **Stop on any test, audit, or check failure.** Releases amplify bugs — the cost of waiting a day is tiny; the cost of a bad publish is days of cleanup.

@@ -1,7 +1,8 @@
 import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
+import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
+import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
@@ -35,25 +36,27 @@ import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-
 import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { BOBBIT_APP_INFO } from "./app-info.js";
+import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "./cors.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { SessionManager, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
+import { SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus, shutdownOAuthFlows } from "./auth/oauth.js";
-import { handleWebSocketConnection } from "./ws/handler.js";
+import { handleWebSocketConnection, hasUiWebSocketPrincipal } from "./ws/handler.js";
+import { isSocketSendable } from "./ws/socket-sendability.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
-import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
+import { TeamManager, GateDependencyError, TeamStartError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
@@ -62,6 +65,7 @@ import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
+import { resumeOperatorPausedGoal } from "./agent/goal-resume.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
@@ -82,10 +86,11 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
-import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
+import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
@@ -103,6 +108,16 @@ import {
 	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
+import { reviewArtifactTabId } from "../shared/review-artifact-identity.js";
+import { createReviewPayloadSessionCoordinator, handleReviewPayloadRoute, type ReviewPayloadSessionCoordinator } from "./review-payload-routes.js";
+import {
+	MAX_REVIEW_PAYLOAD_REQUEST_BYTES,
+	readReviewPayload,
+	removeReviewPayloads,
+	ReviewPayloadError,
+	sweepReviewPayloads,
+	type CanonicalReviewPayload,
+} from "./review-payload-store.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -112,10 +127,15 @@ import {
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { SearchUnavailableError } from "./search/search-service.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
-import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
+import {
+	copySkillSidecarForTranscript,
+	initSkillSidecarDir,
+	purgeSkillSidecar,
+} from "./skills/skill-sidecar.js";
 import {
 	copyAuthorSidecar,
 	initAuthorSidecarDir,
@@ -125,18 +145,35 @@ import {
 import { agentAuthorForSession, BOBBIT_SYSTEM_AUTHOR } from "./agent/message-author.js";
 import { LOCAL_USER_AUTHOR } from "../shared/message-author.js";
 import {
+	copyCompactionSidecarForTranscript,
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
+	purgeCompactionSidecar,
 } from "./agent/compaction-sidecar.js";
-import { projectOwnTranscriptJsonl, readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
+import {
+	projectOwnTranscriptJsonl,
+	readAgentTranscript,
+	readOrphanedBeforeCompaction,
+	readTranscript,
+	TranscriptReaderError,
+} from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
-import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
-import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
+import {
+	sessionFileDeleteContainerOnly,
+	sessionFileRead,
+	sessionFileWriteAtomic,
+	sessionFsContextForAgentFile,
+} from "./agent/session-fs.js";
+import {
+	HistoryForkValidationError,
+	materializeHistoryForkTranscript,
+	type HistoryForkMaterialization,
+} from "./agent/history-fork.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
 import {
@@ -188,6 +225,19 @@ function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
 	const code = (err as { code?: unknown } | null)?.code;
 	const message = err instanceof Error ? err.message : String(err);
 	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
+}
+
+export function shouldLogRemoteStateTelemetry(event: RemoteStateTelemetryEvent, debug = process.env.BOBBIT_DEBUG === "1"): boolean {
+	if (debug) return true;
+	return event.outcome === "failure" || event.outcome === "identity_failure";
+}
+
+function remoteStateTelemetrySink(event: RemoteStateTelemetryEvent): void {
+	// Routine lifecycle telemetry remains available to injected coordinator sinks
+	// and explicit debug runs, but must not flood the normal harness log. Only
+	// actual refresh/identity failures are operational log events by default.
+	if (!shouldLogRemoteStateTelemetry(event)) return;
+	console.debug(`[remote-state] ${JSON.stringify(event)}`);
 }
 
 function extensionChannelAuditSink(event: Record<string, unknown>): void {
@@ -515,6 +565,40 @@ import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 // Entries are also refilled from the transcript check, so survive process
 // restarts via the transcript fallback in findAskResponseAnswers.
 const askSubmittedToolUseIds = new Set<string>();
+// One process-wide reservation per exact history-fork request tuple.
+const historyForkReservations = new Set<string>();
+
+class HistoryForkSourceUnavailableError extends Error {
+	readonly code = "HISTORY_FORK_SOURCE_UNAVAILABLE";
+
+	constructor() {
+		super("The source session is no longer available for history forking");
+		this.name = "HistoryForkSourceUnavailableError";
+	}
+}
+
+type HistoryForkSidecarKind = "skill" | "compaction" | "author";
+type HistoryForkSidecarCopyFake = (
+	kind: HistoryForkSidecarKind,
+	fromSessionId: string,
+	toSessionId: string,
+) => boolean | undefined;
+let _historyForkSidecarCopyFake: HistoryForkSidecarCopyFake | undefined;
+/** Test seam for deterministic destination-sidecar write failures. */
+export function __setHistoryForkSidecarCopyFake(fake: HistoryForkSidecarCopyFake): void {
+	_historyForkSidecarCopyFake = fake;
+}
+export function __clearHistoryForkSidecarCopyFake(): void {
+	_historyForkSidecarCopyFake = undefined;
+}
+function copyHistoryForkSidecar(
+	kind: HistoryForkSidecarKind,
+	fromSessionId: string,
+	toSessionId: string,
+	copy: () => boolean,
+): boolean {
+	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
+}
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
@@ -574,7 +658,6 @@ import {
 	type AigwModel,
 } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
-import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -602,6 +685,7 @@ import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource
 import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
+import { worktreeRoot as resolveWorktreeRoot } from "./skills/worktree-paths.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
@@ -614,11 +698,11 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
-import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
-import { scopeMarketPackEntries } from "./agent/pack-list.js";
+import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
@@ -1089,6 +1173,7 @@ const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
 const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
+const PR_HEAD_LIST_FIELDS = `${PR_STATUS_FIELDS},updatedAt,headRepository,headRepositoryOwner,isCrossRepository`;
 const PR_MERGE_PERMISSIONS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){viewerCanMergeAsAdmin}}}";
 
 type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
@@ -1098,26 +1183,67 @@ export function buildGhPrViewArgs(branch?: string): string[] {
 	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
 }
 
-export function buildGhPrMergePermissionsArgs(owner: string, name: string, number: number): string[] {
+export function githubRepositorySelector(remote: TrustedGithubRemote): string {
+	const repository = `${remote.owner}/${remote.repository}`;
+	return remote.host === "github.com" ? repository : `${remote.host}/${repository}`;
+}
+
+/** Repository-scoped head lookup: the branch is data for --head, never a PR selector. */
+export function buildGhPrHeadListArgs(remote: TrustedGithubRemote, branch: string): string[] {
 	return [
-		"api", "graphql",
+		"pr", "list",
+		"--repo", githubRepositorySelector(remote),
+		"--head", branch,
+		"--state", "all",
+		"--limit", "100",
+		"--json", PR_HEAD_LIST_FIELDS,
+	];
+}
+
+export function buildGhCommitPullsArgs(remote: TrustedGithubRemote, oid: string): string[] {
+	return [
+		"api",
+		...(remote.host === "github.com" ? [] : ["--hostname", remote.host]),
+		`repos/${remote.owner}/${remote.repository}/commits/${oid}/pulls`,
+	];
+}
+
+function ghApiHostnameArgs(remote: TrustedGithubRemote): string[] {
+	return remote.host === "github.com" ? [] : ["--hostname", remote.host];
+}
+
+export function buildGhPrMergePermissionsArgs(remote: TrustedGithubRemote, number: number): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote), "graphql",
 		"-f", `query=${PR_MERGE_PERMISSIONS_QUERY}`,
-		"-F", `owner=${owner}`,
-		"-F", `name=${name}`,
+		"-F", `owner=${remote.owner}`,
+		"-F", `name=${remote.repository}`,
 		"-F", `number=${number}`,
 	];
 }
 
-export function buildGhBranchRulesArgs(owner: string, name: string, branch: string): string[] {
-	return ["api", `repos/${owner}/${name}/rules/branches/${encodeURIComponent(branch)}`];
+export function buildGhBranchRulesArgs(remote: TrustedGithubRemote, branch: string): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote),
+		`repos/${remote.owner}/${remote.repository}/rules/branches/${encodeURIComponent(branch)}`,
+	];
 }
 
-export function buildGhRulesetArgs(owner: string, name: string, rulesetId: number): string[] {
-	return ["api", `repos/${owner}/${name}/rulesets/${rulesetId}`];
+export function buildGhRulesetArgs(remote: TrustedGithubRemote, rulesetId: number): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote),
+		`repos/${remote.owner}/${remote.repository}/rulesets/${rulesetId}`,
+	];
 }
 
-export function buildGhPrMergeArgs(branch: string | undefined, method: string, admin: unknown): string[] {
-	return ["pr", "merge", ...(branch ? [branch] : []), `--${method}`, ...(admin ? ["--admin"] : [])];
+export function buildGhPrMergeArgs(number: number, remote: TrustedGithubRemote, method: string, admin: unknown): string[] {
+	if (!Number.isSafeInteger(number) || number <= 0) throw new Error("PR merge requires a positive PR number");
+	return [
+		"pr", "merge", String(number),
+		"--repo", githubRepositorySelector(remote),
+		`--${method}`,
+		...(admin ? ["--admin"] : []),
+	];
 }
 
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
@@ -1155,14 +1281,14 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
-function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null {
+function parseGithubPrRepo(url: unknown): TrustedGithubRemote | null {
 	if (typeof url !== "string" || !url) return null;
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") return null;
-		const [owner, name, pull, number] = parsed.pathname.split("/").filter(Boolean);
-		if (!owner || !name || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
-		return { owner, name };
+		const [owner, repository, pull, number] = parsed.pathname.split("/").filter(Boolean);
+		if (!owner || !repository || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
+		return { host: "github.com", owner, repository };
 	} catch {
 		return null;
 	}
@@ -1171,11 +1297,12 @@ function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null
 async function getViewerMergePermissions(
 	cwd: string,
 	pr: { url?: string; number?: number; baseRefName?: string },
+	trustedRemote?: TrustedGithubRemote,
 ): Promise<{ viewerIsAdmin: boolean; viewerCanMergeAsAdmin: boolean }> {
-	const repo = parseGithubPrRepo(pr.url);
-	if (repo && typeof pr.number === "number") {
+	const remote = trustedRemote ?? parseGithubPrRepo(pr.url);
+	if (remote && typeof pr.number === "number") {
 		try {
-			const stdout = await execGh(buildGhPrMergePermissionsArgs(repo.owner, repo.name, pr.number), cwd);
+			const stdout = await execGh(buildGhPrMergePermissionsArgs(remote, pr.number), cwd);
 			const parsed = JSON.parse(stdout);
 			const repository = parsed?.data?.repository;
 			const perm = repository?.viewerPermission ?? "";
@@ -1183,7 +1310,7 @@ async function getViewerMergePermissions(
 
 			let viewerCanMergeAsAdmin = repository?.pullRequest?.viewerCanMergeAsAdmin === true;
 			if (!viewerCanMergeAsAdmin && typeof pr.baseRefName === "string" && pr.baseRefName) {
-				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, repo, pr.baseRefName);
+				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, remote, pr.baseRefName);
 			}
 
 			return { viewerIsAdmin: perm === "ADMIN", viewerCanMergeAsAdmin };
@@ -1196,11 +1323,11 @@ async function getViewerMergePermissions(
 
 async function getViewerCanBypassBranchRules(
 	cwd: string,
-	repo: { owner: string; name: string },
+	remote: TrustedGithubRemote,
 	branch: string,
 ): Promise<boolean> {
 	try {
-		const stdout = await execGh(buildGhBranchRulesArgs(repo.owner, repo.name, branch), cwd);
+		const stdout = await execGh(buildGhBranchRulesArgs(remote, branch), cwd);
 		const rules = JSON.parse(stdout);
 		if (!Array.isArray(rules)) return false;
 
@@ -1212,7 +1339,7 @@ async function getViewerCanBypassBranchRules(
 
 		for (const rulesetId of rulesetIds) {
 			try {
-				const detail = JSON.parse(await execGh(buildGhRulesetArgs(repo.owner, repo.name, rulesetId), cwd));
+				const detail = JSON.parse(await execGh(buildGhRulesetArgs(remote, rulesetId), cwd));
 				if (isBypassMode(detail?.current_user_can_bypass)) return true;
 			} catch {
 				// Continue checking other matching rulesets.
@@ -1228,11 +1355,29 @@ function isBypassMode(mode: unknown): boolean {
 	return mode === "always" || mode === "pull_requests_only";
 }
 
-async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+function isDefinitiveNoPullRequestError(error: unknown): boolean {
+	const candidate = error as { message?: unknown; stderr?: unknown } | undefined;
+	const text = [candidate?.message, candidate?.stderr]
+		.map((part) => typeof part === "string" || Buffer.isBuffer(part) ? String(part) : "")
+		.join(" ")
+		.toLowerCase();
+	return /no pull requests? found(?: for (?:the )?branch)?|no pull request found|could not resolve to a pullrequest/.test(text);
+}
+
+async function fetchPrStatus(
+	cwd: string,
+	branch: string | undefined,
+	fallbackCwd: string | undefined,
+	failureMode: "legacy-null" | "throw-transient",
+): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	const args = buildGhPrViewArgs(branch);
+	const failures: unknown[] = [];
 
-	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
+	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken).
+	// A coordinated refresh may publish null only when every attempted lookup
+	// positively reports that no PR exists. Transport/auth/parse failures must
+	// remain failures so the coordinator retains its last-good snapshot.
 	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
 	for (const dir of cwdsToTry) {
 		try {
@@ -1254,12 +1399,150 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 			const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
 			_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
 			return data;
-		} catch {
-			// Try next cwd
+		} catch (error) {
+			failures.push(error);
 		}
 	}
-	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
-	return null;
+
+	if (failureMode === "legacy-null" || (failures.length > 0 && failures.every(isDefinitiveNoPullRequestError))) {
+		_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
+		return null;
+	}
+	throw failures.find(error => !isDefinitiveNoPullRequestError(error)) ?? new Error("Pull request status unavailable");
+}
+
+async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return fetchPrStatus(cwd, branch, fallbackCwd, "legacy-null");
+}
+
+type CoordinatedPrSelector = { kind: "head" | "oid"; value: string };
+export type CoordinatedPrLookupTarget = {
+	executionCwd: string;
+	remote: TrustedGithubRemote;
+	selector: CoordinatedPrSelector;
+};
+
+type NormalizedCoordinatedPr = {
+	data: any;
+	updatedAt?: number;
+	/** Validation/permission input only; never copied into the public snapshot. */
+	baseRefName?: string;
+};
+
+function coordinatedHeadRepository(raw: any): { owner: string; repository: string } | undefined {
+	const fullName = raw?.headRepository?.nameWithOwner ?? raw?.head?.repo?.full_name;
+	// Current gh releases can emit an empty nameWithOwner alongside valid
+	// headRepository.name and headRepositoryOwner.login fields. Treat only a
+	// non-empty combined name as authoritative; malformed non-empty values still
+	// fail closed rather than falling through to less-specific fields.
+	if (typeof fullName === "string" && fullName.length > 0) {
+		const parts = fullName.split("/");
+		if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("Pull request lookup returned an invalid result");
+		return { owner: parts[0].toLowerCase(), repository: parts[1].toLowerCase() };
+	}
+	const owner = raw?.headRepositoryOwner?.login ?? raw?.head?.repo?.owner?.login;
+	const repository = raw?.headRepository?.name ?? raw?.head?.repo?.name;
+	if (owner === undefined && repository === undefined) return undefined;
+	if (typeof owner !== "string" || typeof repository !== "string" || !owner || !repository) {
+		throw new Error("Pull request lookup returned an invalid result");
+	}
+	return { owner: owner.toLowerCase(), repository: repository.toLowerCase() };
+}
+
+function normalizeCoordinatedPr(raw: any, target: CoordinatedPrLookupTarget): NormalizedCoordinatedPr {
+	const number = Number(raw?.number);
+	const url = raw?.url ?? raw?.html_url;
+	const headRefName = raw?.headRefName ?? raw?.head?.ref;
+	const baseRefName = raw?.baseRefName ?? raw?.base?.ref;
+	const state = typeof raw?.state === "string" ? raw.state.toUpperCase() : undefined;
+	if (!Number.isSafeInteger(number) || number <= 0 || typeof url !== "string"
+		|| (state !== "OPEN" && state !== "MERGED" && state !== "CLOSED")) {
+		throw new Error("Pull request lookup returned an invalid result");
+	}
+	const headRepository = coordinatedHeadRepository(raw);
+	if (target.selector.kind === "head" && (
+		headRefName !== target.selector.value
+		|| raw?.isCrossRepository !== false
+		|| !headRepository
+		|| headRepository.owner !== target.remote.owner
+		|| headRepository.repository !== target.remote.repository
+	)) throw new Error("Pull request lookup escaped the selected repository");
+	if (target.selector.kind === "oid" && (raw?.isCrossRepository === true || (headRepository && (
+		headRepository.owner !== target.remote.owner || headRepository.repository !== target.remote.repository
+	)))) throw new Error("Pull request lookup escaped the selected repository");
+
+	let parsed: URL;
+	try { parsed = new URL(url); } catch { throw new Error("Pull request lookup returned an invalid URL"); }
+	const expectedPath = `/${target.remote.owner}/${target.remote.repository}/pull/${number}`;
+	if (
+		parsed.protocol !== "https:"
+		|| parsed.username !== ""
+		|| parsed.password !== ""
+		|| parsed.search !== ""
+		|| parsed.hash !== ""
+		|| parsed.host.toLowerCase() !== target.remote.host
+		|| parsed.pathname.toLowerCase() !== expectedPath
+	) throw new Error("Pull request lookup escaped the selected repository");
+
+	const rawUpdatedAt = raw?.updatedAt ?? raw?.updated_at;
+	const updatedAt = typeof rawUpdatedAt === "string" ? Date.parse(rawUpdatedAt) : undefined;
+	return {
+		data: {
+			number,
+			// Never publish the upstream string. Reconstruct from the validated,
+			// server-derived repository authority so credentials, query material and
+			// active-content schemes cannot cross the coordinator boundary.
+			url: `https://${target.remote.host}${expectedPath}`,
+			title: raw.title,
+			state,
+			mergeable: raw.mergeable ?? null,
+			// Exact head/base refs are validation/permission inputs only. They are
+			// deliberately excluded so private/internal refs never cross REST/WS.
+			reviewDecision: raw.reviewDecision || null,
+		},
+		...(typeof baseRefName === "string" && baseRefName ? { baseRefName } : {}),
+		...(updatedAt !== undefined && Number.isFinite(updatedAt) ? { updatedAt } : {}),
+	};
+}
+
+function selectNormalizedCoordinatedPr(results: unknown, target: CoordinatedPrLookupTarget): NormalizedCoordinatedPr | null {
+	if (!Array.isArray(results)) throw new Error("Pull request lookup returned an invalid result");
+	if (results.length === 0) return null;
+	const candidates = results.map(raw => normalizeCoordinatedPr(raw, target));
+	const open = candidates.filter(candidate => candidate.data.state === "OPEN");
+	if (open.length === 1) return open[0];
+	if (open.length > 1) throw new Error("Pull request lookup was ambiguous");
+	if (candidates.length === 1) return candidates[0];
+
+	// Historical same-head PRs are valid. With no open PR, publish the uniquely
+	// most-recent terminal state; tied or missing ordering evidence fails closed.
+	if (candidates.some(candidate => candidate.updatedAt === undefined)) {
+		throw new Error("Pull request lookup was ambiguous");
+	}
+	const newest = Math.max(...candidates.map(candidate => candidate.updatedAt!));
+	const latest = candidates.filter(candidate => candidate.updatedAt === newest);
+	if (latest.length !== 1) throw new Error("Pull request lookup was ambiguous");
+	return latest[0];
+}
+
+/** Select the safe public PR projection from one repository-bound external read. */
+export function selectCoordinatedPrResult(results: unknown, target: CoordinatedPrLookupTarget): any | null {
+	return selectNormalizedCoordinatedPr(results, target)?.data ?? null;
+}
+
+async function fetchCoordinatedPrStatus(target: CoordinatedPrLookupTarget): Promise<any | null> {
+	const args = target.selector.kind === "head"
+		? buildGhPrHeadListArgs(target.remote, target.selector.value)
+		: buildGhCommitPullsArgs(target.remote, target.selector.value);
+	const stdout = await execGh(args, target.executionCwd);
+	const selected = selectNormalizedCoordinatedPr(JSON.parse(stdout), target);
+	if (!selected) return null;
+	const permissions = await getViewerMergePermissions(
+		target.executionCwd,
+		{ ...selected.data, baseRefName: selected.baseRefName },
+		target.remote,
+	);
+	return { ...selected.data, ...permissions };
 }
 
 export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -1320,6 +1603,36 @@ async function execGitArgs(args: string[], cwd: string, timeout = 5000, containe
 	}
 	const { stdout } = await runner.execFile("git", args, { cwd, encoding: "utf-8", timeout });
 	return String(stdout).trim();
+}
+
+/** Private canonical selector used only as hashed coordinator identity input. */
+async function resolvePullRequestHeadIdentity(
+	cwd: string,
+	branch: string | undefined,
+	containerId?: string,
+	commandRunner?: CommandRunner,
+): Promise<string | undefined> {
+	const knownBranch = branch?.trim();
+	if (knownBranch) {
+		if (/^[\-]|[\u0000-\u001f\u007f]/.test(knownBranch)) return undefined;
+		try {
+			const checked = await execGitArgs(["check-ref-format", "--branch", knownBranch], cwd, 5_000, containerId, commandRunner);
+			return checked === knownBranch ? `ref:${knownBranch}` : undefined;
+		} catch { return undefined; }
+	}
+	try {
+		const symbolicHead = await execGitArgs(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd, 5_000, containerId, commandRunner);
+		if (symbolicHead && symbolicHead !== "HEAD") {
+			const checked = await execGitArgs(["check-ref-format", "--branch", symbolicHead], cwd, 5_000, containerId, commandRunner);
+			if (checked === symbolicHead) return `ref:${symbolicHead}`;
+		}
+	} catch { /* detached or unavailable; verify the commit object below */ }
+	try {
+		const oid = await execGitArgs(["rev-parse", "--verify", "HEAD^{commit}"], cwd, 5_000, containerId, commandRunner);
+		return /^[0-9a-f]{40,64}$/i.test(oid) ? `oid:${oid.toLowerCase()}` : undefined;
+	} catch {
+		return undefined;
+	}
 }
 // Argument-vector variant of execGitSafe: never passes user input through a shell.
 async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
@@ -1394,6 +1707,14 @@ type GitStatusFakeValue = GitStatusResult | GitStatusProbe | null;
 let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean; configuredBaseRef?: string }) => Promise<GitStatusFakeValue>) | undefined;
 export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
 export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
+
+/** Test-only monotonic clock for the explicit remote-read burst marker. The
+ * production path always uses performance.now(); tests must install and clear
+ * the override explicitly. */
+let _remoteStateForceNowFake: (() => number) | undefined;
+export function __setRemoteStateForceNowFake(fn: () => number): void { _remoteStateForceNowFake = fn; }
+export function __clearRemoteStateForceNowFake(): void { _remoteStateForceNowFake = undefined; }
+function remoteStateForceNow(): number { return _remoteStateForceNowFake?.() ?? performance.now(); }
 
 function gitStatusCacheKey(cwd: string, containerId?: string, untracked?: boolean): string {
 	return `${containerId ?? 'host'}::${cwd}::${untracked ? 'u' : 's'}`;
@@ -1822,6 +2143,83 @@ export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "
 	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
 }
 
+interface ShutdownWorktreePool {
+	stop(): Promise<void>;
+	drain(): Promise<void>;
+}
+
+const SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS = 15_000;
+
+type ShutdownOperationResult =
+	| { status: "fulfilled" }
+	| { status: "rejected"; reason: unknown }
+	| { status: "timeout" };
+
+/** Settle a shutdown operation without allowing a stuck best-effort cleanup to block teardown. */
+function runShutdownOperation(
+	operation: () => Promise<void>,
+	timeoutMs: number,
+): Promise<ShutdownOperationResult> {
+	return new Promise(resolve => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ status: "timeout" });
+		}, timeoutMs);
+		(timer as { unref?: () => void }).unref?.();
+
+		// Both handlers remain attached after a timeout so late settlement, including
+		// rejection, is consumed rather than becoming an unhandled rejection.
+		Promise.resolve().then(operation).then(
+			() => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "fulfilled" });
+			},
+			(reason: unknown) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "rejected", reason });
+			},
+		);
+	});
+}
+
+/** Stop every current pool before draining any of them, isolating failures per pool. */
+export async function drainWorktreePoolsForShutdown(
+	pools: ReadonlyMap<string, ShutdownWorktreePool>,
+	timeoutMs = SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS,
+): Promise<void> {
+	const snapshot = Array.from(pools.entries());
+	const stopResults = await Promise.all(
+		snapshot.map(([, pool]) => runShutdownOperation(() => pool.stop(), timeoutMs)),
+	);
+
+	for (let index = 0; index < snapshot.length; index++) {
+		const [projectId, pool] = snapshot[index]!;
+		const stopResult = stopResults[index]!;
+		if (stopResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool stop failed for project ${projectId}:`, stopResult.reason); } catch { /* best-effort */ }
+			continue;
+		}
+		if (stopResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool stop timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+			continue;
+		}
+
+		const drainResult = await runShutdownOperation(() => pool.drain(), timeoutMs);
+		if (drainResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool drain failed for project ${projectId}:`, drainResult.reason); } catch { /* best-effort */ }
+		} else if (drainResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool drain timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+		}
+	}
+}
+
 /**
  * Serialize the boot-time worktree ownership transition. The sweeper rechecks
  * live durable owners at every mutation boundary, while a pool entry must not
@@ -1978,6 +2376,8 @@ export function installGatewayBridgeDeps(deps?: GatewayDeps) {
 }
 
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
+	let standaloneTaskStore: TaskStore | undefined;
+	try {
 	// Construction checkpoint timer — createGateway runs fully synchronously
 	// before start(), and earlier profiling showed ~19s of unattributed time
 	// here. Log cumulative elapsed at each major subsystem so the heavy step is
@@ -2207,6 +2607,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
+	const reviewPayloadOperations = createReviewPayloadSessionCoordinator();
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
@@ -2549,10 +2950,23 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// provider declaring `activation.requiresConfig` stays dormant until it is
 		// configured. packId scopes the store; scope/project are accepted for parity
 		// with the activation lookups (provider config is pack-global in external mode).
-		(_scope, _projectId, packId, providerId) => {
-			if (!packId) return undefined;
-			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
-			return persisted && typeof persisted === "object" ? persisted : undefined;
+		(_scope, _projectId, packId, providerId): ProviderConfigOverrideReadResult => {
+			if (!packId) return { state: "absent" };
+			const result = getPackStore().readSync<Record<string, unknown>>(
+				packId,
+				providerConfigStoreKey(providerId),
+			);
+			if (result.state !== "present") return result;
+			// A valid store envelope can contain any JSON value, while persisted
+			// provider config must be a flat object. Do not silently replace a
+			// scalar/array snapshot with defaults on the next config write.
+			if (!result.value || typeof result.value !== "object" || Array.isArray(result.value)) {
+				return {
+					state: "error",
+					diagnostic: { code: "STORE_READ_INVALID_CONFIG", retryable: false },
+				};
+			}
+			return result;
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 	);
@@ -2574,6 +2988,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 			return ctx.goalManager.getEffectiveGoalMetadata(goalId);
 		},
+		// Scope construction is deliberately project-first: the resolver receives
+		// only coordinates owned by the dispatched session and never falls back to
+		// another project by goal id.
+		scopeContextResolver: (input) => resolveHookScopeContext(projectContextManager, input),
 		// Least-privilege, store-only host for provider hooks (capabilities.store ===
 		// true; session/agents denied) — gives a provider its own pack-scoped durable
 		// store via the same parent-authorized path routes use.
@@ -2671,8 +3089,498 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		console.warn("[server] backfillStaffIds failed (non-fatal):", err);
 	}
 
-	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock);
+	// The coordinator owns remote refresh cadence. The callback only carries the
+	// copied, public envelope to already-addressed sockets; canonical keys and
+	// remotes never cross this boundary.
+	const remoteStateCoordinator = new RemoteStateCoordinator({
+		clock: gatewayDeps.clock,
+		commandRunner: gatewayDeps.commandRunner,
+		telemetry: remoteStateTelemetrySink,
+		broadcast: (address, snapshot) => {
+			const publicSnapshot = publicRemoteSnapshot(snapshot);
+			const resource = snapshot.source === "repository" ? "git" : "pr";
+			if (address.kind === "goal") {
+				broadcastToGoal(address.id, { type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
+			} else if (address.kind === "session") {
+				broadcastToSession(address.id, { type: "remote_state_snapshot", sessionId: address.id, resource, snapshot: publicSnapshot });
+			} else {
+				broadcastToUi({ type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
+			}
+		},
+	});
+	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock, {
+		ensureFreshRepository: async (repo) => {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({ cwd: repo });
+			const key = remoteStateCoordinator.registerRepository(identity, {
+				refresh: async () => {
+					if (identity.hasRemote) await execGit("git fetch --quiet", repo, 15_000, undefined, gatewayDeps.commandRunner);
+					return { fetched: identity.hasRemote };
+				},
+			});
+			const snapshot = await remoteStateCoordinator.ensureFreshRepository<{ fetched: boolean }>(key);
+			return { ...snapshot, hasRemote: identity.hasRemote };
+		},
+	});
 	triggerEngine.start();
+
+	function publicRemoteSnapshot(snapshot: { data?: unknown; observedAt: number; refreshedAt?: number; stale: boolean; source: string; lastError?: { kind: string }; ageMs?: number }) {
+		return {
+			...(snapshot.data === undefined ? {} : { data: snapshot.data }),
+			observedAt: snapshot.observedAt,
+			...(snapshot.refreshedAt === undefined ? {} : { refreshedAt: snapshot.refreshedAt }),
+			stale: snapshot.stale,
+			source: snapshot.source === "repository" ? "repository" : "pr",
+			...(snapshot.lastError ? { lastError: snapshot.lastError.kind } : {}),
+			ageMs: snapshot.ageMs ?? 0,
+		};
+	}
+	const coordinatorIntent = (value: string | null): { intent: RemoteStateIntent; cadence?: "active" | "sidebar" } => {
+		switch (value) {
+			case "explicit": return { intent: "explicit" };
+			case "visible": return { intent: "visible" };
+			case "sidebar": return { intent: "automatic", cadence: "sidebar" };
+			default: return { intent: "automatic" };
+		}
+	};
+	const gitSnapshotFor = async (
+		cwd: string,
+		containerId: string | undefined,
+		address: RemoteStateAddress,
+		intentValue: string | null,
+		binding?: RepositorySnapshotBinding,
+	) => {
+		const forceRequestedAt = remoteStateForceNow();
+		const legacyFetch = intentValue === "force";
+		const force = legacyFetch || intentValue === "explicit";
+		const readOpts = {
+			...coordinatorIntent(force ? "explicit" : intentValue),
+			address,
+			...(force ? { forceRequestedAt, forceCoalesceMs: 250 } : {}),
+		};
+		try {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
+				cwd,
+				executionNamespace: containerId ? `container:${containerId}` : undefined,
+				...(containerId ? {
+					executeGit: (args: readonly string[], timeoutMs: number) => execGitArgs([...args], cwd, timeoutMs, containerId, gatewayDeps.commandRunner),
+				} : {}),
+			});
+			const key = remoteStateCoordinator.registerRepository(identity, {
+				// A canonical repository record owns fetched-ref freshness. After it
+				// completes, each bound entity recomputes its own local status without
+				// further remote I/O so sibling dirty state remains isolated.
+				refresh: async (): Promise<void> => {
+					if (identity.hasRemote) await execGit("git fetch --quiet", cwd, 15_000, containerId, gatewayDeps.commandRunner);
+					invalidateGitStatusCache(cwd, containerId);
+				},
+				address,
+				binding,
+			});
+			return force
+				? remoteStateCoordinator.refreshSnapshot(key, readOpts)
+				: remoteStateCoordinator.readSnapshot(key, readOpts);
+		} catch (error) {
+			// Preserve the explicit fetch path for roots whose canonical identity
+			// cannot be resolved (notably partially configured polyrepos). Normal
+			// automatic reads remain fetch-free when identity resolution fails.
+			if (legacyFetch) {
+				try {
+					await execGit("git fetch --quiet", cwd, 15_000, containerId, gatewayDeps.commandRunner);
+				} finally {
+					invalidateGitStatusCache(cwd, containerId);
+				}
+			}
+			throw error;
+		}
+	};
+	const gitSnapshotsFor = async (
+		worktrees: readonly string[],
+		containerId: string | undefined,
+		address: RemoteStateAddress,
+		intentValue: string | null,
+		binding?: RepositorySnapshotBinding,
+	) => {
+		const results = await Promise.allSettled(worktrees.map(worktree => gitSnapshotFor(worktree, containerId, address, intentValue, binding)));
+		return results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+	};
+	const publicGitSnapshot = (snapshots: readonly any[]) => {
+		const projected = snapshots.map(publicRemoteSnapshot);
+		if (projected.length === 0) {
+			return { observedAt: gatewayDeps.clock.now(), stale: false, source: "repository", ageMs: 0 };
+		}
+		const refreshedAt = projected.map(snapshot => snapshot.refreshedAt).filter((value): value is number => typeof value === "number");
+		const lastError = projected.find(snapshot => snapshot.lastError)?.lastError;
+		return {
+			observedAt: Math.max(...projected.map(snapshot => snapshot.observedAt)),
+			...(refreshedAt.length === projected.length ? { refreshedAt: Math.min(...refreshedAt) } : {}),
+			stale: projected.some(snapshot => snapshot.stale),
+			source: "repository",
+			...(lastError ? { lastError } : {}),
+			ageMs: Math.max(...projected.map(snapshot => snapshot.ageMs ?? 0)),
+		};
+	};
+	/** Best-effort canonical invalidation after a successful explicit Git mutation. */
+	const invalidateRemoteGitSnapshot = async (cwd: string, containerId: string | undefined): Promise<void> => {
+		try {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
+				cwd,
+				executionNamespace: containerId ? `container:${containerId}` : undefined,
+				...(containerId ? {
+					executeGit: (args: readonly string[], timeoutMs: number) => execGitArgs([...args], cwd, timeoutMs, containerId, gatewayDeps.commandRunner),
+				} : {}),
+			});
+			// Mutation invalidation marks retained data stale but does not erase the
+			// record-owned 30-second automatic attempt budget. Explicit reads bypass it.
+			remoteStateCoordinator.invalidate(identity.key);
+		} catch {
+			// A completed Git action must not fail because an optional prior snapshot
+			// was never registered or identity lookup is temporarily unavailable.
+		}
+	};
+	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
+		try {
+			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
+			const configuredEnterpriseHosts = normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts"));
+			return parseTrustedGithubRemote(origin, configuredEnterpriseHosts);
+		} catch {
+			return undefined;
+		}
+	};
+	type PrSnapshotTarget = CoordinatedPrLookupTarget & {
+		branch: string | undefined;
+		identity: PullRequestIdentity;
+	};
+	type PrRouteOwner = {
+		id: string;
+		cwd?: string;
+		worktreePath?: string;
+		repoPath?: string;
+		repoWorktrees?: Readonly<Record<string, string>> | ReadonlyArray<{ repo: string; worktreePath: string }>;
+		sandboxed?: boolean;
+	};
+	const canonicalOwnedPath = (inputPath: string): string => {
+		const resolved = path.resolve(inputPath);
+		// Match execution-cwd ownership validation: resolve the longest existing
+		// prefix so a symlink cannot move a missing suffix across project bounds.
+		let existing = resolved;
+		const suffix: string[] = [];
+		while (true) {
+			try {
+				return path.join(path.resolve(fs.realpathSync(existing)), ...suffix.reverse());
+			} catch {
+				const parent = path.dirname(existing);
+				if (parent === existing) return resolved;
+				suffix.push(path.basename(existing));
+				existing = parent;
+			}
+		}
+	};
+	const comparableOwnedPath = (inputPath: string): string => {
+		const canonical = canonicalOwnedPath(inputPath);
+		return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+	};
+	const isSameOrDescendantOwnedPath = (root: string, candidate: string): boolean => {
+		const relative = path.relative(comparableOwnedPath(root), comparableOwnedPath(candidate));
+		return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+	};
+	type OwnedPrRepositoryIdentity = {
+		commonDir: string;
+		remote: TrustedGithubRemote;
+	};
+	type OwnedPrCandidate = {
+		cwd: string;
+		/** Multi-repo candidates stay bound to the authoritative source remote. */
+		remote?: TrustedGithubRemote;
+	};
+	const resolveOwnedPrRepositoryIdentity = async (cwd: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		let rawCommonDir: string;
+		try {
+			rawCommonDir = (await execGitArgs(
+				["rev-parse", "--path-format=absolute", "--git-common-dir"],
+				cwd,
+				5_000,
+				undefined,
+				gatewayDeps.commandRunner,
+			)).trim();
+		} catch {
+			try {
+				rawCommonDir = (await execGitArgs(
+					["rev-parse", "--git-common-dir"],
+					cwd,
+					5_000,
+					undefined,
+					gatewayDeps.commandRunner,
+				)).trim();
+			} catch {
+				return undefined;
+			}
+		}
+		if (!rawCommonDir) return undefined;
+		const remote = await parsePrRemote(cwd);
+		if (!remote) return undefined;
+		const absoluteCommonDir = path.isAbsolute(rawCommonDir) ? rawCommonDir : path.resolve(cwd, rawCommonDir);
+		return {
+			commonDir: comparableOwnedPath(absoluteCommonDir),
+			remote,
+		};
+	};
+	const sameOwnedPrRepository = (left: OwnedPrRepositoryIdentity, right: OwnedPrRepositoryIdentity): boolean => (
+		left.commonDir === right.commonDir
+		&& left.remote.host === right.remote.host
+		&& left.remote.owner === right.remote.owner
+		&& left.remote.repository === right.remote.repository
+	);
+	const resolveConfiguredPrTopLevel = async (source: string): Promise<string | undefined> => {
+		let rawTopLevel: string;
+		try {
+			rawTopLevel = (await execGitArgs(
+				["rev-parse", "--show-toplevel"],
+				source,
+				5_000,
+				undefined,
+				gatewayDeps.commandRunner,
+			)).trim();
+		} catch {
+			return undefined;
+		}
+		if (!rawTopLevel) return undefined;
+		return canonicalOwnedPath(path.isAbsolute(rawTopLevel) ? rawTopLevel : path.resolve(source, rawTopLevel));
+	};
+	const resolveConfiguredPrSourceIdentity = async (source: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		const topLevel = await resolveConfiguredPrTopLevel(source);
+		// A selected nested component must be a repository root in its own right.
+		// Merely resolving Git through an enclosing repository is not ownership.
+		if (!topLevel || comparableOwnedPath(topLevel) !== comparableOwnedPath(source)) return undefined;
+		return resolveOwnedPrRepositoryIdentity(source);
+	};
+	const ownedPrCandidates = async (owner: PrRouteOwner): Promise<OwnedPrCandidate[]> => {
+		// Project scope comes from the store that owns the entity, never from its
+		// mutable/persisted projectId or repository metadata.
+		const owningContext = projectContextManager.getContextForGoal(owner.id)
+			?? projectContextManager.getContextForSession(owner.id);
+		if (!owningContext) return [];
+		const project = owningContext.project;
+		const components = owningContext.projectConfigStore.getComponents();
+		const multiRepo = components.some(component => component.repo !== ".");
+		const projectRoot = canonicalOwnedPath(project.rootPath);
+		let worktreeLayoutRoot = projectRoot;
+		if (!multiRepo) {
+			// A registered project may be a subdirectory of its repository. Derive
+			// the default sibling worktree root from that authoritative project path,
+			// not from mutable owner.repoPath metadata.
+			try {
+				const rawTopLevel = (await execGitArgs(
+					["rev-parse", "--show-toplevel"],
+					projectRoot,
+					5_000,
+					undefined,
+					gatewayDeps.commandRunner,
+				)).trim();
+				if (rawTopLevel && path.isAbsolute(rawTopLevel)) {
+					const topLevel = canonicalOwnedPath(rawTopLevel);
+					if (isSameOrDescendantOwnedPath(topLevel, projectRoot)) worktreeLayoutRoot = topLevel;
+				}
+			} catch { /* non-Git project roots keep their registered layout root */ }
+		}
+		const configuredWorktreeRoot = canonicalOwnedPath(resolveWorktreeRoot({
+			rootPath: worktreeLayoutRoot,
+			worktreeRoot: owningContext.projectConfigStore.get("worktree_root") || undefined,
+		}));
+		const candidates: string[] = [];
+		const seen = new Set<string>();
+		const add = (candidate: unknown, allowedRoots: readonly string[]) => {
+			if (typeof candidate !== "string" || !candidate.trim() || !path.isAbsolute(candidate)) return;
+			const canonical = canonicalOwnedPath(candidate);
+			if (!allowedRoots.some(root => isSameOrDescendantOwnedPath(root, canonical))) return;
+			const key = comparableOwnedPath(canonical);
+			if (!seen.has(key)) {
+				seen.add(key);
+				candidates.push(canonical);
+			}
+		};
+		const repoWorktreeEntries = Array.isArray(owner.repoWorktrees)
+			? owner.repoWorktrees.map(entry => [entry.repo, entry.worktreePath] as const)
+			: Object.entries(owner.repoWorktrees ?? {});
+		const repoWorktrees: Record<string, string> = {};
+		for (const [repo, worktreePath] of repoWorktreeEntries) {
+			// Duplicate coordinates are ambiguous and therefore unusable.
+			if (repo in repoWorktrees && comparableOwnedPath(repoWorktrees[repo]) !== comparableOwnedPath(worktreePath)) return [];
+			repoWorktrees[repo] = worktreePath;
+		}
+
+		if (multiRepo) {
+			const selected = resolveConfiguredComponent(components, project.rootPath, {
+				cwd: owner.cwd ?? owner.worktreePath ?? "",
+				worktreePath: owner.worktreePath,
+				repoPath: owner.repoPath,
+				repoWorktrees,
+			});
+			if (!selected) return [];
+			const selectedWorktree = repoWorktrees[selected.repo];
+			const selectedSource = canonicalOwnedPath(selected.repo === "."
+				? projectRoot
+				: path.join(projectRoot, selected.repo));
+			if (!isSameOrDescendantOwnedPath(projectRoot, selectedSource)) return [];
+
+			// Canonical source aliases remain ambiguous across every configured repo,
+			// while genuine nested repositories are allowed even though paths overlap.
+			const configuredSources = new Map<string, string>();
+			const sourcePaths = new Set<string>();
+			for (const component of components) {
+				if (configuredSources.has(component.repo)) continue;
+				const source = canonicalOwnedPath(component.repo === "."
+					? projectRoot
+					: path.join(projectRoot, component.repo));
+				if (!isSameOrDescendantOwnedPath(projectRoot, source)) return [];
+				const sourcePath = comparableOwnedPath(source);
+				if (sourcePaths.has(sourcePath)) return [];
+				sourcePaths.add(sourcePath);
+				configuredSources.set(component.repo, source);
+			}
+
+			// The selected registered source must be an exact trusted GitHub repository.
+			// Unavailable, local-only, or non-GitHub siblings do not participate in PR
+			// routing, but any observable top-level/identity alias still fails closed.
+			const selectedConfiguredSource = configuredSources.get(selected.repo);
+			if (!selectedConfiguredSource || comparableOwnedPath(selectedConfiguredSource) !== comparableOwnedPath(selectedSource)) return [];
+			const sourceIdentity = await resolveConfiguredPrSourceIdentity(selectedConfiguredSource);
+			if (!sourceIdentity) return [];
+			for (const [repo, siblingSource] of configuredSources) {
+				if (repo === selected.repo) continue;
+				const siblingTopLevel = await resolveConfiguredPrTopLevel(siblingSource);
+				if (!siblingTopLevel) continue;
+				if (comparableOwnedPath(siblingTopLevel) !== comparableOwnedPath(siblingSource)) return [];
+				const siblingIdentity = await resolveOwnedPrRepositoryIdentity(siblingSource);
+				if (siblingIdentity && sameOwnedPrRepository(sourceIdentity, siblingIdentity)) return [];
+			}
+			const addMatchingRepository = async (candidate: unknown, allowedRoots: readonly string[]) => {
+				const before = candidates.length;
+				add(candidate, allowedRoots);
+				if (candidates.length === before) return;
+				const added = candidates[candidates.length - 1];
+				const identity = await resolveOwnedPrRepositoryIdentity(added);
+				if (!identity || !sameOwnedPrRepository(sourceIdentity, identity)) {
+					candidates.pop();
+					seen.delete(comparableOwnedPath(added));
+				}
+			};
+
+			if (selectedWorktree) {
+				const selectedWorktreeRoot = canonicalOwnedPath(selectedWorktree);
+				await addMatchingRepository(selectedWorktreeRoot, [configuredWorktreeRoot]);
+				if (!owner.sandboxed) await addMatchingRepository(owner.cwd, [selectedWorktreeRoot, selectedSource]);
+			}
+			else if (!owner.sandboxed) await addMatchingRepository(owner.cwd, [selectedSource]);
+			add(selectedSource, [projectRoot]);
+			return candidates.map(cwd => ({ cwd, remote: sourceIdentity.remote }));
+		}
+
+		// Single-repository compatibility retains owned worktree/source fallbacks.
+		const executionRoots = [projectRoot, configuredWorktreeRoot];
+		if (!owner.sandboxed) add(owner.cwd, executionRoots);
+		add(owner.worktreePath, executionRoots);
+		for (const worktreePath of Object.values(repoWorktrees)) add(worktreePath, [configuredWorktreeRoot]);
+		add(owner.repoPath, [projectRoot]);
+		add(projectRoot, [projectRoot]);
+		return candidates.map(cwd => ({ cwd }));
+	};
+	const resolvePrSnapshotTarget = async (
+		owner: PrRouteOwner,
+		branch: string | undefined,
+		identitySource?: { cwd: string; containerId?: string },
+	): Promise<PrSnapshotTarget | undefined> => {
+		// Selection is local-only and restricted to entity/project-owned candidates.
+		// A broken worktree can recover through its persisted repoPath or registered
+		// project root, but a merely Git-valid ambient directory is never eligible.
+		let selectedCandidate: OwnedPrCandidate | undefined;
+		for (const candidate of await ownedPrCandidates(owner)) {
+			try {
+				await execGitArgs(["rev-parse", "--git-dir"], candidate.cwd, 5_000, undefined, gatewayDeps.commandRunner);
+				selectedCandidate = candidate;
+				break;
+			} catch { /* try the next owned candidate before any GitHub read */ }
+		}
+		if (!selectedCandidate) return undefined;
+		const executionCwd = selectedCandidate.cwd;
+
+		const [remote, head] = await Promise.all([
+			selectedCandidate.remote ? Promise.resolve(selectedCandidate.remote) : parsePrRemote(executionCwd),
+			resolvePullRequestHeadIdentity(
+				identitySource?.cwd ?? executionCwd,
+				branch,
+				identitySource?.containerId,
+				gatewayDeps.commandRunner,
+			),
+		]);
+		if (!remote || !head) return undefined;
+		const separator = head.indexOf(":");
+		const kind = head.slice(0, separator);
+		const value = head.slice(separator + 1);
+		if ((kind !== "ref" && kind !== "oid") || !value) return undefined;
+		return {
+			executionCwd,
+			remote,
+			selector: { kind: kind === "ref" ? "head" : "oid", value },
+			branch: kind === "ref" ? value : undefined,
+			identity: remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head }),
+		};
+	};
+	const prSnapshotFor = async (
+		target: PrSnapshotTarget,
+		address: RemoteStateAddress,
+		intentValue: string | null,
+	) => {
+		const forceRequestedAt = remoteStateForceNow();
+		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
+			? { kind: "sidebar", id: address.id }
+			: address;
+		const key = remoteStateCoordinator.registerPullRequest(target.identity, {
+			refresh: () => fetchCoordinatedPrStatus(target),
+			address: effectiveAddress,
+		});
+		const force = intentValue === "explicit";
+		const readOpts = {
+			...coordinatorIntent(intentValue),
+			address: effectiveAddress,
+			...(force ? { forceRequestedAt, forceCoalesceMs: 250 } : {}),
+		};
+		return force
+			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
+			: remoteStateCoordinator.readSnapshot(key, readOpts);
+	};
+	const resolvePrMergeAuthorization = async (
+		target: PrSnapshotTarget,
+		address: RemoteStateAddress,
+		clientBranch: unknown,
+	): Promise<{ number: number } | { error: string; status: number }> => {
+		const snapshot = await prSnapshotFor(target, address, "explicit");
+		const data = snapshot.data as { number?: unknown } | null | undefined;
+		if (snapshot.stale || snapshot.lastError || !data || !Number.isSafeInteger(data.number) || Number(data.number) <= 0) {
+			return { error: "Current PR status is unavailable; refresh and try again", status: 409 };
+		}
+		if (clientBranch !== undefined && (
+			target.selector.kind !== "head"
+			|| typeof clientBranch !== "string"
+			|| clientBranch !== target.selector.value
+		)) {
+			return { error: "PR head changed; refresh before merging", status: 409 };
+		}
+		return { number: Number(data.number) };
+	};
+	const invalidatePrSnapshot = (target: PrSnapshotTarget | undefined): void => {
+		if (target) remoteStateCoordinator.invalidate(target.identity.key, { allowImmediateRefresh: true });
+	};
+	const remoteStateRoutes = {
+		publicSnapshot: publicRemoteSnapshot,
+		publicGitSnapshot,
+		gitSnapshotFor,
+		gitSnapshotsFor,
+		resolvePrSnapshotTarget,
+		prSnapshotFor,
+		invalidateGitSnapshot: invalidateRemoteGitSnapshot,
+		resolvePrMergeAuthorization,
+		invalidatePrSnapshot,
+	};
 	inboxNudger.start();
 
 	// Push-based dispatcher for `goal_created` / `goal_archived` staff triggers.
@@ -2686,7 +3594,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// first registered project's store is used when available, otherwise a server-
 	// scoped store is instantiated solely so construction doesn't require a project.
 	const firstCtxForInit = projectContextManager.all().next().value as import("./agent/project-context.js").ProjectContext | undefined;
-	const taskStore = firstCtxForInit ? firstCtxForInit.taskStore : new TaskStore(stateDir);
+	standaloneTaskStore = firstCtxForInit ? undefined : new TaskStore(stateDir);
+	const taskStore = firstCtxForInit?.taskStore ?? standaloneTaskStore!;
 	// OrchestrationCore (docs/design/orchestration-core.md) — the ONE goal-agnostic
 	// child-agent lifecycle implementation. Constructed near teamManager and wired
 	// back into sessionManager (boot index rebuild + restart reminder) and into
@@ -2747,6 +3656,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		toolManager,
 		orchestrationCore,
+		// Keep team-start's auto-resume on the same canonical lifecycle as
+		// POST /goals/:id/resume: durable update, stale-conflict clearing, then
+		// a goal_state_changed broadcast. TeamManager supplies the per-goal lock.
+		resumeGoal: async (goalId) => {
+			const context = projectContextManager.getContextForGoal(goalId);
+			const goal = context?.goalStore.get(goalId);
+			if (!goal || !context) throw new Error(`Goal not found: ${goalId}`);
+			await resumeOperatorPausedGoal(
+				goal,
+				context.goalManager,
+				(resumedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: resumedGoalId }),
+			);
+		},
 		commandRunner: gatewayDeps.commandRunner,
 	}, undefined, gatewayDeps.clock);
 	const bgProcessManager = new BgProcessManager(
@@ -2841,10 +3763,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
 			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
-			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
+			res.setHeader("Access-Control-Allow-Methods", API_CORS_ALLOWED_METHODS.join(", "));
+			res.setHeader("Access-Control-Allow-Headers", API_CORS_ALLOWED_HEADERS.join(", "));
 
 			if (req.method === "OPTIONS") {
+				res.setHeader("Access-Control-Max-Age", API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 				res.writeHead(204);
 				res.end();
 				return;
@@ -2855,12 +3778,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Content-Length over the cap is refused with a definitive 413;
 			// chunked/streamed bodies without a length are bounded by the
 			// streaming cap inside readBody().
-			if (bodyLimitExceeded(req.headers["content-length"])) {
+			const reviewPayloadUpload = req.method === "POST"
+				&& /^\/api\/sessions\/[^/]+\/review-payloads$/.test(url.pathname);
+			const requestBodyLimit = reviewPayloadUpload ? MAX_REVIEW_PAYLOAD_REQUEST_BYTES : MAX_REQUEST_BODY_BYTES;
+			if (bodyLimitExceeded(req.headers["content-length"], requestBodyLimit)) {
 				res.writeHead(413, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({
+				res.end(JSON.stringify(reviewPayloadUpload ? {
+					ok: false,
+					status: "failed",
+					code: "REVIEW_PAYLOAD_TOO_LARGE",
+					retryable: false,
+					message: "Review upload exceeds the bounded request limit",
+					limit: requestBodyLimit,
+				} : {
 					error: "Request body too large",
 					code: "BODY_TOO_LARGE",
-					limit: MAX_REQUEST_BODY_BYTES,
+					limit: requestBodyLimit,
 				}));
 				return;
 			}
@@ -2961,7 +3894,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -3035,6 +3968,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// during high-volume mock-agent event bursts. Loopback never benefits
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
+	const rejectUnavailableWebSocket = (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer, code: "SERVER_STARTING" | "SERVER_SATURATED", retryAfterMs: number) => {
+		// The rejected socket is briefly live while its retry frame drains. Keep
+		// no-op listeners until it closes so a reset/malformed peer cannot turn
+		// that short window into an unhandled `error` event on the gateway.
+		socket.once("error", () => {});
+		wss.handleUpgrade(req, socket, head, (ws) => {
+			ws.once("error", () => {});
+			const message = code === "SERVER_STARTING"
+				? "Gateway is starting. Retrying automatically…"
+				: "Gateway is busy. Retrying automatically…";
+			// The frame is deliberately sent before auth: it contains no session or
+			// credential information, and lets browser clients distinguish a boot
+			// gate from a transport failure (HTTP Upgrade response headers are not
+			// exposed to the WebSocket API).
+			ws.send(JSON.stringify({ type: "error", code, message, retryAfterMs }), () => {
+				ws.close(1013, code);
+			});
+		});
+	};
 
 	// Broadcast a message to WebSocket clients belonging to a specific goal.
 	// Recipients are the matching goal's session sockets plus explicit
@@ -3045,7 +3997,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const data = JSON.stringify(event);
 			const baseMeta = describeWsPayload(event, data);
 			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				if (!(ws as any).authenticated || !isSocketSendable(ws)) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
@@ -3093,7 +4045,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skippedViewerUnsubscribed = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			if (!(ws as any).authenticated || !isSocketSendable(ws)) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
@@ -3161,7 +4113,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of wss.clients) {
-				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+				if ((ws as any).authenticated && isSocketSendable(ws)) {
 					ws.send(data);
 				}
 			}
@@ -3177,7 +4129,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+			if ((ws as any).authenticated && isSocketSendable(ws)) {
 				ws.send(data);
 				recipients++;
 			} else {
@@ -3185,6 +4137,52 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 		}
 		getCpuDiagnostics().recordWsBroadcast("server:broadcastToAll", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
+	}
+
+	/**
+	 * Broadcast global UI state only to principals that authenticated as the
+	 * local user. Sandbox sockets retain targeted goal/session delivery, but can
+	 * never observe unrelated sidebar state. The shared predicate deliberately
+	 * governs both diagnostic modes.
+	 */
+	function broadcastToUi(event: any): void {
+		const isRecipient = (ws: WebSocket): boolean =>
+			(ws as any).authenticated === true
+			&& isSocketSendable(ws)
+			&& hasUiWebSocketPrincipal(ws);
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if (isRecipient(ws)) ws.send(data);
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
+		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
+		for (const ws of wss.clients) {
+			scanned++;
+			if (isRecipient(ws)) {
+				ws.send(data);
+				recipients++;
+			} else {
+				skipped++;
+			}
+		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToUi", wsEventType(event), {
 			frames: 1,
 			scanned,
 			recipients,
@@ -3205,7 +4203,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				if (!(ws as any).authenticated || !isSocketSendable(ws)) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
@@ -3226,7 +4224,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			if (!(ws as any).authenticated || !isSocketSendable(ws)) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
@@ -3306,12 +4304,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		if (info.reason === "purged") {
 			purgeAuthorSidecar(sessionId);
-			try {
-				await previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
-			} catch (err) {
+			// Install both permanent fences before awaiting either cleanup. This keeps
+			// a stalled request from entering review persistence during preview purge.
+			const reviewPayloadCleanup = reviewPayloadOperations.purge(sessionId, () => removeReviewPayloads(sessionId));
+			const previewCleanup = previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
+			const [previewResult, reviewPayloadResult] = await Promise.allSettled([previewCleanup, reviewPayloadCleanup]);
+			if (previewResult.status === "rejected") {
 				// This listener owns preview-artifact cleanup errors; SessionManager
 				// only awaits the listener contract and must not duplicate this log.
-				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
+				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, previewResult.reason);
+			}
+			if (reviewPayloadResult.status === "rejected") {
+				console.error(`[review-payloads] remove failed for ${sessionId}:`, reviewPayloadResult.reason);
 			}
 		}
 	});
@@ -3324,7 +4328,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!goal) return;
 		_prCache.delete(goal.cwd);
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
-		broadcastToAll({ type: "pr_status_changed", goalId });
+		// Publish the legacy cache-bust only after the canonical record is stale and
+		// immediately eligible, so the reacting client cannot race the invalidation.
+		void remoteStateRoutes.resolvePrSnapshotTarget(goal, goal.branch)
+			.then((target: PrSnapshotTarget | undefined) => remoteStateRoutes.invalidatePrSnapshot(target))
+			.catch(() => { /* unavailable owned target: legacy broadcast still proceeds */ })
+			.finally(() => {
+				broadcastToAll({ type: "pr_status_changed", goalId });
+			});
 	});
 	// Broadcast a message to all WebSocket clients subscribed to a specific session.
 	function broadcastToSession(sessionId: string, event: any): void {
@@ -3333,7 +4344,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of session.clients) {
-				if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+				if (isSocketSendable(ws)) ws.send(data);
 			}
 			return;
 		}
@@ -3347,7 +4358,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of session.clients) {
 			scanned++;
-			if ((ws as any).readyState === 1 /* OPEN */) {
+			if (isSocketSendable(ws)) {
 				ws.send(data);
 				recipients++;
 			} else {
@@ -3400,26 +4411,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			socket.destroy();
 			return;
 		}
-		if (!gatewayReady) {
-			socket.destroy();
-			return;
-		}
 		const viewerMatch = wsPathname === "/ws/viewer";
 		const match = viewerMatch ? null : wsPathname.match(/^\/ws\/([^/]+)$/);
-
 		if (!match && !viewerMatch) {
 			socket.destroy();
 			return;
 		}
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
-
 		const ip = req.socket.remoteAddress || "unknown";
 		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
 			return;
 		}
-
+		// Only valid, admission-approved routes receive the credential-free boot
+		// frame. Invalid or rate-limited upgrades remain cheap socket destroys.
+		if (!gatewayReady) {
+			rejectUnavailableWebSocket(req, socket, head, "SERVER_STARTING", 1_000);
+			return;
+		}
 		wss.handleUpgrade(req, socket, head, (ws) => {
 			const channels = extensionChannelServices;
 			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
@@ -3488,8 +4498,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// any agent subprocesses start.
 			migrateGatewayPrefs(preferencesStore);
 			await bootPhase("aigw-check", () => startupAigwCheck(preferencesStore));
-			writeContextWindowOverrides();
-			writeOpenAIModelAdditions();
 			await bootPhase("extension-channels", () => initExtensionChannelsOnce());
 
 			// Initialize MCP servers (skip when disabled by gateway runtime config)
@@ -3530,17 +4538,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// shared across projects (Docker image tags) so the first project
 				// to request a sandbox pays the build cost.
 				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
-				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined);
+				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 				if (imageStatus.imageExists === false) {
 					if (!dockerContextRoot) {
 						throw new Error(`[sandbox] Docker image "${imageName}" is missing and docker/Dockerfile could not be found`);
 					}
-					const buildResult = await buildSandboxImage(imageName, dockerContextRoot);
+					const buildResult = await buildSandboxImage(imageName, dockerContextRoot, gatewayDeps.commandRunner);
 					if (!buildResult.success) {
 						throw new Error(`[sandbox] Auto-build failed for project ${projectId}: ${buildResult.error || "unknown error"}`);
 					}
 				} else if (imageStatus.imageExists === true) {
-					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined);
+					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 					if (!imageReady) {
 						throw new Error(`[sandbox] Docker image "${imageName}" is stale and could not be rebuilt`);
 					}
@@ -3688,6 +4696,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
 			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			await bootPhase("review-payload-recovery", async () => {
+				try {
+					const knownSessionIds = [...projectContextManager.all()]
+						.flatMap((context) => context.sessionStore.getAll().map((session) => session.id));
+					await sweepReviewPayloads(knownSessionIds);
+				} catch (err) {
+					console.warn("[review-payloads] startup recovery failed (non-fatal):", err);
+				}
+			});
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
@@ -3965,27 +4982,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (bootBackgroundTask) {
 					await phase("boot-background", () => bootBackgroundTask!);
 				}
+				// Only drain ready entries held by these live pool instances. Claimed
+				// worktrees have already left their pools, and stale disk entries are
+				// never discovered or adopted during shutdown.
+				await phase("worktree-pools", () => drainWorktreePoolsForShutdown(sessionManager.getAllWorktreePools()));
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
+				shutdownEventLoopLagMonitor();
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-				// Worktree pools are intentionally NOT drained on shutdown.
-				//
-				// Pool entries are pre-built worktrees on `pool/_pool-*` branches
-				// created `pushPolicy: "local-only"` — they never exist on the remote.
-				// The old `drain()` here ran, serially across every project's pool,
-				// `git worktree remove --force` + `git branch -D` + a pointless
-				// `git push origin --delete` (a network round-trip, up to a 15s
-				// timeout each, to delete a branch that was never pushed). That both
-				// slowed shutdown AND destroyed exactly the worktrees the next boot
-				// then had to rebuild from scratch (`git worktree add` + `npm ci`),
-				// leaving new sessions on the cold path for minutes after start.
-				//
-				// Leaving them on disk lets `WorktreePool.reclaimOrphaned` re-adopt
-				// them instantly at the next boot (the sweeper skips pool branches,
-				// and reclaim is capped at the pool's target size, so they don't
-				// accumulate). Explicit teardown still drains: project removal
-				// (`removeWorktreePool`) and the Settings → Maintenance cleanup.
 				await phase("session-manager", () => sessionManager.shutdown());
+				const ownedTaskStore = standaloneTaskStore;
+				if (ownedTaskStore) {
+					await phase("standalone-task-store", () => ownedTaskStore.close());
+				}
 				await phase("project-contexts", () => projectContextManager.closeAll());
 				if (sandboxManager) {
 					await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
@@ -4000,6 +5009,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 		},
 	};
+	} catch (error) {
+		standaloneTaskStore?.dispose();
+		throw error;
+	}
 }
 
 // isSetupComplete now lives in ./setup-status.ts (re-exported at top of file).
@@ -4204,6 +5217,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
+	broadcastToUi: (event: any) => void,
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	configCascade: ConfigCascade,
@@ -4226,12 +5240,15 @@ async function handleApiRoute(
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
+	reviewPayloadOperations: ReviewPayloadSessionCoordinator = createReviewPayloadSessionCoordinator(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
+	remoteStateRoutes?: any,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
 	const dispatcher = actionDispatcher!;
+	const remoteState = remoteStateRoutes!;
 	// Slice B3: the route dispatcher + pack-level route registry (always wired by the
 	// sole caller alongside actionDispatcher).
 	const routeDispatcher = routeDispatcherArg!;
@@ -4309,7 +5326,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -4428,6 +5445,84 @@ async function handleApiRoute(
 		readBody,
 		broadcastToSession: _broadcastToSession,
 		packContributionRegistry,
+	})) return;
+
+	const resolveExistingReviewPayload = async (
+		sessionId: string,
+		title: string,
+		incomingReviewId: string,
+		replace: boolean,
+	): Promise<{ reviewId: string; payload?: CanonicalReviewPayload; activeFileId?: string }> => {
+		if (!replace) return { reviewId: incomingReviewId };
+		const workspace = sessionManager.getPersistedSession(sessionId)?.sidePanelWorkspace;
+		for (const tab of workspace?.tabs ?? []) {
+			if (tab.kind !== "review" || tab.source.type !== "review" || tab.source.title !== title) continue;
+			const reviewId = typeof tab.source.reviewId === "string" && tab.source.reviewId ? tab.source.reviewId : incomingReviewId;
+			const activeFileId = typeof tab.state?.activeFileId === "string" ? tab.state.activeFileId : undefined;
+			const source = tab.source as unknown as Record<string, unknown>;
+			if (typeof source.payloadId === "string" && typeof source.toolCallId === "string" && typeof source.contentHash === "string") {
+				try {
+					const prior = await readReviewPayload(sessionId, source.payloadId);
+					if (prior.reviewId === reviewId && prior.toolCallId === source.toolCallId && prior.hash === source.contentHash) {
+						return { reviewId, payload: prior, activeFileId };
+					}
+				} catch { /* Preserve stable review identity even when old content expired. */ }
+			}
+			return { reviewId };
+		}
+		return { reviewId: incomingReviewId };
+	};
+	const openReviewPayload = async (payload: CanonicalReviewPayload) => {
+		const source = {
+			type: "review",
+			sessionId: payload.sessionId,
+			reviewId: payload.reviewId,
+			title: payload.title,
+			toolCallId: payload.toolCallId,
+			toolUseId: payload.toolCallId,
+			payloadId: payload.payloadId,
+			contentHash: payload.hash,
+		};
+		// Tombstones suppress passive replay only when this authoritative primary is
+		// absent. An explicit open publishes the primary without editing annotation
+		// storage, so a workspace failure cannot erase close/submit suppression.
+		// The saved file selection is a read-only hint for a closed review; a live
+		// workspace selection still wins under the workspace lock below.
+		const tombstonedActiveFileId = reviewAnnotationStore?.getReviewActiveFile(payload.sessionId, payload.reviewId);
+		const activeFileId = tombstonedActiveFileId && payload.files.some((file) => file.fileId === tombstonedActiveFileId)
+			? tombstonedActiveFileId
+			: payload.activeFileId;
+		const tabId = reviewArtifactTabId(payload.reviewId);
+		if (!tabId) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Review identity is invalid");
+		const workspace = await openSidePanelWorkspaceTab({
+			sessionManager,
+			readBody,
+			broadcastToSession: _broadcastToSession,
+			packContributionRegistry,
+		}, payload.sessionId, {
+			id: tabId,
+			kind: "review",
+			title: `Review: ${payload.title}`,
+			label: `Review: ${payload.title}`,
+			source,
+			state: { activeFileId },
+			updatedAt: Date.now(),
+		}, {
+			focus: true,
+			placeAfterActive: true,
+			// Resolve the current selection while holding the authoritative workspace
+			// lock so a manual Re-open cannot reset live file navigation.
+			preserveActiveFileIds: new Set(payload.files.map((file) => file.fileId)),
+		});
+		if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+		return workspace;
+	};
+	if (await handleReviewPayloadRoute(url, req, res, {
+		sessionManager,
+		readBody,
+		openReview: openReviewPayload,
+		operations: reviewPayloadOperations,
+		resolveExistingReview: resolveExistingReviewPayload,
 	})) return;
 
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
@@ -4923,6 +6018,8 @@ async function handleApiRoute(
 		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
+		// Docker must use this request's gateway-owned runner: test coordinators
+		// fence host commands through that seam rather than allowing direct spawns.
 		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner);
 		json({ ...status, configured });
 		return;
@@ -4947,7 +6044,7 @@ async function handleApiRoute(
 			json({ error: "Build already in progress" }, 409);
 			return;
 		}
-		const result = await buildSandboxImage(imageName, dockerContextRoot);
+		const result = await buildSandboxImage(imageName, dockerContextRoot, commandRunner!);
 		if (result.success) {
 			json({ success: true });
 		} else {
@@ -5615,12 +6712,36 @@ async function handleApiRoute(
 		const project = projectRegistry.get(projectId);
 		try {
 			if (project) assertNormalMutableProject(project, "removed");
-			// Drain the project's worktree pool before removing
+			// Drain the project's worktree pool before removing.
 			await sessionManager.removeWorktreePool(projectId);
-			// Terminate all live sessions belonging to the removed project
-			const liveSessions = sessionManager.listSessions().filter(s => s.projectId === projectId);
-			for (const s of liveSessions) {
-				try { await sessionManager.terminateSession(s.id); } catch {}
+			// Borrowers must stop before the sandbox session that owns their shared
+			// worktree. terminateSession() serializes both sides through the existing
+			// per-owner FIFO, so a concurrently registered borrower either finishes
+			// first and makes owner teardown reject, or observes the terminated owner.
+			const liveSessions = sessionManager.getAllSessionsRaw()
+				.map(session => ({ session, persisted: sessionManager.getPersistedSession(session.id) }))
+				.filter(({ session, persisted }) => (persisted?.projectId ?? session.projectId) === projectId);
+			const borrowers = liveSessions.filter(({ session, persisted }) =>
+				persisted?.borrowsWorktree ?? session.borrowsWorktree,
+			);
+			const ownersAndIndependent = liveSessions.filter(entry => !borrowers.includes(entry));
+			for (const { session } of [...borrowers, ...ownersAndIndependent]) {
+				await sessionManager.terminateSession(session.id);
+			}
+			// Never remove a project context/store while a replacement or concurrent
+			// launch has left a live session behind.
+			const survivors = sessionManager.getAllSessionsRaw()
+				.filter(session =>
+					(sessionManager.getPersistedSession(session.id)?.projectId ?? session.projectId) === projectId,
+				)
+				.map(session => session.id);
+			if (survivors.length > 0) {
+				json({
+					error: "Project still has active sessions",
+					code: "PROJECT_SESSIONS_STILL_ACTIVE",
+					sessionIds: survivors,
+				}, 409);
+				return;
 			}
 			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
 			await projectContextManager.remove(projectId);
@@ -5631,6 +6752,10 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
+			if (err instanceof SharedSandboxWorktreeInUseError) {
+				json({ error: err.message, code: err.code }, 409);
+				return;
+			}
 			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
@@ -6122,6 +7247,10 @@ async function handleApiRoute(
 			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames, includeArchived });
 			json(results);
 		} catch (err) {
+			if (err instanceof SearchUnavailableError) {
+				json(searchUnavailableResponse("ready", err.reason), 503);
+				return;
+			}
 			json({ error: `Search failed: ${err}` }, 500);
 		}
 		return;
@@ -6129,7 +7258,12 @@ async function handleApiRoute(
 
 	function* visibleArchivedRaw() {
 		for (const ctx of projectContextManager.visible()) {
-			for (const session of ctx.sessionStore.getArchived()) yield session;
+			for (const session of ctx.sessionStore.getArchived()) {
+				yield sessionManager.serializeSessionListTags(
+					{ ...session, status: "archived", isCompacting: false },
+					{ archived: true },
+				);
+			}
 		}
 	}
 
@@ -6185,7 +7319,13 @@ async function handleApiRoute(
 			for (const ctx of projectContextManager.visible()) {
 				const store = ctx.sessionStore;
 				for (const s of store.getArchived()) {
-					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
+					allArchived.push({
+						...sessionManager.serializeSessionListTags(
+							{ ...s, status: "archived", isCompacting: false },
+							{ archived: true },
+						),
+						colorIndex: colorStore.get(s.id),
+					} as any);
 				}
 			}
 			// Sort by archivedAt descending
@@ -6363,22 +7503,50 @@ async function handleApiRoute(
 	//
 	// Resolve a session's lifecycle dispatch context from live or persisted state.
 	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
-	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
+	const resolveHookCtx = (id: string): {
+		base: Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
+		scopeInput: {
+			projectId?: string;
+			goalId?: string;
+			roleName?: string;
+			cwd: string;
+			worktreePath?: string;
+			repoPath?: string;
+			repoWorktrees?: Readonly<Record<string, string>>;
+		};
+	} | undefined => {
 		const live = sessionManager.getSession(id);
 		const persisted = sessionManager.getPersistedSession(id);
-		if (!live && !persisted) return undefined;
-		const projectId = live?.projectId ?? persisted?.projectId;
-		return {
+		const source = live ?? persisted;
+		if (!source) return undefined;
+		const projectId = source.projectId;
+		const goalId = source.goalId ?? source.teamGoalId;
+		const repoWorktrees = Array.isArray(source.repoWorktrees)
+			? Object.fromEntries(source.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
+			: source.repoWorktrees;
+		const base = {
 			sessionId: id,
 			projectId,
-			scope: projectId ? "project" : "global",
-			cwd: live?.cwd ?? persisted?.cwd ?? process.cwd(),
+			scope: projectId ? "project" as const : "global" as const,
+			cwd: source.cwd ?? process.cwd(),
 			// Effective goal: team members, delegates, and reviewers carry the goal
 			// only in teamGoalId, so fall back to it before persisted state. Without
 			// this, disabled-provider filtering would not apply at the provider hook
 			// endpoints (beforePrompt / beforeCompact) for non-lead sessions.
-			goalId: live?.goalId ?? live?.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId,
-			roleName: live?.role ?? persisted?.role,
+			goalId,
+			roleName: source.role,
+		};
+		return {
+			base,
+			scopeInput: {
+				projectId,
+				goalId,
+				roleName: source.role,
+				cwd: source.cwd ?? process.cwd(),
+				worktreePath: source.worktreePath,
+				repoPath: source.repoPath,
+				repoWorktrees,
+			},
 		};
 	};
 
@@ -6391,8 +7559,8 @@ async function handleApiRoute(
 			json({ error: "prompt must be a string" }, 400);
 			return;
 		}
-		const base = resolveHookCtx(sessionId);
-		if (!base) {
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
 			json({ error: "Session not found" }, 404);
 			return;
 		}
@@ -6404,10 +7572,10 @@ async function handleApiRoute(
 		try {
 			const turnIndex = body?.turn?.index;
 			const { blocks } = await hub.dispatch("beforePrompt", {
-				...base,
+				...hookContext.base,
 				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
-			});
+			}, hookContext.scopeInput);
 			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
 			// Temporary back-compat for generated bridges from the system-prompt-tail era.
 			// New bridges consume `content` only and must never return systemPrompt.
@@ -6450,8 +7618,8 @@ async function handleApiRoute(
 			json({ error: "summary must be a string" }, 400);
 			return;
 		}
-		const base = resolveHookCtx(sessionId);
-		if (!base) {
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
 			json({ error: "Session not found" }, 404);
 			return;
 		}
@@ -6462,10 +7630,10 @@ async function handleApiRoute(
 		}
 		try {
 			await hub.dispatch("beforeCompact", {
-				...base,
+				...hookContext.base,
 				span: typeof body?.span === "string" ? body.span : undefined,
 				summary: typeof body?.summary === "string" ? body.summary : undefined,
-			});
+			}, hookContext.scopeInput);
 			json({});
 		} catch (err: any) {
 			jsonError(500, err);
@@ -6617,7 +7785,11 @@ async function handleApiRoute(
 			spawnPinnedModel: session.spawnPinnedModel,
 			spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 			restoreError: session.restoreError,
+			condition: session.condition,
 			lastTurnErrored: session.lastTurnErrored ?? false,
+			manualRetryRequired: session.manualRetryRequired ?? sessionPs?.manualRetryRequired ?? false,
+			transientRetryAttempts: session.transientRetryAttempts ?? 0,
+			recoverDrainAttempts: session.recoverDrainAttempts ?? 0,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 			completedTurnCount: session.completedTurnCount ?? 0,
 			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
@@ -6686,6 +7858,11 @@ async function handleApiRoute(
 				if (sandboxScope && sandboxTokenStore) {
 					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
 				}
+				// SessionStore mutations remain coalesced and asynchronous for ordinary
+				// traffic. Creation is the one API boundary that promises a durable
+				// result, so do not acknowledge it until this project's store publishes
+				// its atomic sessions.json snapshot.
+				await sessionManager.getSessionStore(session.projectId).flushAsync();
 				json({
 					id: session.id,
 					cwd: session.cwd,
@@ -6934,7 +8111,7 @@ async function handleApiRoute(
 			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
 			if (!hasReadyContainer) {
 				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
-					const dockerStatus = await checkDockerAvailability();
+					const dockerStatus = await checkDockerAvailability(undefined, undefined, commandRunner!);
 					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
 				}
 				if (!_dockerAvailCache.available) {
@@ -7045,6 +8222,13 @@ async function handleApiRoute(
 			if (resolvedProjectId) {
 				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
 			}
+
+			// Structural creation writes are normally async/coalesced. POST success,
+			// however, is an externally visible durability boundary: the project that
+			// owns this session must be able to recover it from sessions.json as soon
+			// as the caller receives 201. This drains only that project's store and
+			// leaves all ordinary mutation paths asynchronous.
+			await sessionManager.getSessionStore(session.projectId).flushAsync();
 
 			json({
 				id: session.id,
@@ -7215,7 +8399,13 @@ async function handleApiRoute(
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
 				for (const s of ctx.sessionStore.getArchived()) {
-					sessionsForGoalQuery.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+					sessionsForGoalQuery.push({
+						...sessionManager.serializeSessionListTags(
+							{ ...s, status: "archived", isCompacting: false },
+							{ archived: true },
+						),
+						colorIndex: colorStore.get(s.id),
+					});
 				}
 			}
 			if (archivedQuery) {
@@ -7241,7 +8431,13 @@ async function handleApiRoute(
 				for (const s of ctx.sessionStore.getArchived()) {
 					if (!seenSessionIds.has(s.id) && (goalIdsInPage.has((s as any).teamGoalId) || goalIdsInPage.has((s as any).goalId))) {
 						seenSessionIds.add(s.id);
-						affiliatedSessions.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+						affiliatedSessions.push({
+							...sessionManager.serializeSessionListTags(
+								{ ...s, status: "archived", isCompacting: false },
+								{ archived: true },
+							),
+							colorIndex: colorStore.get(s.id),
+						});
 					}
 				}
 			}
@@ -7605,6 +8801,14 @@ async function handleApiRoute(
 			if (goal.workflow) {
 				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
 			}
+			// A successful create response must never reference a goal or its
+			// initialized gates that vanish on an immediate process kill. Ordinary
+			// mutations still use each store's coalesced writer; this is the narrow
+			// external creation boundary that awaits its existing publication queue.
+			await Promise.all([
+				targetGoalManager.getGoalStore().flush(),
+				targetCtx.gateStore.flush(),
+			]);
 			json(goal, 201);
 
 			// Fire-and-forget async worktree setup (and optionally start team)
@@ -7995,7 +9199,9 @@ async function handleApiRoute(
 				state: body.state,
 				spec: body.spec,
 				team: true, // Always-on team mode
-				repoPath: body.repoPath,
+				// repoPath is lifecycle-owned structural metadata. Preserve PUT's
+				// unknown-field compatibility by ignoring it rather than allowing an
+				// API caller to manufacture a PR fallback ownership binding.
 				branch: body.branch,
 				reattemptOf: body.reattemptOf,
 			});
@@ -8580,7 +9786,7 @@ async function handleApiRoute(
 	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
 	if (storeMatch && req.method === "POST") {
 		const op = decodeURIComponent(storeMatch[1]);
-		if (op !== "get" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
+		if (op !== "get" && op !== "read" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
 			json({ error: `Unknown store op "${op}"`, code: "STORE_OP_UNKNOWN" }, 404);
 			return;
 		}
@@ -8636,6 +9842,15 @@ async function handleApiRoute(
 			// open outside the blast-radius control.
 			if (op === "get") {
 				result = await withStoreTimeout(packStore.get(ident.packId, key as string), undefined, `store ${op}`);
+			} else if (op === "read") {
+				// Unlike legacy get(), read transports the PackStore's explicit
+				// absent/present/error outcome. The diagnostic is produced by the
+				// store contract and intentionally has no path or raw I/O text.
+				result = await withStoreTimeout(
+					packStore.read(ident.packId, key as string),
+					undefined,
+					`store ${op}`,
+				);
 			} else if (op === "put") {
 				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions }).opts), undefined, `store ${op}`);
 				// Host-owned: a direct provider-config write must drop activation caches too.
@@ -10969,6 +12184,11 @@ async function handleApiRoute(
 				workflowGateId: typeof body.workflowGateId === "string" ? body.workflowGateId : undefined,
 				inputGateIds: Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined,
 			});
+			const taskCtx = projectContextManager.getContextForGoal(goalId);
+			if (!taskCtx) throw new Error(`Task ${task.id} created for a goal without a project context`);
+			// As with goals, fence only creation responses; routine task updates
+			// remain coalesced behind TaskStore's asynchronous writer.
+			await taskCtx.taskStore.flush();
 			json(task, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -11404,13 +12624,13 @@ async function handleApiRoute(
 
 		let resetResult: GateResetResult;
 		try {
-			resetResult = gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
+			resetResult = await gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
 		} catch (err) {
 			// A synchronous failure is compensated when both rollback writes work.
 			// If compensation itself fails, the retained intent remains the source of
 			// truth and boot recovery safely completes the operation.
 			try {
-				gateResetCtx.gateResetCoordinator.abort(intent);
+				await gateResetCtx.gateResetCoordinator.abort(intent);
 			} catch (abortErr) {
 				console.error(`[api] Failed to abort gate reset ${goalId}/${gateId}; recovery intent retained:`, abortErr);
 			}
@@ -12202,18 +13422,67 @@ async function handleApiRoute(
 	const teamStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/start$/);
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
-		// Guard: goal spec must be set before starting the team.
 		const startGoal = getGoalAcrossProjects(goalId);
-		const trimmedSpec = (startGoal?.spec ?? "").trim();
+		if (!startGoal) {
+			json({ error: "Goal not found", code: "GOAL_NOT_FOUND", goalId }, 404);
+			return;
+		}
+		// Guard: goal spec must be set before starting the team.
+		const trimmedSpec = (startGoal.spec ?? "").trim();
 		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec.toLowerCase() === "placeholder") {
 			json({ error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.", code: "SPEC_REQUIRED" }, 400);
 			return;
 		}
+		// Snapshot the pause state before authorization. An active request must
+		// never acquire resume authority if a later lifecycle request pauses it.
+		const resumePaused = startGoal.paused === true;
+		// A paused start composes the operator-only resume lifecycle. Global
+		// Bearer auth is not sufficient: agents hold that credential, so accept
+		// only a verified UI cookie or the authoritative lead's session secret.
+		// Do this before TeamManager can resume the goal or create a session.
+		if (resumePaused) {
+			const h = req.headers as Record<string, string | string[] | undefined>;
+			const readHeader = (n: string): string | undefined => {
+				const v = h[n.toLowerCase()];
+				const s = Array.isArray(v) ? v[0] : v;
+				return typeof s === "string" && s.trim() ? s.trim() : undefined;
+			};
+			const authz = authorizeChildrenMutation({
+				mutationClass: "operator",
+				isHumanOperator: cookieTryAuth(req, cookieStore!),
+				// Resolve the caller from the per-session secret; the public
+				// spawning-session header is bookkeeping only and is forgeable.
+				authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+					readHeader("x-bobbit-session-secret"),
+				),
+				teamLeadSessionId: teamManager.getTeamState(goalId)?.teamLeadSessionId,
+			});
+			if (!authz.ok) {
+				json({
+					error: "Caller is not authorized to resume and start this goal's team",
+					code: "NOT_TEAM_LEAD",
+					goalId,
+				}, 403);
+				return;
+			}
+		}
 		try {
-			const session = await teamManager.startTeam(goalId);
+			// REST retries are idempotent even after the first paused request has
+			// resumed the goal. Resume authority remains limited to the paused
+			// snapshot that passed operator authorization above.
+			const session = await teamManager.startTeam(goalId, { explicitIdempotent: true, resumePaused });
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
-			jsonError(400, err);
+			if (err instanceof TeamStartError) {
+				json({ error: err.message, code: err.code, goalId }, err.status);
+			} else if (err instanceof GoalPausedError) {
+				json({ error: err.message, code: err.code, goalId: err.goalId }, err.status);
+			} else {
+				// Preserve the diagnostic server-side, but never surface an internal
+				// error or stack trace in the Start team UI.
+				console.error(`[team-start] failed for ${goalId}:`, err);
+				json({ error: "Unable to start the team. Check the goal setup and try again.", code: "TEAM_START_FAILED", goalId }, 500);
+			}
 		}
 		return;
 	}
@@ -12455,15 +13724,42 @@ async function handleApiRoute(
 		const goalUntracked = url.searchParams.get('untracked') === '1';
 		const shouldFetch = url.searchParams.get('fetch') === 'true';
 		try {
-			const collected = await collectGitStatusEnvelope({
+			const address = { kind: "goal", id: goalId } as const;
+			const worktrees = [...new Set([cwd, ...components.map(component => component.worktreePath)])];
+			const collectStatus = (untracked: boolean) => collectGitStatusEnvelope({
 				rootPath: cwd,
 				components,
-				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }),
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked, configuredBaseRef: goalBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
-				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
+			const binding: RepositorySnapshotBinding = {
+				address,
+				invalidate: () => { for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid); },
+				project: async () => {
+					const projected = await collectStatus(false);
+					if (projected.kind !== "success") throw new Error("Local Git status projection failed");
+					return projected.envelope;
+				},
+			};
+			const intentValue = shouldFetch ? "force" : url.searchParams.get("intent");
+			const isExplicit = intentValue === "force" || intentValue === "explicit";
+			// Explicit revalidation must complete before local status is sampled so
+			// ahead/behind data reflects the fetched refs in this same response.
+			let remoteSnapshots = isExplicit
+				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding)
+				: undefined;
+			if (isExplicit) {
+				for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid);
+			}
+			const collected = await collectStatus(goalUntracked);
 			if (collected.kind === "success") {
+				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding);
+				const snapshot = remoteState.publicGitSnapshot(remoteSnapshots);
+				// Preserve the established flat GitStatusEnvelope as the response owner
+				// while attaching copied coordinator metadata and a nested data projection.
+				// Repository snapshots share fetched refs only; status remains local.
+				const data = { ...collected.envelope };
+				Object.assign(collected.envelope, snapshot, { data });
 				json(collected.envelope);
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
@@ -12530,13 +13826,20 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR status"), 409); return; }
-		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
-		// (e.g. pruned worktree), gh can still query by branch name from the main repo.
 		const optional = url.searchParams.get("optional") === "1";
-		const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
-		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		const snapshot = target
+			? await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, url.searchParams.get("intent"))
+			: undefined;
+		if (!snapshot) {
+			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
+			// reads must never fall back to an independent legacy `gh` lookup.
+			if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			return;
+		}
+		const publicSnapshot = remoteState.publicSnapshot(snapshot);
+		if (publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
+		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
 		return;
 	}
 
@@ -12544,12 +13847,19 @@ async function handleApiRoute(
 	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
 	if (goalGithubLinkMatch && req.method === "GET") {
 		const goalId = goalGithubLinkMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
 		json(await resolveGoalGithubLink<PersistedGoal, PrStatusEntry>(goalId, {
 			getGoal: getGoalAcrossProjects,
 			hasGitWorktree: hasGoalGitWorktree,
 			noWorktreeMessage: noWorktreeGoalGitMessage,
 			getCachedPr: id => prStatusStore.get(id),
-			getFreshPr: (cwd, branch) => getCachedPrStatus(cwd, branch, process.cwd()),
+			getFreshPr: async (_cwd, _branch) => {
+				if (!goal) return null;
+				const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+				if (!target) return null;
+				const snapshot = await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, "automatic");
+				return snapshot.data && typeof snapshot.data === "object" ? snapshot.data : null;
+			},
 			setCachedPr: (id, pr) => prStatusStore.set(id, pr),
 			pathExists: fs.existsSync,
 			getOriginRemote: async cwd => {
@@ -12570,9 +13880,14 @@ async function handleApiRoute(
 		const goalId = goalPrCacheBustMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const cwd = goal.cwd;
-		_prCache.delete(cwd);
-		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		if (target) {
+			_prCache.delete(target.executionCwd);
+			if (target.branch) _prCache.delete(`${target.executionCwd}::${target.branch}`);
+		}
+		// Complete canonical invalidation before broadcasting/responding so a client
+		// reacting immediately can start the next eligible single-flight refresh.
+		remoteState.invalidatePrSnapshot(target);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 		json({ ok: true });
 		return;
@@ -12585,20 +13900,26 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR merge"), 409); return; }
-		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		if (!target) { json({ error: "PR repository unavailable" }, 409); return; }
 		const body = await readBody(req);
 		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
-		const resolvedGoalBranch = clientGoalBranch || goal.branch;
+		const authorization = await remoteState.resolvePrMergeAuthorization(
+			target,
+			{ kind: "goal", id: goalId },
+			body?.branch,
+		);
+		if ("error" in authorization) { json({ error: authorization.error }, authorization.status); return; }
 		try {
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(authorization.number, target.remote, method, body?.admin), { cwd: target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			_prCache.delete(target.executionCwd);
+			if (target.branch) _prCache.delete(`${target.executionCwd}::${target.branch}`);
+			// Status, invalidation, and merge all consume the same ownership-validated target.
+			remoteState.invalidatePrSnapshot(target);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -12990,7 +14311,16 @@ async function handleApiRoute(
 				json({ ok: true });
 				return;
 			}
-			const terminated = await sessionManager.terminateSession(id);
+			let terminated: boolean;
+			try {
+				terminated = await sessionManager.terminateSession(id);
+			} catch (err) {
+				if (err instanceof SharedSandboxWorktreeInUseError) {
+					json({ error: err.message, code: err.code }, 409);
+					return;
+				}
+				throw err;
+			}
 			if (!terminated) {
 				// Session not live. It may still exist as a dormant / store-only entry
 				// (e.g. a completed delegate parent, or a parent that went dormant after
@@ -13006,7 +14336,15 @@ async function handleApiRoute(
 				}
 				// storeArchive → archiveWithCascade → cascadeReapOwner(children) then archive,
 				// so the dormant parent's live children are reaped before it is archived.
-				await sessionManager.storeArchive(id);
+				try {
+					await sessionManager.storeArchive(id);
+				} catch (err) {
+					if (err instanceof SharedSandboxWorktreeInUseError) {
+						json({ error: err.message, code: err.code }, 409);
+						return;
+					}
+					throw err;
+				}
 				if (purge) {
 					await sessionManager.purgeArchivedSession(id);
 				}
@@ -13022,172 +14360,393 @@ async function handleApiRoute(
 		}
 	}
 
-	// POST /api/sessions/:id/fork — fork a live plain session: clone the source
-	// transcript (and tool-content / proposal drafts) into a fresh session and
-	// preserve its project/goal/task/model/role context. The caller chooses
-	// whether to spin up a new worktree (default) or reuse the source's worktree.
+	// POST /api/sessions/:id/fork — fork a live plain session. Whole-session
+	// requests clone the transcript; entryId requests materialize the active
+	// history strictly before that prompt. Both preserve the established context
+	// and let the caller choose a fresh (default) or reused source worktree.
 	const forkMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/fork$/);
 	if (forkMatch && req.method === "POST") {
 		const sourceId = forkMatch[1];
 		const forkBody = await readBody(req).catch(() => ({} as any));
-		// Default to a NEW worktree when the flag is omitted.
-		const newWorktree = forkBody?.newWorktree === undefined ? true : !!forkBody.newWorktree;
-
-		const source = sessionManager.getSession(sourceId);
-		const ps = sessionManager.getPersistedSession(sourceId);
-		if (!ps) { json({ error: "session not found" }, 404); return; }
-		if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
-		if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
-
-		const unsupported = isUnsupportedForkSource(source, ps);
-		if (unsupported) { json({ error: unsupported }, 422); return; }
-
-		const projectId = ps.projectId || source.projectId;
-		if (!projectId || !projectRegistry.get(projectId)) {
-			json({ error: "source project no longer registered" }, 410);
+		const hasEntryId = forkBody != null
+			&& typeof forkBody === "object"
+			&& Object.prototype.hasOwnProperty.call(forkBody, "entryId");
+		const entryId = hasEntryId ? forkBody.entryId : undefined;
+		if (
+			hasEntryId
+			&& (typeof entryId !== "string"
+				|| entryId.length === 0
+				|| entryId.length > 256
+				|| entryId.trim() !== entryId)
+		) {
+			json({ error: "Invalid history fork entry id", code: "HISTORY_FORK_CURSOR_INVALID" }, 400);
 			return;
 		}
-		const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
-		const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
-		const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
-		const forkInitialModel = forkSourceTuple.initialModel
-			?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
-		if (forkInitialModel && !(await requireCurrentSessionModel(forkInitialModel, "Fork model"))) return;
-
-		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
-		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
-		if (goal?.state === "todo") {
-			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+		if (
+			forkBody != null
+			&& typeof forkBody === "object"
+			&& Object.prototype.hasOwnProperty.call(forkBody, "newWorktree")
+			&& typeof forkBody.newWorktree !== "boolean"
+		) {
+			json({ error: "Invalid newWorktree flag" }, 400);
+			return;
 		}
+		// Whole-session omission remains backward-compatible. The prompt surface
+		// sends its history default (`false`) explicitly.
+		const newWorktree = forkBody?.newWorktree === undefined ? true : forkBody.newWorktree;
+		let historyReservationKey: string | undefined;
+		let historyReservationAcquired = false;
 
-		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
-		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
-		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+		try {
+			let source = sessionManager.getSession(sourceId);
+			const ps = sessionManager.getPersistedSession(sourceId);
+			if (!ps) { json({ error: "session not found" }, 404); return; }
+			if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
+			if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
 
-		// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
-		// rows that never persisted `agentSessionFile`.
-		let sourceJsonl = ps.agentSessionFile;
-		if (!sourceJsonl) {
-			const recovered = sessionManager.recoverSessionFile(ps);
-			if (recovered) sourceJsonl = recovered;
-		}
-		if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
-		if (!ps.sandboxed) {
-			try {
-				const st = fs.statSync(sourceJsonl);
-				if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
-			} catch {
-				json({ error: "source transcript missing or empty" }, 404);
+			const unsupported = isUnsupportedForkSource(source, ps);
+			if (unsupported) { json({ error: unsupported }, 422); return; }
+
+			const projectId = ps.projectId || source.projectId;
+			if (!projectId || !projectRegistry.get(projectId)) {
+				json({ error: "source project no longer registered" }, 410);
 				return;
 			}
-		}
+			const sharedSandboxReuse = hasEntryId && !newWorktree && ps.sandboxed === true;
+			const sharedSandboxOwnerSessionId = sharedSandboxReuse
+				? sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId)
+				: undefined;
+			if (sharedSandboxReuse && !sharedSandboxOwnerSessionId) {
+				json({
+					error: "The source sandbox worktree owner is unavailable for history forking",
+					code: "HISTORY_FORK_SOURCE_UNAVAILABLE",
+				}, 422);
+				return;
+			}
+			const sharedSandboxSourceCwd = sharedSandboxReuse ? source.cwd : undefined;
+			const sharedSandboxPersistedCwd = sharedSandboxReuse ? ps.cwd : undefined;
+			const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
+			const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+			const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
+			const forkInitialModel = forkSourceTuple.initialModel
+				?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
+			if (forkInitialModel && !(await requireCurrentSessionModel(forkInitialModel, "Fork model"))) return;
 
-		const projCwd = projectRegistry.get(projectId)!.rootPath;
-		const forkId = randomUUID();
-		// Use the project root for the cloned `.jsonl` slug (same as /continue);
-		// worktree-backed sessions rotate to the final cwd-derived file after the
-		// worktree is ready, adopting this clone via switch_session.
-		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
+			if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
 
-		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
-		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
-		let clonedTranscript: string | null = null;
-		try {
-			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
-			clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
-		} catch (err) {
-			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
-			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
-			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
-			return;
-		}
-		try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
-			console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
-		}
-		try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
-			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
-		}
+			const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+			const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+			const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 
-		try {
-			// The destination id is fixed before creation. Copy author bindings now so
-			// switch_session replay is normalized correctly on its first pass and the
-			// resulting EventBuffer never captures fallback authors.
-			copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
-			const launched = await launchSidebarSessionFork({
-				forkId,
-				projectId,
-				projectRoot: projCwd,
-				destJsonl,
-				newWorktree,
-				source,
-				persisted: ps,
-			}, {
-				resolveNewWorktreeRepoPath: async projectRoot => {
-					try {
-						return await isGitRepo(projectRoot, serverCommandRunner)
-							? await getRepoRoot(projectRoot, serverCommandRunner)
-							: undefined;
-					} catch {
-						return undefined;
+			// Resolve or recover the source `.jsonl` authoritatively. Never let a raw
+			// persisted path bypass host/container transcript-path validation.
+			const sourceJsonl = sessionManager.recoverSessionFile(ps);
+			if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
+
+			const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+			let historyMaterialization: HistoryForkMaterialization | undefined;
+			let clonedTranscript: string | null = null;
+			if (hasEntryId) {
+				historyReservationKey = `${sourceId}\0${entryId}\0${newWorktree ? "1" : "0"}`;
+				if (historyForkReservations.has(historyReservationKey)) {
+					json({
+						error: "A fork from this prompt is already being created",
+						code: "HISTORY_FORK_IN_PROGRESS",
+					}, 409);
+					return;
+				}
+				historyForkReservations.add(historyReservationKey);
+				historyReservationAcquired = true;
+
+				const sourceContent = await sessionFileRead(srcCtx, sourceJsonl, sandboxManager ?? null);
+				if (!sourceContent) {
+					json({ error: "source transcript missing or empty" }, 404);
+					return;
+				}
+
+				// Source eligibility is authoritative at launch time too. The immutable
+				// read is retained, but a source that stopped being live cannot be forked.
+				const currentSource = sessionManager.getSession(sourceId);
+				const currentPersisted = sessionManager.getPersistedSession(sourceId);
+				if (!currentSource || !currentPersisted) {
+					json({ error: "only live sessions can be forked" }, 422);
+					return;
+				}
+				const currentUnsupported = isUnsupportedForkSource(currentSource, currentPersisted);
+				if (currentUnsupported) {
+					json({ error: currentUnsupported }, 422);
+					return;
+				}
+				source = currentSource;
+
+				try {
+					historyMaterialization = materializeHistoryForkTranscript(
+						sourceContent,
+						entryId,
+					);
+					clonedTranscript = historyMaterialization.content;
+				} catch (err) {
+					if (err instanceof HistoryForkValidationError) {
+						json({ error: err.message, code: err.code }, err.status);
+						return;
 					}
-				},
-				buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
-					const createOpts: any = {
-						sessionId: forkId,
-						projectId,
-						sandboxed: !!ps.sandboxed,
-						worktreeOpts,
-						preExistingAgentSessionFile: destJsonl,
-						preExistingAgentSessionOldCwds: oldTranscriptCwds,
-						taskId: ps.taskId,
-						reattemptGoalId: ps.reattemptGoalId,
-						staffId: ps.staffId,
-						allowedTools: ps.allowedTools,
-					};
-					if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
-						createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
-					}
+					jsonError(500, err, {
+						error: `failed to materialize history fork: ${err instanceof Error ? err.message : String(err)}`,
+					});
+					return;
+				}
+			}
 
-					if (forkStaff) {
-						createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
-						createOpts.roleName = forkStaff.roleId;
-						createOpts.accessory = forkStaff.accessory;
-						createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
-					} else {
-						if (forkRole) {
-							const opts = roleCreateOptions(forkRole);
-							if (createOpts.initialModel) delete opts.initialModel;
-							Object.assign(createOpts, opts);
-						} else if (ps.role) {
-							createOpts.role = ps.role;
-							createOpts.roleName = ps.role;
-							if (ps.accessory) createOpts.accessory = ps.accessory;
-						} else if (ps.accessory) {
-							createOpts.accessory = ps.accessory;
+			// History validation must complete before any goal state or destination
+			// state changes. Whole-session forks retain the established transition.
+			if (goal?.state === "todo") {
+				await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+			}
+
+			const projCwd = projectRegistry.get(projectId)!.rootPath;
+			const forkId = randomUUID();
+			// Use the project root for the cloned `.jsonl` slug (same as /continue);
+			// worktree-backed sessions rotate to the final cwd-derived file after the
+			// worktree is ready, adopting this clone via switch_session.
+			const formattedDestJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const sandboxHistoryDestination = hasEntryId && ps.sandboxed === true;
+			const sandboxDestJsonl = sandboxHistoryDestination
+				? tryHostPathToContainer(formattedDestJsonl)
+				: null;
+			if (sandboxHistoryDestination && !sandboxDestJsonl) {
+				json({ error: "failed to resolve sandbox transcript destination" }, 500);
+				return;
+			}
+			const destJsonl = sandboxDestJsonl ?? formattedDestJsonl;
+			const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
+			const cleanupFailedFork = async (): Promise<void> => {
+				let failedRecord = sessionManager.getPersistedSession(forkId);
+				const failedTranscripts = new Set<string>([destJsonl]);
+				if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+				try {
+					if (sessionManager.getSession(forkId)) {
+						await sessionManager.terminateSession(forkId);
+					} else if (failedRecord && !failedRecord.archived) {
+						await sessionManager.storeArchive(forkId);
+					}
+					failedRecord = sessionManager.getPersistedSession(forkId);
+					if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+					if (sandboxHistoryDestination && failedRecord?.archived) {
+						for (const transcript of failedTranscripts) {
+							await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
 						}
+						// purgeArchivedSession uses compatibility deletion with host fallback.
+						// Hide this newly generated container path from that legacy path; if
+						// container deletion failed, trusted orphan cleanup owns it instead.
+						failedRecord.agentSessionFile = "";
 					}
-					if (forkSourceTuple.initialModel) {
-						delete createOpts.initialThinkingLevel;
-						Object.assign(createOpts, forkSourceTuple);
+					if (sessionManager.getArchivedSession(forkId)) {
+						await sessionManager.purgeArchivedSession(forkId);
 					}
-					return createOpts;
-				},
-				createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
-				setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
-			});
-			if (ps.staffId) launched.fork.staffId = ps.staffId;
-			json({
-				id: launched.fork.id,
-				cwd: launched.fork.cwd,
-				status: launched.fork.status,
-				projectId: launched.projectId,
-				goalId: launched.goalId,
-				title: launched.title,
-			}, 201);
-		} catch (err) {
-			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
-			purgeAuthorSidecar(forkId);
-			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+				} catch (cleanupErr) {
+					console.warn(`[fork] failed-session lifecycle cleanup failed for ${forkId}: ${cleanupErr}`);
+				}
+				failedRecord = sessionManager.getPersistedSession(forkId);
+				if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+				if (sandboxHistoryDestination) {
+					for (const transcript of failedTranscripts) {
+						await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
+					}
+					// State sidecars and proposal/tool directories remain host-owned. Never
+					// pass a container transcript path to direct-host cleanup.
+					cleanupFailedContinue(undefined, forkId, bobbitStateDir());
+				} else {
+					for (const transcript of failedTranscripts) {
+						cleanupFailedContinue(transcript, forkId, bobbitStateDir());
+					}
+				}
+				purgeAuthorSidecar(forkId);
+				purgeSkillSidecar(forkId);
+				purgeCompactionSidecar(forkId);
+			};
+
+			try {
+				if (hasEntryId) {
+					await sessionFileWriteAtomic(dstCtx, destJsonl, clonedTranscript!, sandboxManager ?? null);
+				} else {
+					await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+					clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
+				}
+			} catch (err) {
+				if (err instanceof CrossRealmCopyError) {
+					await cleanupFailedFork();
+					json({ error: "cross-realm fork not supported" }, 422);
+					return;
+				}
+				await cleanupFailedFork();
+				jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
+
+			try {
+				// Positional tool caches are safe only for an uncut transcript. History
+				// forks retain their exact tool content in JSONL and build fresh caches.
+				if (hasEntryId) {
+					// A partial proposal/sidecar copy must fail the history fork so cleanup
+					// cannot leave discarded-entry references in a successful destination.
+					copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir());
+					if (!copyHistoryForkSidecar("skill", sourceId, forkId, () =>
+						copySkillSidecarForTranscript(
+							sourceId,
+							forkId,
+							historyMaterialization!.retainedEntryIds,
+						))) {
+						throw new Error("failed to copy filtered skill sidecar");
+					}
+					if (!copyHistoryForkSidecar("compaction", sourceId, forkId, () =>
+						copyCompactionSidecarForTranscript(
+							sourceId,
+							forkId,
+							historyMaterialization!.retainedCompactions,
+							historyMaterialization!.retainedEntryIds,
+						))) {
+						throw new Error("failed to copy filtered compaction sidecar");
+					}
+				} else {
+					try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+						console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
+					}
+					try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+						console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
+					}
+				}
+				// The destination id is fixed before creation. Copy author bindings now so
+				// switch_session replay is normalized correctly on its first pass and the
+				// resulting EventBuffer never captures fallback authors.
+				const authorCopied = hasEntryId
+					? copyHistoryForkSidecar("author", sourceId, forkId, () =>
+						copyAuthorSidecar(sourceId, forkId, {
+							transcript: clonedTranscript,
+							strictExactIdentity: true,
+						}))
+					: copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
+				if (hasEntryId && !authorCopied) {
+					throw new Error("failed to copy filtered author sidecar");
+				}
+				const launchFork = () => launchSidebarSessionFork({
+					forkId,
+					projectId,
+					projectRoot: projCwd,
+					destJsonl,
+					newWorktree,
+					source: source!,
+					persisted: ps,
+				}, {
+					resolveNewWorktreeRepoPath: async projectRoot => {
+						try {
+							return await isGitRepo(projectRoot, serverCommandRunner)
+								? await getRepoRoot(projectRoot, serverCommandRunner)
+								: undefined;
+						} catch {
+							return undefined;
+						}
+					},
+					buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
+						const createOpts: any = {
+							sessionId: forkId,
+							projectId,
+							sandboxed: !!ps.sandboxed,
+							worktreeOpts,
+							preExistingAgentSessionFile: destJsonl,
+							preExistingAgentSessionOldCwds: oldTranscriptCwds,
+							// A cut-before history fork is writable in the exact source cwd, but
+							// the flattened original owner retains the worktree lifecycle.
+							borrowsWorktree: (hasEntryId && !newWorktree) || undefined,
+							borrowedWorktreeOwnerSessionId: sharedSandboxOwnerSessionId,
+							taskId: ps.taskId,
+							reattemptGoalId: ps.reattemptGoalId,
+							staffId: ps.staffId,
+							allowedTools: ps.allowedTools,
+						};
+						// A fresh Git fork must not return the temporary project-root cwd
+						// from the preparing SessionInfo. Reuse and non-Git fresh forks
+						// retain their established lifecycle.
+						if (worktreeOpts) createOpts.awaitWorktreeSetup = true;
+						if (newWorktree && ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+							createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+						}
+
+						if (forkStaff) {
+							createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
+							createOpts.roleName = forkStaff.roleId;
+							createOpts.accessory = forkStaff.accessory;
+							createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+						} else {
+							if (forkRole) {
+								const opts = roleCreateOptions(forkRole);
+								if (createOpts.initialModel) delete opts.initialModel;
+								Object.assign(createOpts, opts);
+							} else if (ps.role) {
+								createOpts.role = ps.role;
+								createOpts.roleName = ps.role;
+								if (ps.accessory) createOpts.accessory = ps.accessory;
+							} else if (ps.accessory) {
+								createOpts.accessory = ps.accessory;
+							}
+						}
+						if (forkSourceTuple.initialModel) {
+							delete createOpts.initialThinkingLevel;
+							Object.assign(createOpts, forkSourceTuple);
+						}
+						return createOpts;
+					},
+					createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
+					setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
+				});
+				const launchSharedSandboxFork = async () => {
+					const currentSource = sessionManager.getSession(sourceId);
+					const currentPersisted = sessionManager.getPersistedSession(sourceId);
+					const currentOwnerSessionId = sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId);
+					if (
+						!currentSource
+						|| !currentPersisted
+						|| currentPersisted.archived
+						|| currentSource.cwd !== sharedSandboxSourceCwd
+						|| currentPersisted.cwd !== sharedSandboxPersistedCwd
+						|| currentOwnerSessionId !== sharedSandboxOwnerSessionId
+						|| isUnsupportedForkSource(currentSource, currentPersisted)
+					) {
+						throw new HistoryForkSourceUnavailableError();
+					}
+					source = currentSource;
+					return launchFork();
+				};
+				const launched = sharedSandboxReuse
+					? await sessionManager.withSandboxWorktreeOwnerLifecycle(
+						sharedSandboxOwnerSessionId!,
+						launchSharedSandboxFork,
+					)
+					: await launchFork();
+				if (ps.staffId) (launched.fork as SessionInfo).staffId = ps.staffId;
+				json({
+					id: launched.fork.id,
+					cwd: launched.fork.cwd,
+					status: launched.fork.status,
+					projectId: launched.projectId,
+					goalId: launched.goalId,
+					title: launched.title,
+				}, 201);
+			} catch (err) {
+				// The shared owner FIFO has released before cleanup. A failed destination
+				// may itself be a borrower, so terminating it while holding the owner key
+				// would re-enter the same queue.
+				await cleanupFailedFork();
+				if (err instanceof HistoryForkSourceUnavailableError) {
+					json({ error: err.message, code: err.code }, 422);
+				} else {
+					jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+				}
+			}
+		} finally {
+			if (historyReservationAcquired && historyReservationKey) {
+				historyForkReservations.delete(historyReservationKey);
+			}
 		}
 		return;
 	}
@@ -13799,6 +15358,42 @@ async function handleApiRoute(
 		return;
 	}
 
+	// PUT /api/sessions/:id/pin — narrow durable Pin / Unpin mutation.
+	const pinMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/pin$/);
+	if (pinMatch && req.method === "PUT") {
+		let id: string;
+		try { id = decodeURIComponent(pinMatch[1]); }
+		catch { json({ error: "Invalid session ID" }, 400); return; }
+		const body = await readBody(req);
+		if (
+			!body
+			|| typeof body !== "object"
+			|| Array.isArray(body)
+			|| typeof body.pinned !== "boolean"
+			|| Object.keys(body).some(key => key !== "pinned")
+		) {
+			json({ error: "Body must be an object containing only boolean pinned" }, 400);
+			return;
+		}
+		try {
+			const user_tags = await sessionManager.setSessionPinned(id, body.pinned);
+			const projectId = sessionManager.getPersistedSession(id)?.projectId;
+			try {
+				broadcastToUi({ type: "sessions_changed", sessionId: id, projectId, user_tags });
+			} catch (err) {
+				console.error(`[broadcast] sessions_changed failed for ${id}:`, err);
+			}
+			json({ user_tags });
+		} catch (err) {
+			if (err instanceof SessionPinNotFoundError) {
+				json({ error: "Session not found" }, 404);
+				return;
+			}
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// PATCH /api/sessions/:id — update session properties (title, colorIndex, etc.)
 	const patchMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (patchMatch && req.method === "PATCH") {
@@ -13928,9 +15523,13 @@ async function handleApiRoute(
 	const markReadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/mark-read$/);
 	if (markReadMatch && req.method === "POST") {
 		const id = markReadMatch[1];
-		const ok = sessionManager.markSessionRead(id);
-		if (!ok) { json({ error: "session not found" }, 404); return; }
-		json({ ok: true });
+		try {
+			const ok = await sessionManager.markSessionRead(id);
+			if (!ok) { json({ error: "session not found" }, 404); return; }
+			json({ ok: true });
+		} catch (err) {
+			jsonError(500, err);
+		}
 		return;
 	}
 
@@ -14609,15 +16208,42 @@ async function handleApiRoute(
 		const sessUntracked = url.searchParams.get('untracked') === '1';
 		const shouldFetch = url.searchParams.get('fetch') === 'true';
 		try {
-			const collected = await collectGitStatusEnvelope({
+			const address = { kind: "session", id } as const;
+			const worktrees = [...new Set([cwd, ...components.map(component => component.worktreePath)])];
+			const collectStatus = (untracked: boolean) => collectGitStatusEnvelope({
 				rootPath: cwd,
 				components,
-				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }),
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked, configuredBaseRef: sessionBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
-				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
+			const binding: RepositorySnapshotBinding = {
+				address,
+				invalidate: () => { for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid); },
+				project: async () => {
+					const projected = await collectStatus(false);
+					if (projected.kind !== "success") throw new Error("Local Git status projection failed");
+					return projected.envelope;
+				},
+			};
+			const intentValue = shouldFetch ? "force" : url.searchParams.get("intent");
+			const isExplicit = intentValue === "force" || intentValue === "explicit";
+			// Explicit revalidation must complete before local status is sampled so
+			// ahead/behind data reflects the fetched refs in this same response.
+			let remoteSnapshots = isExplicit
+				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding)
+				: undefined;
+			if (isExplicit) {
+				for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid);
+			}
+			const collected = await collectStatus(sessUntracked);
 			if (collected.kind === "success") {
+				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding);
+				const snapshot = remoteState.publicGitSnapshot(remoteSnapshots);
+				// Preserve the established flat GitStatusEnvelope as the response owner
+				// while attaching copied coordinator metadata and a nested data projection.
+				// Repository snapshots share fetched refs only; status remains local.
+				const data = { ...collected.envelope };
+				Object.assign(collected.envelope, snapshot, { data });
 				json(collected.envelope);
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
@@ -14630,6 +16256,90 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	// GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex —
+	// identity-addressed lazy-load for client histories whose synthetic rows no
+	// longer align with the raw agent transcript.
+	const toolContentByCallMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/by-tool-call\/([^/]+)\/(\d+)$/);
+	if (toolContentByCallMatch && req.method === "GET") {
+		const [, id, encodedToolCallId, blkIdxStr] = toolContentByCallMatch;
+		let toolCallId: string;
+		const identityError = (status: number, error: string, code: string) => json({ error, code }, status);
+		try {
+			toolCallId = decodeURIComponent(encodedToolCallId);
+		} catch {
+			identityError(400, "invalid_tool_call_id", "invalid_tool_call_id");
+			return;
+		}
+		const blockIndex = parseInt(blkIdxStr, 10);
+		const expectPreviewSnapshot = url.searchParams.get("expected") === "preview-snapshot";
+		const session = sessionManager.getSession(id);
+		if (!session) { identityError(404, "Session not found", "session_not_found"); return; }
+		try {
+			const msgsResp = await session.rpcClient.getMessages();
+			const messages = msgsResp?.data?.messages || msgsResp?.data;
+			if (!Array.isArray(messages)) { identityError(500, "Could not retrieve messages", "tool_content_unavailable"); return; }
+
+			// A pi tool result owns its identity on the message. An assistant tool-call
+			// owns it on the call block; preview snapshots are emitted in the result row.
+			const resultMessage = messages.find((message: any) =>
+				message?.role === "toolResult" && message.toolCallId === toolCallId,
+			);
+			const assistantCall = messages
+				.flatMap((message: any) => Array.isArray(message?.content)
+					? message.content.map((block: any, index: number) => ({ message, block, index }))
+					: [])
+				.find(({ message, block }: any) =>
+					message?.role === "assistant"
+					&& (block?.type === "toolCall" || block?.type === "tool_use")
+					&& block.id === toolCallId,
+				) as { message: any; block: any; index: number } | undefined;
+			if (!resultMessage && !assistantCall) {
+				identityError(404, "transcript_tool_call_unavailable", "transcript_tool_call_unavailable");
+				return;
+			}
+
+			// A call and its result commonly share an id and block index. Preview
+			// restoration names its expected payload, which selects the result; generic
+			// lazy tool-input loading must select the identity-bearing assistant call
+			// whenever it exists, so it cannot substitute a same-id result block.
+			const selectedMessage = expectPreviewSnapshot
+				? (resultMessage ?? assistantCall!.message)
+				: (assistantCall?.message ?? resultMessage!);
+			// For assistant calls, only the call block itself is addressed by its ID;
+			// never let a shared message row expose a neighbouring tool block.
+			if (selectedMessage === assistantCall?.message && assistantCall?.index !== blockIndex) {
+				const code = expectPreviewSnapshot ? "snapshot_block_mismatch" : "tool_call_block_mismatch";
+				identityError(409, code, code);
+				return;
+			}
+			const content = Array.isArray(selectedMessage.content) ? selectedMessage.content : [];
+			const block = content[blockIndex];
+			if (!block) {
+				identityError(404, "transcript_block_unavailable", "transcript_block_unavailable");
+				return;
+			}
+			let toolContent = block.arguments?.content ?? block.input?.content;
+			if (toolContent === undefined && block.type === "text" && typeof block.text === "string") {
+				toolContent = block.text;
+			}
+			if (toolContent === undefined) {
+				identityError(404, "transcript_block_unavailable", "transcript_block_unavailable");
+				return;
+			}
+			if (expectPreviewSnapshot && (
+				typeof toolContent !== "string"
+				|| !["__preview_snapshot_v1__\n", "__preview_snapshot_v2__\n", "__preview_snapshot_v3__\n"].some(marker => toolContent.startsWith(marker))
+			)) {
+				identityError(409, "snapshot_block_mismatch", "snapshot_block_mismatch");
+				return;
+			}
+			json({ content: toolContent });
+		} catch (err) {
+			jsonError(500, err, { error: "Could not retrieve tool content", code: "tool_content_unavailable" });
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content
 	const toolContentMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/(\d+)\/(\d+)$/);
 	if (toolContentMatch && req.method === "GET") {
@@ -14697,27 +16407,51 @@ async function handleApiRoute(
 			throw new TranscriptReaderError("invalid_params", `${foundName} must be a boolean`);
 		}
 		try {
-			const params = {
-				offset: parseIntParam("offset"),
-				limit: parseIntParam("limit"),
-				pattern: qp.get("pattern") ?? undefined,
-				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
-				context: parseIntParam("context"),
-				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
-				includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
-			};
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
-			const envelope = await readTranscript(params, {
+			const options = {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 				authorContext: {
 					session: targetPs,
 					sidecarEntries: readAuthorSidecar(targetId),
 					agentDeps: {
-						getStaff: (id) => staffManager.getStaff(id),
-						getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+						getStaff: (id: string) => staffManager.getStaff(id),
+						getRole: (name: string) => resolveRoleForProject(name, targetPs.projectId),
 					},
 				},
-			});
+			};
+			const operation = qp.get("operation");
+			let envelope;
+			if (operation === "list") {
+				envelope = await readAgentTranscript({
+					operation: "list",
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+					pattern: qp.get("pattern") ?? undefined,
+					caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+					context: parseIntParam("context"),
+				}, options);
+			} else if (operation === "inspect") {
+				envelope = await readAgentTranscript({
+					operation: "inspect",
+					messageIndex: parseIntParam("message_index") as number,
+					resultIndex: parseIntParam("result_index"),
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+				}, options);
+			} else if (operation !== null) {
+				throw new TranscriptReaderError("invalid_params", "operation must be list or inspect");
+			} else {
+				// Direct REST/UI compatibility path. Agent reads always supply an operation.
+				envelope = await readTranscript({
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+					pattern: qp.get("pattern") ?? undefined,
+					caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+					context: parseIntParam("context"),
+					verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
+					includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
+				}, options);
+			}
 			json(envelope);
 		} catch (err) {
 			if (err instanceof TranscriptReaderError) {
@@ -14887,37 +16621,62 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	const resolveSessionPrRouteSelector = async (id: string, session: any) => {
+		const cwd = session.cwd as string;
+		const cid = session.sandboxed ? session.containerId as string | undefined : undefined;
+		const persisted = sessionManager.getPersistedSession(id);
+		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged.
+		// For non-goal sessions, fall back to the session's persisted branch — needed for sandbox
+		// sessions where the host worktree may not have the right branch checked out.
+		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
+		let branch = goalBranch || persisted?.branch;
+		// Sandboxed sessions derive the canonical head from the container rather than
+		// a potentially stale host/persisted display branch.
+		if (cid && cwd) {
+			try {
+				const actualBranch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid);
+				if (actualBranch && actualBranch !== "HEAD") branch = actualBranch;
+			} catch { /* fall back to persisted branch */ }
+		}
+		const owner = {
+			...persisted,
+			...session,
+			projectId: session.projectId ?? persisted?.projectId,
+			repoPath: session.repoPath ?? persisted?.repoPath,
+			worktreePath: session.worktreePath ?? persisted?.worktreePath,
+			repoWorktrees: session.repoWorktrees ?? persisted?.repoWorktrees,
+			sandboxed: !!cid,
+		};
+		const identitySource = { cwd, containerId: cid };
+		return {
+			cwd,
+			cid,
+			branch,
+			target: await remoteState.resolvePrSnapshotTarget(owner, branch, identitySource),
+		};
+	};
+
 	// GET /api/sessions/:id/pr-status — PR status for session's branch
 	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/pr-status')) {
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR status"), 409); return; }
-		const cwd = session.cwd;
-		const cid = session.sandboxed ? session.containerId : undefined;
-		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged.
-		// For non-goal sessions, fall back to the session's persisted branch — needed for sandbox
-		// sessions where the host worktree may not have the right branch checked out.
-		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
-		let sessionBranch = goalBranch || sessionManager.getPersistedSession(id)?.branch;
-		// For sandboxed sessions, the persisted branch may not match the actual container branch
-		// (e.g. gateway assigns a different worktree name). Detect the real branch from the container.
-		if (cid && cwd) {
-			try {
-				const actualBranch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid);
-				if (actualBranch && actualBranch !== "HEAD") sessionBranch = actualBranch;
-			} catch { /* fall back to persisted branch */ }
-		}
-		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
-		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
+		const selector = await resolveSessionPrRouteSelector(id, session);
 		const optional = url.searchParams.get("optional") === "1";
-		const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
-		if (pr) {
-			const goalId = session.goalId;
-			if (goalId) prStatusStore.set(goalId, pr);
-			json(pr);
-		} else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+		const snapshot = selector.target
+			? await remoteState.prSnapshotFor(selector.target, { kind: "session", id }, url.searchParams.get("intent"))
+			: undefined;
+		if (!snapshot) {
+			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
+			// reads must never fall back to an independent legacy `gh` lookup.
+			if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			return;
+		}
+		const publicSnapshot = remoteState.publicSnapshot(snapshot);
+		const goalId = session.goalId;
+		if (goalId && publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
+		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
 		return;
 	}
 
@@ -14933,6 +16692,7 @@ async function handleApiRoute(
 		try {
 			const output = await execGit('git pull', cwd, 30000, cid);
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -14956,6 +16716,7 @@ async function handleApiRoute(
 			const upstream = await execGitSafe('git rev-parse --abbrev-ref --symbolic-full-name @{u}', cwd, "", cid);
 			const output = await publishCurrentBranchToOrigin(cwd, branch, { containerId: cid, setUpstream: !upstream });
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -15041,6 +16802,7 @@ async function handleApiRoute(
 			// 3. Push that commit to master
 			await execGit(`git push origin ${squashCommit}:refs/heads/${primaryBranch}`, cwd, 30000, cid);
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 
 			json({ ok: true, output: `Squash pushed ${aheadCount} commit${aheadCount > 1 ? "s" : ""} to ${primaryBranch}` });
 		} catch (err: unknown) {
@@ -15109,11 +16871,13 @@ async function handleApiRoute(
 					// Tree is identical — these are orphaned commits from a squash merge
 					await execGit(`git reset --hard ${primaryRef}`, cwd, 10000, cid);
 					invalidateGitStatusCache(cwd, cid);
+					await remoteState.invalidateGitSnapshot(cwd, cid);
 					json({ ok: true, output: `Rebased and reset ${aheadAfter} orphaned commit(s) from squash merge` });
 					return;
 				}
 			}
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 
 			json({ ok: true, output });
 		} catch (err: unknown) {
@@ -15129,27 +16893,26 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR merge"), 409); return; }
-		const cwd = session.cwd;
-		const cid = session.sandboxed ? session.containerId : undefined;
-		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const selector = await resolveSessionPrRouteSelector(id, session);
+		if (!selector.target) { json({ error: "PR repository unavailable" }, 409); return; }
 		const body = await readBody(req);
 		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		// Prefer the client-provided branch (headRefName from PR status) so the merge
-		// targets the exact PR the widget displayed — avoids mismatches when the session's
-		// persisted branch differs from the PR's head ref (e.g. staff/team agent worktrees).
-		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
-		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
-		const sessMergeBranch = clientBranch || goalBranch || sessionManager.getPersistedSession(id)?.branch;
+		const authorization = await remoteState.resolvePrMergeAuthorization(
+			selector.target,
+			{ kind: "session", id },
+			body?.branch,
+		);
+		if ("error" in authorization) { json({ error: authorization.error }, authorization.status); return; }
 		try {
-			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
-			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
+			// Merge the immutable number returned by a current repository-bound refresh.
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(authorization.number, selector.target.remote, method, body?.admin), { cwd: selector.target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			_prCache.delete(selector.target.executionCwd);
+			if (selector.target.branch) _prCache.delete(`${selector.target.executionCwd}::${selector.target.branch}`);
+			remoteState.invalidatePrSnapshot(selector.target);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -16169,18 +17932,13 @@ async function handleApiRoute(
 				}
 			}
 		}
-		// If `submitted` is omitted (or non-boolean), preserve whatever is
-		// already on disk. This is critical: the page-unload beacon historically
-		// sent `submitted: false` whenever the local cache hadn't observed a
-		// `true`, which clobbered out-of-band PUT(submitted=true) calls (other
-		// tabs, REST clients, the test harness) on the next page reload (RP-09).
-		// The client now omits the field unless it positively wants to write
-		// `true`; the legacy clear path still goes through the dedicated
-		// /review/submitted PUT.
-		const submitted = typeof body.submitted === "boolean"
-			? body.submitted
-			: reviewAnnotationStore.isSubmitted(sessionId);
-		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
+		// writeAll merges with the latest persisted state so this annotation-only
+		// unload payload can never clobber per-review submitted/closed tombstones.
+		reviewAnnotationStore.writeAll(
+			sessionId,
+			annotations,
+			typeof body.submitted === "boolean" ? body.submitted : undefined,
+		);
 		json({ ok: true });
 		return;
 	}
@@ -16237,21 +17995,103 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/sessions/:id/review/submitted
+	// GET /api/sessions/:id/review/tombstones[/:reviewId]
+	// Collection reads expose every durable ID. Exact reads also perform the
+	// one-time migration from a legacy session-wide submitted flag.
+	const reviewTombstoneMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/review\/tombstones(?:\/([^/]+))?$/);
+	if (reviewTombstoneMatch && req.method === "GET") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		if (!reviewTombstoneMatch[2]) {
+			json(reviewAnnotationStore.getReviewTombstones(sessionId));
+			return;
+		}
+		let reviewId: string;
+		try { reviewId = decodeURIComponent(reviewTombstoneMatch[2]); }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		if (!reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		const state = reviewAnnotationStore.getReviewTombstone(sessionId, reviewId);
+		json({ reviewId, state: state ?? null, submitted: state === "submitted", closed: state === "closed" });
+		return;
+	}
+
+	// PUT /api/sessions/:id/review/tombstones[/:reviewId]
+	if (reviewTombstoneMatch && req.method === "PUT") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = await readBody(req);
+		let pathReviewId: string | undefined;
+		try { pathReviewId = reviewTombstoneMatch[2] ? decodeURIComponent(reviewTombstoneMatch[2]) : undefined; }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		const reviewId = pathReviewId ?? body?.reviewId;
+		const tombstoneState = body?.state;
+		const activeFileId = body?.activeFileId;
+		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		if (tombstoneState !== "submitted" && tombstoneState !== "closed") {
+			json({ error: "state must be submitted or closed" }, 400);
+			return;
+		}
+		if (activeFileId !== undefined && (typeof activeFileId !== "string" || !activeFileId.trim() || Buffer.byteLength(activeFileId, "utf8") > 300 || /[\x00-\x1f\x7f\\/]/.test(activeFileId))) {
+			json({ error: "activeFileId is invalid" }, 400);
+			return;
+		}
+		reviewAnnotationStore.setReviewTombstone(sessionId, reviewId, tombstoneState, activeFileId);
+		json({ ok: true });
+		return;
+	}
+
+	// DELETE /api/sessions/:id/review/tombstones[/:reviewId]
+	if (reviewTombstoneMatch && req.method === "DELETE") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = reviewTombstoneMatch[2] ? undefined : await readBody(req);
+		let pathReviewId: string | undefined;
+		try { pathReviewId = reviewTombstoneMatch[2] ? decodeURIComponent(reviewTombstoneMatch[2]) : undefined; }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		const reviewId = pathReviewId ?? url.searchParams.get("reviewId") ?? body?.reviewId;
+		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		reviewAnnotationStore.clearReviewTombstone(sessionId, reviewId, {
+			clearLegacySubmitted: url.searchParams.get("clearLegacySubmitted") === "true" || body?.clearLegacySubmitted === true,
+		});
+		json({ ok: true });
+		return;
+	}
+
+	// GET /api/sessions/:id/review/submitted[?reviewId=...] — legacy session
+	// boolean when omitted; exact per-review compatibility when supplied.
 	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
 		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const reviewId = url.searchParams.get("reviewId");
+		if (reviewId !== null) {
+			if (!reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+			json({ submitted: reviewAnnotationStore.getReviewTombstone(sessionId, reviewId) === "submitted" });
+			return;
+		}
 		json({ submitted: reviewAnnotationStore.isSubmitted(sessionId) });
 		return;
 	}
 
-	// PUT /api/sessions/:id/review/submitted
+	// PUT /api/sessions/:id/review/submitted — legacy, or exact when reviewId is present.
 	if (req.method === "PUT" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
 		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		const body = await readBody(req);
+		if (typeof body?.reviewId === "string") {
+			if (!body.reviewId.trim() || typeof body.submitted !== "boolean") {
+				json({ error: "reviewId and boolean submitted are required" }, 400);
+				return;
+			}
+			if (body.submitted) reviewAnnotationStore.setReviewTombstone(sessionId, body.reviewId, "submitted");
+			else reviewAnnotationStore.clearReviewTombstone(sessionId, body.reviewId);
+			json({ ok: true });
+			return;
+		}
 		reviewAnnotationStore.setSubmitted(sessionId, !!body?.submitted);
 		json({ ok: true });
 		return;
@@ -17222,13 +19062,13 @@ async function handleApiRoute(
 		return ctx;
 	}
 
-	function searchUnavailableResponse(state: string) {
+	function searchUnavailableResponse(state: string, unavailableReason = state) {
 		const reasonMap: Record<string, string> = {
 			"disabled": "disabled",
 			"closed": "closed",
 			"initializing": "initializing",
 		};
-		const reason = reasonMap[state] ?? state;
+		const reason = reasonMap[unavailableReason] ?? unavailableReason;
 		return { error: "search-unavailable", reason, state };
 	}
 
@@ -17300,41 +19140,16 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
+		if (ctx.searchIndex.getState() !== "ready") { json(searchUnavailableResponse(ctx.searchIndex.getState()), 503); return; }
 		try {
-			const rows = store.list({ limit: 100000 });
-			const orphans: Array<{ id: string; source_id: string; parent_id: string | null }> = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					const goalId = id.replace(/^goal:/, "");
-					isOrphan = !ctx.goalStore.get(goalId);
-				} else if (sourceId === "sessions") {
-					const sessionId = id.replace(/^session:/, "");
-					isOrphan = !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					const staffId = id.replace(/^staff:/, "");
-					isOrphan = !ctx.staffStore.get(staffId);
-				}
-				if (isOrphan) {
-					orphans.push({
-						id,
-						source_id: sourceId,
-						parent_id: row.parent_id != null ? String(row.parent_id) : null,
-					});
-				}
-			}
+			const live = { goalIds: ctx.goalStore.getAll().map((goal) => goal.id), sessionIds: ctx.sessionStore.getAll().map((session) => session.id), staffIds: ctx.staffStore.getAll().map((staff) => staff.id) };
+			const orphans = await ctx.searchIndex.findOrphanedRows(live);
 			json({ count: orphans.length, sample: orphans.slice(0, 100) });
 		} catch (err) {
+			if (err instanceof SearchUnavailableError) {
+				json(searchUnavailableResponse(ctx.searchIndex.getState(), err.reason), 503);
+				return;
+			}
 			json({ error: `Orphan scan failed: ${(err as Error).message}` }, 500);
 		}
 		return;
@@ -17351,33 +19166,15 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
+		if (ctx.searchIndex.getState() !== "ready") { json(searchUnavailableResponse(ctx.searchIndex.getState()), 503); return; }
 		try {
-			const rows = store.list({ limit: 100000 });
-			const toDelete: string[] = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					isOrphan = !ctx.goalStore.get(id.replace(/^goal:/, ""));
-				} else if (sourceId === "sessions") {
-					isOrphan = !ctx.sessionStore.get(id.replace(/^session:/, ""));
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					isOrphan = !ctx.staffStore.get(id.replace(/^staff:/, ""));
-				}
-				if (isOrphan) toDelete.push(id);
-			}
-			if (toDelete.length) await store.deleteByIds(toDelete);
-			json({ deleted: toDelete.length });
+			const live = { goalIds: ctx.goalStore.getAll().map((goal) => goal.id), sessionIds: ctx.sessionStore.getAll().map((session) => session.id), staffIds: ctx.staffStore.getAll().map((staff) => staff.id) };
+			json({ deleted: await ctx.searchIndex.cleanupOrphanedRows(live) });
 		} catch (err) {
+			if (err instanceof SearchUnavailableError) {
+				json(searchUnavailableResponse(ctx.searchIndex.getState(), err.reason), 503);
+				return;
+			}
 			json({ error: `Cleanup failed: ${(err as Error).message}` }, 500);
 		}
 		return;

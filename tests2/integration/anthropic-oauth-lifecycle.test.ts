@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { vi } from "vitest";
+import type { AuthInteraction, Credential, Models } from "@earendil-works/pi-ai";
 import { AtomicCredentialStore } from "../../src/server/auth/credential-store.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_e2e/e2e-setup.js";
@@ -9,6 +10,8 @@ import { loadServerTestRuntime } from "../harness/server-runtime.js";
 let globalAuthPath: typeof import("../../src/server/bobbit-dir.js").globalAuthPath;
 let oauthCancel: typeof import("../../src/server/auth/oauth.js").oauthCancel;
 let refreshOAuthToken: typeof import("../../src/server/auth/oauth.js").refreshOAuthToken;
+let setOAuthModelsFactoryForTests: typeof import("../../src/server/auth/oauth.js").setOAuthModelsFactoryForTests;
+let deterministicLoginInvocations = 0;
 const activeFlows = new Set<string>();
 const originalFetch = globalThis.fetch;
 
@@ -63,13 +66,54 @@ function callbackFor(start: { url: string }): string {
 	return `http://localhost:53692/callback?code=${encodeURIComponent(randomUUID())}&state=${encodeURIComponent(state)}`;
 }
 
+/**
+ * The route contract needs a complete Pi-shaped interaction, not Pi's
+ * process-global callback listener. This facade preserves callback parsing,
+ * state validation, cancellation, and returned-credential persistence through
+ * the production adapter without binding Pi's fixed localhost port.
+ */
+function deterministicAnthropicModels(): Pick<Models, "login"> {
+	return {
+		login: (async (provider: string, type: string, interaction: AuthInteraction) => {
+			deterministicLoginInvocations += 1;
+			if (provider !== "anthropic" || type !== "oauth") throw new Error("unexpected OAuth provider");
+			const state = randomUUID();
+			interaction.notify({
+				type: "auth_url",
+				url: `https://claude.ai/oauth/authorize?${new URLSearchParams({ state }).toString()}`,
+				instructions: "Complete the deterministic Anthropic OAuth flow",
+			});
+			const supplied = await interaction.prompt({
+				type: "manual_code",
+				message: "Paste redirect URL",
+			});
+			const callback = new URL(supplied);
+			if (callback.searchParams.get("state") !== state) throw new Error("OAuth state mismatch");
+			if (!callback.searchParams.get("code")) throw new Error("Missing authorization code");
+			return {
+				type: "oauth",
+				access: randomUUID(),
+				refresh: randomUUID(),
+				expires: Date.now() + 60 * 60 * 1000,
+			} satisfies Credential;
+		}) as Models["login"],
+	};
+}
+
 test.beforeAll(async () => {
 	const runtime = await loadServerTestRuntime();
 	({ globalAuthPath } = runtime.bobbitDir);
-	({ oauthCancel, refreshOAuthToken } = runtime.oauth);
+	({ oauthCancel, refreshOAuthToken, setOAuthModelsFactoryForTests } = runtime.oauth);
+	setOAuthModelsFactoryForTests(deterministicAnthropicModels);
+});
+
+test.afterAll(() => {
+	setOAuthModelsFactoryForTests(undefined);
+	deterministicLoginInvocations = 0;
 });
 
 test.beforeEach(() => {
+	deterministicLoginInvocations = 0;
 	restoreCredentialFixture();
 });
 
@@ -77,6 +121,7 @@ test.afterEach(() => {
 	for (const flowId of activeFlows) oauthCancel(flowId, "anthropic");
 	activeFlows.clear();
 	globalThis.fetch = originalFetch;
+	deterministicLoginInvocations = 0;
 	restoreCredentialFixture();
 });
 
@@ -98,6 +143,8 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 			activeFlows.add(first.flowId);
 			expect(first.provider).toBe("anthropic");
 			expect(new URL(first.url).searchParams.get("state")).toBeTruthy();
+			// The real gateway route must select the installed test facade, not Pi's listener.
+			expect(deterministicLoginInvocations).toBe(1);
 
 			const busy = await api("/api/oauth/start", {
 				method: "POST",
@@ -129,12 +176,13 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 			activeFlows.delete(first.flowId);
 
 			// This intentionally follows cancellation with no retry delay: the route
-			// must not leave Pi's single callback-port lease stranded.
+			// must not leave the gateway's Anthropic sign-in lease stranded.
 			const retryResponse = await api("/api/oauth/start", {
 				method: "POST",
 				body: JSON.stringify({ provider: "anthropic" }),
 			});
 			expect(retryResponse.status).toBe(200);
+			expect(deterministicLoginInvocations).toBe(2);
 			const retry = await retryResponse.json() as { flowId: string; url: string };
 			activeFlows.add(retry.flowId);
 
@@ -185,12 +233,15 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 			const started = await startResponse.json() as { flowId: string; url: string };
 			activeFlows.add(started.flowId);
 
-			// Drive Pi's real loopback callback instead of Bobbit's completion route.
-			// `/complete` consumes the finished flow, leaving a later cancel as a
-			// no-op; a browser callback leaves the completed credential addressable
-			// until the caller confirms it, which is the lifecycle being exercised.
-			const callback = await fetch(callbackFor(started));
-			expect(callback.ok).toBe(true);
+			// The injected Pi-shaped facade settles through the real completion route.
+			// Completed flows remain addressable through the acknowledgement window,
+			// so cancellation still exercises the exact credential rollback path.
+			const completed = await api("/api/oauth/complete", {
+				method: "POST",
+				body: JSON.stringify({ flowId: started.flowId, provider: "anthropic", code: callbackFor(started) }),
+			});
+			expect(completed.status).toBe(200);
+			expect(await completed.json()).toEqual({ success: true });
 
 			const rollback = vi.spyOn(AtomicCredentialStore.prototype, "rollbackCredentialIfCurrent")
 				.mockRejectedValueOnce(new Error(cancellationFailure));

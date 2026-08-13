@@ -15,14 +15,10 @@ __syncBeforeAll(() => __syncCE());
  * Design reference: docs/design/portable-search.md §3, §6, §13.
  */
 import { expect, test } from "vitest";
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	FLEX_EXPORT_BUNDLE_FILE,
-	FlexSearchStore,
-} from "../../../src/server/search/flex-store.ts";
+import { FlexSearchStore } from "../../../src/server/search/flex-store.ts";
 import { Indexer } from "../../../src/server/search/indexer.ts";
 import { ProgressBus } from "../../../src/server/search/progress-bus.ts";
 import type {
@@ -119,7 +115,8 @@ test("author metadata survives Indexer → disk → search while legacy docs rem
 	await store.close();
 
 	const docsPath = path.join(dir, "index", "__docs__.json");
-	const docs = JSON.parse(fs.readFileSync(docsPath, "utf-8")) as Array<Record<string, unknown>>;
+	const snapshot = JSON.parse(fs.readFileSync(docsPath, "utf-8")) as { version: number; throughSequence: number; docs: Array<Record<string, unknown>> };
+	const docs = snapshot.docs;
 	const authoredDoc = docs.find((doc) => doc.id === "authored");
 	expect(authoredDoc).toMatchObject({
 		author_kind: "system",
@@ -127,18 +124,13 @@ test("author metadata survives Indexer → disk → search while legacy docs rem
 		author_label: "Bobbit",
 	});
 
-	// Emulate a mirror row written by a pre-author index. Keep the export
-	// bundle coherent so reopen exercises the normal disk-restore path.
+	// Emulate a mirror row written by a pre-author index. The mirror alone
+	// is durable; the searchable index is rebuilt lazily after restart.
 	const legacyDoc = docs.find((doc) => doc.id === "legacy")!;
 	delete legacyDoc.author_kind;
 	delete legacyDoc.author_id;
 	delete legacyDoc.author_label;
-	const legacyDocsJson = JSON.stringify(docs);
-	fs.writeFileSync(docsPath, legacyDocsJson, "utf-8");
-	const bundlePath = path.join(dir, "index", FLEX_EXPORT_BUNDLE_FILE);
-	const bundle = JSON.parse(fs.readFileSync(bundlePath, "utf-8")) as Record<string, unknown>;
-	bundle.docsHash = createHash("sha256").update(legacyDocsJson).digest("hex");
-	fs.writeFileSync(bundlePath, JSON.stringify(bundle), "utf-8");
+	fs.writeFileSync(docsPath, JSON.stringify(snapshot), "utf-8");
 
 	const reopened = await FlexSearchStore.open({ dataDir: dir });
 	try {
