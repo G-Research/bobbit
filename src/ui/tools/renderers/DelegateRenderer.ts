@@ -102,7 +102,7 @@ function phaseState(phase: unknown): string {
 		case "completed": return "completed";
 		case "error": return "failed";
 		case "aborted": return "stopped";
-		default: return "working";
+		default: return "unknown";
 	}
 }
 
@@ -204,6 +204,9 @@ function blocksFor(message: Record<string, any>): unknown[] {
 class EmbeddedAgentActivitySection extends LitElement {
 	@property({ type: Object }) activity!: EmbeddedAgentActivity;
 	@property({ type: Boolean }) parentStreaming = false;
+	/** A terminal root Agent result also settles child calls whose lifecycle was
+	 * unavailable in the final snapshot. */
+	@property({ type: Boolean }) parentTerminal = false;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment { return this; }
 	override connectedCallback(): void { super.connectedCallback(); this.style.display = "block"; }
@@ -234,15 +237,15 @@ class EmbeddedAgentActivitySection extends LitElement {
 					const id = block.id ?? block.toolUseId ?? block.tool_use_id;
 					if (typeof id !== "string") continue;
 					const result = results.get(id);
-					const terminalWithoutResult = isTerminal(this.activity) && !result;
+					const terminalWithoutResult = (isTerminal(this.activity) || this.parentTerminal) && !result;
 					const call = { ...block, id, name: canonicalToolName(block.name ?? block.toolName), arguments: block.arguments ?? block.input ?? {} } as ToolCall;
 					const dangling = terminalWithoutResult ? {
 						role: "toolResult", toolCallId: id, toolName: call.name, isError: true,
 						content: [{ type: "text", text: "Tool call ended before a result was received." }], timestamp: Date.now(),
 					} as ToolResultMessage<any> : result;
 					parts.push(html`<div class="py-1.5"><tool-message
-						.toolCall=${call} .result=${dangling} .pending=${!dangling && !isTerminal(this.activity)}
-						.isStreaming=${this.parentStreaming && !isTerminal(this.activity)} .embedded=${true}
+						.toolCall=${call} .result=${dangling} .pending=${!dangling && !isTerminal(this.activity) && !this.parentTerminal}
+						.isStreaming=${this.parentStreaming && !isTerminal(this.activity) && !this.parentTerminal} .embedded=${true}
 					></tool-message></div>`);
 				}
 			}
@@ -276,7 +279,9 @@ class EmbeddedAgentCard extends LitElement {
 		const count = this.activities.reduce((total, activity) => total + (activity.orderedMessages ?? activity.messages ?? []).flatMap((m: any) => blocksFor(asRecord(m) ?? {})).filter((b: any) => b?.type === "toolCall" || b?.type === "tool_call").length, 0);
 		const failed = this.activities.filter((activity) => activity.state === "failed").length;
 		const role = safeLabel(this.activities[0] ?? {});
-		const status = this.parentState === "completed" ? "Completed" : this.parentState === "failed" ? "Failed" : this.parentState === "stopped" ? "Stopped" : failed ? `Working · ${failed} failed` : this.activities.some((activity) => !isTerminal(activity)) ? `Working${count ? ` · ${count} tools` : ""}` : this.activities.length ? `Finishing…${count ? ` · ${count} tools` : ""}` : "Starting…";
+		const hasActiveChild = this.activities.some((activity) => activity.state === "starting" || activity.state === "working");
+		const hasUnknownChild = this.activities.some((activity) => activity.state === "unknown");
+		const status = this.parentState === "completed" ? "Completed" : this.parentState === "failed" ? "Failed" : this.parentState === "stopped" ? "Stopped" : failed ? `Working · ${failed} failed` : this.parentState === "working" || hasActiveChild ? `Working${count ? ` · ${count} tools` : ""}` : hasUnknownChild ? "Status unavailable" : this.activities.length ? `Finishing…${count ? ` · ${count} tools` : ""}` : "Starting…";
 		const regionId = stableDomId(this.parentToolUseId);
 		const iconName = this.parentState === "completed" ? CheckCircle2 : this.parentState === "failed" ? CircleAlert : Bot;
 		const iconClass = this.parentState === "completed" ? "text-green-600 dark:text-green-500" : this.parentState === "failed" ? "text-destructive" : "text-foreground";
@@ -287,7 +292,7 @@ class EmbeddedAgentCard extends LitElement {
 					<span class=${iconClass} aria-hidden="true">${icon(iconName, "sm")}</span><span class="min-w-0 truncate"><strong>Agent</strong> · <span title=${role}>${role}</span></span><span class="ml-auto shrink-0 text-xs">${status}</span>${busy ? html`<span class="text-foreground animate-spin" aria-hidden="true">${icon(Loader, "sm")}</span>` : nothing}<span aria-hidden="true">${icon(this._expanded ? ChevronUp : ChevronDown, "sm")}</span>
 				</button>
 				<span class="sr-only" role="status" aria-live="polite" aria-atomic="true">${status}</span>
-				<div id=${regionId} ?hidden=${!this._expanded} aria-busy=${String(busy)} class="mt-3 space-y-3">${this.activities.map((activity) => html`<embedded-agent-activity-section .activity=${activity} .parentStreaming=${busy}></embedded-agent-activity-section>`)}${this.parentOutput ? html`<div class="text-sm ${this.parentState === "failed" ? "text-destructive" : "text-muted-foreground"}"><markdown-block .content=${this.parentOutput}></markdown-block></div>` : nothing}</div>
+				<div id=${regionId} ?hidden=${!this._expanded} aria-busy=${String(busy)} class="mt-3 space-y-3">${this.activities.map((activity) => html`<embedded-agent-activity-section .activity=${activity} .parentStreaming=${busy} .parentTerminal=${isTerminal({ state: this.parentState })}></embedded-agent-activity-section>`)}${this.parentOutput ? html`<div class="text-sm ${this.parentState === "failed" ? "text-destructive" : "text-muted-foreground"}"><markdown-block .content=${this.parentOutput}></markdown-block></div>` : nothing}</div>
 			</div>`;
 	}
 }

@@ -216,6 +216,17 @@ test.describe("Claude SDK embedded subagent card", () => {
 			await expect(reloadedParent).not.toContainText(CHILD_FAILURE);
 			await expectNoRootChildProse(page);
 
+			// Reload after failure: a less-specific recovery snapshot must not clobber
+			// the live terminal/error state or render the raw SDK sentinel.
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const terminalReloadedParent = page.locator(`[data-subagent-parent-tool-use-id="${PARENT_TOOL_USE_ID}"]`);
+			await expect(terminalReloadedParent).toBeVisible({ timeout: 20_000 });
+			await expect(terminalReloadedParent.locator(`[data-subagent-agent-id="${CHILD_AGENT_ID}"]`)).toContainText("Failed");
+			await expect(terminalReloadedParent.locator('[role="alert"]')).toContainText(SAFE_CHILD_FAILURE);
+			await expect(terminalReloadedParent).not.toContainText(CHILD_FAILURE);
+			await expectNoRootChildProse(page);
+
 			// Child lifecycle never creates a Bobbit child session, sidebar row, task,
 			// route, or a second standalone card outside its admitted root Agent call.
 			await expect(page.locator(`[data-session-id="${CHILD_AGENT_ID}"]`)).toHaveCount(0);

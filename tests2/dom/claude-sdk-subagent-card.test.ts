@@ -24,7 +24,7 @@ async function settle(root: ParentNode): Promise<void> {
 	}
 }
 
-async function mount(work: unknown, parentId = "root-agent-a") {
+async function mount(work: unknown, parentId = "root-agent-a", terminalRoot = false) {
 	const host = document.createElement("div");
 	const message = document.createElement("assistant-message") as any;
 	message.message = {
@@ -33,6 +33,11 @@ async function mount(work: unknown, parentId = "root-agent-a") {
 		timestamp: 100,
 	};
 	message.embeddedSubagentWork = work;
+	if (terminalRoot) {
+		message.toolResultsById = new Map([[parentId, {
+			role: "toolResult", toolCallId: parentId, toolName: "Agent", isError: false, content: [], timestamp: 101,
+		}]]);
+	}
 	host.append(message);
 	document.body.append(host);
 	await settle(host);
@@ -65,6 +70,24 @@ describe("Claude SDK embedded subagent card", () => {
 		expect(card?.textContent).toContain("Working");
 		expect(card?.querySelector('[data-tool-name="read"]')).toBeTruthy();
 		expect(host.textContent).not.toContain("private child prompt");
+	});
+
+	it("shows unknown child state honestly and settles its dangling tool when the root Agent is terminal", async () => {
+		const host = await mount({
+			"root-agent-a": {
+				parentToolUseId: "root-agent-a", phase: "unknown",
+				identities: [{ parentToolUseId: "root-agent-a", agentId: "sdk-child-unknown", agentType: "Recovery helper" }],
+				messages: [{
+					id: "unknown-tool-call", role: "assistant", parentToolUseId: "root-agent-a", parentAgentId: "sdk-child-unknown",
+					content: [{ type: "toolCall", id: "unknown-dangling", name: "grep", arguments: { pattern: "x" } }],
+				}],
+				pendingToolCallIds: ["unknown-dangling"],
+			},
+		}, "root-agent-a", true);
+		const card = host.querySelector("embedded-agent-card") as HTMLElement;
+		expect(card.textContent).toContain("Status unavailable");
+		expect(card.textContent).not.toContain("Working");
+		expect(card.querySelector('[data-tool-name="grep"]')?.textContent).toContain("Tool call ended before a result was received.");
 	});
 
 	it("never mounts a partition with a different or absent parent", async () => {
