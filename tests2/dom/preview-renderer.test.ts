@@ -550,7 +550,7 @@ describe("PreviewOpenRenderer", () => {
 		expect(ps.previewPanelMountedTabId).toBe(INLINE_TAB_ID);
 	});
 
-	it("v3 compact directory marker with entry reopens the historical artifact", async () => {
+	it("v3 canonical compact marker reopens the historical artifact", async () => {
 		const entry = "roadmap.html";
 		const oldHash = "c".repeat(64);
 		const result = {
@@ -560,7 +560,6 @@ describe("PreviewOpenRenderer", () => {
 				{ type: "text", text: MARKER_V3 + JSON.stringify({
 					kind: "preview",
 					url: `/preview/${SESSION_ID}/`,
-					path: entry,
 					entry,
 					contentHash: HASH,
 					artifactId: ARTIFACT_ID,
