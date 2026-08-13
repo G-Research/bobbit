@@ -18,13 +18,15 @@ describe("AIGW metadata shim retirement", () => {
 		}
 	});
 
-	it("confines model-family inference to the legacy /v1/models fallback", () => {
+	it("confines model-family inference to unauthoritative /v1/models discovery", () => {
 		const source = fs.readFileSync(path.resolve("src/server/agent/aigw-manager.ts"), "utf-8");
 		const calls = [...source.matchAll(/inferLegacyAigwMeta\s*\(/g)].map((match) => match.index);
-		assert.equal(calls.length, 2, "expected one declaration and one legacy fallback call");
+		assert.equal(calls.length, 3, "expected one declaration and one fallback call for each /v1/models discovery path");
 		const fallback = source.indexOf("const modelsUrl =");
-		assert.ok(fallback >= 0);
-		assert.ok(calls[1] > fallback, "the only call must remain inside legacy /v1/models discovery");
+		const genericDiscovery = source.indexOf("export async function discoverOpenAiCompatibleModels");
+		assert.ok(fallback >= 0 && genericDiscovery >= 0);
+		assert.ok(calls[1] > fallback, "the AIGW call must remain inside legacy /v1/models discovery");
+		assert.ok(calls[2] > genericDiscovery, "the generic call must remain inside generic /v1/models discovery");
 		const translator = source.slice(source.indexOf("export function translateWellKnown"), fallback);
 		assert.equal(/inferLegacyAigwMeta\s*\(/.test(translator), false);
 	});

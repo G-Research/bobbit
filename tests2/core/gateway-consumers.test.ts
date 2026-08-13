@@ -195,7 +195,7 @@ describe("multi-gateway consumers", () => {
 		const service = await startGateway();
 		try {
 			service.setAvailable(false);
-			const registered = gateway("retained-aigw", service.url, "aigw");
+			const registered = gateway("aigw", service.url, "aigw");
 			const prefs = new PreferencesStore(path.join(agentDir, "retained-origin-state"));
 			prefs.set("modelGateways", [registered]);
 			prefs.set(`providerKey.gateway.${registered.id}`, "gateway-secret");
@@ -203,10 +203,11 @@ describe("multi-gateway consumers", () => {
 				providers: {
 					[registered.name]: {
 						baseUrl: service.url,
+						apiKey: "none",
 						api: "openai-completions",
 						models: [
-							{ id: "same-origin", api: "openai-completions", baseUrl: `${service.url}/v1`, contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST },
-							{ id: "foreign-retained", api: "openai-completions", baseUrl: "http://127.0.0.1:9/v1", contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST },
+							{ id: "same-origin", name: "Same origin", api: "openai-completions", baseUrl: `${service.url}/v1`, contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST },
+							{ id: "foreign-retained", name: "Foreign retained", api: "openai-completions", baseUrl: "http://127.0.0.1:9/v1", contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST },
 						],
 					},
 				},

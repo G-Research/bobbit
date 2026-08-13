@@ -373,14 +373,29 @@ function readAigwTargetRealm(): AigwTargetRealm {
 	}
 }
 
+function restrictCredentialedAigwModels(models: ApiModel[], configuredUrl: string, hasCredential: boolean): ApiModel[] {
+	if (!hasCredential) return models;
+	let configuredOrigin: string;
+	try { configuredOrigin = new URL(configuredUrl).origin; }
+	catch { return []; }
+	return models.filter((model) => {
+		try { return typeof model.baseUrl === "string" && new URL(model.baseUrl).origin === configuredOrigin; }
+		catch { return false; }
+	});
+}
+
 async function readManagedRetainedAigwModels(
 	configuredUrl: string,
 	realm: Extract<AigwTargetRealm, { kind: "managed" }>,
+	hasCredential: boolean,
 ): Promise<ComposedAigwModels> {
 	const activeUrl = comparableAigwUrl(configuredUrl);
 	const retainedUrl = comparableAigwUrl(realm.provider.baseUrl);
 	if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl) return { available: false, models: [] };
-	return composeAigwTargetModels(realm.provider, true);
+	const composed = await composeAigwTargetModels(realm.provider, true);
+	return composed.available
+		? { ...composed, models: restrictCredentialedAigwModels(composed.models, configuredUrl, hasCredential) }
+		: composed;
 }
 
 interface AssembledModelCatalog {
@@ -408,7 +423,8 @@ async function assembleModels(
 	const dynamicModels = new Map<string, ApiModel[]>();
 	const gateways = registryGateways(prefs);
 	const enabledGateways = gateways.filter((gateway) => gateway.enabled);
-	const aigwUrl = enabledGateways.find((gateway) => gateway.type === "aigw")?.url;
+	const aigwGateway = enabledGateways.find((gateway) => gateway.type === "aigw");
+	const aigwUrl = aigwGateway?.url;
 
 	// Exclusivity is derived from enabled enterprise AIGWs. OpenAI-compatible
 	// gateways and built-ins share the picker unless an AIGW is the configured
@@ -456,7 +472,9 @@ async function assembleModels(
 		let sourceModels: ApiModel[] | undefined;
 		if (targetRealm.kind === "unmarked-user") {
 			const composed = await composeAigwTargetModels(targetRealm.provider);
-			sourceModels = composed.available ? composed.models : [];
+			sourceModels = composed.available
+				? restrictCredentialedAigwModels(composed.models, aigwUrl, gatewayHasConfiguredApiKey(prefs, aigwGateway!.id))
+				: [];
 		} else if (targetRealm.kind === "invalid") {
 			console.error(`[model-registry] AIGW target realm is unavailable: ${targetRealm.reason}`);
 			sourceModels = [];
@@ -496,7 +514,7 @@ async function assembleModels(
 				// An absent target keeps the prior exact discovery snapshot; user-owned
 				// targets were handled above and can never be bypassed by that cache.
 				const retained = targetRealm.kind === "managed"
-					? await readManagedRetainedAigwModels(aigwUrl, targetRealm)
+					? await readManagedRetainedAigwModels(aigwUrl, targetRealm, gatewayHasConfiguredApiKey(prefs, aigwGateway!.id))
 					: { available: false, models: [] };
 				sourceModels = retained.available ? retained.models : previousDynamicModels.get(sourceKey);
 			}

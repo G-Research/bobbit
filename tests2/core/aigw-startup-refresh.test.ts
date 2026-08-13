@@ -164,7 +164,10 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 						openai: {
 							npm: "@ai-sdk/openai",
 							options: { baseURL: `http://127.0.0.1:${port}/v1` },
-							models: { "gpt-5.5": { name: "GPT 5.5", limit: { context: 128000, output: 16384 } } },
+							models: { "gpt-5.5": {
+								name: "GPT 5.5", reasoning: false, modalities: { input: ["text"] },
+								limit: { context: 128000, output: 16384 },
+							} },
 						},
 					},
 				}));
