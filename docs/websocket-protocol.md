@@ -317,7 +317,7 @@ for the SDK contract.
 | `client_left` | `clientId` | A client disconnected |
 | `error` | `message`, `code` | Error message |
 | `pong` | — | Keepalive response |
-| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Cumulative persisted session cost snapshot. Sent after live completed assistant usage and during hydration paths when persisted cost exists. Current servers include `cost.cacheHitRate`; see [Cost update shape](#cost-update-shape). |
+| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Authoritative, cumulative persisted `SessionUsageSnapshot`, identical to `state.serverCost` (not a delta). Clients replace their snapshot and never sum visible transcript rows. Sent after Pi completed-assistant/completed-compaction accounting, after an SDK root result is durably accepted, and during hydration when usage exists. See [Session usage and cost — Snapshot contract](session-cost.md#snapshot-contract). |
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
 | `side_panel_workspace` | `sessionId`, `workspace` | The server-authoritative side-panel workspace for the session changed. Clients replace their local mirror only when `workspace.revision` is newer; see [side-panel-workspace.md](side-panel-workspace.md). |
 | `task_changed` | `task` | A task was created, updated, or deleted |
@@ -404,31 +404,37 @@ Dormant archived, shelved, or paused goals return REST `409`; they produce no `g
 
 ### Session cost hydration
 
-`cost_update.cost` has the same shape as `state.serverCost`: cumulative input/output/cache token totals plus `totalCost`, with `cacheHitRate` included by current servers. The payload is read from persisted `CostTracker` data and is not a delta; clients should replace their cached cost snapshot, not add it locally.
+`cost_update.cost` and `state.serverCost` are the same persisted, cumulative, non-delta `SessionUsageSnapshot`. Clients replace the stored snapshot on either frame; they must never sum visible transcript rows, replayed events, or prior snapshots. The legacy input/output/cache token counters and `cacheHitRate` remain available for existing clients.
 
-When persisted cost exists, the server hydrates it on active attach/reconnect, `get_state`, `get_messages`, resume/replay fallback, archived attach/state/messages, and `refreshAfterCompaction()`. `refreshAfterCompaction()` sends `cost_update` before the compacted `messages` snapshot so the UI keeps showing cumulative spend instead of recalculating from the reduced visible transcript.
+When persisted usage exists, the server hydrates it on active attach/reconnect, `get_state`, `get_messages`, resume/replay fallback, archived attach/state/messages, and `refreshAfterCompaction()`. Compaction preserves the ordering: `refreshAfterCompaction()` sends `cost_update`, then the compacted `messages` snapshot, then `state`. This keeps cumulative usage visible without recounting the shortened transcript.
 
-See [session-cost.md](session-cost.md) for the source-of-truth and no-double-counting rules.
+Pi records usage from completed assistant and completed compaction events. Claude Agent SDK sessions record it only when a root `result` has been durably accepted by the private exactly-once ledger; streamed messages, child results, and replay do not advance the snapshot.
+
+See [Session usage and cost — Snapshot contract](session-cost.md#snapshot-contract) for the canonical full shape and no-double-counting rules.
 
 ### Cost update shape
 
-The `cost` field of a `cost_update` message:
+The snapshot retains legacy token counters and `cacheHitRate`, and adds cost basis, per-model usage, and context data. `totalCost` is a billed amount only when established; `null` means unknown or not applicable, never zero. Subscription usage is instead represented by `notionalCostUsd` with `costBasis: "subscription-notional"` and `totalCost: null`.
+
+A compact SDK subscription example (the canonical document defines all nested fields):
 
 ```json
 {
   "inputTokens": 12500,
   "outputTokens": 340,
-  "cacheReadTokens": 87000,
-  "cacheWriteTokens": 3200,
-  "totalCost": 0.004712,
-  "cacheHitRate": 0.874
+  "cacheHitRate": 0.874,
+  "totalCost": null,
+  "notionalCostUsd": 0.004712,
+  "costBasis": "subscription-notional",
+  "costBasisHistory": ["subscription-notional"],
+  "byModel": { "claude-sonnet": { "inputTokens": 12500 } },
+  "context": { "currentTokens": 18200, "highWaterTokens": 24100 }
 }
 ```
 
-- `cacheHitRate?: number | null` — derived ratio `cacheReadTokens / (cacheReadTokens + inputTokens)`. `null` when the denominator is 0 (cold session, or provider that does not report cache counters). Optional for mixed-version compatibility with older payloads.
-- Older clients that do not recognise `cacheHitRate` silently ignore it.
+`costBasisHistory` preserves basis transitions. `byModel` attributes usage by model. `context.currentTokens` reports the latest authoritative SDK occupancy, while `context.highWaterTokens` is the persistent maximum; their model-specific counterparts are in `context.byModel`.
 
-See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details and null semantics.
+See [Session usage and cost — Snapshot contract](session-cost.md#snapshot-contract) for the complete `SessionUsageSnapshot`, and [cache-hit-rate.md](cache-hit-rate.md) for the cache-ratio formula and its `null` semantics.
 
 ### Streaming resume
 
