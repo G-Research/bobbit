@@ -1917,6 +1917,9 @@ export class AgentInterface extends LitElement {
 
 		// Build a map of tool results to allow inline rendering in assistant messages
 		const toolResultsById = this._getToolResultsById();
+		// Nested SDK child work is owned by RemoteAgent outside root ordering. Pass
+		// the exact-parent map through both stable and streaming card paths only.
+		const subagentWorkByParent = (state as any).subagentWorkByParent;
 		// Hide `[ask_user_choices_response tool_use_id=...]` user messages from the
 		// rendered transcript — the matching tool_use card renders the user's
 		// answers inline via the widget's Answered mode. The envelope message must
@@ -1951,6 +1954,7 @@ export class AgentInterface extends LitElement {
 					.isStreaming=${state.isStreaming}
 					.hasStreamMessage=${!!state.streamingMessage}
 					.toolPartialResults=${(state as any).toolPartialResults}
+					.embeddedSubagentWork=${subagentWorkByParent}
 					.hideActionablePermissionRows=${true}
 					.promptAuthorDisplayMode=${promptAuthorDisplayMode}
 					.resolvePromptAuthorAppearance=${this._resolvePromptAuthorAppearance}
@@ -1996,6 +2000,7 @@ export class AgentInterface extends LitElement {
 					.permissionBlockedTools=${this._activePermissionToolNames()}
 					.toolResultsById=${toolResultsById}
 					.toolPartialResults=${(state as any).toolPartialResults}
+					.embeddedSubagentWork=${subagentWorkByParent}
 					.onCostClick=${this.onCostClick}
 					.turnStartTime=${(state as any).turnStartTime ?? null}
 				></streaming-message-container>

@@ -11452,6 +11452,8 @@ export class SessionManager {
 			return { ...base, sandboxSdk: {
 				getSessionInfo: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
 				getSessionMessages: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
+				listSubagents: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
+				getSubagentMessages: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
 			} };
 		}
 		return {
