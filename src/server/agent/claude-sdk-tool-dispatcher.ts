@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { Worker } from "node:worker_threads";
 import type { ChildProcess } from "node:child_process";
 import type { McpManager } from "../mcp/mcp-manager.js";
@@ -185,6 +186,17 @@ function buildClaudeSdkSandboxWorkerEnv(
 /** Session-local adapter around Pi's public extension loader. */
 type DispatcherProcess = Worker | ChildProcess;
 
+type SandboxFrameReader = {
+	decoder: StringDecoder;
+	buffer: string;
+	failed: boolean;
+};
+
+// Tool results may legitimately exceed a pipe's typical 64 KiB chunk. Keep a
+// bounded incomplete-frame buffer so a malformed worker cannot retain stdout
+// indefinitely before its newline arrives.
+const MAX_SANDBOX_DISPATCH_FRAME_BYTES = 4 * 1024 * 1024;
+
 export class ClaudeSdkExtensionDispatcher {
 	private worker?: DispatcherProcess;
 	private starting?: Promise<DispatcherProcess>;
@@ -193,7 +205,6 @@ export class ClaudeSdkExtensionDispatcher {
 	private disposed = false;
 	private schemas: readonly ClaudeSdkExtensionSchema[] = [];
 	private readonly pending = new Map<number, Pending>();
-	private stdoutBuffer = "";
 
 	constructor(private readonly options: ClaudeSdkExtensionDispatcherOptions) {}
 
@@ -222,7 +233,10 @@ export class ClaudeSdkExtensionDispatcher {
 			env: workerEnv,
 			...(useSourceWorker ? { execArgv: ["--import", "tsx"] } : {}),
 		});
-		return this.awaitReady(worker, message => worker.on("message", message), () => worker.terminate(), message => worker.postMessage(message));
+		return this.awaitReady(worker, listener => {
+			worker.on("message", listener);
+			return () => worker.off("message", listener);
+		}, () => worker.terminate(), message => worker.postMessage(message));
 	}
 
 	private startSandboxWorker(): Promise<ChildProcess> {
@@ -254,54 +268,101 @@ export class ClaudeSdkExtensionDispatcher {
 			child.kill("SIGTERM");
 			throw new Error("Claude SDK sandbox dispatcher did not provide pipe stdio");
 		}
-		return this.awaitReady(child, listener => child.stdout!.on("data", chunk => this.readSandboxMessage(chunk, listener)), () => child.kill("SIGTERM"), message => this.send(child, message), {
+		const reader: SandboxFrameReader = { decoder: new StringDecoder("utf8"), buffer: "", failed: false };
+		return this.awaitReady(child, listener => {
+			const onData = (chunk: Buffer) => this.readSandboxMessage(reader, chunk, listener);
+			child.stdout!.on("data", onData);
+			return () => child.stdout!.off("data", onData);
+		}, () => child.kill("SIGTERM"), message => this.send(child, message), {
 			cwd: sandbox.cwd,
 			env: workerEnv,
 			manifest,
-		});
+		}, reader);
 	}
 
-	private awaitReady<T extends DispatcherProcess>(worker: T, subscribe: (listener: (message: any) => void) => void, terminate: () => unknown, send: (message: unknown) => void, init?: unknown): Promise<T> {
+	private awaitReady<T extends DispatcherProcess>(worker: T, subscribe: (listener: (message: any) => void) => (() => void) | void, terminate: () => unknown, send: (message: unknown) => void, init?: unknown, sandboxReader?: SandboxFrameReader): Promise<T> {
 		this.startingWorker = worker;
 		return new Promise<T>((resolve, reject) => {
+			let settled = false;
+			let detach: (() => void) | undefined;
+			const onExit = () => rejectStartup("worker-exited");
+			const cleanupStartupListeners = () => {
+				detach?.();
+				worker.off("error", rejectStartup);
+				worker.off("exit", onExit);
+			};
 			const rejectStartup = (diagnostic?: unknown) => {
+				if (settled) return;
+				settled = true;
+				cleanupStartupListeners();
 				if (this.startingWorker === worker) this.startingWorker = undefined;
 				void terminate();
 				const detail = typeof diagnostic === "string" ? diagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) : "";
 				reject(new Error(`Bobbit extension dispatcher failed to start${detail ? ` (${detail})` : ""}`));
 			};
 			const onMessage = (message: any) => {
+				if (settled) return;
+				if (message?.type === "protocol-error") return rejectStartup("invalid-protocol");
 				if (message?.type === "ready") {
 					if (!Array.isArray(message.schemas)) return rejectStartup();
-					if (Array.isArray(message.omittedConditional) && message.omittedConditional.length > 0) {
-						const omitted = message.omittedConditional.filter((name: unknown): name is string => typeof name === "string").slice(0, 8).map((name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80));
-						console.warn(`[claude-sdk] ${message.omittedConditional.length} selected conditional tool registration(s) omitted${omitted.length ? `: ${omitted.join(",")}` : ""}`);
+					try {
+						if (Array.isArray(message.omittedConditional) && message.omittedConditional.length > 0) {
+							const omitted = message.omittedConditional.filter((name: unknown): name is string => typeof name === "string").slice(0, 8).map((name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80));
+							console.warn(`[claude-sdk] ${message.omittedConditional.length} selected conditional tool registration(s) omitted${omitted.length ? `: ${omitted.join(",")}` : ""}`);
+						}
+						this.schemas = Object.freeze(message.schemas.map((schema: unknown) => {
+							if (!schema || typeof schema !== "object" || typeof (schema as ClaudeSdkExtensionSchema).name !== "string" || !(schema as ClaudeSdkExtensionSchema).inputSchema || typeof (schema as ClaudeSdkExtensionSchema).inputSchema !== "object") throw new Error("Invalid Claude SDK extension schema");
+							return Object.freeze({ name: (schema as ClaudeSdkExtensionSchema).name, inputSchema: (schema as ClaudeSdkExtensionSchema).inputSchema });
+						}));
+					} catch {
+						return rejectStartup("invalid-schema");
 					}
-					this.schemas = Object.freeze(message.schemas.map((schema: unknown) => {
-						if (!schema || typeof schema !== "object" || typeof (schema as ClaudeSdkExtensionSchema).name !== "string" || !(schema as ClaudeSdkExtensionSchema).inputSchema || typeof (schema as ClaudeSdkExtensionSchema).inputSchema !== "object") throw new Error("Invalid Claude SDK extension schema");
-						return Object.freeze({ name: (schema as ClaudeSdkExtensionSchema).name, inputSchema: (schema as ClaudeSdkExtensionSchema).inputSchema });
-					}));
+					settled = true;
+					cleanupStartupListeners();
 					this.startingWorker = undefined;
-					this.attach(worker);
+					this.attach(worker, sandboxReader);
 					this.worker = worker;
 					resolve(worker);
 				} else if (message?.type === "startup-error") rejectStartup(message.diagnostic);
 			};
-			subscribe(onMessage);
+			detach = subscribe(onMessage) ?? undefined;
 			worker.once("error", rejectStartup);
-			worker.once("exit", () => rejectStartup("worker-exited"));
+			worker.once("exit", onExit);
 			if (init) send({ type: "init", ...(init as object) });
 		});
 	}
 
-	private readSandboxMessage(chunk: Buffer | string, listener: (message: any) => void): void {
-		this.stdoutBuffer += chunk.toString();
-		const lines = this.stdoutBuffer.split("\n");
-		this.stdoutBuffer = lines.pop() ?? "";
+	private readSandboxMessage(reader: SandboxFrameReader, chunk: Buffer | string, listener: (message: any) => void): void {
+		if (reader.failed) return;
+		reader.buffer += reader.decoder.write(chunk);
+		if (Buffer.byteLength(reader.buffer) > MAX_SANDBOX_DISPATCH_FRAME_BYTES) {
+			reader.failed = true;
+			listener({ type: "protocol-error" });
+			return;
+		}
+		const lines = reader.buffer.split("\n");
+		reader.buffer = lines.pop() ?? "";
 		for (const line of lines) {
 			if (!line.startsWith("BOBBIT_SDK_DISPATCH:")) continue;
-			try { listener(JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length))); } catch { /* Trusted worker diagnostics may be truncated; ignore non-protocol output. */ }
+			try {
+				const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
+				if (!message || typeof message !== "object") throw new Error("invalid protocol message");
+				listener(message);
+			} catch {
+				reader.failed = true;
+				listener({ type: "protocol-error" });
+				return;
+			}
 		}
+	}
+
+	private failSandboxProtocol(worker: DispatcherProcess): void {
+		if (this.worker === worker) this.worker = undefined;
+		if (this.startingWorker === worker) this.startingWorker = undefined;
+		this.starting = undefined;
+		this.failAll(new Error("Bobbit extension dispatcher protocol error"));
+		if (worker instanceof Worker) void worker.terminate();
+		else worker.kill("SIGTERM");
 	}
 
 	private send(worker: DispatcherProcess, message: unknown): void {
@@ -309,8 +370,12 @@ export class ClaudeSdkExtensionDispatcher {
 		else worker.stdin?.write(`BOBBIT_SDK_DISPATCH:${JSON.stringify(message)}\n`);
 	}
 
-	private attach(worker: DispatcherProcess): void {
+	private attach(worker: DispatcherProcess, sandboxReader?: SandboxFrameReader): void {
 		const onMessage = (message: any) => {
+			if (message?.type === "protocol-error") {
+				this.failSandboxProtocol(worker);
+				return;
+			}
 			if (message?.type !== "result" || typeof message.id !== "number") return;
 			const pending = this.pending.get(message.id);
 			if (!pending) return;
@@ -320,7 +385,10 @@ export class ClaudeSdkExtensionDispatcher {
 			else pending.resolve(message.result);
 		};
 		if (worker instanceof Worker) worker.on("message", onMessage);
-		else worker.stdout?.on("data", chunk => this.readSandboxMessage(chunk, onMessage));
+		else {
+			if (!sandboxReader) throw new Error("Claude SDK sandbox dispatcher is missing its stdout frame reader");
+			worker.stdout?.on("data", chunk => this.readSandboxMessage(sandboxReader, chunk, onMessage));
+		}
 		worker.on("error", error => this.failAll(error));
 		worker.on("exit", () => {
 			this.worker = undefined;

@@ -58,6 +58,43 @@ function workerEnv(manifest: ReturnType<typeof buildClaudeSdkExtensionManifest>)
 	return { BOBBIT_BUILTIN_TOOLS: [...new Set(manifest.flatMap(entry => entry.builtinToolNames ?? []))].sort().join(",") };
 }
 
+function sandboxDispatcherFixture() {
+	const child = new EventEmitter() as any;
+	child.stdin = new PassThrough();
+	child.stdout = new PassThrough();
+	child.stderr = new PassThrough();
+	child.killed = false;
+	child.exitCode = null;
+	child.signalCode = null;
+	child.kill = vi.fn(() => true);
+	const dockerSpawn = vi.fn((_command: string, args: string[]) => {
+		expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/current", "container-current", "node"]));
+		expect(args.join(" ")).toContain("BOBBIT_TOKEN=scoped-token");
+		return child;
+	});
+	const received: any[] = [];
+	let input = "";
+	child.stdin.on("data", (chunk: Buffer) => {
+		input += chunk.toString();
+		const lines = input.split("\n");
+		input = lines.pop() ?? "";
+		for (const line of lines) {
+			const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
+			received.push(message);
+			if (message.type === "init") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "ready", schemas: [{ name: "read", inputSchema: { type: "object" } }], omittedConditional: [] }) + "\n");
+		}
+	});
+	const dispatcher = new ClaudeSdkExtensionDispatcher({
+		cwd: "/host/must-not-run-tools",
+		env: {},
+		gatewayCredentials: { token: "scoped-token", url: "http://gateway.test" },
+		manifest: [{ extensionPath: path.resolve("defaults/tools/_builtins/extension.ts"), selectedToolNames: ["read"], allowedToolNames: ["read"] }],
+		sandbox: { containerId: "container-current", cwd: "/workspace-wt/current", builtinToolsDir: path.resolve("defaults/tools"), spawn: dockerSpawn as any, workerSource: "void 0" },
+	});
+	const emit = (message: unknown) => child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify(message) + "\n");
+	return { child, dispatcher, dockerSpawn, emit, received };
+}
+
 describe("Claude SDK Bobbit tool permission integration", () => {
 	it("applies registration, canUseTool, and PreToolUse ceilings independently", async () => {
 		const { surface } = fixture();
@@ -158,44 +195,65 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		}
 	});
 
-	it("runs a sandbox dispatcher through the current container instead of a host Worker", async () => {
-		const child = new EventEmitter() as any;
-		child.stdin = new PassThrough();
-		child.stdout = new PassThrough();
-		child.stderr = new PassThrough();
-		child.killed = false;
-		child.exitCode = null;
-		child.signalCode = null;
-		child.kill = vi.fn(() => true);
-		const dockerSpawn = vi.fn((_command: string, args: string[]) => {
-			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/current", "container-current", "node"]));
-			expect(args.join(" ")).toContain("BOBBIT_TOKEN=scoped-token");
-			return child;
-		});
-		let input = "";
-		child.stdin.on("data", (chunk: Buffer) => {
-			input += chunk.toString();
-			const lines = input.split("\n");
-			input = lines.pop() ?? "";
-			for (const line of lines) {
-				const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
-				if (message.type === "init") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "ready", schemas: [{ name: "read", inputSchema: { type: "object" } }], omittedConditional: [] }) + "\n");
-				if (message.type === "invoke") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "result", id: message.id, result: "container-result" }) + "\n");
-			}
-		});
-		const dispatcher = new ClaudeSdkExtensionDispatcher({
-			cwd: "/host/must-not-run-tools",
-			env: {},
-			gatewayCredentials: { token: "scoped-token", url: "http://gateway.test" },
-			manifest: [{ extensionPath: path.resolve("defaults/tools/_builtins/extension.ts"), selectedToolNames: ["read"], allowedToolNames: ["read"] }],
-			sandbox: { containerId: "container-current", cwd: "/workspace-wt/current", builtinToolsDir: path.resolve("defaults/tools"), spawn: dockerSpawn as any, workerSource: "void 0" },
-		});
+	it("frames sandbox dispatcher stdout once across split, large, and UTF-8 result chunks", async () => {
+		const { child, dispatcher, dockerSpawn, emit, received } = sandboxDispatcherFixture();
+		const nextInvocation = async () => {
+			const pending = dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(received.at(-1)?.type).toBe("invoke"));
+			return { pending, id: received.at(-1)!.id as number };
+		};
 		try {
 			await expect(dispatcher.start()).resolves.toEqual([{ name: "read", inputSchema: { type: "object" } }]);
-			await expect(dispatcher.invoke("read", {}, {})).resolves.toBe("container-result");
+			expect(child.stdout.listenerCount("data")).toBe(1);
+
+			const split = await nextInvocation();
+			const splitFrame = "BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "result", id: split.id, result: "split-result" }) + "\n";
+			const splitAt = splitFrame.indexOf("result") + 3;
+			child.stdout.write(splitFrame.slice(0, splitAt));
+			child.stdout.write(splitFrame.slice(splitAt));
+			await expect(split.pending).resolves.toBe("split-result");
+
+			const large = await nextInvocation();
+			const largeResult = "x".repeat(65 * 1024);
+			emit({ type: "result", id: large.id, result: largeResult });
+			await expect(large.pending).resolves.toBe(largeResult);
+
+			const utf8 = await nextInvocation();
+			const utf8Result = "split emoji: 🙂";
+			const utf8Frame = Buffer.from("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "result", id: utf8.id, result: utf8Result }) + "\n");
+			const emojiOffset = utf8Frame.indexOf(Buffer.from("🙂")) + 2;
+			child.stdout.write(utf8Frame.subarray(0, emojiOffset));
+			child.stdout.write(utf8Frame.subarray(emojiOffset));
+			await expect(utf8.pending).resolves.toBe(utf8Result);
 			expect(dockerSpawn).toHaveBeenCalledOnce();
 		} finally {
 			dispatcher.dispose();
+		}
+	});
+
+	it("fails closed and settles pending sandbox calls for malformed and oversized frames", async () => {
+		const malformed = sandboxDispatcherFixture();
+		try {
+			await malformed.dispatcher.start();
+			const pending = malformed.dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(malformed.received.at(-1)?.type).toBe("invoke"));
+			malformed.child.stdout.write("BOBBIT_SDK_DISPATCH:{not-json}\n");
+			await expect(pending).rejects.toThrow("protocol error");
+			expect(malformed.child.kill).toHaveBeenCalledWith("SIGTERM");
+		} finally {
+			malformed.dispatcher.dispose();
+		}
+
+		const oversized = sandboxDispatcherFixture();
+		try {
+			await oversized.dispatcher.start();
+			const pending = oversized.dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(oversized.received.at(-1)?.type).toBe("invoke"));
+			oversized.child.stdout.write("BOBBIT_SDK_DISPATCH:" + "x".repeat(5 * 1024 * 1024));
+			await expect(pending).rejects.toThrow("protocol error");
+			expect(oversized.child.kill).toHaveBeenCalledWith("SIGTERM");
+		} finally {
+			oversized.dispatcher.dispose();
 		}
 	});
 
