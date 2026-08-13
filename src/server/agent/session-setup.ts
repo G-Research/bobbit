@@ -66,6 +66,7 @@ import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, providerFromModel, recoverAnthropicApiKeyRuntime } from "./host-tokens.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
+import { claudeAgentSdkUnavailableDiagnostic, isClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 
 export interface PiExtensionDiagnostic {
 	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
@@ -466,9 +467,12 @@ export async function withRetry<T>(
 			if (opts.nonRetryable?.(lastError)) throw lastError;
 			if (attempt < opts.retries) {
 				const delay = opts.delays[attempt] ?? opts.delays[opts.delays.length - 1];
+				const diagnostic = isClaudeAgentSdkUnavailableError(lastError)
+					? claudeAgentSdkUnavailableDiagnostic(lastError)
+					: lastError.message;
 				console.warn(
 					`[session-setup] ${opts.label} failed for ${opts.sessionId} (attempt ${attempt + 1}/${opts.retries + 1}), ` +
-					`retrying in ${delay}ms: ${lastError.message}`,
+					`retrying in ${delay}ms: ${diagnostic}`,
 				);
 				await new Promise(resolve => setTimeout(resolve, delay));
 			}
