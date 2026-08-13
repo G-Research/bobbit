@@ -191,7 +191,7 @@ describe("ServiceRuntimeSupervisor", () => {
 		const status = await instance.start({ ...identity, mode: "local" });
 		assert.deepEqual(status, { identity, desired: "running", mode: "local", state: "ready", endpoint });
 		assert.deepEqual(events, ["persist:none", "environment", "start", "persist:none", `persist:${endpoint}`]);
-		assert.deepEqual(store.environmentCalls, [{ FIXED: "fixed", CONFIG: "configured", USER_SECRET: "user-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080" }]);
+		assert.deepEqual(store.environmentCalls, [{ FIXED: "fixed", CONFIG: "configured", USER_SECRET: "user-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080", HOST: "127.0.0.1" }]);
 		assert.equal(resolveSecret.mock.calls.length, 1);
 		assert.ok(!JSON.stringify(store.replaceCalls).includes("user-secret"));
 		assert.ok(!JSON.stringify(store.replaceCalls).includes("generated-TOKEN"));
@@ -216,7 +216,7 @@ describe("ServiceRuntimeSupervisor", () => {
 
 		await expect(instance.start({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "ready" });
 		assert.equal(resolveSecret.mock.calls.length, 0, "a control uses its immutable settings/secret snapshot");
-		assert.deepEqual(store.environmentCalls[0], { FIXED: "fixed", CONFIG: "configured", USER_SECRET: "snapshot-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080" });
+		assert.deepEqual(store.environmentCalls[0], { FIXED: "fixed", CONFIG: "configured", USER_SECRET: "snapshot-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080", HOST: "127.0.0.1" });
 		assert.ok(!JSON.stringify(store.replaceCalls).includes("snapshot-secret"));
 	});
 
@@ -715,7 +715,7 @@ describe("ServiceRuntimeSupervisor", () => {
 		assert.equal(resolve.mock.calls.length, 1, "restart never resolves a second generation after stop");
 		assert.equal(resolveSecret.mock.calls.length, 0, "the captured EP-7 secret pair is never mixed with a later generation");
 		assert.deepEqual(store.environmentCalls.at(-1), {
-			FIXED: "fixed", CONFIG: "old-public", USER_SECRET: "old-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080",
+			FIXED: "fixed", CONFIG: "old-public", USER_SECRET: "old-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080", HOST: "127.0.0.1",
 		});
 		assert.equal(store.records.get(store.key(identity))?.settingsRevision, "revision-2");
 	});
