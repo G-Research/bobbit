@@ -367,6 +367,11 @@ const VERIFIER_BUSY_PARKED_ENVELOPE = "Verifier prompt parked after reviewer con
 const VERIFIER_BUSY_TRANSPORT = "Agent is already processing\\.\\s*Specify streamingBehavior \\('steer' or 'followUp'\\) to queue the message\\.?";
 const VERIFIER_RECEIPT_TIMEOUT = "Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \\d+ms";
 const VERIFIER_RESTART_BEFORE_DISPATCH = "Verifier (?:session [a-z0-9][a-z0-9-]* (?:restarted|was terminated) before dispatch|prompt [a-z0-9][a-z0-9-]* was cancelled before dispatch)";
+// describeProviderBackoff() appends this durable diagnostic to a failed step.
+// Permit only its fixed shape after an otherwise exact infrastructure envelope;
+// never scan a reviewer finding for a phrase that merely resembles one.
+const VERIFIER_BACKOFF_SUFFIX = "(?:\\s+Last turn hit a provider (?:rate-limit|overload|backoff) error(?:[\\s\\S]*))?";
+const VERIFIER_RECOVERY_PREFIX = "Reviewer agent was not ready / timed out while (?:resuming|sending post-continuation reminder) after server restart:\\s*";
 
 /**
  * The verifier receipt's bounded dispatch wait elapsed while its durable row
@@ -375,7 +380,10 @@ const VERIFIER_RESTART_BEFORE_DISPATCH = "Verifier (?:session [a-z0-9][a-z0-9-]*
  * delivery uses its tick-zero queue redrain rather than verification retries.
  */
 export function isVerifierPromptDispatchTimeoutError(output: string): boolean {
-	return !!output && new RegExp(`^${VERIFIER_FAILURE_PREFIX}\\s*${VERIFIER_RECEIPT_TIMEOUT}$`, "i").test(output.trim());
+	return !!output && new RegExp(
+		`^(?:${VERIFIER_FAILURE_PREFIX}\\s*|${VERIFIER_RECOVERY_PREFIX})${VERIFIER_RECEIPT_TIMEOUT}${VERIFIER_BACKOFF_SUFFIX}$`,
+		"i",
+	).test(output.trim());
 }
 
 /**
@@ -400,11 +408,15 @@ export function isVerifierBusyTransportError(output: string): boolean {
 export function isVerifierRestartBeforeDispatchError(output: string): boolean {
 	if (!output) return false;
 	const text = output.trim();
-	return new RegExp(`^(?:${VERIFIER_FAILURE_PREFIX}\\s*|Reviewer agent was not ready / timed out while (?:resuming|sending post-continuation reminder) after server restart:\\s*)${VERIFIER_RESTART_BEFORE_DISPATCH}$`, "i").test(text);
+	return new RegExp(
+		`^(?:${VERIFIER_FAILURE_PREFIX}\\s*|${VERIFIER_RECOVERY_PREFIX})${VERIFIER_RESTART_BEFORE_DISPATCH}${VERIFIER_BACKOFF_SUFFIX}$`,
+		"i",
+	).test(text);
 }
 
 /** Verifier-only transient policy; generic SessionManager policy stays narrow. */
 export function isTransientVerifierReviewError(output: string): boolean {
+	if (isNonRetryableAgentError(output)) return false;
 	return isTransientReviewError(output)
 		|| isVerifierBusyTransportError(output)
 		|| isVerifierPromptDispatchTimeoutError(output)
@@ -413,6 +425,7 @@ export function isTransientVerifierReviewError(output: string): boolean {
 
 /** Verifier-only QA variant, preserving QA's ordinary stricter policy. */
 export function isTransientVerifierQaError(output: string): boolean {
+	if (isNonRetryableAgentError(output)) return false;
 	return isTransientQaError(output)
 		|| isVerifierBusyTransportError(output)
 		|| isVerifierPromptDispatchTimeoutError(output)

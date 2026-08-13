@@ -1010,6 +1010,10 @@ import {
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
 import { dispatchTrackedSystemPrompt, type SessionInfo } from "./session-manager.js";
+import {
+	COLD_REPROMPT_PROMPT_TIMEOUT_MS,
+	COLD_REPROMPT_READY_TIMEOUT_MS,
+} from "./rpc-bridge.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
@@ -2077,7 +2081,20 @@ export function sanitizeVerificationWsEvent<T>(event: T): T {
 const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
 const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
 /** Queue admission is outside active review time, but cannot block forever. */
-const VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS = 60_000;
+export const VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS = 60_000;
+/** Small event-loop/RPC handoff allowance beyond the bridge's cold-start budgets. */
+export const VERIFIER_COLD_PROMPT_DISPATCH_MARGIN_MS = 5_000;
+/**
+ * A cold receipt includes both bridge waits: readiness plus its first prompt
+ * acknowledgement. Keep this derived from RpcBridge's exported contract so a
+ * bridge timeout change cannot silently reintroduce a shorter verifier fence.
+ */
+export const VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS =
+	COLD_REPROMPT_READY_TIMEOUT_MS + COLD_REPROMPT_PROMPT_TIMEOUT_MS + VERIFIER_COLD_PROMPT_DISPATCH_MARGIN_MS;
+
+export function verifierPromptDispatchTimeoutMs(coldStart?: boolean): number {
+	return coldStart ? VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS : VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS;
+}
 // Reminder-path fairness (see runLlmReviewViaSession). A reviewer that went
 // idle without calling verification_result is nudged up to MAX_REVIEWER_REMINDERS
 // times. Each nudge waits for its exact durable dispatch receipt, then gives
@@ -5353,7 +5370,8 @@ export class VerificationHarness {
 			resultPromise?: Promise<VerificationResult>;
 		},
 	): Promise<VerifierPromptDispatchOutcome> {
-		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1}`;
+		const dispatchBudgetMs = verifierPromptDispatchTimeoutMs(args.whenReady);
+		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1} dispatchBudgetMs=${dispatchBudgetMs}`;
 		const signalIsCurrent = () => {
 			if (!args.signalId) return true;
 			const active = this.activeVerifications.get(args.signalId);
@@ -5415,7 +5433,7 @@ export class VerificationHarness {
 					...(resultArrival ? [resultArrival] : []),
 					cancellation.promise,
 					new Promise<{ type: "timeout" }>(resolve => {
-						timer = this.clock.setTimeout(() => resolve({ type: "timeout" }), VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS);
+						timer = this.clock.setTimeout(() => resolve({ type: "timeout" }), dispatchBudgetMs);
 					}),
 				]);
 				// A tool POST can arrive between the provider accepting a turn and its
@@ -5433,7 +5451,7 @@ export class VerificationHarness {
 					console.warn(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=cancelled-generation row=${receipt.rowId}`);
 					return { type: "cancelled", reason: winner.type === "cancelled" ? winner.reason : `Verifier prompt ${receipt.rowId} was superseded before acknowledgement` };
 				}
-				if (winner.type === "timeout") throw new Error(`Verifier prompt ${receipt.rowId} did not dispatch within ${VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS}ms`);
+				if (winner.type === "timeout") throw new Error(`Verifier prompt ${receipt.rowId} did not dispatch within ${dispatchBudgetMs}ms`);
 				console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=dispatched row=${receipt.rowId}`);
 				return { type: "dispatched" };
 			} catch (error) {
@@ -5452,6 +5470,7 @@ export class VerificationHarness {
 				const decision = isReviewerBusyError(message)
 					? "busy-contention"
 					: isVerifierPromptDispatchTimeoutError(message)
+						|| /^Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \d+ms$/i.test(message)
 						? "dispatch-timeout"
 						: "cancelled";
 				// Lifecycle fields only: error strings can include provider payloads.
