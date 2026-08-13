@@ -24,13 +24,13 @@
 import { test, expect } from "./in-process-harness-realpush.js";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
 import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
 import { apiFetch } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -72,9 +72,24 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 		projectId = proj.id;
 	});
 
-	test.afterAll(() => {
+	test.afterAll(async () => {
+		// ProjectContext owns SQLite handles under workRepo/.bobbit/state. Remove
+		// the registered project first: DELETE awaits ProjectContext.close(), which
+		// flushes pending archive writes and releases every native handle before the
+		// containing fixture tree is relocated. Deleting tmpRoot first makes the
+		// worker-scoped gateway's later shutdown flush fail with
+		// SQLITE_READONLY_DBMOVED.
+		if (projectId) {
+			const response = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+			if (!response.ok) {
+				throw new Error(`project cleanup failed: ${response.status} ${await response.text()}`);
+			}
+		}
 		if (tmpRoot) {
-			try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
+			const cleanup = await awaitableRm(tmpRoot);
+			if (!cleanup.removed) {
+				throw cleanup.lastError ?? new Error(`fixture cleanup failed for ${tmpRoot}`);
+			}
 		}
 	});
 
