@@ -23,12 +23,16 @@ function assistant(id: string, parentToolUseId: string | undefined, parentAgentI
 	};
 }
 
-function recoverySdk(rowsByAgent: Record<string, SdkSessionMessage[]>): { sdk: ClaudeAgentSdkSessionApi; deps: { loadSdk: () => Promise<ClaudeAgentSdkSessionApi> } } {
+function recoverySdk(
+	rowsByAgent: Record<string, SdkSessionMessage[]>,
+	overrides: Partial<ClaudeAgentSdkSessionApi> = {},
+): { sdk: ClaudeAgentSdkSessionApi; deps: { loadSdk: () => Promise<ClaudeAgentSdkSessionApi> } } {
 	const sdk: ClaudeAgentSdkSessionApi = {
 		getSessionInfo: vi.fn(async () => undefined),
 		getSessionMessages: vi.fn(async () => []),
 		listSubagents: vi.fn(async () => Object.keys(rowsByAgent)),
 		getSubagentMessages: vi.fn(async (_sessionId, agentId) => rowsByAgent[agentId] ?? []),
+		...overrides,
 	};
 	return { sdk, deps: { loadSdk: async () => sdk } };
 }
@@ -132,7 +136,7 @@ describe("Claude SDK embedded subagent work", () => {
 				message: { content: [{ type: "text", text: "recovered" }], stop_reason: "end_turn" },
 			}));
 		});
-		const fixture = recoverySdk({
+		const fixture = recoverySdk({}, {
 			listSubagents: vi.fn(async () => ids),
 			getSubagentMessages,
 		});
