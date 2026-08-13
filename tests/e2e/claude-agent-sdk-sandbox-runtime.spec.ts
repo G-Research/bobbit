@@ -371,6 +371,15 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			expect(scan).toBe("");
 			expect(scan).not.toContain(sentinel);
 			docker(["exec", "-u", "node", name, "sh", "-c", "printf workspace-ok > /workspace/sdk-uid-workspace; test \"$(cat /workspace/sdk-uid-workspace)\" = workspace-ok"]);
+
+			// A model-controlled workspace can swap a lexically valid path for a
+			// symlink to SDK state. Workspace preparation runs as node, so Docker's
+			// resolved CWD remains inaccessible and cannot widen the private config.
+			docker(["exec", "-u", "root", name, "ln", "-s", "/bobbit-state/claude-agent-sdk/sentinel", "/workspace/sdk-uid-trap"]);
+			const beforePrivateState = docker(["exec", "-u", "root", name, "sh", "-c", "stat -c '%a:%u:%g' /bobbit-state/claude-agent-sdk/sentinel /bobbit-state/claude-agent-sdk/sentinel/history; cat /bobbit-state/claude-agent-sdk/sentinel/history"]);
+			expect(() => docker(["exec", "-u", "node", "-w", "/workspace/sdk-uid-trap", name, "chgrp", "-R", "bobbit-sdk", "."])).toThrow();
+			expect(docker(["exec", "-u", "root", name, "sh", "-c", "stat -c '%a:%u:%g' /bobbit-state/claude-agent-sdk/sentinel /bobbit-state/claude-agent-sdk/sentinel/history; cat /bobbit-state/claude-agent-sdk/sentinel/history"])).toBe(beforePrivateState);
+
 			docker(["restart", name]);
 			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/sentinel/history"])).toBe("sdk-history");
 			expect(docker(["exec", "-u", "node", name, "cat", "/workspace/sdk-uid-workspace"])).toBe("workspace-ok");

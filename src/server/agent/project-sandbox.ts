@@ -631,11 +631,14 @@ export class ProjectSandbox {
 			"exec", "-i", "-u", "root", containerId,
 			"install", "-d", "-o", CLAUDE_AGENT_SDK_DOCKER_USER, "-g", CLAUDE_AGENT_SDK_DOCKER_USER, "-m", "700", configDir,
 		], { timeout: 10_000, env: DOCKER_ENV });
-		// Both commands are fixed and run from a validated container CWD. GNU
-		// recursive ownership operations do not follow symlinks by default.
+		// Never recurse as root through a session-controlled CWD. `node` owns the
+		// normal workspace and is in the collaboration group, so it can prepare
+		// ordinary workspace files but cannot traverse or change an SDK-private
+		// config directory reached through a swapped symlink. Either ownership
+		// incompatibility fails this setup before the SDK receives OAuth.
 		for (const command of [["chgrp", "-R", CLAUDE_AGENT_SDK_DOCKER_USER, "."], ["chmod", "-R", "g+rwX", "."]]) {
 			await this.execDocker([
-				"exec", "-i", "-u", "root", "-w", cwd, containerId, ...command,
+				"exec", "-i", "-u", "node", "-w", cwd, containerId, ...command,
 			], { timeout: 30_000, env: DOCKER_ENV });
 		}
 	}

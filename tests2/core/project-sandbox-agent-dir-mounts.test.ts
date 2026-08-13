@@ -301,13 +301,30 @@ describe("ProjectSandbox state mount staleness", () => {
 
 		assert.deepEqual(commands.map(args => args.slice(0, 5)), [
 			["exec", "-i", "-u", "root", "container-sdk"],
-			["exec", "-i", "-u", "root", "-w"],
-			["exec", "-i", "-u", "root", "-w"],
+			["exec", "-i", "-u", "node", "-w"],
+			["exec", "-i", "-u", "node", "-w"],
 		]);
 		assert.deepEqual(commands[0].slice(5), ["install", "-d", "-o", "bobbit-sdk", "-g", "bobbit-sdk", "-m", "700", "/bobbit-state/claude-agent-sdk/sdk-session"]);
 		assert.deepEqual(commands[1].slice(-4), ["chgrp", "-R", "bobbit-sdk", "."]);
 		assert.deepEqual(commands[2].slice(-4), ["chmod", "-R", "g+rwX", "."]);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/host/project", "sdk-session"), /session path is invalid/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session path is invalid/);
+	});
+
+	it("fails closed before chmod when the unprivileged workspace preparation is incompatible", async () => {
+		const sandbox = makeSandbox();
+		const commands: string[][] = [];
+		(sandbox as any).containerId = "container-sdk";
+		(sandbox as any).execDocker = async (args: string[]) => {
+			commands.push(args);
+			if (args.includes("chgrp")) throw new Error("workspace inaccessible");
+			return { stdout: "", stderr: "" };
+		};
+
+		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace-wt/session/swapped", "sdk-session"), /workspace inaccessible/);
+		assert.equal(commands.length, 2);
+		assert.deepEqual(commands[0].slice(5), ["install", "-d", "-o", "bobbit-sdk", "-g", "bobbit-sdk", "-m", "700", "/bobbit-state/claude-agent-sdk/sdk-session"]);
+		assert.equal(commands[1][3], "node");
+		assert.equal(commands.some(args => args.includes("chmod")), false);
 	});
 });
