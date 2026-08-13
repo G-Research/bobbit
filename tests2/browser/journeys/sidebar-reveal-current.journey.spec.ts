@@ -1,4 +1,5 @@
-import { expect, test, type Locator, type Page } from "../gateway-harness.js";
+import type { Locator, Page } from "@playwright/test";
+import { expect, test } from "../gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
