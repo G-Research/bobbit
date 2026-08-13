@@ -70,6 +70,14 @@ function child(pid = 1234) {
 	return result;
 }
 
+function settledChild(outcome: unknown, exitCode: number | null = 1) {
+	const result = (outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome)) as any;
+	result.pid = 9000;
+	result.exitCode = exitCode;
+	result.kill = vi.fn(() => true);
+	return result;
+}
+
 function commandResult(stdout = "", exitCode = 0) {
 	return Promise.resolve({ stdout, stderr: "", exitCode }) as any;
 }
@@ -126,19 +134,27 @@ describe("service runtime runners", () => {
 	});
 
 	it("retries an early reject:false EADDRINUSE result instead of returning a false start", async () => {
-		const execute = vi.fn(() => {
-			const result = Promise.resolve({ stdout: "", stderr: "listen EADDRINUSE", all: "listen EADDRINUSE", exitCode: 1 }) as any;
-			result.pid = 9000;
-			result.exitCode = 1;
-			result.kill = vi.fn(() => true);
-			return result;
-		});
+		const execute = vi.fn(() => settledChild({ stdout: "", stderr: "listen EADDRINUSE", all: "listen EADDRINUSE", exitCode: 1 }));
 		const getPort = vi.fn(async () => 44000 + getPort.mock.calls.length);
 		const runner = new LocalServiceRunner({ execute, getPort });
 
 		await expect(runner.start(startInput("local"))).rejects.toMatchObject({ code: "SERVICE_PORT_CONFLICT" });
 		expect(getPort).toHaveBeenCalledTimes(3);
 		expect(execute).toHaveBeenCalledTimes(3);
+	});
+
+	it.each([
+		["ENOENT", new Error("spawn fixture-server ENOENT"), 1],
+		["nonzero", { stdout: "", stderr: "failed", exitCode: 1 }, 1],
+		["zero", { stdout: "", stderr: "", exitCode: 0 }, 0],
+	])("fails a settled reject:false child with %s exit without waiting for readiness", async (_kind, outcome, exitCode) => {
+		const execute = vi.fn(() => settledChild(outcome, exitCode));
+		const getPort = vi.fn(async () => 44000);
+		const runner = new LocalServiceRunner({ execute, getPort });
+
+		await expect(runner.start(startInput("local"))).rejects.toMatchObject({ code: "SERVICE_LAUNCH_FAILED" });
+		expect(getPort).toHaveBeenCalledOnce();
+		expect(execute).toHaveBeenCalledOnce();
 	});
 
 	it("uses Docker daemon port allocation and refuses to control a differently labelled container", async () => {

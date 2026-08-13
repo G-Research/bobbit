@@ -265,18 +265,18 @@ function isBindConflict(error: unknown): boolean {
 /**
  * `reject:false` resolves an early child failure instead of throwing it. A
  * small bounded observation window leaves readiness exclusively supervisor-owned
- * while allowing a bind conflict to discard its candidate port before a false
+ * while ensuring any child which has already exited cannot be reported as a
  * successful start.
  */
-async function hasEarlyBindConflict(child: ChildCommand): Promise<boolean> {
-	let settled: unknown;
-	let didSettle = false;
+async function observeEarlyLocalExit(child: ChildCommand): Promise<{ settled: boolean; outcome?: unknown }> {
+	let outcome: unknown;
+	let settled = false;
 	void child.then(
-		(result) => { settled = result; didSettle = true; },
-		(error: unknown) => { settled = error; didSettle = true; },
+		(result) => { outcome = result; settled = true; },
+		(error: unknown) => { outcome = error; settled = true; },
 	);
 	await new Promise<void>((resolve) => setTimeout(resolve, EARLY_LOCAL_FAILURE_WINDOW_MS));
-	return didSettle && isBindConflict(settled);
+	return { settled, outcome };
 }
 
 function isNotFound(error: unknown): boolean {
@@ -346,7 +346,11 @@ export class LocalServiceRunner implements ServiceRunner {
 					(result) => emitOutput(input, result),
 					(error: unknown) => input.onOutput?.(safeOutput(error instanceof Error ? error.message : String(error), input.redactions)),
 				);
-				if (await hasEarlyBindConflict(child)) throw new Error("EADDRINUSE");
+				const earlyExit = await observeEarlyLocalExit(child);
+				if (earlyExit.settled) {
+					if (isBindConflict(earlyExit.outcome)) throw new Error("EADDRINUSE");
+					throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Local service exited during launch", { cause: earlyExit.outcome });
+				}
 				id = `local-${++this.sequence}-${child.pid ?? port}`;
 				const started: StartedService = {
 					endpoint,
