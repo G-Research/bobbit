@@ -492,6 +492,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		for (const frame of frames) this.emit(frame);
 	}
 
+	/** Provider error bodies may contain credentials or local paths. Never put them on a UI-bound frame. */
+	private static readonly SUBAGENT_FAILURE_DETAIL = "Subagent failed";
+
 	/** Preserve the raw child source identity only inside the semantic projection. */
 	private subagentProjectionEvent(event: any, source: Record<string, unknown>): Record<string, unknown> {
 		const sourceId = typeof source.uuid === "string" ? source.uuid : undefined;
@@ -499,12 +502,14 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		const message = event.message && typeof event.message === "object" && agentId
 			? { ...event.message, parentAgentId: agentId } : event.message;
 		// Translator terminal rows intentionally remain root-lifecycle-neutral.
-		// Copy only bounded child terminal metadata into the semantic projection so
-		// an SDK `result` failure updates the embedded card, not root prose.
+		// Keep only a stable terminal state and public failure detail: SDK errors
+		// are provider-controlled and can include credentials or private paths.
+		const sourceError = typeof source.error === "string" && source.error.length > 0;
+		const failed = source.is_error === true || sourceError || /^error/.test(String(source.subtype ?? ""));
 		const terminal = event.type === "agent_end"
 			? {
-				terminalReason: typeof source.subtype === "string" ? source.subtype : undefined,
-				...(typeof source.error === "string" ? { error: source.error } : {}),
+				terminalReason: source.aborted === true ? "aborted" : failed ? "error" : "completed",
+				...(failed ? { error: ClaudeAgentSdkBridge.SUBAGENT_FAILURE_DETAIL } : {}),
 			}
 			: undefined;
 		return {
@@ -524,13 +529,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		const terminal = type === "result" || (type === "assistant" && (source.aborted === true || typeof source.error === "string"));
 		if (!parentToolUseId || !terminal) return;
 		const agentId = typeof source.parent_agent_id === "string" && source.parent_agent_id ? source.parent_agent_id : undefined;
-		const error = typeof source.error === "string" && source.error ? source.error : undefined;
+		const sourceError = typeof source.error === "string" && source.error.length > 0;
 		const phase = source.aborted === true ? "aborted"
-			: source.is_error === true || !!error || /^error/.test(String(source.subtype ?? "")) ? "error"
+			: source.is_error === true || sourceError || /^error/.test(String(source.subtype ?? "")) ? "error"
 			: "completed";
 		this.emitSubagentWork(this.subagentWork.ingestTerminal(
 			parentToolUseId,
-			{ phase, ...(error ? { error } : {}) },
+			{ phase, ...(phase === "error" ? { error: ClaudeAgentSdkBridge.SUBAGENT_FAILURE_DETAIL } : {}) },
 			agentId ? { parentToolUseId, agentId } : undefined,
 		));
 	}
