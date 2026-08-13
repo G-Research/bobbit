@@ -81,7 +81,7 @@ export class ReliableTurnRuntime {
 		};
 		this.bridge.steer = async function heldSteer(text: string, ...args: any[]) {
 			const failure = fixture.shift(fixture.steerFailures, text);
-			if (failure) throw failure;
+			if (failure) return { success: false, error: failure.message };
 			const result = await fixture.originalSteer.call(this, text, ...args);
 			const gate = fixture.shift(fixture.steerAckHolds, text);
 			if (gate) await gate.wait();
