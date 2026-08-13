@@ -290,7 +290,7 @@ describe("file explorer list route", () => {
 			{ body: { path: "" } },
 		);
 
-		expect(result).toMatchObject({ ok: true, value: { path: "", truncated: false } });
+		expect(result).toMatchObject({ ok: true, value: { path: "", rootPath: SESSION_ROOT, truncated: false } });
 		if (!result.ok) throw new Error("expected list success");
 		expect(result.value.entries).toEqual([
 			{ path: "alpha", name: "alpha", kind: "directory" },
@@ -452,12 +452,13 @@ describe("file explorer resolve route", () => {
 
 		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "" } })).toEqual({
 			ok: true,
-			value: { path: "", kind: "root", chain: [] },
+			value: { path: "", rootPath: SESSION_ROOT, kind: "root", chain: [] },
 		});
 		expect(await routes.resolve({ workingDir: SESSION_ROOT }, { body: { path: "deep/nested" } })).toEqual({
 			ok: true,
 			value: {
 				path: "deep/nested",
+				rootPath: SESSION_ROOT,
 				kind: "directory",
 				chain: [
 					{ path: "deep", name: "deep", kind: "directory" },
@@ -469,11 +470,27 @@ describe("file explorer resolve route", () => {
 			ok: true,
 			value: {
 				path: "deep/nested/file.txt",
+				rootPath: SESSION_ROOT,
 				kind: "file",
 				chain: [{ path: "deep" }, { path: "deep/nested" }, { path: "deep/nested/file.txt", kind: "file" }],
 			},
 		});
 		expect(new Set(observed)).toEqual(new Set(["deep", "deep/nested", "deep/nested/file.txt"]));
+	});
+
+	it("accepts an absolute directory as a new explorer root", async () => {
+		const fs: ExplorerFsAdapter = {
+			realpath: async (target) => path.resolve(target),
+			opendir: async () => { throw new Error("unused"); },
+			open: async () => { throw new Error("unused"); },
+			lstat: async () => directoryStat(identityFor("absolute-root")),
+		};
+		const target = path.resolve(SESSION_ROOT, "..", "elsewhere");
+		const result = await createExplorerRoutes({ fs, git: neverGit() }).resolve(
+			{ workingDir: SESSION_ROOT },
+			{ body: { absolutePath: target } },
+		);
+		expect(result).toEqual({ ok: true, value: { path: "", rootPath: target, kind: "root", chain: [] } });
 	});
 
 	it("rejects invalid and .git paths before I/O and distinguishes missing and non-directory parents", async () => {

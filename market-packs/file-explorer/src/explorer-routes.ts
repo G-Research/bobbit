@@ -64,6 +64,7 @@ export type GitSnapshot =
 
 export interface ListValue {
 	path: string;
+	rootPath: string;
 	entries: ExplorerEntry[];
 	truncated: boolean;
 	status?: GitSnapshot;
@@ -71,6 +72,7 @@ export interface ListValue {
 
 export interface ResolveValue {
 	path: string;
+	rootPath?: string;
 	kind: "root" | ExplorerEntryKind;
 	chain: ExplorerEntry[];
 }
@@ -303,6 +305,12 @@ class RootedFsError extends Error {
 function routeCwd(ctx: RouteContext): string {
 	if (typeof ctx?.workingDir !== "string" || ctx.workingDir.length === 0) throw new ExplorerPathError();
 	return ctx.workingDir;
+}
+
+function routeRoot(ctx: RouteContext, body: Record<string, unknown>): string {
+	if (body.rootPath === undefined) return routeCwd(ctx);
+	if (typeof body.rootPath !== "string" || !path.isAbsolute(body.rootPath) || body.rootPath.includes("\0")) throw new ExplorerPathError("The explorer root must be an absolute path.");
+	return path.resolve(body.rootPath);
 }
 
 function absolutePath(cwd: string, relativePath: string): string {
@@ -572,7 +580,7 @@ function statKind(stat: StatLike): ExplorerEntryKind {
 async function resolvePath(cwd: string, relativePath: string, deps: ExplorerDependencies): Promise<ResolveValue> {
 	const deadline = new FsDeadline(deps.fsTimeoutMs);
 	const root = await bindRoot(cwd, deadline, deps);
-	if (relativePath === "") return { path: "", kind: "root", chain: [] };
+	if (relativePath === "") return { path: "", rootPath: root.absolutePath, kind: "root", chain: [] };
 	const claims = await claimRelativePath(root, relativePath, deadline, deps);
 	const segments = relativePath.split("/");
 	const chain = claims.map((claim, index): ExplorerEntry => ({
@@ -580,7 +588,22 @@ async function resolvePath(cwd: string, relativePath: string, deps: ExplorerDepe
 		name: segments[index],
 		kind: statKind(claim.stats),
 	}));
-	return { path: relativePath, kind: chain.at(-1)!.kind, chain };
+	return { path: relativePath, rootPath: root.absolutePath, kind: chain.at(-1)!.kind, chain };
+}
+
+async function resolveAbsolutePath(absolute: string, deps: ExplorerDependencies): Promise<ResolveValue> {
+	if (!path.isAbsolute(absolute) || absolute.includes("\0")) throw new ExplorerPathError("Enter an absolute filesystem path.");
+	const deadline = new FsDeadline(deps.fsTimeoutMs);
+	const canonical = await deadline.call(deps.fs.realpath(path.resolve(absolute)));
+	const stats = await deadline.call(deps.fs.lstat(canonical));
+	if (stats.isDirectory() && !stats.isSymbolicLink()) {
+		const root = await bindRoot(canonical, deadline, deps);
+		return { path: "", rootPath: root.absolutePath, kind: "root", chain: [] };
+	}
+	const parent = path.dirname(canonical);
+	const relativePath = normalizeRoutePath(path.basename(canonical));
+	const resolved = await resolvePath(parent, relativePath, deps);
+	return { ...resolved, rootPath: parent };
 }
 
 interface PendingSearchDirectory {
@@ -833,12 +856,12 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 			try {
 				const body = bodyRecord(req);
 				const relativePath = normalizeRoutePath(body.path, { allowRoot: true });
-				const cwd = routeCwd(ctx);
+				const cwd = routeRoot(ctx, body);
 				const listed = await listDirectory(cwd, relativePath, deps);
 				const includeStatus = body.includeStatus === true && relativePath === "";
 				const status = includeStatus ? await collectGitSnapshot(listed.root.absolutePath, deps.git, deps.gitTimeoutMs) : undefined;
 				if (status) await assertClaimCurrent(listed.root, new FsDeadline(deps.fsTimeoutMs), deps);
-				return { ok: true, value: { path: relativePath, entries: listed.entries, truncated: listed.truncated, ...(status ? { status } : {}) } };
+				return { ok: true, value: { path: relativePath, rootPath: listed.root.absolutePath, entries: listed.entries, truncated: listed.truncated, ...(status ? { status } : {}) } };
 			} catch (error) {
 				return fsFailure(error, "list");
 			}
@@ -846,8 +869,10 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 
 		resolve: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<ResolveValue>> => {
 			try {
-				const relativePath = normalizeRoutePath(bodyRecord(req).path, { allowRoot: true });
-				return { ok: true, value: await resolvePath(routeCwd(ctx), relativePath, deps) };
+				const body = bodyRecord(req);
+				if (typeof body.absolutePath === "string") return { ok: true, value: await resolveAbsolutePath(body.absolutePath, deps) };
+				const relativePath = normalizeRoutePath(body.path, { allowRoot: true });
+				return { ok: true, value: await resolvePath(routeRoot(ctx, body), relativePath, deps) };
 			} catch (error) {
 				return resolveFailure(error);
 			}
@@ -855,12 +880,13 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 
 		search: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<SearchValue>> => {
 			try {
-				const rawQuery = bodyRecord(req).query;
+				const body = bodyRecord(req);
+				const rawQuery = body.query;
 				if (typeof rawQuery !== "string") throw new ExplorerSearchQueryError("A search query is required.");
 				const query = rawQuery.trim();
 				if (!query || query.includes("\0")) throw new ExplorerSearchQueryError("Enter a non-empty search query.");
 				if (query.length > SEARCH_QUERY_LIMIT) throw new ExplorerSearchQueryError(`Search queries are limited to ${SEARCH_QUERY_LIMIT} characters.`);
-				return { ok: true, value: await searchFiles(routeCwd(ctx), query, deps) };
+				return { ok: true, value: await searchFiles(routeRoot(ctx, body), query, deps) };
 			} catch (error) {
 				return searchFailure(error);
 			}
@@ -868,8 +894,9 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 
 		read: async (ctx: RouteContext, req: RouteRequest): Promise<RouteResult<ReadValue>> => {
 			try {
-				const relativePath = normalizeRoutePath(bodyRecord(req).path);
-				const content = await readRegularFile(routeCwd(ctx), relativePath, READ_BYTE_LIMIT, deps);
+				const body = bodyRecord(req);
+				const relativePath = normalizeRoutePath(body.path);
+				const content = await readRegularFile(routeRoot(ctx, body), relativePath, READ_BYTE_LIMIT, deps);
 				return { ok: true, value: { path: relativePath, ...content, limit: READ_BYTE_LIMIT } };
 			} catch (error) {
 				return readFailure(error);
@@ -880,8 +907,9 @@ export function createExplorerRoutes(overrides: Partial<ExplorerDependencies> = 
 			let relativePath: string;
 			let root: PathClaim;
 			try {
-				relativePath = normalizeRoutePath(bodyRecord(req).path);
-				root = await bindRoot(routeCwd(ctx), new FsDeadline(deps.fsTimeoutMs), deps);
+				const body = bodyRecord(req);
+				relativePath = normalizeRoutePath(body.path);
+				root = await bindRoot(routeRoot(ctx, body), new FsDeadline(deps.fsTimeoutMs), deps);
 			} catch (error) { return fsFailure(error, "read"); }
 			const cwd = root.absolutePath;
 			const snapshot = await collectGitSnapshot(cwd, deps.git, deps.gitTimeoutMs);

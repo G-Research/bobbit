@@ -222,7 +222,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await pathInput.press("Enter");
 		await expect(treeItem(page, "deep/navigation"), "direct directory navigation reveals initially unloaded ancestors").toBeVisible({ timeout: 15_000 });
 		await expect(treeItem(page, "deep/navigation")).toBeFocused();
-		const breadcrumbs = panel.getByRole("navigation", { name: "Current path" });
+		const breadcrumbs = panel.getByRole("navigation", { name: "Current absolute path" });
 		await expect(breadcrumbs).toBeVisible();
 		await expect(breadcrumbs.getByRole("button", { name: /navigation/i })).toHaveAttribute("aria-current", "location");
 
@@ -284,7 +284,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		pathInput = panel.getByRole("textbox", { name: "Relative path" });
 		await pathInput.fill("deep/navigation/direct-target.txt");
 		await pathInput.press("Enter");
-		await expect(panel.getByRole("navigation", { name: "Current path" }), "the path bar remains available in the narrow preview pane").toBeVisible();
+		await expect(panel.getByRole("navigation", { name: "Current absolute path" }), "the path bar remains available in the narrow preview pane").toBeVisible();
 		await expect(panel.getByRole("button", { name: "Back to files" })).toBeVisible();
 		await panel.getByRole("button", { name: "Back to files" }).click();
 		await expect(search).toBeVisible();
@@ -317,7 +317,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		let restored = await waitForExplorer(page);
 		await expect(restored.getByRole("button", { name: "Changed files only" })).toHaveAttribute("aria-pressed", "true");
 		await expect(restored.getByRole("combobox", { name: "Search files and folders" }), "search queries are transient across reload").toHaveValue("");
-		await expect(restored.getByRole("navigation", { name: "Current path" })).toBeVisible();
+		await expect(restored.getByRole("navigation", { name: "Current absolute path" })).toBeVisible();
 
 		await restored.getByRole("button", { name: /Edit path/ }).click();
 		pathInput = restored.getByRole("textbox", { name: "Relative path" });
@@ -325,7 +325,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await page.reload();
 		restored = await waitForExplorer(page);
 		await expect(restored.getByRole("textbox", { name: "Relative path" }), "path editing state is transient across reload").toHaveCount(0);
-		await expect(restored.getByRole("navigation", { name: "Current path" })).toBeVisible();
+		await expect(restored.getByRole("navigation", { name: "Current absolute path" })).toBeVisible();
 		await expect(restored.getByRole("button", { name: "Changed files only" }), "the durable filter preference survives both reloads").toHaveAttribute("aria-pressed", "true");
 	});
 
@@ -406,7 +406,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(page.locator(PANEL)).toBeVisible();
 
 		const src = treeItem(page, "src");
-		await expect(src.locator('.bb-explorer-ancestor[aria-label="Contains changes"]')).toBeVisible();
+		await expect(src.locator(".bb-explorer-icon.kind-directory svg")).toHaveAttribute("stroke", /^url\(#folder-gradient-/);
 		await src.focus();
 		await src.press("ArrowRight");
 		await expect(src).toHaveAttribute("aria-expanded", "true");
@@ -425,7 +425,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expectBadge(page, "binary.dat", /Unstaged modified/);
 
 		const nested = treeItem(page, "nested");
-		await expect(nested.locator('.bb-explorer-ancestor[aria-label="Contains changes"]')).toBeVisible();
+		await expect(nested.locator(".bb-explorer-icon.kind-directory svg")).toHaveAttribute("stroke", "var(--warning)");
 		await nested.click();
 		await expect(nested).toHaveAttribute("aria-expanded", "true");
 		await expectBadge(page, "nested/copied.txt", /copied from copy-source\.txt/i);
@@ -457,12 +457,16 @@ test.describe("Journey: built-in file explorer pack", () => {
 
 		await showTreeIfNarrow(panel);
 		await treeItem(page, "binary.dat").click();
+		await expect(panel.getByRole("tab", { name: "Diff" }), "file navigation remembers Diff mode").toHaveAttribute("aria-selected", "true");
+		await expect(panel.locator(PREVIEW)).toContainText("Binary file changed. A text diff is not available.");
+		await panel.getByRole("tab", { name: "File" }).click();
 		await expect(panel.locator(PREVIEW)).toContainText("Binary files cannot be previewed.");
 		await showTreeIfNarrow(panel);
 		await treeItem(page, "empty.txt").click();
 		await expect(panel.locator(PREVIEW)).toContainText("This file is empty.");
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		await expect(panel.locator(PREVIEW)).toContainText("Empty file added.");
+		await panel.getByRole("tab", { name: "File" }).click();
 		await showTreeIfNarrow(panel);
 		await treeItem(page, "oversized.txt").click();
 		await expect(panel.locator(PREVIEW)).toContainText(/File is too large|File exceeds the preview limit/);
@@ -475,7 +479,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await treeItem(page, "src/changed.ts").click();
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		write(root!, "new-after-refresh.txt", "created outside Bobbit\n");
-		await panel.getByRole("button", { name: "Refresh explorer" }).click();
+		await page.getByTestId("pack-panel-refresh").click();
 		await showTreeIfNarrow(panel);
 		await expect(treeItem(page, "new-after-refresh.txt")).toBeVisible({ timeout: 15_000 });
 		await expect(src, "manual refresh preserves valid expansion").toHaveAttribute("aria-expanded", "true");

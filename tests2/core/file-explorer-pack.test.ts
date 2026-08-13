@@ -69,7 +69,7 @@ describe("built-in file explorer pack shipping", () => {
 
 		expect(enabled.getPanel(undefined, "file-explorer", "file-explorer.panel")).toMatchObject({
 			id: "file-explorer.panel",
-			title: "Explorer",
+			title: "Files",
 			instanceMode: "singleton",
 		});
 		expect(enabled.getEntrypoint(undefined, "file-explorer", "file-explorer.session-menu")).toMatchObject({
