@@ -401,6 +401,7 @@ describe("AIGW retained catalog on discovery failure", () => {
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				authenticated: true,
+				runtime: "pi",
 			});
 
 			custom.setMode("failure");
