@@ -159,7 +159,22 @@ describe("Claude Agent SDK event translator", () => {
 				},
 			},
 		};
-		const translated = translateClaudeSdkEvent(createClaudeSdkTranslatorState(), rootResult);
+		let state = translateClaudeSdkEvent(createClaudeSdkTranslatorState(), {
+			type: "assistant", uuid: "root-assistant-usage", message: {
+				model: "claude-sonnet-4",
+				usage: { input_tokens: 150, cache_read_input_tokens: 10, cache_creation_input_tokens: 10 },
+				content: [{ type: "text", text: "root" }],
+			},
+		}).state;
+		// A child may report a different model and usage, but it is not root context.
+		state = translateClaudeSdkEvent(state, {
+			type: "assistant", parent_tool_use_id: "child-tool", uuid: "child-assistant-usage", message: {
+				model: "claude-haiku-4",
+				usage: { input_tokens: 9_999, cache_read_input_tokens: 1, cache_creation_input_tokens: 1 },
+				content: [{ type: "text", text: "child" }],
+			},
+		}).state;
+		const translated = translateClaudeSdkEvent(state, rootResult);
 		expect(translated.diagnostics).toEqual([]);
 		expect(translated.events).toEqual([expect.objectContaining({
 			type: "agent_end",
@@ -170,20 +185,16 @@ describe("Claude Agent SDK event translator", () => {
 				costBasis: "subscription-notional",
 				total: { inputTokens: 123, outputTokens: 45, cacheReadTokens: 10, cacheWriteTokens: 2, notionalCostUsd: 0.0042 },
 				modelUsage: expect.objectContaining({
-					"claude-sonnet-4": expect.objectContaining({ inputTokens: 121, contextWindow: 200_000, maxOutputTokens: 16_384, contextTokens: 133, notionalCostUsd: 0.004 }),
+					// Raw root request usage is authoritative, even above its declared window.
+					"claude-sonnet-4": expect.objectContaining({ inputTokens: 121, contextWindow: 200_000, maxOutputTokens: 16_384, contextTokens: 170, notionalCostUsd: 0.004 }),
+					// The child model cannot overwrite root context or receive a synthetic value.
+					"claude-haiku-4": expect.not.objectContaining({ contextTokens: expect.any(Number) }),
 				}),
 			},
 		})]);
 
-		const clamped = normalizeClaudeSdkRootResultUsage({
-			...rootResult,
-			uuid: "result-usage-clamped",
-			modelUsage: {
-				...rootResult.modelUsage,
-				"claude-sonnet-4": { ...rootResult.modelUsage["claude-sonnet-4"], contextWindow: 125 },
-			},
-		});
-		expect(clamped?.modelUsage["claude-sonnet-4"].contextTokens).toBe(125);
+		const withoutRootAssistant = normalizeClaudeSdkRootResultUsage(rootResult);
+		expect(withoutRootAssistant?.modelUsage["claude-sonnet-4"]).not.toHaveProperty("contextTokens");
 
 		expect(normalizeClaudeSdkRootResultUsage({ ...rootResult, parent_tool_use_id: "parent-tool" })).toBeUndefined();
 		expect(normalizeClaudeSdkRootResultUsage({ ...rootResult, uuid: "" })).toBeUndefined();

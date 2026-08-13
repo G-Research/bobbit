@@ -496,6 +496,8 @@ describe("CostTracker", () => {
 						costUSD: 0.42, contextWindow: 200_000, maxOutputTokens: 16_384,
 					},
 				},
+			}, {
+				model, inputTokens: 100, cacheReadTokens: cacheReadInputTokens, cacheWriteTokens: 0,
 			});
 			if (!normalized) throw new Error("expected a valid pinned SDK result");
 			return normalized;
@@ -529,7 +531,7 @@ describe("CostTracker", () => {
 			expect(second.snapshot.context.highWaterModel).toBe("claude-sonnet");
 		});
 
-		it("projects pinned SDK input composition into current and high-water model context", () => {
+		it("projects root assistant request usage into current and high-water model context", () => {
 			const tracker = new CostTracker(stateDir, memfs);
 			const normalize = (uuid: string, inputTokens: number, cacheReadInputTokens: number, cacheCreationInputTokens: number) => normalizeClaudeSdkRootResultUsage({
 				type: "result", uuid, session_id: "sdk-session",
@@ -540,6 +542,8 @@ describe("CostTracker", () => {
 						costUSD: 0.01, contextWindow: 200_000, maxOutputTokens: 16_384,
 					},
 				},
+			}, {
+				model: "claude-sonnet", inputTokens, cacheReadTokens: cacheReadInputTokens, cacheWriteTokens: cacheCreationInputTokens,
 			});
 			const first = normalize("result-1", 60_000, 15_000, 5_000);
 			const second = normalize("result-2", 35_000, 4_000, 1_000);
