@@ -100,6 +100,11 @@ export interface PersistedGoal {
 	 * suppression — paused != failed; the parent (or user) must act before the child can resume.
 	 */
 	paused?: boolean;
+	/**
+	 * Why a goal is paused. Operator provenance preserves an explicit pause across
+	 * boot-time legacy dependency-pause migration; absent values are legacy records.
+	 */
+	pauseSource?: "operator" | "legacy-deps";
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */
 	replanCount?: number;
 	/**
