@@ -54,6 +54,70 @@ let roleDropdownOpen = false;
 let accessoryDropdownOpen = false;
 let colorDropdownOpen = false;
 
+type PickerKind = "role" | "accessory" | "color";
+
+const pickerSelectors: Record<PickerKind, { trigger: string; options: string }> = {
+	role: { trigger: "[data-testid='staff-role-select']", options: "[data-picker='role'] [role='option']" },
+	accessory: { trigger: "[data-testid='staff-accessory-select']", options: "[data-picker='accessory'] [role='option']" },
+	color: { trigger: "[data-testid='staff-color-select']", options: "[data-picker='color'] [role='option']" },
+};
+
+function focusAfterRender(selector: string, index?: number): void {
+	requestAnimationFrame(() => {
+		const matches = Array.from(document.querySelectorAll<HTMLElement>(selector));
+		const target = index === undefined ? matches[0] : matches[Math.max(0, Math.min(index, matches.length - 1))];
+		target?.focus();
+	});
+}
+
+function setOpenPicker(kind: PickerKind | null, focusIndex?: number): void {
+	roleDropdownOpen = kind === "role";
+	accessoryDropdownOpen = kind === "accessory";
+	colorDropdownOpen = kind === "color";
+	renderApp();
+	if (kind) focusAfterRender(pickerSelectors[kind].options, focusIndex);
+}
+
+function closePicker(kind: PickerKind, restoreFocus = false): void {
+	setOpenPicker(null);
+	if (restoreFocus) focusAfterRender(pickerSelectors[kind].trigger);
+}
+
+function handlePickerTriggerKeydown(event: KeyboardEvent, kind: PickerKind, selectedIndex: number, optionCount: number): void {
+	if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End" && event.key !== "Escape") return;
+	event.preventDefault();
+	if (event.key === "Escape") {
+		closePicker(kind, true);
+		return;
+	}
+	const index = event.key === "End"
+		? optionCount - 1
+		: event.key === "Home"
+			? 0
+			: Math.max(0, selectedIndex);
+	setOpenPicker(kind, index);
+}
+
+function handlePickerOptionKeydown(event: KeyboardEvent, kind: PickerKind, index: number, optionCount: number): void {
+	let nextIndex: number | undefined;
+	if (event.key === "ArrowDown") nextIndex = (index + 1) % optionCount;
+	else if (event.key === "ArrowUp") nextIndex = (index - 1 + optionCount) % optionCount;
+	else if (event.key === "Home") nextIndex = 0;
+	else if (event.key === "End") nextIndex = optionCount - 1;
+	else if (event.key === "Escape") {
+		event.preventDefault();
+		closePicker(kind, true);
+		return;
+	} else if (event.key === "Tab") {
+		requestAnimationFrame(() => setOpenPicker(null));
+		return;
+	} else {
+		return;
+	}
+	event.preventDefault();
+	focusAfterRender(pickerSelectors[kind].options, nextIndex);
+}
+
 interface TriggerDef {
 	type: string;
 	config: Record<string, any>;
@@ -264,21 +328,19 @@ function selectRole(value: string): void {
 		const role = roles.find((r) => r.name === editRoleId);
 		if (role) editAccessory = role.accessory || "none";
 	}
-	renderApp();
+	closePicker("role", true);
 }
 
 function selectAccessory(value: string): void {
 	editAccessory = value;
 	accessoryUserTouched = true;
-	accessoryDropdownOpen = false;
-	renderApp();
+	closePicker("accessory", true);
 }
 
 function selectColor(index: number): void {
 	editColorIndex = index;
 	colorUserTouched = true;
-	colorDropdownOpen = false;
-	renderApp();
+	closePicker("color", true);
 }
 
 async function handleTogglePause(): Promise<void> {
@@ -694,11 +756,13 @@ function renderEditView(): TemplateResult {
 	if (!selectedStaff) return html`<div class="p-4">Staff agent not found</div>`;
 
 	const displayColorIndex = editColorIndex >= 0 ? editColorIndex : BOBBIT_HUE_ROTATIONS.indexOf(0);
+	const roleOptionIndex = editRoleId ? Math.max(0, roles.findIndex((role) => role.name === editRoleId) + 1) : 0;
+	const accessoryOptionIndex = Math.max(0, ACCESSORY_IDS.indexOf(editAccessory));
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-hidden">
-			<div class="flex items-center justify-between p-4 border-b border-border shrink-0">
-				<div class="flex items-center gap-2">
+			<div class="flex flex-wrap items-center justify-between gap-2 p-4 border-b border-border shrink-0">
+				<div class="flex min-w-0 items-center gap-2">
 					${Button({
 						variant: "ghost",
 						size: "sm",
@@ -708,7 +772,7 @@ function renderEditView(): TemplateResult {
 					<h1 class="text-lg font-semibold">${selectedStaff.name}</h1>
 					${stateBadge(selectedStaff.state)}
 				</div>
-				<div class="flex items-center gap-2" data-testid="staff-edit-header-actions">
+				<div class="flex flex-wrap items-center justify-end gap-2" data-testid="staff-edit-header-actions">
 					${Button({
 						variant: "ghost",
 						size: "sm",
@@ -779,41 +843,45 @@ function renderEditView(): TemplateResult {
 						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; renderApp(); }}
 					></textarea>
 				</div>
-				<div class="grid grid-cols-3 gap-3" data-testid="staff-identity-selects">
+				<div class="grid grid-cols-1 sm:grid-cols-3 gap-3" data-testid="staff-identity-selects">
 					<div>
 						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Role</label>
-						<div class="relative" data-testid="staff-role-picker">
+						<div class="relative" data-testid="staff-role-picker" data-picker="role">
 							<button
 								data-testid="staff-role-select"
 								class="w-full h-9 text-left px-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-1.5"
 								aria-label="Select role"
+								aria-haspopup="listbox"
+								aria-controls="staff-role-options"
 								aria-expanded=${roleDropdownOpen ? "true" : "false"}
-								@click=${() => {
-									roleDropdownOpen = !roleDropdownOpen;
-									accessoryDropdownOpen = false;
-									colorDropdownOpen = false;
-									renderApp();
-								}}
+								@keydown=${(event: KeyboardEvent) => handlePickerTriggerKeydown(event, "role", roleOptionIndex, roles.length + 1)}
+								@click=${() => roleDropdownOpen ? closePicker("role") : setOpenPicker("role", roleOptionIndex)}
 							>
 								${renderPickerSprite(roles.find((role) => role.name === editRoleId)?.accessory || "none", displayColorIndex)}
 								<span class="flex-1 truncate ${editRoleId ? "text-foreground" : "text-muted-foreground"}">${roles.find((role) => role.name === editRoleId)?.label || "No role"}</span>
 								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${roleDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
 							</button>
 							${roleDropdownOpen ? html`
-								<div class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="group" aria-label="Role options">
+								<div id="staff-role-options" class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="listbox" aria-label="Role options">
 									<button
 										class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${!editRoleId ? "bg-accent/50" : ""}"
-										aria-pressed=${!editRoleId ? "true" : "false"}
+										role="option"
+										aria-selected=${!editRoleId ? "true" : "false"}
+										tabindex=${roleOptionIndex === 0 ? "0" : "-1"}
+										@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "role", 0, roles.length + 1)}
 										@click=${() => selectRole("")}
 									>
 										${renderPickerSprite("none", displayColorIndex)}
 										<span>No role</span>
 									</button>
-									${roles.map((role) => html`
+									${roles.map((role, index) => html`
 										<button
 											class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${editRoleId === role.name ? "bg-accent/50" : ""}"
-											aria-pressed=${editRoleId === role.name ? "true" : "false"}
+											role="option"
+											aria-selected=${editRoleId === role.name ? "true" : "false"}
+											tabindex=${roleOptionIndex === index + 1 ? "0" : "-1"}
 											data-value=${role.name}
+											@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "role", index + 1, roles.length + 1)}
 											@click=${() => selectRole(role.name)}
 										>
 											${renderPickerSprite(role.accessory || "none", displayColorIndex)}
@@ -826,32 +894,33 @@ function renderEditView(): TemplateResult {
 					</div>
 					<div>
 						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Accessory</label>
-						<div class="relative" data-testid="staff-accessory-picker">
+						<div class="relative" data-testid="staff-accessory-picker" data-picker="accessory">
 							<button
 								data-testid="staff-accessory-select"
 								data-value=${editAccessory}
 								class="w-full h-9 text-left px-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-1.5"
 								aria-label="Select accessory"
+								aria-haspopup="listbox"
+								aria-controls="staff-accessory-options"
 								aria-expanded=${accessoryDropdownOpen ? "true" : "false"}
-								@click=${() => {
-									accessoryDropdownOpen = !accessoryDropdownOpen;
-									roleDropdownOpen = false;
-									colorDropdownOpen = false;
-									renderApp();
-								}}
+								@keydown=${(event: KeyboardEvent) => handlePickerTriggerKeydown(event, "accessory", accessoryOptionIndex, ACCESSORY_IDS.length)}
+								@click=${() => accessoryDropdownOpen ? closePicker("accessory") : setOpenPicker("accessory", accessoryOptionIndex)}
 							>
 								${renderPickerSprite(editAccessory, displayColorIndex)}
 								<span class="flex-1 truncate">${getAccessory(editAccessory).label}</span>
 								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${accessoryDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
 							</button>
 							${accessoryDropdownOpen ? html`
-								<div class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="group" aria-label="Accessory options">
-									${ACCESSORY_IDS.map((accId: string) => html`
+								<div id="staff-accessory-options" class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="listbox" aria-label="Accessory options">
+									${ACCESSORY_IDS.map((accId: string, index: number) => html`
 										<button
 											class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${editAccessory === accId ? "bg-accent/50" : ""}"
-											aria-pressed=${editAccessory === accId ? "true" : "false"}
+											role="option"
+											aria-selected=${editAccessory === accId ? "true" : "false"}
+											tabindex=${accessoryOptionIndex === index ? "0" : "-1"}
 											data-value=${accId}
 											title=${getAccessory(accId).label}
+											@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "accessory", index, ACCESSORY_IDS.length)}
 											@click=${() => selectAccessory(accId)}
 										>
 											${renderPickerSprite(accId, displayColorIndex)}
@@ -864,31 +933,32 @@ function renderEditView(): TemplateResult {
 					</div>
 					<div>
 						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Colour</label>
-						<div class="relative" data-testid="staff-color-picker">
+						<div class="relative" data-testid="staff-color-picker" data-picker="color">
 							<button
 								data-testid="staff-color-select"
 								data-value=${String(displayColorIndex)}
 								class="w-full h-9 text-left px-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-1.5"
 								aria-label="Select colour"
+								aria-haspopup="listbox"
+								aria-controls="staff-color-options"
 								aria-expanded=${colorDropdownOpen ? "true" : "false"}
-								@click=${() => {
-									colorDropdownOpen = !colorDropdownOpen;
-									roleDropdownOpen = false;
-									accessoryDropdownOpen = false;
-									renderApp();
-								}}
+								@keydown=${(event: KeyboardEvent) => handlePickerTriggerKeydown(event, "color", displayColorIndex, BOBBIT_HUE_ROTATIONS.length)}
+								@click=${() => colorDropdownOpen ? closePicker("color") : setOpenPicker("color", displayColorIndex)}
 							>
 								${renderPickerSprite(editAccessory, displayColorIndex)}
 								<span class="flex-1 truncate">${BOBBIT_COLOR_NAMES[displayColorIndex]}</span>
 								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${colorDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
 							</button>
 							${colorDropdownOpen ? html`
-								<div class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="group" aria-label="Colour options">
+								<div id="staff-color-options" class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="listbox" aria-label="Colour options">
 									${BOBBIT_HUE_ROTATIONS.map((_rotation: number, index: number) => html`
 										<button
 											class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${displayColorIndex === index ? "bg-accent/50" : ""}"
-											aria-pressed=${displayColorIndex === index ? "true" : "false"}
+											role="option"
+											aria-selected=${displayColorIndex === index ? "true" : "false"}
+											tabindex=${displayColorIndex === index ? "0" : "-1"}
 											data-value=${String(index)}
+											@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "color", index, BOBBIT_HUE_ROTATIONS.length)}
 											@click=${() => selectColor(index)}
 										>
 											${renderPickerSprite(editAccessory, index)}

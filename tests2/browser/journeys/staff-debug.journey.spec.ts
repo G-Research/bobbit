@@ -220,6 +220,26 @@ test.describe("Journey: Staff Role Select", () => {
 			await expect(page.getByRole("button", { name: "Wake Now" })).toHaveCount(0);
 			await expect(page.getByRole("button", { name: "View Session" })).toHaveCount(0);
 
+			for (const picker of [
+				{ testId: "staff-role-select", listName: "Role options" },
+				{ testId: "staff-accessory-select", listName: "Accessory options" },
+				{ testId: "staff-color-select", listName: "Colour options" },
+			]) {
+				const trigger = page.getByTestId(picker.testId);
+				await trigger.focus();
+				await page.keyboard.press("ArrowDown");
+				const listbox = page.getByRole("listbox", { name: picker.listName });
+				await expect(listbox).toBeVisible();
+				await expect(listbox.locator('[role="option"]:focus')).toHaveCount(1);
+				await page.keyboard.press("End");
+				await expect(listbox.getByRole("option").last()).toBeFocused();
+				await page.keyboard.press("Home");
+				await expect(listbox.getByRole("option").first()).toBeFocused();
+				await page.keyboard.press("Escape");
+				await expect(listbox).toHaveCount(0);
+				await expect(trigger).toBeFocused();
+			}
+
 			const tabs = page.getByTestId("staff-edit-tabs");
 			const promptTab = tabs.getByRole("button", { name: "Prompt" });
 			const triggersTab = tabs.getByRole("button", { name: "Triggers" });
@@ -308,6 +328,12 @@ test.describe("Journey: Staff Role Select", () => {
 			expect(colorPreviewBox!.width).toBeCloseTo(accessoryPreviewBox!.width, 0);
 			expect(colorPreviewBox!.height).toBeCloseTo(accessoryPreviewBox!.height, 0);
 			await expect(page.getByTestId("staff-color-select")).not.toContainText(/Colour \d+/);
+
+			await page.setViewportSize({ width: 360, height: 640 });
+			const saveBox = await headerActions.getByRole("button", { name: "Save Changes" }).boundingBox();
+			expect(saveBox).not.toBeNull();
+			expect(saveBox!.x).toBeGreaterThanOrEqual(0);
+			expect(saveBox!.x + saveBox!.width).toBeLessThanOrEqual(360);
 		} finally {
 			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
 		}
@@ -355,7 +381,7 @@ test.describe("Journey: Ponytail Accessory", () => {
 			expect(accessoryBox).not.toBeNull();
 			expect(accessoryBox!.y).toBeCloseTo(roleBox!.y, 0);
 			await accessorySelect.click();
-			const option = page.getByRole("button", { name: PONYTAIL_LABEL, exact: true });
+			const option = page.getByRole("option", { name: PONYTAIL_LABEL, exact: true });
 			await expect(option).toBeVisible();
 			await expect(option.locator("img")).toHaveCount(2);
 			const nudgedSprite = option.getByTestId("staff-picker-sprite").locator(":scope > span");
