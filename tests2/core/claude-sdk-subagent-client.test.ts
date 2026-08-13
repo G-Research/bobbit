@@ -42,7 +42,9 @@ describe("Claude SDK embedded client projection", () => {
 		assert.deepEqual(work.get("agent-1")?.messages.map((m) => m.id), ["child-a-message"]);
 		assert.equal((work.get("agent-1")?.messages[0] as any).content[0].text, "complete");
 		assert.equal((work.get("agent-1")?.messages[0] as any).usage.cost, 0.4);
-		assert.deepEqual(work.get("agent-2")?.pendingToolCallIds, ["child-b-tool"]);
+		// Terminal child work closes any unmatched calls; the card renders each
+		// retained call as its bounded terminal error result instead of pending.
+		assert.deepEqual(work.get("agent-2")?.pendingToolCallIds, []);
 		assert.equal(work.get("agent-2")?.phase, "error");
 		assert.equal(work.get("agent-1")?.phase, "running");
 	});
