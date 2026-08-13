@@ -191,7 +191,6 @@ export class PromptQueue {
 		const normalized = normalizeQueuedMessage(message, (target) => this.allocateSequence(target));
 		this.observeSequence(normalized);
 		this.queue.push(normalized);
-		if (normalized.isSteered) this.reorder();
 		return normalized;
 	}
 
@@ -204,7 +203,6 @@ export class PromptQueue {
 		const normalized = normalizeQueuedMessage(message, (target) => this.allocateSequence(target));
 		this.observeSequence(normalized);
 		this.queue.unshift(normalized);
-		this.reorder();
 		return normalized;
 	}
 

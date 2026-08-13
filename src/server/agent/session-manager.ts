@@ -1524,7 +1524,6 @@ type ReliableInFlightRecord = InFlightSteerRecord & {
 	intentId?: string;
 	attemptId?: string;
 	dispatchEpoch?: number;
-	state?: "dispatching" | "uncertain" | "received" | "retired";
 	targetTurn?: DeliveryTargetTurn;
 	sequence?: number;
 	kind?: "prompt" | "steer";
@@ -1813,9 +1812,9 @@ export function prepareVisibleAgentEvent(
 				&& (pending ? candidate.id === pending.promptId : candidate.text === modelText),
 		);
 		const record = (pending
-			? ledger.find((candidate) => candidate.promptId === pending.promptId && candidate.state !== "received" && candidate.state !== "retired")
+			? ledger.find((candidate) => candidate.promptId === pending.promptId)
 			: undefined)
-			?? ledger.find((candidate) => candidate.intentId && candidate.text === modelText && candidate.state !== "received" && candidate.state !== "retired");
+			?? ledger.find((candidate) => candidate.intentId && candidate.text === modelText);
 		const deliveryIntentId = record?.intentId ?? queuedDispatch?.id;
 		const deliveryAttemptId = record?.attemptId ?? queuedDispatch?.attemptId;
 		if (deliveryIntentId) {
@@ -5214,7 +5213,7 @@ export class SessionManager {
 		const queued = session.promptQueue.toArray() as ReliableQueuedMessage[];
 		const ids = new Set(queued.map((row) => row.id));
 		const inFlight = ((session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[])
-			.filter((record) => record.intentId && record.state !== "received" && record.state !== "retired")
+			.filter((record) => record.intentId)
 			.filter((record) => !ids.has(record.intentId!))
 			.map((record): ReliableQueuedMessage => ({
 				id: record.intentId!,
@@ -6063,7 +6062,7 @@ export class SessionManager {
 				}
 				const row = rawRow as ReliableQueuedMessage;
 				const active = (session.inFlightSteerTexts as ReliableInFlightRecord[] | undefined)
-					?.find((record) => record.intentId === row.id && record.state !== "retired" && record.state !== "received");
+					?.find((record) => record.intentId === row.id);
 				if (active) continue;
 				const source = row.source ?? "user";
 				const author = resolveAcceptedPromptAuthor(source, row.author);
@@ -6174,7 +6173,7 @@ export class SessionManager {
 			let changed = false;
 			const legacy = ledger.filter((record) => !record.intentId);
 			for (const record of ledger) {
-				if (record.intentId && record.state !== "received" && record.state !== "retired") {
+				if (record.intentId) {
 					record.state = "uncertain";
 					record.retryable = false;
 					changed = true;
@@ -6194,7 +6193,7 @@ export class SessionManager {
 			return;
 		}
 
-		const recoverable = ledger.filter((record) => record.state !== "received" && record.state !== "retired");
+		const recoverable = [...ledger];
 		for (const record of recoverable) this.cancelRestoredPromptAuthorDispatch(session, record.promptId);
 		session.inFlightSteerTexts = ledger.filter((record) => !recoverable.includes(record));
 		for (const record of [...recoverable].reverse()) {
@@ -6268,7 +6267,7 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) return false;
 		const active = (session.inFlightSteerTexts as ReliableInFlightRecord[] | undefined)
-			?.some((record) => record.intentId === intentId && record.state !== "retired" && record.state !== "received");
+			?.some((record) => record.intentId === intentId);
 		if (active) return false;
 		const row = (session.promptQueue.toArray() as ReliableQueuedMessage[]).find((candidate) => candidate.id === intentId);
 		if (!row || row.deliveryState !== "failed" || row.retryable === false) return false;
