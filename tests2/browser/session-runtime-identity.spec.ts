@@ -159,6 +159,10 @@ test.describe("session runtime identity", () => {
 				return record.archived === true || record.status === "archived";
 			}, { timeout: 15_000 }).toBe(true);
 
+			// Archiving through the REST seam does not mutate this page's sidebar
+			// cache. Reload before selecting the archived filter so this assertion
+			// exercises the audit-list projection rather than stale client state.
+			await page.reload({ waitUntil: "domcontentloaded" });
 			await showArchived(page);
 			const archivedRow = sessionRow(page, sessionId);
 			await expect(archivedRow).toBeVisible({ timeout: 20_000 });
