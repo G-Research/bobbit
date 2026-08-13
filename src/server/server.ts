@@ -17041,7 +17041,10 @@ async function handleApiRoute(
 					throw new PromptExtensionValidationError("GRANT_REQUIRED", "prompt:system-author grant is required for prompt extension proposals");
 				}
 			}
-			return { changes, context, targetProjectId, proposalSession, persistedProposalSession, packs, grants };
+			// A retarget leaves section bytes unchanged, but it still authorizes and
+			// publishes an authoring request in the new project. Preserve those next
+			// sections for the target-attributed audit rather than dropping the event.
+			return { changes: targetChanged ? next : changes, context, targetProjectId, proposalSession, persistedProposalSession, packs, grants };
 		};
 		const recordAgentPromptProposalAudit = (
 			authoring: NonNullable<ReturnType<typeof authorizeAgentPromptProposalCandidate>>,
@@ -17053,7 +17056,16 @@ async function handleApiRoute(
 					const change = authoring.changes.find(candidate => candidate.packId === section.packId && candidate.sectionId === section.sectionId);
 					return change ? { ...section, content: change.content } : section;
 				});
-				const audit = new PromptExtensionAuthoringAuditStore(authoring.context.stateDir, fsImpl);
+				const sessionAuditContext = authoring.proposalSession?.projectId
+					? projectContextManager.getOrCreate(authoring.proposalSession.projectId)
+					: undefined;
+				// The target remains authoritative, while an identical, target-attributed
+				// record in the authoring session's project lets the session route read it
+				// directly. Never discover this by scanning other project state directories.
+				const auditStateDirs = [...new Set([
+					authoring.context.stateDir,
+					sessionAuditContext?.stateDir,
+				].filter((value): value is string => !!value))];
 				const promptParts = sessionManager.getPromptParts(sessionId);
 				const totalPromptBytes = promptParts
 					? getSystemPromptLayout({ ...promptParts, extensionPromptSections: after }).totalPromptBytes : 0;
@@ -17066,20 +17078,27 @@ async function handleApiRoute(
 						&& candidateGrant.capability === "prompt:system-author"
 						&& !!authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook => hook.id === candidateGrant.hookId));
 					if (!baseline || !grant) continue;
-					const record = audit.create({
-						packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
-						actor: "agent", sessionId, projectId: authoring.context.project.id,
-						...(authoring.proposalSession?.goalId ? { goalId: authoring.proposalSession.goalId } : {}), trigger,
-						...promptExtensionBaseline(baseline.content), proposalId: `${sessionId}:${rev}`,
-						diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
-						...(authoring.persistedProposalSession?.modelProvider && authoring.persistedProposalSession.modelId ? { model: `${authoring.persistedProposalSession.modelProvider}/${authoring.persistedProposalSession.modelId}`, provider: authoring.persistedProposalSession.modelProvider } : {}),
-						...(authoring.persistedProposalSession?.effectiveThinkingLevel ? { thinkingLevel: authoring.persistedProposalSession.effectiveThinkingLevel } : {}),
-						sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes,
-					});
-					auditIds.push(record.id);
+					let recordId: string | undefined;
+					for (const stateDir of auditStateDirs) {
+						const record = new PromptExtensionAuthoringAuditStore(stateDir, fsImpl).create({
+							...(recordId ? { id: recordId } : {}),
+							packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
+							actor: "agent", sessionId, projectId: authoring.context.project.id,
+							...(authoring.proposalSession?.goalId ? { goalId: authoring.proposalSession.goalId } : {}), trigger,
+							...promptExtensionBaseline(baseline.content), proposalId: `${sessionId}:${rev}`,
+							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
+							...(authoring.persistedProposalSession?.modelProvider && authoring.persistedProposalSession.modelId ? { model: `${authoring.persistedProposalSession.modelProvider}/${authoring.persistedProposalSession.modelId}`, provider: authoring.persistedProposalSession.modelProvider } : {}),
+							...(authoring.persistedProposalSession?.effectiveThinkingLevel ? { thinkingLevel: authoring.persistedProposalSession.effectiveThinkingLevel } : {}),
+							sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes,
+						});
+						recordId ??= record.id;
+					}
+					if (recordId) auditIds.push(recordId);
 				}
 				sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds, {
-					projectId: authoring.context.project.id, stateDir: authoring.context.stateDir,
+					projectId: authoring.context.project.id,
+					stateDir: authoring.context.stateDir,
+					...(sessionAuditContext?.stateDir ? { sessionStateDir: sessionAuditContext.stateDir } : {}),
 				});
 			} catch (error) {
 				console.warn(`[prompt-extension] proposal audit unavailable for ${sessionId}:`, redactSensitive(String(error)));
@@ -17186,12 +17205,17 @@ async function handleApiRoute(
 				// Override publication above is authoritative. Audit/trace availability
 				// must not turn an already-accepted proposal into a false client failure.
 				try {
-					const audit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
+					const authoringSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+					const sessionAuditContext = authoringSession?.projectId
+						? projectContextManager.getOrCreate(authoringSession.projectId)
+						: undefined;
+					const auditStateDirs = [...new Set([context.stateDir, sessionAuditContext?.stateDir].filter((value): value is string => !!value))];
+					const targetAudit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
 					for (const change of changes) {
 						// Draft edits create a new proposal revision without changing the
-						// authoring request identity. Match the newest active record for the
-						// affected section, then attach the revision actually approved.
-						const entry = audit.list(200).filter(candidate =>
+						// authoring request identity. Match the newest target record, then
+						// update its direct session-route mirror by the same opaque id.
+						const entry = targetAudit.list(200).filter(candidate =>
 							candidate.sessionId === sessionId
 							&& candidate.packId === change.packId
 							&& candidate.sectionId === change.sectionId
@@ -17199,11 +17223,15 @@ async function handleApiRoute(
 						).at(-1);
 						const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
 						if (!entry || !baseline) continue;
-						audit.complete(entry.id, {
-							status: "accepted", terminal: false, proposalId,
+						const update = {
+							status: "accepted" as const, terminal: false, proposalId,
 							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
 							sectionBytes: promptExtensionSectionBytes(change),
-						});
+						};
+						for (const stateDir of auditStateDirs) {
+							const audit = new PromptExtensionAuthoringAuditStore(stateDir, fsImpl);
+							if (audit.get(entry.id)) audit.complete(entry.id, update);
+						}
 						acceptedAuditIds.push(entry.id);
 					}
 					// Trace deliberately exposes only bounded ids/statuses; the authorized
