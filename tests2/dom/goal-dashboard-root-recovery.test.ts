@@ -6,6 +6,7 @@ import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../../src/ui/components/GitStatusWidget.js";
 import type { Goal } from "../../src/app/state.js";
+import { refreshSessions } from "../../src/app/api.js";
 
 type StateModule = typeof import("../../src/app/state.js");
 type DashboardModule = typeof import("../../src/app/goal-dashboard.js");
@@ -23,6 +24,10 @@ let webSocketSendCount: number;
 let descendantsRequestCount: number;
 let holdDescendantsResponse = false;
 let resolveDescendantsResponse: ((response: Response) => void) | undefined;
+let holdGoalsResponse = false;
+let resolveGoalsResponse: ((response: Response) => void) | undefined;
+let goalsSnapshot: Goal[] = [];
+let retryGoalId: string;
 
 const now = 1_783_682_557_000;
 
@@ -55,7 +60,7 @@ function installFetchStub(): void {
 		const path = `${url.pathname}${url.search}`;
 		const method = (init?.method || (input instanceof Request ? input.method : "GET") || "GET").toUpperCase();
 
-		if (method === "POST" && path === `/api/goals/${activeGoal.id}/retry-scheduled-start`) {
+		if (method === "POST" && path === `/api/goals/${retryGoalId}/retry-scheduled-start`) {
 			if (retryResult === "network") return Promise.reject(new Error("offline"));
 			return Promise.resolve(jsonResponse({}, { status: retryResult === "success" ? 200 : 409 }));
 		}
@@ -80,7 +85,13 @@ function installFetchStub(): void {
 		if (path === `/api/goals/${activeGoal.id}/mutations/pending`) return Promise.resolve(jsonResponse({ pending: [] }));
 		if (path === `/api/goals/${activeGoal.id}/verifications/active`) return Promise.resolve(jsonResponse({ verifications: [] }));
 		if (path === "/api/sessions") return Promise.resolve(jsonResponse({ sessions: [], generation: 1 }));
-		if (path === "/api/goals") return Promise.resolve(jsonResponse({ goals: state.goals, generation: 1 }));
+		if (url.pathname === "/api/goals") {
+			const snapshot = goalsSnapshot;
+			if (holdGoalsResponse) {
+				return new Promise<Response>(resolve => { resolveGoalsResponse = resolve; });
+			}
+			return Promise.resolve(jsonResponse({ goals: snapshot, generation: state.goalsGeneration + 1 }));
+		}
 		if (path === "/api/projects") return Promise.resolve(jsonResponse({ projects: state.projects }));
 		if (path.startsWith("/api/sessions/archived") || path.startsWith("/api/goals/archived")) return Promise.resolve(jsonResponse({ sessions: [], goals: [] }));
 		if (path === "/api/staff" || path.startsWith("/api/staff?") || path === "/api/staff/orphaned") return Promise.resolve(jsonResponse([]));
@@ -115,6 +126,10 @@ beforeEach(async () => {
 	descendantsRequestCount = 0;
 	holdDescendantsResponse = false;
 	resolveDescendantsResponse = undefined;
+	holdGoalsResponse = false;
+	resolveGoalsResponse = undefined;
+	goalsSnapshot = [activeGoal];
+	retryGoalId = activeGoal.id;
 	installFetchStub();
 	vi.stubGlobal("WebSocket", class extends EventTarget {
 		static OPEN = 1;
@@ -133,6 +148,8 @@ beforeEach(async () => {
 	renderGoalDashboard = dashboardMod.renderGoalDashboard;
 	clearDashboardState();
 	state.goals = [activeGoal];
+	state.goalsGeneration = -1;
+	state.sessionsGeneration = -1;
 	state.gatewaySessions = [];
 	state.projects = [{ id: "project-1", name: "Project", rootPath: "/repo", colorLight: "#fff", colorDark: "#000" }];
 	state.activeProjectId = "project-1";
@@ -188,5 +205,64 @@ describe("root scheduler recovery retry", () => {
 
 		expect(state.goals[0]?.schedulerRecovery).toEqual(activeGoal.schedulerRecovery);
 		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeTruthy();
+	});
+
+	it("fences a held pre-retry goals refresh without hiding a later recovery generation", async () => {
+		holdGoalsResponse = true;
+		const staleRefresh = refreshSessions();
+		await Promise.resolve();
+		expect(resolveGoalsResponse).toBeTypeOf("function");
+
+		host.querySelector<HTMLButtonElement>("[data-testid='goal-scheduler-recovery-retry']")!.click();
+		await waitFor(() => state.goals[0]?.schedulerRecovery === undefined);
+
+		// This response was captured before the successful POST, so its old
+		// recovery record must not overwrite the local consume.
+		resolveGoalsResponse!(jsonResponse({ goals: [activeGoal], generation: 1 }));
+		await staleRefresh;
+		expect(state.goals[0]?.schedulerRecovery).toBeUndefined();
+		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeNull();
+
+		// A later request is authoritative: a new server recovery must surface.
+		holdGoalsResponse = false;
+		const laterRecovery = { ...activeGoal.schedulerRecovery!, code: "NEW_RECOVERY", updatedAt: now + 1 };
+		goalsSnapshot = [{ ...activeGoal, schedulerRecovery: laterRecovery }];
+		await refreshSessions();
+		await nextFrame();
+		expect(state.goals[0]?.schedulerRecovery).toEqual(laterRecovery);
+		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeTruthy();
+	});
+
+	it("shares the goals-refresh fence with a successful Plan retry", async () => {
+		const childGoal: Goal = {
+			...makeGoal(),
+			id: "plan-recovery-child",
+			title: "Plan recovery child",
+			parentGoalId: activeGoal.id,
+			rootGoalId: activeGoal.id,
+			spawnedFromPlanId: "plan-step",
+			schedulerRecovery: { kind: "child", code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true, updatedAt: now },
+		};
+		state.goals = [activeGoal, childGoal];
+		goalsSnapshot = [activeGoal, childGoal];
+		retryGoalId = childGoal.id;
+		render(renderGoalDashboard(), host);
+		host.querySelector<HTMLElement>("[data-testid='tab-plan']")!.click();
+		await nextFrame();
+		expect(host.querySelector<HTMLButtonElement>("[data-testid='plan-node-scheduler-retry']")).toBeTruthy();
+
+		holdGoalsResponse = true;
+		const staleRefresh = refreshSessions();
+		await Promise.resolve();
+		expect(resolveGoalsResponse).toBeTypeOf("function");
+
+		host.querySelector<HTMLButtonElement>("[data-testid='plan-node-scheduler-retry']")!.click();
+		await waitFor(() => state.goals.find(goal => goal.id === childGoal.id)?.schedulerRecovery === undefined);
+		resolveGoalsResponse!(jsonResponse({ goals: [activeGoal, childGoal], generation: 1 }));
+		await staleRefresh;
+
+		expect(state.goals.find(goal => goal.id === childGoal.id)?.schedulerRecovery).toBeUndefined();
+		expect(state.goals.find(goal => goal.id === activeGoal.id)?.schedulerRecovery).toEqual(activeGoal.schedulerRecovery);
+		expect(host.querySelector("[data-testid='plan-node-scheduler-retry']")).toBeNull();
 	});
 });

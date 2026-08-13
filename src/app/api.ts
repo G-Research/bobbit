@@ -27,6 +27,7 @@ import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 import { showHeaderToast } from "./header-toast.js";
 import { ensureProjectPlayFinishSoundOverride } from "./play-finish-sound.js";
 import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
+import { beginSchedulerRecoverySnapshot, fenceStaleSchedulerRecovery } from "./scheduler-recovery-fence.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -712,6 +713,9 @@ export function retryLoadSessions(): void {
 }
 
 export async function refreshSessions(): Promise<void> {
+	// A retry can consume recovery while this request is in flight. Keep the
+	// request's start generation so only its pre-consume snapshot is fenced.
+	const recoverySnapshotGeneration = beginSchedulerRecoverySnapshot();
 	const isInitial = isInitialSessionsLoad({
 		gatewaySessionsLength: state.gatewaySessions.length,
 		sessionsGeneration: state.sessionsGeneration,
@@ -822,7 +826,10 @@ export async function refreshSessions(): Promise<void> {
 			} else {
 				goalsChanged = true;
 				const prevGoalIds = new Set(state.goals.map((g) => g.id));
-				const incoming: Goal[] = goalsData.goals || [];
+				const incoming = fenceStaleSchedulerRecovery(
+					(goalsData.goals || []) as Goal[],
+					recoverySnapshotGeneration,
+				);
 				// Merge instead of overwrite. The /api/goals endpoint returns only
 				// live goals by default; archived goals arrive via a separate
 				// fetchArchivedGoalsPaginated() call. A naive overwrite here
