@@ -257,4 +257,39 @@ test.describe("session runtime route boundary", () => {
 			expect(gateway.sessionManager.listSessions()).toHaveLength(before);
 		}
 	});
+
+	test("reads an SDK transcript through the session manager's injected SDK access seam", async ({ gateway }) => {
+		const sdkSessionId = "00000000-0000-4000-8000-000000000007";
+		const sessionId = sessions.add(seedArchivedSession(gateway, {
+			runtime: "claude-agent-sdk",
+			claudeAgentSdkSessionId: sdkSessionId,
+			modelProvider: SDK_PROVIDER,
+			modelId: SDK_MODEL,
+			agentSessionFile: "/must-not-read.jsonl",
+		}));
+		const manager = gateway.sessionManager as any;
+		const original = manager.getSdkSessionAccessDeps;
+		const calls: string[] = [];
+		manager.getSdkSessionAccessDeps = (persisted: any) => {
+			calls.push(persisted.id);
+			return {
+				loadSdk: async () => ({
+					getSessionInfo: async () => ({ sessionId: sdkSessionId, summary: "SDK history", lastModified: 1 }),
+					getSessionMessages: async () => [{
+						type: "user", uuid: "sdk-history-user", session_id: sdkSessionId,
+						message: { role: "user", content: "SDK_TRANSCRIPT_MANAGER_SEAM" },
+						parent_tool_use_id: null, parent_agent_id: null,
+					}],
+				}),
+			};
+		};
+		try {
+			const response = await localApiFetch(gateway, `/api/sessions/${sessionId}/transcript`);
+			expect(response.status).toBe(200);
+			expect(calls).toEqual([sessionId]);
+			expect(JSON.stringify(await response.json())).toContain("SDK_TRANSCRIPT_MANAGER_SEAM");
+		} finally {
+			manager.getSdkSessionAccessDeps = original;
+		}
+	});
 });

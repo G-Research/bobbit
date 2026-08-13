@@ -15808,8 +15808,8 @@ async function handleApiRoute(
 				session: targetPs,
 				sidecarEntries: readAuthorSidecar(targetId),
 				agentDeps: {
-					getStaff: (id) => staffManager.getStaff(id),
-					getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+					getStaff: (id: string) => staffManager.getStaff(id),
+					getRole: (name: string) => resolveRoleForProject(name, targetPs.projectId),
 				},
 			};
 			if (resolveSessionRuntime({
@@ -15819,15 +15819,10 @@ async function handleApiRoute(
 				if (!isClaudeAgentSdkSessionId(targetPs.claudeAgentSdkSessionId)) {
 					throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: invalid SDK session identity");
 				}
-				const bridgeDeps = gatewayDeps.claudeAgentSdkBridgeDepsFactory?.({
-					runtime: "claude-agent-sdk",
-					cwd: targetPs.cwd,
-					claudeAgentSdkSessionId: targetPs.claudeAgentSdkSessionId,
-				});
 				const history = await readSdkSessionMessages({
 					sessionId: targetPs.claudeAgentSdkSessionId,
 					cwd: targetPs.cwd,
-				}, bridgeDeps?.sessionAccess);
+				}, sessionManager.getSdkSessionAccessDeps(targetPs));
 				json(await readTranscriptMessages(params, {
 					messages: adaptSdkSessionMessages(history),
 					authorContext,

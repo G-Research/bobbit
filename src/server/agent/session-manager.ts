@@ -11243,7 +11243,7 @@ export class SessionManager {
 	}
 
 	/** Resolve the existing SDK bridge factory's deterministic history seam. */
-	private sdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
+	getSdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
 		if (!this.claudeAgentSdkBridgeDepsFactory || !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
 		const options: ClaudeAgentSdkBridgeOptions = {
 			runtime: "claude-agent-sdk",
@@ -11261,7 +11261,7 @@ export class SessionManager {
 		return readSdkSessionInfo({
 			sessionId: ps.claudeAgentSdkSessionId,
 			cwd: ps.cwd,
-		}, this.sdkSessionAccessDeps(ps));
+		}, this.getSdkSessionAccessDeps(ps));
 	}
 
 	/** Read archived SDK history from the official SDK store; Pi remains JSONL-backed. */
@@ -11274,7 +11274,7 @@ export class SessionManager {
 				const messages = await readSdkSessionMessages({
 					sessionId: ps.claudeAgentSdkSessionId,
 					cwd: ps.cwd,
-				}, this.sdkSessionAccessDeps(ps));
+				}, this.getSdkSessionAccessDeps(ps));
 				return this.buildVisibleMessageSnapshot(id, adaptSdkSessionMessages(messages));
 			} catch {
 				return [];

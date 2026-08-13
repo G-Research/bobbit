@@ -198,6 +198,7 @@ function withUsageSnapshot(raw: RawSessionCost): SessionUsageSnapshot {
 	const context = raw.context ?? emptyContext();
 	return {
 		...publicRaw,
+		cacheHitRate: deriveCacheHitRate(raw),
 		totalCost: basis === "subscription-notional" || basis === "api-notional" || basis === "unknown" ? null : raw.totalCost,
 		notionalCostUsd: raw.notionalCostUsd ?? null,
 		costBasis: basis,
