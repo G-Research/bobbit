@@ -2913,7 +2913,7 @@
     },
     {
       "path": "tests2/core/preview-snapshot-generality.test.ts",
-      "reason": "Focused writer/reader regression matrix for compact preview v3 markers: raw reserved, Unicode, percent, and long filenames retain the compact route plus validated hash/artifact identity under the 250-byte cap, with trusted preview_open fallback only for entry-omitted long markers and explicit no-silent-degradation cap failure.",
+      "reason": "Focused writer/reader regression matrix for all realistic preview v3 filenames: raw reserved, Unicode, percent, dotted, and long names retain a self-contained compact marker with canonical hash/artifact identity under the 250-byte cap; unsafe and incompressible entries fail loudly at write time.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3170,6 +3170,24 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/operator-pause-durability-repro.test.ts",
+      "reason": "Failing-first durability and auto-unblock regression coverage for operator-paused goals with unmet dependencies, while retaining migration of provenance-free legacy dependency pauses.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/crash-restart.journey.spec.ts",
+      "reason": "Real browser and gateway-restart journey proving an operator pause applied in the dashboard to a dependency-blocked child retains its persisted provenance and paused dashboard affordance after restart.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
       }
     }
   ],
