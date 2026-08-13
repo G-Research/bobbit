@@ -564,6 +564,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
+| `POST` | `/api/goals/:id/retry-setup` | Retry a failed worktree setup. See [Goal setup recovery](#goal-setup-recovery). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Coordinated remote-state status](#coordinated-remote-state-status). |
@@ -574,6 +575,18 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
+
+### Goal setup recovery
+
+`POST /api/goals/:id/retry-setup` is the operator recovery path for a goal whose authoritative `setupStatus` is `error`. It has no request body. On acceptance it persistently transitions the goal to `retrying`, atomically clears the active `setupError`, broadcasts `goal_state_changed`, and returns without waiting for provisioning:
+
+```json
+{ "ok": true, "coalesced": false, "setupStatus": "retrying" }
+```
+
+Concurrent retry requests coalesce: the response may contain `coalesced: true` and the currently active setup state, but no extra worktree, Team Lead, or scheduler continuation is created. A request that joins a genuine initial `preparing` flight also reports coalescing. A persisted `preparing` state without a live flight is not treated as success; it returns `409` with an actionable explanation. A goal that is not failed or otherwise retrying/preparing returns `409`; an unknown goal returns `404`.
+
+The eventual `ready` or `error` transition is delivered through `goal_state_changed` plus the corresponding setup completion/error event. Clients must refresh their goal state on those events rather than retaining the optimistic `retrying` snapshot. `ready` has no `setupError`, so all current-warning surfaces must disappear; a current `error` keeps one actionable diagnostic and blocks goal-scoped session and team starts. For lifecycle, child-scheduler, and Git coordination semantics, see [Goals, Workflows, Tasks & Gates — Atomic goal setup lifecycle](goals-workflows-tasks.md#atomic-goal-setup-lifecycle).
 
 ### Coordinated remote-state status
 
