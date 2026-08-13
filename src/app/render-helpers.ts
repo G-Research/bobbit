@@ -564,6 +564,20 @@ function refreshOpenSidebarActionsPopover(): void {
 	current.element.items = sidebarActionPopoverItems(current.kind, current.actions);
 }
 
+/**
+ * A full sidebar render may replace the trigger while the popover component is
+ * loading. Reacquire only the exact entity/kind trigger so a stale click can
+ * never anchor a menu to another row.
+ */
+function connectedSidebarActionsTrigger(input: Pick<OpenSidebarActionsPopover, "kind" | "entityId"> & { trigger: HTMLElement }): HTMLElement | null {
+	const matches = (element: HTMLElement): boolean => element.isConnected
+		&& element.dataset.sidebarActionsKind === input.kind
+		&& element.dataset.sidebarActionsId === input.entityId;
+	if (matches(input.trigger)) return input.trigger;
+	return [...document.querySelectorAll<HTMLElement>('[data-testid="sidebar-actions-trigger"]')]
+		.find(matches) ?? null;
+}
+
 async function openSidebarActionsPopover(input: {
 	kind: SidebarActionEntityKind;
 	entityId: string;
@@ -579,9 +593,11 @@ async function openSidebarActionsPopover(input: {
 	closeSidebarActionsPopover(false);
 	const requestId = ++_sidebarActionsPopoverRequestId;
 	await import("../ui/components/SidebarActionsPopover.js");
-	if (requestId !== _sidebarActionsPopoverRequestId || !input.trigger.isConnected) return;
+	if (requestId !== _sidebarActionsPopoverRequestId) return;
+	const trigger = connectedSidebarActionsTrigger(input);
+	if (!trigger || requestId !== _sidebarActionsPopoverRequestId) return;
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
-	element.anchorEl = input.trigger;
+	element.anchorEl = trigger;
 	element.items = sidebarActionPopoverItems(input.kind, input.actions);
 	element.sourceRects = input.sourceRects;
 	element.open = true;
