@@ -19,8 +19,13 @@ import {
 	SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY,
 	SIDEBAR_STATUS_FILTER_STORAGE_KEYS,
 	setSidebarStatusSectionExpanded,
+	setSidebarViewFilter,
 } from "../../src/app/sidebar-view-preferences.js";
-import { renderSidebarViewControls } from "../../src/app/sidebar.js";
+import {
+	buildSidebarStatusSections,
+	buildSidebarTreeModel,
+	renderSidebarViewControls,
+} from "../../src/app/sidebar.js";
 import { revealCurrentSidebarSession } from "../../src/app/sidebar-reveal.js";
 import { _setSubgoalsEnabledForTesting } from "../../src/app/subgoals-flag.js";
 import {
@@ -130,6 +135,7 @@ beforeEach(() => {
 	state.statusShowBusy = true;
 	state.statusShowRead = true;
 	state.statusShowTeams = false;
+	(state as typeof state & { sidebarRevealSessionId?: string | null }).sidebarRevealSessionId = null;
 	state.statusCollapsedSections = new Set();
 	state.filtersPopoverOpen = false;
 	state.searchQuery = "";
@@ -249,12 +255,27 @@ describe("reveal current sidebar session control", () => {
 		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(true);
 	});
 
-	it("opens only the active Status section and restarts emphasis on every click", async () => {
+	it("scopes archived/team inclusion to the explicit Status reveal and returns control to manual filters", async () => {
 		state.projects = [project("p")];
-		state.gatewaySessions = [session("target")];
+		state.archivedSessions = [
+			session("target", {
+				archived: true,
+				status: "archived",
+				teamLeadSessionId: "missing-lead",
+				server_tags: ["team-kind=member", "read-state=read"],
+			}),
+			session("archived-other", { archived: true, status: "archived", server_tags: ["read-state=unread"] }),
+		];
+		state.gatewaySessions = [
+			session("member-other", {
+				teamLeadSessionId: "other-missing-lead",
+				server_tags: ["team-kind=member", "read-state=unread"],
+			}),
+			session("visible", { server_tags: ["read-state=unread"] }),
+		];
 		openSession("target");
 		state.sidebarSessionView = "status";
-		state.searchQuery = "filtered";
+		state.searchQuery = "literal query";
 		state.statusShowArchived = true;
 		state.statusShowBusy = false;
 		state.statusShowRead = false;
@@ -269,7 +290,6 @@ describe("reveal current sidebar session control", () => {
 		const row = mountSessionRow("target");
 		const addClass = vi.spyOn(row.classList, "add");
 		await revealCurrentSidebarSession();
-		await revealCurrentSidebarSession();
 
 		expect(state.searchQuery).toBe("");
 		expect({
@@ -283,14 +303,92 @@ describe("reveal current sidebar session control", () => {
 			busy: false,
 			read: false,
 		});
+		expect((state as typeof state & { sidebarRevealSessionId?: string | null }).sidebarRevealSessionId).toBe("target");
+		const explicitlyRevealed = buildSidebarStatusSections();
+		expect(explicitlyRevealed.read.map(value => value.session.id)).toEqual(["target"]);
+		expect(explicitlyRevealed.unread.map(value => value.session.id)).toEqual(["visible"]);
 		expect(state.statusCollapsedSections.has("read")).toBe(false);
 		expect(state.statusCollapsedSections.has("pinned")).toBe(true);
 		expect(localStorage.getItem(SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY)).toBe('["pinned"]');
 		expect(localStorage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showTeams)).toBe("false");
 		expect(state.keyboardNavActiveId).toBe("session:target");
+
+		await revealCurrentSidebarSession();
 		expect(row.scrollIntoView).toHaveBeenCalledTimes(2);
 		expect(addClass.mock.calls.filter(args => args.includes("sidebar-reveal-emphasis")).length).toBe(2);
 		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(true);
+
+		setSidebarViewFilter(state, "status", "showArchived", false);
+		expect((state as typeof state & { sidebarRevealSessionId?: string | null }).sidebarRevealSessionId).toBeNull();
+		const manuallyFiltered = buildSidebarStatusSections();
+		expect([...manuallyFiltered.pinned, ...manuallyFiltered.unread, ...manuallyFiltered.read]
+			.map(value => value.session.id)).toEqual(["visible"]);
+	});
+
+	it("does not leak an explicit inclusion when the open session changes during hydration", async () => {
+		state.projects = [project("p")];
+		openSession("first");
+		let releaseFetch!: (response: Response) => void;
+		const pendingFetch = new Promise<Response>(resolve => { releaseFetch = resolve; });
+		vi.stubGlobal("fetch", vi.fn(() => pendingFetch));
+
+		const reveal = revealCurrentSidebarSession();
+		expect((state as typeof state & { sidebarRevealSessionId?: string | null }).sidebarRevealSessionId).toBe("first");
+		openSession("second");
+		releaseFetch(Response.json(session("first")));
+		await reveal;
+
+		buildSidebarTreeModel();
+		expect((state as typeof state & { sidebarRevealSessionId?: string | null }).sidebarRevealSessionId).not.toBe("first");
+		expect(document.querySelector('[data-nav-id="session:first"]')).toBeNull();
+	});
+
+	it("materializes and explicitly expands a seven-goal target path without changing another project's cap", async () => {
+		state.projects = [project("p"), project("unrelated")];
+		state.goals = [
+			...Array.from({ length: 7 }, (_, index) => goal(`g${index + 1}`, {
+				projectId: "p",
+				parentGoalId: index === 0 ? undefined : `g${index}`,
+				createdAt: index + 1,
+			})),
+			...Array.from({ length: 7 }, (_, index) => goal(`u${index + 1}`, {
+				projectId: "unrelated",
+				parentGoalId: index === 0 ? undefined : `u${index}`,
+				createdAt: 20 + index,
+			})),
+		];
+		state.gatewaySessions = [session("target", { projectId: "p", goalId: "g7", createdAt: 30 })];
+		openSession("target");
+
+		const targetPath: SidebarTreeNodeKey[] = [
+			{ kind: "project", projectId: "p" },
+			...Array.from({ length: 7 }, (_, index): SidebarTreeNodeKey => ({ kind: "goal", goalId: `g${index + 1}` })),
+		];
+		const unrelatedProject: SidebarTreeNodeKey = { kind: "project", projectId: "unrelated" };
+		for (const key of targetPath) setTreeExpanded(key, false);
+		setTreeExpanded(unrelatedProject, false);
+
+		const before = buildSidebarTreeModel();
+		expect(before.flatByKey.has(sidebarTreeKey({ kind: "session", sessionId: "target" }))).toBe(false);
+		expect(before.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "u7" }))).toBe(false);
+		const row = mountSessionRow("target");
+
+		await revealCurrentSidebarSession();
+
+		const after = buildSidebarTreeModel();
+		expect(after.flatByKey.has(sidebarTreeKey({ kind: "session", sessionId: "target" }))).toBe(true);
+		for (const key of targetPath) {
+			expect(isSidebarTreeExpanded(key), sidebarTreeKey(key)).toBe(true);
+		}
+		expect(isSidebarTreeExpanded(unrelatedProject)).toBe(false);
+		expect(after.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "u7" }))).toBe(false);
+		expect(row.scrollIntoView).toHaveBeenCalledWith({ block: "nearest", behavior: "smooth" });
+
+		const persisted = JSON.parse(localStorage.getItem(SIDEBAR_TREE_STATE_STORAGE_KEY) || "{}") as {
+			expansion?: Record<string, string>;
+		};
+		for (const key of targetPath) expect(persisted.expansion?.[sidebarTreeKey(key)]).toBe("expanded");
+		expect(persisted.expansion?.[sidebarTreeKey(unrelatedProject)]).toBe("collapsed");
 	});
 
 	it("cold-loads an exact archived session and canonical archive pages before revealing it", async () => {
