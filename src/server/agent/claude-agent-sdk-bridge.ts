@@ -19,6 +19,7 @@ import {
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import type { ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
+import { ClaudeAgentSdkUnavailableError, normalizeClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
 
 import type { Options, Query, SDKUserMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
@@ -51,13 +52,7 @@ export interface ClaudeAgentSdkBridgeDeps {
 	sessionAccess?: ClaudeAgentSdkSessionAccessDeps;
 }
 
-export class ClaudeAgentSdkUnavailableError extends Error {
-	readonly code = "CLAUDE_AGENT_SDK_UNAVAILABLE";
-	constructor(message = "Claude Agent SDK is unavailable") {
-		super(message);
-		this.name = "ClaudeAgentSdkUnavailableError";
-	}
-}
+export { ClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 
 const CLAUDE_SDK_FIXED_TOKEN_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 const CLAUDE_SDK_EFFORT_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
@@ -222,11 +217,6 @@ class AsyncInputQueue implements AsyncIterable<SDKUserMessage> {
 			},
 		};
 	}
-}
-
-function errorMessage(error: unknown): string {
-	const raw = error instanceof Error ? error.message : String(error);
-	return raw.replace(/(token|secret|key|authorization)\s*[:=]\s*[^\s,;]+/ig, "$1=<redacted>").slice(0, 500);
 }
 
 function boundedString(value: unknown, maxLength = 2_000): string | undefined {
@@ -490,7 +480,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 
 	private fail(error: unknown): void {
 		if (this.state === "failed" || this.state === "stopped") return;
-		const wrapped = error instanceof ClaudeAgentSdkUnavailableError ? error : new ClaudeAgentSdkUnavailableError(errorMessage(error));
+		const wrapped = normalizeClaudeAgentSdkUnavailableError(error);
 		this.terminalError = wrapped;
 		this.state = "failed";
 		this.rejectTerminal(wrapped);
@@ -597,10 +587,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			}, this.deps.sessionAccess);
 			return { success: true, data: adaptSdkSessionMessages(messages) };
 		} catch (error) {
-			const message = error instanceof ClaudeAgentSdkUnavailableError
-				? error.message
-				: `SDK_SESSION_UNAVAILABLE: read session messages: ${errorMessage(error)}`;
-			return unsupported(message);
+			return unsupported(normalizeClaudeAgentSdkUnavailableError(error).message);
 		}
 	}
 	async sendCommand(): Promise<any> { return unsupported("Claude Agent SDK does not support Pi RPC commands"); }

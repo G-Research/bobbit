@@ -1,4 +1,5 @@
-import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
+import { isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
+import { ClaudeAgentSdkUnavailableError, normalizeClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 
 export interface SdkSessionInfo {
 	readonly sessionId: string;
@@ -32,15 +33,8 @@ export interface SdkSessionAccessInput {
 	cwd?: string;
 }
 
-function sanitizedErrorMessage(error: unknown): string {
-	const raw = error instanceof Error ? error.message : String(error);
-	return raw.replace(/(token|secret|key|authorization)\s*[:=]\s*[^\s,;]+/ig, "$1=<redacted>").slice(0, 500);
-}
-
-function unavailable(operation: string, error?: unknown): ClaudeAgentSdkUnavailableError {
-	if (error instanceof ClaudeAgentSdkUnavailableError) return error;
-	const detail = error === undefined ? "session was not found" : sanitizedErrorMessage(error);
-	return new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${operation}: ${detail}`);
+function unavailable(_operation: string, error?: unknown): ClaudeAgentSdkUnavailableError {
+	return normalizeClaudeAgentSdkUnavailableError(error);
 }
 
 function validate(input: SdkSessionAccessInput): void {

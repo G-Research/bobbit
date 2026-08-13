@@ -8,6 +8,7 @@ import {
 	normalizeClaudeAgentSdkModelCapabilities,
 	resolveClaudeAgentSdkModelCapability,
 } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
+import { claudeAgentSdkUnavailableDiagnostic } from "../../src/server/agent/claude-agent-sdk-error.ts";
 import type { Clock } from "../../src/server/gateway-deps.ts";
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void };
@@ -182,7 +183,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(fixture.clock.pending()).toBe(2);
 
 		fixture.clock.advance(1);
-		await expect(steer).rejects.toThrow(/readiness timed out/i);
+		await expect(steer).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
 		expect((fixture.bridge as any).state).toBe("starting");
 		expect(fixture.query.closeCalls).toBe(0);
 		expect(fixture.clock.pending()).toBe(1);
@@ -203,22 +204,25 @@ describe("ClaudeAgentSdkBridge", () => {
 		const directWaiter = fixture.bridge.waitForReady(60_000);
 		const pendingPrompt = fixture.bridge.promptWhenReady("must not be accepted", undefined, { readyTimeoutMs: 70_000 });
 
-		fixture.query.initialization.reject(new Error("subscription unavailable: TOKEN=secret"));
-		await expect(started).rejects.toMatchObject({
-			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-			message: "subscription unavailable: TOKEN=<redacted>",
-		});
-		await expect(directWaiter).rejects.toMatchObject({
-			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-			message: "subscription unavailable: TOKEN=<redacted>",
-		});
-		await expect(pendingPrompt).rejects.toMatchObject({
-			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-			message: "subscription unavailable: TOKEN=<redacted>",
-		});
+		const providerFailure = "subscription unavailable: Authorization: Bearer sk-secret-value abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude/credentials.json opaque_12345678901234567890123456789012";
+		fixture.query.initialization.reject(new Error(providerFailure));
+		for (const pending of [started, directWaiter, pendingPrompt]) {
+			await expect(pending).rejects.toMatchObject({
+				code: "SDK_SESSION_UNAVAILABLE",
+				message: "SDK_SESSION_UNAVAILABLE",
+			});
+		}
+		const failure = await started.catch(error => error);
+		const diagnostic = claudeAgentSdkUnavailableDiagnostic(failure);
+		for (const secret of ["sk-secret-value", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012"]) {
+			expect(diagnostic).not.toContain(secret);
+			expect(JSON.stringify(observed)).not.toContain(secret);
+		}
 		expect(fixture.query.closeCalls).toBe(1);
 		expect(fixture.clock.pending()).toBe(0);
-		expect(observed.filter(event => event.type === "process_exit")).toHaveLength(1);
+		expect(observed.filter(event => event.type === "process_exit")).toEqual([
+			expect.objectContaining({ error: "SDK_SESSION_UNAVAILABLE" }),
+		]);
 	});
 
 	it.each(invalidInitializationIdentities)("fails %s initialization identity once before becoming ready", async (_kind, initialization) => {
@@ -231,8 +235,8 @@ describe("ClaudeAgentSdkBridge", () => {
 		fixture.query.initialization.resolve(initialization);
 
 		await expect(started).rejects.toMatchObject({
-			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-			message: "Claude Agent SDK did not provide a valid resumable session id",
+			code: "SDK_SESSION_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE",
 		});
 		await expect(fixture.bridge.waitForReady()).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 		await expect(pendingPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
@@ -597,7 +601,7 @@ describe("ClaudeAgentSdkBridge", () => {
 			query: (() => { queryCalls++; throw new Error("must not run"); }) as never,
 			clock,
 		});
-		await expect(bridge.start()).rejects.toMatchObject({ code: "CLAUDE_AGENT_SDK_UNAVAILABLE" });
+		await expect(bridge.start()).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
 		expect(queryCalls).toBe(0);
 	});
 
@@ -657,7 +661,7 @@ describe("ClaudeAgentSdkBridge", () => {
 			query: (async () => { calls++; throw new Error("SDK loader missing TOKEN=secret"); }) as never,
 			clock,
 		});
-		await expect(bridge.start()).rejects.toMatchObject({ code: "CLAUDE_AGENT_SDK_UNAVAILABLE", message: expect.stringContaining("TOKEN=<redacted>") });
+		await expect(bridge.start()).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
 		expect(calls).toBe(1);
 		await expect(bridge.waitForReady()).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 	});
