@@ -1,30 +1,28 @@
-// v2-native — failing-first verifier contention coverage. Listed in tests-map.json `v2Native`.
-//
-// This test intentionally models provider idleness separately from RPC
-// responsiveness. Each reviewer is healthy but rejects a direct prompt once
-// with Pi's exact already-processing error. The verifier must enqueue one
-// delivery per session, preserve goal/session isolation, and fence a late
-// verdict from a cancelled signal.
+// v2-native — deterministic verifier contention coverage using the actual
+// SessionManager queue/dispatch implementation and a Pi-shaped RPC transport.
 
-import { describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
+import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
+import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
+import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
+import { createManualClock } from "../harness/clock.js";
 
 const MARKER = "VERIFIER_BUSY_CONCURRENCY_REPRO";
 const BUSY_ERROR = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
 
-type QueuedDelivery = {
-	sessionId: string;
-	text: string;
-	cancelled: boolean;
-	resolve: () => void;
-	reject: (error: Error) => void;
-};
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
 
 function makeStateDir(prefix: string): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -34,166 +32,174 @@ function makeStateDir(prefix: string): string {
 }
 
 async function eventually(predicate: () => boolean, message: string): Promise<void> {
-	for (let attempt = 0; attempt < 50; attempt++) {
+	for (let attempt = 0; attempt < 80; attempt += 1) {
 		if (predicate()) return;
-		await new Promise(resolve => setTimeout(resolve, 5));
+		await new Promise(resolve => setTimeout(resolve, 2));
 	}
 	assert.fail(`${MARKER}: ${message}`);
 }
 
+type PendingPiCommand = {
+	sessionId: string;
+	text: string;
+	streamingBehavior: unknown;
+	settled: ReturnType<typeof deferred<{ success: true }>>;
+	stopped: boolean;
+};
+
 /**
- * A provider-shaped delivery controller. `rpcClient.prompt()` is deliberately
- * the unsafe direct boundary: it always throws busy. The SessionManager queue
- * API below admits exactly one intent, then this controller releases it only
- * when the test declares that the existing turn settled.
+ * Models a responsive Pi RPC transport with an active SDK turn. Direct prompt
+ * delivery always gets Pi's busy rejection; the SAME command is accepted when
+ * `streamingBehavior: "followUp"` is supplied atomically.
  */
-class BusyOnceDeliveryController {
-	readonly directAttempts = new Map<string, number>();
-	readonly accepted = new Map<string, number>();
-	readonly queued: QueuedDelivery[] = [];
-	readonly sessions = new Map<string, any>();
-	readonly sessionGoals = new Map<string, string>();
-	private harness!: VerificationHarness;
+class BusyPiTransport {
+	readonly commands: PendingPiCommand[] = [];
+	readonly rawBusyAttempts = new Map<string, number>();
+	readonly stoppedSessions = new Set<string>();
 
-	attachHarness(harness: VerificationHarness): void {
-		this.harness = harness;
-	}
-
-	createSession(sessionId: string, goalId: string): any {
-		const session = {
-			id: sessionId,
-			status: "streaming",
-			transcriptMarker: `preserved transcript for ${goalId}`,
-			lastTurnErrored: false,
-			rpcClient: {
-				onEvent: (_listener: (event: any) => void) => () => {},
-				prompt: async () => {
-					this.directAttempts.set(sessionId, (this.directAttempts.get(sessionId) ?? 0) + 1);
-					throw new Error(BUSY_ERROR);
-				},
-				promptWhenReady: async () => {
-					this.directAttempts.set(sessionId, (this.directAttempts.get(sessionId) ?? 0) + 1);
-					throw new Error(BUSY_ERROR);
-				},
-			},
-		};
-		this.sessions.set(sessionId, session);
-		this.sessionGoals.set(sessionId, goalId);
-		return session;
-	}
-
-	queue(sessionId: string, text: string): Promise<void> {
-		return new Promise<void>((resolve, reject) => {
-			this.queued.push({ sessionId, text, cancelled: false, resolve, reject });
-		});
-	}
-
-	queuedForGoal(goalId: string): QueuedDelivery[] {
-		return this.queued.filter(item => this.sessionGoals.get(item.sessionId) === goalId && !item.cancelled);
-	}
-
-	release(sessionId: string, summary: string): void {
-		const item = this.queued.find(candidate => candidate.sessionId === sessionId && !candidate.cancelled);
-		assert.ok(item, `${MARKER}: expected one live queued delivery for ${sessionId}`);
-		const session = this.sessions.get(sessionId)!;
-		this.accepted.set(sessionId, (this.accepted.get(sessionId) ?? 0) + 1);
-		session.status = "streaming";
-		this.harness.pendingResults.get(sessionId)?.({ verdict: true, summary });
-		session.status = "idle";
-		item.resolve();
-	}
-
-	cancelSession(sessionId: string): void {
-		for (const item of this.queued) {
-			if (item.sessionId === sessionId && !item.cancelled) {
-				item.cancelled = true;
-				item.reject(new Error("verification prompt delivery cancelled"));
-			}
+	prompt(sessionId: string, text: string, _images?: unknown, _third?: unknown, streamingBehavior?: unknown): Promise<{ success: true }> {
+		if (streamingBehavior !== "followUp") {
+			this.rawBusyAttempts.set(sessionId, (this.rawBusyAttempts.get(sessionId) ?? 0) + 1);
+			return Promise.reject(new Error(BUSY_ERROR));
 		}
+		const settled = deferred<{ success: true }>();
+		this.commands.push({ sessionId, text, streamingBehavior, settled, stopped: false });
+		return settled.promise;
 	}
 
-	publishLate(sessionId: string, summary: string): void {
-		this.harness.pendingResults.get(sessionId)?.({ verdict: true, summary });
+	pending(sessionId: string): PendingPiCommand | undefined {
+		return this.commands.find(command => command.sessionId === sessionId && !command.stopped);
+	}
+
+	accept(sessionId: string): void {
+		const command = this.pending(sessionId);
+		assert.ok(command, `${MARKER}: expected one queued atomic Pi command for ${sessionId}`);
+		command.settled.resolve({ success: true });
+	}
+
+	stop(sessionId: string): void {
+		this.stoppedSessions.add(sessionId);
+		for (const command of this.commands) {
+			if (command.sessionId !== sessionId || command.stopped) continue;
+			command.stopped = true;
+			command.settled.reject(new Error("reviewer session terminated before queued followUp started"));
+		}
 	}
 }
 
-function makeHarness(goalIds: string[], controller: BusyOnceDeliveryController, stateDir: string) {
+const managers: any[] = [];
+
+function makeSessionManager(stateDir: string): any {
+	const clock = createManualClock(1_700_000_000_000);
+	const manager: any = new SessionManager({
+		clock,
+		stateDir,
+		projectContextManager: {} as any,
+	});
+	clock.clearInterval(manager._statusHeartbeatTimer);
+	manager._statusHeartbeatTimer = null;
+	manager.projectContextManager = null;
+	manager._testClock = clock;
+	manager._testStore = {
+		get: () => undefined,
+		getAll: () => [],
+		getLive: () => [],
+		update: () => {},
+		archiveAsync: async () => {},
+	};
+	// Reviewer construction is not the unit under test. Keep the production
+	// SessionManager instance for all prompt admission and delivery behavior.
+	manager.setTitle = () => {};
+	manager.updateSessionMeta = () => {};
+	managers.push(manager);
+	return manager;
+}
+
+function putReviewer(manager: any, transport: BusyPiTransport, sessionId: string, goalId: string): any {
+	const session: any = {
+		id: sessionId,
+		title: `Reviewer ${goalId}`,
+		titleGenerated: true,
+		cwd: "/virtual/project",
+		goalId,
+		status: "idle",
+		statusVersion: 0,
+		createdAt: manager._testClock.now(),
+		lastActivity: manager._testClock.now(),
+		clients: new Set(),
+		promptQueue: new PromptQueue(),
+		eventBuffer: new EventBuffer(),
+		setupComplete: true,
+		transcriptMarker: `preserved transcript for ${goalId}`,
+		unsubscribe: () => {},
+		rpcClient: {
+			onEvent: () => () => {},
+			prompt: (text: string, images?: unknown, third?: unknown, streamingBehavior?: unknown) =>
+				transport.prompt(sessionId, text, images, third, streamingBehavior),
+			getState: async () => ({}),
+			stop: async () => { transport.stop(sessionId); },
+		},
+	};
+	manager.sessions.set(sessionId, session);
+	return session;
+}
+
+function makeHarness(goalIds: string[], stateDir: string, manager: any) {
 	initAuthorSidecarDir(stateDir, {
 		secretsDir: path.join(stateDir, "private-secrets"),
 		hmacKey: Buffer.alloc(32, 0x5b),
 	});
 	const verificationWrites: Array<{ signalId: string; verification: any }> = [];
 	const gateStatusWrites: Array<{ goalId: string; gateId: string; status: string }> = [];
-	const gateStates = new Map(goalIds.map(goalId => [goalId, { status: "pending", signals: [] as any[] }]));
+	const gates = new Map(goalIds.map(goalId => [goalId, { status: "pending", signals: [] as any[] }]));
 	const gateStore = {
-		getGate: (goalId: string) => gateStates.get(goalId),
-		getGatesForGoal: (goalId: string) => [gateStates.get(goalId)],
-		updateSignalVerification: (signalId: string, verification: any) => {
-			verificationWrites.push({ signalId, verification });
-		},
+		getGate: (goalId: string) => gates.get(goalId),
+		getGatesForGoal: (goalId: string) => [gates.get(goalId)],
+		updateSignalVerification: (signalId: string, verification: any) => verificationWrites.push({ signalId, verification }),
 		updateGateStatus: (goalId: string, gateId: string, status: string) => {
 			gateStatusWrites.push({ goalId, gateId, status });
-			const gate = gateStates.get(goalId);
+			const gate = gates.get(goalId);
 			if (gate) gate.status = status;
 		},
 	};
 	const projectContextManager = {
 		getContextForGoal: (goalId: string) => goalIds.includes(goalId) ? {
-			project: { id: "project-busy-concurrency", name: "Busy concurrency" },
+			project: { id: "project-verifier-contention", name: "Verifier contention" },
 			goalStore: { get: (id: string) => id === goalId ? { id, title: goalId, state: "active", branch: `goal/${goalId}` } : undefined },
 			gateStore,
-			projectConfigStore: {
-				get: () => "",
-				getWithDefaults: () => ({}),
-				getComponents: () => [],
-				getQaMaxDurationMinutes: () => 1,
-			},
+			projectConfigStore: { get: () => "", getWithDefaults: () => ({}), getComponents: () => [], getQaMaxDurationMinutes: () => 1 },
 		} : null,
 		all: () => [],
 	};
-	const sessionManager: any = {
-		isSandboxEnabled: false,
-		createSession: async (_cwd: string, _args: unknown, goalId: string, _assistantType: unknown, opts: any) => controller.createSession(opts.sessionId, goalId),
-		getSession: (sessionId: string) => controller.sessions.get(sessionId),
-		setTitle: () => {},
-		updateSessionMeta: () => {},
-		waitForIdle: async () => {},
-		waitForStreaming: async () => {},
-		terminateSession: async (sessionId: string) => { controller.cancelSession(sessionId); },
-		// Expected verifier-owned durable delivery API. Keep enqueuePrompt as an
-		// alias so the contract also accepts an implementation built directly on
-		// SessionManager's existing durable FIFO queue.
-		enqueueVerificationPrompt: async (sessionId: string, text: string) => controller.queue(sessionId, text),
-		enqueuePrompt: async (sessionId: string, text: string) => controller.queue(sessionId, text),
-		queueVerificationPrompt: async (sessionId: string, text: string) => controller.queue(sessionId, text),
-	};
-	const harness = new VerificationHarness(
+	const harness: any = new VerificationHarness(
 		stateDir,
 		gateStore as any,
 		() => {},
 		{ get: (name: string) => name === "reviewer" ? { name, promptTemplate: "Review faithfully.", accessory: "magnifier" } : undefined, getAll: () => [] } as any,
 		undefined,
-		sessionManager,
+		manager,
 		{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {}, getTeamState: () => undefined } as any,
 		undefined,
 		projectContextManager as any,
 		undefined,
-		{ commandRunner: { execFile: async () => ({ stdout: "", stderr: "" }) } as any },
-	) as any;
-	// Keep the focused test independent of Git/worktree discovery.
+		{ commandRunner: { execFile: async () => ({ stdout: "", stderr: "" }) } as any, clock: manager._testClock },
+	);
 	harness.resolveVerificationBaseBranch = async () => "main";
 	harness.resolveLegacyMasterBranch = async () => "main";
-	controller.attachHarness(harness);
-	return { harness, verificationWrites, gateStatusWrites };
+	return { harness, verificationWrites, gateStatusWrites, gates };
 }
 
-function llmGate(goalId: string) {
-	return {
-		id: "review-gate",
-		name: "Review gate",
-		dependsOn: [],
-		verify: [{ name: "Busy review", type: "llm-review", prompt: `Review ${goalId}`, timeout: 60, phase: 0 }],
-	};
+function installReviewerCreation(manager: any, transport: BusyPiTransport): void {
+	manager.createSession = async (_cwd: string, _args: unknown, goalId: string, _assistantType: unknown, opts: { sessionId: string }) =>
+		putReviewer(manager, transport, opts.sessionId, goalId);
+}
+
+function reviewStep(name: string) {
+	return { name, prompt: `Review ${name}`, timeout: 60, role: "reviewer" };
+}
+
+function gate() {
+	return { id: "review-gate", name: "Review gate", dependsOn: [], verify: [{ name: "Busy review", type: "llm-review", prompt: "Review", timeout: 60, phase: 0 }] };
 }
 
 function signal(goalId: string, id: string) {
@@ -210,77 +216,91 @@ function signal(goalId: string, id: string) {
 	};
 }
 
+afterEach(() => {
+	while (managers.length > 0) {
+		const manager = managers.pop();
+		manager._testClock?.clearInterval(manager._statusHeartbeatTimer);
+		manager.sessions.clear();
+	}
+});
+
 describe("verifier busy concurrency reproductions", () => {
-	it("isolates two concurrent goals: each busy reviewer queues once on its own preserved session and completes once", async () => {
+	it("drives two concurrent goals through real SessionManager atomic followUp delivery exactly once", async () => {
+		const stateDir = makeStateDir("verifier-busy-concurrent-");
+		const manager = makeSessionManager(stateDir);
+		const transport = new BusyPiTransport();
+		installReviewerCreation(manager, transport);
 		const goalAlpha = "goal-busy-alpha";
 		const goalBeta = "goal-busy-beta";
-		const controller = new BusyOnceDeliveryController();
-		const { harness } = makeHarness([goalAlpha, goalBeta], controller, makeStateDir("verifier-busy-concurrent-"));
+		const { harness } = makeHarness([goalAlpha, goalBeta], stateDir, manager);
+		const alphaId = "reviewer-alpha-preserved";
+		const betaId = "reviewer-beta-preserved";
 
-		const alphaSessionId = "reviewer-alpha-preserved";
-		const betaSessionId = "reviewer-beta-preserved";
-		const alpha = (harness as any).runLlmReviewViaSession(
-			{ name: "Alpha review", prompt: "alpha", timeout: 60, role: "reviewer" },
-			process.cwd(), goalAlpha, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "alpha kickoff", 60_000, alphaSessionId,
-		);
-		const beta = (harness as any).runLlmReviewViaSession(
-			{ name: "Beta review", prompt: "beta", timeout: 60, role: "reviewer" },
-			process.cwd(), goalBeta, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "beta kickoff", 60_000, betaSessionId,
-		);
+		const alpha = harness.runLlmReviewViaSession(reviewStep("Alpha"), process.cwd(), goalAlpha, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "alpha kickoff", 60_000, alphaId);
+		const beta = harness.runLlmReviewViaSession(reviewStep("Beta"), process.cwd(), goalBeta, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "beta kickoff", 60_000, betaId);
 
-		await eventually(
-			() => controller.queuedForGoal(goalAlpha).length === 1 && controller.queuedForGoal(goalBeta).length === 1,
-			`both healthy-but-busy reviewers must be admitted to independent durable queues instead of terminally failing. direct=${JSON.stringify(Object.fromEntries(controller.directAttempts))}`,
-		);
-		assert.notEqual(alphaSessionId, betaSessionId, `${MARKER}: distinct goals must never share a reviewer session id`);
-		assert.equal(controller.sessions.get(alphaSessionId)?.transcriptMarker, `preserved transcript for ${goalAlpha}`, `${MARKER}: alpha must retain its original reviewer context`);
-		assert.equal(controller.sessions.get(betaSessionId)?.transcriptMarker, `preserved transcript for ${goalBeta}`, `${MARKER}: beta must retain its original reviewer context`);
+		await eventually(() => transport.pending(alphaId) !== undefined && transport.pending(betaId) !== undefined,
+			"both healthy-but-processing Pi reviewers must receive one atomic followUp command");
+		assert.equal(transport.commands.length, 2, `${MARKER}: two goals must produce exactly two distinct provider commands`);
+		assert.deepEqual(new Set(transport.commands.map(command => command.sessionId)), new Set([alphaId, betaId]));
+		assert.ok(transport.commands.every(command => command.streamingBehavior === "followUp"), `${MARKER}: Pi must receive followUp in the original RPC command`);
+		assert.ok(transport.commands.every(command => command.text.startsWith("[System]: ")), `${MARKER}: verifier prompts retain system attribution at the provider boundary`);
+		assert.equal(manager.getSession(alphaId).transcriptMarker, `preserved transcript for ${goalAlpha}`);
+		assert.equal(manager.getSession(betaId).transcriptMarker, `preserved transcript for ${goalBeta}`);
 
-		controller.release(alphaSessionId, "alpha verdict");
-		controller.release(betaSessionId, "beta verdict");
+		transport.accept(alphaId);
+		transport.accept(betaId);
+		harness.pendingResults.get(alphaId)?.({ verdict: true, summary: "alpha verdict" });
+		harness.pendingResults.get(betaId)?.({ verdict: true, summary: "beta verdict" });
+		manager.getSession(alphaId).status = "idle";
+		manager.getSession(betaId).status = "idle";
 		const [alphaResult, betaResult] = await Promise.all([alpha, beta]);
 
-		assert.equal(alphaResult.passed, true, `${MARKER}: alpha busy reviewer must complete after its queued prompt starts. result=${JSON.stringify(alphaResult)}`);
-		assert.equal(betaResult.passed, true, `${MARKER}: beta busy reviewer must complete after its queued prompt starts. result=${JSON.stringify(betaResult)}`);
-		assert.equal(controller.accepted.get(alphaSessionId), 1, `${MARKER}: alpha provider must accept exactly one logical kickoff`);
-		assert.equal(controller.accepted.get(betaSessionId), 1, `${MARKER}: beta provider must accept exactly one logical kickoff`);
-		assert.equal(controller.directAttempts.get(alphaSessionId) ?? 0, 0, `${MARKER}: alpha must not issue a raw duplicate prompt after busy contention`);
-		assert.equal(controller.directAttempts.get(betaSessionId) ?? 0, 0, `${MARKER}: beta must not issue a raw duplicate prompt after busy contention`);
-		assert.doesNotMatch(`${alphaResult.output}\n${betaResult.output}`, /Agent is already processing/i, `${MARKER}: busy contention is infrastructure queueing, never a terminal reviewer finding`);
+		assert.equal(alphaResult.passed, true, `${MARKER}: alpha result=${JSON.stringify(alphaResult)}`);
+		assert.equal(betaResult.passed, true, `${MARKER}: beta result=${JSON.stringify(betaResult)}`);
+		assert.equal(transport.commands.filter(command => command.sessionId === alphaId).length, 1, `${MARKER}: alpha must not raw-retry or duplicate its kickoff`);
+		assert.equal(transport.commands.filter(command => command.sessionId === betaId).length, 1, `${MARKER}: beta must not raw-retry or duplicate its kickoff`);
+		assert.equal(transport.rawBusyAttempts.size, 0, `${MARKER}: a raw prompt would have been rejected busy; followUp must be atomic`);
+		assert.doesNotMatch(`${alphaResult.output}\n${betaResult.output}`, /Agent is already processing/i);
 	});
 
-	it("cancel/re-signal fences a queued old reviewer and cannot publish its late verdict into the replacement signal", async () => {
+	it("terminates a queued followUp on cancel/re-signal and fences its late verdict from the replacement", async () => {
+		const stateDir = makeStateDir("verifier-busy-resignal-");
+		const manager = makeSessionManager(stateDir);
+		const transport = new BusyPiTransport();
+		installReviewerCreation(manager, transport);
 		const goalId = "goal-busy-resignal";
+		const { harness, verificationWrites, gateStatusWrites, gates } = makeHarness([goalId], stateDir, manager);
 		const oldSignal = signal(goalId, "signal-busy-old");
 		const replacementSignal = signal(goalId, "signal-busy-replacement");
-		const controller = new BusyOnceDeliveryController();
-		const { harness, verificationWrites, gateStatusWrites } = makeHarness([goalId], controller, makeStateDir("verifier-busy-resignal-"));
+		gates.get(goalId)!.signals.push(oldSignal);
 
-		const oldRun = harness.verifyGateSignal(oldSignal, llmGate(goalId), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
-		await eventually(
-			() => controller.queuedForGoal(goalId).length === 1,
-			"the original signal must remain queued while its healthy reviewer finishes the prior turn",
-		);
-		const oldSessionId = controller.queuedForGoal(goalId)[0].sessionId;
+		const oldRun = harness.verifyGateSignal(oldSignal, gate(), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
+		await eventually(() => transport.commands.length === 1, "old signal should be waiting in Pi's followUp queue");
+		const oldSessionId = transport.commands[0].sessionId;
 
 		await harness.cancelStaleVerifications(goalId, "review-gate");
-		controller.publishLate(oldSessionId, "STALE_OLD_VERDICT_MUST_NOT_PUBLISH");
+		assert.equal(transport.stoppedSessions.has(oldSessionId), true, `${MARKER}: cancellation must terminate the reviewer owning the queued followUp`);
+		assert.equal(manager.getSession(oldSessionId), undefined, `${MARKER}: cancelled reviewer must no longer be live for a stale delivery`);
+		// This models a delayed tool POST after the old transport's cancellation.
+		harness.pendingResults.get(oldSessionId)?.({ verdict: true, summary: "STALE_OLD_VERDICT_MUST_NOT_PUBLISH" });
 
-		const replacementRun = harness.verifyGateSignal(replacementSignal, llmGate(goalId), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
-		await eventually(
-			() => controller.queuedForGoal(goalId).length === 1,
-			"the replacement signal must receive its own fresh queued reviewer delivery",
-		);
-		const replacementSessionId = controller.queuedForGoal(goalId)[0].sessionId;
-		assert.notEqual(replacementSessionId, oldSessionId, `${MARKER}: re-signal must not revive the superseded reviewer session`);
-		controller.release(replacementSessionId, "replacement verdict");
+		gates.get(goalId)!.signals.push(replacementSignal);
+		const replacementRun = harness.verifyGateSignal(replacementSignal, gate(), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
+		await eventually(() => transport.commands.length === 2, "replacement signal should receive its own atomic followUp delivery");
+		const replacementSessionId = transport.commands[1].sessionId;
+		assert.notEqual(replacementSessionId, oldSessionId, `${MARKER}: re-signal must never reuse the superseded reviewer identity`);
+
+		transport.accept(replacementSessionId);
+		harness.pendingResults.get(replacementSessionId)?.({ verdict: true, summary: "replacement verdict" });
+		manager.getSession(replacementSessionId).status = "idle";
 		await Promise.all([oldRun, replacementRun]);
 
 		const replacementWrite = verificationWrites.find(write => write.signalId === replacementSignal.id);
-		assert.equal(replacementWrite?.verification.status, "passed", `${MARKER}: replacement signal must be the only completed verdict after cancellation. writes=${JSON.stringify(verificationWrites)}`);
-		assert.doesNotMatch(JSON.stringify(replacementWrite), /STALE_OLD_VERDICT_MUST_NOT_PUBLISH/, `${MARKER}: late old verdict crossed the signal fence and overwrote/reached the replacement signal`);
-		assert.equal(controller.accepted.get(oldSessionId) ?? 0, 0, `${MARKER}: cancelled queued old delivery must never reach the provider`);
-		assert.equal(controller.accepted.get(replacementSessionId), 1, `${MARKER}: replacement delivery must reach the provider exactly once`);
-		assert.equal(gateStatusWrites.at(-1)?.status, "passed", `${MARKER}: replacement signal should leave the gate passed, never failed from stale busy contention`);
+		assert.equal(replacementWrite?.verification.status, "passed", `${MARKER}: replacement must pass after its own verdict. writes=${JSON.stringify(verificationWrites)}`);
+		assert.doesNotMatch(JSON.stringify(replacementWrite), /STALE_OLD_VERDICT_MUST_NOT_PUBLISH/);
+		assert.equal(transport.commands.filter(command => command.sessionId === oldSessionId).length, 1, `${MARKER}: cancellation must not redrain the old queued followUp`);
+		assert.equal(transport.commands.filter(command => command.sessionId === replacementSessionId).length, 1, `${MARKER}: replacement accepts exactly one provider command`);
+		assert.equal(gateStatusWrites.at(-1)?.status, "passed", `${MARKER}: stale cancellation must not leave the replacement gate failed`);
 	});
 });

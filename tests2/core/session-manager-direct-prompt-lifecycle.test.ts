@@ -1635,4 +1635,42 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			["terminated"],
 		);
 	});
+
+	it("VERIFIER_BUSY_RACE_REPRO sends one verifier intent as an atomic Pi followUp command", async () => {
+		const manager = makeManager();
+		const commands: Array<{ text: string; images: unknown; third: unknown; streamingBehavior: unknown }> = [];
+		const prompt = vi.fn(async (text: string, images: unknown, third: unknown, streamingBehavior: unknown) => {
+			commands.push({ text, images, third, streamingBehavior });
+			// This is the real Pi contention boundary: a healthy transport is already
+			// processing, and accepts only the atomic followUp form of this exact RPC.
+			if (streamingBehavior !== "followUp") {
+				return { success: false, error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message." };
+			}
+			return { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-verifier-atomic-follow-up",
+			rpcClient: { prompt },
+		});
+
+		const result = await manager.enqueuePrompt(session.id, "submit the review verdict", {
+			source: "verification",
+			streamingBehavior: "followUp",
+			suppressTitleGen: true,
+		});
+
+		assert.deepEqual(result, { status: "dispatched" });
+		assert.equal(commands.length, 1, "VERIFIER_BUSY_RACE_REPRO: a busy verifier must receive one logical provider command, never a raw retry");
+		assert.deepEqual(commands[0], {
+			text: "[System]: submit the review verdict",
+			images: undefined,
+			third: undefined,
+			streamingBehavior: "followUp",
+		});
+		assert.equal(session.promptQueue.length, 0, "VERIFIER_BUSY_RACE_REPRO: accepted atomic followUp must not leave a replayable duplicate queue row");
+		assert.equal(session.status, "streaming");
+		const binding = readAuthorSidecar(session.id)[0];
+		assert.equal(binding?.source, "verification");
+		assert.deepEqual(binding?.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+	});
 });
