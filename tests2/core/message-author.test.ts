@@ -309,7 +309,7 @@ describe("message author primitives", () => {
 		expect(snapshot[1].content).toEqual([{ type: "text", text: "automatic reminder" }]);
 	});
 
-	it("strips untrusted snapshot authors before preserving trusted Bobbit splices", () => {
+	it("strips untrusted snapshot authors and recovery markers before preserving trusted Bobbit splices", () => {
 		const snapshotAgent: MessageAuthor = { kind: "agent", id: "session:snapshot-trust", label: "Snapshot Agent" };
 		const liveAgent: MessageAuthor = { kind: "agent", id: "session:live-trust", label: "Live Agent" };
 		const trustedSystem: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
@@ -318,7 +318,14 @@ describe("message author primitives", () => {
 
 		const rawSnapshot = [
 			{ id: "raw-assistant", role: "assistant", content: "answer", author: untrustedSystem },
-			{ id: "raw-user", role: "user", content: "question", author: untrustedAgent },
+			{
+				id: "raw-user",
+				role: "user",
+				content: "question",
+				author: untrustedAgent,
+				_inFlightSteer: true,
+				_deliveryRecoveryProjection: true,
+			},
 		];
 		const visible = buildVisibleMessageSnapshot(rawSnapshot, {
 			sessionId: "snapshot-trust",
@@ -330,18 +337,27 @@ describe("message author primitives", () => {
 			},
 			inFlightSteerTexts: [{
 				text: "trusted reminder",
-				promptId: "trusted-steer",
+				promptId: "trusted-steer-attempt",
+				intentId: "trusted-steer-intent",
+				attemptId: "trusted-steer-attempt",
 				source: "system",
 				author: trustedSystem,
 			}],
 		});
 
 		expect(visible[0].author).toEqual(snapshotAgent);
-		expect(visible[1].author).toEqual(LOCAL_USER_AUTHOR);
+		expect(visible[1]).toMatchObject({ author: LOCAL_USER_AUTHOR });
+		expect(visible[1]._inFlightSteer).toBeUndefined();
+		expect(visible[1]._deliveryRecoveryProjection).toBeUndefined();
 		expect(visible[2].author).toEqual(liveAgent);
-		expect(visible[3].author).toEqual(trustedSystem);
+		expect(visible[3]).toMatchObject({
+			author: trustedSystem,
+			deliveryIntentId: "trusted-steer-intent",
+			_deliveryRecoveryProjection: true,
+		});
 		expect(rawSnapshot[0].author).toEqual(untrustedSystem);
 		expect(rawSnapshot[1].author).toEqual(untrustedAgent);
+		expect(rawSnapshot[1]._deliveryRecoveryProjection).toBe(true);
 	});
 
 	it("exposes the mixed-author batch identity as a system author", () => {
