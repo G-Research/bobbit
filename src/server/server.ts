@@ -647,6 +647,7 @@ import {
 	ClaudeAgentSdkUnavailableError,
 	claudeAgentSdkUnavailableDiagnostic,
 	claudeAgentSdkUnavailablePayload,
+	isClaudeAgentSdkUnavailableError,
 } from "./agent/claude-agent-sdk-error.js";
 import { resolveSessionRuntime } from "./agent/session-runtime.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -8302,6 +8303,14 @@ async function handleApiRoute(
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
 		} catch (err) {
+			if (isClaudeAgentSdkUnavailableError(err)) {
+				console.error(
+					`[POST /api/sessions] SDK unavailable cwd=${cwd ?? "(none)"} project=${resolvedProjectId ?? "(none)"}: ` +
+					claudeAgentSdkUnavailableDiagnostic(err),
+				);
+				json(claudeAgentSdkUnavailablePayload(), 503);
+				return;
+			}
 			// Log full error context server-side so that flaky 500s in tests
 			// (e.g. resilience suite under FS contention) leave a usable trail.
 			// `String(err)` alone drops the stack and any error.cause chain.
@@ -15149,6 +15158,109 @@ async function handleApiRoute(
 		const continueSourceTuple = resolveServerInitialModelTuple(ps);
 		const continueInitialModel = continueSourceTuple.initialModel
 			?? (typeof continueRole?.model === "string" && /^[^/]+\/.+$/.test(continueRole.model) ? continueRole.model : undefined);
+
+		// Agent SDK continuation has no Pi transcript to recover, stat, or copy.
+		// Validate its opaque resume handle and exact persisted model tuple before
+		// allocating a destination or touching any Pi-specific state.
+		if (sessionAuditIdentity(ps).runtime === "claude-agent-sdk") {
+			const modelProvider = typeof ps.modelProvider === "string" ? ps.modelProvider.trim() : "";
+			const modelId = typeof ps.modelId === "string" ? ps.modelId.trim() : "";
+			const claudeAgentSdkSessionId = ps.claudeAgentSdkSessionId;
+			if (!isClaudeAgentSdkSessionId(claudeAgentSdkSessionId) || modelProvider !== "claude-agent-sdk" || !modelId) {
+				json({
+					error: "Claude Agent SDK session requires a valid resume id and model tuple",
+					code: "RUNTIME_CONTINUE_UNSUPPORTED",
+				}, 422);
+				return;
+			}
+			try {
+				await sessionManager.readSdkSessionInfo(ps);
+			} catch (err) {
+				console.error(`[POST /api/sessions/${archivedId}/continue] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+				json(claudeAgentSdkUnavailablePayload(), 503);
+				return;
+			}
+
+			const proj = projectRegistry.get(ps.projectId)!;
+			const projCwd = proj.rootPath;
+			const wantWorktree = !!ps.worktreePath;
+			let worktreeOpts: { repoPath: string } | undefined;
+			if (wantWorktree) {
+				const projCtx = projectContextManager.getOrCreate(ps.projectId);
+				const components = projCtx?.projectConfigStore.getComponents() ?? [];
+				const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
+				const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef, commandRunner: serverCommandRunner });
+				if (!support.supported || !support.repoPath) {
+					json({
+						error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
+					}, 500);
+					return;
+				}
+				worktreeOpts = { repoPath: support.repoPath };
+			}
+
+			const newSessionId = randomUUID();
+			const sdkSourceTuple = { ...continueSourceTuple, initialModel: `claude-agent-sdk/${modelId}` };
+			const createOpts: any = {
+				sessionId: newSessionId,
+				projectId: ps.projectId,
+				sandboxed: !!ps.sandboxed,
+				worktreeOpts,
+				awaitWorktreeSetup: !!worktreeOpts,
+				bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
+				// Internal source metadata only — never client-controlled.
+				claudeAgentSdkSessionId,
+			};
+			if (continueRole) {
+				Object.assign(createOpts, roleCreateOptions(continueRole));
+			} else if (ps.role) {
+				createOpts.role = ps.role;
+				createOpts.roleName = ps.role;
+				if (ps.accessory) createOpts.accessory = ps.accessory;
+			} else if (ps.accessory) {
+				createOpts.accessory = ps.accessory;
+			}
+			delete createOpts.initialThinkingLevel;
+			Object.assign(createOpts, sdkSourceTuple);
+
+			let newSession;
+			try {
+				newSession = await sessionManager.createSession(
+					projCwd, undefined, undefined, ps.assistantType, createOpts,
+				);
+				// Keep the opaque resume handle durable even if the bridge does not
+				// emit a state frame before this request returns.
+				sessionManager.getSessionStore(ps.projectId).update(newSession.id, {
+					runtime: "claude-agent-sdk",
+					claudeAgentSdkSessionId,
+				});
+			} catch (err) {
+				if (isClaudeAgentSdkUnavailableError(err)) {
+					console.error(`[POST /api/sessions/${archivedId}/continue] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+					json(claudeAgentSdkUnavailablePayload(), 503);
+				} else {
+					// SDK failures can include provider diagnostics and opaque resume
+					// identities. Keep this route's fallback opaque as well.
+					console.error("[POST /api/sessions/continue] Claude Agent SDK continuation failed");
+					json({ error: "failed to continue Claude Agent SDK session" }, 500);
+				}
+				return;
+			}
+
+			const baseTitle = (ps.title || "session").trim() || "session";
+			const continuedTitle = `Continued: ${baseTitle}`;
+			sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
+			json({
+				id: newSession.id,
+				cwd: newSession.cwd,
+				status: newSession.status,
+				title: continuedTitle,
+				assistantType: ps.assistantType,
+				...sessionAuditIdentity(sessionManager.getPersistedSession(newSession.id) ?? newSession, auditModels()),
+			}, 201);
+			return;
+		}
+
 		if (continueInitialModel && !(await requireCurrentSessionModel(continueInitialModel, "Continue model"))) return;
 
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
@@ -15157,7 +15269,6 @@ async function handleApiRoute(
 		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
 		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 		const nodeFs = await import("node:fs");
-		const { randomUUID } = await import("node:crypto");
 
 		let sourceJsonl = ps.agentSessionFile;
 		if (!sourceJsonl) {
