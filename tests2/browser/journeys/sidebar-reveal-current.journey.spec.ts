@@ -18,7 +18,14 @@ const IDS = {
 	teamLead: "reveal-team-lead",
 	delegate: "reveal-team-delegate",
 	unrelatedGoal: "reveal-filler-00",
+	unrelatedTeamGoal: "reveal-unrelated-team-goal",
+	unrelatedTeamLead: "reveal-unrelated-team-lead",
+	unrelatedTeamDelegate: "reveal-unrelated-team-delegate",
 	archived: "reveal-cold-archived",
+	unrelatedArchived: "reveal-unrelated-archived",
+	deepProject: "reveal-deep-project",
+	deepGoalPrefix: "reveal-deep-goal-",
+	deepSession: "reveal-deep-session",
 } as const;
 
 const DEPS = [
@@ -52,8 +59,10 @@ test.beforeAll(() => {
 		'const renderRevealFixture = () => {',
 		'  const fixtureSessions = (window as any).__revealCanonicalSessions;',
 		'  const fixtureGoals = (window as any).__revealCanonicalGoals;',
+		'  const fixtureArchivedSessions = (window as any).__revealCanonicalArchivedSessions;',
 		'  if (fixtureSessions) state.gatewaySessions = fixtureSessions.map((value: any) => ({ ...value }));',
 		'  if (fixtureGoals) state.goals = fixtureGoals.map((value: any) => ({ ...value }));',
+		'  if (fixtureArchivedSessions) state.archivedSessions = fixtureArchivedSessions.map((value: any) => ({ ...value }));',
 		'  if (state.selectedSessionId && !state.remoteAgent) state.connectingSessionId = state.selectedSessionId;',
 		'  doRenderApp();',
 		'};',
@@ -68,6 +77,7 @@ test.beforeAll(() => {
 		'  while (node?.parentKey) { node = model.flatByKey.get(node.parentKey); if (node) out.push(node.key); }',
 		'  return out;',
 		'};',
+		'(window as any).__revealTreeHas = (key: string) => buildSidebarTreeModel().flatByKey.has(key);',
 	].join("\n"));
 	buildBundle({ entry: GENERATED_ENTRY, outfile: BUNDLE, deps: [GENERATED_ENTRY, ...DEPS] });
 });
@@ -187,14 +197,20 @@ async function injectNestedTarget(page: Page, view: "project" | "status" = "proj
 			...fillers,
 			goal(ids.parentGoal, "Reveal nested parent", 1_000, { subgoalsAllowed: true, maxNestingDepth: 3 }),
 			goal(ids.teamGoal, "Reveal nested team", 1_001, { parentGoalId: ids.parentGoal, team: true }),
+			goal(ids.unrelatedTeamGoal, "Unrelated team", 1_004, { team: true }),
 		];
 		state.gatewaySessions = [
 			session(ids.teamLead, "Reveal team lead", 1_002, { goalId: ids.teamGoal, role: "team-lead" }),
 			session(ids.delegate, "Reveal current delegate", 1_003, { delegateOf: ids.teamLead, role: "coder" }),
+			session(ids.unrelatedTeamLead, "Unrelated team lead", 1_005, { goalId: ids.unrelatedTeamGoal, role: "team-lead" }),
+			session(ids.unrelatedTeamDelegate, "Unrelated team delegate", 1_006, { delegateOf: ids.unrelatedTeamLead, role: "coder" }),
 		];
-		state.archivedSessions = [];
+		state.archivedSessions = [session(ids.unrelatedArchived, "Unrelated archived session", 900, {
+			status: "archived", archived: true, archivedAt: 1_900,
+		})];
 		(window as any).__revealCanonicalSessions = state.gatewaySessions.map((value: any) => ({ ...value }));
 		(window as any).__revealCanonicalGoals = state.goals.map((value: any) => ({ ...value }));
+		(window as any).__revealCanonicalArchivedSessions = state.archivedSessions.map((value: any) => ({ ...value }));
 		(window as any).__revealActiveSessionId = ids.delegate;
 		state.selectedSessionId = ids.delegate;
 		state.connectingSessionId = ids.delegate;
@@ -226,9 +242,19 @@ async function injectArchivedTarget(page: Page): Promise<void> {
 			server_tags: [],
 			user_tags: [],
 		};
+		const unrelatedArchived = {
+			...archived,
+			id: ids.unrelatedArchived,
+			title: "Unrelated cold archived session",
+			archivedAt: 1_900,
+			createdAt: 900,
+			lastActivity: 900,
+			lastReadAt: 901,
+		};
 		const originalFetch = window.fetch.bind(window);
 		(window as any).__revealCanonicalSessions = null;
 		(window as any).__revealCanonicalGoals = null;
+		(window as any).__revealCanonicalArchivedSessions = null;
 		(window as any).__revealArchivedRequests = [];
 		window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 			const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -236,7 +262,7 @@ async function injectArchivedTarget(page: Page): Promise<void> {
 			(window as any).__revealArchivedRequests.push(`${init?.method || "GET"} ${url.pathname}${url.search}`);
 			if (url.pathname.endsWith(`/api/sessions/${ids.archived}`)) return Response.json(archived);
 			if (url.pathname.endsWith("/api/sessions") && url.searchParams.get("include") === "archived") {
-				return Response.json({ sessions: [archived], archivedDelegates: [], total: 1, hasMore: false, nextCursor: null });
+				return Response.json({ sessions: [archived, unrelatedArchived], archivedDelegates: [], total: 2, hasMore: false, nextCursor: null });
 			}
 			if (url.pathname.endsWith("/api/goals") && url.searchParams.get("archived") === "true") {
 				return Response.json({ goals: [], total: 0, hasMore: false, nextCursor: null });
@@ -255,6 +281,68 @@ async function injectArchivedTarget(page: Page): Promise<void> {
 	}, IDS);
 	await renderInjectedView(page, "project");
 	await expect(revealButton(page)).toBeEnabled();
+}
+
+async function injectDeepTarget(page: Page): Promise<string[]> {
+	const goalIds = Array.from({ length: 7 }, (_, index) => `${IDS.deepGoalPrefix}${index}`);
+	await page.evaluate(({ ids, deepGoalIds }) => {
+		document.documentElement.dataset.subgoalsEnabled = "true";
+		const state = (window as any).__bobbitState;
+		const project = {
+			id: ids.deepProject,
+			name: "Deep Reveal Project",
+			rootPath: "/tmp/sidebar-reveal-deep",
+			colorLight: "#2563eb",
+			colorDark: "#60a5fa",
+		};
+		const goal = (id: string, title: string, createdAt: number, extra: Record<string, unknown> = {}) => ({
+			id,
+			title,
+			cwd: project.rootPath,
+			projectId: project.id,
+			state: "in-progress",
+			spec: "Seven-goal explicit depth reveal fixture.",
+			createdAt,
+			updatedAt: createdAt,
+			...extra,
+		});
+		const fillers = Array.from({ length: 24 }, (_, index) =>
+			goal(`reveal-deep-filler-${String(index).padStart(2, "0")}`, `Deep filler ${index}`, index + 1));
+		const chain = deepGoalIds.map((id, index) => goal(id, `Deep chain ${index + 1}`, 1_000 + index, {
+			...(index > 0 ? { parentGoalId: deepGoalIds[index - 1] } : {}),
+			subgoalsAllowed: true,
+		}));
+		state.projects = [...state.projects.filter((value: any) => value.id !== project.id), project];
+		state.goals = [...fillers, ...chain];
+		state.gatewaySessions = [{
+			id: ids.deepSession,
+			title: "Deepest current session",
+			cwd: project.rootPath,
+			projectId: project.id,
+			goalId: deepGoalIds.at(-1),
+			status: "idle",
+			createdAt: 2_000,
+			lastActivity: 2_000,
+			lastReadAt: 2_001,
+			clientCount: 0,
+			server_tags: [],
+			user_tags: [],
+		}];
+		state.archivedSessions = [];
+		(window as any).__revealCanonicalSessions = state.gatewaySessions.map((value: any) => ({ ...value }));
+		(window as any).__revealCanonicalGoals = state.goals.map((value: any) => ({ ...value }));
+		(window as any).__revealCanonicalArchivedSessions = [];
+		(window as any).__revealActiveSessionId = ids.deepSession;
+		state.selectedSessionId = ids.deepSession;
+		state.connectingSessionId = ids.deepSession;
+		state.remoteAgent = null;
+		state.keyboardNavActiveId = null;
+		state.sidebarSessionView = "status";
+		window.history.replaceState({}, "", `#/session/${ids.deepSession}`);
+	}, { ids: IDS, deepGoalIds: goalIds });
+	await renderInjectedView(page, "project");
+	await expect(revealButton(page)).toBeEnabled();
+	return goalIds;
 }
 
 async function setFilters(page: Page, values: Partial<Record<"archived" | "busy" | "read" | "teams", boolean>>): Promise<void> {
@@ -425,8 +513,28 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		expect(await storedExpansion(page, unrelatedKey)).toBe("collapsed");
 
 		await page.getByTestId("sidebar-view-status").evaluate((button: HTMLButtonElement) => button.click());
-		await setFilters(page, { teams: true });
+		await expectFilters(page, { archived: false, busy: true, read: true, teams: false });
+		await expect(navRow(page, IDS.delegate), `${MARK}: default Status categories hide the active team member before reveal`).toHaveCount(0);
+		await expect(navRow(page, IDS.unrelatedTeamDelegate), `${MARK}: default Status categories hide unrelated team members`).toHaveCount(0);
+		await expect(navRow(page, IDS.unrelatedArchived), `${MARK}: default Status categories hide unrelated archives`).toHaveCount(0);
+
+		await activateReveal(page);
 		const statusRow = navRow(page, IDS.delegate);
+		await expect(statusRow, `${MARK}: explicit Status reveal narrowly includes the active team member`).toBeVisible();
+		await expect(navRow(page, IDS.unrelatedTeamDelegate), `${MARK}: explicit Status reveal does not include unrelated team members`).toHaveCount(0);
+		await expect(navRow(page, IDS.unrelatedArchived), `${MARK}: explicit Status reveal does not include unrelated archives`).toHaveCount(0);
+
+		// A real categorical filter gesture ends the one-action inclusion. Turning
+		// archives on proves normal filter authority: the archive appears while the
+		// still-filtered team target disappears.
+		await page.getByTestId("sidebar-filters-button").click();
+		await page.getByTestId("sidebar-filter-archived").locator("input").check();
+		await expect(navRow(page, IDS.delegate), `${MARK}: manual category interaction clears narrow inclusion`).toHaveCount(0);
+		await expect(navRow(page, IDS.unrelatedArchived), `${MARK}: manual category interaction restores normal filter authority`).toBeVisible();
+		await page.getByTestId("sidebar-filter-archived").locator("input").uncheck();
+		await page.keyboard.press("Escape");
+
+		await activateReveal(page);
 		await expect(statusRow).toBeVisible();
 		const statusSection = await statusRow.evaluate(element => element.closest<HTMLElement>("[data-status-section]")?.dataset.statusSection);
 		expect(statusSection).toMatch(/^(pinned|unread|read)$/);
@@ -445,6 +553,36 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		const collapsed = await page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-status-collapsed-sections") || "[]"));
 		expect(collapsed).not.toContain(statusSection);
 		expect(await storedExpansion(page, unrelatedKey), `${MARK}: Status leaves unrelated Project state alone`).toBe("collapsed");
+	});
+
+	test("explicit reveal exceeds the default depth cap for a seven-goal chain without changing another project", async ({ page }) => {
+		await openFixture(page);
+		const deepGoalIds = await injectDeepTarget(page);
+		const unrelatedProjectKey = treeKey("project", IDS.project);
+		await clickTreeToggle(page, unrelatedProjectKey);
+		expect(await storedExpansion(page, unrelatedProjectKey)).toBe("collapsed");
+
+		// The builder's default cap is five: the sixth-depth target goal and its
+		// session are absent from the canonical production model before the click.
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", deepGoalIds[5]))).toBe(true);
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", deepGoalIds[6]))).toBe(false);
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), `sidebar-tree/v1/session/${encodeURIComponent(IDS.deepSession)}`)).toBe(false);
+		await expect(navRow(page, IDS.deepSession)).toHaveCount(0);
+
+		const container = page.locator(".sidebar-edge [data-project-reorder-list]");
+		await container.evaluate(element => { (element as HTMLElement).scrollTop = 0; });
+		await installRevealProbes(page, IDS.deepSession);
+		await activateReveal(page);
+
+		const pathKeys = [treeKey("project", IDS.deepProject), ...deepGoalIds.map(id => treeKey("goal", id))];
+		await expect(navRow(page, IDS.deepSession), `${MARK}: explicit reveal renders the depth-capped target`).toBeVisible({ timeout: 3_000 });
+		await expect(navRow(page, IDS.deepSession)).toHaveAttribute("data-nav-active", "true");
+		await expectRowWithinSidebar(page, IDS.deepSession);
+		await expect.poll(() => page.evaluate(() => (window as any).__revealEmphasisCount)).toBeGreaterThanOrEqual(1);
+		for (const key of pathKeys) expect(await storedExpansion(page, key), key).toBe("expanded");
+		expect(await storedExpansion(page, unrelatedProjectKey), `${MARK}: deep reveal leaves another project collapsed`).toBe("collapsed");
+		const deepScroll = await page.evaluate(() => (window as any).__revealScrollCalls.at(-1));
+		expect(deepScroll).toMatchObject({ options: { behavior: "smooth", block: "nearest" }, wasWithin: false, overflowing: true });
 	});
 
 	test("cold archived reveal loads the terminated row, honors reduced motion, omits mobile control, and cleans fixture state", async ({ page }) => {
@@ -466,8 +604,23 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		const archivedRow = navRow(page, IDS.archived);
 		await expect(archivedRow).toBeVisible({ timeout: 3_000 });
 		await expect(archivedRow).toHaveAttribute("data-nav-active", "true");
+		await expect(navRow(page, IDS.unrelatedArchived), `${MARK}: archived reveal includes exactly the cold target`).toHaveCount(0);
 		expect(await storedExpansion(page, treeKey("project", IDS.project))).toBe("expanded");
 		expect(await storedExpansion(page, treeKey("project-archived", IDS.project))).toBe("expanded");
+
+		// Exercise the actual categorical control rather than mutating fixture
+		// state: after Show archived is toggled on then off, the explicit one-shot
+		// inclusion is gone and the default filter hides the active archive again.
+		await page.getByTestId("sidebar-filters-button").click();
+		await page.getByTestId("sidebar-filter-archived").locator("input").check();
+		await expect(navRow(page, IDS.unrelatedArchived)).toBeVisible();
+		await page.getByTestId("sidebar-filter-archived").locator("input").uncheck();
+		await expect(navRow(page, IDS.archived), `${MARK}: manual archive interaction restores default filter authority`).toHaveCount(0);
+		await expect(navRow(page, IDS.unrelatedArchived)).toHaveCount(0);
+		await page.keyboard.press("Escape");
+		await activateReveal(page);
+		await expect(archivedRow).toBeVisible();
+		await expect(navRow(page, IDS.unrelatedArchived)).toHaveCount(0);
 
 		await page.emulateMedia({ reducedMotion: "reduce" });
 		await page.evaluate(() => { (window as any).__revealScrollCalls = []; });
