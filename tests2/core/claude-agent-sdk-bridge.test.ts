@@ -8,6 +8,7 @@ import {
 	normalizeClaudeAgentSdkModelCapabilities,
 	resolveClaudeAgentSdkModelCapability,
 } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
+import { buildClaudeSdkSubagentPolicy, buildClaudeSdkToolSurface } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
 import { claudeAgentSdkUnavailableDiagnostic } from "../../src/server/agent/claude-agent-sdk-error.ts";
 import type { Clock } from "../../src/server/gateway-deps.ts";
 
@@ -162,6 +163,21 @@ async function startReady(fixture: ReturnType<typeof bridgeFixture>, sessionId =
 	fixture.query.initialization.resolve({ session_id: sessionId, models: fixture.models });
 	await started;
 	return fixture.query;
+}
+
+function subagentSurfaceFixture() {
+	const entries = ["read", "find", "grep"].map(name => ({
+		name, description: name, group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow" as const, invoke: async () => "ok",
+	}));
+	const roles = Object.fromEntries([
+		"claude-protocol-scout", "backend-parity-reviewer", "billing-safety-auditor",
+	].map(name => [name, { name, promptTemplate: "Bounded helper {{AGENT_ID}}" }]));
+	const policy = buildClaudeSdkSubagentPolicy({ sessionId: "root-sdk-session", roles, entries });
+	const surface = buildClaudeSdkToolSurface({
+		sessionId: "root-sdk-session", restriction: "restricted", entries,
+		requestToolGrant: async () => ({ granted: false }), subagentPolicy: policy,
+	});
+	return { policy, surface };
 }
 
 describe("ClaudeAgentSdkBridge", () => {
@@ -327,10 +343,57 @@ describe("ClaudeAgentSdkBridge", () => {
 		await flushMicrotasks();
 		expect(observed).toEqual(expect.arrayContaining([
 			expect.objectContaining({ type: "message_end", message: expect.objectContaining({ role: "assistant" }) }),
-			expect.objectContaining({ type: "message_end", parentToolUseId: "child" }),
+			expect.objectContaining({ type: "claude_sdk_subagent_work", parentToolUseId: "child", kind: "message" }),
 			expect.objectContaining({ type: "agent_end" }),
 		]));
+		expect(observed.some(event => event.type === "message_end" && event.parentToolUseId === "child")).toBe(false);
 		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	it("bridges verified lifecycle and child partitions without leaking child rows into root events", async () => {
+		const { policy, surface } = subagentSurfaceFixture();
+		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });
+		const query = await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
+		expect(policy.admit("Agent", {
+			subagent_type: child.agent_type, prompt: "Inspect the bounded change", run_in_background: false,
+		}, { toolUseId: "agent-use-1", permissionMode: "default" })).toBe(true);
+		await (query.options.hooks as any).SubagentStart[0].hooks[0](child);
+		query.emit({
+			type: "assistant", uuid: "child-message", parent_tool_use_id: "agent-use-1", parent_agent_id: "child-1",
+			message: { content: [{ type: "text", text: "child-only evidence" }] },
+		});
+		await flushMicrotasks();
+		await (query.options.hooks as any).SubagentStop[0].hooks[0](child);
+		await flushMicrotasks();
+
+		expect(observed.filter(event => event.type === "claude_sdk_subagent_work")).toEqual([
+			expect.objectContaining({ type: "claude_sdk_subagent_work", kind: "start", parentToolUseId: "agent-use-1" }),
+			expect.objectContaining({ type: "claude_sdk_subagent_work", kind: "message", parentToolUseId: "agent-use-1" }),
+			expect.objectContaining({ type: "claude_sdk_subagent_work", kind: "stop", parentToolUseId: "agent-use-1", terminal: { phase: "completed" } }),
+		]);
+		expect(observed.some(event => event.type === "message_end" && event.parentToolUseId === "agent-use-1")).toBe(false);
+		expect(observed.some(event => event.type === "agent_end")).toBe(false);
+		await fixture.bridge.stop();
+	});
+
+	it("terminal cleanup aborts a live verified child once before disposing its observer", async () => {
+		const { policy, surface } = subagentSurfaceFixture();
+		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });
+		const query = await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
+		policy.admit("Agent", { subagent_type: child.agent_type, prompt: "Inspect", run_in_background: false }, { toolUseId: "agent-use-1", permissionMode: "default" });
+		await (query.options.hooks as any).SubagentStart[0].hooks[0](child);
+		await fixture.bridge.stop();
+		await fixture.bridge.stop();
+
+		expect(observed.filter(event => event.type === "claude_sdk_subagent_work").map(event => [event.kind, event.terminal?.phase])).toEqual([
+			["start", undefined], ["stop", "aborted"],
+		]);
 	});
 
 	it("forwards only root-result usage annotations without reconstructing accounting from messages", async () => {

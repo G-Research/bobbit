@@ -16,6 +16,7 @@ import {
 	translateClaudeSdkEvent,
 	type ClaudeSdkTranslatorState,
 } from "./claude-sdk-event-translator.js";
+import { ClaudeSdkSubagentWorkAssembler } from "./claude-sdk-subagent-work.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import type { ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
@@ -284,6 +285,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private modelCapabilities?: ClaudeAgentSdkModelCapability[];
 	private activeModelCapability?: ClaudeAgentSdkModelCapability;
 	private translatorState: ClaudeSdkTranslatorState = createClaudeSdkTranslatorState();
+	/** A generation prevents a disposed/replaced policy surface from publishing stale child work. */
+	private subagentLifecycleGeneration = 0;
+	private subagentLifecycleUnsubscribe?: () => void;
+	private activeToolSurface?: ClaudeSdkToolSurface;
+	private subagentWork = new ClaudeSdkSubagentWorkAssembler();
 	/** A locally-running turn becomes observable only after SDK input acceptance. */
 	private pendingTurnStart?: symbol;
 	private diagnosticsRemaining = 20;
@@ -392,6 +398,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			// Direct bridge construction is retained only through an equally strict,
 			// explicit empty Bobbit surface; never let the SDK load its defaults.
 			const surface = this.options.claudeSdkToolSurface ?? buildEmptyClaudeSdkToolSurface(this.options.claudeAgentSdkSessionId ?? "direct-bridge");
+			this.attachSubagentLifecycle(surface);
 			const sdkOptions: Options = buildClaudeAgentSdkQueryOptions(surface, sdkBase, preCompact);
 
 			const query = this.deps.query({ prompt: this.input, options: sdkOptions });
@@ -477,6 +484,48 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		});
 	}
 
+	private emitSubagentWork(frames: readonly any[]): void {
+		for (const frame of frames) this.emit(frame);
+	}
+
+	/** Preserve the raw child source identity only inside the semantic projection. */
+	private subagentProjectionEvent(event: any, source: Record<string, unknown>): Record<string, unknown> {
+		const sourceId = typeof source.uuid === "string" ? source.uuid : undefined;
+		const agentId = typeof source.parent_agent_id === "string" ? source.parent_agent_id : undefined;
+		const message = event.message && typeof event.message === "object" && agentId
+			? { ...event.message, parentAgentId: agentId } : event.message;
+		return {
+			...event,
+			...(sourceId ? { sourceId } : {}),
+			...(agentId ? { agentId } : {}),
+			...(message !== event.message ? { message } : {}),
+		};
+	}
+
+	private attachSubagentLifecycle(surface: ClaudeSdkToolSurface): void {
+		this.releaseSubagentLifecycle();
+		this.activeToolSurface = surface;
+		this.subagentWork = new ClaudeSdkSubagentWorkAssembler();
+		const generation = ++this.subagentLifecycleGeneration;
+		this.subagentLifecycleUnsubscribe = surface.subagentPolicy?.subscribe((event) => {
+			if (generation !== this.subagentLifecycleGeneration) return;
+			this.emitSubagentWork(this.subagentWork.ingestLifecycle(event));
+		});
+	}
+
+	/** Abort live entries while subscribed, then sever the generation before disposal. */
+	private releaseSubagentLifecycle(): void {
+		const surface = this.activeToolSurface;
+		if (!surface) return;
+		// Clear while subscribed so every active entry becomes an embedded aborted
+		// terminal before a stale generation is detached.
+		surface.subagentPolicy?.clear();
+		this.subagentLifecycleUnsubscribe?.();
+		this.subagentLifecycleUnsubscribe = undefined;
+		this.activeToolSurface = undefined;
+		this.subagentLifecycleGeneration++;
+	}
+
 	private async consume(query: Query): Promise<void> {
 		try {
 			for await (const sdkEvent of query) {
@@ -490,10 +539,16 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				// push continuation runs. The translated event proves the input was
 				// accepted; publish its start before every event in that turn.
 				if (events.length > 0) this.emitPendingTurnStart();
-				for (const event of events) this.emit(event);
+				for (const event of events) {
+					// The translator already owns partition ordering. A child partition is
+					// never emitted as a root transcript/lifecycle event.
+					if (event.parentToolUseId !== undefined) {
+						this.emitSubagentWork(this.subagentWork.ingestLiveEvent(this.subagentProjectionEvent(event, sdkEvent as Record<string, unknown>)));
+					} else this.emit(event);
+				}
 				const rootTurnEnd = events.some(event => event.type === "agent_end" && event.parentToolUseId === undefined);
 				this.translatorState = rootTurnEnd ? createClaudeSdkTranslatorState() : translated.state;
-				if (rootTurnEnd) this.options.claudeSdkToolSurface?.subagentPolicy?.clear();
+				if (rootTurnEnd) this.activeToolSurface?.subagentPolicy?.clear();
 				if (rootTurnEnd && this.state === "running") this.state = "ready";
 			}
 			if (!this.closed && this.state === "starting") this.fail(new Error("Claude Agent SDK ended before initialization"));
@@ -517,10 +572,14 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.clearPendingTurnStart();
 		this.input.fail(this.terminalError ?? new Error("Claude Agent SDK bridge stopped"));
 		this.abortController.abort();
+		// This publishes an aborted terminal exactly once for each still-live
+		// admitted child before the policy observer is unsubscribed/disposed.
+		const surface = this.activeToolSurface;
+		this.releaseSubagentLifecycle();
 		this.cleanupPromise = Promise.resolve()
 			.then(() => this.queryHandle?.close())
 			.catch(() => undefined)
-			.then(() => this.options.claudeSdkToolSurface?.dispose?.())
+			.then(() => surface?.dispose?.())
 			.catch(() => undefined)
 			.then(() => {
 				if (this.isolatedConfigDir) fs.rmSync(this.isolatedConfigDir, { recursive: true, force: true });
