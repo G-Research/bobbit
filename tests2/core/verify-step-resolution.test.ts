@@ -283,6 +283,40 @@ describe("pinned source layout validation", () => {
 		}
 	});
 
+	it("fails closed when a repository directory is swapped for an outside link during canonicalization", async () => {
+		const base = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-swap-root-"));
+		const root = path.join(base, "container");
+		try {
+			const repository = path.join(root, "services", "api");
+			const outside = path.join(base, "outside");
+			fs.mkdirSync(repository, { recursive: true });
+			fs.mkdirSync(path.join(outside, "api"), { recursive: true });
+			let swapped = false;
+			let gitCalled = false;
+			const pathOps = {
+				lstat: (candidate: fs.PathLike) => fs.promises.lstat(candidate),
+				realpath: async (candidate: fs.PathLike) => {
+					if (!swapped && path.resolve(candidate.toString()) === repository) {
+						fs.renameSync(path.join(root, "services"), path.join(root, "services-original"));
+						if (!tryCreateDirectoryLink(outside, path.join(root, "services"))) throw new Error("directory links unavailable");
+						swapped = true;
+					}
+					return fs.promises.realpath(candidate);
+				},
+			};
+			await assert.rejects(
+				resolvePinnedSourceLayout({ worktreePath: root, cwd: root, repoWorktrees: { "services/api": repository } }, {
+					execFile: async () => { gitCalled = true; throw new Error("Git must not run after a path swap"); },
+				} as any, pathOps),
+				(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
+			);
+			assert.equal(swapped, true, "the deterministic race seam must exercise the swap");
+			assert.equal(gitCalled, false, "a swapped repository must fail before Git runs");
+		} finally {
+			fs.rmSync(base, { recursive: true, force: true });
+		}
+	});
+
 	it("accepts a Git container root alongside disjoint nested repositories", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-root-repository-"));
 		try {

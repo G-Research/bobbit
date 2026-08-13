@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import type { CommandRunner, ExecFileOptions } from "../../src/server/gateway-deps.ts";
@@ -279,6 +279,42 @@ describe("VerificationPinnedCheckoutManager", () => {
 			},
 		}), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
 		assert.equal(git.calls.some(call => call.args.includes("worktree")), false, "linked repository paths fail before Git can create a checkout");
+	});
+
+	it("fails closed before Git when a multi-repository root is swapped during canonicalization", async () => {
+		const source = await fixture();
+		const container = path.join(source.base, "branch-container");
+		const repository = path.join(container, "services", "api");
+		const outside = path.join(source.base, "outside");
+		await mkdir(path.dirname(repository), { recursive: true });
+		await mkdir(path.join(outside, "api"), { recursive: true });
+		await rename(source.root, repository);
+		source.root = repository;
+		let swapped = false;
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: git.runner,
+			pathOps: {
+				lstat,
+				realpath: async candidate => {
+					if (!swapped && path.resolve(candidate.toString()) === repository) {
+						await rename(path.join(container, "services"), path.join(container, "services-original"));
+						if (!await createDirectoryLink(outside, path.join(container, "services"))) throw new Error("directory links unavailable");
+						swapped = true;
+					}
+					return realpath(candidate);
+				},
+			},
+		});
+		await assert.rejects(manager.acquire({
+			signal: signal(source.head), sourceRoot: container, projectId: "test-project-id",
+			layout: {
+				version: 2, kind: "multi", containerRoot: container,
+				repositories: [{ repoKey: "services/api", sourceRoot: repository, commitSha: source.head }],
+			},
+		}), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+		assert.equal(swapped, true, "the deterministic race seam must exercise the swap");
+		assert.equal(git.calls.length, 0, "a swapped repository must fail before Git runs");
 	});
 
 	it("pins, resumes, audits, and cleans each repository in a multi-repository layout independently", async () => {
