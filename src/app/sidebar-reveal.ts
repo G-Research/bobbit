@@ -50,6 +50,7 @@ interface PendingReveal {
 let pending: PendingReveal | null = null;
 let revealToken = 0;
 const activeEmphasisCleanups = new WeakMap<HTMLElement, () => void>();
+let activeEmphasisCleanup: (() => void) | null = null;
 
 function nextFrame(cb: () => void): void {
 	if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => cb());
@@ -315,7 +316,7 @@ function reducedMotionPreferred(): boolean {
 }
 
 function replayEmphasis(row: HTMLElement, reducedMotion: boolean): void {
-	activeEmphasisCleanups.get(row)?.();
+	activeEmphasisCleanup?.();
 	row.classList.remove("sidebar-reveal-emphasis", "sidebar-reveal-emphasis--reduced");
 	void row.offsetWidth;
 	row.classList.add("sidebar-reveal-emphasis");
@@ -323,14 +324,17 @@ function replayEmphasis(row: HTMLElement, reducedMotion: boolean): void {
 
 	const cleanup = () => {
 		row.removeEventListener("animationend", onAnimationEnd);
-		if (activeEmphasisCleanups.get(row) !== cleanup) return;
-		activeEmphasisCleanups.delete(row);
-		row.classList.remove("sidebar-reveal-emphasis", "sidebar-reveal-emphasis--reduced");
+		if (activeEmphasisCleanups.get(row) === cleanup) {
+			activeEmphasisCleanups.delete(row);
+			row.classList.remove("sidebar-reveal-emphasis", "sidebar-reveal-emphasis--reduced");
+		}
+		if (activeEmphasisCleanup === cleanup) activeEmphasisCleanup = null;
 	};
 	const onAnimationEnd = (event: AnimationEvent) => {
 		if (event.target === row) cleanup();
 	};
 	activeEmphasisCleanups.set(row, cleanup);
+	activeEmphasisCleanup = cleanup;
 	row.addEventListener("animationend", onAnimationEnd);
 	setTimeout(cleanup, reducedMotion ? REDUCED_EMPHASIS_DURATION_MS : EMPHASIS_DURATION_MS + 80);
 }
