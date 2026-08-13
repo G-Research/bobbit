@@ -39,13 +39,101 @@ function restoreSmokeEnvironment(environment: Map<string, string | undefined>): 
 	}
 }
 
+/** Keep assertions diagnostic-safe: never stringify SDK-owned transcript rows. */
+function hasCanonicalTool(snapshot: unknown, toolName: string): boolean {
+	const visit = (value: unknown): boolean => {
+		if (!value || typeof value !== "object") return false;
+		if (Array.isArray(value)) return value.some(visit);
+		const row = value as Record<string, unknown>;
+		if (row.type === "toolCall" && row.name === toolName) return true;
+		if (row.type === "toolResult" && row.toolName === toolName) return true;
+		return Object.values(row).some(visit);
+	};
+	return visit(snapshot);
+}
+
+function hasOneNestedHelper(snapshot: unknown): boolean {
+	if (!snapshot || typeof snapshot !== "object") return false;
+	const value = snapshot as { messages?: unknown; subagentWork?: unknown };
+	if (!Array.isArray(value.subagentWork) || value.subagentWork.length !== 1) return false;
+	const helper = value.subagentWork[0] as { parentToolUseId?: unknown; agentType?: unknown; phase?: unknown };
+	if (typeof helper.parentToolUseId !== "string" || typeof helper.agentType !== "string") return false;
+	if (!Array.isArray(value.messages)) return false;
+	return value.messages.some((message: any) => Array.isArray(message?.content) && message.content.some((part: any) =>
+		part?.type === "toolCall" && part?.name === "Agent" && part?.id === helper.parentToolUseId,
+	));
+}
+
+function hasDurableSubscriptionUsage(cost: unknown): boolean {
+	if (!cost || typeof cost !== "object") return false;
+	const value = cost as Record<string, unknown>;
+	const context = value.context as Record<string, unknown> | undefined;
+	return value.costBasis === "subscription-notional"
+		&& value.totalCost === null
+		&& typeof value.notionalCostUsd === "number"
+		&& typeof value.inputTokens === "number"
+		&& typeof value.outputTokens === "number"
+		&& typeof context?.highWaterTokens === "number"
+		&& typeof context?.currentTokens === "number";
+}
+
+function sameTranscriptProjection(before: unknown, after: unknown): boolean {
+	const rows = (value: unknown): Array<{ id: unknown; role: unknown }> | undefined => {
+		if (Array.isArray(value)) return value.map(row => ({ id: (row as any)?.id, role: (row as any)?.role }));
+		if (value && typeof value === "object" && Array.isArray((value as any).messages)) return rows((value as any).messages);
+		return undefined;
+	};
+	const left = rows(before);
+	const right = rows(after);
+	return !!left && !!right && left.length === right.length
+		&& left.every((row, index) => typeof row.id === "string" && row.id === right[index]?.id && row.role === right[index]?.role);
+}
+
+function manualSdkModel(): string {
+	const configuredModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim();
+	if (!configuredModel || configuredModel.startsWith("claude-agent-sdk/")) {
+		throw new Error("Claude Agent SDK smoke requires MANUAL_CLAUDE_AGENT_SDK_MODEL without the provider prefix.");
+	}
+	return configuredModel;
+}
+
+test("Claude Agent SDK provider-unavailable failure is bounded and sanitized without an alternative runtime", async () => {
+	test.setTimeout(15_000);
+	const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const root = join(manualTmpRoot(), `bobbit-claude-agent-sdk-unavailable-${nonce}`);
+	const originalEnvironment = captureSmokeEnvironment();
+	try {
+		mkdirSync(join(root, ".bobbit", "state"), { recursive: true });
+		process.env.BOBBIT_DIR = join(root, ".bobbit");
+		process.env.BOBBIT_SECRETS_DIR = join(root, ".secrets");
+		delete process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_AUTH_TOKEN;
+		const { ClaudeAgentSdkBridge } = await import("../../dist/server/agent/claude-agent-sdk-bridge.js");
+		let sdkQueryAttempts = 0;
+		const bridge = new ClaudeAgentSdkBridge({ runtime: "claude-agent-sdk", cwd: root }, {
+			query: (async () => {
+				sdkQueryAttempts++;
+				throw new Error("provider unavailable");
+			}) as any,
+			clock: { now: () => Date.now(), setTimeout, clearTimeout, setInterval, clearInterval } as any,
+		});
+		await expect(bridge.start()).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
+		expect(sdkQueryAttempts).toBe(1);
+		expect(bridge.running).toBe(false);
+		await expect(bridge.prompt("bounded unavailable lifecycle check")).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
+	} finally {
+		if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+		restoreSmokeEnvironment(originalEnvironment);
+	}
+});
+
 test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 	test("discovers a local subscription and supports ready, prompt, steer, soft interrupt, and termination", async () => {
 		test.skip(
 			process.env.BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE !== "1",
 			"Set BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 to use a local Claude subscription.",
 		);
-		test.setTimeout(300_000);
+		test.setTimeout(420_000);
 
 		const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const root = join(manualTmpRoot(), `bobbit-claude-agent-sdk-smoke-${nonce}`);
@@ -115,16 +203,21 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				method: "POST",
 				body: JSON.stringify({ name: `sdk-smoke-${nonce}`, rootPath: projectRoot, acceptCanonical: true }),
 			});
-			expect(projectResponse.status, await projectResponse.clone().text()).toBe(201);
+			expect(projectResponse.status).toBe(201);
 			const project = await projectResponse.json() as { id: string };
+			// Configure an isolated role before session setup: one harmless tool must
+			// ask so the real SessionManager permission-card lifecycle is exercised,
+			// while the read-only gate query remains non-interactive.
+			const roleResponse = await api("/api/roles/general");
+			expect(roleResponse.status).toBe(200);
+			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
+			const roleUpdate = await api("/api/roles/general", {
+				method: "PUT",
+				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", ask_user_choices: "ask" } }),
+			});
+			expect(roleUpdate.status).toBe(200);
 
-			const configuredModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim();
-			if (!configuredModel || configuredModel.startsWith("claude-agent-sdk/")) {
-				throw new Error(
-					"Claude Agent SDK smoke requires MANUAL_CLAUDE_AGENT_SDK_MODEL to be a non-empty SDK model id " +
-					"without the provider prefix (for example, claude-sonnet-4-5).",
-				);
-			}
+			const configuredModel = manualSdkModel();
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
 			const providerResponse = await api("/api/custom-providers", {
 				method: "POST",
@@ -136,25 +229,31 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 					models: [{ id: configuredModel, name: "Manual Claude Agent SDK smoke" }],
 				}),
 			});
-			expect(providerResponse.status, await providerResponse.text()).toBe(200);
+			expect(providerResponse.status).toBe(200);
 			const preferencesResponse = await api("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
 			});
-			expect(preferencesResponse.status, await preferencesResponse.text()).toBe(200);
+			expect(preferencesResponse.status).toBe(200);
 			const createResponse = await api("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false }),
 			});
-			expect(createResponse.status, await createResponse.clone().text()).toBe(201);
+			expect(createResponse.status).toBe(201);
 			const created = await createResponse.json() as { id: string };
-			const session = await waitFor(
+			let session = await waitFor(
 				() => gateway!.sessionManager.getSession(created.id),
 				"SDK bridge installation",
 			);
 			expect(session.runtime, `default session model ${sessionModel} must select the Claude Agent SDK runtime`).toBe("claude-agent-sdk");
 			await session.rpcClient.waitForReady(90_000);
 			expect(session.rpcClient.running, "SDK query must remain usable after readiness").toBe(true);
+			const runTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
+				const before = session.agentObservedTurnVersion ?? 0;
+				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
+				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
+				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, `${label} to settle`, 120_000);
+			};
 
 			// Use the same SessionManager queue/steer path as the gateway. This keeps
 			// the smoke on the production IRpcBridge boundary while avoiding a second
@@ -171,6 +270,81 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				"first SDK prompt to settle",
 				120_000,
 			);
+
+			// A project-local exact skill proves Bobbit owns expansion before a prompt
+			// crosses the SDK boundary. The test never records the expanded text.
+			const skillDir = join(projectRoot, ".claude", "skills", "sdk-dogfood");
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sdk-dogfood\ndescription: isolated lifecycle proof\n---\nUse only the Bobbit SDK dogfood procedure.\n");
+			const { resolveSkillExpansions } = await import("../../dist/server/skills/resolve-skill-expansions.js");
+			const slash = resolveSkillExpansions("/sdk-dogfood", projectRoot);
+			expect(slash.expansions.length === 1 && slash.unknown.length === 0 && slash.modelText !== slash.originalText).toBe(true);
+			const { createComposerSlashRegistry, resolveComposerSlashDispatch } = await import("../../src/app/composer-slash-dispatch.ts");
+			const slashRegistry = createComposerSlashRegistry({
+				runtime: "claude-agent-sdk",
+				skills: [{ name: "sdk-dogfood", description: "isolated lifecycle proof", source: "project" }],
+				launchers: [],
+			});
+			expect(resolveComposerSlashDispatch("/sdk-dogfood", { runtime: "claude-agent-sdk", registry: slashRegistry })?.kind).toBe("skill");
+			expect(resolveComposerSlashDispatch("/compact", { runtime: "claude-agent-sdk", registry: slashRegistry })?.kind).toBe("unsupported-compact");
+			await runTurn(slash.originalText, "Bobbit-owned slash prompt", { modelText: slash.modelText, skillExpansions: slash.expansions });
+
+			// The model is asked to make one safe allowed canonical call and one ask
+			// call. Settle the manager-owned card without exposing arguments/results.
+			const toolTurnVersion = session.agentObservedTurnVersion ?? 0;
+			await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit ask_user_choices for one harmless lifecycle confirmation.", { source: "user" });
+			const permission = await waitFor(
+				() => gateway!.sessionManager.getPendingToolPermission(created.id),
+				"canonical ask-tool permission card",
+				90_000,
+			);
+			expect(permission.toolName === "ask_user_choices" && permission.group === "Ask").toBe(true);
+			await gateway.sessionManager.grantToolPermission(created.id, "ask_user_choices", "tool", "Ask", "one-time", permission.id);
+			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "canonical Bobbit tool turn", 120_000);
+			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "canonical Bobbit tool turn to settle", 120_000);
+			let transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(transcript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "read")).toBe(true);
+			expect(transcript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "ask_user_choices")).toBe(true);
+
+			// This is read-only: it observes workflow state without signaling a real gate.
+			await runTurn("Use only Bobbit gate_list to inspect the current workflow state; do not signal or modify any gate.", "read-only workflow-gate tool action");
+			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(transcript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "gate_list")).toBe(true);
+
+			await runTurn("Use exactly one foreground bobbit-backend-parity-reviewer helper to read README.md. Do not create a Bobbit task, team, worktree, or another helper.", "constrained foreground helper");
+			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(transcript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data))).toBe(true);
+
+			// Only exercise a live SDK-advertised thinking level. When none is
+			// advertised, verify the explicit unsupported path rather than guessing.
+			const { applyRuntimeSessionThinkingSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
+			const liveState = await session.rpcClient.getState();
+			const model = liveState?.data?.model as { thinkingLevelMap?: Record<string, string | null>; reasoning?: boolean } | undefined;
+			const supportedThinking = model?.reasoning === true
+				? Object.entries(model.thinkingLevelMap ?? {}).find(([level, value]) => level !== "off" && typeof value === "string")?.[0]
+				: undefined;
+			if (supportedThinking) {
+				const effective = await applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, supportedThinking);
+				expect(effective.thinkingLevel === supportedThinking).toBe(true);
+			} else {
+				await expect(applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, "low")).rejects.toThrow(/unavailable/i);
+			}
+
+			const beforeRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(beforeRestart.success && hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
+			// Automatic SDK compaction is intentionally observation-only: this smoke
+			// never invokes a manual/fabricated compaction command.
+			await gateway.shutdown();
+			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
+			const restartedPort = await (gateway as any).start();
+			baseURL = `http://127.0.0.1:${restartedPort}`;
+			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "SDK gateway restart/resume", 120_000);
+			await session.rpcClient.waitForReady(90_000);
+			const reloaded = await api(`/api/sessions/${created.id}/transcript`);
+			expect(reloaded.status).toBe(200);
+			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(beforeRestart.success && afterRestart.success && sameTranscriptProjection(beforeRestart.data, afterRestart.data)).toBe(true);
+			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 
 			await gateway.sessionManager.enqueuePrompt(
 				created.id,
@@ -209,16 +383,13 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			process.env.BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE !== "1",
 			"Set BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 with Docker, a rebuilt bobbit-agent image, and a local Claude subscription.",
 		);
-		test.setTimeout(360_000);
+		test.setTimeout(600_000);
 		try {
 			execFileSync("docker", ["image", "inspect", "bobbit-agent"], { stdio: "ignore", timeout: 10_000 });
 		} catch {
 			throw new Error("Claude Agent SDK sandbox smoke requires Docker and a rebuilt bobbit-agent image.");
 		}
-		const configuredModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim();
-		if (!configuredModel || configuredModel.startsWith("claude-agent-sdk/")) {
-			throw new Error("Claude Agent SDK sandbox smoke requires MANUAL_CLAUDE_AGENT_SDK_MODEL without the provider prefix.");
-		}
+		const configuredModel = manualSdkModel();
 		const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const root = join(manualTmpRoot(), `bobbit-claude-agent-sdk-sandbox-${nonce}`);
 		const bobbitDir = join(root, ".bobbit");
@@ -259,7 +430,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			scaffoldBobbitDir(bobbitDir);
 			token = loadOrCreateToken();
 			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
-			const port = await (gateway as any).start();
+			let port = await (gateway as any).start();
 			const api = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${port}${path}`, {
 				...init,
 				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers as Record<string, string> | undefined) },
@@ -274,15 +445,23 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				throw new Error(`Timed out waiting for ${label}`);
 			};
 			const projectResponse = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: `sdk-sandbox-${nonce}`, rootPath: projectRoot, acceptCanonical: true }) });
-			expect(projectResponse.status, await projectResponse.clone().text()).toBe(201);
+			expect(projectResponse.status).toBe(201);
 			const project = await projectResponse.json() as { id: string };
+			const roleResponse = await api("/api/roles/general");
+			expect(roleResponse.status).toBe(200);
+			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
+			const roleUpdate = await api("/api/roles/general", {
+				method: "PUT",
+				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", ask_user_choices: "ask" } }),
+			});
+			expect(roleUpdate.status).toBe(200);
 			const config = await api(`/api/projects/${project.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }] }),
 			});
-			expect(config.status, await config.text()).toBe(200);
+			expect(config.status).toBe(200);
 			const savedConfigResponse = await api(`/api/projects/${project.id}/config`);
-			expect(savedConfigResponse.status, await savedConfigResponse.clone().text()).toBe(200);
+			expect(savedConfigResponse.status).toBe(200);
 			const savedConfig = await savedConfigResponse.json() as { sandbox_tokens?: Array<{ key: string; enabled: boolean; value: string }> };
 			expect(savedConfig.sandbox_tokens).toEqual([{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true, value: "" }]);
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
@@ -296,42 +475,92 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 					models: [{ id: configuredModel, name: "Manual Claude Agent SDK sandbox smoke" }],
 				}),
 			});
-			expect(providerResponse.status, await providerResponse.text()).toBe(200);
+			expect(providerResponse.status).toBe(200);
 			const preferencesResponse = await api("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
 			});
-			expect(preferencesResponse.status, await preferencesResponse.text()).toBe(200);
+			expect(preferencesResponse.status).toBe(200);
 			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false }) });
-			expect(createdResponse.status, await createdResponse.clone().text()).toBe(201);
+			expect(createdResponse.status).toBe(201);
 			const created = await createdResponse.json() as { id: string };
 			let session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK bridge installation");
 			expect(session.runtime).toBe("claude-agent-sdk");
 			expect(session.sandboxed).toBe(true);
 			expect(session.cwd).toBe("/workspace");
 			await session.rpcClient.waitForReady(120_000);
+			const runSandboxTurn = async (text: string, label: string) => {
+				const before = session.agentObservedTurnVersion ?? 0;
+				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user" });
+				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
+				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, `${label} to settle`, 120_000);
+			};
+			const skillDir = join(projectRoot, ".claude", "skills", "sdk-sandbox-dogfood");
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sdk-sandbox-dogfood\ndescription: isolated sandbox lifecycle proof\n---\nUse only the Bobbit sandbox dogfood procedure.\n");
+			const { resolveSkillExpansions } = await import("../../dist/server/skills/resolve-skill-expansions.js");
+			const sandboxSlash = resolveSkillExpansions("/sdk-sandbox-dogfood", projectRoot);
+			expect(sandboxSlash.expansions.length === 1 && sandboxSlash.unknown.length === 0).toBe(true);
+			const { createComposerSlashRegistry, resolveComposerSlashDispatch } = await import("../../src/app/composer-slash-dispatch.ts");
+			const sandboxRegistry = createComposerSlashRegistry({ runtime: "claude-agent-sdk", skills: [{ name: "sdk-sandbox-dogfood", description: "isolated sandbox lifecycle proof", source: "project" }], launchers: [] });
+			expect(resolveComposerSlashDispatch("/compact", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("unsupported-compact");
+			await runSandboxTurn(sandboxSlash.modelText, "sandbox Bobbit-owned slash prompt");
+
 			const firstVersion = session.agentObservedTurnVersion ?? 0;
 			await gateway.sessionManager.enqueuePrompt(created.id, "Reply with exactly: SDK_SANDBOX_READY", { source: "user" });
 			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > firstVersion ? true : undefined, "sandbox SDK prompt output");
+			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox SDK prompt to settle", 120_000);
+
+			const toolTurnVersion = session.agentObservedTurnVersion ?? 0;
+			await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit ask_user_choices for one harmless sandbox lifecycle confirmation.", { source: "user" });
+			const permission = await waitFor(() => gateway!.sessionManager.getPendingToolPermission(created.id), "sandbox canonical ask-tool permission card", 90_000);
+			expect(permission.toolName === "ask_user_choices" && permission.group === "Ask").toBe(true);
+			await gateway.sessionManager.grantToolPermission(created.id, "ask_user_choices", "tool", "Ask", "one-time", permission.id);
+			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "sandbox canonical Bobbit tool turn", 120_000);
+			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox canonical Bobbit tool turn to settle", 120_000);
+			let sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(sandboxTranscript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "read")).toBe(true);
+			expect(sandboxTranscript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "ask_user_choices")).toBe(true);
+			await runSandboxTurn("Use only Bobbit gate_list to inspect current workflow state. Do not signal or modify any gate.", "sandbox read-only workflow-gate tool action");
+			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(sandboxTranscript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "gate_list")).toBe(true);
+			await runSandboxTurn("Use exactly one foreground bobbit-backend-parity-reviewer helper to read README.md. Do not create a Bobbit task, team, worktree, or another helper.", "sandbox constrained foreground helper");
+			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(sandboxTranscript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data))).toBe(true);
+			const { applyRuntimeSessionThinkingSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
+			const sandboxState = await session.rpcClient.getState();
+			const sandboxModel = sandboxState?.data?.model as { thinkingLevelMap?: Record<string, string | null>; reasoning?: boolean } | undefined;
+			const sandboxThinking = sandboxModel?.reasoning === true ? Object.entries(sandboxModel.thinkingLevelMap ?? {}).find(([level, value]) => level !== "off" && typeof value === "string")?.[0] : undefined;
+			if (sandboxThinking) {
+				const effective = await applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, sandboxThinking);
+				expect(effective.thinkingLevel === sandboxThinking).toBe(true);
+			} else {
+				await expect(applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, "low")).rejects.toThrow(/unavailable/i);
+			}
+			const beforeReplacement = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(beforeReplacement.success && hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
+			// Automatic compaction remains SDK-managed and is only observed if it occurs.
 			await gateway.sessionManager.enqueuePrompt(created.id, "Count slowly until told to stop.", { source: "user" });
 			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "streaming" ? true : undefined, "sandbox SDK streaming turn");
 			await gateway.sessionManager.deliverLiveSteer(created.id, "Stop now and acknowledge this steer.");
 			await gateway.sessionManager.abortSessionTurn(created.id);
 			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox SDK interrupt to settle");
-			const sdkId = gateway.sessionManager.getPersistedSession(created.id).claudeAgentSdkSessionId;
-			expect(typeof sdkId).toBe("string");
 			await gateway.sessionManager.forceAbort(created.id);
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id)?.rpcClient?.running ? gateway!.sessionManager.getSession(created.id) : undefined, "sandbox SDK replacement");
-			expect(gateway.sessionManager.getPersistedSession(created.id).claudeAgentSdkSessionId).toBe(sdkId);
+			expect(session.runtime).toBe("claude-agent-sdk");
 			// Rebuild the gateway against the same isolated state. This exercises the
 			// persisted SDK UUID, fresh container wiring, and subscription handoff a
 			// second time without exposing any credential material to the test.
 			await gateway.shutdown();
 			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
-			await (gateway as any).start();
+			port = await (gateway as any).start();
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK gateway restart");
 			await session.rpcClient.waitForReady(120_000);
-			expect(gateway.sessionManager.getPersistedSession(created.id).claudeAgentSdkSessionId).toBe(sdkId);
+			const sandboxReload = await api(`/api/sessions/${created.id}/transcript`);
+			expect(sandboxReload.status).toBe(200);
+			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(beforeReplacement.success && afterRestart.success && sameTranscriptProjection(beforeReplacement.data, afterRestart.data)).toBe(true);
+			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			await gateway.sessionManager.terminateSession(created.id);
 			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
 		} finally {
