@@ -1132,7 +1132,7 @@ describe("verifier lifecycle reproductions", () => {
 
 		await Promise.resolve();
 		clock.advance(VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS);
-		const error = await outcome.then(() => assert.fail("expected cold receipt timeout"), err => err as Error);
+		const error = await outcome.then(() => assert.fail("expected cold receipt timeout"), (err: unknown) => err as Error);
 		assert.match(error.message, new RegExp(`did not dispatch within ${VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS}ms`));
 		assert.equal(cancelCount, 1, `${MARKER}: exhausted receipt is cancelled so its durable row is purged`);
 		assert.equal(admissions, 1, `${MARKER}: timeout does not redeliver the same verifier intent`);
