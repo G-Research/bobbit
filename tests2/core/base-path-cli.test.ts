@@ -14,6 +14,7 @@ interface StartupUrls {
 }
 
 interface CliModule {
+	hasVersionFlag(argv: string[]): boolean;
 	parseArgs(argv: string[], env?: NodeJS.ProcessEnv): CliArgs;
 	buildStartupUrls(options: {
 		protocol: "http" | "https";
@@ -35,6 +36,33 @@ interface CliModule {
 async function cliModule(): Promise<CliModule> {
 	return await import("../../src/server/cli.ts") as unknown as CliModule;
 }
+
+describe("version CLI selection", () => {
+	it("recognizes the exact standalone version flag", async () => {
+		const { hasVersionFlag } = await cliModule();
+		assert.equal(hasVersionFlag(["--version"]), true);
+	});
+
+	it("recognizes a standalone version flag mixed with normal options", async () => {
+		const { hasVersionFlag } = await cliModule();
+		assert.equal(hasVersionFlag(["--no-ui", "--host", "127.0.0.1", "--version", "--auth"]), true);
+	});
+
+	it.each(["--host", "--port", "--cwd", "--static", "--agent-cli", "--base-path"])(
+		"does not treat --version as the value of %s as a version flag",
+		async (option) => {
+			const { hasVersionFlag } = await cliModule();
+			assert.equal(hasVersionFlag([option, "--version"]), false);
+		},
+	);
+
+	it("leaves a malformed base-path value for parseArgs to reject", async () => {
+		const { hasVersionFlag, parseArgs } = await cliModule();
+		const argv = ["--base-path", "--version"];
+		assert.equal(hasVersionFlag(argv), false);
+		assert.throws(() => parseArgs(argv, {}), /base.path.*value|value.*base.path/i);
+	});
+});
 
 describe("base-path CLI selection", () => {
 	it("defaults to root when neither flag nor environment is present", async () => {

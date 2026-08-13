@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { constants } from "node:perf_hooks";
 import { cpuDiagnosticsEnabled, createCpuDiagnostics, createEventLoopLagMonitor } from "../../src/server/agent/cpu-diagnostics.ts";
 
 function deferred<T>() {
@@ -107,6 +108,10 @@ describe("cpu diagnostics", () => {
 			assert.equal(typeof first.cpuPct, "number");
 			assert.equal(typeof first.elu, "number");
 			assert.equal(typeof first.delayP95Ms, "number");
+			assert.equal(typeof first.gcCount, "number");
+			assert.equal(typeof first.gcMajorCount, "number");
+			assert.equal(typeof first.gcDurationMs, "number");
+			assert.equal(typeof first.gcMaxMs, "number");
 			assert.equal(typeof first.rssMb, "number");
 			assert.equal(typeof first.handles, "object");
 
@@ -136,6 +141,84 @@ describe("cpu diagnostics", () => {
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("drains queued GC entries before disconnecting and includes them once in the final snapshot", async () => {
+		const snapshots: Array<Record<string, unknown>> = [];
+		const queued: Array<{ duration: number; detail: { kind: number } }> = [];
+		let gcCallback: ((entries: ReadonlyArray<{ duration: number; detail?: { kind?: number } }>) => void) | undefined;
+		let takeRecordsCalls = 0;
+		let disconnectCalls = 0;
+		let observedEntryTypes: string[] | undefined;
+		const env = diagnosticsEnv({
+			BOBBIT_CPU_DIAG: "1",
+			BOBBIT_CPU_DIAG_JSONL: path.join("virtual", "cpu.jsonl"),
+			BOBBIT_CPU_DIAG_FLUSH_MS: "60000",
+		});
+		const diag = createCpuDiagnostics({
+			env,
+			gcObserverFactory(callback) {
+				gcCallback = callback;
+				return {
+					observe(options) {
+						observedEntryTypes = options.entryTypes;
+					},
+					takeRecords() {
+						takeRecordsCalls++;
+						return queued.splice(0);
+					},
+					disconnect() {
+						disconnectCalls++;
+					},
+				};
+			},
+			io: {
+				async mkdir() { /* no-op */ },
+				async appendFile(_filePath, data) {
+					snapshots.push(JSON.parse(data));
+				},
+				async writeStderr() {
+					assert.fail("JSONL diagnostics must not write stderr");
+				},
+			},
+		});
+
+		assert.deepEqual(observedEntryTypes, ["gc"]);
+		assert.ok(gcCallback);
+		gcCallback([{ duration: 4, detail: { kind: constants.NODE_PERFORMANCE_GC_MINOR } }]);
+		await diag.flush("callback");
+		assert.deepEqual(
+			{
+				count: snapshots[0]?.gcCount,
+				majorCount: snapshots[0]?.gcMajorCount,
+				durationMs: snapshots[0]?.gcDurationMs,
+				maxMs: snapshots[0]?.gcMaxMs,
+			},
+			{ count: 1, majorCount: 0, durationMs: 4, maxMs: 4 },
+		);
+
+		queued.push(
+			{ duration: 7.5, detail: { kind: constants.NODE_PERFORMANCE_GC_MAJOR } },
+			{ duration: 2.5, detail: { kind: constants.NODE_PERFORMANCE_GC_MINOR } },
+		);
+		await diag.shutdown();
+		await diag.shutdown();
+
+		assert.equal(takeRecordsCalls, 1, "idempotent shutdown drains the observer once");
+		assert.equal(disconnectCalls, 1, "idempotent shutdown disconnects the observer once");
+		assert.equal(queued.length, 0);
+		assert.equal(snapshots.length, 2);
+		assert.equal(snapshots[1]?.reason, "shutdown");
+		assert.deepEqual(
+			{
+				count: snapshots[1]?.gcCount,
+				majorCount: snapshots[1]?.gcMajorCount,
+				durationMs: snapshots[1]?.gcDurationMs,
+				maxMs: snapshots[1]?.gcMaxMs,
+			},
+			{ count: 2, majorCount: 1, durationMs: 10, maxMs: 7.5 },
+			"the final snapshot contains only post-reset queued entries, exactly once",
+		);
 	});
 
 	it("queues deferred writes in snapshot order and exposes a shutdown barrier", async () => {

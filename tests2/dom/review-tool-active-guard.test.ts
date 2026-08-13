@@ -6,12 +6,11 @@ __syncBeforeAll(() => __syncCE());
 // drove the private `_checkReviewToolResult` directly with synthetic tool
 // results. This port does the same under happy-dom — no bundle, no browser.
 //
-// Regression coverage: when an agent in a background/cached session emits a
-// review_open/review_close tool result, its `_checkReviewToolResult` must NOT
-// mutate the globally-shared `state.review*` fields (which would land on
-// whichever session the user is currently viewing). The fix gates every
-// mutation on the agent session still matching `state.selectedSessionId`,
-// including after lazy review-source imports resume.
+// Regression coverage: a live review result belongs to the emitting session.
+// Background opens and closes update that session's durable review/workspace
+// state without mutating foreground `state.review*` fields. Switching to the
+// owner later hydrates the already-open group and active file. Lazy imports
+// retain ownership even if selection changes, while replay stays content-only.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const annotationStoreMocks = vi.hoisted(() => ({
@@ -22,9 +21,11 @@ const annotationStoreMocks = vi.hoisted(() => ({
 	isReviewSubmitted: vi.fn(),
 }));
 const reviewSourceMocks = vi.hoisted(() => ({
+	cleanupReviewGroup: vi.fn(),
 	clearPersistedReviewDocuments: vi.fn(),
 	loadReviewSources: vi.fn(),
-	openMarkdownReviewDocument: vi.fn(),
+	openMarkdownReview: vi.fn(),
+	readPersistedReviewGroups: vi.fn(),
 	removePersistedReviewDocument: vi.fn(),
 	restorePersistedReviewDocuments: vi.fn(),
 }));
@@ -45,11 +46,18 @@ import { RemoteAgent } from "../../src/app/remote-agent.js";
 import { state } from "../../src/app/state.js";
 
 const mockReviewSourcesModule = {
+	cleanupReviewGroup: reviewSourceMocks.cleanupReviewGroup,
 	clearPersistedReviewDocuments: reviewSourceMocks.clearPersistedReviewDocuments,
-	openMarkdownReviewDocument: reviewSourceMocks.openMarkdownReviewDocument,
+	// Keep both names at this mocked boundary while the single-document API is
+	// migrated to an explicit review-group API. Assertions use the shared spy.
+	openMarkdownReviewDocument: reviewSourceMocks.openMarkdownReview,
+	openMarkdownReviewGroup: reviewSourceMocks.openMarkdownReview,
+	readPersistedReviewGroups: reviewSourceMocks.readPersistedReviewGroups,
 	removePersistedReviewDocument: reviewSourceMocks.removePersistedReviewDocument,
 	restorePersistedReviewDocuments: reviewSourceMocks.restorePersistedReviewDocuments,
 };
+
+const persistedReviewOpens = new Map<string, any[]>();
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -88,6 +96,9 @@ function setActive(a: RemoteAgent): void {
 	state.selectedSessionId = (a as any)._sessionId;
 }
 function clearReviewState(): void {
+	state.reviewGroupsBySession = {};
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
@@ -132,22 +143,51 @@ function toolProposalMessage(blockId: string) {
 function deliverAgentEvent(a: RemoteAgent, type: string, message?: any): void {
 	(a as any).handleAgentEvent({ type, ...(message ? { message } : {}) });
 }
+function deliverToolLifecycleEvent(
+	a: RemoteAgent,
+	type: "tool_execution_start" | "tool_execution_end",
+	toolCallId: string,
+	toolName: string,
+): void {
+	(a as any).handleAgentEvent({ type, toolCallId, toolName });
+}
+
+let reviewToolCallSequence = 0;
 async function deliverReviewToolResult(
 	a: RemoteAgent,
 	action: string,
 	payload: any,
 	isLive = true,
 	shape = "json-text",
-): Promise<void> {
+	options: {
+		toolCallId?: string;
+		toolName?: string;
+		start?: boolean;
+		endBeforeResult?: boolean;
+	} = {},
+): Promise<string> {
+	const toolCallId = options.toolCallId ?? `review-call-${++reviewToolCallSequence}`;
+	const toolName = options.toolName ?? action;
+	if (options.start !== false) deliverToolLifecycleEvent(a, "tool_execution_start", toolCallId, toolName);
+	if (options.endBeforeResult) deliverToolLifecycleEvent(a, "tool_execution_end", toolCallId, toolName);
+
 	const envelope = { action, ...payload };
 	const json = JSON.stringify(envelope);
-	const content = shape === "structured"
+	const resultContent = shape === "structured"
 		? [{ type: "text", text: "(tool ack)" }, envelope]
-		: shape === "nested-tool-result"
-			? [{ type: "tool_result", content: [{ type: "text", text: "(tool ack)" }, envelope] }]
-			: [{ type: "text", text: "(tool ack)" }, { type: "text", text: json }];
-	const msg = { role: "toolResult", content };
+		: [{ type: "text", text: "(tool ack)" }, { type: "text", text: json }];
+	const msg = shape === "nested-tool-result"
+		? {
+			role: "user",
+			content: [{
+				type: "tool_result",
+				tool_use_id: toolCallId,
+				content: resultContent,
+			}],
+		}
+		: { role: "toolResult", toolCallId, toolName, content: resultContent };
 	await (a as any)._checkReviewToolResult(msg, isLive);
+	return toolCallId;
 }
 
 beforeEach(() => {
@@ -166,20 +206,74 @@ beforeEach(() => {
 	annotationStoreMocks.isReviewSubmitted.mockReset();
 	annotationStoreMocks.isReviewSubmitted.mockReturnValue(false);
 
+	reviewSourceMocks.cleanupReviewGroup.mockReset();
 	reviewSourceMocks.clearPersistedReviewDocuments.mockReset();
 	reviewSourceMocks.loadReviewSources.mockReset();
 	reviewSourceMocks.loadReviewSources.mockResolvedValue(mockReviewSourcesModule);
-	reviewSourceMocks.openMarkdownReviewDocument.mockReset();
-	reviewSourceMocks.openMarkdownReviewDocument.mockImplementation((options: any) => {
-		const document = { title: options.title, markdown: options.markdown };
-		state.reviewDocuments = new Map(state.reviewDocuments);
-		state.reviewDocuments.set(options.title, document as any);
-		state.reviewActiveTab = options.title;
+	persistedReviewOpens.clear();
+	reviewToolCallSequence = 0;
+	reviewSourceMocks.openMarkdownReview.mockReset();
+	reviewSourceMocks.openMarkdownReview.mockImplementation((options: any) => {
+		const sessionId = String(options.sessionId || "");
+		const files = (options.files || [{ title: options.title, markdown: options.markdown }]).map((file: any, index: number) => ({
+			...file,
+			fileId: file.fileId || `${options.reviewId || options.title}-file-${index + 1}`,
+		}));
+		const persisted = structuredClone({
+			...options,
+			files,
+			activeFileId: options.activeFileId ?? files[0]?.fileId,
+		});
+		persistedReviewOpens.set(sessionId, [
+			...(persistedReviewOpens.get(sessionId) || []),
+			persisted,
+		]);
+		state.reviewGroupsBySession[sessionId] = persistedReviewOpens.get(sessionId)! as any;
+		const document = { title: files[0].title, markdown: files[0].markdown };
+		if (sessionId !== state.selectedSessionId) return document;
+		state.reviewGroups = new Map([[persisted.reviewId || options.title, persisted as any]]);
+		state.reviewActiveReviewId = persisted.reviewId || options.title;
+		state.reviewDocuments = new Map(files.map((file: any) => [file.fileId, {
+			title: file.title,
+			markdown: file.markdown,
+			reviewId: persisted.reviewId,
+			fileId: file.fileId,
+		}]));
+		state.reviewActiveTab = persisted.activeFileId;
 		state.reviewPanelOpen = true;
 		return document;
 	});
+	reviewSourceMocks.readPersistedReviewGroups.mockReset();
+	reviewSourceMocks.readPersistedReviewGroups.mockImplementation((sessionId: string) => persistedReviewOpens.get(sessionId) || []);
+	reviewSourceMocks.cleanupReviewGroup.mockReset();
+	reviewSourceMocks.cleanupReviewGroup.mockImplementation((sessionId: string, reviewId: string) => {
+		const reviews = persistedReviewOpens.get(sessionId) || [];
+		const removed = reviews.find((review) => review.reviewId === reviewId);
+		persistedReviewOpens.set(sessionId, reviews.filter((review) => review.reviewId !== reviewId));
+		return removed;
+	});
 	reviewSourceMocks.removePersistedReviewDocument.mockReset();
+	reviewSourceMocks.removePersistedReviewDocument.mockImplementation((sessionId: string, identity: string) => {
+		const reviews = persistedReviewOpens.get(sessionId) || [];
+		persistedReviewOpens.set(sessionId, reviews.filter((review) =>
+			review.reviewId !== identity && review.title !== identity));
+	});
 	reviewSourceMocks.restorePersistedReviewDocuments.mockReset();
+	reviewSourceMocks.restorePersistedReviewDocuments.mockImplementation((sessionId: string) => {
+		if (sessionId !== state.selectedSessionId) return;
+		const reviews = persistedReviewOpens.get(sessionId) || [];
+		state.reviewGroups = new Map(reviews.map((review) => [review.reviewId || review.title, review]));
+		state.reviewActiveReviewId = reviews[0]?.reviewId || reviews[0]?.title || "";
+		const active = reviews[0];
+		state.reviewDocuments = new Map((active?.files || []).map((file: any) => [file.fileId, {
+			title: file.title,
+			markdown: file.markdown,
+			reviewId: active.reviewId,
+			fileId: file.fileId,
+		}]));
+		state.reviewActiveTab = active?.activeFileId || "";
+		state.reviewPanelOpen = reviews.length > 0;
+	});
 	faviconMocks.showFaviconBadge.mockReset();
 
 	clearReviewState();
@@ -197,23 +291,35 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-describe("review tool active-session guard", () => {
-	it("background session's review_open does NOT mutate global review state", async () => {
+describe("review tool session ownership", () => {
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: live background review_open persists the full group for its owner without replacing foreground state", async () => {
 		const active = makeAgent("active-session");
 		const background = makeAgent("background-session");
 		setActive(active);
-		clearReviewState();
+		seedReviewState();
+		const foregroundBefore = getReviewState();
+		const files = [
+			{ fileId: "background-file-1", title: "Overview", markdown: "# Background overview" },
+			{ fileId: "background-file-2", title: "Details", markdown: "# Background details" },
+		];
 
-		// Simulate the bug: background session's agent emits review_open.
 		await deliverReviewToolResult(background, "review_open", {
-			title: "PR-from-background",
-			markdown: "# Should not appear",
+			reviewId: "background-review-1",
+			title: "PR from background",
+			files,
+			replace: true,
 		});
 
-		const result = getReviewState();
-		expect(result.open).toBe(false);
-		expect(result.activeTab).toBe("");
-		expect(result.docCount).toBe(0);
+		expect(reviewSourceMocks.openMarkdownReview).toHaveBeenCalledWith(expect.objectContaining({
+			reviewId: "background-review-1",
+			title: "PR from background",
+			files,
+			replace: true,
+			sessionId: "background-session",
+		}));
+		expect(persistedReviewOpens.get("background-session")).toHaveLength(1);
+		expect(getReviewState()).toEqual(foregroundBefore);
+		expect(state.selectedSessionId).toBe("active-session");
 	});
 
 	it("active session's review_open DOES open the review pane", async () => {
@@ -228,31 +334,34 @@ describe("review tool active-session guard", () => {
 
 		const result = getReviewState();
 		expect(result.open).toBe(true);
-		expect(result.activeTab).toBe("PR-from-active");
+		expect(result.activeTab).toBe("PR-from-active-file-1");
 		expect(result.docCount).toBe(1);
-		expect(result.docTitles).toEqual(["PR-from-active"]);
+		expect(result.docTitles).toEqual(["PR-from-active-file-1"]);
 	});
 
-	it("review_open does NOT mutate state after a lazy-import session switch", async () => {
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: lazy review_open remains durable for its owner after a session switch", async () => {
 		const active = makeAgent("active-session");
 		const next = makeAgent("next-session");
 		setActive(active);
 		clearReviewState();
 
 		const pending = deliverReviewToolResult(active, "review_open", {
-			title: "Late-PR",
-			markdown: "# Must not appear after session switch",
+			reviewId: "late-review",
+			title: "Late PR",
+			files: [{ fileId: "late-file", title: "Late", markdown: "# Must persist for the prior session" }],
 		});
 		setActive(next);
 		await pending;
 
-		const result = getReviewState();
-		expect(result.open).toBe(false);
-		expect(result.activeTab).toBe("");
-		expect(result.docCount).toBe(0);
+		expect(reviewSourceMocks.openMarkdownReview).toHaveBeenCalledWith(expect.objectContaining({
+			reviewId: "late-review",
+			sessionId: "active-session",
+		}));
+		expect(persistedReviewOpens.get("active-session")).toHaveLength(1);
+		expect(getReviewState()).toEqual({ open: false, activeTab: "", docCount: 0, docTitles: [] });
 	});
 
-	it("active session's inline review_open also handles structured tool-result payloads", async () => {
+	it("active session's inline review_open also handles structured nested tool-result payloads", async () => {
 		const active = makeAgent("active-session");
 		setActive(active);
 		clearReviewState();
@@ -264,57 +373,272 @@ describe("review tool active-session guard", () => {
 
 		const result = getReviewState();
 		expect(result.open).toBe(true);
-		expect(result.activeTab).toBe("Structured inline markdown");
+		expect(result.activeTab).toBe("Structured inline markdown-file-1");
 		expect(result.docCount).toBe(1);
-		expect(result.docTitles).toEqual(["Structured inline markdown"]);
+		expect(result.docTitles).toEqual(["Structured inline markdown-file-1"]);
 	});
 
-	it("background session's review_close does NOT clear active session's documents", async () => {
+	it("retains review provenance when the result arrives after tool_execution_end", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+
+		await deliverReviewToolResult(active, "review_open", {
+			reviewId: "after-end-review",
+			title: "After end",
+			files: [{ fileId: "after-end-file", title: "File", markdown: "# After end" }],
+		}, true, "structured", { endBeforeResult: true });
+
+		expect(reviewSourceMocks.openMarkdownReview).toHaveBeenCalledWith(expect.objectContaining({
+			reviewId: "after-end-review",
+			sessionId: "active-session",
+		}));
+	});
+
+	it("historical replay cannot recreate an absent review primary", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		clearReviewState();
+
+		await deliverReviewToolResult(active, "review_open", {
+			reviewId: "closed-review",
+			title: "Closed review",
+			files: [{ fileId: "closed-file", title: "Closed", markdown: "# Closed" }],
+		}, false);
+
+		expect(reviewSourceMocks.openMarkdownReview).not.toHaveBeenCalled();
+		expect(persistedReviewOpens.has("active-session")).toBe(false);
+		expect(getReviewState()).toEqual({ open: false, activeTab: "", docCount: 0, docTitles: [] });
+	});
+
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: background review_close removes only the owner's persisted review", async () => {
 		const active = makeAgent("active-session");
 		const background = makeAgent("background-session");
 		setActive(active);
-		clearReviewState();
-
-		// Active session opens a review.
-		await deliverReviewToolResult(active, "review_open", {
-			title: "Active-PR",
-			markdown: "# Important",
-		});
+		seedReviewState("Active PR");
 		const before = getReviewState();
+		persistedReviewOpens.set("background-session", [{
+			reviewId: "background-review",
+			title: "Background PR",
+			files: [{ fileId: "background-file", title: "Notes", markdown: "# Notes" }],
+		}]);
 
-		// Background session emits review_close — must NOT clear the active doc.
-		await deliverReviewToolResult(background, "review_close", {});
-		const after = getReviewState();
+		await deliverReviewToolResult(background, "review_close", {
+			reviewId: "background-review",
+			title: "Background PR",
+		});
 
-		expect(before.open).toBe(true);
-		expect(before.docCount).toBe(1);
-		expect(after.open).toBe(true);
-		expect(after.docCount).toBe(1);
-		expect(after.activeTab).toBe("Active-PR");
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledWith(
+			"background-session",
+			"background-review",
+		);
+		expect(persistedReviewOpens.get("background-session")).toEqual([]);
+		expect(getReviewState()).toEqual(before);
 	});
 
-	it("review_close does NOT mutate state after a lazy-import session switch", async () => {
-		const active = makeAgent("active-session");
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: lazy review_close remains scoped to its owner after a session switch", async () => {
+		const closing = makeAgent("closing-session");
 		const next = makeAgent("next-session");
-		setActive(active);
-		clearReviewState();
+		setActive(closing);
+		persistedReviewOpens.set("closing-session", [{
+			reviewId: "closing-review",
+			title: "Closing PR",
+			files: [{ fileId: "closing-file", title: "File", markdown: "# Closing" }],
+		}]);
 
-		await deliverReviewToolResult(active, "review_open", {
-			title: "Active-PR",
-			markdown: "# Important",
+		const pending = deliverReviewToolResult(closing, "review_close", {
+			reviewId: "closing-review",
+			title: "Closing PR",
 		});
-		const before = getReviewState();
-
-		const pending = deliverReviewToolResult(active, "review_close", { title: "Active-PR" });
 		setActive(next);
+		seedReviewState("Next foreground review");
+		const nextBefore = getReviewState();
 		await pending;
-		const after = getReviewState();
 
-		expect(before.open).toBe(true);
-		expect(before.docCount).toBe(1);
-		expect(after.open).toBe(true);
-		expect(after.docCount).toBe(1);
-		expect(after.activeTab).toBe("Active-PR");
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledWith(
+			"closing-session",
+			"closing-review",
+		);
+		expect(persistedReviewOpens.get("closing-session")).toEqual([]);
+		expect(getReviewState()).toEqual(nextBefore);
+	});
+
+	it("REVIEW_BACKGROUND_OPEN_DURABILITY: switching to the owner hydrates the background review and selected file", async () => {
+		const foreground = makeAgent("foreground-session");
+		const background = makeAgent("background-session");
+		setActive(foreground);
+		seedReviewState();
+
+		await deliverReviewToolResult(background, "review_open", {
+			reviewId: "durable-review",
+			title: "Durable background PR",
+			files: [
+				{ fileId: "selected-file", title: "Selected file", markdown: "# Selected" },
+				{ fileId: "other-file", title: "Other file", markdown: "# Other" },
+			],
+		});
+		expect(getReviewState().docTitles).toEqual(["Foreground review"]);
+
+		setActive(background);
+		await deliverSnapshot(background, []);
+
+		expect(reviewSourceMocks.restorePersistedReviewDocuments).toHaveBeenCalledWith(
+			"background-session",
+			{ select: true },
+		);
+		expect(getReviewState()).toEqual({
+			open: true,
+			activeTab: "selected-file",
+			docCount: 2,
+			docTitles: ["selected-file", "other-file"],
+		});
+		expect(persistedReviewOpens.get("background-session")?.[0]).toEqual(expect.objectContaining({
+			activeFileId: "selected-file",
+		}));
+	});
+});
+
+describe("review tool result provenance", () => {
+	function seedOwnedReview(sessionId: string, reviewId = "protected-review") {
+		const group = {
+			reviewId,
+			title: "Protected review",
+			files: [{ fileId: `${reviewId}-file`, title: "Notes", markdown: "# Keep me" }],
+		};
+		persistedReviewOpens.set(sessionId, [group]);
+		state.reviewGroupsBySession[sessionId] = [group] as any;
+		return group;
+	}
+
+	function expectNoDestructiveReviewCalls(): void {
+		expect(reviewSourceMocks.openMarkdownReview).not.toHaveBeenCalled();
+		expect(reviewSourceMocks.cleanupReviewGroup).not.toHaveBeenCalled();
+		expect(reviewSourceMocks.removePersistedReviewDocument).not.toHaveBeenCalled();
+		expect(reviewSourceMocks.clearPersistedReviewDocuments).not.toHaveBeenCalled();
+		expect(annotationStoreMocks.clearAnnotations).not.toHaveBeenCalled();
+		expect(annotationStoreMocks.clearAllAnnotations).not.toHaveBeenCalled();
+		expect(annotationStoreMocks.clearReviewSubmitted).not.toHaveBeenCalled();
+	}
+
+	it("rejects close JSON from unrelated read and bash tool results in selected and background sessions", async () => {
+		const selected = makeAgent("selected-session");
+		const background = makeAgent("background-session");
+		setActive(selected);
+		seedReviewState("Visible review");
+		const foregroundBefore = getReviewState();
+		const selectedGroup = seedOwnedReview("selected-session", "selected-protected");
+		const backgroundGroup = seedOwnedReview("background-session", "background-protected");
+		const closeJson = JSON.stringify({ action: "review_close" });
+
+		for (const [agent, toolCallId, toolName] of [
+			[selected, "read-call", "read"],
+			[background, "bash-call", "bash"],
+		] as const) {
+			deliverToolLifecycleEvent(agent, "tool_execution_start", toolCallId, toolName);
+			await (agent as any)._checkReviewToolResult({
+				role: "toolResult",
+				toolCallId,
+				toolName,
+				content: [{ type: "text", text: closeJson }],
+			}, true);
+		}
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("selected-session")).toEqual([selectedGroup]);
+		expect(persistedReviewOpens.get("background-session")).toEqual([backgroundGroup]);
+		expect(getReviewState()).toEqual(foregroundBefore);
+	});
+
+	it("rejects ordinary user/result text even when a review call is pending", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+		const toolCallId = "pending-review-close";
+		deliverToolLifecycleEvent(active, "tool_execution_start", toolCallId, "review_close");
+		const text = JSON.stringify({ action: "review_close" });
+
+		await (active as any)._checkReviewToolResult({
+			role: "user",
+			content: [{ type: "text", text }],
+		}, true);
+		await (active as any)._checkReviewToolResult({
+			role: "result",
+			toolCallId,
+			content: [{ type: "text", text }],
+		}, true);
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
+	});
+
+	it("rejects missing and unrecognized correlation IDs", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+		deliverToolLifecycleEvent(active, "tool_execution_start", "known-review-close", "review_close");
+		const content = [{ type: "text", text: JSON.stringify({ action: "review_close" }) }];
+
+		await (active as any)._checkReviewToolResult({ role: "toolResult", content }, true);
+		await (active as any)._checkReviewToolResult({
+			role: "toolResult",
+			toolCallId: "unknown-review-close",
+			content,
+		}, true);
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
+	});
+
+	it("rejects an action that does not match the recorded review tool name", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+
+		await deliverReviewToolResult(active, "review_close", {}, true, "json-text", {
+			toolCallId: "mismatched-review-call",
+			toolName: "review_open",
+		});
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
+	});
+
+	it("consumes valid review provenance so duplicate result replay is non-mutating", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		seedOwnedReview("active-session");
+		const toolCallId = "single-use-review-close";
+
+		await deliverReviewToolResult(active, "review_close", {
+			reviewId: "protected-review",
+		}, true, "structured", { toolCallId });
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledOnce();
+
+		// Restore the same group so a forged second authorization would be visible.
+		seedOwnedReview("active-session");
+		await deliverReviewToolResult(active, "review_close", {
+			reviewId: "protected-review",
+		}, true, "structured", { toolCallId, start: false });
+
+		expect(reviewSourceMocks.cleanupReviewGroup).toHaveBeenCalledOnce();
+		expect(persistedReviewOpens.get("active-session")).toHaveLength(1);
+	});
+
+	it("expires stale review call IDs before accepting their results", async () => {
+		const active = makeAgent("active-session");
+		setActive(active);
+		const group = seedOwnedReview("active-session");
+		const toolCallId = "stale-review-close";
+		deliverToolLifecycleEvent(active, "tool_execution_start", toolCallId, "review_close");
+		const pending = (active as any)._pendingReviewToolCalls.get(toolCallId);
+		pending.recordedAt = Date.now() - 16 * 60_000;
+
+		await deliverReviewToolResult(active, "review_close", {}, true, "json-text", {
+			toolCallId,
+			start: false,
+		});
+
+		expectNoDestructiveReviewCalls();
+		expect(persistedReviewOpens.get("active-session")).toEqual([group]);
 	});
 });
 

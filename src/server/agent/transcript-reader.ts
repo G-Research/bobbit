@@ -31,10 +31,7 @@ export interface ReadTranscriptParams {
 	caseSensitive?: boolean;
 	context?: number;
 	verbose?: boolean;
-	/**
-	 * Backward-compatible default is true for direct reader/API callers.
-	 * The agent-facing read_session tool passes false unless explicitly opted in.
-	 */
+	/** Backward-compatible direct reader/API option. Agent tools use readAgentTranscript. */
 	includeToolResults?: boolean;
 }
 
@@ -85,8 +82,8 @@ export interface VerboseMessage {
 	 *  other fields the renderer-side `<message-list>` component expects.
 	 *  Only populated for the orphan-history (`before-compaction`) path
 	 *  where the client renders these rows via the same Lit components
-	 *  that render the live transcript. `readTranscript` callers (read_session
-	 *  tool) still get just `content`. */
+	 *  that render the live transcript. Legacy `readTranscript` callers
+	 *  still get just `content`. */
 	message?: Record<string, unknown>;
 }
 
@@ -335,7 +332,7 @@ function toolResultPreview(content: unknown): string {
 	return (typeof content === "string" ? content : safeStringify(content)).slice(0, PREVIEW_LIMIT);
 }
 
-const OMITTED_TOOL_RESULT_CONTENT = "[tool result omitted; pass include_tool_results:true to read_session to include it]";
+const OMITTED_TOOL_RESULT_CONTENT = "[tool result omitted]";
 
 export function parseJsonl(content: string): RawMessage[] {
 	if (!content) return [];
@@ -487,6 +484,7 @@ function buildMatchList(
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
+	searchText?: (message: RawMessage) => string,
 ): { matchCount: number; expanded: number[] } {
 	let regex: RegExp;
 	try {
@@ -496,7 +494,8 @@ function buildMatchList(
 	}
 	const matches: number[] = [];
 	for (const m of messages) {
-		const flat = isMessageLevelToolResult(m) ? flattenText([messageLevelToolResultBlock(m)]) : flattenText(m.content);
+		const flat = searchText?.(m)
+			?? (isMessageLevelToolResult(m) ? flattenText([messageLevelToolResultBlock(m)]) : flattenText(m.content));
 		if (regex.test(flat)) matches.push(m.index);
 	}
 	if (context <= 0) return { matchCount: matches.length, expanded: matches.slice() };
@@ -599,6 +598,345 @@ export interface ReadTranscriptOptions {
 	readContent: () => Promise<string | null>;
 	/** Optional session and sidecar context for precise agent/system attribution. */
 	authorContext?: TranscriptAuthorResolutionContext;
+}
+
+export type ReadAgentTranscriptParams =
+	| {
+		operation: "list";
+		offset?: number;
+		limit?: number;
+		pattern?: string;
+		caseSensitive?: boolean;
+		context?: number;
+	}
+	| {
+		operation: "inspect";
+		messageIndex: number;
+		resultIndex?: number;
+		offset?: number;
+		limit?: number;
+	};
+
+export interface AgentResultSize {
+	chars: number;
+	lines: number;
+	bytes: number;
+}
+
+export interface AgentToolResultSummary {
+	resultIndex: number;
+	name?: string;
+	toolUseId?: string;
+	status: ToolResultStatus;
+	size: AgentResultSize;
+}
+
+export interface AgentTranscriptMessageSummary {
+	index: number;
+	role: string;
+	ts: string | null;
+	text: string;
+	textTruncated?: boolean;
+	author?: MessageAuthor;
+	toolUses?: Array<{
+		name: string;
+		toolUseId?: string;
+		argumentSummary: string;
+		argumentsTruncated?: boolean;
+	}>;
+	toolResults?: AgentToolResultSummary[];
+}
+
+export interface AgentTranscriptListEnvelope {
+	operation: "list";
+	total: number;
+	matchCount?: number;
+	returned: number;
+	offsetStart: number;
+	offsetEnd: number;
+	messages: AgentTranscriptMessageSummary[];
+}
+
+export interface AgentTranscriptInspectEnvelope {
+	operation: "inspect";
+	message?: Record<string, unknown>;
+	result?: AgentToolResultSummary & {
+		messageIndex: number;
+		excerpt: string;
+		offset: number;
+		returned: number;
+		totalChars: number;
+		nextOffset: number | null;
+		truncated: boolean;
+	};
+}
+
+const DEFAULT_RESULT_EXCERPT_LIMIT = 2_000;
+const MAX_RESULT_EXCERPT_LIMIT = 8_000;
+const RESULT_PRIVATE_KEYS = new Set([
+	"signature",
+	"thinking",
+	"thinkingSignature",
+	"thinking_signature",
+	"providerMetadata",
+	"provider_metadata",
+	"rawProviderData",
+	"raw_provider_data",
+]);
+
+function sanitizeResultValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(sanitizeResultValue);
+	if (!value || typeof value !== "object") return value;
+	const sanitized: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+		if (RESULT_PRIVATE_KEYS.has(key)) continue;
+		sanitized[key] = sanitizeResultValue(child);
+	}
+	return sanitized;
+}
+
+/** Normalize only semantic result text. Provider thinking/signatures are omitted and never counted. */
+function normalizedToolResultText(block: Record<string, unknown>): string {
+	const body = toolResultBody(block);
+	if (!body.has || body.value === null || body.value === undefined) return "";
+	if (typeof body.value === "string") return body.value;
+	if (Array.isArray(body.value)) {
+		const parts: string[] = [];
+		for (const item of body.value) {
+			if (typeof item === "string") {
+				parts.push(item);
+				continue;
+			}
+			if (!item || typeof item !== "object") continue;
+			const candidate = item as Record<string, unknown>;
+			if (candidate.type === "thinking") continue;
+			if (typeof candidate.text === "string") parts.push(candidate.text);
+			else if (typeof candidate.content === "string") parts.push(candidate.content);
+		}
+		return parts.join("\n");
+	}
+	return safeStringify(sanitizeResultValue(body.value));
+}
+
+function agentResultSize(text: string): AgentResultSize {
+	return {
+		chars: text.length,
+		lines: stringLineCount(text),
+		bytes: Buffer.byteLength(text, "utf8"),
+	};
+}
+
+function isAgentToolUseBlock(block: Record<string, unknown>): boolean {
+	if (isToolResultBlock(block)) return false;
+	if (block.type === "tool_use" || block.type === "toolCall") return true;
+	return typeof block.toolCallId === "string" && typeof block.toolName === "string";
+}
+
+function toolUseArguments(block: Record<string, unknown>): unknown {
+	if (Object.prototype.hasOwnProperty.call(block, "input")) return block.input;
+	if (Object.prototype.hasOwnProperty.call(block, "arguments")) return block.arguments;
+	if (Object.prototype.hasOwnProperty.call(block, "args")) return block.args;
+	return {};
+}
+
+function resultBlocks(m: RawMessage): Record<string, unknown>[] {
+	if (isMessageLevelToolResult(m)) return [messageLevelToolResultBlock(m)];
+	if (!Array.isArray(m.content)) return [];
+	return m.content.filter((block): block is Record<string, unknown> => (
+		!!block && typeof block === "object" && isToolResultBlock(block)
+	));
+}
+
+function agentResultSummary(
+	block: Record<string, unknown>,
+	resultIndex: number,
+	message: RawMessage,
+	toolNameById: Map<string, string>,
+): AgentToolResultSummary {
+	const options: RenderOptions = { includeToolResults: false, toolNameById };
+	const meta = toolResultMeta(block, message.fullMessage, options);
+	const text = normalizedToolResultText(block);
+	return {
+		resultIndex,
+		...(meta.name ? { name: meta.name } : {}),
+		...(meta.toolUseId ? { toolUseId: meta.toolUseId } : {}),
+		status: meta.status,
+		size: agentResultSize(text),
+	};
+}
+
+function agentTextAndTools(m: RawMessage, detailed: boolean): {
+	text: string;
+	textTruncated?: boolean;
+	toolUses: Array<Record<string, unknown>>;
+} {
+	let text = "";
+	const toolUses: Array<Record<string, unknown>> = [];
+	if (isMessageLevelToolResult(m)) {
+		// Its content is the result body, represented only by redacted metadata.
+	} else if (typeof m.content === "string") {
+		text = m.content;
+	} else if (Array.isArray(m.content)) {
+		const textParts: string[] = [];
+		for (const block of m.content) {
+			if (!block || typeof block !== "object") continue;
+			const candidate = block as Record<string, unknown>;
+			if (candidate.type === "text" && typeof candidate.text === "string" && !isToolResultBlock(candidate)) {
+				textParts.push(candidate.text);
+			} else if (isAgentToolUseBlock(candidate)) {
+				const name = blockToolName(candidate) ?? "?";
+				const toolUseId = blockToolUseId(candidate);
+				const args = sanitizeResultValue(toolUseArguments(candidate));
+				if (detailed) {
+					toolUses.push({ name, ...(toolUseId ? { toolUseId } : {}), arguments: args });
+				} else {
+					const rawSummary = safeStringify(args);
+					const truncated = rawSummary.length > PREVIEW_LIMIT;
+					toolUses.push({
+						name,
+						...(toolUseId ? { toolUseId } : {}),
+						argumentSummary: truncated ? rawSummary.slice(0, PREVIEW_LIMIT) + "…" : rawSummary,
+						...(truncated ? { argumentsTruncated: true } : {}),
+					});
+				}
+			}
+		}
+		text = textParts.join("\n").trim();
+	}
+	if (!detailed && text.length > TEXT_LIMIT) {
+		return { text: text.slice(0, TEXT_LIMIT) + "…", textTruncated: true, toolUses };
+	}
+	return { text, toolUses };
+}
+
+function toAgentListMessage(
+	m: RawMessage,
+	toolNameById: Map<string, string>,
+): AgentTranscriptMessageSummary {
+	const { text, textTruncated, toolUses } = agentTextAndTools(m, false);
+	const results = resultBlocks(m).map((block, index) => agentResultSummary(block, index, m, toolNameById));
+	return {
+		index: m.index,
+		role: m.role,
+		ts: m.ts,
+		text,
+		...(textTruncated ? { textTruncated } : {}),
+		...(m.author ? { author: m.author } : {}),
+		...(toolUses.length > 0 ? { toolUses: toolUses as AgentTranscriptMessageSummary["toolUses"] } : {}),
+		...(results.length > 0 ? { toolResults: results } : {}),
+	};
+}
+
+function toAgentDetailedMessage(
+	m: RawMessage,
+	toolNameById: Map<string, string>,
+): Record<string, unknown> {
+	const { text, toolUses } = agentTextAndTools(m, true);
+	const results = resultBlocks(m).map((block, index) => agentResultSummary(block, index, m, toolNameById));
+	return {
+		index: m.index,
+		role: m.role,
+		ts: m.ts,
+		text,
+		...(m.author ? { author: m.author } : {}),
+		...(toolUses.length > 0 ? { toolUses } : {}),
+		...(results.length > 0 ? { toolResults: results } : {}),
+	};
+}
+
+function agentSearchText(m: RawMessage): string {
+	const { text, toolUses } = agentTextAndTools(m, true);
+	const resultText = resultBlocks(m).map(normalizedToolResultText);
+	return [text, ...toolUses.map((use) => safeStringify(use)), ...resultText].join("\n");
+}
+
+function requiredInteger(name: string, value: unknown, minimum?: number, maximum?: number): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+		throw new TranscriptReaderError("invalid_params", `${name} must be an integer`);
+	}
+	if (minimum !== undefined && value < minimum) {
+		throw new TranscriptReaderError("invalid_params", `${name} must be at least ${minimum}`);
+	}
+	if (maximum !== undefined && value > maximum) {
+		throw new TranscriptReaderError("invalid_params", `${name} must be at most ${maximum}`);
+	}
+	return value;
+}
+
+/** Agent-facing compact discovery and exact inspection. Legacy REST/UI reads continue through readTranscript. */
+export async function readAgentTranscript(
+	params: ReadAgentTranscriptParams,
+	opts: ReadTranscriptOptions,
+): Promise<AgentTranscriptListEnvelope | AgentTranscriptInspectEnvelope> {
+	const content = await opts.readContent();
+	if (content === null || content === undefined || content === "") {
+		throw new TranscriptReaderError("transcript_unavailable", "transcript file missing or empty");
+	}
+	const all = resolveRawMessageAuthors(parseJsonl(content), opts.authorContext);
+	const toolNameById = buildToolNameMap(all);
+
+	if (params.operation === "inspect") {
+		const messageIndex = requiredInteger("message_index", params.messageIndex, 0);
+		const message = all[messageIndex];
+		if (!message) throw new TranscriptReaderError("invalid_params", `message_index ${messageIndex} is out of range`);
+		if (params.resultIndex === undefined) {
+			if (params.offset !== undefined || params.limit !== undefined) {
+				throw new TranscriptReaderError("invalid_params", "offset and limit require result_index");
+			}
+			return { operation: "inspect", message: toAgentDetailedMessage(message, toolNameById) };
+		}
+
+		const resultIndex = requiredInteger("result_index", params.resultIndex, 0);
+		const blocks = resultBlocks(message);
+		const block = blocks[resultIndex];
+		if (!block) throw new TranscriptReaderError("invalid_params", `result_index ${resultIndex} is out of range`);
+		const offset = params.offset === undefined ? 0 : requiredInteger("offset", params.offset, 0);
+		const limit = params.limit === undefined
+			? DEFAULT_RESULT_EXCERPT_LIMIT
+			: requiredInteger("limit", params.limit, 1, MAX_RESULT_EXCERPT_LIMIT);
+		const text = normalizedToolResultText(block);
+		const excerpt = text.slice(offset, offset + limit);
+		const nextOffset = offset + excerpt.length < text.length ? offset + excerpt.length : null;
+		return {
+			operation: "inspect",
+			result: {
+				...agentResultSummary(block, resultIndex, message, toolNameById),
+				messageIndex,
+				excerpt,
+				offset,
+				returned: excerpt.length,
+				totalChars: text.length,
+				nextOffset,
+				truncated: offset > 0 || nextOffset !== null,
+			},
+		};
+	}
+
+	const limit = params.limit === undefined ? DEFAULT_LIMIT : requiredInteger("limit", params.limit, 1, MAX_LIMIT);
+	const offset = params.offset === undefined ? 0 : requiredInteger("offset", params.offset);
+	const context = params.context === undefined ? 0 : requiredInteger("context", params.context, 0, MAX_CONTEXT);
+	let workingIndices: number[];
+	let matchCount: number | undefined;
+	if (params.pattern) {
+		const matches = buildMatchList(all, params.pattern, !!params.caseSensitive, context, agentSearchText);
+		workingIndices = matches.expanded;
+		matchCount = matches.matchCount;
+	} else {
+		workingIndices = all.map((_, index) => index);
+	}
+	const start = resolveOffset(offset, workingIndices.length);
+	const end = Math.min(workingIndices.length, start + limit);
+	const window = start >= workingIndices.length ? [] : workingIndices.slice(start, end);
+	const messages = window.map((index) => toAgentListMessage(all[index], toolNameById));
+	return {
+		operation: "list",
+		total: all.length,
+		...(matchCount !== undefined ? { matchCount } : {}),
+		returned: messages.length,
+		offsetStart: messages.length > 0 ? messages[0].index : -1,
+		offsetEnd: messages.length > 0 ? messages[messages.length - 1].index : -1,
+		messages,
+	};
 }
 
 /**

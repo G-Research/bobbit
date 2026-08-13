@@ -19,6 +19,8 @@ let html: typeof import("lit").html;
 let render: typeof import("lit").render;
 let icon: typeof import("@mariozechner/mini-lit").icon;
 let Boxes: typeof import("lucide").Boxes;
+let GitFork: typeof import("lucide").GitFork;
+let Copy: typeof import("lucide").Copy;
 let buildSessionActions: typeof import("../../src/app/session-actions.js").buildSessionActions;
 let registerPackEntrypoints: typeof import("../../src/app/pack-entrypoints.js").registerPackEntrypoints;
 let listLauncherEntrypoints: typeof import("../../src/app/pack-entrypoints.js").listLauncherEntrypoints;
@@ -28,7 +30,7 @@ let setLauncherHostFactory: typeof import("../../src/app/pack-panels.js").setLau
 beforeAll(async () => {
 	({ html, render } = await import("lit"));
 	({ icon } = await import("@mariozechner/mini-lit"));
-	({ Boxes } = await import("lucide"));
+	({ Boxes, GitFork, Copy } = await import("lucide"));
 	await import("../../src/ui/components/SidebarActionsPopover.js");
 	await import("../../src/ui/components/GitStatusWidget.js");
 	({ buildSessionActions } = await import("../../src/app/session-actions.js"));
@@ -486,5 +488,178 @@ describe("pack launcher session-menu surfaces", () => {
 		expect(gitLaunchers()).toEqual([]);
 		expect(gitHasPaletteOpener()).toBe(false);
 		expect(gitDropdownText()).not.toMatch(/Extensions|Command palette|Legacy Git Button|Open Demo/);
+	});
+});
+
+const HELP_TEXT = "The new session will include the conversation up to, but not including, this prompt.";
+
+async function mountHelpPopover(options: { checked?: boolean; onToggle?: () => void } = {}): Promise<HTMLElement> {
+	const anchor = document.createElement("button");
+	anchor.type = "button";
+	anchor.textContent = "Prompt actions";
+	document.body.appendChild(anchor);
+	anchor.focus();
+
+	const popover = document.createElement("sidebar-actions-popover") as any;
+	popover.anchorEl = anchor;
+	popover.items = [
+		{
+			id: "history-fork",
+			label: "Fork from history",
+			icon: icon(GitFork, "xs"),
+			quick: false,
+			help: {
+				id: "history-fork-help",
+				ariaLabel: "About Fork from history",
+				text: HELP_TEXT,
+			},
+			trailingToggle: {
+				id: "history-fork-new-worktree",
+				checked: options.checked ?? false,
+				ariaLabel: options.checked
+					? "New worktree (on) — fork into a fresh worktree"
+					: "New worktree (off) — reuse the source worktree",
+				label: "New worktree",
+				onToggle: options.onToggle ?? (() => undefined),
+			},
+		},
+		{ id: "copy-prompt", label: "Copy prompt", icon: icon(Copy, "xs"), quick: false },
+	];
+	popover.open = true;
+	document.body.appendChild(popover);
+	await popover.updateComplete;
+	await flush();
+	return popover;
+}
+
+function dispatchMenuKey(keyName: string): void {
+	document.dispatchEvent(new KeyboardEvent("keydown", { key: keyName, bubbles: true, cancelable: true }));
+}
+
+function tooltip(): HTMLElement | null {
+	return document.querySelector<HTMLElement>("sidebar-actions-popover [role='tooltip']:not([hidden])");
+}
+
+describe("canonical session actions help primitive", () => {
+	it("keeps history rows, icons, and the trailing toggle on the canonical session-menu markup", async () => {
+		await openSurface("header");
+		const sessionFork = document.querySelector<HTMLElement>("[role='menuitem'][data-session-action-id='fork']")!;
+		const sessionToggle = document.querySelector<HTMLElement>("[role='menuitemcheckbox'][data-session-action-id='fork']")!;
+		const canonical = {
+			rowClass: sessionFork.className,
+			rowStyle: sessionFork.getAttribute("style"),
+			toggleClass: sessionToggle.className,
+			toggleStyle: sessionToggle.getAttribute("style"),
+			inputClass: sessionToggle.querySelector("input")?.className,
+		};
+		await closeMenu();
+
+		await mountHelpPopover();
+		const historyFork = document.querySelector<HTMLElement>("[role='menuitem'][data-session-action-id='history-fork']")!;
+		const historyToggle = document.querySelector<HTMLElement>("[role='menuitemcheckbox'][data-session-action-id='history-fork']")!;
+		expect(historyFork.className).toBe(canonical.rowClass);
+		expect(historyFork.getAttribute("style")).toBe(canonical.rowStyle);
+		expect(historyToggle.className).toBe(canonical.toggleClass);
+		expect(historyToggle.getAttribute("style")).toBe(canonical.toggleStyle);
+		expect(historyToggle.querySelector("input")?.className).toBe(canonical.inputClass);
+		expect(historyFork.querySelector("[data-sidebar-actions-popover-icon] svg")).not.toBeNull();
+	});
+
+	it("exposes exact help on hover, focus, and pinned tap without selecting, toggling, or dismissing", async () => {
+		let selections = 0;
+		let toggles = 0;
+		const popover = await mountHelpPopover({ onToggle: () => toggles++ });
+		popover.addEventListener("sidebar-action-select", () => selections++);
+		const help = popover.querySelector<HTMLElement>("[aria-label='About Fork from history']")!;
+		expect(help.textContent?.trim()).toBe("(?)");
+
+		help.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+		await (popover as any).updateComplete;
+		expect(tooltip()?.textContent?.trim()).toBe(HELP_TEXT);
+		help.dispatchEvent(new MouseEvent("mouseleave", { bubbles: false }));
+		await (popover as any).updateComplete;
+		expect(tooltip()).toBeNull();
+
+		help.focus();
+		await (popover as any).updateComplete;
+		expect(tooltip()?.textContent?.trim()).toBe(HELP_TEXT);
+		help.click();
+		help.blur();
+		await (popover as any).updateComplete;
+		expect(tooltip()?.textContent?.trim()).toBe(HELP_TEXT);
+		expect(help.getAttribute("aria-describedby")).toBe(tooltip()?.id);
+		expect(selections).toBe(0);
+		expect(toggles).toBe(0);
+		expect((popover as any).open).toBe(true);
+
+		help.click();
+		await (popover as any).updateComplete;
+		expect(tooltip()).toBeNull();
+		expect(selections).toBe(0);
+	});
+
+	it("includes help in roving order and keeps Enter/Space scoped to help and toggle", async () => {
+		let selections = 0;
+		let toggles = 0;
+		const popover = await mountHelpPopover({ onToggle: () => toggles++ });
+		popover.addEventListener("sidebar-action-select", () => selections++);
+		const help = popover.querySelector<HTMLElement>("[aria-label='About Fork from history']")!;
+		const toggle = popover.querySelector<HTMLElement>("[role='menuitemcheckbox']")!;
+		const copy = popover.querySelector<HTMLElement>("[data-session-action-id='copy-prompt']")!;
+
+		expect((document.activeElement as HTMLElement)?.dataset.sessionActionId).toBe("history-fork");
+		dispatchMenuKey("ArrowDown");
+		await (popover as any).updateComplete;
+		expect(document.activeElement).toBe(help);
+		dispatchMenuKey("Enter");
+		await (popover as any).updateComplete;
+		expect(tooltip()?.textContent?.trim()).toBe(HELP_TEXT);
+		expect(selections).toBe(0);
+
+		dispatchMenuKey("ArrowDown");
+		await (popover as any).updateComplete;
+		expect(document.activeElement).toBe(toggle);
+		dispatchMenuKey(" ");
+		expect(toggles).toBe(1);
+		expect(selections).toBe(0);
+		expect((popover as any).open).toBe(true);
+
+		dispatchMenuKey("ArrowDown");
+		await (popover as any).updateComplete;
+		expect(document.activeElement).toBe(copy);
+		dispatchMenuKey("Home");
+		await (popover as any).updateComplete;
+		expect((document.activeElement as HTMLElement)?.dataset.sessionActionId).toBe("history-fork");
+		dispatchMenuKey("End");
+		await (popover as any).updateComplete;
+		expect(document.activeElement).toBe(copy);
+	});
+
+	it("restores trigger focus for Escape/outside dismissal and lets Tab advance naturally", async () => {
+		let popover = await mountHelpPopover();
+		const anchor = (popover as any).anchorEl as HTMLElement;
+		dispatchMenuKey("Escape");
+		await flush();
+		expect((popover as any).open).toBe(false);
+		expect(document.activeElement).toBe(anchor);
+
+		popover.remove();
+		popover = await mountHelpPopover();
+		const outsideAnchor = (popover as any).anchorEl as HTMLElement;
+		const outside = document.createElement("button");
+		document.body.appendChild(outside);
+		outside.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+		await flush();
+		expect((popover as any).open).toBe(false);
+		expect(document.activeElement).toBe(outsideAnchor);
+
+		popover.remove();
+		popover = await mountHelpPopover();
+		const tabAnchor = (popover as any).anchorEl as HTMLElement;
+		dispatchMenuKey("Tab");
+		document.body.focus();
+		await flush();
+		expect((popover as any).open).toBe(false);
+		expect(document.activeElement).not.toBe(tabAnchor);
 	});
 });

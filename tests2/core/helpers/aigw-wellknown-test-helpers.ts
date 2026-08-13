@@ -26,6 +26,7 @@ export const {
 	getAigwProviderDnsGuardHosts,
 	replaceAigwProviderDnsGuardHosts,
 	removeAigw,
+	removeAigwModelsJson,
 	writeAigwDnsGuardExtension,
 } = await import("../../../src/server/agent/aigw-manager.ts");
 export const { resetAgentDirStateForTests } = await import("../../../src/server/bobbit-dir.js");

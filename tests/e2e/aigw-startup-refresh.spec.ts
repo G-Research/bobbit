@@ -6,12 +6,10 @@
  * `startupAigwCheck()` code path that runs in `createGateway()`.
  *
  * Scenarios:
- *  1. Existing aigw config + reachable mock gateway → models.json rewritten
- *     with the provider-level x-opencode-session header and fresh models.
- *  2. Existing aigw config + unreachable gateway → pre-existing models.json
- *     left byte-identical, gateway still comes up.
- *  3. BOBBIT_SKIP_AIGW_DISCOVERY=1 → no HTTP request to the mock gateway,
- *     models.json untouched, Bedrock env vars set on agent subprocesses.
+ *  1. Reachable configured AIGW publishes an explicitly managed provider.
+ *  2. Unreachable discovery leaves pre-existing models.json byte-identical.
+ *  3. A reachable gateway cannot overwrite an unmarked user-owned AIGW block.
+ *  4. BOBBIT_SKIP_AIGW_DISCOVERY=1 leaves models.json byte-identical.
  */
 import { test as base, expect } from "@playwright/test";
 import http from "node:http";
@@ -46,7 +44,7 @@ interface SeedOpts {
 	aigwUrl?: string;
 	skipDiscovery?: boolean;
 	preWriteModelsJson?: any;
-	mockGateway?: { hits: () => number };
+	preWriteModelsText?: string;
 }
 
 interface StartedGateway {
@@ -82,7 +80,9 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	// Pre-write models.json (in the isolated agent dir) so we can verify
 	// untouched-vs-rewritten on a per-test basis.
 	const modelsJsonPath = join(agentDir, "models.json");
-	if (opts.preWriteModelsJson !== undefined) {
+	if (opts.preWriteModelsText !== undefined) {
+		writeFileSync(modelsJsonPath, opts.preWriteModelsText);
+	} else if (opts.preWriteModelsJson !== undefined) {
 		writeFileSync(modelsJsonPath, JSON.stringify(opts.preWriteModelsJson, null, 2));
 	}
 
@@ -110,7 +110,7 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+	const { setProjectRoot, resetAgentDirStateForTests } = await import("../../dist/server/bobbit-dir.js");
 	const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 	const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 	const { createGateway } = await import("../../dist/server/server.js");
@@ -121,6 +121,10 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 		return null;
 	});
 
+	// This serial suite reuses imported server modules across isolated boots.
+	// Reset the startup-pinned agent directory so each boot publishes only into
+	// its own models.json fixture rather than the first test's removed directory.
+	resetAgentDirStateForTests();
 	setProjectRoot(bobbitDir);
 	scaffoldBobbitDir(bobbitDir);
 	const token = loadOrCreateToken();
@@ -221,7 +225,7 @@ const test = base;
 test.describe.configure({ mode: "serial" });
 
 test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () => {
-	test("startup with reachable aigw rewrites models.json with header block + fresh models", async () => {
+	test("startup with reachable aigw publishes a marked provider with exact routed models", async () => {
 		const mock = await startMockAigw([
 			"openai/gpt-5.2",
 			"aws/us.anthropic.claude-sonnet-4-6",
@@ -233,6 +237,7 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 			expect(existsSync(gw.modelsJsonPath)).toBe(true);
 			const data = JSON.parse(readFileSync(gw.modelsJsonPath, "utf-8"));
 			expect(data?.providers?.aigw, "aigw provider must exist after startup refresh").toBeTruthy();
+			expect(data.providers.aigw["x-bobbit-managed"]).toEqual({ kind: "aigw-publication", version: 1 });
 			expect(data.providers.aigw.headers["x-opencode-session"]).toBe(EXPECTED_HEADER_VALUE);
 			expect(data.providers.aigw.headers["User-Agent"]).toBe(EXPECTED_USER_AGENT);
 
@@ -249,16 +254,7 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 		}
 	});
 
-	test("startup with unreachable aigw leaves pre-existing aigw block untouched", async () => {
-		// Pre-write a sentinel models.json with NO headers block on the aigw
-		// provider — a successful startup refresh would add the
-		// `x-opencode-session` header block, so its absence after startup proves
-		// the file was NOT rewritten by `writeAigwModelsJson`.
-		//
-		// Note: `writeOpenAIModelAdditions()` and `writeContextWindowOverrides()`
-		// run unconditionally after `startupAigwCheck` and may merge unrelated
-		// providers (anthropic, openai-codex) into models.json. We therefore
-		// assert on the aigw block specifically, not full file equality.
+	test("startup with unreachable aigw leaves pre-existing models.json byte-identical", async () => {
 		const sentinelAigw = {
 			baseUrl: "http://127.0.0.1:1",
 			apiKey: "none",
@@ -272,43 +268,47 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 			},
 		};
 
+		const before = JSON.stringify(sentinel, null, 2);
 		let gw: StartedGateway | undefined;
 		try {
 			gw = await startSeededGateway({
 				aigwUrl: "http://127.0.0.1:1", // reserved port — connection refused
-				preWriteModelsJson: sentinel,
+				preWriteModelsText: before,
 			});
 
-			const data = JSON.parse(readFileSync(gw.modelsJsonPath, "utf-8"));
-			expect(data.providers.aigw).toEqual(sentinelAigw);
-			expect(data.providers.aigw.headers).toBeUndefined();
+			expect(readFileSync(gw.modelsJsonPath, "utf-8")).toBe(before);
 		} finally {
 			await gw?.shutdown();
 		}
 	});
 
-	test("startup with BOBBIT_SKIP_AIGW_DISCOVERY=1 makes no HTTP request and leaves models.json untouched", async () => {
+	test("startup with reachable aigw refuses an unmarked user-owned provider byte-identically", async () => {
+		const mock = await startMockAigw(["openai/gpt-5.2"]);
+		const before = '{\n  // user-owned routing must not be claimed\n  "providers": {\n    "aigw": { "baseUrl": "https://user.invalid", "apiKey": "user-key", "unknown": true, "models": [] }\n  },\n  "unknownRoot": [1, 1],\n}\n';
+		let gw: StartedGateway | undefined;
+		try {
+			gw = await startSeededGateway({ aigwUrl: mock.url, preWriteModelsText: before });
+			expect(mock.hits(), "startup should discover before ownership validation").toBeGreaterThan(0);
+			expect(readFileSync(gw.modelsJsonPath, "utf-8")).toBe(before);
+		} finally {
+			await gw?.shutdown();
+			await mock.close();
+		}
+	});
+
+	test("startup with BOBBIT_SKIP_AIGW_DISCOVERY=1 makes no HTTP request and leaves JSONC byte-identical", async () => {
 		const mock = await startMockAigw(["should-not-be-fetched"]);
-		const sentinel = { providers: { anthropic: { apiKey: "sk-test" } } };
+		const before = '{\n  // preserve comments and unknown fields\n  "providers": { "anthropic": { "apiKey": "sk-test", "unknown": true } },\n}\n';
 		let gw: StartedGateway | undefined;
 		try {
 			gw = await startSeededGateway({
 				aigwUrl: mock.url,
 				skipDiscovery: true,
-				preWriteModelsJson: sentinel,
+				preWriteModelsText: before,
 			});
 
 			expect(mock.hits(), "mock gateway must not be hit under skip flag").toBe(0);
-			// `writeOpenAIModelAdditions` runs after startupAigwCheck and may add
-			// unrelated providers (openai-codex etc.). The contract here is that
-			// the aigw provider was NOT touched — in this test no aigw block
-			// was pre-seeded so the post-startup file must STILL have no aigw
-			// provider entry, and the seeded anthropic provider survives intact.
-			const data = JSON.parse(readFileSync(gw.modelsJsonPath, "utf-8"));
-			expect(data.providers.aigw, "no aigw provider must be written under skip flag").toBeUndefined();
-			// Seeded anthropic apiKey survives (writeContextWindowOverrides may add
-			// `modelOverrides` to it but must not clobber the existing fields).
-			expect(data.providers.anthropic.apiKey).toBe("sk-test");
+			expect(readFileSync(gw.modelsJsonPath, "utf-8")).toBe(before);
 
 			// Sanity: gateway came up and serves /api/health (un-authenticated).
 			const res = await fetch(`${gw.baseURL}/api/health`);

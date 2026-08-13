@@ -124,14 +124,28 @@ export async function openSidePanelWorkspaceTab(
 	deps: SidePanelWorkspaceRouteDeps,
 	sessionId: string,
 	tab: unknown,
-	options: { focus?: boolean; placeAfterActive?: boolean } = {},
+	options: { focus?: boolean; placeAfterActive?: boolean; preserveActiveFileIds?: ReadonlySet<string> } = {},
 ): Promise<SidePanelWorkspace | undefined> {
-	const result = await mutate(deps, sessionId, (workspace) => applyWorkspaceMutation(workspace, {
-		type: "open",
-		tab,
-		focus: options.focus !== false,
-		placeAfterActive: options.placeAfterActive === true,
-	}, validatorsFor(deps, sessionId)));
+	const result = await mutate(deps, sessionId, (workspace) => {
+		let resolvedTab = tab;
+		if (options.preserveActiveFileIds && tab && typeof tab === "object" && !Array.isArray(tab)) {
+			const candidate = tab as Record<string, unknown>;
+			const existing = workspace.tabs.find((item) => item.id === candidate.id);
+			const activeFileId = existing?.state?.activeFileId;
+			if (typeof activeFileId === "string" && options.preserveActiveFileIds.has(activeFileId)) {
+				const state = candidate.state && typeof candidate.state === "object" && !Array.isArray(candidate.state)
+					? candidate.state as Record<string, unknown>
+					: {};
+				resolvedTab = { ...candidate, state: { ...state, activeFileId } };
+			}
+		}
+		return applyWorkspaceMutation(workspace, {
+			type: "open",
+			tab: resolvedTab,
+			focus: options.focus !== false,
+			placeAfterActive: options.placeAfterActive === true,
+		}, validatorsFor(deps, sessionId));
+	});
 	return result.status === 200 ? result.workspace : undefined;
 }
 

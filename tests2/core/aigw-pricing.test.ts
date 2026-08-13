@@ -10,7 +10,8 @@ guardProcessEnv();
  * Reproducing test for AI Gateway pricing metadata propagation.
  *
  * AI Gateway /v1/models returns pricing in USD per token. Bobbit must convert
- * that to pi-ai's per-million-token cost shape and expose it through the model
+ * that to pi-ai's per-million-token cost shape without inventing absent cache
+ * prices, and expose it through the model
  * registry used by GET /api/models and the generated agent models.json.
  */
 import { describe, it } from "vitest";
@@ -28,8 +29,8 @@ const { discoverAigwModels, writeAigwModelsJson } = await import("../../src/serv
 const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.js");
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-const GPT_52_COST = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.5625 };
-const CLAUDE_COST = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
+const GPT_52_COST = { input: 1.25, output: 10, cacheRead: 0, cacheWrite: 0 };
+const CLAUDE_COST = { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 };
 
 type MockAigw = {
 	url: string;

@@ -116,12 +116,13 @@ test.describe("Journey: Debug Tools", () => {
 	});
 });
 
-// Ported from staff-sub-section.spec.ts (audit: staff-debug PARTIAL): a project
-// with a staff agent renders the per-project Staff header in the sidebar.
-test.describe("Journey: Staff Sidebar Header", () => {
-	test("creating a staff agent renders the sidebar Staff header", async ({ page }) => {
+// Ported from staff-sub-section.spec.ts and extended to cover the staff row's
+// canonical session actions across desktop, reload, keyboard, and mobile paths.
+test.describe("Journey: Staff Sidebar Actions", () => {
+	test("staff row actions match sessions across desktop, reload, keyboard, and mobile", async ({ page }) => {
+		test.setTimeout(90_000);
 		const project = await defaultProject();
-		let staffId = "";
+		let staff: StaffRecord | undefined;
 		try {
 			const resp = await apiFetch("/api/staff", {
 				method: "POST",
@@ -132,13 +133,56 @@ test.describe("Journey: Staff Sidebar Header", () => {
 				}),
 			});
 			expect(resp.status).toBe(201);
-			staffId = (await resp.json()).id;
+			staff = await resp.json() as StaffRecord;
+			expect(staff.currentSessionId).toBeTruthy();
+			await waitForSessionStatus(staff.currentSessionId!, "idle");
 
+			await page.setViewportSize({ width: 1280, height: 900 });
 			await openApp(page);
 			const header = page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${project.id}"]`).first();
 			await expect(header).toBeVisible({ timeout: 20_000 });
+			const row = page.locator(`[data-nav-id="session:${staff.currentSessionId}"]`).filter({ hasText: staff.name }).first();
+			const trigger = row.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-id="${staff.currentSessionId}"]`).first();
+			await expect(row).toBeVisible({ timeout: 20_000 });
+			await row.hover();
+			await expect(row.locator('[data-session-action-id="modify"][data-sidebar-action-quick="true"]')).toBeVisible();
+			await expect(row.locator('[data-session-action-id="terminate"][data-sidebar-action-quick="true"]')).toBeVisible();
+			await expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+			await trigger.focus();
+			await trigger.press("ArrowDown");
+			const menu = page.locator("sidebar-actions-popover [role='menu']");
+			await expect(menu).toBeVisible({ timeout: 5_000 });
+			await expect(trigger).toHaveAttribute("aria-expanded", "true");
+			for (const actionId of ["modify", "terminate", "refresh-agent", "fork", "copy-link", "view-system-prompt", "open-new-window"]) {
+				await expect(page.locator(`sidebar-actions-popover [role="menuitem"][data-session-action-id="${actionId}"]`).first()).toBeVisible();
+			}
+			await expect(page.locator('sidebar-actions-popover [role="menuitem"][data-session-action-id="modify"]').first()).toContainText("Edit staff");
+			await page.keyboard.press("Escape");
+			await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
+			await expect(trigger).toBeFocused();
+
+			await trigger.press("Enter");
+			await page.locator('sidebar-actions-popover [role="menuitem"][data-session-action-id="modify"]').first().click();
+			await expect(page).toHaveURL(new RegExp(`#/staff/${staff.id}$`));
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
+
+			await page.setViewportSize({ width: 390, height: 820 });
+			await navigateToHash(page, "#/");
+			const mobileRow = page.locator(`[data-nav-id="session:${staff.currentSessionId}"]`).filter({ hasText: staff.name }).first();
+			const mobileTrigger = mobileRow.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-id="${staff.currentSessionId}"]`).first();
+			await expect(mobileRow).toBeVisible({ timeout: 15_000 });
+			await expect(mobileRow.locator('[data-session-action-id="modify"][data-sidebar-action-quick="true"]')).toBeVisible();
+			await expect(mobileRow.locator('[data-session-action-id="terminate"][data-sidebar-action-quick="true"]')).toBeVisible();
+			const startingHash = await page.evaluate(() => window.location.hash);
+			await mobileTrigger.click();
+			await expect(menu).toBeVisible({ timeout: 5_000 });
+			await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(startingHash);
+			await page.keyboard.press("Escape");
+			await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });
 		} finally {
-			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
+			if (staff?.id) await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => {});
+			if (staff?.currentSessionId) await deleteSession(staff.currentSessionId).catch(() => {});
 		}
 	});
 });
