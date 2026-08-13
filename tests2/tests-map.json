@@ -93,6 +93,24 @@
       }
     },
     {
+      "path": "tests2/dom/sidebar-reveal-current.test.ts",
+      "reason": "Focused DOM coverage for current-session reveal filter reset, explicit ancestor expansion, disabled state, repeat emphasis, archived loading, and reduced-motion behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
+      "reason": "Deterministic production-renderer desktop journey covering exact action-scoped inclusion of categorically hidden team/archive targets, manual filter-authority restoration, explicit reveal of a seven-level descendant chain beneath a canonically stamped team-lead spawned goal beyond the default depth cap, durable depth and exact path persistence across a full reload with canonical fixture rehydration and unrelated project state preserved, collapsed live and status=terminated archived-child delegates in Project and Status views, terminal cache normalization, filter/search reset, keyboard highlight restoration, nearest scrolling, repeated emphasis, distinct cold archived hydration, reduced motion, cleanup, and mobile absence.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/fixtures/sidebar-actions-menu-mobile-fixture.spec.ts",
       "reason": "Independent mobile sidebar quick-action and hamburger-menu contract split from sidebar-actions-menu-fixture to keep both files below the strict 60-second per-spec wall cap without dropping assertions.",
       "execution": {
@@ -1868,7 +1886,7 @@
     },
     {
       "path": "tests2/core/headset-accessory.test.ts",
-      "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
+      "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat and cached compositor-only right-facing frame, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1877,7 +1895,7 @@
     },
     {
       "path": "tests2/core/ponytail-accessory.test.ts",
-      "reason": "Pins the 'ponytail' accessory end-to-end wiring (sprite data, app.css overlay + occlusion keyframes, blob DOM templates, role-manager inline rules, staff allowlist) plus the two properties easy to 'tidy' into bugs: the parting/forehead/mouth are drawn by omission (never baked body colour, which would break hue rotation) and the right-facing turn moves the tail to negative x rather than hiding it.",
+      "reason": "Pins the 'ponytail' accessory end-to-end wiring (sprite data, app.css overlay + chat occlusion keyframes, cached compositor-only sidebar right-facing frame, blob DOM templates, role-manager inline rules, staff allowlist) plus the omission and turn-direction invariants that are easy to break.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3090,6 +3108,69 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/browser/goal-setup-recovery.spec.ts",
+      "reason": "Chromium journey through the real gateway retry route and live broadcasts: current setup failures disable team and session starts, retrying renders as in-flight without an agent, and a persisted ready recovery clears dashboard/sidebar warnings through reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/integration/sandbox-git-config-coordination.test.ts",
+      "reason": "Integration coverage for repository-scoped coordination of sandbox Git configuration mutations during concurrent setup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/worktree-pool-config-coordination.test.ts",
+      "reason": "Integration coverage for repository-scoped coordination of worktree-pool Git configuration mutations during concurrent setup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/parallel-goal-setup-repro.test.ts",
+      "reason": "Deterministic failing-first coverage for same-goal setup single-flight: duplicate auto-start callers must await one authoritative setup promise, and recovery to ready must atomically remove the active setup error.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/setup-ready-team-start-guard.test.ts",
+      "reason": "Focused lifecycle coverage proving team leads and workers cannot start while canonical goal setup is preparing, retrying, or failed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/shared-git-config-coordination-repro.test.ts",
+      "reason": "Deterministic barrier-driven reproduction for repository-common-dir Git config mutation coordination across parallel root and child setup transactions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/dom/goal-setup-recovery-repro.test.ts",
+      "reason": "DOM reproduction for truthful setup recovery rendering: a current error is actionable, while a ready live update removes stale setup warnings and restores controls.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [
@@ -3203,6 +3284,10 @@
     },
     {
       "path": "tests2/browser/journeys/sidebar-status.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

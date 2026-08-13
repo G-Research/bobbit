@@ -5,7 +5,7 @@ import "../ui/components/VerificationOutputModal.js";
 import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { state, renderApp, type Goal, type RemoteStateMetadata } from "./state.js";
+import { state, renderApp, getGoalSetupUiState, type Goal, type RemoteStateMetadata } from "./state.js";
 import { isHeadquartersProject } from "./headquarters.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, parseRemoteStateSnapshot, ACTIVE_PR_POLL_INTERVAL_MS, type RemoteStateSnapshot, type GateState, type GateSignal, type VerificationTimeoutInfo } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
@@ -76,6 +76,33 @@ export interface CommitInfo {
 let currentGoalId: string | null = null;
 let currentGoal: Goal | null = null;
 
+/** Normalize transient API state so a recovered goal cannot retain an active error client-side. */
+function normalizeGoalSetup(goal: Goal): Goal {
+	const setup = getGoalSetupUiState(goal);
+	if (goal.setupStatus === setup.status && goal.setupError === setup.error) return goal;
+	return { ...goal, setupStatus: setup.status, setupError: setup.error };
+}
+
+/** Keep the dashboard snapshot and sidebar projection on the same setup lifecycle. */
+function syncDashboardGoalToSidebar(goal: Goal): void {
+	const idx = state.goals.findIndex((item) => item.id === goal.id);
+	if (idx < 0) return;
+	const sidebarGoal = state.goals[idx];
+	if (
+		sidebarGoal.setupStatus === goal.setupStatus
+		&& sidebarGoal.setupError === goal.setupError
+		&& sidebarGoal.state === goal.state
+		&& sidebarGoal.updatedAt === goal.updatedAt
+	) return;
+	state.goals[idx] = {
+		...sidebarGoal,
+		setupStatus: goal.setupStatus,
+		setupError: goal.setupError,
+		state: goal.state,
+		updatedAt: goal.updatedAt,
+	};
+}
+
 function syncCurrentGoalLifecycleFromState(): void {
 	if (!currentGoal || !currentGoalId || currentGoal.id !== currentGoalId) return;
 	const stateGoal = state.goals.find(g => g.id === currentGoalId);
@@ -84,29 +111,26 @@ function syncCurrentGoalLifecycleFromState(): void {
 	const archived = stateGoal.archived === true ? true : undefined;
 	const archivedAt = archived ? (stateGoal.archivedAt ?? currentGoal.archivedAt ?? Date.now()) : undefined;
 	const paused = stateGoal.paused === true ? true : undefined;
-	const setupStatus = stateGoal.setupStatus ?? currentGoal.setupStatus;
-	const setupError = stateGoal.setupError;
+	const setup = getGoalSetupUiState(stateGoal);
 	const updatedAt = stateGoal.updatedAt ?? currentGoal.updatedAt;
 
 	if (
 		currentGoal.archived === archived
 		&& currentGoal.archivedAt === archivedAt
 		&& currentGoal.paused === paused
-		&& currentGoal.setupStatus === setupStatus
-		&& currentGoal.setupError === setupError
+		&& currentGoal.setupStatus === setup.status
+		&& currentGoal.setupError === setup.error
 		&& currentGoal.state === stateGoal.state
 		&& currentGoal.updatedAt === updatedAt
-	) {
-		return;
-	}
+	) return;
 
 	currentGoal = {
 		...currentGoal,
 		archived,
 		archivedAt,
 		paused,
-		setupStatus,
-		setupError,
+		setupStatus: setup.status,
+		setupError: setup.error,
 		state: stateGoal.state,
 		updatedAt,
 	};
@@ -671,6 +695,13 @@ function connectDashboardWs(): void {
 				if (applyDashboardRemoteStateSnapshot(msg)) renderApp();
 				return;
 			}
+			if (msg?.type === "goal_setup_started" || msg?.type === "goal_setup_preparing"
+				|| msg?.type === "goal_setup_retrying" || msg?.type === "goal_setup_complete" || msg?.type === "goal_setup_error") {
+				// Viewer broadcasts have no attached agent. Re-read the authoritative
+				// goal and update both dashboard-local and sidebar projections.
+				void refreshDashboardGoal(msg.goalId);
+				return;
+			}
 			// Dashboard mutation-pending card: react to the live broadcasts. The
 			// in-chat card (remote-agent.ts) handles these independently on the
 			// session socket — this only drives the dashboard surface.
@@ -809,17 +840,8 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		if (!goalRes.ok) throw new Error(`Goal not found (${goalRes.status})`);
 
-		currentGoal = await goalRes.json();
-
-		// Propagate goal metadata to sidebar's goal list so it stays in sync
-		// (e.g. setupStatus may have changed from "preparing" to "ready")
-		const sidebarIdx = state.goals.findIndex((g) => g.id === goalId);
-		if (sidebarIdx >= 0) {
-			const sidebarGoal = state.goals[sidebarIdx];
-			if (sidebarGoal.setupStatus !== currentGoal!.setupStatus || sidebarGoal.setupError !== currentGoal!.setupError || sidebarGoal.state !== currentGoal!.state) {
-				state.goals[sidebarIdx] = { ...sidebarGoal, setupStatus: currentGoal!.setupStatus, setupError: currentGoal!.setupError, state: currentGoal!.state };
-			}
-		}
+		currentGoal = normalizeGoalSetup(await goalRes.json());
+		syncDashboardGoalToSidebar(currentGoal);
 		syncCurrentGoalLifecycleFromState();
 
 		if (tasksRes.ok) {
@@ -896,8 +918,8 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		// Restart-safe rehydration of the mutation-pending approval card.
 		void fetchPendingMutations(goalId);
 
-		// Start setup status polling if worktree is still being prepared
-		if (currentGoal && currentGoal.setupStatus === "preparing") {
+		// Viewer events are a fast path; polling is the restart/disconnect fallback.
+		if (currentGoal && getGoalSetupUiState(currentGoal).isPending) {
 			startSetupStatusPoll(goalId);
 		}
 
@@ -1043,21 +1065,21 @@ export function clearDashboardState(): void {
  * Called when a goal_setup_complete/error event arrives so the "Setting up
  * worktree..." banner dismisses without a full page reload.
  */
-export async function refreshDashboardGoal(): Promise<void> {
-	if (!currentGoalId) return;
+export async function refreshDashboardGoal(goalId = currentGoalId): Promise<void> {
+	if (!goalId) return;
 	try {
-		const res = await gatewayFetch(`/api/goals/${currentGoalId}`);
-		if (res.ok) {
-			currentGoal = await res.json();
-			// Propagate setupStatus to sidebar's goal list so it stays in sync
-			const idx = state.goals.findIndex((g) => g.id === currentGoalId);
-			if (idx >= 0 && (currentGoal!.setupStatus !== state.goals[idx].setupStatus || currentGoal!.setupError !== state.goals[idx].setupError)) {
-				state.goals[idx] = { ...state.goals[idx], setupStatus: currentGoal!.setupStatus, setupError: currentGoal!.setupError };
-			}
+		const res = await gatewayFetch(`/api/goals/${goalId}`);
+		if (!res.ok) return;
+		const refreshedGoal = normalizeGoalSetup(await res.json());
+		syncDashboardGoalToSidebar(refreshedGoal);
+		if (currentGoalId === goalId) {
+			currentGoal = refreshedGoal;
 			syncCurrentGoalLifecycleFromState();
-			renderApp();
+			if (getGoalSetupUiState(refreshedGoal).isPending) startSetupStatusPoll(goalId);
+			else stopSetupStatusPoll();
 		}
-	} catch { /* ignore - polling will catch up */ }
+		renderApp();
+	} catch { /* polling will catch up */ }
 }
 
 // ============================================================================
@@ -1534,10 +1556,8 @@ function startSetupStatusPoll(goalId: string): void {
 	setupPollTimer = setInterval(async () => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
 		await refreshDashboardGoal();
-		// Stop polling once status changes away from "preparing"
-		if (currentGoal && currentGoal.setupStatus !== "preparing") {
-			stopSetupStatusPoll();
-		}
+		// Stop polling once setup reaches a terminal state.
+		if (currentGoal && !getGoalSetupUiState(currentGoal).isPending) stopSetupStatusPoll();
 	}, 3000);
 }
 
@@ -1832,6 +1852,8 @@ function deriveBadges(commitList: CommitInfo[], taskList: Task[]): Map<string, C
 // ============================================================================
 
 async function handleStartTeam(goalId: string): Promise<void> {
+	const goal = state.goals.find((item) => item.id === goalId) ?? currentGoal;
+	if (!goal || !getGoalSetupUiState(goal).canStart) return;
 	teamStarting = true;
 	renderApp();
 	const sessionId = await startTeam(goalId);
@@ -1978,14 +2000,15 @@ const svgChildren = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="n
 async function handleRetrySetup(goalId: string): Promise<void> {
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/retry-setup`, { method: "POST" });
-		if (res.ok) {
-			// Optimistically update local state
-			if (currentGoal) {
-				(currentGoal as any).setupStatus = "preparing";
-				(currentGoal as any).setupError = undefined;
-			}
-			renderApp();
-		}
+		if (!res.ok) return;
+		// The mutation response is intentionally small. Optimistically enter the
+		// canonical retrying state, then reconcile with the authoritative GET.
+		const update = (goal: Goal): Goal => normalizeGoalSetup({ ...goal, setupStatus: "retrying", setupError: undefined });
+		if (currentGoal?.id === goalId) currentGoal = update(currentGoal);
+		const idx = state.goals.findIndex((goal) => goal.id === goalId);
+		if (idx >= 0) state.goals[idx] = update(state.goals[idx]);
+		startSetupStatusPoll(goalId);
+		renderApp();
 	} catch (err) {
 		console.error("[goal-dashboard] Retry setup failed:", err);
 	}
@@ -2005,18 +2028,20 @@ function renderHeadquartersNoWorktreeNotice(goal: Goal): TemplateResult | typeof
 }
 
 function renderSetupBanner(goal: Goal): TemplateResult {
-	if (goal.setupStatus === "preparing") {
+	const setup = getGoalSetupUiState(goal);
+	if (setup.isPending) {
+		const retrying = setup.status === "retrying";
 		return html`
-			<div class="setup-banner setup-banner--preparing">
+			<div class="setup-banner setup-banner--preparing" data-setup-status=${setup.status}>
 				<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
-				<span>Setting up worktree...</span>
+				<span>${retrying ? "Retrying worktree setup..." : "Setting up worktree..."}</span>
 			</div>
 		`;
 	}
-	if (goal.setupStatus === "error") {
+	if (setup.hasError) {
 		return html`
 			<div class="setup-banner setup-banner--error">
-				<span style="color:var(--destructive)">⚠ Worktree setup failed${goal.setupError ? `: ${goal.setupError}` : ""}</span>
+				<span style="color:var(--destructive)">⚠ Worktree setup failed${setup.error ? `: ${setup.error}` : ""}</span>
 				<button class="btn-retry" title="Retry worktree setup" @click=${() => handleRetrySetup(goal.id)}>Retry Setup</button>
 			</div>
 		`;
@@ -2146,27 +2171,31 @@ function renderTeamButton(goal: Goal): TemplateResult {
 			</div>
 		`;
 	}
+	const setup = getGoalSetupUiState(goal);
+	const setupTitle = setup.isPending ? (setup.status === "retrying" ? "Retrying worktree setup…" : "Setting up worktree…")
+		: setup.hasError ? "Worktree setup failed" : "Start the goal team";
 	// When PR is merged, demote Start Team to secondary (Archive is in the nav bar)
 	if (prStatus?.state === "MERGED") {
 		return html`
-			<button class="btn-icon" title="Start the goal team" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
-				${svgCrown}<span>${teamStarting ? "Starting\u2026" : "Start Team"}</span>
+			<button class="btn-icon" title="Start the goal team" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || !setup.canStart}>
+				${svgCrown}<span>${teamStarting ? "Starting…" : "Start Team"}</span>
 			</button>
 		`;
 	}
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" title="${goal.setupStatus === "preparing" ? "Setting up worktree\u2026" : "Start the goal team"}" @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || goal.setupStatus !== "ready"}>
-				${goal.setupStatus === "preparing"
+			<button class="btn-split-main" title=${setupTitle} @click=${() => handleStartTeam(goal.id)} ?disabled=${teamStarting || !setup.canStart}>
+				${setup.isPending
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
 					: svgCrown}
-				<span>${teamStarting ? "Starting\u2026" : goal.setupStatus === "preparing" ? "Setting up\u2026" : "Start Team"}</span>
+				<span>${teamStarting ? "Starting…" : setup.isPending ? (setup.status === "retrying" ? "Retrying…" : "Setting up…") : "Start Team"}</span>
 			</button>
 		</div>
 	`;
 }
 
 function renderSessionButton(goal: Goal): TemplateResult {
+	const setup = getGoalSetupUiState(goal);
 	if (goal.archived) {
 		return html`
 			<div class="btn-split">
@@ -2178,11 +2207,11 @@ function renderSessionButton(goal: Goal): TemplateResult {
 	}
 	return html`
 		<div class="btn-split">
-			<button class="btn-split-main" title="New session for this goal" @click=${() => createAndConnectSession(goal.id)} ?disabled=${goal.setupStatus !== undefined && goal.setupStatus !== "ready"}>
+			<button class="btn-split-main" title=${setup.canStart ? "New session for this goal" : (setup.isPending ? "Worktree setup in progress" : "Worktree setup failed")} @click=${() => createAndConnectSession(goal.id)} ?disabled=${!setup.canStart}>
 				${svgPlus}
 				New Session
 			</button>
-			<button class="btn-split-chevron" @click=${(e: Event) => { e.stopPropagation(); toggleRoleDropdown(); }} title="Choose role">
+			<button class="btn-split-chevron" @click=${(e: Event) => { e.stopPropagation(); toggleRoleDropdown(); }} title="Choose role" ?disabled=${!setup.canStart}>
 				${svgChevronDown}
 			</button>
 			${roleDropdownOpen ? html`

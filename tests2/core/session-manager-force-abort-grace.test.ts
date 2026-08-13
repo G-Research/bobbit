@@ -91,6 +91,69 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.ok(elapsed >= GRACE - 20, `did not force-kill before the grace period (${elapsed}ms)`);
 	});
 
+	it("does not remain aborting while a wedged bridge blocks the pre-kill state snapshot", async () => {
+		// Observed live-session shape: Escape sends the same abort command as Stop
+		// while Pi is streaming a partial edit call. Abort emits no agent_end, and
+		// other RPCs on the same bridge also stop answering. forceAbort correctly
+		// races abort() against its grace timer,
+		// but then asks that same bridge for getState() before calling stop(). A
+		// blocked state snapshot therefore leaves the visible status at "aborting"
+		// instead of force-killing at the grace boundary.
+		registerRpcBridgeFactory(() => { throw new Error("no respawn in test"); });
+
+		const manager: any = new SessionManager();
+		manager._testStore = { update: vi.fn(() => {}), get: vi.fn(() => undefined) };
+		managers.push(manager);
+
+		let releaseState!: () => void;
+		const stateGate = new Promise<void>((resolve) => { releaseState = resolve; });
+		const stop = vi.fn(async () => {});
+		const session: any = {
+			id: "s-wedged-state-snapshot",
+			title: "Wedged during tool call",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "streaming",
+			statusVersion: 1,
+			streamingStartedAt: Date.now(),
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set([{ readyState: 1, send: () => {} }]),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			unsubscribe: () => {},
+			rpcClient: {
+				abort: () => new Promise<void>(() => {}),
+				onEvent: () => () => {},
+				getState: async () => {
+					await stateGate;
+					return { success: false };
+				},
+				stop,
+			},
+		};
+		manager.sessions.set(session.id, session);
+
+		const GRACE = 30;
+		const aborting = manager.forceAbort(session.id, GRACE).catch(() => {});
+		await new Promise((resolve) => setTimeout(resolve, GRACE + 50));
+		const stopStartedAtGraceBoundary = stop.mock.calls.length > 0;
+		const statusAfterGrace = session.status;
+
+		// Release the intentionally wedged RPC so cleanup always completes before
+		// the assertion fails; the test must not leak a replacement coordinator.
+		releaseState();
+		await aborting;
+
+		assert.equal(
+			stopStartedAtGraceBoundary,
+			true,
+			`force-kill did not start after ${GRACE}ms; session remained ${statusAfterGrace}`,
+		);
+		assert.notEqual(statusAfterGrace, "aborting", "the grace boundary must end the visible aborting state");
+	});
+
 	/**
 	 * Force-abort respawn must derive its tool allowlist from the session/persisted
 	 * allowedTools, NOT recompute it from the role alone. A restricted child/delegate
