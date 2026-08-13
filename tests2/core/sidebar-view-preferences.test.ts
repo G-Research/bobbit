@@ -11,6 +11,7 @@ import {
 	loadSidebarStatusCollapsedSections,
 	loadSidebarStatusFilter,
 	parseSidebarSessionView,
+	resetSidebarViewFilters,
 	setActiveSidebarViewFilter,
 	setSidebarStatusSectionExpanded,
 	setSidebarView,
@@ -155,6 +156,68 @@ describe("independent sidebar view filters", () => {
 		state.statusShowTeams = true;
 		assert.equal(isSidebarViewFilterActive(getSidebarViewFilters(state, "project"), "project"), false);
 		assert.equal(isSidebarViewFilterActive(getSidebarViewFilters(state, "status"), "status"), true);
+	});
+
+	it("resets only the active Project filters to their exact persisted defaults and closes Filters", () => {
+		const state = preferenceState();
+		state.showArchived = true;
+		state.showBusy = false;
+		state.showRead = false;
+		state.statusShowArchived = true;
+		state.statusShowBusy = false;
+		state.statusShowRead = false;
+		state.statusShowTeams = true;
+		state.filtersPopoverOpen = true;
+		const inactiveBefore = getSidebarViewFilters(state, "status");
+
+		resetSidebarViewFilters(state, "project");
+
+		assert.deepEqual(getSidebarViewFilters(state, "project"), {
+			showArchived: false,
+			showBusy: true,
+			showRead: true,
+		});
+		assert.deepEqual(getSidebarViewFilters(state, "status"), inactiveBefore);
+		assert.equal(state.filtersPopoverOpen, false);
+		assert.equal(storage.getItem(SIDEBAR_PROJECT_FILTER_STORAGE_KEYS.showArchived), "false");
+		assert.equal(storage.getItem(SIDEBAR_PROJECT_FILTER_STORAGE_KEYS.showBusy), "true");
+		assert.equal(storage.getItem(SIDEBAR_PROJECT_FILTER_STORAGE_KEYS.showRead), "true");
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showArchived), null);
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showBusy), null);
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showRead), null);
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showTeams), null);
+	});
+
+	it("resets only the active Status filters, including teams, to exact persisted defaults", () => {
+		const state = preferenceState();
+		state.sidebarSessionView = "status";
+		state.showArchived = true;
+		state.showBusy = false;
+		state.showRead = false;
+		state.statusShowArchived = true;
+		state.statusShowBusy = false;
+		state.statusShowRead = false;
+		state.statusShowTeams = true;
+		state.filtersPopoverOpen = true;
+		const inactiveBefore = getSidebarViewFilters(state, "project");
+
+		resetSidebarViewFilters(state, "status");
+
+		assert.deepEqual(getSidebarViewFilters(state, "status"), {
+			showArchived: false,
+			showBusy: true,
+			showRead: true,
+			showTeams: false,
+		});
+		assert.deepEqual(getSidebarViewFilters(state, "project"), inactiveBefore);
+		assert.equal(state.filtersPopoverOpen, false);
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showArchived), "false");
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showBusy), "true");
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showRead), "true");
+		assert.equal(storage.getItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS.showTeams), "false");
+		assert.equal(storage.getItem(SIDEBAR_PROJECT_FILTER_STORAGE_KEYS.showArchived), null);
+		assert.equal(storage.getItem(SIDEBAR_PROJECT_FILTER_STORAGE_KEYS.showBusy), null);
+		assert.equal(storage.getItem(SIDEBAR_PROJECT_FILTER_STORAGE_KEYS.showRead), null);
 	});
 
 	it("keeps archives while either view or ephemeral search demands them", () => {

@@ -216,6 +216,32 @@ describe("sidebar-tree-state", () => {
 		assert.equal(state.isProjectExpanded("project"), true);
 	});
 
+	it("validates durable per-project depth caps without discarding v1 expansion", async () => {
+		const expandedGoalKey = key({ kind: "goal", goalId: "survives" });
+		const { store } = installStorage({
+			[STORAGE_KEY]: `{"version":1,"expansion":{"${expandedGoalKey}":"expanded"},"explicitRevealDepthByProject":{"valid":10,"negative":-2,"zero":0,"fractional":7.5,"string":"10","missing":null,"nonfinite":1e309,"huge":1e100}}`,
+		});
+		const state = await importFresh("depth-validation");
+
+		assert.equal(state.isGoalExpanded("survives"), true, "existing v1 expansion still loads");
+		// Force a normalized write so unsafe values cannot remain latent in storage.
+		state.setGoalExpanded("write-normalized-state", true);
+
+		const persisted = JSON.parse(store.get(STORAGE_KEY) ?? "{}") as {
+			expansion?: Record<string, string>;
+			explicitRevealDepthByProject?: Record<string, unknown>;
+		};
+		assert.equal(persisted.expansion?.[expandedGoalKey], "expanded");
+		assert.equal(persisted.expansion?.[key({ kind: "goal", goalId: "write-normalized-state" })], "expanded");
+		assert.equal(persisted.explicitRevealDepthByProject?.valid, 10);
+		for (const invalid of ["negative", "zero", "fractional", "string", "missing", "nonfinite"]) {
+			assert.equal(persisted.explicitRevealDepthByProject?.[invalid], undefined, `${invalid} cap must be ignored`);
+		}
+		const huge = persisted.explicitRevealDepthByProject?.huge;
+		assert.ok(huge === undefined || (typeof huge === "number" && Number.isFinite(huge) && huge > 0 && huge <= 1_000),
+			"an excessively large cap must be ignored or clamped to a safe finite bound");
+	});
+
 	it("ignores corrupted, missing, wrong-version, and throwing storage", async () => {
 		installStorage({ [STORAGE_KEY]: "not-json" });
 		let state = await importFresh("corrupt-json");

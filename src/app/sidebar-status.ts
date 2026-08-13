@@ -32,6 +32,8 @@ export interface SelectSidebarStatusSectionsInput<TSession extends StatusSession
 	filters: Readonly<SidebarViewFilters>;
 	searchQuery?: string;
 	activeSessionId?: string | null;
+	/** Exact active session temporarily admitted by the explicit reveal action. */
+	revealSessionId?: string | null;
 	isPinned: (session: TSession) => boolean;
 	isUnread: (session: TSession) => boolean;
 	isBusy: (session: TSession) => boolean;
@@ -137,13 +139,16 @@ export function selectSidebarStatusSections<TSession extends StatusSession = Sta
 		if (seen.has(session.id)) continue;
 		seen.add(session.id);
 		const active = session.id === input.activeSessionId;
+		const explicitlyRevealed = active && session.id === input.revealSessionId;
 		let busy = false;
 		let unread: boolean | undefined;
 
 		if (!bypassFilters) {
-			// Filter order is normative: Archived, teams, Busy, Read.
-			if (!input.filters.showArchived && candidate.archived) continue;
-			if (!input.filters.showTeams && input.isTeamMember(session)) continue;
+			// Filter order is normative: Archived, teams, Busy, Read. Categorical
+			// gates admit the exact active row only after the explicit reveal action;
+			// Busy and Read retain their established active-session exemption.
+			if (!input.filters.showArchived && candidate.archived && !explicitlyRevealed) continue;
+			if (!input.filters.showTeams && input.isTeamMember(session) && !explicitlyRevealed) continue;
 			busy = input.isBusy(session);
 			if (!input.filters.showBusy && busy && !active) continue;
 			unread = input.isUnread(session);

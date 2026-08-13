@@ -83,9 +83,9 @@ Defaults apply only when no explicit preference exists:
 | Archived delegate group | Collapsed |
 | Leaf session | Collapsed fallback; not persisted |
 
-`setSidebarTreeExpanded()`, `toggleSidebarTreeExpanded()`, and `collapseSidebarTreeNode()` persist explicit user/application choices. `expandSidebarTreeNode(key, { explicit: false })` is the safe automatic path: it no-ops when a preference already exists and also avoids writing expansion for nodes whose default is already expanded.
+`setSidebarTreeExpanded()`, `toggleSidebarTreeExpanded()`, and `collapseSidebarTreeNode()` persist explicit user/application choices. `expandSidebarTreeNode(key, { explicit: false })` is the safe discovery/polling path: it no-ops when a preference already exists and also avoids writing expansion for nodes whose default is already expanded. Session and goal route reveals instead use `expandSidebarTreeNode(key, { explicit: true })` for each resolved ancestor. Navigation force-expands a previously collapsed target path and persists that narrowly scoped path so it remains revealed after reload; unrelated expansion preferences are untouched.
 
-This distinction is the reason user intent survives polling, hard refresh, and gateway restart.
+This distinction preserves passive polling behavior while treating direct or in-app route navigation as explicit reveal intent.
 
 ## Legacy migration
 
@@ -112,9 +112,9 @@ All goal nodes default collapsed, including top-level goals and sub-goals. The r
 - `refreshSessions()` does not auto-expand parent goals just because a child/sub-goal appeared.
 - `createGoal()` walks the created goal and ancestors through `expandSidebarTreeNode(..., { explicit: false })`, so it reveals an explicitly created path without overwriting any existing collapsed preference.
 
-Because automatic expansion is non-explicit, an explicit collapsed parent remains collapsed across later polling and restart.
+Because polling and discovery expansion is non-explicit, an explicit collapsed parent remains collapsed across later polling and restart.
 
-Route navigation reuses the same non-explicit path to reveal a target row's ancestors on deep-links and in-app route changes. See [Sidebar reveal on nav](sidebar-reveal-on-nav.md).
+Route navigation has a different contract: deep-links and in-app session/goal route changes force-expand and persist only the resolved ancestor path, overriding stored collapses on that path while leaving unrelated groups unchanged. See [Sidebar reveal on nav](sidebar-reveal-on-nav.md).
 
 ## Archived and search behavior
 

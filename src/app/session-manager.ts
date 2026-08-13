@@ -1357,6 +1357,8 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
 	state.selectedSessionId = sessionId;
+	// A new canonical selection supersedes any prior explicit sidebar reveal.
+	state.sidebarRevealSessionId = null;
 
 	// Proposals are scoped to the session that emitted them. Clear stale slots
 	// the moment the user navigates away so they never bleed into other sessions.
