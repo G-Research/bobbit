@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +21,7 @@ import provider, {
   __setClientFactory,
 } from "../../market-packs/hindsight/src/provider.ts";
 import { routes } from "../../market-packs/hindsight/src/routes.ts";
+import { createClient } from "../../market-packs/hindsight/src/hindsight-client.ts";
 import {
   clientConfig,
   isActive,
@@ -132,6 +135,35 @@ describe("Hindsight generic runtime linkage", () => {
       );
     } finally {
       __setClientFactory(null);
+    }
+  });
+
+  it("keeps the external bearer out of managed local, Docker, and Compose requests", async () => {
+    const authorization: Array<string | undefined> = [];
+    const server = http.createServer((request, response) => {
+      authorization.push(request.headers.authorization);
+      response.statusCode = 204;
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const apiKey = "external-bearer-must-not-reach-managed-runtime";
+    try {
+      const external = resolveConfig({ runtimeMode: "external", externalUrl: url, apiKey });
+      assert.equal(external.apiKey, apiKey, "the stored external credential remains available for external mode");
+      await createClient(clientConfig(external)).ensureBank("bobbit");
+
+      for (const runtimeMode of ["local", "docker", "compose"] as const) {
+        const managed = resolveConfig({ runtimeMode, apiKey });
+        assert.equal(managed.apiKey, apiKey, `${runtimeMode} retains the write-only setting without repurposing it`);
+        const config = clientConfig(managed, { state: "ready", endpoint: url });
+        assert.equal("apiKey" in config, false, `${runtimeMode} client configuration excludes the external bearer`);
+        await createClient(config).ensureBank("bobbit");
+      }
+      assert.deepEqual(authorization, [`Bearer ${apiKey}`, undefined, undefined, undefined]);
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
