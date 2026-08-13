@@ -115,12 +115,18 @@ export async function readSdkSubagents(
  * row and must be checked by the caller before any rendering projection.
  */
 export async function readSdkSubagentMessages(
-	input: SdkSessionAccessInput & { agentId: string },
+	input: SdkSessionAccessInput & { agentId: string; limit?: number },
 	deps: ClaudeAgentSdkSessionAccessDeps = defaultClaudeAgentSdkSessionAccessDeps,
 ): Promise<SdkSessionMessage[]> {
 	if (!isSubagentId(input.agentId)) throw unavailable("invalid SDK subagent identity");
+	if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 0)) {
+		throw unavailable("invalid SDK subagent message limit");
+	}
 	return withSdk(input, deps, "read subagent messages", (sdk) =>
-		sdk.getSubagentMessages(input.sessionId, input.agentId, { dir: input.cwd }));
+		sdk.getSubagentMessages(input.sessionId, input.agentId, {
+			dir: input.cwd,
+			...(input.limit !== undefined ? { limit: input.limit } : {}),
+		}));
 }
 
 const execFileAsync = promisify(execFile);

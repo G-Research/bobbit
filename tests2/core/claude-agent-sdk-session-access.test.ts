@@ -45,8 +45,10 @@ describe("Claude Agent SDK session access", () => {
 
 		await expect(readSdkSubagents({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toEqual(["child-1"]);
 		await expect(readSdkSubagentMessages({ sessionId: SESSION_ID, cwd: CWD, agentId: "child-1" }, fixture.deps)).resolves.toEqual([]);
+		await expect(readSdkSubagentMessages({ sessionId: SESSION_ID, cwd: CWD, agentId: "child-1", limit: 17 }, fixture.deps)).resolves.toEqual([]);
 		expect(fixture.sdk.listSubagents).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
-		expect(fixture.sdk.getSubagentMessages).toHaveBeenCalledWith(SESSION_ID, "child-1", { dir: CWD });
+		expect(fixture.sdk.getSubagentMessages).toHaveBeenNthCalledWith(1, SESSION_ID, "child-1", { dir: CWD });
+		expect(fixture.sdk.getSubagentMessages).toHaveBeenNthCalledWith(2, SESSION_ID, "child-1", { dir: CWD, limit: 17 });
 		await expect(readSdkSubagentMessages({ sessionId: SESSION_ID, cwd: CWD, agentId: "" }, fixture.deps)).rejects.toMatchObject({
 			code: "SDK_SESSION_UNAVAILABLE",
 		});

@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
 	ClaudeSdkSubagentWorkAssembler,
+	MAX_RECOVERY_BYTES,
+	MAX_RECOVERY_CONCURRENCY,
+	MAX_RECOVERY_ROWS,
 	projectClaudeSdkEmbeddedWork,
+	recoverClaudeSdkEmbeddedWork,
 } from "../../src/server/agent/claude-sdk-subagent-work.ts";
 import type { ClaudeAgentSdkHistoryMessage } from "../../src/server/agent/claude-agent-sdk-history-adapter.ts";
 import type { ClaudeAgentSdkSessionApi, SdkSessionMessage } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
@@ -108,5 +112,64 @@ describe("Claude SDK embedded subagent work", () => {
 		expect(work.messages[0]).toMatchObject({ usage: expect.anything() });
 		expect(work.diagnostic).toBe("recovery-mismatch");
 		expect(assembler.snapshot().has("other-parent")).toBe(false);
+	});
+
+	it("recovers a snapshot with one child listing, bounded concurrent limited reads, and a global row budget", async () => {
+		const parent = "agent-use";
+		const root = assistant("root", undefined, "", [{ type: "toolCall", id: parent, name: "Agent", arguments: {} }]);
+		const ids = Array.from({ length: 32 }, (_, index) => `child-${index}`);
+		let active = 0;
+		let peakActive = 0;
+		const getSubagentMessages = vi.fn(async (_sessionId: string, agentId: string, options?: { limit?: number }) => {
+			active += 1;
+			peakActive = Math.max(peakActive, active);
+			await new Promise(resolve => setTimeout(resolve, 1));
+			active -= 1;
+			const count = (options?.limit ?? 0) + 1; // A provider ignoring the requested limit cannot exceed admission.
+			return Array.from({ length: count }, (_, index): SdkSessionMessage => ({
+				type: "assistant", uuid: `${agentId}-${index}`, session_id: SESSION_ID,
+				parent_tool_use_id: parent, parent_agent_id: agentId,
+				message: { content: [{ type: "text", text: "recovered" }], stop_reason: "end_turn" },
+			}));
+		});
+		const fixture = recoverySdk({
+			listSubagents: vi.fn(async () => ids),
+			getSubagentMessages,
+		});
+
+		const recovered = await recoverClaudeSdkEmbeddedWork([root], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+
+		expect(fixture.sdk.listSubagents).toHaveBeenCalledTimes(1);
+		expect(getSubagentMessages).toHaveBeenCalledTimes(ids.length);
+		expect(new Set(getSubagentMessages.mock.calls.map(([, agentId]) => agentId))).toEqual(new Set(ids));
+		expect(peakActive).toBeLessThanOrEqual(MAX_RECOVERY_CONCURRENCY);
+		const limits = getSubagentMessages.mock.calls.map(([, , options]) => options?.limit);
+		expect(limits.every(limit => typeof limit === "number" && limit > 0)).toBe(true);
+		expect(limits.reduce((total, limit) => total + limit!, 0)).toBeLessThanOrEqual(MAX_RECOVERY_ROWS);
+		expect(recovered).toHaveLength(1 + MAX_RECOVERY_ROWS);
+	});
+
+	it("partitions only exact non-empty root parents and drops rows after the byte budget without failing recovery", async () => {
+		const one = "agent-use-1";
+		const two = "agent-use-2";
+		const root = assistant("root", undefined, "", [
+			{ type: "toolCall", id: one, name: "Agent", arguments: {} },
+			{ type: "toolCall", id: two, name: "Task", arguments: {} },
+		]);
+		const fixture = recoverySdk({
+			"child-mixed": [
+				{ type: "assistant", uuid: "one", session_id: SESSION_ID, parent_tool_use_id: one, parent_agent_id: "child-mixed", message: { content: [{ type: "text", text: "one" }], stop_reason: "end_turn" } },
+				{ type: "assistant", uuid: "two", session_id: SESSION_ID, parent_tool_use_id: two, parent_agent_id: "child-mixed", message: { content: [{ type: "text", text: "two" }], stop_reason: "end_turn" } },
+				{ type: "assistant", uuid: "unknown", session_id: SESSION_ID, parent_tool_use_id: "not-a-root-parent", parent_agent_id: "child-mixed", message: { content: [{ type: "text", text: "hidden" }], stop_reason: "end_turn" } },
+			],
+			"child-oversized": [{
+				type: "assistant", uuid: "oversized", session_id: SESSION_ID, parent_tool_use_id: one, parent_agent_id: "child-oversized",
+				message: { content: [{ type: "text", text: "x".repeat(MAX_RECOVERY_BYTES) }], stop_reason: "end_turn" },
+			}],
+		});
+
+		const recovered = await recoverClaudeSdkEmbeddedWork([root], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+		expect(recovered.map(row => row.id)).toEqual(["root", "one", "two"]);
+		expect(recovered.some(row => row.parentToolUseId === "not-a-root-parent")).toBe(false);
 	});
 });
