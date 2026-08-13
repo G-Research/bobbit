@@ -108,7 +108,7 @@ Per-mutant workflow (the loop):
 4. Re-run `--ids <id>` → confirm `v2=caught`.
 5. Commit per domain/batch; update the tally doc.
 
-To pre-build dist for clean-pass runs (harness builds its own per-mutant; clean-pass needs dist in your worktree): junction a complete `node_modules` in, then
+To pre-build dist for clean-pass runs (harness builds its own per-mutant; clean-pass needs dist in your worktree): make sure the worktree has its OWN complete `node_modules` (`npm ci` in the worktree). **Do NOT `mklink`/junction the primary or a shared `node_modules` into the worktree** — a later `npm ci` or recursive delete descends the junction and wipes the shared tree (see [node-modules-corruption-rca.md](node-modules-corruption-rca.md)). Then
 `node <nm>/typescript/bin/tsc -p tsconfig.server.json && node scripts/copy-defaults.mjs && node scripts/copy-builtin-packs.mjs && node <nm>/vite/bin/vite.js build && node scripts/build-market-packs.mjs`.
 
 ### Gotchas

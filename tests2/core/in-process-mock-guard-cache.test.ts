@@ -106,6 +106,58 @@ function makeBridge(
 	});
 }
 
+describe("in-process mock bridge transcript cursor snapshot", () => {
+	it("exposes a narrow read-only transcript entries plane", async () => {
+		const bridge = new InProcessMockBridge();
+		(bridge as any).sendCommand = async (command: { type: string }) => {
+			assert.equal(command.type, "get_entries");
+			return { success: true, data: { entries: [{ id: "entry-1" }], leafId: "entry-1", ignored: true } };
+		};
+		assert.deepEqual(await bridge.getTranscriptEntries(), {
+			success: true,
+			data: { entries: [{ id: "entry-1" }], leafId: "entry-1" },
+		});
+	});
+
+	it("reads both immutable cursor planes concurrently and preserves failure precedence", async () => {
+		const bridge = new InProcessMockBridge();
+		const calls: string[] = [];
+		let resolveFork!: (value: unknown) => void;
+		let resolveEntries!: (value: unknown) => void;
+		const forkResponse = new Promise((resolve) => { resolveFork = resolve; });
+		const entriesResponse = new Promise((resolve) => { resolveEntries = resolve; });
+		(bridge as any).sendCommand = (command: { type: string }) => {
+			calls.push(command.type);
+			return command.type === "get_fork_messages" ? forkResponse : entriesResponse;
+		};
+
+		const snapshotPromise = bridge.getTranscriptCursorSnapshot();
+		assert.deepEqual(calls, ["get_fork_messages", "get_entries"]);
+		resolveEntries({ success: true, data: { entries: [{ id: "entry-1" }], leafId: "entry-1" } });
+		resolveFork({ success: true, data: { messages: [{ role: "user", content: "prompt" }] } });
+		assert.deepEqual(await snapshotPromise, {
+			success: true,
+			data: {
+				forkMessages: [{ role: "user", content: "prompt" }],
+				entries: [{ id: "entry-1" }],
+				leafId: "entry-1",
+			},
+		});
+
+		const failureCases = [
+			[{ success: false, error: "fork failed" }, { success: false, error: "entries failed" }, "fork failed"],
+			[{ success: false }, { success: false, error: "entries failed" }, "entries failed"],
+			[{ success: false }, { success: false }, "Pi transcript cursor data is unavailable"],
+		] as const;
+		for (const [fork, entries, error] of failureCases) {
+			(bridge as any).sendCommand = (command: { type: string }) => Promise.resolve(
+				command.type === "get_fork_messages" ? fork : entries,
+			);
+			assert.deepEqual(await bridge.getTranscriptCursorSnapshot(), { success: false, error });
+		}
+	});
+});
+
 describe("in-process mock shared tool-guard module", () => {
 	it("keeps session identity and token isolated for later and concurrent callbacks", async () => {
 		const harness = createGuardHarness();

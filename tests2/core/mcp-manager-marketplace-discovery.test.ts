@@ -828,7 +828,11 @@ describe("SessionManager scoped MCP manager creation", () => {
     }]));
 
     const registry = new ProjectRegistry(registryStateDir);
-    const pcm = new ProjectContextManager(registry);
+    const pcm = new ProjectContextManager(registry, {
+      goalPersistence: "json",
+      taskPersistence: "json",
+      gatePersistence: "json",
+    });
     const sessionManager = new SessionManager({ projectConfigStore: serverStore, projectContextManager: pcm });
 
     try {
@@ -845,8 +849,12 @@ describe("SessionManager scoped MCP manager creation", () => {
       assert.deepEqual(scopedDiscovered.project_scoped, { command: "project-scoped" });
       assert.equal(scopedDiscovered.server_only, undefined);
     } finally {
-      await Promise.all(Array.from(pcm.all(), (ctx) => ctx.close()));
+      await pcm.closeAll();
     }
+
+    const projectStateDir = path.join(projectRoot, ".bobbit", "state");
+    assert.equal(fs.existsSync(path.join(projectStateDir, "goals.sqlite")), false);
+    assert.equal(fs.existsSync(path.join(projectStateDir, "tasks.sqlite")), false);
   });
 
   it("does not substitute the default MCP manager for project pipeline context", async () => {
@@ -866,7 +874,11 @@ describe("SessionManager scoped MCP manager creation", () => {
     }]));
 
     const registry = new ProjectRegistry(registryStateDir);
-    const pcm = new ProjectContextManager(registry);
+    const pcm = new ProjectContextManager(registry, {
+      goalPersistence: "json",
+      taskPersistence: "json",
+      gatePersistence: "json",
+    });
     const sessionManager = new SessionManager({ projectContextManager: pcm }) as any;
     const defaultMgr = { marker: "default" };
     const scopedMgr = { marker: "scoped", connectAll: async () => {} };
@@ -878,8 +890,12 @@ describe("SessionManager scoped MCP manager creation", () => {
       assert.equal(await sessionManager.ensureMcpManager({ projectId }), scopedMgr);
       assert.equal(sessionManager.buildPipelineContext(projectId, projectRoot).mcpManager, scopedMgr);
     } finally {
-      await Promise.all(Array.from(pcm.all(), (ctx) => ctx.close()));
+      await pcm.closeAll();
     }
+
+    const projectStateDir = path.join(projectRoot, ".bobbit", "state");
+    assert.equal(fs.existsSync(path.join(projectStateDir, "goals.sqlite")), false);
+    assert.equal(fs.existsSync(path.join(projectStateDir, "tasks.sqlite")), false);
   });
 
   it("fails closed for no-project MCP sessions without cwd/default fallback", async () => {

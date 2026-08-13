@@ -25,6 +25,7 @@ import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
+import { repositoryMutationCoordinator } from "../skills/repository-mutation-coordinator.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "./project-config-store.js";
 import type { SandboxCloneSource } from "./sandbox-clone-source.js";
@@ -463,42 +464,14 @@ export class ProjectSandbox {
 			}
 		}
 
-		// Create the worktree
-		const args = ["git", "worktree", "add", worktreePath, "-b", branch, startPoint];
-		try {
-			await this._dockerExec(containerId, args, { cwd: "/workspace" });
-		} catch {
-			// Branch may already exist — try without -b
-			try {
-				await this._dockerExec(containerId, ["git", "worktree", "add", worktreePath, branch], { cwd: "/workspace" });
-			} catch (err2: any) {
-				// Worktree might already exist (e.g. after gateway restart)
-				if (err2?.message?.includes("already exists") || err2?.stderr?.includes("already exists")) {
-					console.log(`[project-sandbox] Worktree ${name} already exists, reusing`);
-					return worktreePath;
-				}
-				throw err2;
-			}
-		}
-
-		// Sandbox worktree creation is local-only. It never publishes the branch
-		// or installs a post-commit push hook.
-
-		// When the project has a configured `base_ref`, override the per-branch
-		// upstream so `@{u}` (and the ahead/behind pair) points at the configured
-		// integration target.
-		// Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
-		// Non-fatal in the sandbox — host-side save-time validation already
-		// guarantees the ref resolves; this is defence-in-depth.
-		if (configuredBaseRefTrimmed) {
-			try {
-				await this._dockerExec(containerId,
-					["git", "branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branch],
-					{ cwd: worktreePath });
-			} catch (err: any) {
-				console.warn(`[project-sandbox] Failed to set upstream for ${branch} to ${configuredBaseRefTrimmed}:`, err?.message || err);
-			}
-		}
+		await this._createCoordinatedWorktree({
+			containerId,
+			repoPath: "/workspace",
+			worktreePath,
+			branch,
+			startPoint,
+			expectedUpstream: configuredBaseRefTrimmed || undefined,
+		});
 
 		console.log(`[project-sandbox] Created worktree ${name} (branch: ${branch}) at ${worktreePath}`);
 		return worktreePath;
@@ -546,61 +519,48 @@ export class ProjectSandbox {
 		const configuredBaseRef = this.options.baseRefResolver?.();
 		const configuredBaseRefTrimmed = (configuredBaseRef ?? "").trim();
 
-		const out: Array<{ repo: string; worktreePath: string }> = [];
+		const resolvedWorktrees: Array<{ repo: string; repoPath: string; worktreePath: string; startPoint: string }> = [];
 		for (const repo of repos) {
-			const repoSrc = `/workspace/${repo}`;
-			const wtPath = `${container}/${repo}`;
+			const repoPath = `/workspace/${repo}`;
+			const worktreePath = `${container}/${repo}`;
 
 			// Resolve start point (per-repo so different repos can be at different
 			// primary branches if they ever drift — we still warn elsewhere).
-			// Honors the project's configured `base_ref` via the resolver injected
-			// from the host; empty/undefined falls back to the in-container
-			// `symbolic-ref refs/remotes/origin/HEAD` chain (today's behaviour).
 			let startPoint = baseBranch;
 			if (!startPoint) {
 				const exec = async (args: string[]): Promise<string> => {
-					return this._dockerExec(containerId, ["git", ...args], { cwd: repoSrc });
+					return this._dockerExec(containerId, ["git", ...args], { cwd: repoPath });
 				};
 				const { ref } = await resolveBaseRefWithExec(exec, configuredBaseRef);
 				startPoint = ref || "origin/master";
 				if (startPoint === "HEAD" && !configuredBaseRefTrimmed && !(await hasResolvedHeadWithExec(exec))) {
-					console.warn(`[project-sandbox] Skipping worktree ${name}/${repo}: ${new UnresolvedHeadWorktreeError(repoSrc).message}`);
+					console.warn(`[project-sandbox] Skipping worktree ${name}/${repo}: ${new UnresolvedHeadWorktreeError(repoPath).message}`);
 					continue;
 				}
 			}
-
-			try {
-				await this._dockerExec(containerId, ["git", "worktree", "add", wtPath, "-b", branch, startPoint], { cwd: repoSrc });
-			} catch {
-				try {
-					await this._dockerExec(containerId, ["git", "worktree", "add", wtPath, branch], { cwd: repoSrc });
-				} catch (err2: any) {
-					if (!(err2?.message?.includes("already exists") || err2?.stderr?.includes("already exists"))) {
-						throw err2;
-					}
-					console.log(`[project-sandbox] Worktree ${name}/${repo} already exists, reusing`);
-				}
-			}
-
-			// Sandbox worktree creation is local-only. It never publishes the branch
-			// or installs a post-commit push hook.
-
-			// Override per-branch upstream to the configured `base_ref` when set,
-			// mirroring host-side `createWorktreeSet` (see `docs/design/base-ref.md` §2).
-			// Non-fatal — host-side save-time validation already guarantees the ref
-			// resolves; this is defence-in-depth for the container path.
-			if (configuredBaseRefTrimmed) {
-				try {
-					await this._dockerExec(containerId,
-						["git", "branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branch],
-						{ cwd: wtPath });
-				} catch (err: any) {
-					console.warn(`[project-sandbox] Failed to set upstream for ${branch} (${repo}) to ${configuredBaseRefTrimmed}:`, err?.message || err);
-				}
-			}
-
-			out.push({ repo, worktreePath: wtPath });
+			resolvedWorktrees.push({ repo, repoPath, worktreePath, startPoint });
 		}
+
+		// Acquire every participating repository's common-dir lock in stable order.
+		// This prevents overlapping multi-repo allocations from deadlocking while
+		// keeping branch creation, explicit upstream configuration, and validation
+		// in one repository-scoped transaction.
+		const mutationKeys = await Promise.all(resolvedWorktrees.map(({ repoPath }) => this._sandboxGitCommonDir(containerId, repoPath)));
+		const out = await this._withSandboxRepositoryMutationKeys(mutationKeys, async () => {
+			const created: Array<{ repo: string; worktreePath: string }> = [];
+			for (const worktree of resolvedWorktrees) {
+				await this._createWorktreeUncoordinated({
+					containerId,
+					repoPath: worktree.repoPath,
+					worktreePath: worktree.worktreePath,
+					branch,
+					startPoint: worktree.startPoint,
+					expectedUpstream: configuredBaseRefTrimmed || undefined,
+				});
+				created.push({ repo: worktree.repo, worktreePath: worktree.worktreePath });
+			}
+			return created;
+		});
 
 		if (out.length === 0) {
 			console.warn(`[project-sandbox] No worktree-able repo remained for ${name}; running without sandbox worktrees`);
@@ -667,6 +627,179 @@ export class ProjectSandbox {
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * Resolve a coordinator key from the container's Git common directory.
+	 * The container ID scopes identical in-container paths to the one sandbox
+	 * that actually shares their config and refs.
+	 */
+	private async _sandboxGitCommonDir(containerId: string, repoPath: string): Promise<string> {
+		let commonDir = repoPath;
+		try {
+			commonDir = (await this._dockerExec(containerId,
+				["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+				{ cwd: repoPath, timeout: 5_000 },
+			)).trim() || repoPath;
+		} catch {
+			try {
+				commonDir = (await this._dockerExec(containerId,
+					["git", "rev-parse", "--git-common-dir"],
+					{ cwd: repoPath, timeout: 5_000 },
+				)).trim() || repoPath;
+			} catch {
+				// Let the actual worktree transaction report a malformed repository.
+			}
+		}
+		return `sandbox:${containerId}:${commonDir}`;
+	}
+
+	private async _withSandboxRepositoryMutationKeys<T>(keys: readonly string[], operation: () => Promise<T>): Promise<T> {
+		const uniqueKeys = [...new Set(keys)].sort();
+		const run = async (index: number): Promise<T> => index === uniqueKeys.length
+			? operation()
+			: repositoryMutationCoordinator.run(uniqueKeys[index], () => run(index + 1));
+		return run(0);
+	}
+
+	private async _createCoordinatedWorktree(params: {
+		containerId: string;
+		repoPath: string;
+		worktreePath: string;
+		branch: string;
+		startPoint: string;
+		expectedUpstream?: string;
+	}): Promise<void> {
+		const key = await this._sandboxGitCommonDir(params.containerId, params.repoPath);
+		await repositoryMutationCoordinator.run(key, () => this._createWorktreeUncoordinated(params));
+	}
+
+	private async _createWorktreeUncoordinated(params: {
+		containerId: string;
+		repoPath: string;
+		worktreePath: string;
+		branch: string;
+		startPoint: string;
+		expectedUpstream?: string;
+	}): Promise<void> {
+		const { containerId, repoPath, worktreePath, branch, startPoint, expectedUpstream } = params;
+		let branchExists = false;
+		try {
+			await this._dockerExec(containerId,
+				["git", "show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+				{ cwd: repoPath, timeout: 5_000 });
+			branchExists = true;
+		} catch {
+			// The creation command below is authoritative for a missing branch.
+		}
+
+		try {
+			// When a configured base requires explicit tracking, `--no-track` avoids
+			// Git's implicit shared config write and the serialized update below is
+			// the only config mutation. Without a configured base, preserve Git's
+			// normal implicit upstream for remote start points. Git accepts --no-track
+			// only while creating a branch, so existing branches use the plain form.
+			await this._dockerExec(containerId,
+				branchExists
+					? ["git", "worktree", "add", worktreePath, branch]
+					: expectedUpstream
+						? ["git", "worktree", "add", "--no-track", "-b", branch, worktreePath, startPoint]
+						: ["git", "worktree", "add", "-b", branch, worktreePath, startPoint],
+				{ cwd: repoPath });
+		} catch (worktreeError) {
+			if (!branchExists) throw worktreeError;
+			// A retry after partial setup may own both the branch and worktree. Only
+			// reuse it after proving its identity, then repair the explicit upstream.
+			try {
+				await this._validateSandboxWorktree({ ...params, expectedUpstream: undefined });
+				if (expectedUpstream) await this._setSandboxBranchUpstream(params);
+				await this._validateSandboxWorktree(params);
+				console.log(`[project-sandbox] Worktree ${worktreePath} already exists, reusing`);
+				return;
+			} catch {
+				throw worktreeError;
+			}
+		}
+
+		if (expectedUpstream) await this._setSandboxBranchUpstream(params);
+		await this._validateSandboxWorktree(params);
+	}
+
+	private async _readSandboxBranchUpstream(
+		containerId: string,
+		worktreePath: string,
+		branch: string,
+	): Promise<string | undefined> {
+		try {
+			const upstream = await this._dockerExec(containerId,
+				["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", `${branch}@{upstream}`],
+				{ cwd: worktreePath, timeout: 5_000 });
+			return upstream.trim() || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async _setSandboxBranchUpstream(params: {
+		containerId: string;
+		worktreePath: string;
+		branch: string;
+		expectedUpstream?: string;
+	}): Promise<void> {
+		const { containerId, worktreePath, branch, expectedUpstream } = params;
+		if (!expectedUpstream || await this._readSandboxBranchUpstream(containerId, worktreePath, branch) === expectedUpstream) return;
+		let lastLockError: unknown;
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try {
+				await this._dockerExec(containerId,
+					["git", "branch", `--set-upstream-to=${expectedUpstream}`, branch],
+					{ cwd: worktreePath, timeout: 10_000 });
+				if (await this._readSandboxBranchUpstream(containerId, worktreePath, branch) === expectedUpstream) return;
+				throw new Error(`Git reported success but branch '${branch}' does not track '${expectedUpstream}'`);
+			} catch (err) {
+				// A competing process may report config.lock after the write is visible.
+				// Reconcile only this narrow ambiguity; every other Git error is genuine.
+				if (await this._readSandboxBranchUpstream(containerId, worktreePath, branch) === expectedUpstream) return;
+				if (!this._isSandboxConfigLockContention(err)) throw err;
+				lastLockError = err;
+				if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+			}
+		}
+		throw lastLockError;
+	}
+
+	private _isSandboxConfigLockContention(err: unknown): boolean {
+		const candidate = err as { message?: unknown; stderr?: unknown } | null;
+		const text = [
+			err instanceof Error ? err.message : String(err),
+			typeof candidate?.stderr === "string" ? candidate.stderr : "",
+		].join("\n");
+		return /could not lock config file\b[\s\S]*(?:\.git(?:[\\/])config(?:\.lock)?|config(?:\.lock)?):\s*file exists/i.test(text);
+	}
+
+	private async _validateSandboxWorktree(params: {
+		containerId: string;
+		repoPath: string;
+		worktreePath: string;
+		branch: string;
+		expectedUpstream?: string;
+	}): Promise<void> {
+		const { containerId, repoPath, worktreePath, branch, expectedUpstream } = params;
+		const topLevel = (await this._dockerExec(containerId,
+			["git", "rev-parse", "--show-toplevel"], { cwd: worktreePath, timeout: 5_000 })).trim();
+		if (topLevel !== worktreePath) {
+			throw new Error(`Worktree validation failed: expected ${worktreePath}, found ${topLevel || "no Git worktree"}`);
+		}
+		const actualBranch = (await this._dockerExec(containerId,
+			["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath, timeout: 5_000 })).trim();
+		if (actualBranch !== branch) {
+			throw new Error(`Worktree validation failed: expected branch '${branch}', found '${actualBranch || "detached HEAD"}'`);
+		}
+		if (expectedUpstream && await this._readSandboxBranchUpstream(containerId, worktreePath, branch) !== expectedUpstream) {
+			throw new Error(`Worktree validation failed: branch '${branch}' does not track '${expectedUpstream}'`);
+		}
+		await this._dockerExec(containerId,
+			["git", "rev-parse", "--git-common-dir"], { cwd: repoPath, timeout: 5_000 });
 	}
 
 	// ── Health monitoring ──────────────────────────────────────────────

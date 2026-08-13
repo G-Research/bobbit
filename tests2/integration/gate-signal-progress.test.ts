@@ -186,11 +186,11 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 		// proving terminal status/phase survives reconstruction without NTFS I/O.
 		const memfs = createMemFs();
 		const stateDir = path.resolve("/memfs/gate-progress-reopen");
-		const persisted = new GateStore(stateDir, memfs);
+		const persisted = new GateStore(stateDir, memfs, { persistence: "json" });
 		persisted.initGatesForGoal(goalId, ["failing-multi"]);
 		persisted.recordSignal(structuredClone(stored));
 		await persisted.flush();
-		const reopened = new GateStore(stateDir, memfs).getGate(goalId, "failing-multi")?.signals[0];
+		const reopened = new GateStore(stateDir, memfs, { persistence: "json" }).getGate(goalId, "failing-multi")?.signals[0];
 		expect(reopened?.verification.steps).toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS);
 	});
 });

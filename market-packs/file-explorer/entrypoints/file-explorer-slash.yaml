@@ -1,0 +1,6 @@
+id: files
+kind: composer-slash
+label: /files
+icon: folder-tree
+target:
+  panelId: file-explorer.panel

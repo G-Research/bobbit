@@ -55,14 +55,15 @@ export class WriteRenderer implements ToolRenderer<WriteParams, any> {
 	}
 
 	render(params: WriteParams | undefined, result: ToolResultMessage<any> | undefined, isStreaming?: boolean): ToolRenderResult {
-		// Delegate .svg files to the SVG renderer for inline preview
-		if (params?.path?.toLowerCase().endsWith(".svg")) {
+		const truncated = isTruncated(params?.content);
+		const lowerPath = params?.path?.toLowerCase() || "";
+
+		// Truncated descriptors use the generic preview and lazy-loading controls;
+		// only source strings are safe to delegate to the inline renderers.
+		if (!truncated && lowerPath.endsWith(".svg")) {
 			return svgRenderer.render(params as any, result, isStreaming);
 		}
-
-		// Delegate .html/.htm files to the HTML renderer for inline preview
-		const lowerPath = params?.path?.toLowerCase() || "";
-		if (lowerPath.endsWith(".html") || lowerPath.endsWith(".htm")) {
+		if (!truncated && (lowerPath.endsWith(".html") || lowerPath.endsWith(".htm"))) {
 			return htmlRenderer.render(params as any, result, isStreaming);
 		}
 
@@ -72,8 +73,6 @@ export class WriteRenderer implements ToolRenderer<WriteParams, any> {
 			? `${i18n("Writing")} ${params.path}`
 			: i18n("Writing file...");
 
-		// Detect truncated content
-		const truncated = isTruncated(params?.content);
 		const displayContent: string | undefined = truncated
 			? (params!.content as TruncatedContent).preview
 			: (params?.content as string | undefined);

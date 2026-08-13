@@ -1851,5 +1851,27 @@
       }
     ],
     "rationale": "The renamed test retains the sole `.` repository entry's flat-render compatibility invariant, while named-component multi-repository rendering behavior is covered separately."
+  },
+  {
+    "baseFile": "tests2/core/build-unit-gate-ci.test.ts",
+    "baseName": "adds PR-only affected feedback with full history and no persisted credentials",
+    "current": [
+      {
+        "file": "tests2/core/build-unit-gate-ci.test.ts",
+        "name": "keeps affected testing out of CI"
+      }
+    ],
+    "rationale": "The CI policy intentionally removed the PR-only affected-feedback job. The replacement declaration owns that workflow boundary by asserting that neither the job nor a test:affected invocation remains in CI."
+  },
+  {
+    "baseFile": "tests2/core/build-unit-gate-ci.test.ts",
+    "baseName": "validates the explicit PR base and keeps affected results job-local",
+    "current": [
+      {
+        "file": "tests2/core/build-unit-gate-ci.test.ts",
+        "name": "keeps affected testing out of CI"
+      }
+    ],
+    "rationale": "The explicit PR-base and job-local cache checks became obsolete when affected testing moved out of CI. The replacement declaration pins the new local-only policy and prevents the removed CI invocation from returning."
   }
 ]

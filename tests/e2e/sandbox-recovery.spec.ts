@@ -27,7 +27,7 @@ import {
 // ---------------------------------------------------------------------------
 
 test.describe("atomic models.json bind mount", () => {
-	test("refresh remount for one same-project E2E run preserves the other run's labelled resources", async () => {
+	test("refresh restores exact managed AIGW publication without disturbing a sibling run", async () => {
 		test.skip(!isDockerAvailable(), "Docker not available");
 		const root = mkdtempSync(path.join(tmpdir(), "bobbit-model-remount-"));
 		const source = path.join(root, "source");
@@ -100,7 +100,49 @@ test.describe("atomic models.json bind mount", () => {
 			execFileSync("git", ["add", "README.md"], { cwd: source, stdio: "ignore" });
 			execFileSync("git", ["-c", "user.name=Bobbit", "-c", "user.email=bobbit@bobbit.ai", "commit", "-m", "sandbox source"], { cwd: source, stdio: "ignore" });
 			mkdirSync(agentDir, { recursive: true });
-			writeFileSync(modelsJson, '{"generation":0}\n');
+			const publishedV1 = JSON.stringify({
+				providers: {
+					aigw: {
+						baseUrl: "https://gateway.example",
+						apiKey: "none",
+						api: "openai-completions",
+						models: [{
+							id: "model-o1-lookalike",
+							name: "Exact Custom Model",
+							api: "openai-completions",
+							baseUrl: "https://gateway.example/custom/v1",
+							contextWindow: 73_000,
+							maxTokens: 9_000,
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 3, output: 7, cacheRead: 0, cacheWrite: 0 },
+						}],
+						"x-bobbit-managed": { kind: "aigw-publication", version: 1 },
+					},
+				},
+			});
+			const publishedV2 = JSON.stringify({
+				providers: {
+					aigw: {
+						baseUrl: "https://gateway.example",
+						apiKey: "none",
+						api: "openai-completions",
+						models: [{
+							id: "model-o1-lookalike",
+							name: "Exact Custom Model",
+							api: "openai-completions",
+							baseUrl: "https://gateway.example/custom/v1",
+							contextWindow: 91_000,
+							maxTokens: 11_000,
+							reasoning: false,
+							input: ["text", "image"],
+							cost: { input: 3, output: 7, cacheRead: 0, cacheWrite: 0 },
+						}],
+						"x-bobbit-managed": { kind: "aigw-publication", version: 1 },
+					},
+				},
+			});
+			writeFileSync(modelsJson, `${publishedV1}\n`);
 
 			const createSandbox = () => new ProjectSandbox({
 				projectId,
@@ -128,9 +170,9 @@ test.describe("atomic models.json bind mount", () => {
 					expect(volumeLabels(volume)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runId });
 				}
 			}
-			expect(mountedModels(initialA)).toBe('{"generation":0}');
+			expect(mountedModels(initialA)).toBe(publishedV1);
 
-			writeFileSync(replacement, '{"generation":1}\n');
+			writeFileSync(replacement, `${publishedV2}\n`);
 			renameSync(replacement, modelsJson);
 			// A sandbox's owner was captured at construction. An unrelated ambient
 			// value must not retarget its lookup/removal/replacement lifecycle.
@@ -140,7 +182,15 @@ test.describe("atomic models.json bind mount", () => {
 			expect(recreatedA).not.toBe(initialA);
 			expect(exists(initialA)).toBe(false);
 			expect(containerLabels(recreatedA)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runA });
-			expect(mountedModels(recreatedA)).toBe('{"generation":1}');
+			const restoredPublication = mountedModels(recreatedA);
+			expect(restoredPublication).toBe(publishedV2);
+			expect(JSON.parse(restoredPublication).providers.aigw.models[0]).toMatchObject({
+				id: "model-o1-lookalike",
+				contextWindow: 91_000,
+				maxTokens: 11_000,
+				reasoning: false,
+				input: ["text", "image"],
+			});
 
 			// Run B has the same project ID but a distinct E2E ownership label.
 			// Its container and its independently labelled named volumes must survive.

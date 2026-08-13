@@ -43,6 +43,44 @@ obtain the weak operator cookie. Cookies have
 localhost HTTP mode. Individual cookies are not independently revocable;
 rotating the signing key invalidates all of them.
 
+### Cross-origin API preflight
+
+Every `/api/` response advertises the API's complete request-method contract:
+`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`. An `OPTIONS` preflight
+returns `204` and additionally caches that approval for 600 seconds via
+`Access-Control-Max-Age`. This lets a UI on a different origin perform every
+supported API mutation, including `PATCH`, rather than having the browser
+reject a valid request before it reaches the gateway.
+
+The preflight allows these non-simple request headers:
+
+- `Authorization`
+- `Content-Type`
+- `If-Match`
+- `X-Bobbit-Session-Id`
+- `X-Bobbit-Spawning-Session`
+- `X-Bobbit-Session-Secret`
+
+These headers are permitted so authenticated, concurrency-aware, and
+session-scoped API calls can cross origins; permission is not authentication.
+In particular, a remote UI normally authenticates with its explicit Bearer
+token. CORS is intentionally non-credentialed: the gateway does not send
+`Access-Control-Allow-Credentials`, so browsers must not rely on cross-origin
+cookie authentication. Same-origin cookie flows remain governed by their
+normal authentication rules.
+
+This does not broaden the origin policy. A gateway serving its UI reflects the
+request origin (and varies by `Origin`); a gateway not serving the UI continues
+to advertise `*`. The method and header contract is separate from that origin
+decision.
+
+For example, the side-panel workspace persists a tab edit through
+`PATCH /api/sessions/:id/side-panel-workspace/tabs/:tabId`. When the UI and
+gateway use different origins, the browser preflights that `PATCH` before the
+request. Advertising `PATCH`, `Authorization`, and any applicable session or
+concurrency header lets the persistence request reach its existing route, so a
+side-panel edit is retained instead of appearing to be forgotten after reload.
+
 ### Driving the gateway from an agent
 
 Agents should prefer the **`bobbit` tool group** over hand-rolled `curl` for
@@ -96,18 +134,19 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) and [Session runtime identity](#session-runtime-identity). |
+| `GET` | `/api/sessions` | List sessions. Every serialized row includes normalized `user_tags` and fresh derived `server_tags`. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) and [Session list tags and pinning](#session-list-tags-and-pinning). |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
-| `POST` | `/api/sessions/:id/fork` | Fork a live Pi session: clone its JSONL transcript (+ tool-content / proposal drafts) into a new session and preserve its context. The pinned SDK exports `forkSession`, but Bobbit has no reviewed atomic fork integration, so Claude Agent SDK sources return `422 RUNTIME_FORK_UNSUPPORTED`. An SDK resume UUID is never used as a fork. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live Pi session. Body `{ newWorktree?: boolean, entryId?: string }`: omit `entryId` to clone the whole source JSONL, or supply a durable Pi prompt cursor to clone the active branch strictly before that prompt. Claude Agent SDK sources return `422 RUNTIME_FORK_UNSUPPORTED`. See [Fork session endpoint](#fork-session-endpoint). |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
-| `GET` | `/api/sessions/:id` | Get session details. See [Session runtime identity](#session-runtime-identity). |
-| `DELETE` | `/api/sessions/:id` | Terminate a session |
+| `GET` | `/api/sessions/:id` | Get session details |
+| `DELETE` | `/api/sessions/:id` | Terminate a session. A sandbox worktree owner with a live history-fork borrower returns typed `409 SHARED_SANDBOX_WORKTREE_IN_USE` without changing the owner. |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
-| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
+| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. A processless target awaiting model recovery returns `409 { code: "MODEL_SELECTION_REQUIRED" }` before prompt or steer acceptance, so no queue or transcript work is created; select a replacement through the session picker/`set_model` path. The existing `409 { code: "GOAL_PAUSED" }` response still applies when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
-| `POST` | `/api/sessions/:archivedId/continue` | Continue an archived session in a fresh Bobbit session. Pi sources rehydrate from a lossless `.jsonl` clone; Claude Agent SDK sources resume through their persisted SDK UUID and model tuple. See [Continue-Archived endpoint](#continue-archived-endpoint) |
+| `PUT` | `/api/sessions/:id/pin` | Set or remove the durable `pinned=true` user tag. The body must be exactly `{ "pinned": boolean }`; success returns `{ "user_tags": string[] }`. See [Session list tags and pinning](#session-list-tags-and-pinning). |
+| `POST` | `/api/sessions/:archivedId/continue` | Continue an archived session in a fresh Bobbit session. Pi sources rehydrate from a lossless `.jsonl` clone; Claude Agent SDK sources resume through their persisted SDK UUID and model tuple. See [Continue-Archived endpoint](#continue-archived-endpoint). |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. See [Coordinated remote-state status](#coordinated-remote-state-status). |
@@ -120,34 +159,16 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=kill` | Terminate a running process (whole tree / group); keep the now-terminal record until dismissed. `{ ok, killed }`; 404 if not found/not running |
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=dismiss` | Remove the record **and** delete its persisted log/status/spool files; broadcasts `bg_process_dismissed`. `{ ok }`; 409 if still running |
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid` | Legacy: kill-if-running, else dismiss |
-| `GET` | `/api/sessions/:id/cost` | Persisted cumulative server usage projection for one session. Returns 404 when no cost record exists. The additive response includes legacy token counters and `cacheHitRate`, plus billed/notional basis, by-model usage, and current/high-water context where available; `totalCost: null` is unknown/not-applicable, not zero. See [Session usage and cost](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
+| `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex` | Preferred identity-addressed lazy-load for a truncated tool-content block. `?expected=preview-snapshot` verifies a historical preview marker before returning it (see [Large content truncation](#large-content-truncation)). |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Legacy positional lazy-load for a truncated block; retained for compatibility (see [Large content truncation](#large-content-truncation)). |
-| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`, `include_tool_results` / `includeToolResults`. Direct REST remains backward-compatible: omitted include flag keeps tool results unredacted; pass false/0 to redact. `read_session` passes false by default. Pi reads JSONL; Claude Agent SDK reads use official SDK history and canonical Bobbit tool names. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), or `SDK_SESSION_UNAVAILABLE` (503). See [Transcript reads and tool-result redaction](read-session.md) and [Claude SDK unavailable responses](#claude-sdk-unavailable-responses). |
-| `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated pre-compaction history for one canonical compaction marker. Query params: `compactionId` (required; Pi sidecar id or SDK checkpoint/marker id), `cursor` (from `nextCursor`), `limit` (default 50, range 1..200), and `verbose=true` or `verbose=1`. Both runtimes use `{ total, returned, nextCursor, messages[] }`, cursor pagination, and the normal bearer/session authentication: any authenticated caller on the same gateway that can reach the target session may read it. Pi resolves its host sidecar's `firstKeptEntryId`, then the JSONL marker's id, then that marker itself, and reads JSONL through the sandbox-aware session-file path. SDK reads its durable host checkpoint only: compact rows are `{ index, role, ts: null, content: <text> }`; verbose rows preserve raw `content` plus the normalized root `message`. It never reads a Pi `agentSessionFile` or calls the provider for this request. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). See [Compaction history](compaction-history.md) and [SDK compaction checkpoints](claude-agent-sdk-sessions.md#sdk-compaction-checkpoints). |
+| `GET` | `/api/sessions/:id/transcript` | Without `operation`, preserves legacy direct REST/UI paging and the `verbose`, `include_tool_results`, and `includeToolResults` aliases. Agent calls use `operation=list` for compact discovery or `operation=inspect` for one exact message/result. Pi reads JSONL; Claude Agent SDK reads use official SDK history and canonical Bobbit tool names. `SDK_SESSION_UNAVAILABLE` returns `503`. See [Focused transcript reads](read-session.md). |
+| `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
-
-### Session runtime identity
-
-`GET /api/sessions`, including `include=archived` rows and `archivedDelegates`, and
-`GET /api/sessions/:id` project the same durable runtime audit identity. This
-lets list, archive, and detail views explain which recovery contract applies
-without making runtime a second session setting.
-
-| Field | Contract |
-|---|---|
-| `runtime` | Server-derived `"pi"` or `"claude-agent-sdk"`, determined from the persisted provider/model tuple. With no usable tuple, a valid persisted runtime audit snapshot is retained; otherwise legacy rows fall back to `"pi"`. It is informational and is not a session creation, patch, or model-selection input. |
-| `modelProvider`, `modelId` | The retained persisted model tuple, including a tuple no longer available for session selection. Consumers must not replace it with a current default merely because it is unavailable. |
-| `modelAvailable` | A current-catalog snapshot, not durable identity. When a cached catalog conclusively lacks the exact session-selectable provider/model tuple, the response includes `false`; when it contains that tuple, it includes `true`. The field is omitted when the catalog is cold or failed, or when the row lacks a complete tuple, because availability is then unknown rather than false. |
-
-These audit routes do not trigger provider discovery just to answer availability:
-that avoids mislabelling a retained session model as unavailable during a cold or
-failed catalog lookup. Runtime remains derived from the tuple and can therefore
-still distinguish a retained SDK session when its model is unavailable.
 
 ### Standard session role resolution
 
@@ -190,35 +211,11 @@ for the creation and modification UI boundary.
 
 ### Transcript reader and `read_session`
 
-`GET /api/sessions/:id/transcript` and the `read_session` tool share the same transcript reader but use different defaults. Direct REST calls keep the legacy behavior and leave tool results unredacted when `include_tool_results` / `includeToolResults` is omitted. Pass `include_tool_results=false`, `includeToolResults=false`, or `0` to get the redacted shape. The agent-facing `read_session` tool always sends the include flag and defaults it to false, so tool result bodies are omitted unless the agent passes `include_tool_results: true`.
+No-operation requests retain the legacy direct REST/UI aliases and behavior. Agent `read_session` requests instead use `operation=list` to choose an index, then `operation=inspect` for exactly that message or result; its closed schema does not accept the legacy aliases. Direct REST calls keep the legacy behavior and leave tool results unredacted when `include_tool_results` / `includeToolResults` is omitted; pass `false` or `0` to redact them. See [Focused transcript reads](read-session.md).
 
-`verbose` changes compact summaries into full content blocks; it does not override result-body redaction. For `read_session`, `verbose: true` still omits tool result bodies unless `include_tool_results: true` is also set. Either flag is context-heavy at the agent-tool layer and requires an explicit integer `limit` from 1 through 10; rejected tool calls return `CONTEXT_HEAVY_LIMIT_REQUIRED` without reaching this route. Direct REST and other programmatic callers retain the endpoint's existing limits and behavior. Use `pattern`, `context`, `offset`, and `limit` to find a large output first, then fetch narrow batches while monitoring token consumption. Redacted placeholders carry metadata such as tool name/id, status, and size or line counts. See [Transcript reads and tool-result redaction](read-session.md) for examples and response details.
+For a Claude Agent SDK session, the shared reader confirms the persisted opaque SDK identity, then reads official SDK history from the persisted session cwd. It adapts those rows into the same envelope and redaction contract as Pi while preserving SDK UUIDs, tool-use IDs, and parent tool/agent partitions. Historical `mcp__bobbit__*` tool names are canonicalized (for example, `mcp__bobbit__read` becomes `read`).
 
-For a Claude Agent SDK session, the shared reader first confirms the persisted
-opaque SDK session identity, then reads official SDK history from the persisted
-session cwd. The server adapts those rows into the same envelope and redaction
-contract as Pi, while preserving SDK UUIDs, tool-use IDs, and parent tool/agent
-partitions. Historical `mcp__bobbit__*` tool names use the same canonical name
-as live events (for example, `mcp__bobbit__read` becomes `read`). This gives
-REST, `read_session`, live reload, and lazy tool-content reads one transcript
-projection; clients must not reconstruct names or accounting from visible rows.
-
-### Claude SDK unavailable responses
-
-When the Claude Agent SDK package, provider, persisted resume identity, or
-official history is unavailable, SDK-backed session creation, continuation, and
-transcript reads return:
-
-```json
-{ "error": "SDK_SESSION_UNAVAILABLE", "code": "SDK_SESSION_UNAVAILABLE" }
-```
-
-The HTTP status is `503`. This stable public category lets callers stop waiting
-and offer recovery without exposing provider-controlled details. Credential
-values, SDK storage/config paths, resume IDs, and raw provider messages remain
-private server diagnostics. Bobbit does not return an empty successful SDK
-transcript, create a new SDK conversation, or fall back to Pi. Pi routes keep
-their existing JSONL and error behavior.
+When the Claude Agent SDK package, provider, persisted resume identity, or official history is unavailable, SDK-backed session creation, continuation, and transcript reads return `503 { "error": "SDK_SESSION_UNAVAILABLE", "code": "SDK_SESSION_UNAVAILABLE" }`. Bobbit does not return an empty successful SDK transcript, create a new SDK conversation, or fall back to Pi.
 
 ### Archived session list and query search
 
@@ -248,6 +245,34 @@ With `limit`, the response shape is:
 ```
 
 `total`, `hasMore`, and `nextCursor` describe only the filtered archived corpus. `sessions` contains the current live sessions followed by the requested archived page, so clients that need only archived results should filter for `archived === true` or `status === "archived"`. `q` is applied before pagination so older matching archived sessions can be found without loading non-matching pages.
+
+### Session list tags and pinning
+
+Every serialized live or archived session-list row exposes two arrays:
+
+```ts
+{
+  server_tags: string[];
+  user_tags: string[];
+}
+```
+
+Legacy missing or malformed values serialize as empty `user_tags`. Valid tags use lowercase kebab-case keys in `key=value` form; normalization keeps the last valid value for each key and preserves unknown keys. `server_tags` is rebuilt for every list serialization from canonical state and is never persisted or accepted from clients. Its projection includes read, activity, archive, and team state, plus project and goal ids when present. This projection exists so clients can consume consistent metadata without becoming another writer of runtime state.
+
+`PUT /api/sessions/:id/pin` is the only user-tag mutation exposed by this feature:
+
+```http
+PUT /api/sessions/<id>/pin
+Content-Type: application/json
+
+{ "pinned": true }
+```
+
+Pin replaces any existing `pinned` value with one `pinned=true`; unpin removes that key. Both preserve unrelated user tags and leave server tags unchanged. The route works for live, dormant, terminated, and archived persisted sessions. Repeating a request is idempotent.
+
+The body must be an object containing only the boolean `pinned` field. Malformed JSON, extra fields, and other value types return `400`; an unknown session returns `404`. The route uses the normal API authentication boundary.
+
+Mutations for one session are serialized in admitted order while different sessions remain independent. The server waits for durable store flush before returning `200 { "user_tags": [...] }` and broadcasting `sessions_changed` with the same authoritative tags to authenticated UI clients. A failed write restores the prior in-memory tag shape, attempts to persist that compensation, returns `500`, and does not emit the success invalidation. This ordering prevents an acknowledged pin from disappearing after restart and prevents a later queued mutation from starting from failed optimistic state. See [Sidebar grouping](internals.md#sidebar-grouping) for the client reconciliation path and the [approved sidebar specification](design/session-manager-sidebar-views.md) for the normative product contract.
 
 ### Side-panel workspace
 
@@ -306,43 +331,100 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` forks a live Pi source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+`POST /api/sessions/:id/fork` creates a writable live Pi session that rehydrates through `switch_session` from a server-built clone of the source Pi transcript. The route supports two modes so whole-session and prompt-history forks share source eligibility, context assembly, worktree provisioning, cleanup, and response behavior. Claude Agent SDK sources return `422 { "code": "RUNTIME_FORK_UNSUPPORTED" }` before destination allocation: the pinned SDK's `forkSession` export has no reviewed integration for Bobbit's active-query snapshot, worktree lifecycle, sidecars, and rollback, and an SDK resume UUID is never used as a fork.
 
-This is a Pi JSONL feature. The pinned SDK exports `forkSession`, but Bobbit
-has no reviewed atomic integration joining an SDK fork to the active-query
-snapshot, destination/worktree creation, sidecar ownership, and rollback. SDK
-sources therefore return `422 RUNTIME_FORK_UNSUPPORTED` before destination
-allocation or any copy; an SDK resume UUID is never used as a fork.
+#### Request
 
-Request body (optional):
-
-```json
-{ "newWorktree": true }
-```
-
-- `newWorktree: true` (default when omitted) — create a fresh worktree/branch off the project repo (a plain project-root session when the project isn't a git repo).
-- `newWorktree: false` — reuse the source session's existing worktree directly. The fork's `cwd` is set to the source's `worktreePath` and **no** new worktree is created; the two live sessions intentionally share the worktree/branch. The fork does not register worktree metadata, so terminating either session never tears down the shared tree. When the source has no worktree, the fork reuses the project-root cwd.
-
-Success returns `201`:
-
-```json
-{
-  "id": "new-session-id",
-  "cwd": "/repo-or-worktree",
-  "status": "idle",
-  "projectId": "project-id",
-  "goalId": "goal-id",
-  "title": "Fork: Source title"
+```ts
+interface ForkSessionRequest {
+  newWorktree?: boolean;
+  entryId?: string;
 }
 ```
 
-`goalId` is omitted when not applicable. The new session title is `Fork: <source title>` (`markGenerated`, so the first prompt's auto-titler won't overwrite it).
+| Request | Transcript boundary | Worktree default |
+|---|---|---|
+| `{}` or `{ newWorktree }` | Copy the whole source transcript file. | Omission means `newWorktree: true`, preserving the session-level **Fork** contract. |
+| `{ entryId, newWorktree }` | Clone the active branch strictly before the named prompt. | The prompt UI always sends the boolean and opens with `false`; direct API callers that omit it still get the endpoint default of `true`. |
 
-The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
+`newWorktree`, when present, must be boolean. A history `entryId` must be a trimmed, non-empty string of at most 256 UTF-16 code units. Unknown request fields are ignored, but the server never accepts a browser message array, rendered index, prompt text, or client-computed branch as the boundary.
 
-Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Claude Agent SDK sources return `422 { code: "RUNTIME_FORK_UNSUPPORTED" }`. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty Pi source transcript returns `404`; a cross-realm Pi clone returns `422`.
+#### History boundary and cursor eligibility
 
-See [Sidebar Actions Menu](sidebar-actions-menu.md#fork-session-endpoint) for the user-facing behavior.
+A prompt action exposes `entryId` only when the row is a settled server-origin user prompt with Bobbit's transcript-confirmed Pi cursor provenance. This client check keeps actions off assistant, tool-result-only, synthetic, optimistic, pending, archived, non-interactive, child/team, and current in-flight rows. It is only an affordance check: the server independently resolves the id in one immutable read of the source JSONL and requires that it name an ordinary accountable user prompt on Pi's current parent-linked active branch.
+
+Before that read, the route resolves `agentSessionFile` through the session manager instead of trusting the persisted string. Sandbox paths must be canonical paths under a supported container sessions root, and host paths must pass the persisted-transcript read policy. An absent or rejected value falls back to recovery within trusted sessions roots; if no validated source can be resolved, the route returns `404` before creating destination state.
+
+The destination contains the exact raw session header followed by the selected prompt's active ancestors in parent order. Retained model changes, assistant/tool records, compaction records, timestamps, line endings, and unknown additive Pi fields remain lossless. The selected prompt, its response, every later active entry, and inactive-branch records are physically absent. Selecting the first prompt therefore produces a transcript containing only the session header. The route never prefills, resends, or appends the selected prompt.
+
+The immutable read is also the concurrency boundary: entries appended afterward cannot enter the destination. One unterminated final append fragment may be ignored; a malformed complete record or structurally ambiguous tree fails closed. The source transcript is never opened for write.
+
+#### Worktree modes and ownership
+
+- `newWorktree: false` reuses the source session's exact live `cwd`, including a nested directory within its worktree, and therefore shares the same filesystem state and branch. A history fork is persisted as a writable borrowed-worktree session without worktree/repository/branch teardown coordinates. It does not register, claim, reset, clean, stash, adopt, repair, or remove that tree. For a sandbox source, Bobbit resolves and persists the flattened final owner rather than treating an intermediate borrower as the owner; this keeps borrower chains on one teardown authority. Terminating or recovering a borrower cannot tear down or recreate the shared tree.
+- `newWorktree: true` uses the established session-level Fork lifecycle. A Git-backed project gets a fresh owned `session/...` branch/worktree and the response waits for setup to finish; a non-Git project uses the established project-root behavior. Sandbox provisioning follows the same fresh-fork path rather than a history-specific lifecycle.
+
+Sandbox borrower creation, borrower termination/archive, and final-owner termination/archive serialize through one FIFO keyed by that final owner. Reuse-fork launch revalidates the live source, cwd, and owner inside the FIFO, so it cannot attach after owner teardown. Final-owner teardown checks for live borrowers before any lifecycle mutation and returns `409 { "error": "...", "code": "SHARED_SANDBOX_WORKTREE_IN_USE" }` if one remains; callers should terminate borrowers first and retry. This rejection leaves the owner live and unchanged.
+
+Both modes pass prior runtime cwd values only as provenance for rebasing top-level Pi runtime metadata during `switch_session`. User and assistant content mentioning an old path is not rewritten.
+
+#### Preserved context and filtered state
+
+Both fork modes preserve the source context that still applies: project; goal, task, and reattempt-goal association; assistant type; staff identity/environment or role/accessory configuration; sandbox realm; allowed tools; selected/effective model and thinking level; and generated `Fork: <source title>` naming. A valid fork may transition an associated todo goal through the existing shared behavior, but cursor validation completes first.
+
+Whole-session forks retain their established full-JSONL and best-effort cache-copy behavior. History forks instead apply the cut consistently to destination state:
+
+- proposal drafts and their history are copied because they are session-level;
+- author bindings are copied only when an echoed settlement's exact Pi message ID names a retained prompt and its digest confirms the same model text; each retained row can admit at most one binding. History cuts disable timestamp- and text-only fallback matching so a discarded duplicate prompt cannot transfer its author to identical retained text;
+- slash-skill/file-mention and compaction sidecars are copied only when their proven Pi entry or checkpoint survives the cut;
+- positional tool-content cache directories are not copied because their indexes may refer to discarded rows; retained tool content remains in the JSONL;
+- live prompt queues, in-flight steer state, EventBuffer snapshots, and other source-only runtime state are not copied.
+
+A filtered sidecar copy failure fails the request instead of returning a destination with stale references. Launch failures purge the destination transcript, session record, proposals, caches, and copied sidecars. Cleanup never mutates the source or a borrowed worktree.
+
+For a sandbox history fork, the materialized transcript stays in container coordinates through initial publication, cwd rebasing, sanitization, final-path rename, persistence, and `switch_session`. The host creates only an exclusive owner-only flat stage in the trusted sessions mount; fixed in-container code copies it to an exclusive sibling temporary file, flushes complete bytes, and atomically renames it over the destination. Transcript content is never passed in command arguments, and each invocation removes only its own host stage and sibling temporary file.
+
+Failure cleanup validates canonical container session paths and deletes generated transcripts only through the live container. It never translates an attacker-influenced container path into direct host deletion. If the sandbox is unavailable, Bobbit still purges the host-owned destination record and sidecars but leaves the transcript orphan for trusted maintenance rather than risk host filesystem mutation.
+
+#### Source immutability, single-flight, and navigation
+
+The source process, session record, transcript bytes, sidecars, cwd/branch, prompt queue, running project state, connected clients, and session-list entry remain unchanged. The server reserves each exact `(sourceId, entryId, newWorktree)` history request while it runs; an identical concurrent request receives `HISTORY_FORK_IN_PROGRESS`, while different boundaries remain independent. The reservation is released on success and failure.
+
+The browser also disables prompt actions while session creation is pending. On a successful `201`, the initiating client refreshes the session list, connects to the returned id as an existing session, refetches cloned history when ready, and navigates there. Other clients may observe the new session through normal session-list invalidation, but they are not navigated away from the source. A request, launch, or connection failure stays on the source route and uses the existing visible connection-error surface.
+
+#### Success response
+
+Success returns `201`:
+
+```ts
+interface ForkSessionResponse {
+  id: string;
+  cwd: string;
+  status: string;
+  projectId: string;
+  goalId?: string;
+  title: string;
+}
+```
+
+`goalId` is omitted when not applicable. The title is `Fork: <source title>` and is marked generated so first-prompt auto-titling does not replace it.
+
+#### Errors
+
+History validation uses the standard `{ error, code }` response shape:
+
+| Status | Code | `error` |
+|---|---|---|
+| `400` | `HISTORY_FORK_CURSOR_INVALID` | `Invalid history fork entry id` |
+| `409` | `HISTORY_FORK_CURSOR_NOT_FOUND` | `This prompt is no longer available` |
+| `409` | `HISTORY_FORK_CURSOR_INACTIVE` | `This prompt is no longer on the active conversation branch` |
+| `422` | `HISTORY_FORK_CURSOR_NOT_USER` | `History forks must start before a user prompt` |
+| `409` | `HISTORY_FORK_TRANSCRIPT_INVALID` | `The session transcript changed or is not valid for history forking` |
+| `409` | `HISTORY_FORK_IN_PROGRESS` | `A fork from this prompt is already being created` |
+
+An invalid `newWorktree` value returns `400 { "error": "Invalid newWorktree flag" }` without a code. A sandbox reuse request whose final owner cannot be resolved returns `422 { "error": "The source sandbox worktree owner is unavailable for history forking", "code": "HISTORY_FORK_SOURCE_UNAVAILABLE" }`. If the source cwd or owner changes before serialized launch, the route returns the same status and code with `error: "The source session is no longer available for history forking"`. Existing route failures remain unchanged: missing persisted source or transcript is `404`; an unregistered project or missing goal is `410`; archived, terminated/non-live, delegate, child, read-only, non-interactive, team, cross-realm, or SDK sources are `422` (SDK uses `RUNTIME_FORK_UNSUPPORTED`); clone, filtered-sidecar, worktree-setup, and launch failures are `500` with a descriptive `error`.
+
+See [Unified Session Actions — Historic prompt actions](session-actions.md#historic-prompt-actions) for the user-facing controls and [History Fork Prompt Actions](design/history-fork-prompt-actions.md) for the design rationale.
 
 ### Background processes
 
@@ -451,6 +533,18 @@ Structured proposal validation failures share this JSON shape across seed, edit,
 
 **Revision snapshots.** Every successful `seed` and `edit` write also writes an immutable per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>` (filename grammar `^(\d+)\.(md|yaml)$`; integer rev parsed back from filenames — no metadata file). The server stamps the resulting `rev` on every `proposal_update` WS event (single source of truth — the client overwrites `slot.rev` with the server value, never increments locally). Snapshot-write failures are non-fatal: the live draft is committed and the broadcast carries `rev: 0`, which the client treats as "snapshot system unavailable". Chat-card "Open proposal" buttons parse the `__proposal_rev_v1__:<n>` marker and, for older revisions, call the non-mutating `GET /snapshot` endpoint to populate read-only historical tabs. The mutating `restore` endpoint remains available for explicit rollback flows but is not used for ordinary history browsing. Full design: [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
 
+### Review payload artifacts
+
+These session-scoped routes persist canonical `review_open` Markdown outside the bounded tool result, then address it by exact identity. See [Durable review opening](review-open-architecture.md) for the receipt, persistence, workspace, and cleanup contract.
+
+| Method | Path | Authentication and identity contract |
+|---|---|---|
+| `POST` | `/api/sessions/:id/review-payloads` | Upload a canonical review for the exact owning session. Requires normal gateway authentication plus that session's `X-Bobbit-Session-Secret`; a sandbox credential may call only its own session collection route. The cumulative Markdown limit is 10 MiB in UTF-8 bytes across all files. |
+| `GET` | `/api/sessions/:id/review-payloads/:payloadId?toolCallId=:toolCallId&reviewId=:reviewId&hash=:hash` | Fetch only when the route owner and payload id plus the complete `toolCallId`, `reviewId`, and SHA-256 `hash` tuple match the stored artifact. This is a browser/admin surface; sandbox credentials cannot fetch Markdown. |
+| `POST` | `/api/sessions/:id/review-payloads/:payloadId/open` | Explicitly open or reopen the exact stored review through its owning session's workspace. This browser/admin-only route requires the body to repeat the exact `payloadId`, `toolCallId`, `reviewId`, and `hash`; sandbox credentials cannot mutate the workspace. |
+
+The 10 MiB bound applies only to cumulative review Markdown. The upload route has a narrowly larger JSON request allowance for escaping and bounded metadata; it does not raise generic API-body, WebSocket, transcript, event-buffer, or tool-result limits.
+
 ### Review Annotations
 
 Per-session review annotations are stored server-side so they survive browser close/reopen, server restart, and are visible from any connected client (on refresh). Annotations are stored in `.bobbit/state/review-annotations-{sessionId}.json`. The client `AnnotationStore` uses a cache-first pattern: reads are synchronous from an in-memory cache, writes update the cache immediately and send async server requests.
@@ -474,6 +568,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id` | Get a goal |
 | `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
 | `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
+| `POST` | `/api/goals/:id/retry-setup` | Retry a failed worktree setup. See [Goal setup recovery](#goal-setup-recovery). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Coordinated remote-state status](#coordinated-remote-state-status). |
@@ -484,6 +579,18 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
+
+### Goal setup recovery
+
+`POST /api/goals/:id/retry-setup` is the operator recovery path for a goal whose authoritative `setupStatus` is `error`. It has no request body. On acceptance it persistently transitions the goal to `retrying`, atomically clears the active `setupError`, broadcasts `goal_state_changed`, and returns without waiting for provisioning:
+
+```json
+{ "ok": true, "coalesced": false, "setupStatus": "retrying" }
+```
+
+Concurrent retry requests coalesce: the response may contain `coalesced: true` and the currently active setup state, but no extra worktree, Team Lead, or scheduler continuation is created. A request that joins a genuine initial `preparing` flight also reports coalescing. A persisted `preparing` state without a live flight is not treated as success; it returns `409` with an actionable explanation. A goal that is not failed or otherwise retrying/preparing returns `409`; an unknown goal returns `404`.
+
+The eventual `ready` or `error` transition is delivered through `goal_state_changed` plus the corresponding setup completion/error event. Clients must refresh their goal state on those events rather than retaining the optimistic `retrying` snapshot. `ready` has no `setupError`, so all current-warning surfaces must disappear; a current `error` keeps one actionable diagnostic and blocks goal-scoped session and team starts. For lifecycle, child-scheduler, and Git coordination semantics, see [Goals, Workflows, Tasks & Gates — Atomic goal setup lifecycle](goals-workflows-tasks.md#atomic-goal-setup-lifecycle).
 
 ### Coordinated remote-state status
 
@@ -1011,7 +1118,9 @@ Staff records include a persisted `accessory` string as part of the staff identi
 | `GET` | `/api/projects/:id` | Get a single project. `GET /api/projects/headquarters` works even when Headquarters is hidden from normal lists. |
 | `GET` | `/api/projects/:id/base-ref/detect` | Read-only `base_ref` resolver helper. Returns `{ resolved, detected }`. `resolved` is exactly what worktrees branch off right now (`resolveBaseRef` against the pool/primary repo). `detected` is the live `git ls-remote --symref origin HEAD` result as `origin/<branch>`, **filtered to be saveable** — it is `null` unless it passes the same grammar + cross-component existence checks add-time pinning applies, so any non-`null` value can be saved without rejection. No mutation. Drives the Settings "Detect from remote" action. See [design/base-ref.md](design/base-ref.md). |
 | `PUT` | `/api/projects/:id` | Update normal-project name/color/root/palette. Headquarters and hidden/system projects are immutable. |
-| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete files on disk). The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
+| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete the registered project root). The server drains its worktree pool, terminates live history-fork borrowers before their owners and other sessions, and removes project state only after no live project session remains. The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
+
+Project deletion uses normal per-owner sandbox lifecycle serialization rather than bypassing shared-worktree ownership. If a concurrent launch or replacement leaves any live project session after termination, deletion stops before project-context removal and returns `409 { "error": "Project still has active sessions", "code": "PROJECT_SESSIONS_STILL_ACTIVE", "sessionIds": [...] }`. A shared sandbox owner conflict is likewise a typed `409` with `code: "SHARED_SANDBOX_WORKTREE_IN_USE"`. These fail-closed responses preserve the registered project and its remaining live sessions so the caller can terminate borrowers or other survivors and retry.
 
 #### Add Project directory helpers
 
@@ -1312,16 +1421,7 @@ interface AgentDirApiState {
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
-`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `runtime`, `sessionSelectable`, `sessionUnavailableReason`, `upstreamProvider`, and tiered `cost.tiers[]`.
-
-Every model row's `runtime` is a read-only `"pi"` or `"claude-agent-sdk"`
-projection derived from its exact provider. It tells clients which runtime a new
-session would use if that model is bound; it is not a picker input or an
-independent runtime selector. `sessionSelectable` is separate: `false` means
-that this catalog row must not be bound to a Bobbit session, while omitted or
-`true` means it is selectable. A non-selectable row still retains its
-derived runtime; `sessionUnavailableReason` can explain why it is unavailable
-for sessions.
+`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`.
 
 #### Pi 0.82.1 Claude Opus 5 catalog
 
@@ -1391,7 +1491,7 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. A discovery failure returns `models: []` as live status even when `/api/models` can use the matching last-published catalog. |
+| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. `models: []` describes that live status request and does not clear eligible durable or same-process retention in `/api/models`. |
 | `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
 | `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
 | `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
@@ -1400,7 +1500,9 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
 
-Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. On a discovery error, `/api/models` may read the last atomically published `providers.aigw.models` only when its normalized `baseUrl` exactly matches the currently configured URL. A successful discovery is authoritative, including model omissions; retained rows are never merged back into a successful result. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, outage retention, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
+Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. If discovery throws, `/api/models` uses Pi's exact rows from a valid marked publication when its normalized `baseUrl` matches the saved `aigw.url`. If the target is absent, or a marked target cannot supply rows, it may instead use the current process's last exact discovery snapshot keyed to that unchanged normalized URL. This snapshot is in memory only and does not survive restart. A valid unmarked target remains user-owned and authoritative through Pi composition; discovery retention never bypasses it. A malformed or ambiguous target fails closed.
+
+A successful discovery result replaces the same-process snapshot and is authoritative even when empty after validation or filtering; retained rows are not merged into it. `GET /api/aigw/status` performs its own fresh discovery and may return `models: []` without mutating `models.json` or the catalog retention used by `/api/models`. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md#transient-discovery-outages) for the full outage matrix, precedence, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
 
 ### OAuth
 
@@ -1624,19 +1726,17 @@ The preview side-panel iframe is fed by a per-session content mount served from 
 
 #### Historical `preview_open` snapshot markers
 
-A successful `preview_open` result includes a v3 marker that lets its preview card reopen the historical preview, preferring an immutable artifact when its identity is present. The normal payload stores the complete mount route and host-invariant path:
+A successful `preview_open` result includes a v3 marker that lets its preview card reopen the historical preview from its immutable artifact. Current writers emit only this canonical compact shape:
 
 ```json
-{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
+{"kind":"preview","url":"/preview/<sid>/","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
 ```
 
-`entry` is a raw single filename, not a percent-encoded URL segment. The writer stores it verbatim and encodes it exactly once when forming a full route; the reader preserves it verbatim and encodes it exactly once when reconstructing a compact route. This makes literal-percent names such as `100%.html` and `%41.html`, Unicode names, and URL-significant characters refer to their original files rather than to decoded or double-encoded names. Compaction compares the raw or encoded suffix consistently, so it applies to every accepted filename rather than only ASCII names.
+The directory URL, canonical `entry`, `contentHash`, and `artifactId` preserve both the resolved file and its replay identity without a duplicate `path`. `entry` is a raw single filename, not a percent-encoded route segment. It is encoded exactly once when the reader rebuilds `/preview/<sid>/<encoded-entry>`, so literal-percent names such as `%41.html`, Unicode, and URL-significant characters resolve to their original files.
 
-The complete marker block has a hard 250 UTF-8-byte cap so tool output stays bounded. The writer selects the first lossless payload in its compatibility-preserving order: a normal full route when it fits, then compact forms that remove duplicated route/path data and use the validated `aid` or `a` artifact-id aliases. Readers also recognize the historical `artifact_id` spelling. Valid `contentHash` and artifact identity are replay metadata, not expendable space-saving fields: neither is silently dropped. If no lossless form can fit, `preview_open` fails with `PREVIEW_SNAPSHOT_CAP`, naming the affected filename and the byte-budget reason instead of emitting a truncated or dead marker.
+The complete marker block has a hard 250 UTF-8-byte cap so tool output stays bounded. A writer first uses the raw entry and may use a bounded reversible entry envelope when that saves space. Its last compact form may omit `entry` only with valid canonical `contentHash` and `artifactId`, and only beside trusted parameters from that same `preview_open` call; the renderer then derives and validates the basename from `file` (or `inline.html` for `html`). It otherwise fails with `PREVIEW_SNAPSHOT_CAP`, naming the filename and byte-budget reason rather than dropping replay identity or writing a dead marker. See [Current write contract](preview-architecture.md#current-write-contract) for the entry envelope and safety rules.
 
-The usual compact form is `url: "/preview/<sid>/"` with a safe raw `entry`; it may omit the redundant `path`. For a long filename, the final compact form can omit `entry` as well, but only when both validated `contentHash` and artifact identity remain. That form is meaningful only beside the parameters of its own `preview_open` call: the renderer obtains the trusted raw basename from `file` (or `inline.html` for `html`), then validates and reconstructs the route. A standalone historical marker without its entry remains strict and malformed rather than guessing a file.
-
-The compact URL is an encoding for a marker, not a relaxation of preview routing. The reader reconstructs `/preview/<sid>/<encoded-entry>` and passes it through the same strict preview-route validation as a full URL. A compact URL without a safe explicit entry or permitted same-tool fallback, traversal-shaped data, invalid metadata, or an invalid artifact route remains malformed. This read compatibility is necessary because historical markers cannot be rewritten; recognized same-origin/base-path forms are reduced to the validated internal route rather than used as public navigation URLs.
+Compact marker URLs are not relaxed navigation rules: reconstructed routes still pass strict preview-route validation. Historical transcript markers remain readable because the reader accepts legacy full routes and `path`, `e`, `artifact_id`, `aid`, and `a` aliases. Those spellings are reader compatibility only; new writers never emit them.
 
 | Method | Path | Description |
 |---|---|---|
@@ -1653,7 +1753,7 @@ Maintenance endpoints back Settings → Maintenance. They are preview-first and 
 |---|---|---|
 | `GET` | `/api/maintenance/worktrees` | Canonical unified worktree inventory. Optional `?include=all|actionable|troubleshooting`; default is `all`. |
 | `POST` | `/api/maintenance/cleanup-worktrees` | Canonical cleanup for all safe or selected unified worktree inventory items. Also accepts legacy orphan cleanup bodies. |
-| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy compatibility view of safe unowned Bobbit `session/*` git worktrees. |
+| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy `{ worktrees }` compatibility shape; excludes ownership-unverified Git worktrees. Use the canonical troubleshooting inventory for diagnostics. |
 | `GET` | `/api/maintenance/archived-session-worktrees` | Legacy compatibility view of archived-session worktree candidates. `?includeAlreadyCleaned=1` includes disabled diagnostic rows whose worktree path and git metadata are already gone. |
 | `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Legacy compatibility cleanup for archived-session worktree candidates. |
 | `GET` | `/api/maintenance/orphaned-sessions` | List orphaned non-interactive sessions. |
@@ -1713,7 +1813,7 @@ Use `?include=actionable` to return only cleanup candidates. Use `?include=troub
 
 `mode: "all-safe"` rejects selectors. `mode: "selected"` requires `itemIds` as an array of strings. If `itemIds` is present without `mode`, the request returns `400`. Non-object bodies are rejected.
 
-The server always re-runs the unified inventory before cleanup and only removes fresh actionable candidates. Filesystem-only directories, pool entries, protected rows, stale selections, and invalid ids are skipped. Branch deletion is best-effort and blocked when any live or durable Bobbit record still references the branch.
+The server always re-runs the unified inventory before cleanup and only removes fresh actionable candidates. Ownership-unverified Git worktrees, filesystem-only directories, pool entries, protected rows, stale selections, and invalid ids are skipped without mutation. Branch deletion is best-effort and blocked when any live or durable Bobbit record still references the branch.
 
 ```ts
 interface CleanupWorktreeInventoryResponse {
@@ -1744,9 +1844,9 @@ interface CleanupWorktreeInventoryResponse {
 }
 ```
 
-Legacy orphan cleanup bodies are still supported for compatibility. `{}` cleans all currently safe legacy orphan candidates and `{ worktrees: [{ path, branch, repoPath }] }` cleans matching safe candidates. Legacy responses keep the older `{ cleaned: number }` shape. Unknown keys in a legacy body return `400`.
+Legacy orphan cleanup body shapes remain supported: `{}` and `{ worktrees: [{ path, branch, repoPath }] }`. Ownership-unverified Git worktrees are excluded or skipped without mutation; legacy responses keep the older `{ cleaned: number }` shape. Unknown keys in a legacy body return `400`.
 
-**`GET /api/maintenance/orphaned-worktrees`** returns the legacy `{ worktrees }` shape. It is a filtered view of the unified inventory containing only actionable unowned Bobbit `session/*` git worktrees with `{ path, branch, repoPath }`.
+**`GET /api/maintenance/orphaned-worktrees`** returns the legacy `{ worktrees }` shape but excludes ownership-unverified Git worktrees. Inspect those non-actionable rows through `GET /api/maintenance/worktrees?include=troubleshooting` instead.
 
 **`GET /api/maintenance/archived-session-worktrees`** returns the existing archived-session compatibility shape: `sessions`, flattened `items`, `groups`, `selectionPresets`, additive `counts`, and `generatedAt`. It is backed by the unified inventory. Default scans omit sessions whose rows are all `already-cleaned`; use `?includeAlreadyCleaned=1` for diagnostics.
 
@@ -2363,13 +2463,9 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 ### Continue-Archived endpoint
 
-`POST /api/sessions/:archivedId/continue` creates a brand-new Bobbit session from an archived, non-goal, non-delegate source. Used by the "Continue in New Session" footer button on archived session transcripts.
+`POST /api/sessions/:archivedId/continue` creates a brand-new session from an archived, non-goal, non-delegate source. Used by the "Continue in New Session" footer button on archived session transcripts. Pi sources rehydrate from a lossless `.jsonl` clone; Claude Agent SDK sources create a fresh Bobbit session from the exact persisted SDK model tuple and opaque resume UUID, without reading or copying Pi transcript data.
 
-Pi sources rehydrate from a lossless clone of their `.jsonl`. Claude Agent SDK
-sources create a fresh Bobbit session from the exact persisted SDK model tuple
-and opaque SDK resume UUID, without reading or copying Pi transcript data.
-
-**Why it exists**: Users often want to pick up work from a finished session without reanimating stale worktree, container, or branch state. Both paths route through normal session setup, so the new Bobbit session has fresh worktree/container state and no goal/team/delegate relationship. Pi carries lossless conversation history through a cloned JSONL and `switch_session`, with no byte budget or system-prompt injection. SDK continues the provider-owned conversation through its resume UUID instead of copying Pi-format history.
+**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). The endpoint copies applicable configuration (project, model, role, sandbox mode, worktree mode) and routes through normal session setup, so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. Pi rehydrates the cloned transcript through `switch_session` with lossless user-visible content, no byte budget, and no system-prompt injection. SDK Continue resumes the provider-owned conversation through its UUID instead of copying Pi-format history.
 
 For archived worktree-backed sources, the persisted `worktreePath` is only a provenance marker that enables worktree mode for the continued session. The endpoint does not require that path or the archived `branch` to exist, and it does not reuse them. The continued session gets its own `session/<new-id8>` branch/worktree from the currently registered project repo and configured base ref. Archived cwd/worktree values may be used only as old values when rebasing runtime-only Pi cwd metadata in the cloned transcript.
 
@@ -2377,7 +2473,7 @@ Non-sandboxed worktree-backed continues use the normal session worktree allocati
 
 **Request body**: empty (or absent). A legacy `mode` field is tolerated but ignored — there is no Summary vs Full distinction any more, and no transcript truncation. See [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md) for the design rationale.
 
-**Assistant sessions are accepted.** Sessions with `assistantType` set (one of `goal | role | tool | staff | project`) can be continued; the new session inherits the source's `assistantType`, persisted `role`, and `accessory`. For Pi sources, the proposal-draft directory — live `<type>.{md,yaml}` plus the `<type>.history/<rev>.<ext>` snapshot tree — is cloned verbatim via `copyProposalDirIfPresent`, and the standard WS `auth_ok` rehydrate broadcast surfaces it in the proposal panel. SDK continuation deliberately copies no Pi sidecar data. See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the Pi user-facing flow. Coding-agent guards (`goalId`, `delegateOf`, `teamGoalId`) remain in place — those sessions still return **422**.
+**Assistant sessions are accepted.** Sessions with `assistantType` set (one of `goal | role | tool | staff | project`) can be continued; the new session inherits the source's `assistantType`, persisted `role`, and `accessory`, and the proposal-draft directory — live `<type>.{md,yaml}` plus the `<type>.history/<rev>.<ext>` snapshot tree — is cloned verbatim into the new session's slot via `copyProposalDirIfPresent` (a sibling of `copyToolContentDirIfPresent` in `src/server/agent/continue-archived.ts`). The standard WS `auth_ok` rehydrate broadcast surfaces the draft in the proposal panel without extra wiring. See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the user-facing flow. Coding-agent guards (`goalId`, `delegateOf`, `teamGoalId`) remain in place — those sessions still return **422**.
 
 **Success response** (`201 Created`):
 
@@ -2393,18 +2489,17 @@ Non-sandboxed worktree-backed continues use the normal session worktree allocati
 
 The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt. `assistantType` echoes the source value (or `null` for non-assistant sessions) so callers can confirm the identity carried over. If the source was worktree-backed, the returned `cwd` points at the newly claimed or cold-created worktree path, not the archived source path.
 
-For Pi sources, before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Message content and user-visible transcript text are preserved losslessly.
+Before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Message content and user-visible transcript text are preserved losslessly.
 
 **Error responses**:
 
 | Status | Meaning |
 |---|---|
-| `404` | Archived session not found, or a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it. |
-| `503` | Official SDK session-info preflight finds the SDK source unavailable. The response is the opaque `SDK_SESSION_UNAVAILABLE` category; no destination, worktree, session row, or Pi artifact is created. |
+| `404` | Archived session not found, or its transcript (`.jsonl`) is missing on disk and `recoverSessionFile` cannot locate it |
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
-| `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set); a Pi copy would cross realms; or an SDK source lacks its exact `claude-agent-sdk` model tuple or a valid resume UUID (`RUNTIME_CONTINUE_UNSUPPORTED`) |
-| `500` | Pi JSONL clone failed unexpectedly (e.g. disk full, permission denied), or fresh session/worktree creation failed against the current project repo/base ref after any pool fallback. Clone failures unlink the destination file and create no session row; create-session failures clean up the cloned transcript and any copied proposal/tool-content directories. A pool miss, `null` claim, or claim exception is not an API error by itself. Errors for worktree setup should identify the current project/base/worktree problem, not the archived source path or branch. See server logs. |
+| `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set) — not eligible for continuation; **or** the copy would cross realms (host↔sandbox or between two different sandboxed projects — `CrossRealmCopyError`) |
+| `500` | JSONL clone failed unexpectedly (e.g. disk full, permission denied), or fresh session/worktree creation failed against the current project repo/base ref after any pool fallback. Clone failures unlink the destination file and create no session row; create-session failures clean up the cloned transcript and any copied proposal/tool-content directories. A pool miss, `null` claim, or claim exception is not an API error by itself. Errors for worktree setup should identify the current project/base/worktree problem, not the archived source path or branch. See server logs. |
 
 **Scope gate**: The endpoint refuses goal-linked, delegate, and team-member sessions on purpose. Goal coupling (team structure, gates, tasks, shared worktrees) and delegate scoping don't survive the continue-into-a-fresh-session model. Users wanting to iterate on a goal should create a new session inside the goal instead. Assistant sessions (`assistantType` set) are explicitly **not** in this gate — see the previous paragraph for the carry-over semantics.
 

@@ -35,15 +35,15 @@ interface GitFixture {
 	origin: string;
 }
 
-function makeGitFixture(label: string): GitFixture {
+function makeGitFixture(label: string, primaryBranch = "master"): GitFixture {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-no-publication-${label}-`));
 	roots.push(root);
 	const origin = path.join(root, "origin.git");
 	const repo = path.join(root, "repo");
 	fs.mkdirSync(origin);
 	fs.mkdirSync(repo);
-	git(origin, "init", "--bare", "--initial-branch=master");
-	git(repo, "init", "--initial-branch=master");
+	git(origin, "init", "--bare", `--initial-branch=${primaryBranch}`);
+	git(repo, "init", `--initial-branch=${primaryBranch}`);
 	git(repo, "config", "user.name", "Bobbit Test");
 	git(repo, "config", "user.email", "bobbit-test@example.invalid");
 	git(repo, "config", "core.autocrlf", "false");
@@ -51,8 +51,8 @@ function makeGitFixture(label: string): GitFixture {
 	git(repo, "add", "README.md");
 	git(repo, "commit", "-m", "initial");
 	git(repo, "remote", "add", "origin", origin);
-	git(repo, "push", "-u", "origin", "master");
-	git(repo, "remote", "set-head", "origin", "master");
+	git(repo, "push", "-u", "origin", primaryBranch);
+	git(repo, "remote", "set-head", "origin", primaryBranch);
 	return { root, repo, origin };
 }
 
@@ -79,6 +79,46 @@ function explicitlyPublishThenDelete(fixture: GitFixture, worktree: string, bran
 }
 
 describe("real Git lifecycle operations preserve deleted remote branches", () => {
+	it("reuses an existing branch without the creation-only --no-track option", async () => {
+		const fixture = makeGitFixture("existing-branch-recovery");
+		const branch = "session/existing-branch-local";
+		const rejectedPath = path.join(fixture.root, "rejected-existing-branch");
+		const recoveredPath = path.join(fixture.root, "recovered-existing-branch");
+		git(fixture.repo, "branch", branch, "origin/master");
+
+		// Git itself rejects --no-track unless this command also creates a branch
+		// with -b. This is the invalid recovery/reuse command that regressed.
+		expect(() => git(fixture.repo, "worktree", "add", "--no-track", rejectedPath, branch)).toThrow();
+
+		const recovered = await recoverWorktree(fixture.repo, branch, recoveredPath);
+		expect(recovered).toBe(recoveredPath);
+		expect(git(recoveredPath, "branch", "--show-current")).toBe(branch);
+		expectRemoteBranchAbsent(fixture.origin, branch, "existing-branch recovery");
+	});
+
+	it("retains Git's implicit origin/main upstream without a configured base", async () => {
+		const fixture = makeGitFixture("implicit-base", "main");
+		const branch = "session/implicit-base-local";
+		const created = await createWorktree(fixture.repo, branch, { configuredBaseRef: " " });
+
+		expect(git(created.worktreePath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")).toBe("origin/main");
+		expectRemoteBranchAbsent(fixture.origin, branch, "implicit base_ref creation");
+	});
+
+	it("restores the origin upstream when recovering a remote-only branch", async () => {
+		const fixture = makeGitFixture("remote-only-recovery", "main");
+		const branch = "session/remote-only";
+		git(fixture.repo, "push", "origin", `origin/main:refs/heads/${branch}`);
+		expect(() => git(fixture.repo, "rev-parse", "--verify", branch)).toThrow();
+
+		const recoveredPath = path.join(fixture.root, "recovered-remote-only");
+		const recovered = await recoverWorktree(fixture.repo, branch, recoveredPath);
+
+		expect(recovered).toBe(recoveredPath);
+		expect(git(recoveredPath, "branch", "--show-current")).toBe(branch);
+		expect(git(recoveredPath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")).toBe(`origin/${branch}`);
+	});
+
 	it("keeps configured-base creation, reuse, and recovery local-only", async () => {
 		const fixture = makeGitFixture("configured-base");
 		const branch = "session/configured-base-local";
@@ -178,7 +218,7 @@ describe("real Git lifecycle operations preserve deleted remote branches", () =>
 		explicitlyPublishThenDelete(fixture, parentWorktree, parentBranch);
 
 		const stateDir = path.join(fixture.root, "goal-state");
-		const store = new GoalStore(stateDir);
+		const store = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const now = Date.now();
 		store.put({
 			id: "parent",

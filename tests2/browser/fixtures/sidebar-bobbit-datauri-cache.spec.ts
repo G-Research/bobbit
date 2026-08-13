@@ -66,6 +66,7 @@ async function installSpyAndLoad(page: import("@playwright/test").Page): Promise
 	});
 	await page.goto(fileUrl(FIXTURE));
 	await page.waitForFunction(() => (window as any).__ready === true);
+	await page.waitForFunction(() => Array.from(document.styleSheets).some(sheet => sheet.href?.endsWith("/src/app/app.css")));
 }
 
 test.describe("Sidebar bobbit data-URL memoization", () => {
@@ -240,6 +241,95 @@ test.describe("Sidebar bobbit data-URL memoization", () => {
 		// render is a pure cache hit. Pre-memoization this would be 4 * N = 32.
 		expect(result.calls).toBe(4);
 		expect(result.calls).toBeLessThan(4 * N);
+	});
+
+	test("headset and ponytail swap cached right-facing frames without JS redraw work", async ({ page }) => {
+		await installSpyAndLoad(page);
+
+		const result = await page.evaluate(async () => {
+			const api = (window as any).__sidebarBobbit;
+			const host = document.getElementById("host")!;
+			const capture = () => ({
+				front: host.querySelector<HTMLImageElement>(".bobbit-sidebar-accessory--front"),
+				right: host.querySelector<HTMLImageElement>(".bobbit-sidebar-accessory--right"),
+				calls: (window as any).__dataUrlCalls as number,
+			});
+
+			(window as any).__dataUrlCalls = 0;
+			api.renderInto(host, { status: "busy", isSelected: true, accessory: api.ACCESSORY_DEFS.headset });
+			const selectedHeadset = capture();
+			const sampleTurnAt = async (layers: ReturnType<typeof capture>, time: number) => {
+				for (const element of [layers.front, layers.right]) {
+					for (const animation of element?.getAnimations() ?? []) {
+						animation.pause();
+						animation.currentTime = time;
+					}
+				}
+				await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+				return {
+					front: getComputedStyle(layers.front!).opacity,
+					right: getComputedStyle(layers.right!).opacity,
+				};
+			};
+			const rightPhase = await sampleTurnAt(selectedHeadset, 4_500);
+			const frontPhase = await sampleTurnAt(selectedHeadset, 5_400);
+			const selected = {
+				frontClass: selectedHeadset.front?.className ?? "",
+				rightClass: selectedHeadset.right?.className ?? "",
+				frontSrc: selectedHeadset.front?.src ?? "",
+				rightSrc: selectedHeadset.right?.src ?? "",
+				rightPhase,
+				frontPhase,
+				calls: selectedHeadset.calls,
+			};
+
+			api.renderInto(host, {
+				status: "busy",
+				isCompacting: true,
+				isSelected: true,
+				isAborting: true,
+				accessory: api.ACCESSORY_DEFS.headset,
+			});
+			const cancellingCompaction = capture();
+			const cancelling = {
+				frontClass: cancellingCompaction.front?.className ?? "",
+				rightClass: cancellingCompaction.right?.className ?? "",
+				rightPhase: await sampleTurnAt(cancellingCompaction, 4_500),
+			};
+
+			(window as any).__dataUrlCalls = 0;
+			api.renderInto(host, { status: "idle", unread: true, accessory: api.ACCESSORY_DEFS.ponytail });
+			const unreadPonytail = capture();
+			const unread = {
+				frontPresent: !!unreadPonytail.front,
+				rightPresent: !!unreadPonytail.right,
+				rightClass: unreadPonytail.right?.className ?? "",
+				calls: unreadPonytail.calls,
+			};
+
+			(window as any).__dataUrlCalls = 0;
+			api.renderInto(host, { status: "idle", unread: true, accessory: api.ACCESSORY_DEFS.ponytail });
+			const repeatedUnreadCalls = (window as any).__dataUrlCalls as number;
+			return { selected, cancelling, unread, repeatedUnreadCalls };
+		});
+
+		expect(result.selected.frontClass).toContain("bobbit-sidebar-accessory-turn-front");
+		expect(result.selected.rightClass).toContain("bobbit-sidebar-accessory-turn-right");
+		expect(result.selected.frontSrc).not.toEqual(result.selected.rightSrc);
+		expect(result.selected.rightPhase).toEqual({ front: "0", right: "1" });
+		expect(result.selected.frontPhase).toEqual({ front: "1", right: "0" });
+		// Body + selected-eye + front accessory + right accessory: one-time only.
+		expect(result.selected.calls).toBe(4);
+		expect(result.cancelling.frontClass).toContain("bobbit-sidebar-accessory-turn-front");
+		expect(result.cancelling.rightClass).toContain("bobbit-sidebar-accessory-turn-right");
+		expect(result.cancelling.rightPhase).toEqual({ front: "0", right: "1" });
+		expect(result.unread.frontPresent).toBe(false);
+		expect(result.unread.rightPresent).toBe(true);
+		expect(result.unread.rightClass).not.toContain("bobbit-sidebar-accessory-turn-right");
+		// Body + blink + right accessory; the unused front bitmap is never encoded.
+		expect(result.unread.calls).toBe(3);
+		// Re-rendering performs no canvas encodes or frame-generation work.
+		expect(result.repeatedUnreadCalls).toBe(0);
 	});
 
 	test("single-layer sprite: only one encode across many renders", async ({ page }) => {

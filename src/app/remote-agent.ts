@@ -46,20 +46,20 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 }
 import { applyGatewaySessionIdentity, state, renderApp, setProjectsIfChanged } from "./state.js";
 import type { SessionRuntime } from "../server/agent/session-runtime.js";
-import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
+import { hydrateArtifactReviewsForWorkspace, openReviewReceipt, parseReviewOpenReceipt, registerReviewOpenReceipt } from "./review-open-controller.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
-import { applySidePanelWorkspaceFromServer, closeSidePanelTab, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
 import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-minter-registry.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./mutation-approval-events.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
-import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
@@ -80,6 +80,7 @@ import {
 import type { AutoRetryPendingEvent, ManualRetryRequiredEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction, RemoteStateSnapshotMessage } from "../server/ws/protocol.js";
 import { LOCAL_USER_AUTHOR, type BobbitMessage, type MessageAuthor } from "../shared/message-author.js";
 import type { PromptSource } from "../shared/prompt-source.js";
+import { reconstructAssistantStreamDelta } from "../shared/assistant-stream-delta.js";
 
 const CLIENT_SYSTEM_AUTHOR: MessageAuthor = {
 	kind: "system",
@@ -122,6 +123,28 @@ export interface ProviderAuthRequiredState {
 	message: string;
 	actions: ProviderAuthRecoveryAction[];
 	receivedAt: number;
+}
+
+export interface ModelSelectionRequiredCondition {
+	code: "MODEL_SELECTION_REQUIRED";
+	provider: string;
+	modelId: string;
+}
+
+function modelSelectionRequiredCondition(value: unknown): ModelSelectionRequiredCondition | null {
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Partial<ModelSelectionRequiredCondition>;
+	return candidate.code === "MODEL_SELECTION_REQUIRED"
+		&& typeof candidate.provider === "string"
+		&& candidate.provider.length > 0
+		&& typeof candidate.modelId === "string"
+		&& candidate.modelId.length > 0
+		? {
+			code: "MODEL_SELECTION_REQUIRED",
+			provider: candidate.provider,
+			modelId: candidate.modelId,
+		}
+		: null;
 }
 
 // ───────────────────────────────────────────────────────────
@@ -231,15 +254,6 @@ function mergeToolPayloads(...payloads: Array<Record<string, unknown> | null | u
 	return merged;
 }
 
-function isReviewWorkspaceSelectionActive(title?: string): boolean {
-	const s = state as any;
-	const activeId = typeof s.activePanelTabId === "string" ? s.activePanelTabId
-		: typeof s.panelWorkspace?.activeTabId === "string" ? s.panelWorkspace.activeTabId
-		: "";
-	if (activeId) return activeId.startsWith("review:") || (!!title && activeId === `review:${encodeURIComponent(title)}`);
-	return s.previewPanelTab === "review" || s.previewPanelActiveTab === "review";
-}
-
 function normalizeProposalToolCallInputs(message: any, inputByToolId?: (id: string) => unknown): any {
 	if (!message || !Array.isArray(message.content)) return message;
 	let changed = false;
@@ -267,6 +281,83 @@ function normalizeProposalToolCallInputs(message: any, inputByToolId?: (id: stri
 function toolEventId(event: any): string | undefined {
 	const id = event?.toolCallId ?? event?.toolId;
 	return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+type ReviewToolName = "review_open" | "review_close";
+type PendingReviewToolCall = { toolName: ReviewToolName; recordedAt: number };
+type CorrelatedReviewResult = { toolCallId: string; payloads: Record<string, unknown>[] };
+
+const REVIEW_TOOL_CALL_TTL_MS = 15 * 60_000;
+const REVIEW_TOOL_CALL_MAX_PENDING = 128;
+
+function reviewToolName(value: unknown): ReviewToolName | null {
+	return value === "review_open" || value === "review_close" ? value : null;
+}
+
+function reviewResultCorrelationId(value: Record<string, unknown>): string {
+	const id = value.toolCallId ?? value.tool_use_id;
+	return typeof id === "string" && id.length > 0 ? id : "";
+}
+
+function isTypedToolResult(value: Record<string, unknown>): boolean {
+	return value.role === "toolResult"
+		|| value.role === "tool_result"
+		|| value.type === "toolResult"
+		|| value.type === "tool_result";
+}
+
+/**
+ * Extract review payloads only from protocol-typed tool-result envelopes.
+ * A message-level result owns its content; otherwise direct nested
+ * `tool_result` blocks own theirs. We deliberately do not recursively search
+ * arbitrary objects, because unrelated tool output may itself contain data
+ * that resembles a result block.
+ */
+function correlatedReviewResults(message: unknown): CorrelatedReviewResult[] {
+	if (!message || typeof message !== "object" || Array.isArray(message)) return [];
+	const msg = message as Record<string, unknown>;
+	const envelopes: Record<string, unknown>[] = [];
+	if (isTypedToolResult(msg)) {
+		envelopes.push(msg);
+	} else if (Array.isArray(msg.content)) {
+		for (const block of msg.content) {
+			if (block && typeof block === "object" && !Array.isArray(block) && isTypedToolResult(block as Record<string, unknown>)) {
+				envelopes.push(block as Record<string, unknown>);
+			}
+		}
+	}
+
+	return envelopes.flatMap((envelope) => {
+		const toolCallId = reviewResultCorrelationId(envelope);
+		if (!toolCallId) return [];
+		const payloads: Record<string, unknown>[] = [];
+		const collectPayloads = (value: unknown): void => {
+			if (typeof value === "string") {
+				try {
+					const parsed = JSON.parse(value.trim());
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && reviewToolName((parsed as any).action)) {
+						payloads.push(parsed as Record<string, unknown>);
+					}
+				} catch { /* ordinary result text is not a review control payload */ }
+				return;
+			}
+			if (Array.isArray(value)) {
+				for (const item of value) collectPayloads(item);
+				return;
+			}
+			if (!value || typeof value !== "object") return;
+			const block = value as Record<string, unknown>;
+			if (reviewToolName(block.action)) {
+				payloads.push(block);
+			} else if (block.type === "text") {
+				collectPayloads(block.text);
+			}
+		};
+		collectPayloads(envelope.content);
+		collectPayloads(envelope.output);
+		collectPayloads(envelope.result);
+		return [{ toolCallId, payloads }];
+	});
 }
 
 function sameProposalFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
@@ -331,13 +422,19 @@ export class RemoteAgent {
 	private _sessionPoster: ((req: SessionPostRequest) => Promise<void>) | undefined;
 	private _surfaceTokenMinter: ((surface: PackSurfaceRef) => Promise<string>) | undefined;
 	private _surfaceTokenAuthorityKey: string | undefined;
+	private _assistantStreamDeltaEnabled = false;
+	private _previousRawAssistantStreamMessage: any;
 	private subscribers: Array<(event: any) => void> = [];
 	private _state: any;
+	private _conditionSnapshotReceived = false;
 	private _gatewayUrl = "";
 	private _authToken = "";
 	private _sessionId = "";
 	private _toolCallInputsById = new Map<string, unknown>();
 	private _proposalToolCallsById = new Map<string, { type: ProposalType; input: Record<string, unknown> }>();
+	/** Single-use provenance for live review controls. Kept past
+	 * `tool_execution_end` because the persisted result message may follow it. */
+	private _pendingReviewToolCalls = new Map<string, PendingReviewToolCall>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
 	// Client-side outbox for user-intent frames issued while the WS is not OPEN
@@ -642,8 +739,8 @@ export class RemoteAgent {
 	/** Callback fired when the server-side prompt queue changes. */
 	onQueueUpdate?: (queue: QueuedMessage[]) => void;
 	/** Callback fired when background process state changes. */
-	/** Callback fired when goal setup status changes (worktree ready or failed). */
-	onGoalSetupEvent?: () => void;
+	/** Callback fired when the shared goal worktree setup lifecycle changes. */
+	onGoalSetupEvent?: (goalId?: string) => void;
 	/** Callback fired when compaction state changes (start/end). */
 	onCompactionChange?: (isCompacting: boolean) => void;
 	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; terminalReason?: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null; spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string } | null; endTime?: number | null; process?: any }) => void;
@@ -697,6 +794,9 @@ export class RemoteAgent {
 			} | null,
 			providerAuthRequired: null as ProviderAuthRequiredState | null,
 			manualRetryRequired: null as { message: string; error?: string } | null,
+			condition: null as ModelSelectionRequiredCondition | null,
+			modelSelectionPending: null as { provider: string; modelId: string } | null,
+			modelSelectionError: null as string | null,
 		};
 		// Single source of truth: status drives every legacy boolean. Defining
 		// these as getters on the underlying object means every existing reader
@@ -722,6 +822,9 @@ export class RemoteAgent {
 
 	get state() {
 		return this._state;
+	}
+	get conditionSnapshotReceived(): boolean {
+		return this._conditionSnapshotReceived;
 	}
 	get sessionId() {
 		return this._sessionId || undefined;
@@ -769,35 +872,19 @@ export class RemoteAgent {
 		}
 	}
 	/**
-	 * Remove review tabs restored from the server after this session's review
-	 * was already submitted. Initial/reconnect workspace hydration can finish
-	 * after transcript replay performed the same cleanup against an empty local
-	 * workspace, so callers replay it at the workspace-apply boundary.
-	 *
-	 * This intentionally has no active-session guard: cached/background sessions
-	 * still own their keyed workspace and must not retain a submitted review tab.
+	 * Reconcile review content after the owner session's annotation/tombstone
+	 * cache and workspace have hydrated. Tombstones suppress passive recreation
+	 * only when the authoritative primary is absent; an existing exact primary
+	 * proves an explicit open committed and must survive reload/reconnect.
 	 */
-	async reconcileSubmittedReviewWorkspace(): Promise<void> {
+	async reconcileSubmittedReviewWorkspace(options: {
+		annotationStoreHydrated?: boolean;
+		reviewSources?: any;
+	} = {}): Promise<void> {
 		const sessionId = this._sessionId;
-		if (!sessionId || !isReviewSubmitted(sessionId)) return;
-		const isReviewTab = (tab: { id?: string; kind?: string }): boolean =>
-			tab.kind === "review" || tab.id?.startsWith("review:") === true;
-		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
-			.filter(isReviewTab)
-			.map((tab) => tab.id);
-		if (reviewTabIds.length === 0) return;
-
-		// Keep every deletion on the normal mutation path. A confirmed compatible
-		// 204 settles the optimistic close, while a 409 workspace remains
-		// authoritative and may be retried once at its newer revision. Refetches,
-		// network failures, and rollbacks are never locally filtered afterward.
-		for (const tabId of reviewTabIds) {
-			try {
-				await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
-			} catch (err) {
-				console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err);
-			}
-		}
+		if (!sessionId) return;
+		if (!options.annotationStoreHydrated) await initAnnotationStore(sessionId);
+		await hydrateArtifactReviewsForWorkspace(sessionId);
 	}
 	private _isActiveSession(): boolean {
 		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;
@@ -918,7 +1005,12 @@ export class RemoteAgent {
 
 			ws.onopen = () => {
 				bootMark("ws-open");
-				ws.send(JSON.stringify({ type: "auth", token: this._authToken, clientKind: "app" }));
+				ws.send(JSON.stringify({
+					type: "auth",
+					token: this._authToken,
+					clientKind: "app",
+					capabilities: { assistantStreamDelta: 1 },
+				}));
 			};
 
 			ws.onmessage = (evt) => {
@@ -940,6 +1032,7 @@ export class RemoteAgent {
 					if (msg.type === "auth_ok") {
 						settled = true;
 						this._surfaceTokenAuthorityKey = typeof msg.surfaceTokenKey === "string" ? msg.surfaceTokenKey : undefined;
+						this._assistantStreamDeltaEnabled = msg.capabilities?.assistantStreamDelta === 1;
 						// Register the sanctioned WS transports for pack-bound surface-token minting
 						// and `host.session.postMessage` (C2 session WRITE, extension-host-phase2.md
 						// §8 C2.1). Server-side session binding, surface-token resolution, and
@@ -954,7 +1047,7 @@ export class RemoteAgent {
 						resolve();
 						// Initial hydration is owned by connectToSession after ChatPanel
 						// binding. Reconnects still refresh the server workspace here and
-						// then replay submitted-review cleanup against the hydrated tabs.
+						// then hydrate review content against authoritative tabs.
 						if (!initial) {
 							void hydrateSidePanelWorkspace(this._sessionId)
 								.then(() => this.reconcileSubmittedReviewWorkspace());
@@ -1064,6 +1157,25 @@ export class RemoteAgent {
 		this.onConnectionStatusChange?.(status);
 	}
 
+	private _prunePendingReviewToolCalls(now = Date.now()): void {
+		for (const [id, pending] of this._pendingReviewToolCalls) {
+			if (now - pending.recordedAt > REVIEW_TOOL_CALL_TTL_MS) this._pendingReviewToolCalls.delete(id);
+		}
+		while (this._pendingReviewToolCalls.size > REVIEW_TOOL_CALL_MAX_PENDING) {
+			const oldestId = this._pendingReviewToolCalls.keys().next().value as string | undefined;
+			if (!oldestId) break;
+			this._pendingReviewToolCalls.delete(oldestId);
+		}
+	}
+
+	private _rememberReviewToolCall(id: string, toolName: ReviewToolName): void {
+		this._prunePendingReviewToolCalls();
+		// Refresh insertion order if a provider reuses an ID for a new start.
+		this._pendingReviewToolCalls.delete(id);
+		this._pendingReviewToolCalls.set(id, { toolName, recordedAt: Date.now() });
+		this._prunePendingReviewToolCalls();
+	}
+
 	private _scheduleReconnect(): void {
 		if (this._intentionalDisconnect || this._reconnectTimer) return;
 
@@ -1084,6 +1196,7 @@ export class RemoteAgent {
 
 	disconnect(): void {
 		this._intentionalDisconnect = true;
+		this._pendingReviewToolCalls.clear();
 		if (this._reconnectTimer) {
 			clearTimeout(this._reconnectTimer);
 			this._reconnectTimer = null;
@@ -1382,11 +1495,18 @@ export class RemoteAgent {
 		this._lastStatusVersion = -1;
 		this._isAborting = false;
 		this._state.pendingToolCalls = new Set();
+		this._pendingReviewToolCalls.clear();
 		this._state.error = undefined;
 		this._state.turnStartTime = null;
 		this._state.providerAuthRequired = null;
+		this._state.condition = null;
+		this._state.modelSelectionPending = null;
+		this._state.modelSelectionError = null;
+		this._conditionSnapshotReceived = false;
 		this._pendingAttachments = null;
 		this._pendingSkillExpansions = null;
+		this._assistantStreamDeltaEnabled = false;
+		this._previousRawAssistantStreamMessage = undefined;
 		this._highestSeq = 0;
 		this._seqInitialized = false;
 		this._pendingEvents = [];
@@ -1451,9 +1571,18 @@ export class RemoteAgent {
 	// ── Setters (Agent interface) ────────────────────────────────────
 
 	setModel(model: any, thinkingLevel?: string): void {
+		if (this._state.modelSelectionPending) return;
 		const effectiveThinking = thinkingLevel ?? this._state.thinkingLevel;
-		this._state.model = model;
-		this._state.thinkingLevel = effectiveThinking as any;
+		const recoveryCondition = modelSelectionRequiredCondition(this._state.condition);
+		if (recoveryCondition) {
+			// Recovery is verified server-side. Keep the retired tuple visible until an
+			// explicit state publication clears the condition and publishes the replacement.
+			this._state.modelSelectionPending = { provider: model.provider, modelId: model.id };
+			this._state.modelSelectionError = null;
+		} else {
+			this._state.model = model;
+			this._state.thinkingLevel = effectiveThinking as any;
+		}
 		this._clearProviderAuthRequired();
 		this.send({
 			type: "set_model",
@@ -1466,6 +1595,7 @@ export class RemoteAgent {
 	}
 
 	setThinkingLevel(level: any): void {
+		if (modelSelectionRequiredCondition(this._state.condition)) return;
 		this._state.thinkingLevel = level;
 		this.send({ type: "set_thinking_level", level });
 		state.chatPanel?.agentInterface?.requestUpdate();
@@ -1757,14 +1887,20 @@ export class RemoteAgent {
 	 *  reconciliation replaces the pending pills. (S2) */
 	private _flushOutbox(): void {
 		if (this._pendingOutbox.length === 0) return;
-		const pending = this._pendingOutbox;
-		this._pendingOutbox = [];
-		for (const entry of pending) {
-			if (this.ws?.readyState === WebSocket.OPEN) {
-				try { this.ws.send(JSON.stringify(entry.frame)); } catch { /* re-drop on a racing close; rare */ }
+		let sent = 0;
+		while (this._pendingOutbox.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
+			const entry = this._pendingOutbox[0];
+			try {
+				this.ws.send(JSON.stringify(entry.frame));
+			} catch {
+				// Keep this entry and the unsent suffix in FIFO order. A later auth_ok
+				// retries them on the replacement socket instead of silently losing intent.
+				break;
 			}
+			this._pendingOutbox.shift();
+			sent++;
 		}
-		this.onQueueUpdate?.(this.getQueue());
+		if (sent > 0) this.onQueueUpdate?.(this.getQueue());
 	}
 
 	private async handleServerMessage(msg: any) {
@@ -1827,6 +1963,14 @@ export class RemoteAgent {
 					// (legacy server payload), force it so the derived getter agrees.
 					if (this._state.status !== "archived") this._state.status = "archived";
 				}
+				// Condition changes are authoritative only when explicitly present. Partial
+				// state_update events must not accidentally unblock the composer.
+				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "condition")) {
+					this._conditionSnapshotReceived = true;
+					this._state.condition = modelSelectionRequiredCondition(msg.data.condition);
+					this._state.modelSelectionPending = null;
+					if (!this._state.condition) this._state.modelSelectionError = null;
+				}
 				// Always update model from server state (keeps context window accurate after compaction)
 				if (msg.data?.model) {
 					this._state.model = msg.data.model;
@@ -1884,6 +2028,7 @@ export class RemoteAgent {
 					// the server, so future visibility ticks can short-circuit
 					// `requestMessages()` until the WS drops again.
 					this._hadDisconnectSinceLastSnapshot = false;
+					this._previousRawAssistantStreamMessage = undefined;
 					// Streaming preview: if the snapshot contains the streaming
 					// message id, it's no longer in-flight on this client.
 					this.streamingMessageId = undefined;
@@ -1902,10 +2047,15 @@ export class RemoteAgent {
 					// container when it's null — so we must clear here first.
 					this._state.streamingMessage = null;
 
-					// Emit message_end for each message so AgentInterface re-renders
+					// Preserve the historical per-message replay contract for subscribers,
+					// then emit one bulk boundary after the entire reducer replacement. The
+					// boundary lets AgentInterface wait for MessageList/child commits before
+					// its final tail pin; metadata enrichment can otherwise grow historic
+					// user rows after the per-message updateComplete callbacks have run.
 					for (const m of this._state.messages) {
 						this.emit({ type: "message_end", message: m });
 					}
+					this.emit({ type: "messages_snapshot" } as any);
 					// Scan loaded messages for goal proposals (e.g. reconnecting to an existing session).
 					// If proposal checking is deferred (draft restores in progress),
 					// just flag that we have proposals to check later.
@@ -1914,29 +2064,21 @@ export class RemoteAgent {
 					} else {
 						this._scanLoadedProposalMessages();
 					}
-					// Rebuild review pane state from message history (same persistence as preview pane).
-					// Annotation hydration is session-scoped and can continue for a cached
-					// background agent. The review pane itself is global, so only the still-
-					// active session may clear, rebuild, or restore it.
+					// Review content is durable per session. Transcript replay is deliberately
+					// content-only: an old review_open/review_close result must never recreate
+					// a primary tab whose authoritative workspace entry is absent.
 					const reviewSessionId = this._sessionId;
 					await initAnnotationStore(reviewSessionId);
 					if (this._isActiveSession()) {
+						state.reviewGroups = new Map();
+						state.reviewActiveReviewId = "";
 						state.reviewDocuments = new Map();
 						state.reviewActiveTab = "";
 						state.reviewPanelOpen = false;
-						if (!isReviewSubmitted(reviewSessionId)) {
-							for (const m of this._state.messages) {
-								await this._checkReviewToolResult(m);
-								if (!this._isActiveSession()) break;
-							}
-						} else {
-							await this.reconcileSubmittedReviewWorkspace();
-						}
+						const reviewSources = await loadReviewSources();
 						if (this._isActiveSession()) {
-							const reviewSources = await loadReviewSources();
-							if (this._isActiveSession()) {
-								reviewSources.restorePersistedReviewDocuments(reviewSessionId, { select: true });
-							}
+							await this.reconcileSubmittedReviewWorkspace({ annotationStoreHydrated: true, reviewSources });
+							if (this._isActiveSession()) reviewSources.restorePersistedReviewDocuments(reviewSessionId, { select: true });
 						}
 					}
 					// Re-add compacting placeholder if compaction is still in progress
@@ -2101,9 +2243,12 @@ export class RemoteAgent {
 				if ((msg as any).workspace) applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
 				break;
 
+			case "goal_setup_started":
+			case "goal_setup_preparing":
+			case "goal_setup_retrying":
 			case "goal_setup_complete":
 			case "goal_setup_error":
-				this.onGoalSetupEvent?.();
+				this.onGoalSetupEvent?.(typeof (msg as any).goalId === "string" ? (msg as any).goalId : undefined);
 				break;
 
 			case "goal_state_changed":
@@ -2318,6 +2463,7 @@ export class RemoteAgent {
 				const removedId = (msg as any).sessionId as string | undefined;
 				const reason = (msg as any).reason as string | undefined;
 				if (!removedId) break;
+				if (removedId === this._sessionId) this._pendingReviewToolCalls.clear();
 				this.onSessionRemoved?.(removedId, reason ?? "archived");
 				break;
 			}
@@ -2378,6 +2524,12 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				if (this._state.modelSelectionPending) {
+					this._state.modelSelectionPending = null;
+					this._state.modelSelectionError = typeof msg.message === "string" && msg.message
+						? msg.message
+						: "Couldn’t activate that model. Choose another available model and try again.";
+				}
 				if ((msg as any).code === "SET_MODEL_FAILED" || (msg as any).code === "SET_THINKING_LEVEL_FAILED") {
 					this.send({ type: "get_state" });
 				}
@@ -2645,133 +2797,85 @@ export class RemoteAgent {
 	}
 
 	/**
-	 * Check if a message contains review tool results (from the review_open/review_close
-	 * extension) and update the review pane state accordingly. Scans message text content
-	 * for JSON payloads with action "review_open" or "review_close".
-	 *
-	 * Active-session guard: `state.review*` is global, but every connected session
-	 * (including cached/background ones whose RemoteAgent is kept alive in
-	 * `sessionCache` — see session-manager.ts::selectSession) routes its
-	 * `message_end` events through here. Without this gate, a `review_open`
-	 * emitted by a background session would mutate the globally-shared review
-	 * state and land on whichever session the user is currently viewing.
-	 *
-	 * We compare `_sessionId` against `state.selectedSessionId` (set
-	 * synchronously in `selectSession()` before `connectToSession()` runs),
-	 * not `state.remoteAgent`, because the latter is assigned only AFTER
-	 * `remote.connect()` returns — and the initial `auth_ok` handler replays
-	 * message history through this method during connect, so a
-	 * `state.remoteAgent`-based check would no-op the initial review-pane
-	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
+	 * Route live review tool results to the emitting session. Persisted review
+	 * groups and the server workspace are session-keyed, while visible review
+	 * state remains selected-session-only. Historical results are ignored: the
+	 * authoritative workspace plus durable group store perform hydration without
+	 * resurrecting a closed or submitted review.
 	 */
 	private async _checkReviewToolResult(msg: any, isLive = false): Promise<void> {
 		const sessionId = this._sessionId;
-		const isActiveSession = (): boolean => this._isActiveSession();
-		if (!isActiveSession()) return;
+		if (!sessionId || !isLive) return;
 
-		// Extract review tool-result payloads. Production providers are not fully
-		// consistent here: the review extension usually returns a JSON text block,
-		// but direct/tool-protocol paths can carry the same envelope as a structured
-		// object or nested under a tool_result block. Only inspect result-like
-		// content/output fields; do not treat tool-call input as an opened review.
-		const payloads: any[] = [];
-		const collectReviewPayloads = (value: unknown): void => {
-			if (typeof value === "string") {
-				const trimmed = value.trim();
-				if (!trimmed.startsWith('{"action":"review_')) return;
-				try { payloads.push(JSON.parse(trimmed)); } catch { /* ignore non-JSON text */ }
-				return;
-			}
-			if (Array.isArray(value)) {
-				for (const item of value) collectReviewPayloads(item);
-				return;
-			}
-			if (!value || typeof value !== "object") return;
-			const block = value as Record<string, unknown>;
-			if (typeof block.action === "string" && block.action.startsWith("review_")) {
-				payloads.push(block);
-				return;
-			}
-			if (block.type === "text") collectReviewPayloads(block.text);
-			else if (block.type === "tool_result" || block.type === "toolResult" || block.role === "toolResult") {
-				collectReviewPayloads(block.content);
-				collectReviewPayloads(block.output);
-				collectReviewPayloads(block.result);
-			} else if (typeof block.content === "string") {
-				collectReviewPayloads(block.content);
-			}
-		};
-		collectReviewPayloads(msg.content);
-		collectReviewPayloads((msg as any).output);
-		collectReviewPayloads((msg as any).result);
+		this._prunePendingReviewToolCalls();
+		for (const result of correlatedReviewResults(msg)) {
+			const pending = this._pendingReviewToolCalls.get(result.toolCallId);
+			if (!pending) continue;
+			// A review tool emits one control envelope. Multiple review actions are
+			// ambiguous and fail closed rather than selecting a convenient match.
+			if (result.payloads.length !== 1) continue;
+			const data = result.payloads[0];
+			if (data.action !== pending.toolName) continue;
 
-		for (const data of payloads) {
-			if (!isActiveSession()) return;
-			if (data.action === "review_open" && data.title && data.markdown) {
-				if (sessionId) {
-					const title = String(data.title);
-					const hasOpenWorkspaceTab = getSidePanelWorkspace(sessionId).tabs.some((tab) => {
-						if (tab.kind !== "review") return false;
-						const source = tab.source as Record<string, unknown> | undefined;
-						const tabTitle = typeof source?.title === "string" ? source.title : tab.title.replace(/^Review:\s*/, "");
-						return tabTitle === title;
+			if (pending.toolName === "review_open") {
+				const receipt = parseReviewOpenReceipt(data, result.toolCallId);
+				if (receipt) {
+					// Consume before the first await so concurrent/replayed delivery cannot
+					// authorize the same receipt twice. The coordinator retains its outcome
+					// under the exact session/tool-use/payload identity for the originating
+					// renderer and deduplicates an explicit retry while this open is pending.
+					this._pendingReviewToolCalls.delete(result.toolCallId);
+					registerReviewOpenReceipt(sessionId, result.toolCallId, receipt);
+					await openReviewReceipt({
+						sessionId,
+						toolUseId: result.toolCallId,
+						receipt,
+						intent: "automatic",
 					});
-					if (!hasOpenWorkspaceTab && !isLive) return;
+					continue;
 				}
-				// If the user already submitted this review, suppress reopening it on
-				// REPLAY paths (snapshot loop / non-live message_end). The submitted
-				// flag is per-session and persisted server-side; without this gate, a
-				// page reload would re-open a panel the user explicitly submitted.
-				// On a LIVE event (the agent emits a fresh review_open after a prior
-				// submit) we DO want to reopen — fall through and clear the flag.
-				// RP-09.
-				if (!isLive && sessionId && isReviewSubmitted(sessionId)) return;
-				const replace = data.replace !== false;
+				if (data.version === 2) {
+					// A malformed v2 receipt must not downgrade into the inline legacy
+					// path, even if it happens to carry Markdown-shaped fields.
+					this._pendingReviewToolCalls.delete(result.toolCallId);
+					continue;
+				}
+
+				// Read-only compatibility for trusted live v1 controls. Historical
+				// transcript rendering never reaches this method, so inline Markdown
+				// cannot passively recreate an authoritatively absent review.
+				const files = Array.isArray(data.files)
+					? data.files.filter((file: unknown) => !!file && typeof file === "object" && typeof (file as any).markdown === "string")
+					: typeof data.markdown === "string"
+						? [{
+							fileId: typeof data.fileId === "string" ? data.fileId : typeof data.documentId === "string" ? data.documentId : undefined,
+							title: typeof data.title === "string" && data.title.trim() ? data.title : "Review",
+							markdown: data.markdown,
+						}]
+						: [];
+				if (files.length === 0) continue;
+				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
-				if (!isActiveSession()) return;
-				// New review opened on a LIVE event — clear any prior submitted flag
-				// so the panel can reopen on subsequent reconnects. Skip on replay
-				// (the fire-and-forget PUT would race with concurrent server-side
-				// setSubmitted(true) and clobber it on reload). RP-09.
-				if (isLive && sessionId) clearReviewSubmitted(sessionId);
-				if (!isActiveSession()) return;
-				reviewSources.openMarkdownReviewDocument({
-					title: data.title,
-					markdown: data.markdown,
-					replace,
+				reviewSources.openMarkdownReviewGroup({
+					title: typeof data.title === "string" && data.title.trim() ? data.title : "Review",
+					reviewId: typeof data.reviewId === "string" ? data.reviewId : typeof data.documentId === "string" ? data.documentId : undefined,
+					files,
+					activeFileId: typeof data.activeFileId === "string" ? data.activeFileId : undefined,
+					replace: data.replace !== false,
+					live: true,
 					sessionId,
 				});
-			} else if (data.action === "review_close") {
-				const closingTitle = typeof data.title === "string" ? data.title : undefined;
+			} else {
+				this._pendingReviewToolCalls.delete(result.toolCallId);
 				const reviewSources = await loadReviewSources();
-				if (!isActiveSession()) return;
-				const shouldReselect = isReviewWorkspaceSelectionActive(closingTitle);
-				state.reviewDocuments = new Map(state.reviewDocuments);
-				if (closingTitle) {
-					state.reviewDocuments.delete(closingTitle);
-					clearAnnotations(sessionId, closingTitle);
-					reviewSources.removePersistedReviewDocument(sessionId, closingTitle);
-					if (state.reviewActiveTab === closingTitle) {
-						const keys = [...state.reviewDocuments.keys()];
-						state.reviewActiveTab = keys[0] || "";
-					}
-					closeReviewWorkspaceTabs([closingTitle], { sessionId, select: false });
-				} else {
-					state.reviewDocuments = new Map();
-					state.reviewActiveTab = "";
-					clearAllAnnotations(sessionId);
-					reviewSources.clearPersistedReviewDocuments(sessionId);
-					closeReviewWorkspaceTabs(undefined, { sessionId, select: false });
-				}
-				state.reviewPanelOpen = state.reviewDocuments.size > 0;
-				if (shouldReselect) {
-					if (state.reviewPanelOpen && state.reviewActiveTab) {
-						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId, select: true });
-					} else {
-						selectSensiblePanelWorkspaceTab({ sessionId, select: true });
-					}
-				}
-				renderApp();
+				const knownGroups = state.reviewGroupsBySession[sessionId]
+					|| reviewSources.readPersistedReviewGroups(sessionId);
+				const reviewId = typeof data.reviewId === "string" ? data.reviewId : "";
+				const title = typeof data.title === "string" ? data.title : "";
+				const targets = reviewId
+					? knownGroups.filter((group) => group.reviewId === reviewId)
+					: title ? knownGroups.filter((group) => group.title === title) : knownGroups;
+				for (const group of targets) await reviewSources.cleanupReviewGroup(sessionId, group.reviewId);
 			}
 		}
 	}
@@ -2879,7 +2983,30 @@ export class RemoteAgent {
 		this._state.providerAuthRequired = null;
 	}
 
+	private _normalizeAssistantStreamUpdate(event: any): any | null {
+		if (!event || event.type !== "message_update") return event;
+		const expectsCompact = this._assistantStreamDeltaEnabled && event.assistantStreamDelta === 1;
+		const reconstructed: any = event.assistantStreamDelta === 1
+			? reconstructAssistantStreamDelta(event, this._previousRawAssistantStreamMessage)
+			: event;
+		if (event.assistantStreamDelta === 1 && (!reconstructed || reconstructed === event || !reconstructed.message)) {
+			console.warn(`[RemoteAgent] assistantStreamDelta reconstruction failed${expectsCompact ? "" : " (unexpected compact frame)"}; reconnecting for a fresh delta baseline`);
+			this._previousRawAssistantStreamMessage = undefined;
+			// A snapshot alone cannot reset the server's per-socket delta baseline.
+			// Reconnect so auth negotiation marks the replacement socket as needing a
+			// self-contained first update; cumulative replay remains authoritative.
+			try { this.ws?.close(4009, "assistant stream resync"); } catch { this.requestMessages(); }
+			return null;
+		}
+		if (reconstructed?.message?.role === "assistant") {
+			this._previousRawAssistantStreamMessage = reconstructed.message;
+		}
+		return reconstructed;
+	}
+
 	private handleAgentEvent(event: any) {
+		event = this._normalizeAssistantStreamUpdate(event);
+		if (!event) return;
 		// Track current event seq so live-event reducer dispatches use it.
 		const eventSeq = this._highestSeq;
 		// Child frames are a nested projection, never root agent events. Handle the
@@ -2963,8 +3090,18 @@ export class RemoteAgent {
 				break;
 			}
 
+			case "process_exit":
+				// The server clears its delta-chain base on process death. Mirror that
+				// boundary so a replacement agent's self-contained first update is not
+				// incorrectly applied to stale pre-crash content.
+				this._previousRawAssistantStreamMessage = undefined;
+				this._pendingReviewToolCalls.clear();
+				break;
+
 			case "agent_end": {
+				this._previousRawAssistantStreamMessage = undefined;
 				this.streamingMessageId = undefined;
+				this._pendingReviewToolCalls.clear();
 				// Status is owned by `session_status` (server). agent_end is a
 				// signal: streaming-message cleanup + per-tag flag clear + beep + badge.
 				this._state.streamingMessage = null;
@@ -3046,6 +3183,7 @@ export class RemoteAgent {
 				break;
 
 			case "message_end":
+				this._previousRawAssistantStreamMessage = undefined;
 				if (event.message) {
 					let msg = normalizeProposalToolCallInputs(event.message, (id) => this._toolCallInputsById.get(id));
 					if (msg.role === "assistant") {
@@ -3196,6 +3334,8 @@ export class RemoteAgent {
 					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
 					if (input) this._toolCallInputsById.set(id, input);
 					const toolName = typeof event.toolName === "string" ? event.toolName : "";
+					const exactReviewToolName = reviewToolName(toolName);
+					if (exactReviewToolName) this._rememberReviewToolCall(id, exactReviewToolName);
 					const proposalType = toolName.startsWith("propose_") ? toolName.replace("propose_", "") : "";
 					if (input && isProposalType(proposalType)) this._proposalToolCallsById.set(id, { type: proposalType, input: { ...input } });
 				}

@@ -137,7 +137,15 @@ Post-fix follow-ups moved three more store tests onto memfs:
 
 ## Integration fidelity coverage
 
-Real-disk fidelity was preserved, not deleted. Coverage moved to the integration lane so unit tests stay fs-free.
+Real-disk fidelity was preserved, not deleted. Coverage normally moves to the integration lane so unit tests stay fs-free. Native SQLite is an explicit focused exception: production-only behavior needs the real filesystem and native binding, while broad store semantics continue to use memfs.
+
+### Goal and task SQLite production adapters
+
+`GoalStore` and `TaskStore` automatically use SQLite when constructed with the real filesystem. Fixtures using `createMemFs()` select the JSON adapter and create no `.sqlite` files; test-only real-path seams may explicitly request `persistence: "json"`.
+
+Focused native tests remain in `tests2/core/goal-store-sqlite.test.ts`, `task-store-sqlite.test.ts`, and `goal-task-store-lifecycle.test.ts`. They own the narrow production boundaries that memfs cannot prove: transactional import and rollback, SQLite authority metadata, collision-safe hard-link retirement, native-handle release, and Windows directory cleanup. The daily E2E owner, `tests/e2e/goal-task-sqlite-upgrade-restart.spec.ts`, boots a real gateway from legacy JSON, mutates through supported APIs, restarts against the same directory, and inspects authoritative rows only after graceful shutdown.
+
+Packed-consumer native binding load and write/read/close belong to bundle qualification, not the ordinary unit critical path. See [Goal and task store SQLite persistence](../design/goal-task-store-sqlite-persistence.md#test-ownership).
 
 ### Session store real filesystem — `tests2/integration/session-store-real-fs.test.ts`
 

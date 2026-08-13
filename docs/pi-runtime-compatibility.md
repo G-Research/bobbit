@@ -113,7 +113,7 @@ Host and sandbox processes use the same argument builder and receive separate ar
 --provider amazon-bedrock --model eu.anthropic.claude-opus-5 --thinking max
 ```
 
-The provider/model split occurs at the first slash only, preserving slashes inside model IDs. Spawn planning clamps thinking against the exact chosen or role-overridden model before launch. Delegates and host children prefer the owner's durable tuple; team workers apply role model/thinking overrides first and otherwise inherit the lead's durable tuple, with the resulting pair clamped together. Bobbit-owned spawns without an explicit tuple resolve and pin a current selectable catalog model rather than allowing a hidden Pi default.
+The provider/model split occurs at the first slash only, preserving slashes inside model IDs. After all raw arguments and realm wiring are assembled, the final spawn boundary resolves Pi's effective last-wins tuple, preserves requested and effective identity separately, validates the effective model against the exact host or sandbox catalog, and clamps thinking against that row. It then emits one canonical tuple. The same guard covers creation, delegates, restore, role/force-abort replacement, review/QA, fork/continue, host, and sandbox paths; invalid or cross-provider tuples fail before bridge construction.
 
 ### Deferred provider and login surfaces
 
@@ -289,7 +289,7 @@ Claude Fable 5 remains the canary for model metadata preservation because Pi rep
 
 The `off: null` entry means Fable cannot disable adaptive thinking. The `max` entry means Bobbit must keep the `Max` selector option available whenever the live model frame carries that map.
 
-All live and rehydrated `state.model` frames must route through `resolveModelStateMeta(provider, id)` instead of deriving metadata from `inferMeta(id)` alone. The resolver checks the merged registry cache first, then the Pi catalog, then `inferMeta` as a last resort. This matters on reconnect and `get_state`: a plausible fallback can silently drop `thinkingLevelMap.max` and the 1M context window.
+All live and rehydrated `state.model` frames route through `resolveModelStateMeta(provider, id)`. The resolver checks the last exact assembled registry row first, then an exact direct Pi row, and otherwise returns unavailable capability metadata. During a transient AIGW/custom refresh failure, the unchanged source retains its last exact row; identity-matching live fields may be preserved only when exact composition is temporarily unavailable. No family fallback is allowed to invent context, reasoning, modalities, or thinking tiers.
 
 Pinned coverage: `tests2/core/model-state-meta-resolver.test.ts` and `tests2/integration/fable-model-state-frame.test.ts`.
 

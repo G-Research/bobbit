@@ -171,6 +171,14 @@ export class MockAgentCore {
 		this.env = options.env || process.env;
 		this._onEvent = options.onEvent || (() => {});
 		this.conversationMessages = [];
+		// Pi owns two related but intentionally distinct views: model-facing
+		// messages and the append-only session-entry tree. Agent events expose only
+		// messages; durable entry ids are available through read-only session RPCs.
+		this._transcriptEntries = [];
+		this._sessionHeader = null;
+		this._runtimeCwdMetadata = [];
+		this._lastTranscriptEntryId = null;
+		this._nextTranscriptEntrySequence = 1;
 		this.currentModel = mockModelFromString(options.initialModel) || { ...DEFAULT_MODEL };
 		// Pi initializes sessions at its default thinking level and reports the
 		// effective value through get_state after every runtime mutation.
@@ -198,8 +206,70 @@ export class MockAgentCore {
 	/** Override the event emitter (used by child-process mode). */
 	setEventEmitter(fn) { this._onEvent = fn; }
 
-	/** Emit an agent event to the listener */
-	emit(event) { this._onEvent(event); }
+	/** Emit an agent event to the listener. Message events deliberately remain
+	 * id-free: real Pi persists the corresponding SessionEntry only after the
+	 * terminal event. The read-only entry RPCs below are the authoritative cursor
+	 * surface. */
+	emit(event) {
+		this._onEvent(event);
+		if (event?.type === "message_end" && event.message && typeof event.message === "object") {
+			this._appendTranscriptMessage(event.message);
+		}
+		// Pi 0.82 distinguishes a low-level agent_end from the fully durable,
+		// no-more-continuations settlement boundary. History cursor enrichment must
+		// observe the latter, after every terminal message has been persisted.
+		if (event?.type === "agent_end" && event.willRetry !== true) {
+			this._onEvent({ type: "agent_settled" });
+		}
+	}
+
+	_nextTranscriptEntryId() {
+		const occupied = new Set(this._activeTranscriptEntries().map(entry => entry?.id).filter(Boolean));
+		let id;
+		do {
+			id = `mock-entry-${this._nextTranscriptEntrySequence++}`;
+		} while (occupied.has(id));
+		return id;
+	}
+
+	_activeTranscriptEntries() {
+		return Array.isArray(this._postCompactionEntries) ? this._postCompactionEntries : this._transcriptEntries;
+	}
+
+	_appendTranscriptMessage(message) {
+		const entry = {
+			type: "message",
+			id: this._nextTranscriptEntryId(),
+			parentId: this._lastTranscriptEntryId,
+			timestamp: new Date().toISOString(),
+			message,
+		};
+		this._activeTranscriptEntries().push(entry);
+		this._lastTranscriptEntryId = entry.id;
+		this._persistTranscript();
+		return entry;
+	}
+
+	_createSessionHeader() {
+		const uuid = (typeof crypto !== "undefined" && crypto.randomUUID?.()) || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		return {
+			type: "session",
+			version: 3,
+			id: `mock-session-${uuid}`,
+			timestamp: new Date().toISOString(),
+			cwd: this.cwd,
+		};
+	}
+
+	_persistTranscript() {
+		const sf = this.ensureSessionFile();
+		const lines = [
+			JSON.stringify(this._sessionHeader),
+			...this._runtimeCwdMetadata.map(entry => JSON.stringify(entry)),
+			...this._activeTranscriptEntries().map(entry => JSON.stringify(entry)),
+		];
+		fs.writeFileSync(sf, `${lines.join("\n")}\n`);
+	}
 
 	/** Ensure the session .jsonl file exists and return its path */
 	ensureSessionFile() {
@@ -212,7 +282,8 @@ export class MockAgentCore {
 		const ts = new Date().toISOString().replace(/[:.]/g, "-");
 		const uuid = (typeof crypto !== "undefined" && crypto.randomUUID?.()) || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		this.sessionFilePath = path.join(dir, `${ts}_${uuid}.jsonl`);
-		fs.writeFileSync(this.sessionFilePath, "");
+		this._sessionHeader ||= this._createSessionHeader();
+		fs.writeFileSync(this.sessionFilePath, `${JSON.stringify(this._sessionHeader)}\n`);
 		return this.sessionFilePath;
 	}
 
@@ -594,6 +665,56 @@ export class MockAgentCore {
 			return { previewSnapshot: body };
 		}
 
+		// Durable large-review adapter. Unlike the legacy canned review triggers,
+		// this posts the canonical payload through the authenticated production API
+		// and emits the returned bounded receipt as the correlated tool result.
+		const durableLargeReview = text.match(/REVIEW_OPEN_DURABLE_LARGE_20(?:_DELAY:(\d+))?/);
+		if (durableLargeReview) {
+			return { durableLargeReview: { delayMs: durableLargeReview[1] ? Math.max(0, parseInt(durableLargeReview[1], 10)) : 0 } };
+		}
+
+		// Review-group browser triggers. Stable review/file identities make reload,
+		// background-session, close, and replay-suppression assertions deterministic.
+		const reviewGroupAction = (reviewId, title, files) => ({
+			tool: "review_open",
+			input: { title, files: files.map(({ title: fileTitle, markdown }) => ({ title: fileTitle, markdown })) },
+			output: JSON.stringify({ action: "review_open", reviewId, title, files, replace: true }),
+		});
+		const alphaReviewFiles = [
+			{ fileId: "alpha-file-1", title: "Overview.md", markdown: "# Alpha overview\n\nAlpha overview body." },
+			{ fileId: "alpha-file-2", title: "Details.md", markdown: "# Alpha details\n\nAlpha details body." },
+		];
+		const overflowReviewFiles = Array.from({ length: 7 }, (_, index) => ({
+			fileId: `overflow-file-${index + 1}`,
+			title: `Section ${index + 1}.md`,
+			markdown: `# Overflow section ${index + 1}\n\nOverflow body ${index + 1}.`,
+		}));
+		const backgroundReviewFiles = [
+			{ fileId: "background-file-1", title: "Background A.md", markdown: "# Background A\n\nBackground owner content A." },
+			{ fileId: "background-file-2", title: "Background B.md", markdown: "# Background B\n\nBackground owner content B." },
+		];
+		if (lower.includes("review_groups_two")) {
+			return {
+				multiTool: [
+					reviewGroupAction("alpha-review", "Alpha Review", alphaReviewFiles),
+					reviewGroupAction(
+						"overflow-review",
+						"Overflow Review With A Very Long Primary Workspace Tab Title That Must Truncate",
+						overflowReviewFiles,
+					),
+				],
+			};
+		}
+		if (lower.includes("review_group_background_open")) {
+			return reviewGroupAction("background-review", "Background Session Review", backgroundReviewFiles);
+		}
+		if (lower.includes("review_group_background_close")) {
+			return {
+				tool: "review_close",
+				input: { title: "Background Session Review" },
+				output: JSON.stringify({ action: "review_close", title: "Background Session Review" }),
+			};
+		}
 		if (lower.includes("review_multi")) {
 			const docs = [
 				{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
@@ -1017,6 +1138,11 @@ export class MockAgentCore {
 			return;
 		}
 
+		// Give browser journeys a deterministic window to navigate away before a
+		// background session emits its live review_open/review_close result.
+		const reviewGroupDelay = text.match(/REVIEW_GROUP_BACKGROUND_(?:OPEN|CLOSE)_DELAY:(\d+)/);
+		if (reviewGroupDelay) await this.tick(Math.max(0, parseInt(reviewGroupDelay[1], 10)));
+
 		const toolAction = MockAgentCore.respondToPrompt(text);
 
 		if (toolAction && toolAction.toolDenied) {
@@ -1044,6 +1170,8 @@ export class MockAgentCore {
 			await this._handleTeamDelegateCard(toolAction.teamDelegateCard);
 		} else if (toolAction && toolAction.proposalBurst) {
 			await this._handleProposalBurst();
+		} else if (toolAction && toolAction.durableLargeReview) {
+			await this._handleDurableLargeReview(toolAction.durableLargeReview.delayMs);
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
 		} else if (toolAction && toolAction.previewArtifactFileCompactSnapshot) {
@@ -1179,7 +1307,7 @@ export class MockAgentCore {
 		const isManual = reason === "manual";
 		const startType = isManual ? "compaction_start" : "auto_compaction_start";
 		const endType = isManual ? "compaction_end" : "auto_compaction_end";
-		const sf = this.ensureSessionFile();
+		this.ensureSessionFile();
 		const ts = new Date().toISOString();
 		const firstKeptEntryId = "kept-0";
 		const tokensBefore = 50_000;
@@ -1222,7 +1350,8 @@ export class MockAgentCore {
 		});
 		// Persist the full transcript (with ids) and pin it so get_state keeps it.
 		this._postCompactionEntries = entries;
-		fs.writeFileSync(sf, entries.map(e => JSON.stringify(e)).join("\n") + "\n");
+		this._lastTranscriptEntryId = firstKeptEntryId;
+		this._persistTranscript();
 		// getMessages() returns only the active branch post-compaction.
 		this.conversationMessages = [{ id: firstKeptEntryId, ...keptMsg }];
 
@@ -2248,12 +2377,10 @@ export class MockAgentCore {
 	}
 
 	/**
-	 * File-mode counterpart to the compact artifact fixture above. It writes the
-	 * entry below a source subdirectory with a nested declared asset, mounts it
-	 * through the real gateway, and uses the production writer to emit the only
-	 * lossless under-cap marker it can produce: one with the long entry omitted
-	 * but both artifact identity fields retained. Removing the source immediately
-	 * after mounting ensures reopening must use the immutable artifact.
+	 * File-mode counterpart to the compact artifact fixture above. It writes a
+	 * Unicode/dotted entry below a source subdirectory with a nested declared
+	 * asset, mounts it through the real gateway, and removes the source right
+	 * away so reopening must use the immutable artifact.
 	 */
 	async _handlePreviewArtifactFileCompactSnapshot() {
 		const sessionId = this.env.BOBBIT_SESSION_ID;
@@ -2270,7 +2397,7 @@ export class MockAgentCore {
 		}
 
 		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-		const entry = `compact-${"x".repeat(210)}.HTML`;
+		const entry = "résumé.v1.雪.html";
 		const sourceRoot = fs.mkdtempSync(path.join(this.cwd, ".preview-reopen-source-"));
 		const sourceDir = path.join(sourceRoot, "pages");
 		const sourceFile = path.join(sourceDir, entry);
@@ -2367,12 +2494,13 @@ export class MockAgentCore {
 			const payload = JSON.parse(marker.slice("__preview_snapshot_v3__\n".length));
 			if (
 				Buffer.byteLength(marker, "utf8") > 250 ||
-				payload.entry !== undefined || payload.e !== undefined ||
+				payload.entry !== entry ||
+				payload.path !== undefined ||
 				payload.contentHash !== mounted.body.contentHash ||
-				(payload.artifactId ?? payload.aid) !== mounted.body.artifactId ||
+				payload.artifactId !== mounted.body.artifactId ||
 				payload.url !== `/preview/${sessionId}/`
 			) {
-				fail(`file compact snapshot lost a required lossless variant: ${marker}`);
+				fail(`file compact snapshot must retain the canonical entry and identities: ${marker}`);
 				return;
 			}
 		} catch (error) {
@@ -2680,6 +2808,97 @@ export class MockAgentCore {
 		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
+	async _handleDurableLargeReview(delayMs = 0) {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const toolId = `tool_large_review_${Date.now()}`;
+		const title = "Durable 20-file review";
+		const reviewId = "browser-large-review-20";
+		const totalBytes = 485 * 1024;
+		const bytesPerFile = totalBytes / 20;
+		const files = Array.from({ length: 20 }, (_, offset) => {
+			const index = offset + 1;
+			const suffix = String(index).padStart(2, "0");
+			const fileId = `browser-large-file-${suffix}`;
+			const fileTitle = index === 9 || index === 10 ? "Duplicate.md" : `Large file ${suffix}.md`;
+			const marker = `LARGE_REVIEW_MARKER_${suffix}`;
+			const prefix = `# Large file ${suffix}\n\nIdentity: ${fileId}\n\n${marker}\n\n`;
+			const markdown = prefix + "x".repeat(bytesPerFile - Buffer.byteLength(prefix, "utf8"));
+			return { fileId, title: fileTitle, markdown };
+		});
+		const input = {
+			title,
+			replace: true,
+			files: files.map(({ title: fileTitle, markdown }) => ({ title: fileTitle, markdown })),
+		};
+		this.emit({ type: "tool_execution_start", toolName: "review_open", toolId, input });
+		if (delayMs > 0) await this.tick(delayMs);
+
+		let output;
+		let isError = false;
+		try {
+			const response = sessionId ? await this._gatewayPost(
+				`/api/sessions/${encodeURIComponent(sessionId)}/review-payloads`,
+				{
+					toolCallId: toolId,
+					review: {
+						reviewId,
+						title,
+						files,
+						activeFileId: files[0].fileId,
+						replace: true,
+					},
+				},
+				{ "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" },
+			) : null;
+			if (!response || response.action !== "review_open" || response.version !== 2 || response.toolCallId !== toolId) {
+				isError = true;
+				output = JSON.stringify({
+					action: "review_open",
+					version: 2,
+					toolCallId: toolId,
+					error: { code: "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE", retryable: true, message: "Review content could not be prepared." },
+				});
+			} else {
+				output = JSON.stringify(response);
+			}
+		} catch {
+			isError = true;
+			output = JSON.stringify({
+				action: "review_open",
+				version: 2,
+				toolCallId: toolId,
+				error: { code: "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE", retryable: true, message: "Review content could not be prepared." },
+			});
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName: "review_open", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "review_open", isError });
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "review_open", arguments: input, input },
+				{ type: "text", text: "Done. Used review_open tool." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "review_open",
+			isError,
+			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+		// Keep the mock turn streaming until the browser has had an event-loop
+		// window to fetch and hydrate the artifact behind the bounded receipt.
+		// The real agent naturally spends longer after a 485 KiB tool call; without
+		// this adapter delay a status poll can observe idle before the client open
+		// coordinator has published its result.
+		await this.tick(1_000);
+	}
+
 	async _handleSingleTool(toolAction) {
 		// Honor an explicit stable toolId when provided (extension-host litmus), else
 		// the default per-call id. A stable id lets a test correlate the rendered
@@ -2785,8 +3004,8 @@ export class MockAgentCore {
 		}
 	}
 
-	/** Generic gateway POST helper used by seed / edit endpoints. */
-	_gatewayPost(pathname, body) {
+	/** Generic gateway POST helper used by seed, edit, and durable review fixtures. */
+	_gatewayPost(pathname, body, extraHeaders = {}) {
 		const creds = this._gatewayCreds();
 		if (!creds) return Promise.resolve(null);
 		const { gwUrl, token } = creds;
@@ -2800,6 +3019,7 @@ export class MockAgentCore {
 						"Authorization": `Bearer ${token}`,
 						"Content-Type": "application/json",
 						"Content-Length": Buffer.byteLength(payload),
+						...extraHeaders,
 					},
 					timeout: 5_000,
 				}, (res) => {
@@ -2852,6 +3072,11 @@ export class MockAgentCore {
 				// rather than interleave (which would double-assign
 				// currentAbortController and scramble event ordering).
 				const text = msg.message || "";
+				// Make the durable large-review fixture's busy transition observable
+				// before the prompt acknowledgement reaches browser polling helpers.
+				if (text.includes("REVIEW_OPEN_DURABLE_LARGE_20")) {
+					this.emit({ type: "session_status", status: "streaming" });
+				}
 				// Forward images so the echo can build image content blocks under the
 				// ECHO_IMAGE_BLOCK trigger (default text-only echo discarded them).
 				const images = Array.isArray(msg.images) ? msg.images : undefined;
@@ -2861,6 +3086,11 @@ export class MockAgentCore {
 					.catch(err => {
 						console.error("[mock-agent-core] Prompt error:", err);
 					});
+				// This fixture is parsed directly from the in-process transcript. Await
+				// its bounded real-API round trip so the prompt acknowledgement cannot
+				// race the journey's receipt lookup while ordinary mock prompts retain
+				// the production-like immediate acknowledgement.
+				if (text.includes("REVIEW_OPEN_DURABLE_LARGE_20")) await this._promptChain;
 				return { success: true };
 			}
 
@@ -2980,26 +3210,22 @@ export class MockAgentCore {
 
 			case "get_state": {
 				const sf = this.ensureSessionFile();
-				// Real Pi retains top-level runtime cwd headers when serializing state.
-				// Keep their exact raw JSONL lines instead of dropping them while the
-				// mock rewrites its message view.
-				const runtimeCwdHeaders = fs.readFileSync(sf, "utf8").split("\n").filter(line => {
-					try {
-						const parsed = JSON.parse(line);
-						return (parsed?.type === "system" || parsed?.type === "session") && typeof parsed.cwd === "string";
-					} catch {
-						return false;
+				// A few E2E seams replace conversationMessages directly. Rebuild the
+				// mock entry tree only for that explicit mismatch; normal agent turns,
+				// compaction, and switch_session retain their durable ids verbatim.
+				if (!Array.isArray(this._postCompactionEntries)) {
+					const trackedMessages = this._transcriptEntries
+						.filter(entry => entry?.type === "message")
+						.map(entry => entry.message);
+					const externallyReplaced = trackedMessages.length !== this.conversationMessages.length
+						|| trackedMessages.some((message, index) => message !== this.conversationMessages[index]);
+					if (externallyReplaced) {
+						this._transcriptEntries = [];
+						this._lastTranscriptEntryId = null;
+						for (const message of this.conversationMessages) this._appendTranscriptMessage(message);
 					}
-				});
-				// After an AUTO_COMPACT turn, preserve the full on-disk transcript
-				// (orphans + compaction marker + kept tail) WITH top-level ids so a
-				// post-compaction get_state (e.g. refreshAfterCompaction) does not
-				// clobber the ids the orphan-history endpoint splits on.
-				const lines = Array.isArray(this._postCompactionEntries)
-					? this._postCompactionEntries.map(e => JSON.stringify(e))
-					: this.conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
-				lines.push(...runtimeCwdHeaders);
-				fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
+				}
+				this._persistTranscript();
 				return {
 					success: true,
 					data: {
@@ -3013,6 +3239,48 @@ export class MockAgentCore {
 
 			case "get_messages":
 				return { success: true, data: this.conversationMessages };
+
+			case "get_entries": {
+				const entries = this._activeTranscriptEntries();
+				let start = 0;
+				if (msg.since !== undefined) {
+					const cursor = entries.findIndex(entry => entry?.id === msg.since);
+					if (cursor < 0) return { success: false, error: `Entry not found: ${msg.since}` };
+					start = cursor + 1;
+				}
+				return {
+					success: true,
+					data: {
+						entries: entries.slice(start),
+						leafId: this._lastTranscriptEntryId,
+					},
+				};
+			}
+
+			case "get_fork_messages": {
+				const entries = this._activeTranscriptEntries();
+				const byId = new Map(entries.filter(entry => typeof entry?.id === "string").map(entry => [entry.id, entry]));
+				const active = [];
+				const seen = new Set();
+				let current = this._lastTranscriptEntryId ? byId.get(this._lastTranscriptEntryId) : undefined;
+				while (current && !seen.has(current.id)) {
+					active.push(current);
+					seen.add(current.id);
+					current = current.parentId ? byId.get(current.parentId) : undefined;
+				}
+				active.reverse();
+				const messages = active.flatMap(entry => {
+					if (entry?.type !== "message" || (entry.message?.role !== "user" && entry.message?.role !== "user-with-attachments")) return [];
+					const content = entry.message.content;
+					const text = typeof content === "string"
+						? content
+						: Array.isArray(content)
+							? content.filter(block => block?.type === "text" && typeof block.text === "string").map(block => block.text).join("\n")
+							: "";
+					return [{ entryId: entry.id, text }];
+				});
+				return { success: true, data: { messages } };
+			}
 
 			case "set_model": {
 				const provider = msg.provider || "mock";
@@ -3035,18 +3303,16 @@ export class MockAgentCore {
 				return { success: true };
 
 			case "switch_session": {
-				// Faithful to the real pi-agent CLI: rehydrate the conversation from
-				// the given `.jsonl` transcript. Used by restore, Continue-Archived,
-				// and Fork. Without this the mock would drop the cloned history and
-				// forked/continued sessions would open empty in the E2E tier (the
-				// real CLI loads it; the mock previously no-op'd here). The file is
-				// written by `get_state` as newline-delimited {type:"message",message}.
-				// The real CLI also validates runtime cwd metadata before accepting the
-				// transcript; stale archived worktree paths must fail here.
+				// Faithful to the real pi-agent CLI: rehydrate both the visible message
+				// view and its durable append-only entry tree. Used by restore,
+				// Continue-Archived, and Fork.
 				try {
 					const sp = msg.sessionPath;
 					if (sp && fs.existsSync(sp)) {
 						const loaded = [];
+						const entries = [];
+						let sessionHeader = null;
+						const runtimeCwdMetadata = [];
 						for (const line of fs.readFileSync(sp, "utf-8").split("\n")) {
 							const trimmed = line.trim();
 							if (!trimmed) continue;
@@ -3055,10 +3321,25 @@ export class MockAgentCore {
 								if (parsed && (parsed.type === "system" || parsed.type === "session") && typeof parsed.cwd === "string" && !fs.existsSync(parsed.cwd)) {
 									return { success: false, error: `Stored session working directory does not exist: ${parsed.cwd}` };
 								}
-								if (parsed && parsed.type === "message" && parsed.message) loaded.push(parsed.message);
+								if (parsed?.type === "session" && !sessionHeader) {
+									sessionHeader = parsed;
+								} else if (parsed?.type === "system" && typeof parsed.cwd === "string") {
+									runtimeCwdMetadata.push(parsed);
+								} else if (parsed && parsed.type !== "session") {
+									entries.push(parsed);
+									if (parsed.type === "message" && parsed.message) loaded.push(parsed.message);
+								}
 							} catch { /* skip malformed line */ }
 						}
 						this.conversationMessages = loaded;
+						this._transcriptEntries = entries;
+						this._postCompactionEntries = null;
+						this._sessionHeader = sessionHeader || this._createSessionHeader();
+						this._runtimeCwdMetadata = runtimeCwdMetadata;
+						const lastEntry = entries.at(-1);
+						this._lastTranscriptEntryId = lastEntry?.type === "leaf"
+							? (typeof lastEntry.targetId === "string" ? lastEntry.targetId : null)
+							: (typeof lastEntry?.id === "string" ? lastEntry.id : null);
 						this.sessionFilePath = sp;
 					}
 				} catch { /* best-effort — leave existing conversation intact */ }

@@ -266,7 +266,7 @@ describe("shared worktree guard reproductions", () => {
 			makeWorktree(webWorktree);
 
 			const goalState = path.join(tmp, "goal-state");
-			const goalStore = new GoalStore(goalState);
+			const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
 			const goalManager = new GoalManager(goalStore, undefined, undefined, {
 				commandRunner: fakeGitRunner,
 				remotePolicy: { skipRemotePush: true },

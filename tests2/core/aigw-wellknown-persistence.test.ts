@@ -6,8 +6,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-	GATEWAY, loadFixture, normalizeAigwModelString, resetAgentDirStateForTests,
+	GATEWAY, loadFixture, normalizeAigwModelString, removeAigwModelsJson, resetAgentDirStateForTests,
 	translateWellKnown, writeAigwModelsJson,
 } from "./helpers/aigw-wellknown-test-helpers.js";
 
@@ -72,6 +73,97 @@ describe("writeAigwModelsJson — authoritative per-model api/baseUrl", () => {
 			{ id: "shared", upstreamProvider: "second" },
 		] } } }));
 		assert.equal(normalizeAigwModelString("aigw/first/shared"), "aigw/first/shared");
+	});
+
+	it("adds a forward-only marker and Pi 0.82.1 ignores it while loading the model", async () => {
+		const models = translateWellKnown(loadFixture(), GATEWAY);
+		writeAigwModelsJson(`${GATEWAY}/v1`, models);
+		const modelsPath = path.join(tmpAgentDir, "models.json");
+		const data = JSON.parse(fs.readFileSync(modelsPath, "utf-8"));
+		assert.deepEqual(data.providers.aigw["x-bobbit-managed"], {
+			kind: "aigw-publication", version: 1,
+		});
+
+		const runtime = await ModelRuntime.create({
+			modelsPath,
+			authPath: path.join(tmpAgentDir, "auth.json"),
+			allowModelNetwork: false,
+		});
+		assert.equal(runtime.getError(), undefined);
+		const loaded = runtime.getModel("aigw", "gpt-5.6-sol");
+		assert.ok(loaded, "Pi must load models from a provider carrying the marker");
+		assert.equal(loaded.contextWindow, 272_000);
+	});
+
+	it("refreshes only managed fields in marked JSONC and preserves comments and unknown fields", () => {
+		const modelsPath = path.join(tmpAgentDir, "models.json");
+		const original = `{
+  // user root comment
+  "unknownRoot": { "keep": true },
+  "providers": {
+    "anthropic": { "apiKey": "user-secret" },
+    "aigw": {
+      // keep provider comment
+      "x-bobbit-managed": { "kind": "aigw-publication", "version": 1 },
+      "baseUrl": "https://old.invalid/v1",
+      "apiKey": "none",
+      "api": "openai-completions",
+      "headers": { "X-User": "keep" },
+      "models": [],
+      "unknownProviderField": { "keep": true }
+    }
+  },
+  "modelOverrides": { "user": true }
+}
+`;
+		fs.writeFileSync(modelsPath, original);
+		writeAigwModelsJson(`${GATEWAY}/v1`, translateWellKnown(loadFixture(), GATEWAY));
+		const refreshed = fs.readFileSync(modelsPath, "utf-8");
+		for (const preserved of [
+			"// user root comment",
+			"// keep provider comment",
+			'"unknownRoot": { "keep": true }',
+			'"anthropic": { "apiKey": "user-secret" }',
+			'"X-User": "keep"',
+			'"unknownProviderField": { "keep": true }',
+			'"modelOverrides": { "user": true }',
+		]) assert.ok(refreshed.includes(preserved), `expected byte-preserved fragment: ${preserved}`);
+		const parsed = JSON.parse(refreshed.replace(/^\s*\/\/.*$/gm, ""));
+		assert.equal(parsed.providers.aigw.baseUrl, `${GATEWAY}/v1`);
+		assert.ok(parsed.providers.aigw.models.length > 0);
+	});
+
+	it("fails closed and leaves unmarked, malformed, and ambiguous documents byte-identical", () => {
+		const modelsPath = path.join(tmpAgentDir, "models.json");
+		const fixtures = [
+			'{"providers":{"aigw":{"baseUrl":"https://user.invalid","models":[]}},"unknown":true}',
+			'{ "providers": { /* malformed */ ',
+			'{"providers":{},"providers":{"other":{}}}',
+			'{"providers":{"aigw":{},"aigw":{"models":[]}}}',
+			'{"providers":{"aigw":{"x-bobbit-managed":{"kind":"aigw-publication","version":1},"baseUrl":"one","baseUrl":"two"}}}',
+		];
+		for (const fixture of fixtures) {
+			fs.writeFileSync(modelsPath, fixture);
+			assert.throws(
+				() => writeAigwModelsJson(`${GATEWAY}/v1`, translateWellKnown(loadFixture(), GATEWAY)),
+				/refusing|user-owned|duplicate|malformed/,
+			);
+			assert.equal(fs.readFileSync(modelsPath, "utf-8"), fixture);
+		}
+	});
+
+	it("removes only a marked generated provider and never removes an unmarked user provider", () => {
+		const modelsPath = path.join(tmpAgentDir, "models.json");
+		const unmarked = '{"providers":{"aigw":{"baseUrl":"https://user.invalid","models":[]}},"keep":true}';
+		fs.writeFileSync(modelsPath, unmarked);
+		removeAigwModelsJson();
+		assert.equal(fs.readFileSync(modelsPath, "utf-8"), unmarked);
+
+		fs.rmSync(modelsPath);
+		writeAigwModelsJson(`${GATEWAY}/v1`, translateWellKnown(loadFixture(), GATEWAY));
+		removeAigwModelsJson();
+		const removed = JSON.parse(fs.readFileSync(modelsPath, "utf-8"));
+		assert.equal(removed.providers.aigw, undefined);
 	});
 
 });

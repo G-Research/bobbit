@@ -80,7 +80,7 @@ A hidden, synthetic project with id `system` is registered at server startup by 
 
 **Hidden flag.** `hidden: true` causes `GET /api/projects` to filter the project out, so it never reaches the client's `state.projects`. UI surfaces (sidebar grouping, project pickers, settings scope rows) therefore behave as if it doesn't exist and show Headquarters as the server scope instead. Internal lookups by id still resolve normally; lookups by `rootPath` or `cwd` (`findByPath`, `findByCwd`) skip hidden projects so the install dir cannot accidentally match the system anchor.
 
-**StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.json` / `sessions.json` with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
+**StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.sqlite` / `sessions.json` with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
 
 **Iteration contract: `visible()` vs `all()`.** `ProjectContextManager` exposes two iterators. `all()` returns **every** context including the hidden system project — use this for callers that legitimately need it (`getContextForSession`, `findStoreForStaff`, MCP discovery, system-scope tool authoring resolution). `visible()` skips `hidden: true` contexts — use this for worktree sweepers, worktree-pool init, goal-manager pool-resolver wiring, unified worktree maintenance, and the `/api/sessions` + `/api/goals` listing aggregations that back the UI. The cross-project aggregation methods on the manager (`getAllLiveGoals`, `getAllLiveSessions`, `getAllGoals`, `getAllSessions`, `searchAll`) filter hidden internally for the same reason. Iterating hidden via `all()` for worktree/pool flows was the root cause of `pool/_pool-*` branches being allocated in unrelated host repos when the bobbit state dir was nested inside one (pinned by `tests/system-project-pool-leak.test.ts`).
 
@@ -94,11 +94,11 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
 <normal-project-root>/.bobbit/
   config/          # Normal project config
   state/
-    goals.json     # Goals for THIS project
+    goals.sqlite   # Goals for THIS project, one JSON-payload row per goal
     sessions.json  # Sessions for THIS project
-    tasks.json     # Tasks for THIS project's goals
+    tasks.sqlite   # Tasks for THIS project's goals, one JSON-payload row per task
     team-state.json # Team state
-    gates.json     # Gate state and signals
+    gates.sqlite   # Gate state and signals, one row per gate
     staff.json     # Staff agents
     search.flex/       # Durable search mirror + derived FlexSearch cache for THIS project
     session-costs.json # Cost tracking (see session-cost.md)
@@ -110,7 +110,8 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
   # NOTE: live secrets (token, tls/, sandbox-agent-auth/) live under
   # serverSecretsDir() OUTSIDE any project root, not here.
   colors.json       # Session colors
-  goals.json        # Headquarters goals
+  goals.sqlite      # Headquarters goals
+  tasks.sqlite      # Headquarters tasks
   sessions.json     # Headquarters sessions
   staff.json        # Headquarters staff
   system-project/   # Hidden internal system-project anchor
@@ -132,7 +133,7 @@ Directories usually derive from the project's `rootPath`:
 
 For Headquarters, `ProjectContext` uses `bobbitStateDir()` and `bobbitConfigDir()` instead. The context also reuses the standalone server `ProjectConfigStore`, so `/api/project-config` and `/api/projects/headquarters/config` cannot stale-read or clobber each other.
 
-`ProjectContext.open()` initializes the search index and wires mutation hooks so goal/session changes are automatically indexed. `ProjectContext.close()` flushes the session store and closes the search index.
+`ProjectContext.open()` initializes the search index and wires mutation hooks so goal/session changes are automatically indexed. `ProjectContext.close()` is an idempotent barrier: it stops mutation sources, waits for reset recovery, closes the goal, task, and gate SQLite stores alongside the session drain, and then closes remaining durable resources. Every sibling close is attempted before errors are reported, so one failure cannot strand another native handle during Windows directory cleanup.
 
 ### ProjectContextManager
 
@@ -193,9 +194,9 @@ On first startup after upgrading to per-project state, `migrateToPerProjectState
 
 1. Reads central `goals.json`, `sessions.json`, `tasks.json`, `team-state.json`, `gates.json`, `staff.json`
 2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
-3. Merges into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
+3. Merges legacy JSON buckets into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
 4. Staff agents without a `projectId` are anchored to the migration target project (`projectRegistry.getByPath(serverCwd)` if registered, else `projects[0]`). This is **migration-only** behavior - it runs once, is guarded by `.migrated-to-per-project`, and does not imply a runtime default. The block comment on `migrateToPerProjectState()` explains why this anchor is safe and why it must not be reused elsewhere.
-5. Renames central files with `.pre-migration` suffix (not deleted)
+5. Renames central files with `.pre-migration` suffix (not deleted). `GoalStore`, `TaskStore`, and `GateStore` then own their corresponding JSON and recovery sources: each validates and transactionally imports into its separate SQLite authority before collision-safe retirement. The generic recovery pass excludes those three stores so it cannot recreate JSON that SQLite would ignore.
 6. Writes `.bobbit/state/.migrated-to-per-project` marker to prevent re-running
 
 The migration is idempotent and handles missing files gracefully (fresh installs have nothing to migrate). Any legacy central or per-project `search.db` is deleted on first startup under the new code - FlexSearch indexes rebuild automatically on first access (see [Semantic search](#semantic-search)).
@@ -733,7 +734,7 @@ Non-goal, non-assistant sessions normally get their own git worktree branch. Thi
 
 All Bobbit-owned worktree creation is local-only. Sessions, goals and child goals, team members, staff, and pool entries use the same invariant across host/sandbox and single-/multi-repo paths. Legacy `worktreePushPolicy`, `remotePublicationPolicy`, `pushPolicy`, and `skipPush` fields do not opt creation into publication; low-level worktree helpers ignore the deprecated creation options. Explicit push APIs and workflow commands are separate operations.
 
-**Pool branch namespace.** Pool entries pre-create worktrees under the `pool/_pool-<id>` branch prefix (was `session/_pool-*` pre-Phase 3). The `pool/` namespace lets the boot sweeper distinguish pool entries from session worktrees by branch prefix alone, and prevents pool entries from polluting the user's session branch list. Both prefixes (`pool/_pool-*` and the legacy `session/_pool-*`) are recognised on startup so sweeping is idempotent across version upgrades.
+**Pool branch namespace.** Pool entries pre-create worktrees under the `pool/_pool-<id>` branch prefix (was `session/_pool-*` pre-Phase 3). The namespace keeps current-instance pool entries out of the user's session branch list, but it is not ownership proof. At startup, both current and legacy pool-shaped branches may appear in diagnostics; the sweeper does not clean them and a new pool does not adopt them.
 
 **Unborn or unresolved `HEAD`.** Git cannot create a worktree from literal `HEAD` until the repository has an initial commit. Bobbit checks `git rev-parse --verify HEAD` before any implicit-`HEAD` worktree creation path. If a fresh local-only repo has no commits and no configured `base_ref`, regular sessions, staff auto-worktrees, goals, and pool prefill degrade to the same no-worktree behavior used for non-git projects. The warning is actionable (`Make an initial commit to enable worktrees`) and avoids surfacing raw `fatal: invalid reference HEAD` as the primary error.
 
@@ -779,28 +780,23 @@ Before deleting a host worktree, cleanup checks persisted sessions across visibl
 - `cwd` - protects the candidate when the live session cwd is the same path or a child of it, which covers subdirectory projects.
 - `repoWorktrees` - every per-repo worktree path in a multi-repo session.
 
-Normalization is intentionally host-path focused: paths are trimmed, backslashes are treated as forward slashes, trailing separators are ignored, and comparison is case-insensitive. This lets Windows and Linux-style separators, casing differences, and stored `cwd` offsets compare consistently. It is not a broad ownership lock: if no live session references the normalized path, true orphan cleanup is still allowed.
+Normalization is intentionally host-path focused: paths are trimmed, backslashes are treated as forward slashes, trailing separators are ignored, and comparison is case-insensitive. This lets Windows and Linux-style separators, casing differences, and stored `cwd` offsets compare consistently. It is not ownership proof: absence of a live reference does not authorize cleanup of a discovered worktree.
 
-Protected cleanup paths include archived-session purge, manual maintenance orphan listing and cleanup, boot worktree sweeper classification/cleanup, multi-repo goal archive cleanup, and setup-failure cleanup. The existing delegate skip remains, but shared-path detection is the authoritative protection.
+The guard applies to normal exact-owned lifecycle cleanup, archived-session Maintenance cleanup, multi-repo goal archive cleanup, and setup-failure cleanup. Boot discovery itself is non-destructive. The existing delegate skip remains, but shared-path detection is the authoritative protection once an owning lifecycle has independently authorized cleanup.
 
-**Boot sweeper.** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
+**Boot sweeper.** `worktree-sweeper.ts` scans `.git/worktrees/*` against persisted session/goal/staff records for diagnostics. Boot never repairs or removes a worktree discovered from Git metadata, branch naming, or root placement, and a fresh pool never adopts a pool-shaped leftover from an earlier process.
 
-- `pool/_pool-<id>` worktrees not in the in-memory pool - reclaimed.
-- Legacy `session/_pool-*` entries (pre-Phase 3) - also recognised.
-- Orphaned `session-<id8>/` directories not owned by any persisted, non-archived session - scheduled for cleanup.
-- Legacy `session-<slug>-<id8>/` and `session-new-session-<id8>/` directories left over from pre-rename-removal sessions - tolerated while a live session row still references them, otherwise treated as orphans (back-compat for sessions that survive an upgrade).
+The pre-refactor "renamed-but-orphaned" branch (server died between branch-rename and row-persist) is gone - that race no longer exists because the rename happens synchronously inside `pool.claim()` before the session row is published. See [Preserve user worktrees](design/preserve-user-worktrees.md) for the authoritative discovery, Maintenance, and restart policy.
 
-The pre-refactor "renamed-but-orphaned" branch (server died between branch-rename and row-persist) is gone - that race no longer exists because the rename happens synchronously inside `pool.claim()` before the session row is published. See [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md) §13 for the full classification table.
-
-This means crash recovery doesn't require the user to manually clean up pool detritus.
+**Graceful pool shutdown.** After new work is fenced and boot initialization settles, the gateway snapshots the live per-project pools and starts `stop()` on all of them before any drain. Each stop and drain is bounded to 15 seconds. Only pools whose stop succeeds are drained, and drain snapshots only ready entries still held by that instance; successful claims have already left the pool. Tracked claim-failure cleanup participates in the stop barrier. Both that cleanup and single-/multi-repo drain cleanup force `skipRemotePush: true`, because pool branches are local-only. Failure or timeout may leak an entry but cannot block later pools or gateway teardown. A later boot reports any leftover diagnostically and neither adopts nor automatically cleans it.
 
 **Lifecycle:**
 
 1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name; on first claim the pool entry's `pool/_pool-<id>` is renamed once to `session/<id8>` (or the goal branch as appropriate). Staff worktrees are provisioned by `StaffManager` directly and use the same project worktree-root/base-ref/component setup helpers when auto mode chooses a worktree. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, staff provisioning, and team member spawning.
 2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget reports branch, upstream, ahead/behind, and dirty state without mutating local or remote refs. Explicit push/pull controls remain available when publication or sync is intentionally needed.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox) only after the shared worktree deletion guard confirms no other non-archived session still references the same host path.
-4. **Maintenance cleanup**: If Bobbit-created host worktrees outlive their active owner, Settings → Maintenance → Worktree Cleanup can remove only fresh server-classified safe candidates without purging archives or other durable records. The unified inventory keeps archived metadata as provenance, skips rows protected by live sessions/goals/teams/delegates/staff, evaluates multi-repo component worktrees independently, treats branch-only leftovers as already cleaned, and leaves filesystem-only directories as needs-attention by default. Legacy orphaned and archived-session worktree REST routes are compatibility filters over the same inventory. See [maintenance.md](maintenance.md#worktree-cleanup).
-5. **Restore**: After a restart, existing session worktrees are reused - the server reconnects to the worktree on disk without recreating it. Repair/recovery may fetch and rebuild a missing worktree from the persisted local branch, but never pushes that branch. If its remote counterpart was deleted, recovery leaves it deleted.
+4. **Maintenance cleanup**: Settings → Maintenance → Worktree Cleanup may remove only an archived session worktree whose durable repository, current Git worktree path, and non-empty branch match exactly and still match on the immediate pre-cleanup scan. Ordinary and Bobbit-shaped Git worktrees without that proof are ownership-unverified, non-actionable diagnostics in canonical and legacy adapters; filesystem-only directories also remain needs-attention. Live session/goal/team/delegate/staff and multi-repo component guards still apply, and cleanup does not purge archives or other durable records. See [maintenance.md](maintenance.md#worktree-cleanup) and [Preserve user worktrees](design/preserve-user-worktrees.md).
+5. **Restore**: After a restart, existing session worktrees are reused - the server reconnects to the worktree on disk without recreating it. Repair/recovery may fetch and rebuild a missing worktree only from an exact persisted session record, but never pushes that branch. If its remote counterpart was deleted, recovery leaves it deleted. Discovered leftovers without exact durable identity remain diagnostic-only.
 
 **Session creation modes:** The session-setup pipeline (`src/server/agent/session-setup.ts`) handles these modes, all routed through the same plan/execute structure:
 
@@ -809,10 +805,14 @@ This means crash recovery doesn't require the user to manually clean up pool det
 | Normal (assistant) | `POST /api/sessions` for assistant types (goal/project/tool) | No | No |
 | Worktree | `POST /api/sessions` for non-goal, non-assistant sessions in a git repo | Yes (auto) | No |
 | Delegate | Parent session spawns a child via the `team_delegate` tool (or the `host.agents` pack capability) — both go through `OrchestrationCore`; see [orchestration.md](orchestration.md) | Inherits parent cwd | No |
-| Fork (Pi) | `POST /api/sessions/:id/fork` | Fresh by default; can reuse the source cwd/worktree with `newWorktree:false` | No - agent CLI rehydrates from a clone of the source `.jsonl` |
-| Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | Pi: no - agent CLI rehydrates from a cloned `.jsonl`; SDK: no - a fresh Bobbit wrapper resumes the same opaque SDK UUID |
+| Fork (Pi) | `POST /api/sessions/:id/fork` | API/whole-session default is fresh; historic prompt UI defaults to borrowing the exact source cwd with `newWorktree:false` | No - agent CLI rehydrates from a whole or cut-before clone of the source `.jsonl` |
+| Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | Pi: no - agent CLI rehydrates from a cloned `.jsonl`; SDK: no - a fresh Bobbit wrapper resumes the persisted opaque SDK UUID |
 
-The clone and `switch_session` steps are Pi-only. Pi Fork and Continue-Archived clone transcript history; old cwd candidates let `session-setup.ts` rebase only top-level runtime cwd metadata before `switch_session`, never user or assistant message content. SDK Continue instead validates its persisted UUID/model tuple and resumes SDK-owned history; live SDK Fork is rejected before destination allocation. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md). Fork stale-source coverage is pinned in `tests/e2e/sidebar-actions-server.spec.ts`.
+Pi Fork and Continue-Archived clone transcript history and hand that clone to the agent with `switch_session`. A fork request with a durable Pi `entryId` materializes only the source's active ancestors strictly before that prompt; the selected and later entries are not copied. Any path values copied from the source runtime must be treated as provenance, not as the fork/continue runtime. Their handlers therefore pass old cwd candidates as `preExistingAgentSessionOldCwds` so `session-setup.ts` can rebase only top-level runtime cwd metadata before `switch_session`. User and assistant message content is not inspected or rewritten, so ordinary mentions of old paths remain byte-identical.
+
+Claude Agent SDK Fork is deliberately unsupported: the route returns `422 RUNTIME_FORK_UNSUPPORTED` before destination allocation because Bobbit has no reviewed atomic SDK fork lifecycle. SDK Continue validates the persisted SDK UUID and model tuple, then resumes provider-owned history without copying Pi transcript data. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md).
+
+A historic fork with `newWorktree:false` is marked `borrowsWorktree` and carries no teardown coordinates. This allows the destination to remain writable in the source's exact cwd while preventing termination and restore/recovery from removing or recreating the shared host or sandbox worktree. For sandbox reuse, `borrowedWorktreeOwnerSessionId` records the flattened final owner even when the source is itself a borrower. Creation and termination/archive operations serialize through a FIFO keyed by that owner; owner teardown fails before mutation with typed `409 SHARED_SANDBOX_WORKTREE_IN_USE` while any borrower remains. Project deletion therefore terminates borrowers before owners, then refuses project-context removal with typed `409 PROJECT_SESSIONS_STILL_ACTIVE` if a concurrent launch or replacement leaves survivors. Fresh mode continues through the established owned-worktree lifecycle. See [Fork session endpoint](rest-api.md#fork-session-endpoint) for cursor validation, sidecar filtering, lifecycle errors, and retry behavior; source-cwd rebasing coverage remains pinned in `tests/e2e/sidebar-actions-server.spec.ts`.
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
 
@@ -963,15 +963,11 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 - `goalId`, `teamGoalId`, `teamLeadSessionId`, `delegateOf` - guaranteed absent because the scope gate rejects those source types up front
 - Task/gate signals, streaming state, tool state
 
-**Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. Assistant sessions (`assistantType` set) are accepted and inherit `assistantType`, `role`, and `accessory`. Pi Continue also clones the source proposal-draft directory so the resumed agent picks up the in-progress draft; SDK Continue copies no Pi proposal sidecar. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table and [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the Pi assistant-continue flow.
+**Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. Assistant sessions (`assistantType` set) are accepted — the new session inherits `assistantType`, `role`, and `accessory`, and the source's proposal-draft directory is cloned into the new session's slot so the resumed agent picks up the in-progress draft. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table and [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the assistant-continue flow.
 
-**Runtime-aware conversation carry-over**: Pi Continue-Archived clones the archived `.jsonl` and lets the agent CLI rehydrate through `switch_session`, preserving conversation content without a byte budget, system-prompt section, or Summary vs Full distinction. Runtime-only Pi metadata may be rebased for the fresh runtime. SDK Continue never reads or clones Pi data: it resumes SDK-owned history through the persisted opaque UUID. See [Lossless Continue-Archived](design/lossless-continue-archived.md) for the Pi contract and [Claude Agent SDK sessions](claude-agent-sdk-sessions.md) for the SDK contract.
+**Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB - any non-trivial session was truncated. The endpoint now clones the source `.jsonl` and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Conversation and user-visible transcript content remain lossless, with no byte budget, system-prompt section, or Summary vs Full distinction. Runtime-only Pi metadata inside the JSONL, such as Pi `session` cwd records or `system`/`init` cwd records, may be rebased so the clone can load in the fresh runtime. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
 
 **Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
-
-**SDK branch, before Pi step 1:** validate the exact persisted `claude-agent-sdk` model tuple and resume UUID, then preflight the official SDK session-info lookup with the persisted cwd **before** allocating a destination or creating a worktree/session row. Invalid metadata returns `422 RUNTIME_CONTINUE_UNSUPPORTED`; an unavailable source returns the opaque `503 SDK_SESSION_UNAVAILABLE` category; both create nothing. A valid source creates a fresh Bobbit wrapper using the same UUID as SDK `resume`. It does not clone JSONL, tool-content, proposal, or author sidecars, and never sends `switch_session`.
-
-**Pi branch:**
 
 1. Resolve the source `agentSessionFile` from `getPersistedSession(archivedId)`. Falls back to `sessionManager.recoverSessionFile(ps)` (promoted to public) for legacy persisted rows that never carried the field. Missing on both paths → **404**.
 2. Compute the destination path via `formatAgentSessionFilePath(cwd, createdAtMs, sessionId)` in `src/server/agent/agent-session-path.ts`. Format matches the agent CLI's own naming under the startup active `<agentDir>/sessions/--<cwd-slug>--/<isoTs>_<uuid>.jsonl`, so the path round-trips through `recoverSessionFile`'s parser regex.
@@ -989,8 +985,6 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 **Fresh worktree failure reporting**: If the source was worktree-backed and the current project repo/base ref is invalid, Continue returns the fresh-create failure from the current project setup path. Pool miss, `claim()` returning `null`, and `claim()` throwing are not surfaced as API errors; they fall back to cold creation first. The final error, if any, should mention the current repo/base/worktree problem, not the archived source `worktreePath` or `branch`, because those archived fields are not dependencies. Regression test: `tests/e2e/continue-archived-worktree-invalid-base.spec.ts`.
 
 **Title**: The new session is titled `Continued: <original title>` and marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
-
-The remaining clone, rebase, cleanup, and key-file details in this section describe the **Pi branch**. SDK Continue has no cloned Pi artifacts or sidecars; its history and resume semantics are defined by [Claude Agent SDK sessions](claude-agent-sdk-sessions.md).
 
 **Key files:**
 
@@ -1017,7 +1011,9 @@ When a client opens an archived session, the WebSocket handler in `src/server/ws
 
 ### Sidebar grouping
 
-The sidebar always groups sessions and goals under collapsible project folder rows - even with a single project. This unified code path avoids duplication between single-project and multi-project layouts.
+The sidebar has two persisted session views. The [approved specification](design/session-manager-sidebar-views.md) defines their behavior, and the [interactive mock](design/mockups/session-manager/README.md) defines the expanded desktop presentation. This section documents the implementation boundaries rather than repeating those contracts.
+
+**By Project** groups sessions and goals under collapsible project folder rows, even with a single project. This remains the production hierarchy:
 
 ```
 ├── Project A (collapsible)
@@ -1029,6 +1025,18 @@ The sidebar always groups sessions and goals under collapsible project folder ro
 │   ├── ...
 ├── [+ Add Project]
 ```
+
+**By Status composition.** `buildSidebarTreeModelWithSearch()` remains the shared eligibility, archive, and search pipeline. By Project renders that tree; By Status passes the same model to `collectEligibleStatusSessions()`, which walks the complete `flatByKey` index without consulting expansion, adds staff through the production staff-session adapter, and deduplicates by session id with live and staff-backed representations preferred. The pure `selectSidebarStatusSections()` helper then applies visibility gates, assigns each row once to Pinned, Unread, or Read, and sorts deterministically. Keeping the tree upstream prevents the flat view from exposing sessions that the production sidebar suppresses.
+
+**Shared presentation and actions.** Status candidates call the canonical live or archived row renderer with flat tree chrome. The action builders are also shared: Pin / Unpin is a non-quick descriptor, while Modify, Terminate or End team, archive-safe actions, extension actions, keyboard behavior, and the `Menu` trigger retain their existing eligibility and ordering. This prevents the alternate grouping from becoming a second session-row implementation.
+
+**Preferences and archive ownership.** The view-preference adapter owns the selected view and independent Project and Status filter values. Existing Archived, Busy, and Read shortcuts write to the active view; Show teams is rejected for By Project. Both views share the normal archive pages and search results, so archive data is cleared only when neither view nor ephemeral archived search still needs it. View switches therefore preserve pagination, search, expansion, and the inactive view's filters.
+
+**Tags and pin durability.** Session-list serialization attaches fresh `server_tags` and normalized durable `user_tags` through the shared tag helpers. Server tags project the canonical unread, activity, archive, team, project, and goal policies and are never persisted; `user_tags` lives on the session record. By Status deliberately uses the same client unread and busy classifiers as the existing row treatment, rather than interpreting tag strings as a competing policy.
+
+Pin mutations are serialized per session on both sides. The client immediately overlays the newest local intent across loaded live and archived representations, queues rapid clicks, reconciles the authoritative response, and restores the last committed shape on failure. While that queue is active, stale list snapshots and `sessions_changed` frames cannot overwrite the newest intent. The server normalizes only the `pinned` key, preserves unrelated user tags, waits for the session-store durability fence, and restores the exact legacy field shape if that fence fails. Only a successful durable mutation is broadcast to authenticated UI clients; the API contract is documented under [Session list tags and pinning](rest-api.md#session-list-tags-and-pinning).
+
+**Regression coverage.** Core tests pin tag policy, flattening, exclusive grouping, sorting, search bypass, and independent preferences. DOM tests pin canonical action order plus optimistic sequencing and rollback. Integration tests cover validation, live/dormant/archived persistence, failure compensation, call-order concurrency, serialization, and UI-only propagation. The registered browser journey exercises the production renderers across desktop, mobile, and collapsed surfaces; the gateway E2E test proves pin and archived-unpin durability across restarts.
 
 When only one project is visible, its folder row defaults to expanded so there is no extra click required. A fresh server normally has one visible project: Headquarters. Headquarters uses the Lucide `TowerControl` icon, is a reorderable project (carries a `position` field and can be dragged like any other), and has no destructive project actions. If the user hides Headquarters and no normal projects remain, the sidebar shows a fallback with **Quick Session in Headquarters**, **Show Headquarters**, and **Add Project** instead of a dead-end "No projects configured" state.
 
@@ -1048,7 +1056,7 @@ The per-project "+ goal" button on each project row bypasses the popover - the p
 
 Staff agents are project-scoped permanent sessions: each staff record carries a `projectId`, lives in that project's `staff.json`, and runs either in the project root/subdirectory or in a project-derived `staff-<name>-<id>` worktree. Each project group in the sidebar renders a dedicated, collapsible **Staff** sub-section between the project's goals and its ungrouped Sessions list. The sub-section is rendered by `renderStaffSidebarSection` in `src/app/sidebar.ts` (the same helper drives desktop and mobile — it branches internally on `isDesktop()`).
 
-The sub-section is always present, even when the project has zero staff, so users have a stable place to create their first one. This includes Headquarters on a fresh server, so New Staff does not require adding a normal project first. Its header carries a `Bot` icon, the **Staff** label, and two action buttons that mirror the project header's quick-actions: **Manage staff** (`List` icon → `#/staff`) and **New staff** (`Plus` icon → `startNewStaffFlow(e, project.id)`). Individual staff rows get the same active / unread / last-activity treatment as ordinary sessions, plus a hover-action pencil that opens `#/staff/<id>`. Staff whose current session is archived under a goal render in that goal's archived sub-section instead, never duplicated into Staff.
+The sub-section is always present, even when the project has zero staff, so users have a stable place to create their first one. This includes Headquarters on a fresh server, so New Staff does not require adding a normal project first. Its header carries a `Bot` icon, the **Staff** label, and two action buttons that mirror the project header's quick-actions: **Manage staff** (`List` icon → `#/staff`) and **New staff** (`Plus` icon → `startNewStaffFlow(e, project.id)`). Individual staff rows reuse the ordinary session title and last-activity presentation, including matching typography, active / unread state, and mobile activity shimmer. Their quick actions and hamburger expose the canonical session actions, with **Modify** relabelled to **Edit staff** and routed to `#/staff/<id>`. Staff whose current session is archived under a goal render in that goal's archived sub-section instead, never duplicated into Staff.
 
 **Staff are not merged into Sessions.** Created staff agents live exclusively in the Staff sub-section. The staff-creation **assistant session** (`assistantType: "staff"`) is a transient normal session and shows up in the project's Sessions list while open — only the persisted staff record that results from accepting `propose_staff` moves into Staff. Sidebar classification uses `state.staffList[*].currentSessionId` as the exclusion set for permanent staff-agent sessions. Do not filter regular sessions by `assistantType === "staff"`: that value belongs to the staff-creation assistant, which must stay in regular Sessions.
 
@@ -1068,7 +1076,7 @@ The client treats `staff_changed` as a combined staff-and-session invalidation. 
 
 **Per-project Archived subsections**: Each project group ends with its own collapsible Archived subsection (rendered by `renderProjectArchivedSection` in `src/app/render-helpers.ts`, shared between desktop `renderSidebar` (`src/app/sidebar.ts`) and mobile `renderMobileLanding` (`src/app/render.ts`) so both breakpoints render identically). Bucketing is currently split: desktop uses an inline loop in `sidebar.ts` that emits `console.warn` for orphaned items, while mobile uses the `bucketArchivedByProject` helper in `render-helpers.ts` which silently drops unmatched items. The global Archived block that used to sit at the bottom of the sidebar is gone.
 
-- **Global visibility toggle**: The bottom-bar "See Archived" button (localStorage `bobbit-show-archived`, state `state.showArchived`) still controls whether any archived content is rendered at all. It is global, not per-project - one toggle flips every per-project Archived subsection at once. This keeps the user-visible UX contract of the pre-existing toggle unchanged.
+- **By Project visibility toggle**: By Project retains the production `bobbit-show-archived` preference. One value controls every project's Archived subsection, while By Status keeps an independent value and both views reuse the same loaded archive pages.
 - **Per-project collapse state**: Each project's Archived subsection defaults to **expanded** when `showArchived` is on; users can collapse individual projects' subsections independently. The preference is persisted through the unified sidebar tree-state namespace with a `project-archived` key. Default-expanded is deliberate: before the per-project split there was no intermediate "collapsed but visible" state, so expanded-by-default preserves the old behaviour of "See Archived on = archived items are visible".
 - **Orphaned-item fallback**: Archived goals or sessions whose `projectId` is missing or does not resolve to a registered project are bucketed into the first project's Archived subsection so they remain visible to the user rather than silently disappearing. This is a UI rendering fallback for data inconsistencies - it does not imply a runtime default project on the server side. On desktop the fallback emits a `console.warn` to make the inconsistency debuggable; on mobile (via `bucketArchivedByProject` in `render-helpers.ts`) the fallback is silent.
 - **Pagination**: Archived goals and sessions are fetched through the archived list endpoints: `GET /api/goals?archived=true` and `GET /api/sessions?include=archived`. With no sidebar query, the "Load more archived goals..." / "Load more archived sessions..." buttons are rendered **once**, below the project list, not per project, and page by `archivedAt` recency. With an active sidebar query, normal archive pagination is replaced by query-aware pagination against `q`-filtered results; the controls become "Load more matching archived goals..." / "Load more matching archived sessions..." and keep the active query instead of loading arbitrary non-matching pages.
@@ -1360,7 +1368,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 
 ### Data flow
 
-1. **Server stores** `lastReadAt?: number` on `PersistedSession` (see `src/server/agent/session-store.ts`). It is included in `UpdatableSessionFields` so writes go through the normal `SessionStore.update()` path with disk persistence.
+1. **Server stores** `lastReadAt?: number` on `PersistedSession` through the normal session-store update path. Routine activity writes remain debounced, but `SessionManager.markSessionRead()` awaits the store's async flush before `POST /api/sessions/:id/mark-read` returns `{ ok: true }`. A persistence failure returns an error instead of falsely acknowledging a read, so every successful response is a durability barrier for an immediate graceful stop/start.
 2. **Server exposes** `lastReadAt` in session-list payloads - `GET /api/sessions` (via `listSessions()`) and the archived-sessions list (via `listArchivedSessions()`). The field is threaded through both the live and archived `SessionSummary` shapes in `session-manager.ts`. The single-session `GET /api/sessions/:id` endpoint and the WS `messages` frame (which carries chat transcript, not session metadata) do not include `lastReadAt` - the client only needs it for the sidebar list, which is hydrated from the list endpoint.
 3. **Client computes unseen-ness locally** in `src/app/render-helpers.ts::hasUnseenActivity` by comparing `session.lastActivity > (session.lastReadAt ?? 0)`. No round-trip is needed to render the dot.
 4. **On navigation**, the sidebar calls `markSessionVisited(sessionId)` which (a) updates an in-memory mirror so the dot disappears on the very next render, and (b) fires `POST /api/sessions/:id/mark-read` so other browsers learn on their next refresh. The endpoint is backed by `SessionManager.markSessionRead`, which uses `resolveStoreForId` so live, dormant, and archived sessions are all markable.
@@ -1376,27 +1384,23 @@ Two invariants live in `hasUnseenActivity` and must be preserved by any future r
 
 Existing users have a `bobbit-session-visited` map in `localStorage` from before the server-side feature. `migrateLegacyVisitedMap` in `src/app/render-helpers.ts` is invoked once post-auth from `src/app/main.ts`: it POSTs `mark-read` for each entry, then deletes the localStorage key. The migration is idempotent - re-running it is a no-op once the key is gone - and non-fatal: a network error leaves the legacy key intact for a retry on the next load. New users never have the key and skip the migration entirely.
 
-### `lastActivity` preservation across restart
+### `lastActivity` attribution across restart
 
-`lastReadAt` is only useful if `lastActivity` is itself trustworthy across a server restart. The persisted timestamp on disk is correct, but three paths in `session-manager.ts` install rpc-event listeners that mutate `session.lastActivity` after re-attaching to a fresh `RpcBridge`:
+`lastReadAt` is useful only if `lastActivity` distinguishes new work from transport replay. A restored bridge can emit history, lifecycle, model, and thinking events on either side of the `switch_session` response. Response timing therefore cannot prove that a later frame is new: treating it as such stamps unrelated sessions with restart-time activity and makes previously read sessions look unread.
 
-- `restoreSession()` - server startup restores persisted sessions concurrently (CONCURRENCY=5).
-- The role-restart path - swaps the bridge after a role change.
-- The abort-restart path (`restoreFromAbort`) - swaps the bridge after a force-abort.
+**Origin transaction.** The activity attributor starts each prompt or steer attempt with a unique in-memory attempt token. Beginning is side-effect free: it neither changes `lastActivity` nor releases restore quarantine. The exact token commits only when its RPC returns a positive acknowledgement or when the manager correlates an exact, trusted, unambiguous terminal user `message_end` with that attempt. Commit advances activity once and releases quarantine. A negative acknowledgement or throw cancels only its exact pending attempt; if the terminal echo committed first, the later failure is a stale acknowledgement and cannot requeue accepted intent. Durable queue-row identity stays separate from attempt identity so a redrain cannot be accepted by an older callback.
 
-All three bridges emit `switch_session` history replay frames followed by lifecycle frames on resume (`agent_start`, `agent_idle`, `connection_state`, `state`, `session_title`, etc.). Without a guard, every one of those frames would call `session.lastActivity = Date.now()` and clobber the persisted value. The original guard - a `restoring` / `switchingSession` flag flipped to `false` after `switch_session` resolves - was insufficient because lifecycle frames continue to fire after the flag clears, and under concurrent restore every restored session ended up clustered at restart time with identical timestamps.
+Bridge replacement re-enters quarantine and cancels all pending tokens owned by the replaced attribution installation. Late acknowledgements from the old bridge are therefore inert. Cold restore, role and abort restart, dormant revival, continuation, and other replacement paths install the same attributor rather than implementing local timing rules.
 
-**Single source of truth**: the exported helper `isUserVisibleActivity(event)` at the top of `src/server/agent/session-manager.ts`. It returns `true` only for events that represent real new turn activity:
+**Replay ambiguity fence.** Pi does not always provide a stable message ID or timestamp, so an old cancelled or settled keyless occurrence can have the same text as a current retry. Both cancelled attempts and restored, already-settled occurrences without a stable key use one bounded fence. It retains only keyed digests of exact Pi-facing text—never raw prompt text—and is capped at 256 records and 64 KiB per session. If a record cannot be represented or either cap is exceeded, overflow becomes sticky across replacement and hydration. An explicit zero-row result from restored author-sidecar hydration also marks this shared ambiguity state sticky and fail-closed because the compatibility reader cannot distinguish a missing, wholly corrupt, future-version, legacy, or genuinely empty sidecar. Raw same-text user events then cannot accept a current attempt before acknowledgement; a positive RPC acknowledgement remains authoritative. The reader does not represent partial sidecar completeness, so a non-empty compatibility result must not be described as proof that every row survived. This spends bounded memory while preferring a recoverable retry over falsely attributing replay as new work.
 
-- `message_update`
-- `message_end`
-- `tool_execution_start`
-- `tool_execution_end`
-- `agent_end`
+**Event meaning.** The generic activity classifier excludes both `message_update` and `message_end` for `user` and `user-with-attachments` roles. The prompt transaction is the sole writer of a user prompt's activity timestamp: a user `message_update` may establish correlation and visible projection progress, but never commits the attempt, releases quarantine, settles its author-sidecar occurrence, or retires queue/steer recovery ownership. A positive RPC acknowledgement can still commit that transaction exactly once; an exact trusted terminal user `message_end` may instead commit it through manager correlation, then settle the occurrence and retire its exact recovery ownership. An ambiguous terminal projection remains buffered for a positive acknowledgement.
 
-Everything else returns `false`, including all lifecycle frames, `auto_compaction_*`, `process_exit`, container `died`/`recovered` events, and `gate_verification_*` frames. All three rpc-event listeners now wrap the `session.lastActivity = Date.now()` bump in `if (isUserVisibleActivity(event))`. The pre-existing `restoring` / `switchingSession` flags are retained for cost-tracking but no longer relied on for `lastActivity`. The dormant-session path (`addDormantSession`) preserves `ps.lastActivity` directly and is unaffected.
+After a genuine prompt origin opens the boundary, assistant message progress/completion, tool execution, and a non-retryable final `agent_end` remain generic user-visible activity. Lifecycle/status/model/thinking frames, history hydration, and `{ type: "agent_end", willRetry: true }` are not.
 
-Locked by `tests/session-restore-last-activity.test.ts` - source-scan assertions verify all three sites import the helper, and behavioural tests verify (a) lifecycle frames don't bump, (b) real activity does bump, and (c) concurrent restore of N sessions with widely-varied pre-restart timestamps does not cluster them.
+Every activity write is strictly monotonic: the next value is at least the current clock value and greater than both the prior `lastActivity` and persisted `lastReadAt`. Genuine work therefore becomes unread even when read and activity events share a millisecond. Restore-only traffic preserves both timestamps; routine activity writes remain debounced. Notification policy remains separate, so team-member suppression and human-attention rules are unchanged.
+
+Core coverage exercises rejected direct prompts and steers, positive/negative acknowledgement races, exact keyed and keyless echoes, queue redrains, bridge replacement, bounded overflow, terminal settlement, and same-millisecond monotonicity. The restart journey marks sessions read, performs a graceful gateway restart, verifies exact persisted timestamps and indicators, then proves genuine new work becomes unread.
 
 ### Client must not mutate `lastActivity`
 
@@ -1410,17 +1414,19 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 
 | File | Role |
 |---|---|
-| `src/server/agent/session-store.ts` | `PersistedSession.lastReadAt` field + `UpdatableSessionFields` entry |
-| `src/server/agent/session-manager.ts` | `markSessionRead()`; `lastReadAt` in `SessionSummary` payloads; `isUserVisibleActivity()` filter applied at `restoreSession`, role-restart, and abort-restart event listeners |
-| `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
+| `src/server/agent/session-store.ts` | Timestamp persistence, debounced activity writes, and `flushAsync()` durability barrier |
+| `src/server/agent/session-activity.ts` | Prompt transaction, restore quarantine, generic event classifier, and monotonic activity writer |
+| `src/server/agent/session-manager.ts` | Terminal user-event correlation, author-sidecar hydration, restore/restart wiring, durable `markSessionRead()`, and `lastReadAt` in session summaries |
+| `src/server/agent/session-setup.ts` | Fresh/continue/fork subscription wiring through the shared attributor |
+| `src/server/server.ts` | Awaited `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
 | `src/app/notification-policy.ts` | Shared notification predicates for unread state and one-shot idle-transition beeps |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
-| `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
-| `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
-| `tests/session-restore-last-activity.test.ts` | `isUserVisibleActivity` filter at all three restore sites; concurrent-restore non-clustering |
-| `tests/e2e/ui/unseen-activity.spec.ts` | Read state survives reload after `localStorage` cleared |
+| `tests2/core/session-restore-last-activity.test.ts` | Restore quarantine, rejected and raced dispatches, monotonic timestamps, and mark-read durability |
+| `tests2/core/message-author-dispatch.test.ts` | Exact echo attribution, bounded digest fences, overflow, and terminal settlement |
+| `tests2/core/session-manager-direct-prompt-lifecycle.test.ts` | Direct/queued/steered acceptance, cancellation, and recovery ownership |
+| `tests2/browser/journeys/session-activity-restart.journey.spec.ts` | Navigation mark-read, graceful restart durability, exact timestamps/indicators, and genuine new activity |
 
 ---
 
@@ -1435,7 +1441,7 @@ Loading an archived session needs to show its real model in the footer on first 
 - **Archived auth-ok branch.** Right after `session_title`, the handler builds the payload and sends it. This is the fix - the footer now reads the persisted model on first connect, with no round-trip required.
 - **Legacy `get_state` handler.** The same helper drives the response, so the reconnect path stays consistent with first-connect.
 
-The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow, maxTokens, reasoning, thinkingLevelMap?}` from `resolveModelStateMeta(archived.modelProvider, archived.modelId)` (registry cache → pi-ai catalog → `inferMeta`), plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. Persisted `modelProvider`/`modelId` come from the archived row in the session store. Routing through the resolver instead of `inferMeta` alone keeps the archived frame consistent with the live/dropdown metadata — see [Per-model thinking-level capabilities](thinking-levels.md#the-thinkinglevelmap-has-to-reach-the-client-to-be-useful). `thinkingLevelMap` is omitted when upstream metadata doesn't carry it.
+The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow?, maxTokens?, reasoning?, thinkingLevelMap?, input?}` from `resolveModelStateMeta(archived.modelProvider, archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. The resolver uses the last exact assembled row, then an exact direct Pi row; an unknown tuple carries identity only. This keeps archived state consistent with live/catalog metadata without fabricating capabilities. See [Per-model thinking-level capabilities](thinking-levels.md#live-state-metadata).
 
 The footer model picker remains read-only/disabled for archived sessions - the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from archived-footer model E2E coverage.
 
@@ -1587,7 +1593,7 @@ Roles can pin a specific model and reasoning level for any session that runs und
 
 This is the third role-level override, alongside `toolPolicies` (which tools the role can use) and `defaultPersonalities` (how the role communicates). All three cascade the same way and are edited from the same role-manager page.
 
-> **Authoritative design:** [docs/design/per-role-model-overrides.md](design/per-role-model-overrides.md) - file-level mechanics, validators, and the rationale behind splitting `applyModelString` from `applyReviewModelOverrides`. Model binding failures and the opt-in fallback policy are covered in [Controlled session model fallback](session-model-fallback.md).
+> **Historical background:** [The original per-role override design](design/per-role-model-overrides.md) predates the authoritative-metadata retirement and is not the current mechanics reference. This section documents current role resolution; see [Thinking-level metadata authority](thinking-levels.md#metadata-authority) for exact capability and clamp rules, [Spawn-time model pinning](#spawn-time-model-pinning) for final selection and verification, and [Controlled session model fallback](session-model-fallback.md) for binding failures and the opt-in fallback policy.
 
 ### Role fields
 
@@ -1643,32 +1649,31 @@ A normal spawn selects an exact current catalog tuple in this order:
 
 An explicit candidate must still be present on Bobbit's current session-selectable catalog; stale, malformed, deferred-provider, or otherwise unavailable selections fail with the existing unavailable-model error instead of falling through to another provider. If no eligible catalog row exists, creation fails rather than delegating provider choice to Pi. `skipAutoModel` skips role/default preference selection, not this deterministic final binding.
 
-The compatibility exception is a caller that supplies non-empty generic raw Pi arguments without selecting a model. That path remains caller-owned and does not synthesize Bobbit's catalog default. Bobbit-generated goal/team argument lists containing only `--extension` pairs are not generic raw arguments and still receive the deterministic tuple.
+Raw Pi arguments are not an escape from catalog validation. They may change the effective tuple under Pi's last-value-wins rules, while the original request remains separate for diagnostics. Bobbit validates that final effect before a real bridge is constructed.
 
 Spawn-pinned models are read-back verified before a session becomes idle/live. If the agent reports a different model or the selected model cannot bind, the controlled policy in [Controlled session model fallback](session-model-fallback.md) decides whether to fail immediately or try `default.sessionModel` exactly once.
 
 ### Bridge options and CLI flags
 
-`RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries two optional fields:
+`RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries the canonical `initialModel` and `initialThinkingLevel` plus separate `requestedModel` and `requestedThinkingLevel` fields. Requested identity is diagnostic and recovery context; the initial fields are the effective tuple Pi receives.
 
-- `initialModel?: string` - literal `<provider>/<modelId>`.
-- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high|xhigh|max`. The level is clamped against the resolved model before injection — see [Per-model thinking-level capabilities](thinking-levels.md) for the rules.
+`resolveEffectivePiSelection(options)` parses the fully assembled raw arguments before process creation. It follows Pi's last-value-wins semantics for repeated `--provider`, `--model`, and `--thinking` flags, qualified models, nested IDs, and the `model:thinking` shorthand. Missing values and unknown thinking tokens fail closed. It removes all raw selection flags from `sanitizedArgs` so they cannot override the validated tuple later.
 
-`buildAgentArgs(options)` translates the tuple to separate Pi arguments:
+After finalization, `buildAgentArgs(options)` emits one canonical tuple:
 
 ```text
 --provider <provider> --model <modelId> --thinking <level>
 ```
 
-It splits `initialModel` only at the first slash. For example, `aigw/aws/us.anthropic.claude-opus-5` becomes provider `aigw` and model id `aws/us.anthropic.claude-opus-5`; slashes inside the model id remain part of its identity. Malformed model strings and unknown thinking tokens are silently omitted at this low-level bridge boundary.
-
-Generated provider/model/thinking arguments precede caller-supplied `options.args`, so Pi's normal last-value-wins parsing preserves explicit overrides in generic raw-argument flows. The existing project-trust and context-file flags are the narrow exception: the bridge strips their caller-supplied forms and emits Bobbit's non-overridable values.
+Provider/model splitting occurs only at the first slash, preserving further slashes inside the model ID. Project-trust and context-file flags remain non-overridable and are sanitized independently.
 
 ### Resolution and catalog validation
 
-`SessionManager.resolveInitialModel(role, projectId)` supplies the role/default candidate used across setup paths. `requireCurrentCatalogSpawnModel` validates an exact requested tuple, while `resolveCurrentCatalogSpawnModel` supplies the deterministic catalog choice only when no exact selection exists. Effective thinking resolves from an explicit value, then the role override, then `default.sessionThinkingLevel`, then `medium`, and is clamped against that exact provider/model before spawn.
+`SessionManager.resolveInitialModel(role, projectId)` supplies the role/default candidate used across setup paths. `resolveCurrentCatalogSpawnModel` supplies the deterministic catalog choice only when no exact selection exists.
 
-The resolved tuple flows through the existing session setup, restore, respawn, delegate/team, host, and sandbox mechanisms as `initialModel` and `initialThinkingLevel`. The live session retains the spawn values as `spawnPinnedModel` and `spawnPinnedThinkingLevel` for read-back verification and later inheritance.
+After every extension, realm remap, and caller argument has been assembled, `finalizeSpawnOptions` resolves the effective tuple and requires its exact provider/model in the current session-selectable target-realm catalog. It clamps thinking against that exact row, replaces raw selection arguments with the canonical initial tuple, and refreshes direct-host credentials if raw arguments changed providers. Invalid, unavailable, cross-provider, or Pi-fabricated tuples fail before bridge construction or durable effective-state mutation.
+
+The same finalizer runs for normal/worktree/delegate/fork/continue setup, cold restore, role replacement, force-abort replacement, review/QA, host execution, and sandbox execution. Requested and effective identity remain separate when controlled fallback intentionally chooses a replacement. The live session retains only the validated effective values as `spawnPinnedModel` and `spawnPinnedThinkingLevel` for read-back verification and later inheritance.
 
 ### Skip-setModel branch preserves hard-fail-on-mismatch
 
@@ -1676,7 +1681,7 @@ The resolved tuple flows through the existing session setup, restore, respawn, d
 
 ### Pool-claimed sessions
 
-The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too; only the explicit generic raw-argument compatibility path may intentionally omit Bobbit's generated model tuple.
+The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same finalization before `new RpcBridge(plan.bridgeOptions)` as a non-pool spawn, so canonical tuple validation and spawn pins are identical.
 
 ### Out of scope
 
@@ -1687,9 +1692,9 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 
 | File | Role |
 |---|---|
-| `src/server/agent/rpc-bridge.ts` | `RpcBridgeOptions.initialModel`/`initialThinkingLevel`, `buildAgentArgs` |
-| `src/server/agent/session-setup.ts` | `resolveBridgeOptions` injects pinned values into `bridgeOptions`; persists them onto the session |
-| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevel`; `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` skip-setModel branch; respawn pinning |
+| `src/server/agent/rpc-bridge.ts` | Effective raw-argument resolver and canonical Pi argument builder |
+| `src/server/agent/session-setup.ts` | Assembles realm-specific options and finalizes them before real bridge creation |
+| `src/server/agent/session-manager.ts` | Exact catalog validation, thinking clamp, requested/effective identity, and recovery replacement finalization |
 | `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
@@ -1770,16 +1775,9 @@ The Bobbit AI Gateway user agent is sent only by AIGW-specific request paths. Di
 
 AI Gateway model discovery is Bobbit's source of truth for gateway-backed pricing because completion responses include token counts but no cost and gateway aggregate endpoints are not reliable for Bobbit usage accounting. Authoritative well-known discovery reads each model's per-million-token `cost`; legacy `/v1/models` discovery reads the optional per-token `pricing` object.
 
-On the legacy path, `pricing.prompt` and `pricing.completion` are USD per token. Bobbit converts them to the per-million-token `cost` shape expected by pi-ai:
+On the legacy path, `pricing.prompt` and `pricing.completion` are USD per token. Bobbit scales those two supplied fields into Pi's per-million-token shape. Legacy discovery does not advertise cache pricing, so `cacheRead` and `cacheWrite` remain zero instead of using heuristic ratios.
 
-```ts
-input = pricing.prompt * 1_000_000
-output = pricing.completion * 1_000_000
-cacheRead = pricing.prompt * 0.1 * 1_000_000
-cacheWrite = pricing.prompt * 1.25 * 1_000_000
-```
-
-Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and safely falls back to `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from discovery metadata plus token counts.
+Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and represented as `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from discovery metadata plus token counts.
 
 The normalized `cost` values flow through two surfaces:
 
@@ -1788,7 +1786,7 @@ The normalized `cost` values flow through two surfaces:
 
 ### Well-known-driven discovery (openai-responses routing)
 
-Model discovery is **well-known-first**. Instead of hand-rolling routing from `/v1/models` + `inferMeta` id heuristics, `discoverAigwModels()` first consults the gateway's authoritative opencode config at `{gatewayOrigin}/.well-known/opencode`. This is the same contract opencode itself uses, so Bobbit inherits opencode's per-provider routing decisions rather than guessing them. When the well-known config is present it is the source of truth; the legacy heuristic path is only a fallback.
+Model discovery is **well-known-first**. Instead of applying `/v1/models` model-name heuristics, `discoverAigwModels()` first consults the gateway's authoritative opencode config at `{gatewayOrigin}/.well-known/opencode`. This is the same contract opencode itself uses, so Bobbit inherits opencode's per-provider routing decisions rather than guessing them. When the well-known config is present it is the source of truth; the explicitly named `inferLegacyAigwMeta` path is only a legacy fallback.
 
 **Why this exists.** On this gateway the `gpt-5.6-sol` / GPT 5.6 family reject function tools combined with `reasoning_effort` on `/v1/chat/completions`:
 
@@ -1802,7 +1800,7 @@ Bobbit historically routed every non-Claude model through pi-ai's `openai-comple
 
 #### Discovery flow and fallback
 
-`discoverAigwModels()` resolves `/.well-known/opencode` against the configured **origin root** (the well-known document never lives under `/v1`). `fetchWellKnownConfig()` returns `null` — triggering the legacy `/v1/models` + `inferMeta` fallback — on HTTP/network/JSON errors, redirects, invalid URLs, timeout, an over-1 MiB body, unsafe targets, excessive indirection, or test-network guards. The initial fetch, optional remote fetch, and provider DNS admission share one eight-second deadline. Distinct provider hostnames resolve concurrently and duplicate hostnames share one lookup, so a large or slow provider list cannot multiply the bound.
+`discoverAigwModels()` resolves `/.well-known/opencode` against the configured **origin root** (the well-known document never lives under `/v1`). `fetchWellKnownConfig()` returns `null` — triggering the legacy `/v1/models` + `inferLegacyAigwMeta` fallback — on HTTP/network/JSON errors, redirects, invalid URLs, timeout, an over-1 MiB body, unsafe targets, excessive indirection, or test-network guards. The initial fetch, optional remote fetch, and provider DNS admission share one eight-second deadline. Distinct provider hostnames resolve concurrently and duplicate hostnames share one lookup, so a large or slow provider list cannot multiply the bound.
 
 The payload resolver accepts raw configs, a top-level `config` wrapper, or exactly one `remote_config` hop. A second unresolved `remote_config` is rejected. A valid `provider` object is authoritative even when filtering leaves zero models, so disabled, unwhitelisted, collided-away, or invalid providers are never repopulated from `/v1/models`. Configure reuses the resolved config and does not fetch it a second time.
 
@@ -1824,7 +1822,7 @@ Token resolution is fully guarded and never throws.
 
 #### Provider adapter → pi-ai `api`
 
-`translateWellKnown()` maps each provider's npm adapter to a pi-ai `api`. Unknown adapters fall back to the conservative `openai-completions`:
+`translateWellKnown()` maps each documented provider npm adapter to its wire-tested Pi API. Unknown adapters are omitted because an authoritative document does not authorize Bobbit to guess a transport:
 
 | provider | `npm` adapter | `options.baseURL` subpath | pi-ai `api` | endpoint |
 |---|---|---|---|---|
@@ -1844,11 +1842,13 @@ Each provider's `options.baseURL` becomes the **per-model `baseUrl`**, which pi-
 
 The SDK's `baseURL`-plus-`/responses` behaviour is exactly why the baseURL must end in `…/openai/v1` and not the bare origin.
 
-`models.json` is published on the host with temp-file-plus-rename atomic replacement. Docker file bind mounts retain the old inode in an already-running container, so configure, refresh, and removal notify every tracked project sandbox. Each sandbox maintains monotonic published/mounted generations and serializes remounts with health recovery; a second publication during recreation therefore triggers another recreation until the mounted generation is current. Workspaces/worktrees survive, and live sandboxed sessions respawn through the normal container-recovery event. Direct host agent processes are not recreated by this path and retain their spawn-time model registry/guard until respawn. The durable model/preferences commit invalidates registry and SessionManager caches and broadcasts preferences before remount recovery; a Docker failure is returned as `remountPending: true` without falsely reporting the committed configuration as rolled back, while normal health recovery remains queued. Startup staleness also compares in-container model content with the active host file, catching a replacement that occurred while Bobbit was down.
+Bobbit publishes only a `providers.aigw` block carrying `x-bobbit-managed: {kind:"aigw-publication",version:1}`. The JSONC editor inserts an absent block or updates documented fields in an unambiguous marked block; an unmarked block is user-owned, while malformed or duplicate target paths fail closed without a preference commit. Localized edits preserve comments and unknown fields outside managed values before temp-file-plus-rename atomic replacement.
+
+Docker file bind mounts retain the old inode in an already-running container, so successful publication or removal notifies every tracked project sandbox. Each sandbox maintains monotonic published/mounted generations and serializes remounts with health recovery; a second publication during recreation therefore triggers another recreation until the mounted generation is current. Workspaces/worktrees survive, and live sandboxed sessions respawn through the normal container-recovery event. Direct host agent processes are not recreated by this path and retain their spawn-time model registry/guard until respawn. The durable model/preferences commit invalidates registry and SessionManager caches and broadcasts preferences before remount recovery; a Docker failure is returned as `remountPending: true` without falsely reporting the committed configuration as rolled back, while normal health recovery remains queued. Startup staleness also compares in-container model content with the active host file, catching a replacement that occurred while Bobbit was down.
 
 #### Filters and per-model metadata
 
-When the well-known config is present, `translateWellKnown()` applies hard filters and never falls back to `inferMeta` guessing:
+When the well-known config is present, `translateWellKnown()` applies hard filters and never calls `inferLegacyAigwMeta`:
 
 - `disabled_providers` — drops whole providers.
 - per-provider `whitelist` — drops any model id not listed.
@@ -1856,20 +1856,18 @@ When the well-known config is present, `translateWellKnown()` applies hard filte
 
 Bare IDs are unique. If multiple eligible providers advertise the same ID, the provider named by top-level `config.model` wins for that ID; otherwise the first provider in object insertion order wins. Provenance remains in `upstreamProvider` rather than being synthesized into the model ID. The registry and `models.json` preserve this field; Settings and model pickers render it as the AIGW provider badge and include it in search without changing the selectable `aigw/<bare-id>` preference.
 
-Per-model fields are mapped straight across:
+A row is published only when it provides positive context/output limits, boolean reasoning, at least one supported input modality, and a documented adapter. Its capability fields then map directly:
 
 | well-known field | Bobbit `AigwModel` field |
 |---|---|
-| `variants` keys | `thinkingLevelMap` (identity per tier; reasoning models also get `off:"none"`) |
+| recognized `variants` keys | `thinkingLevelMap` (identity per advertised tier; advertised `none` also maps `off` to `none`) |
 | `limit.context` | `contextWindow` |
 | `limit.output` | `maxTokens` |
 | `modalities.input` | `input` (filtered to `text`/`image`) |
 | `reasoning` | `reasoning` |
 | `cost` | `cost` via `normalizeWellKnownCost()` |
 
-`buildThinkingLevelMap()` only keeps recognized effort tiers (`minimal/none/low/medium/high/xhigh/max`) and adds `off:"none"` for reasoning models so the responses/completions adapters emit `reasoning_effort:"none"` in the no-effort case — the tool-compatible path the gateway wants.
-
-`normalizeWellKnownCost()` is distinct from the legacy `/v1/models` normalizer. Well-known `cost` is already denominated in **USD per 1M tokens** under `{input,output,cache_read,cache_write}`, so the fields map directly (with `cache_read`/`cache_write` defaulting to the same `input * 0.1` / `input * 1.25` heuristics when omitted). The legacy `normalizeAigwPricing()` instead takes USD **per token** under `{prompt,completion}` and scales up by 1M.
+`buildThinkingLevelMap()` does not add unadvertised tiers. `normalizeWellKnownCost()` maps supplied per-million-token `{input,output,cache_read,cache_write}` values directly; absent or invalid prices become zero rather than heuristic cache-price ratios. The legacy normalizer instead scales supplied per-token `{prompt,completion}` values by one million and likewise leaves unavailable cache prices at zero.
 
 `compat.supportsReasoningEffort` is set `true` only for the OpenAI-style endpoints (`openai-responses` / `openai-completions`) and left undefined for `bedrock-converse-stream` (Bedrock ignores compat). Because `@ai-sdk/openai` now routes to `openai-responses`, the forbidden tools+`reasoning_effort`-on-chat/completions combination can no longer occur.
 
@@ -1881,7 +1879,7 @@ Legacy `aigw/<upstream>/<id>` preferences are conservatively migrated to `aigw/<
 
 #### Fallback path (option-1 fix)
 
-When the well-known config is absent, the legacy `/v1/models` + `inferMeta` path still applies the minimal routing fix: OpenAI-family reasoning ids (`gpt-*` / `o[1-9]`, excluding Claude) are routed to `openai-responses` on `${origin}/openai/v1` with a **bare `wireId`**, so tools + reasoning don't 400 on the chat/completions root. Because the emitted id is bare, the registry and models.json ids for these models are bare (e.g. `gpt-5.6-luna`). Other non-Claude models stay on `openai-completions`, and Claude is remapped to `bedrock-converse-stream` downstream.
+When the well-known config is absent, the legacy `/v1/models` + `inferLegacyAigwMeta` path applies the compatibility routing rules: OpenAI-family reasoning ids (`gpt-*` / `o[1-9]`, excluding Claude) are routed to `openai-responses` on `${origin}/openai/v1` with a **bare `wireId`**, so tools + reasoning don't 400 on the chat/completions root. Because the emitted id is bare, the registry and models.json ids for these models are bare (e.g. `gpt-5.6-luna`). Other non-Claude models stay on `openai-completions`, and Claude is remapped to `bedrock-converse-stream` downstream.
 
 #### Probes and cache behavior
 
@@ -1889,9 +1887,9 @@ When the well-known config is absent, the legacy `/v1/models` + `inferMeta` path
 
 Cold authoritative discovery makes one request, fallback makes the well-known and `/v1/models` requests, and one-hop remote discovery makes two requests within the shared deadline. Configure reuses discovery output. The existing five-second registry and sixty-second SessionManager caches remain unchanged.
 
-### Generated `providers.aigw.headers`
+### Managed `providers.aigw.headers`
 
-`writeAigwModelsJson()` writes the AI Gateway provider into the active agent directory's `models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
+`writeAigwModelsJson()` inserts or refreshes only a provider carrying Bobbit's forward-only ownership marker. It refuses an unmarked user block and malformed or ambiguous JSONC. The managed provider-level header block contains both headers:
 
 ```json
 {
@@ -1921,23 +1919,17 @@ pi-ai v0.79.6+ natively forwards provider-level `headers` into the AWS SDK reque
 
 ### Startup refresh behavior
 
-On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites the active agent directory's `models.json` with:
+On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway.
 
-- the current gateway model list,
-- the current gateway-derived per-model `cost` values from well-known metadata or legacy `/v1/models` pricing,
-- the current canonical `User-Agent: Bobbit/<version>`,
-- the unchanged `x-opencode-session` resolver literal,
-- existing non-aigw providers and user `modelOverrides` preserved.
-
-This means users with older `models.json` files pick up the user-agent header after restart or manual refresh without reconfiguring the gateway. If the configured gateway is unreachable, Bobbit logs the startup warning and leaves the existing file untouched rather than replacing a working cached configuration with a partial one. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
+A successful discovery refreshes the current model, cost, header, and marker fields only when `providers.aigw` is absent or already marked. Historical unmarked blocks are intentionally user-owned; startup does not adopt or rewrite them. Malformed JSONC and ambiguous duplicate target paths also remain byte-identical and produce an ownership/publication diagnostic. If the gateway is unreachable, Bobbit leaves the existing file untouched rather than replacing a working exact catalog with partial data. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
 
 ### No-leakage boundaries
 
 The Bobbit AI Gateway user agent is not a process-wide default HTTP header. It is attached only by AI Gateway-specific helpers or by the generated `providers.aigw` entry:
 
 - `aigwUserAgentHeaders()` is used for AI Gateway discovery, proxying, and gateway title/goal-summary calls.
-- `writeAigwModelsJson()` writes headers only under `providers.aigw`; non-aigw providers are preserved as-is.
-- `removeAigwModelsJson()` removes the entire `aigw` provider block and leaves no orphan AI Gateway headers on other providers.
+- `writeAigwModelsJson()` writes headers only under a marked `providers.aigw`; non-aigw and unmarked AIGW providers are preserved as-is.
+- `removeAigwModelsJson()` removes only a marked Bobbit publication and leaves user-owned blocks unchanged.
 - Direct public-provider paths, such as Anthropic title fallback or non-aigw model completion, do not use the Bobbit AI Gateway user-agent helper.
 - Bedrock custom headers are emitted only by models under the generated `aigw` provider; public Bedrock models are unchanged.
 
@@ -2549,7 +2541,7 @@ Sandboxed agents use standard git worktrees inside the project container when th
 1. Removes the worktree via `git worktree remove --force`
 2. Called during session termination
 
-**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 - it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence (single rename at claim time, no first-prompt rename - see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)). Pools are **per-project** - `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` - sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
+**Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 - it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence (single rename at claim time, no first-prompt rename - see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)). Pools are **per-project** - `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a new pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and per-component setup config; it creates and claims only entries tracked by that live instance and never discovers or adopts prior-process entries by branch/path shape. New projects registered at runtime (`POST /api/projects`) get the same initialization if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their live pool drained via `removeWorktreePool(projectId)`. Graceful gateway shutdown stops every live pool before cleanup and locally drains only its remaining ready entries; claimed worktrees survive, while crashes, failures, and 15-second stop/drain timeouts may leave diagnostic-only leftovers. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
 
 **Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the configured base ref (project `base_ref`, falling back to the dynamically-resolved remote primary via `git symbolic-ref refs/remotes/origin/HEAD`, then `HEAD`). This prevents stale worktrees when the base has advanced since the pool entry was created. The pool reads the current `base_ref` on every fill/claim via a live `baseRefResolver` (sibling of `componentsResolver`) — pool entries auto-adopt the new value when the setting changes, no drain needed. If fallback resolution reaches an unborn `HEAD`, pool prefill skips that repo with the initial-commit warning instead of repeatedly attempting `git worktree add ... HEAD`. The fetch+reset is non-fatal: if it fails, the worktree is still usable but may be behind. Branch publication is separate from freshness and, when intentional, always uses an explicit destination refspec for the target branch. Full design: [design/base-ref.md](design/base-ref.md).
 
@@ -2673,7 +2665,7 @@ The truncation system intercepts live events and history snapshots before they r
 ### Architecture
 
 ```
-Agent process → message_update (full content)
+Agent process → message_update/message_end (full content)
        │
        ├─→ handleAgentLifecycle() - receives original (for search indexing)
        ├─→ trackCostFromEvent()   - receives original (for token accounting)
@@ -2687,14 +2679,20 @@ Agent process → message_update (full content)
 
 Session history snapshots (`get_messages`, attach/reconnect hydration, archived reads) pass through `truncateLargeToolContentInMessages()` before they are sent to the browser, so reconnect cannot replay a large report or tool result as one unbounded frame.
 
+### Live transport projection invariant
+
+Every live `message_update` or `message_end` has exactly one size-boundary projection before `emitSessionEvent()` retains it in the EventBuffer or broadcasts it. `truncateLargeToolContent()` applies the same block projection to every cumulative assistant copy that Pi may include: `event.message`, `assistantMessageEvent.partial`, and the completed `assistantMessageEvent.toolCall` checkpoint on `toolcall_end`. It handles content under both `toolCall.arguments` and `tool_use.input`. This is copy-on-write: unchanged objects retain their references, while truncation shallow-clones only changed ancestors. Pi's original event therefore remains available to lifecycle processing, cost accounting, diagnostics, and the durable `.jsonl` transcript.
+
+Projection happens before assistant stream compaction so `message` and `partial` describe the same bounded state. Capable-client deltas are accepted only when reconstruction matches that projected state. When a growing string crosses the threshold and becomes a descriptor, append-only reconstruction cannot represent the replacement, so the sender falls back to the complete projected event. A reconnect then receives a self-contained baseline built from the projected state; it never depends on the pre-threshold string. Keeping this invariant at the common boundary also bounds legacy frames and EventBuffer retention. Do not add unrelated downstream WebSocket caps: they can hide a projection or reconstruction mismatch while leaving another retained copy unbounded.
+
 ### Key design decisions
 
 - **32KB threshold** - generous enough that normal code files (<10KB) pass through untouched, but catches generated data files, large test fixtures, and minified bundles. Exported as `LARGE_CONTENT_THRESHOLD` from `truncate-large-content.ts`.
 - **Zero overhead for small content** - no cloning occurs unless truncation is actually needed. The function returns the original event reference unchanged.
-- **Original event never mutated** - `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event. Only the broadcast/buffer path sees the truncated version.
+- **Original event never mutated** - `handleAgentLifecycle()` and `trackCostFromEvent()` receive the unmodified event, and the agent-owned durable transcript keeps the full tool input. Only the EventBuffer/broadcast projection contains truncation descriptors.
 - **Dual format support** - both `toolCall`/`arguments` (pi-coding-agent RPC format) and `tool_use`/`input` (Anthropic API format) are handled for robustness. Text blocks and marker-less toolResult blocks are also bounded on history replay.
 - **Reviewer/QA report fields** - `verification_result.summary` and `verification_result.report_html` are truncated in both live session events and persisted-history snapshots. Large HTML reports remain available through the QA/report artifact paths instead of riding the chat WebSocket repeatedly.
-- **UI lazy loading** - `WriteRenderer` shows a preview (first 512 chars) with a "Load full content" button. It resolves full content with `GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`, using the tool-call id plus content-block index. Client-rendered history can include compaction placeholders and other synthetic rows that are not present in the runtime transcript, so a client-derived message index is not a safe address. The endpoint reads `block.arguments?.content ?? block.input?.content` for tool-call blocks and falls back to `block.text` for text blocks. The positional route remains legacy-compatible, but new clients must use identity resolution.
+- **UI dispatch and lazy loading** - `WriteRenderer` recognizes a truncation descriptor before dispatching by file extension. Truncated HTML, HTM, and SVG writes therefore use the generic preview, size badge, and "Load full content" controls rather than entering source-string renderers; ordinary source strings still use the inline HTML/SVG renderers. Completed writes keep the same lazy-loading flow through `GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`, using the tool-call id plus content-block index. Client-rendered history can include compaction placeholders and other synthetic rows that are not present in the runtime transcript, so a client-derived message index is not a safe address. The endpoint reads `block.arguments?.content ?? block.input?.content` for tool-call blocks and falls back to `block.text` for text blocks. The positional route remains legacy-compatible, but new clients must use identity resolution.
 - **`preview_open` snapshot blocks** - `preview_open` tool_results carry a second `{type:"text"}` block whose text begins with one of the `__preview_snapshot_v{1,2,3}__\n` sentinels. `truncateSnapshotBlock()` walks `toolResult` messages, and when a snapshot exceeds the threshold it rewrites the block to `{ type:"text", text: marker, _truncated:true, _originalLength, preview }` - the matched marker is preserved so downstream consumers (UI renderer, further truncation passes) can still detect the block. Current v3 markers are capped at 250 UTF-8 bytes and never trip the threshold; legacy v1 raw-HTML and unbounded v2 path markers can. `PreviewRenderer` uses the identity route with `expected=preview-snapshot`, which verifies that the returned block is a supported marker before parsing it. A missing call or block reports `transcript_tool_call_unavailable` or `transcript_block_unavailable`; a wrong block or marker reports `snapshot_block_mismatch`. Agent-facing context therefore only ever sees the 512-char preview; the UI hydrates the full HTML via the tool-content endpoint. See [Tool-content identity resolution](rest-api.md#tool-content-identity-resolution).
 - **Streaming throttle** - `remote-agent.ts` throttles `streamMessage` updates to 2x/sec when content is truncated, reducing Lit re-render pressure in the browser.
 
@@ -2706,7 +2704,7 @@ Session history snapshots (`get_messages`, attach/reconnect hydration, archived 
 | `session-manager.ts` | Applies live-event truncation at event listener sites and history truncation before snapshot sends |
 | `server.ts` | REST endpoint for lazy-loading full content from `.jsonl` |
 | `fetch-tool-content.ts` (UI) | Client-side REST helper for lazy loading |
-| `WriteRenderer.ts` (UI) | Detects truncation, shows preview + "Load full content" button |
+| `WriteRenderer.ts` (UI) | Routes truncation descriptors to the generic preview/lazy-load UI before extension dispatch |
 | `Messages.ts` (UI) | Handles `load-full-content` CustomEvent, fetches and re-renders |
 | `remote-agent.ts` (UI) | Throttles stream updates for truncated content |
 
@@ -2744,11 +2742,11 @@ Agent calls preview_open({html|file})
         tool_result = [
           {type:"text", text:"Preview panel is open ..."},
           {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON
-             {kind:"preview", url, path?, entry?, contentHash?, artifactId?}}
-        ]  // new path = relPath: "<sid>/<entry>", host-invariant, forward slashes on all OSes
+             {kind:"preview", url:"/preview/<sid>/", entry, contentHash, artifactId}}
+        ]  // canonical current marker: no duplicate path or identity aliases
    └─→ session.jsonl persists both blocks (snapshot block ≤ 250 UTF-8 bytes;
-       the builder compacts duplicated data and artifact-id keys but never
-       silently removes valid contentHash or artifact identity)
+       the builder preserves canonical contentHash and artifactId, using a
+       bounded reversible entry envelope or trusted same-call fallback when needed)
    └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
        {entry, mtime, url, path, contentHash, artifactId?}; iframe src bumps
        `?mtime=<n>` and reloads.
@@ -2774,7 +2772,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 ### Key design decisions
 
 - **Server-backed side-panel workspace** - regular and assistant sessions share the same durable tab model for previews, proposals, reviews, inbox, and pack panels. Chat stays outside the tab strip. The live preview tab tracks explicit preview open/update events; bootstrap/SSE metadata patches only already-open tabs so closed tabs do not resurrect.
-- **Lossless snapshots (≤ 250 UTF-8 bytes)** - v3 markers retain validated content and artifact identities while compacting duplicated route/path data and artifact-id keys. `path` is optional; when emitted it uses the host-invariant `<sessionId>/<entry>` form (forward slashes on all OSes), not a host-absolute path. A compact marker uses `/preview/<sid>/` plus a raw filename; the reader encodes that filename exactly once and validates the reconstructed route. It accepts raw percent, Unicode, and URL-significant filenames without changing them. If no lossless shape fits, `preview_open` returns `PREVIEW_SNAPSHOT_CAP` naming the filename rather than emitting a dead marker. The agent can refresh a 5000-line report 50 times without its bytes entering context.
+- **Lossless snapshots (≤ 250 UTF-8 bytes)** - current v3 writers use `/preview/<sid>/` with canonical `entry`, `contentHash`, and `artifactId`; they omit duplicate `path` and never write identity aliases. The entry remains reversible through a bounded envelope or the trusted same-call fallback, and is encoded exactly once when the reader rebuilds the strict route. Historical `path`, `e`, and artifact-id aliases are reader compatibility only. If no lossless shape fits, `preview_open` returns `PREVIEW_SNAPSHOT_CAP` naming the filename rather than emitting a dead marker. See [the current write contract](preview-architecture.md#current-write-contract).
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
 - **Cookie auth for the content origin** - the stateless HMAC-signed `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens. A stable 32-byte key is loaded once from `<serverSecretsDir>/cookie-signing-key`; request verification is bounded and entirely in memory. Cookie bootstrap and seven-day renewal happen only on centrally classified browser-signaled API requests, never on preview content or SSE.
@@ -2823,53 +2821,56 @@ Full reasoning and alternatives considered are in [docs/design/streaming-dedup-r
 
 ### Server side
 
-`EventBuffer` (`src/server/agent/event-buffer.ts`) stores `{seq, ts, event}` tuples in a 1000-entry ring. `push()` assigns the next `seq` and stamps `ts = Date.now()`. It exposes:
+`EventBuffer` (`src/server/agent/event-buffer.ts`) stores `{seq, ts, event}` entries under two default limits: 1,000 retained events and 2 MiB of estimated serialized UTF-8 data. It caches each retained entry's byte estimate in `retainedBytes`, exposes the configured `maxBytes`, and evicts only from the head until both limits hold. The byte limit matches the resume replay budget because retaining a larger tail would add heap pressure without making that tail replayable.
 
-- `since(fromSeq)` - entries with `seq > fromSeq` (the reconnect tail).
-- `canResumeFrom(fromSeq)` - false if `fromSeq` is older than the retained window (ring eviction).
-- `lastSeq` - highest assigned seq (used in `resume_gap` so the client can resync).
+`push()` always assigns the next monotonic `seq` and stamps `ts = Date.now()`, even when the entry cannot be retained. An event larger than `maxBytes`, an event that cannot be serialized, or a zero-capacity buffer clears retained history and records the assigned sequence as an explicit hole. `pushFrame()` likewise assigns a sequence without retaining the frame. These holes matter because a later retained event must not make an older cursor look safely replayable.
 
-All `{type:"event"}` broadcasts flow through a single helper `emitSessionEvent(session, event)` in `src/server/agent/session-manager.ts`. Callers pass an already-bounded event, and the helper pushes it into the buffer and broadcasts `{type:"event", data, seq, ts}` in lockstep. This replaces the previous pattern of paired `eventBuffer.push(...) + broadcast(...)` calls; the helper is the only place that can assign a seq, which keeps the stream strictly monotonic even across call sites.
+The resume API separates validation from retrieval:
 
-Other broadcast types (`session_status`, `session_title`, `messages`, `state`, `queue_update`, ...) do **not** carry `seq` - they are idempotent snapshots, not stream deltas, and the dup/reorder class of bug doesn't apply.
+- `canResumeFrom(fromSeq)` is true only when the buffer covers a contiguous suffix beginning at `fromSeq + 1`; count or byte eviction and any unretained sequence advance this safe floor.
+- `since(fromSeq)` returns retained entries with `seq > fromSeq`, but is only a retrieval helper. Callers must prove continuity with `canResumeFrom()` first.
+- `lastSeq` is the highest assigned sequence, including unretained entries, and is returned in `resume_gap` so the client can re-baseline after a snapshot.
+
+All `{type:"event"}` broadcasts flow through `emitSessionEvent(session, event)` in the session manager. Callers pass an already-bounded event, and the helper retains the original cumulative event while projecting either a compact live update to negotiated clients or a cumulative update to legacy clients. The durable Pi transcript, replay buffer, and snapshot paths remain cumulative and authoritative; compact frames are a live-only transport optimization. Other snapshot-like broadcasts (`session_status`, `session_title`, `messages`, `state`, `queue_update`, ...) do not use this retained event stream.
 
 ### Resume handshake
 
-The WS protocol (`src/server/ws/protocol.ts`) gains two message types:
+The WS protocol has two resume messages:
 
-- `{type:"resume", fromSeq}` - client → server, sent immediately after `auth_ok` on a reconnect when the client has a non-zero `_highestSeq`.
-- `{type:"resume_gap", lastSeq}` - server → client, sent when `canResumeFrom(fromSeq)` is false (the missed tail has already been evicted). The client resets its seq tracking to `lastSeq` and falls back to the `get_messages` snapshot path.
+- `{type:"resume", fromSeq}` asks the server for the missed retained tail.
+- `{type:"resume_gap", lastSeq}` requires the client to recover through the authoritative `get_messages` snapshot.
 
-`src/server/ws/handler.ts` handles `resume` by replaying `since(fromSeq)` as normal `{type:"event"}` frames (same seq/ts as the originals), then the session continues to broadcast live events as they arrive. Clients that never send `resume` (old clients, or first-time connections with `_highestSeq === 0`) get the existing cold-connect path - `getState()` + `get_messages` - which is backward-compatible.
+The handler calls `canResumeFrom(fromSeq)` before `since(fromSeq)`. It replays a proven contiguous suffix with the original sequence and timestamp, subject to the replay byte budget, drain wait, pacing, and socket-sendability checks. A count/byte eviction, an oversized or unserializable event, an unretained `pushFrame()` sequence, an over-budget tail, or a socket that cannot drain produces `resume_gap`, never a plausible partial replay with a hidden hole.
 
 ### Client side
 
-`RemoteAgent` in `src/app/remote-agent.ts` tracks `_highestSeq` and a small `_pendingEvents` array:
+`RemoteAgent` tracks `_highestSeq` and a bounded `_pendingEvents` array:
 
-- **Duplicate drop.** `seq <= _highestSeq` is silently discarded.
+- **Duplicate drop.** `seq <= _highestSeq` is discarded.
 - **In-order dispatch.** `seq === _highestSeq + 1` advances the watermark and dispatches the event.
-- **Out-of-order buffering.** Any higher seq is inserted into `_pendingEvents` (sorted by seq). After every ingest the drain loop pops entries whose seq is now contiguous and dispatches them. If `_pendingEvents` exceeds 500 entries the client abandons the gap and forces a snapshot refresh - a safety valve so a permanently-gapped client can't grow unbounded.
-- **Baseline adoption.** The first seq'd frame on a fresh connection adopts `seq - 1` as the baseline, so the initial state-snapshot path doesn't stall waiting for a non-existent seq 1.
-- **Reconnect.** On WS reopen, if `_highestSeq > 0`, the client sends `{type:"resume", fromSeq: _highestSeq}` **before** any other traffic. On `resume_gap` it resets `_highestSeq` to the server's `lastSeq` and falls back to `get_messages`.
+- **Out-of-order buffering.** A higher sequence waits in sorted order until the gap closes. If the pending array exceeds its bound, the client abandons the gap and requests a snapshot rather than growing indefinitely.
+- **Baseline adoption.** The first sequenced frame on a fresh client adopts `seq - 1` as its baseline, so initial snapshot hydration does not wait for old live frames.
+- **Reconnect ordering.** After `auth_ok`, the client first flushes queued `prompt`, `steer`, and `retry` frames in FIFO order. It removes an outbox entry only after `WebSocket.send()` accepts it; a close or thrown send leaves the failed current item and every unsent successor queued for the next replacement socket. Only after that flush does the client request sequence resume, or a snapshot when no resume cursor exists. `resume_gap` also falls back to `get_messages` and re-baselines at `lastSeq`.
 
-Seq-less frames (old servers) fall through the dispatch path unchanged - the reducer still runs and the pre-seq dedup heuristics (user messages by text, assistant messages by id) still apply. There is no hard dependency on seq at render time; `messages[]` remains the authoritative ordered list, and seq only governs the event→state reducer.
+This outbox-first order prevents recovered transcript traffic from overtaking user intent issued while disconnected. Seq-less frames from old servers still pass through the reducer, so legacy interoperability remains intact.
+
+See [WebSocket protocol — Cumulative assistant stream compaction](websocket-protocol.md#cumulative-assistant-stream-compaction) for compact-live reconstruction, cumulative replay, slow-client cutover, and the prohibition on semantic-delta replay chains and timer-based coalescing.
 
 ### Tests
 
-- `tests/event-buffer.test.ts` - seq monotonicity, eviction invariants, `since()` / `canResumeFrom()` / `lastSeq` semantics.
-- `tests/remote-agent-seq-dedup.spec.ts` (+ `tests/fixtures/remote-agent-seq-dedup.html`) - file:// fixture driving synthetic WS frames through the reducer: duplicate drop, out-of-order buffering, `resume` on reconnect, compat fallback for seq-less frames, full-buffer replay dedup.
-- `tests/e2e/ui/stories-streaming.spec.ts` - `ST-DEDUP-01` reproducing test: reconnect mid-stream must not duplicate or reorder events. Fails on master pre-fix, passes after.
-- `tests/e2e/ui/stories-resilience.spec.ts` - `RE-07` (reconnect catch-up) unchanged and still green; the new `resume` path is a strict superset of its coverage.
+- `tests2/core/event-buffer.test.ts` covers count/byte head eviction, retained-byte accounting, monotonic allocation, oversized events, `pushFrame()` holes, and the `canResumeFrom()`/`since()` boundary.
+- `tests2/dom/remote-agent-seq-dedup.test.ts`, `remote-agent-seq-overflow.test.ts`, and `remote-agent-sequence-hole.test.ts` cover duplicate suppression, ordering, resume, and bounded snapshot fallback.
+- `tests2/dom/remote-agent-outbox.test.ts` covers offline intent, FIFO flush, and preservation of the failed item plus unsent suffix across a reconnect race.
 
 ### Key files
 
 | File | Purpose |
 |---|---|
-| `src/server/agent/event-buffer.ts` | `{seq, ts, event}` ring buffer + `since()` / `canResumeFrom()` / `lastSeq` |
-| `src/server/agent/session-manager.ts` | `emitSessionEvent()` - single push+broadcast helper |
-| `src/server/ws/protocol.ts` | Additive `seq`/`ts` on `event`; new `resume` / `resume_gap` types |
-| `src/server/ws/handler.ts` | Handles `resume`, emits `resume_gap` on eviction |
-| `src/app/remote-agent.ts` | `_highestSeq`, `_pendingEvents`, reconnect `resume`, gap fallback |
+| `src/server/agent/event-buffer.ts` | Dual-bounded retained events, byte accounting, sequence holes, and contiguous-resume validation |
+| `src/server/agent/session-manager.ts` | Authoritative event retention and capable/legacy live projection |
+| `src/server/ws/protocol.ts` | Additive `seq`/`ts`, capability negotiation, and resume message types |
+| `src/server/ws/handler.ts` | Hole-aware, byte-bounded, paced resume or explicit `resume_gap` |
+| `src/app/remote-agent.ts` | Ordered event ingest, outbox-first reconnect, and snapshot fallback |
 
 ---
 
@@ -3407,14 +3408,14 @@ Each registered project has its own state directory. All store data is scoped to
 
 | File / Directory | Owner | Purpose |
 |---|---|---|
-| `goals.json` | `GoalStore` | Goal definitions |
+| `goals.sqlite` | `GoalStore` | One transactional SQLite row per goal containing the flexible JSON payload. Startup automatically imports validated `goals.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
 | `sessions.json` | `SessionStore` | Session metadata |
-| `tasks.json` | `TaskStore` | Task state |
-| `gates.json` | `GateStore` | Gate state + signals |
+| `tasks.sqlite` | `TaskStore` | One transactional SQLite row per task containing the flexible JSON payload. Startup automatically imports validated `tasks.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
+| `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then moves sources to collision-safe backups using atomic no-replace links before source unlink. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` worker | Durable document mirror (`index/__docs__.json` + journal), compatibility metadata, and disposable derived cache. See [Semantic search](#semantic-search). |
-| `session-costs.json` | `CostTracker` | Token/cost data. See [Session usage and cost](session-cost.md). |
+| `session-costs.json` | `CostTracker` | Token/cost data. See [Session cost display](session-cost.md). |
 | `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 
 ### `<server-cwd>/.bobbit/state/` - global, gitignored

@@ -49,6 +49,45 @@ for response codes, authorization, and idempotency details.
 
 Worktree setup for a goal is driven by **per-component / project setup commands** plus, for goal-scoped variation, **hierarchical goal metadata**.
 
+#### Atomic goal setup lifecycle
+
+Git worktree provisioning is an authoritative lifecycle boundary, not background work that a team may race. Its canonical persisted states are:
+
+| `setupStatus` | Meaning | Start behavior |
+|---|---|---|
+| `preparing` | Initial provisioning is in progress. | No goal-scoped session, Team Lead, worker, or scheduler-created team start may proceed. |
+| `retrying` | A failed setup is being repaired. | The same start guard applies; the UI presents recovery rather than a new goal. |
+| `ready` | The goal has no worktree requirement, or its usable worktree and Git contract have been verified and durably published. | Normal manual or eligible scheduled start may proceed. |
+| `error` | Setup has failed with one current actionable diagnostic. | No team or goal-scoped session starts; an operator can retry. |
+
+`setupError` is the active diagnostic only, and is valid only for `error`. Every transition to `preparing`, `retrying`, or `ready` removes it in the same persisted update. In particular, a recovered goal cannot retain a misleading "Worktree setup failed" warning after `ready` is published. Historical evidence belongs in logs or a separate audit surface; it must never be represented by the active `setupError` field.
+
+Readiness is published only after provisioning has reconciled any partial work, verified the usable worktree and expected branch, and verified the configured upstream contract when one is required. This prevents an earlier command result from being mistaken for usable setup. Component `worktree_setup_command` failures remain non-fatal as described below; they are logged, while Git provisioning and its postconditions remain the readiness authority.
+
+Setup is single-flight per goal. Creation, scheduler, and retry callers join one provisioning transaction, so a retry can reuse and repair an existing branch/worktree instead of creating duplicates. A transient `config.lock` result is reconciled against the desired upstream before retrying; only that narrow lock contention receives bounded backoff. Invalid refs, permissions problems, malformed repositories, and other non-transient failures remain `error` states.
+
+Concurrent goals can still share a repository. Bobbit serializes the complete Git mutation transaction by the repository's canonical Git common directory, not by individual worktree paths, because linked worktrees share refs and Git configuration. The transaction includes branch creation or reuse, worktree registration, explicit upstream setup, and final validation. For a newly created branch with a configured `base_ref`, `git worktree add --no-track` avoids Git's implicit shared-config write; Bobbit then performs the required explicit upstream write inside that serialized transaction. Existing-branch recovery omits `--no-track`, and callers without an explicit configured base retain Git's normal implicit-tracking behavior.
+
+#### Team, session, and child scheduling guards
+
+The Team Manager refuses to create a lead or worker until setup is exactly `ready`; the goal-scoped session route uses the same boundary. Thus a failed setup leaves no active team, and a `ready` state is durable before auto-start can invoke the Team Manager. A failed auto-start after verified readiness is distinct from setup failure: the worktree remains available to the normal manual start path.
+
+Nested children always use the per-root scheduler. A child that is otherwise eligible may begin its own setup when scheduled, but its team starts only after that child's readiness has been verified. A dependency- or capacity-blocked child may retry to repair its worktree, but remains teamless and `blocked` until the scheduler releases it; repairing setup neither completes dependencies nor treats the child as normally paused. Operator-paused lifecycle semantics are also preserved: setup recovery does not itself resume a paused goal.
+
+#### Operator recovery and live state
+
+`POST /api/goals/:id/retry-setup` is the recovery action for a goal in `error`. It moves the goal to `retrying`, clears the active error atomically, and returns immediately while the authoritative setup transaction continues. Concurrent retries coalesce both that transaction and its start/scheduler continuation. A request may join a genuinely live initial setup; an orphaned persisted `preparing` status is reported as actionable rather than falsely succeeding. See [REST API — Goal setup recovery](rest-api.md#goal-setup-recovery).
+
+The server broadcasts the persisted transition before returning the retry response and broadcasts settlement afterward. Clients must invalidate their goal/session state from those updates: `error` renders the current diagnostic and Retry Setup while disabling start controls; `preparing` and `retrying` render an in-progress state; `ready` removes stale warnings and restores the applicable Start Team or New Session control.
+
+Durable regression coverage is kept near the affected contracts:
+
+- [`tests2/core/parallel-goal-setup-repro.test.ts`](../tests2/core/parallel-goal-setup-repro.test.ts) covers same-goal single-flight and atomic active-error clearing.
+- [`tests2/core/setup-ready-team-start-guard.test.ts`](../tests2/core/setup-ready-team-start-guard.test.ts) covers the Team Manager readiness boundary.
+- [`tests2/integration/shared-git-config-coordination-repro.test.ts`](../tests2/integration/shared-git-config-coordination-repro.test.ts) deterministically exercises parallel root/child shared-config coordination and postcondition reconciliation.
+- [`tests2/integration/api-goals-child-autostart-ready.test.ts`](../tests2/integration/api-goals-child-autostart-ready.test.ts) covers child scheduler and blocked-retry behavior.
+- [`tests2/browser/goal-setup-recovery.spec.ts`](../tests2/browser/goal-setup-recovery.spec.ts) covers the live UI and reload after recovery.
+
 - **Per-component setup** — each component's `worktree_setup_command` (project config) runs when a goal worktree is provisioned, identically for every goal in the project. Failures are non-fatal (logged; the worktree is still used). See [dev-workflow.md — Worktree branch namespaces](dev-workflow.md#worktree-branch-namespaces).
 - **Goal-scoped variation** — when you need one goal to differ from another (enable a feature, seed an index, disable a tool/provider, reorder prompt sections), use **hierarchical goal metadata** and the `goalProvisioned` extension hook. Metadata is set at goal creation, inherited down the goal tree, and applied uniformly to every session (team lead, members, delegates, reviewers, nested sub-goals). See **[docs/design/goal-metadata.md](design/goal-metadata.md)** for the full design.
 
@@ -1061,9 +1100,11 @@ State is per-project — each project has its own copies of these files in `<pro
 | Location | What |
 |---|---|
 | `defaults/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
-| `<project>/.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
-| `<project>/.bobbit/state/gates.json` | Gate state and signal history |
-| `<project>/.bobbit/state/tasks.json` | Tasks with workflow gate links |
+| `<project>/.bobbit/state/goals.sqlite` | Goal definitions and snapshotted workflows, one transactional JSON-payload row per goal. Validated legacy `goals.json` and `.pre-migration` recovery are imported automatically and retained under collision-safe backup names. |
+| `<project>/.bobbit/state/gates.sqlite` | Gate state and signal history, one transactional row per gate. Legacy `gates.json` plus `.pre-migration` recovery are imported automatically, then retained under atomically claimed, collision-safe backup names. |
+| `<project>/.bobbit/state/tasks.sqlite` | Task state and workflow gate links, one transactional JSON-payload row per task. Validated legacy `tasks.json` and `.pre-migration` recovery are imported automatically and retained under collision-safe backup names. |
+
+The three stores keep separate per-project databases and in-memory read models. Real-filesystem construction selects SQLite automatically; injected/memfs unit fixtures retain their JSON adapters. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md) and [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md).
 
 ## Key source files
 
@@ -1073,8 +1114,9 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/workflow-manager.ts` | Workflow CRUD, DAG validation, cloning |
 | `src/server/agent/verification-harness.ts` | Async verification orchestration (command + LLM review + agent-qa, session lifecycle, artifact population) |
 | `src/server/agent/verification-logic.ts` | Pure verification logic — variable substitution, phase grouping, optional step skipping, cache reuse, error pattern matching (unit-testable without server state) |
+| `src/server/agent/goal-store.ts` | In-memory goal read model, SQLite production persistence, JSON fixture adapter, and legacy migration |
 | `src/server/agent/gate-store.ts` | Gate state, reset, and signal history persistence |
-| `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
+| `src/server/agent/task-store.ts` | In-memory task read model, SQLite production persistence, JSON fixture adapter, and workflow gate links |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
 | `src/app/goal-dashboard.ts` | Goal dashboard gate pipeline, focused route state, expanded gate/signal sections |

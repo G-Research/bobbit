@@ -35,7 +35,7 @@ beforeEach(() => {
 });
 
 function makeManager(): { gm: GoalManager; store: GoalStore } {
-	const goalStore = new GoalStore(stateDir);
+	const goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 	const cfg = new ProjectConfigStore(configDir);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([{

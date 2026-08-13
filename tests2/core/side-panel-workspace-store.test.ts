@@ -39,13 +39,13 @@ function previewTab(entry = "index.html", version?: number): SidePanelWorkspaceT
 	};
 }
 
-function reviewTab(documentId = "doc-1", title = "Review"): SidePanelWorkspaceTab {
+function reviewTab(reviewId = "review-1", title = "Review"): SidePanelWorkspaceTab {
 	return {
-		id: `review:${encodeURIComponent(documentId)}`,
+		id: `review:${encodeURIComponent(reviewId)}`,
 		kind: "review",
 		title,
 		label: title,
-		source: { type: "review", sessionId, documentId, title },
+		source: { type: "review", sessionId, reviewId, title },
 		updatedAt: 1,
 	};
 }
@@ -72,8 +72,8 @@ describe("side-panel workspace canonicalization", () => {
 		assert.equal(canonicalizeTab({ ...previewTab("index.html"), id: "preview:entry:index.html:v:0", source: { type: "preview", sessionId, entry: "index.html", historical: true, version: 0 } }, sessionId), null);
 	});
 
-	it("migrates legacy review-title tabs to deterministic document ids", () => {
-		const tab = canonicalizeTab({
+	it("migrates legacy review document/title tabs to canonical review ids", () => {
+		const titleOnly = canonicalizeTab({
 			id: "review:My%20Review",
 			kind: "review",
 			title: "My Review",
@@ -81,10 +81,181 @@ describe("side-panel workspace canonicalization", () => {
 			source: { type: "review", sessionId, title: "My Review" },
 			updatedAt: 1,
 		}, sessionId);
+		assert.ok(titleOnly);
+		assert.match(titleOnly.id, /^review:legacy-title-[0-9a-f]{16}$/);
+		assert.equal(titleOnly.source.type, "review");
+		assert.match((titleOnly.source as any).reviewId, /^legacy-title-[0-9a-f]{16}$/);
+		assert.equal((titleOnly.source as any).documentId, undefined);
+
+		const document = canonicalizeTab({
+			id: "review:legacy-title",
+			kind: "review",
+			title: "Legacy document",
+			label: "Review",
+			source: { type: "review", sessionId, documentId: "document-1", title: "Legacy document" },
+			updatedAt: 1,
+		}, sessionId);
+		assert.ok(document);
+		assert.equal(document.id, "review:document-1");
+		assert.deepEqual(document.source, { type: "review", sessionId, reviewId: "document-1", title: "Legacy document" });
+	});
+
+	it("keeps duplicate review titles distinct by review id and rejects mismatched canonical ids", () => {
+		const workspace = canonicalizeWorkspace({
+			tabs: [reviewTab("review-first", "Findings"), reviewTab("review-second", "Findings")],
+			activeTabId: "review:review-second",
+		}, sessionId);
+		assert.deepEqual(workspace.tabs.map((tab) => tab.id), ["review:review-first", "review:review-second"]);
+		assert.equal(workspace.activeTabId, "review:review-second");
+
+		assert.equal(canonicalizeTab({
+			...reviewTab("review-first", "Findings"),
+			id: "review:review-second",
+		}, sessionId), null);
+	});
+
+	it("retains an exact bounded review payload identity and active file", () => {
+		const contentHash = "a".repeat(64);
+		const tab = canonicalizeTab({
+			...reviewTab("review/payload-1", "Payload review"),
+			source: {
+				type: "review",
+				sessionId,
+				reviewId: "review/payload-1",
+				title: "Payload review",
+				toolCallId: "tool-call:review-open-1",
+				payloadId: "payload-1",
+				contentHash,
+			},
+			state: { activeFileId: "file-2", scrollTop: 14 },
+		}, sessionId);
+
 		assert.ok(tab);
-		assert.match(tab.id, /^review:legacy-title-[0-9a-f]{16}$/);
-		assert.equal(tab.source.type, "review");
-		assert.match(tab.source.documentId, /^legacy-title-[0-9a-f]{16}$/);
+		assert.deepEqual(tab.source, {
+			type: "review",
+			sessionId,
+			reviewId: "review/payload-1",
+			title: "Payload review",
+			toolCallId: "tool-call:review-open-1",
+			payloadId: "payload-1",
+			contentHash,
+		});
+		assert.deepEqual({ ...tab.state }, { activeFileId: "file-2", scrollTop: 14 });
+	});
+
+	it("preserves byte-exact payload titles while bounding their display labels", () => {
+		const exactTitle = `  ${"é".repeat(150)}${"x".repeat(12)}  `;
+		assert.equal(Buffer.byteLength(exactTitle, "utf8"), 316);
+		assert.ok(exactTitle.length > 160);
+		const base = reviewTab("payload-title-review", exactTitle);
+		const tab = canonicalizeTab({
+			...base,
+			title: `Review: ${exactTitle}`,
+			label: `Review: ${exactTitle}`,
+			source: {
+				...base.source,
+				title: exactTitle,
+				toolCallId: "tool-call-title",
+				payloadId: "payload-title",
+				contentHash: "d".repeat(64),
+			},
+			state: { activeFileId: "file-title" },
+		}, sessionId);
+
+		assert.ok(tab);
+		assert.equal((tab.source as any).title, exactTitle);
+		assert.equal(tab.title.length, 160);
+		assert.notEqual(tab.title, exactTitle);
+
+		const candidate = (title: string) => canonicalizeTab({
+			...base,
+			source: {
+				...base.source,
+				title,
+				toolCallId: "tool-call-title",
+				payloadId: "payload-title",
+				contentHash: "d".repeat(64),
+			},
+			state: { activeFileId: "file-title" },
+		}, sessionId);
+		assert.equal(candidate("é".repeat(161)), null);
+		assert.equal(candidate("bad\u0000title"), null);
+	});
+
+	it("preserves multibyte artifact identities at their shared UTF-8 limits and rejects +1", () => {
+		const reviewId = "界".repeat(100); // 300 UTF-8 bytes, 900 encoded route characters.
+		const toolCallId = `${"界".repeat(66)}é`; // 200 UTF-8 bytes.
+		const fileId = `${"🙂".repeat(49)}界x`; // 200 UTF-8 bytes.
+		const id = `review:${encodeURIComponent(reviewId)}`;
+		const candidate = (overrides: { reviewId?: string; toolCallId?: string; fileId?: string } = {}) => {
+			const exactReviewId = overrides.reviewId ?? reviewId;
+			const exactFileId = overrides.fileId ?? fileId;
+			return canonicalizeTab({
+				id: `review:${encodeURIComponent(exactReviewId)}`,
+				kind: "review",
+				title: "Review: Identity limits",
+				label: "Identity limits",
+				source: {
+					type: "review",
+					sessionId,
+					reviewId: exactReviewId,
+					title: "Identity limits",
+					toolCallId: overrides.toolCallId ?? toolCallId,
+					payloadId: "payload-identity",
+					contentHash: "e".repeat(64),
+				},
+				state: { activeFileId: exactFileId },
+				updatedAt: 1,
+			}, sessionId);
+		};
+
+		const exact = candidate();
+		assert.ok(exact);
+		assert.equal(exact.id, id);
+		assert.equal((exact.source as any).reviewId, reviewId);
+		assert.equal((exact.source as any).toolCallId, toolCallId);
+		assert.equal(exact.state?.activeFileId, fileId);
+		assert.equal(candidate({ reviewId: `${reviewId}x` }), null);
+		assert.equal(candidate({ toolCallId: `${toolCallId}x` }), null);
+		assert.equal(candidate({ fileId: `${fileId}x` }), null);
+	});
+
+	it("rejects partial, malformed, or unbounded review payload identities atomically", () => {
+		const base = reviewTab("payload-review", "Payload review");
+		const validSource = {
+			...base.source,
+			toolCallId: "tool-call-1",
+			payloadId: "payload-1",
+			contentHash: "b".repeat(64),
+		};
+		const candidate = (source: Record<string, unknown>, state: unknown = { activeFileId: "file-1" }) =>
+			canonicalizeTab({ ...base, source, state }, sessionId);
+
+		assert.equal(candidate({ ...base.source, payloadId: "payload-1" }), null);
+		assert.equal(candidate({ ...validSource, documentId: "legacy-document" }), null);
+		assert.equal(candidate({ ...validSource, reviewTitle: "Legacy title" }), null);
+		assert.equal(candidate({ ...validSource, reviewId: undefined }), null);
+		assert.equal((candidate({ ...validSource, toolCallId: " tool-call-1" })?.source as any)?.toolCallId, " tool-call-1");
+		assert.equal(candidate({ ...validSource, payloadId: "x".repeat(161) }), null);
+		assert.equal(candidate({ ...validSource, payloadId: "é".repeat(81) }), null);
+		assert.equal(candidate({ ...validSource, contentHash: "B".repeat(64) }), null);
+		assert.equal(candidate({ ...validSource, contentHash: "b".repeat(63) }), null);
+		assert.equal(canonicalizeTab({ ...base, source: validSource }, sessionId), null);
+		assert.equal(candidate(validSource, {}), null);
+		assert.equal(candidate(validSource, { activeFileId: " file-1" })?.state?.activeFileId, " file-1");
+		assert.ok(candidate(validSource, { activeFileId: "x".repeat(200) }));
+		assert.equal(candidate(validSource, { activeFileId: "x".repeat(201) }), null);
+		assert.ok(candidate(validSource, { activeFileId: "é".repeat(100) }));
+		assert.equal(candidate(validSource, { activeFileId: `${"é".repeat(100)}x` }), null);
+	});
+
+	it("preserves legacy review state while validating an explicitly stored active file", () => {
+		const legacy = reviewTab("legacy-review", "Legacy");
+		assert.deepEqual({ ...canonicalizeTab({ ...legacy, state: { activeFileId: "legacy-file" } }, sessionId)?.state }, {
+			activeFileId: "legacy-file",
+		});
+		assert.equal(canonicalizeTab({ ...legacy, state: { activeFileId: "" } }, sessionId), null);
+		assert.ok(canonicalizeTab(legacy, sessionId));
 	});
 
 	it("canonicalizes legacy pack ids to default instance and rejects unsafe params", () => {
@@ -186,8 +357,8 @@ describe("side-panel workspace mutations", () => {
 
 	it("chooses adjacent active tab on close", () => {
 		const tabs = [proposalTab(), previewTab(), reviewTab()];
-		assert.equal(nextActiveAfterClose(tabs, "preview:entry:index.html", "preview:entry:index.html"), "review:doc-1");
-		assert.equal(nextActiveAfterClose(tabs, "review:doc-1", "review:doc-1"), "preview:entry:index.html");
+		assert.equal(nextActiveAfterClose(tabs, "preview:entry:index.html", "preview:entry:index.html"), "review:review-1");
+		assert.equal(nextActiveAfterClose(tabs, "review:review-1", "review:review-1"), "preview:entry:index.html");
 		assert.equal(nextActiveAfterClose(tabs, "preview:entry:index.html", "proposal:goal"), "proposal:goal");
 	});
 
@@ -198,6 +369,37 @@ describe("side-panel workspace mutations", () => {
 		assert.throws(() => applyWorkspaceMutation(workspace, { type: "reorder", tabIds: [] }), SidePanelWorkspaceError);
 		workspace = applyWorkspaceMutation(workspace, { type: "update", tabId: "proposal:goal", patch: { title: "Updated" } });
 		assert.equal(workspace.tabs[0].title, "Updated");
+	});
+
+	it("persists payload-backed active-file updates without weakening the payload tuple", () => {
+		const tab = {
+			...reviewTab("payload-review", "Payload review"),
+			source: {
+				type: "review" as const,
+				sessionId,
+				reviewId: "payload-review",
+				title: "Payload review",
+				toolCallId: "tool-call-1",
+				payloadId: "payload-1",
+				contentHash: "c".repeat(64),
+			},
+			state: { activeFileId: "file-1" },
+		};
+		const opened = applyWorkspaceMutation(emptyWorkspace(sessionId), { type: "open", tab });
+		const updated = applyWorkspaceMutation(opened, {
+			type: "update",
+			tabId: tab.id,
+			patch: { state: { activeFileId: "file-2" } },
+		});
+		assert.equal(updated.tabs[0].state?.activeFileId, "file-2");
+		assert.deepEqual(updated.tabs[0].source, opened.tabs[0].source);
+
+		assert.throws(() => applyWorkspaceMutation(updated, {
+			type: "update",
+			tabId: tab.id,
+			patch: { state: { activeFileId: "" } },
+		}), (error: unknown) => error instanceof SidePanelWorkspaceError && error.code === "INVALID_TAB");
+		assert.equal(updated.tabs[0].state?.activeFileId, "file-2");
 	});
 
 	it("migrates once with stamp and ignores later migrations", () => {

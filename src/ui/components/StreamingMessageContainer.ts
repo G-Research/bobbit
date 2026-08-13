@@ -428,6 +428,7 @@ export class StreamingMessageContainer extends LitElement {
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
 					<div class="bobbit-blob__headset"></div>
+					<div class="bobbit-blob__ponytail"></div>
 					<div class="bobbit-blob__shadow"></div>
 					<div class="bobbit-blob__zzz" aria-hidden="true">
 						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--1">z</span>

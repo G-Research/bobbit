@@ -1,0 +1,4 @@
+id: file-explorer.panel
+title: Files
+entry: ../lib/file-explorer-panel.js
+instanceMode: singleton

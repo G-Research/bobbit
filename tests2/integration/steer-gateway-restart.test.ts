@@ -56,6 +56,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 		let conn = await connectWs(sessionId);
 		const sm = gateway.sessionManager as any;
 		let steerRpc: ReturnType<typeof vi.spyOn> | undefined;
+		let restorePrepareVisibleAgentEvent: (() => void) | undefined;
 
 		try {
 			await conn.waitFor((message: any) => message.type === "queue_update");
@@ -80,6 +81,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			expect(steerRpc).toHaveBeenCalledWith(STEER_TEXT);
 
 			const persistedBeforeRestore = sm.resolveStoreForSession(sessionId).get(sessionId);
+			const activityBeforeRestore = persistedBeforeRestore?.lastActivity;
 			expect(persistedBeforeRestore?.messageQueue ?? []).toHaveLength(0);
 			expect(persistedBeforeRestore?.inFlightSteerTexts).toEqual([
 				expect.objectContaining({
@@ -103,7 +105,22 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			live.unsubscribe();
 			await live.rpcClient.stop();
 			sm.sessions.delete(sessionId);
+			let activityAtRedrivenEcho: number | undefined;
+			const originalPrepareVisibleAgentEvent = sm.prepareVisibleAgentEvent;
+			sm.prepareVisibleAgentEvent = function(target: any, event: any) {
+				if (event?.type === "message_end" && messageText(event.message) === STEER_TEXT) {
+					activityAtRedrivenEcho = target.lastActivity;
+				}
+				return originalPrepareVisibleAgentEvent.call(this, target, event);
+			};
+			restorePrepareVisibleAgentEvent = () => { sm.prepareVisibleAgentEvent = originalPrepareVisibleAgentEvent; };
 			const restoredClock = await restoreWithLocalMockAgentClock(gateway, sessionId);
+			restorePrepareVisibleAgentEvent();
+			restorePrepareVisibleAgentEvent = undefined;
+			expect(activityAtRedrivenEcho, "mock emits the recovered echo before its positive prompt acknowledgement")
+				.toBe(activityBeforeRestore);
+			expect(sm.sessions.get(sessionId)?.lastActivity, "positive acknowledgement subsequently commits activity")
+				.toBeGreaterThan(activityBeforeRestore ?? 0);
 			await restoredClock.settleCurrentPrompt();
 
 			conn = await connectWs(sessionId);
@@ -129,6 +146,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			expect(humanDispatches.every(binding => (binding as any).modelPrefix === undefined)).toBe(true);
 			expect(sm.resolveStoreForSession(sessionId).get(sessionId)?.inFlightSteerTexts ?? []).toHaveLength(0);
 		} finally {
+			restorePrepareVisibleAgentEvent?.();
 			steerRpc?.mockRestore();
 			conn.close();
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });
@@ -140,6 +158,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 		let conn = await connectWs(sessionId);
 		const sm = gateway.sessionManager as any;
 		let steerRpc: ReturnType<typeof vi.spyOn> | undefined;
+		let restorePrepareVisibleAgentEvent: (() => void) | undefined;
 		const piText = `${AGENT_PREFIX}${AGENT_STEER_TEXT}`;
 
 		try {
@@ -159,6 +178,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			expect(steerRpc).toHaveBeenCalledOnce();
 			expect(steerRpc).toHaveBeenCalledWith(piText);
 			const persistedBeforeRestore = sm.resolveStoreForSession(sessionId).get(sessionId);
+			const activityBeforeRestore = persistedBeforeRestore?.lastActivity;
 			expect(persistedBeforeRestore?.inFlightSteerTexts).toEqual([
 				expect.objectContaining({
 					text: AGENT_STEER_TEXT,
@@ -177,7 +197,22 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			live.unsubscribe();
 			await live.rpcClient.stop();
 			sm.sessions.delete(sessionId);
+			let activityAtRedrivenEcho: number | undefined;
+			const originalPrepareVisibleAgentEvent = sm.prepareVisibleAgentEvent;
+			sm.prepareVisibleAgentEvent = function(target: any, event: any) {
+				if (event?.type === "message_end" && messageText(event.message) === piText) {
+					activityAtRedrivenEcho = target.lastActivity;
+				}
+				return originalPrepareVisibleAgentEvent.call(this, target, event);
+			};
+			restorePrepareVisibleAgentEvent = () => { sm.prepareVisibleAgentEvent = originalPrepareVisibleAgentEvent; };
 			const restoredClock = await restoreWithLocalMockAgentClock(gateway, sessionId);
+			restorePrepareVisibleAgentEvent();
+			restorePrepareVisibleAgentEvent = undefined;
+			expect(activityAtRedrivenEcho, "mock emits the accountable echo before its positive prompt acknowledgement")
+				.toBe(activityBeforeRestore);
+			expect(sm.sessions.get(sessionId)?.lastActivity, "positive acknowledgement subsequently commits accountable activity")
+				.toBeGreaterThan(activityBeforeRestore ?? 0);
 			await restoredClock.settleCurrentPrompt();
 			expect(rawUserMessages(gateway, sessionId).filter(message => messageText(message) === piText),
 				"only the healthy post-restart bridge observes the decorated steer").toHaveLength(1);
@@ -201,6 +236,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			expect(agentDispatches.every(binding => (binding as any).modelPrefix === AGENT_PREFIX)).toBe(true);
 			expect(sm.resolveStoreForSession(sessionId).get(sessionId)?.inFlightSteerTexts ?? []).toHaveLength(0);
 		} finally {
+			restorePrepareVisibleAgentEvent?.();
 			steerRpc?.mockRestore();
 			conn.close();
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });

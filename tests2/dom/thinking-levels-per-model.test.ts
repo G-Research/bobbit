@@ -38,7 +38,7 @@ function parseModel(value: string): ModelLike {
 	return m;
 }
 
-const DEFAULT_MODEL = "anthropic|claude-opus-4-8-20260528|1";
+const DEFAULT_MODEL = "anthropic|claude-opus-4-8-20260528|1|xhigh=xhigh";
 
 /** Reproduce the fixture's reactive selector, backed by REAL capability logic. */
 function createHarness() {
@@ -88,34 +88,28 @@ let h: ReturnType<typeof createHarness>;
 afterEach(() => { document.body.innerHTML = ""; });
 
 describe("Per-model thinking-level selector", () => {
-	it("Opus 4.8 exposes xhigh option", () => {
+	it("explicit maps expose xhigh regardless of model family or route", () => {
 		h = createHarness();
-		h.setModelByValue("anthropic|claude-opus-4-8-20260528|1");
-		expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+		for (const model of [
+			"anthropic|claude-opus-4-8-20260528|1|xhigh=xhigh",
+			"aigw|claude-opus-4.8-20260528|1|xhigh=xhigh",
+			"custom|future-reasoner|1|xhigh=extra",
+		]) {
+			h.setModelByValue(model);
+			expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+		}
 	});
 
-	it("dotted Opus 4.8 exposes xhigh option", () => {
+	it("model names do not expose xhigh without an explicit map", () => {
 		h = createHarness();
-		h.setModelByValue("anthropic|claude-opus-4.8-20260528|1");
-		expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
-	});
-
-	it("AIGW-routed Opus 4.8 exposes xhigh option", () => {
-		h = createHarness();
-		h.setModelByValue("aigw|claude-opus-4-8-20260528|1");
-		expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
-	});
-
-	it("AIGW-routed dotted Opus 4.8 exposes xhigh option", () => {
-		h = createHarness();
-		h.setModelByValue("aigw|claude-opus-4.8-20260528|1");
-		expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
-	});
-
-	it("Opus 4.7 exposes xhigh option", () => {
-		h = createHarness();
-		h.setModelByValue("anthropic|claude-opus-4-7-20251101|1");
-		expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+		for (const model of [
+			"anthropic|claude-opus-4-8-20260528|1",
+			"aigw|claude-opus-4-7-20251101|1",
+			"openai|gpt-5.2-codex|1",
+		]) {
+			h.setModelByValue(model);
+			expect(h.getSupported()).toEqual(["off", "minimal", "low", "medium", "high"]);
+		}
 	});
 
 	it("Claude Fable 5 (off:null map) omits off and offers minimal..xhigh", () => {
@@ -132,28 +126,12 @@ describe("Per-model thinking-level selector", () => {
 		expect(h.getSupported()).not.toContain("xhigh");
 	});
 
-	it("gpt-5.2-codex exposes xhigh option", () => {
+	it("OpenAI family names without maps stay on the base ladder", () => {
 		h = createHarness();
-		h.setModelByValue("openai|gpt-5.2-codex|1");
-		expect(h.getSupported()).toContain("xhigh");
-	});
-
-	it("gpt-5.4 exposes xhigh option", () => {
-		h = createHarness();
-		h.setModelByValue("openai|gpt-5.4|1");
-		expect(h.getSupported()).toContain("xhigh");
-	});
-
-	it("gpt-5.5 exposes xhigh option", () => {
-		h = createHarness();
-		h.setModelByValue("openai|gpt-5.5|1");
-		expect(h.getSupported()).toContain("xhigh");
-	});
-
-	it("gpt-5.1-codex-max exposes xhigh option", () => {
-		h = createHarness();
-		h.setModelByValue("openai|gpt-5.1-codex-max|1");
-		expect(h.getSupported()).toContain("xhigh");
+		for (const id of ["gpt-5.2-codex", "gpt-5.4", "gpt-5.5", "gpt-5.1-codex-max"]) {
+			h.setModelByValue(`openai|${id}|1`);
+			expect(h.getSupported()).not.toContain("xhigh");
+		}
 	});
 
 	it("gpt-5.6 metadata exposes xhigh and max options", () => {
@@ -174,9 +152,9 @@ describe("Per-model thinking-level selector", () => {
 		expect(h.getSupported()).toEqual(["off"]);
 	});
 
-	it("xhigh on Opus 4.8 clamps to high when switching to Opus 4.5", () => {
+	it("xhigh on an explicitly capable model clamps to high when switching to a mapless model", () => {
 		h = createHarness();
-		h.setModelByValue("anthropic|claude-opus-4-8-20260528|1");
+		h.setModelByValue("anthropic|claude-opus-4-8-20260528|1|xhigh=xhigh");
 		h.pickLevel("xhigh");
 		expect(h.getCurrentLevel()).toBe("xhigh");
 
@@ -198,17 +176,17 @@ describe("Per-model thinking-level selector", () => {
 		expect(h.getSupported()).toEqual(["off"]);
 	});
 
-	it("supported level is preserved when switching between equally capable models", () => {
+	it("supported level is preserved between models with explicit maps", () => {
 		h = createHarness();
-		h.setModelByValue("anthropic|claude-opus-4-7-20251101|1");
+		h.setModelByValue("anthropic|claude-opus-4-7-20251101|1|xhigh=xhigh");
 		h.pickLevel("xhigh");
-		h.setModelByValue("openai|gpt-5.2|1");
+		h.setModelByValue("openai|gpt-5.2|1|xhigh=xhigh");
 		expect(h.getCurrentLevel()).toBe("xhigh");
 	});
 
-	it("xhigh persists across reload on a capable model", () => {
+	it("xhigh persists across reload when the model map advertises it", () => {
 		h = createHarness();
-		h.setModelByValue("anthropic|claude-opus-4-8-20260528|1");
+		h.setModelByValue("anthropic|claude-opus-4-8-20260528|1|xhigh=xhigh");
 		h.pickLevel("xhigh");
 		expect(h.getCurrentLevel()).toBe("xhigh");
 

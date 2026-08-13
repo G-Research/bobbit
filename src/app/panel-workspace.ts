@@ -30,7 +30,7 @@ export interface PanelWorkspaceTab {
 			[key: string]: unknown;
 		}
 		| { type: "proposal"; proposalType: ProposalType; sessionId?: string; rev?: number; historical?: boolean; [key: string]: unknown }
-		| { type: "review"; documentId?: string; title?: string; reviewTitle?: string; sessionId?: string }
+		| { type: "review"; reviewId?: string; documentId?: string; title?: string; reviewTitle?: string; sessionId?: string; toolCallId?: string; payloadId?: string; contentHash?: string }
 		| { type: "inbox"; sessionId?: string }
 		| {
 			/** A pack-contributed side panel (pack schema V1 §8.1). `{packId, panelId,
@@ -254,13 +254,23 @@ export function isPinnedPanelTab(_tab: PanelWorkspaceTab | undefined | null): bo
 	return false;
 }
 
+/** Return the immutable artifact backing a preview tab, regardless of whether
+ * the tab is the current/live identity. "Live" controls update semantics; once
+ * an artifact exists, its stable route is always safer than the mutable mount. */
+export function previewArtifactIdFromTab(tab: PanelWorkspaceTab | undefined | null): string {
+	if (!tab || tab.kind !== "preview") return "";
+	const source = tab.source as Record<string, unknown> | undefined;
+	const tabState = tab.state as Record<string, unknown> | undefined;
+	const stateArtifactId = typeof tabState?.artifactId === "string" ? tabState.artifactId.trim() : "";
+	const sourceArtifactId = typeof source?.artifactId === "string" ? source.artifactId.trim() : "";
+	return stateArtifactId || sourceArtifactId;
+}
+
 export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
 	if (!tab || tab.kind !== "preview") return false;
 	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) return true;
 	const source = tab.source as Record<string, unknown> | undefined;
-	const tabState = tab.state as Record<string, unknown> | undefined;
-	const hasArtifact = typeof source?.artifactId === "string" && source.artifactId
-		|| typeof tabState?.artifactId === "string" && tabState.artifactId;
+	const hasArtifact = previewArtifactIdFromTab(tab);
 	const hasLiveSource = source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
 	// Current filename tabs are live when the preview event explicitly marks them
 	// live, even if the server also attached an immutable artifact for historical
@@ -587,16 +597,29 @@ function looksLikeReviewDocumentId(value: string): boolean {
 	return value.startsWith("review-doc:") || value.startsWith("legacy-title-") || reviewDocumentTitlesById.has(value);
 }
 
+/** Build the canonical primary workspace id from a stable review identity. */
+export function reviewPanelTabIdFromReviewId(reviewId: string): string {
+	return `review:${encodeURIComponent(reviewId)}`;
+}
+
+/**
+ * Legacy document/title helper retained for existing single-document callers.
+ * New review-group callers must use `reviewPanelTabIdFromReviewId` so opaque
+ * review ids are never mistaken for display titles.
+ */
 export function reviewPanelTabId(documentIdOrTitle: string): string {
 	const documentId = looksLikeReviewDocumentId(documentIdOrTitle)
 		? documentIdOrTitle
 		: reviewDocumentIdForTitle(documentIdOrTitle);
-	return `review:${encodeURIComponent(documentId)}`;
+	return reviewPanelTabIdFromReviewId(documentId);
 }
 
-export function reviewDocumentIdFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
+export function reviewIdFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
 	if (!tab) return "";
-	if (tab.source?.type === "review" && typeof tab.source.documentId === "string" && tab.source.documentId) return tab.source.documentId;
+	if (tab.source?.type === "review") {
+		if (typeof tab.source.reviewId === "string" && tab.source.reviewId) return tab.source.reviewId;
+		if (typeof tab.source.documentId === "string" && tab.source.documentId) return tab.source.documentId;
+	}
 	const encoded = tab.id.startsWith("review:") ? tab.id.slice("review:".length) : "";
 	if (encoded) {
 		try { return decodeURIComponent(encoded); } catch { return encoded; }
@@ -604,13 +627,18 @@ export function reviewDocumentIdFromPanelTab(tab: PanelWorkspaceTab | undefined 
 	return "";
 }
 
+/** @deprecated Review workspace tabs are now keyed by review id. */
+export function reviewDocumentIdFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
+	return reviewIdFromPanelTab(tab);
+}
+
 export function reviewTitleFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
 	if (!tab) return "";
 	if (tab.source?.type === "review") {
-		if (typeof tab.source.reviewTitle === "string") return tab.source.reviewTitle;
 		if (typeof tab.source.title === "string") return tab.source.title;
+		if (typeof tab.source.reviewTitle === "string") return tab.source.reviewTitle;
 	}
-	const decodedId = reviewDocumentIdFromPanelTab(tab);
+	const decodedId = reviewIdFromPanelTab(tab);
 	if (decodedId && !looksLikeReviewDocumentId(decodedId)) return decodedId;
 	return tab.title.replace(/^Review:\s*/, "");
 }
@@ -633,6 +661,13 @@ export function assistantProposalType(assistantType: string | null | undefined):
 	}
 }
 
+export interface ReviewWorkspaceGroup {
+	reviewId: string;
+	title: string;
+	files?: readonly unknown[];
+	activeFileId?: string;
+}
+
 export interface BuildPanelWorkspaceTabsInput {
 	sessionId?: string;
 	isPreviewSession: boolean;
@@ -640,7 +675,10 @@ export interface BuildPanelWorkspaceTabsInput {
 	previewContentHash?: string;
 	activeProposalTypes: ProposalType[];
 	assistantProposalType: ProposalType | null;
+	/** Legacy flat-document input. Ignored when canonical review groups exist. */
 	reviewTitles: string[];
+	/** Each review contributes one primary tab; its files remain secondary navigation. */
+	reviewGroups?: readonly ReviewWorkspaceGroup[];
 	reviewPanelOpen: boolean;
 	inboxPanelOpen: boolean;
 	inboxHasPending: boolean;
@@ -695,17 +733,38 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 	}
 
 	if (input.reviewPanelOpen) {
-		for (const titleOrDocumentId of input.reviewTitles) {
-			const documentId = looksLikeReviewDocumentId(titleOrDocumentId) ? titleOrDocumentId : reviewDocumentIdForTitle(titleOrDocumentId);
-			const title = reviewDocumentTitlesById.get(documentId) || titleOrDocumentId;
-			tabs.push({
-				id: reviewPanelTabId(documentId),
-				kind: "review",
-				title: `Review: ${title}`,
-				label: `Review: ${title}`,
-				legacyTab: "review",
-				source: { type: "review", documentId, title, reviewTitle: title, sessionId: input.sessionId },
-			});
+		const reviewGroups = Array.isArray(input.reviewGroups)
+			? input.reviewGroups.filter((group) => typeof group?.reviewId === "string" && group.reviewId.trim().length > 0)
+			: [];
+		if (reviewGroups.length > 0) {
+			const seenReviewIds = new Set<string>();
+			for (const group of reviewGroups) {
+				const reviewId = group.reviewId.trim();
+				if (seenReviewIds.has(reviewId)) continue;
+				seenReviewIds.add(reviewId);
+				const title = typeof group.title === "string" && group.title ? group.title : "Review";
+				tabs.push({
+					id: reviewPanelTabIdFromReviewId(reviewId),
+					kind: "review",
+					title: `Review: ${title}`,
+					label: `Review: ${title}`,
+					legacyTab: "review",
+					source: { type: "review", reviewId, title, sessionId: input.sessionId },
+				});
+			}
+		} else {
+			for (const titleOrDocumentId of input.reviewTitles) {
+				const documentId = looksLikeReviewDocumentId(titleOrDocumentId) ? titleOrDocumentId : reviewDocumentIdForTitle(titleOrDocumentId);
+				const title = reviewDocumentTitlesById.get(documentId) || titleOrDocumentId;
+				tabs.push({
+					id: reviewPanelTabId(documentId),
+					kind: "review",
+					title: `Review: ${title}`,
+					label: `Review: ${title}`,
+					legacyTab: "review",
+					source: { type: "review", documentId, title, reviewTitle: title, sessionId: input.sessionId },
+				});
+			}
 		}
 	}
 
@@ -755,20 +814,32 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 		const encoded = id.slice("review:".length);
 		let decoded = encoded;
 		try { decoded = decodeURIComponent(encoded); } catch { /* keep encoded */ }
-		const sourceTitle = typeof source.reviewTitle === "string" ? source.reviewTitle : typeof source.title === "string" ? source.title : undefined;
-		const documentId = typeof source.documentId === "string" && source.documentId
-			? source.documentId
-			: looksLikeReviewDocumentId(decoded) ? decoded : legacyReviewDocumentIdFromTitle(decoded);
+		const sourceTitle = typeof source.title === "string" ? source.title : typeof source.reviewTitle === "string" ? source.reviewTitle : undefined;
+		const canonicalReviewId = typeof source.reviewId === "string" && source.reviewId ? source.reviewId : undefined;
+		const legacyDocumentId = typeof source.documentId === "string" && source.documentId ? source.documentId : undefined;
+		const reviewId = canonicalReviewId
+			|| legacyDocumentId
+			|| (looksLikeReviewDocumentId(decoded) ? decoded : legacyReviewDocumentIdFromTitle(sourceTitle || decoded));
 		const title = sourceTitle || (!looksLikeReviewDocumentId(decoded) ? decoded : rawTab.title.replace(/^Review:\s*/, "") || "Review");
-		if (title && documentId) rememberReviewDocumentIdentity(title, documentId);
+		if (!canonicalReviewId && title && reviewId) rememberReviewDocumentIdentity(title, reviewId);
+		const toolCallId = typeof source.toolCallId === "string" && source.toolCallId ? source.toolCallId : undefined;
+		const payloadId = typeof source.payloadId === "string" && source.payloadId ? source.payloadId : undefined;
+		const contentHash = typeof source.contentHash === "string" && source.contentHash ? source.contentHash : undefined;
+		const artifactFieldCount = Number(!!toolCallId) + Number(!!payloadId) + Number(!!contentHash);
 		return {
 			...rawTab,
-			id: reviewPanelTabId(documentId),
+			id: reviewPanelTabIdFromReviewId(reviewId),
 			kind: "review",
 			title: `Review: ${title}`,
 			label: `Review: ${title}`,
 			legacyTab: "review",
-			source: { ...source, type: "review", documentId, title, reviewTitle: title } as PanelWorkspaceTab["source"],
+			source: {
+				type: "review",
+				reviewId,
+				title,
+				...(typeof source.sessionId === "string" ? { sessionId: source.sessionId } : {}),
+				...(artifactFieldCount === 3 ? { toolCallId, payloadId, contentHash } : {}),
+			},
 		};
 	}
 	if (kind === "pack") {
@@ -885,7 +956,7 @@ export function findPanelTab(tabs: PanelWorkspaceTab[], id: string | null | unde
 		const raw = id.slice("review:".length);
 		let decoded = raw;
 		try { decoded = decodeURIComponent(raw); } catch { /* keep raw */ }
-		return tabs.find((tab) => tab.kind === "review" && (reviewDocumentIdFromPanelTab(tab) === decoded || reviewTitleFromPanelTab(tab) === decoded));
+		return tabs.find((tab) => tab.kind === "review" && (reviewIdFromPanelTab(tab) === decoded || reviewTitleFromPanelTab(tab) === decoded));
 	}
 	return undefined;
 }

@@ -8,7 +8,7 @@ The **Bobbit** is a squishy green pixel-art blob — think Stardew Valley slime 
 - **Chat blob** — a larger 3.5× scale animated character in the `StreamingMessageContainer`, expressing the agent's activity state through Disney-style animations
 - **Role page** — inline blobs at arbitrary sizes inside role cards and the accessory picker
 
-The bobbit uses one canonical pixel grid across renderers. Sidebar sprites and accessories use CSS `box-shadow`; chat and inline body sprites use a device-pixel canvas so eye frames can be swapped atomically without resampling artifacts. There are no image or SVG assets. Accessories remain separate overlay `<div>`s and are counter-hue-rotated to maintain color stability across session identities.
+The bobbit uses one canonical pixel grid across renderers. Sidebar sprites and accessories are cached device-pixel canvas images; chat accessories use CSS `box-shadow`, while chat and inline body sprites use canvas so eye frames can be swapped atomically without resampling artifacts. There are no image or SVG assets. Accessories remain separate overlays and are counter-hue-rotated to maintain color stability across session identities.
 
 ---
 
@@ -129,6 +129,7 @@ interface AccessoryDefinition {
 | `none` | None | — | false | No accessory | — |
 | `crown` | Crown | Head-worn | **true** | Gold crown with three points and a red jewel. Yellow (`#fef08a`, `#fde047`) and gold (`#ca8a04`, `#eab308`) tones. | Adds 4px top padding to blob container; `translateX(-0.5px)` nudge in sidebar |
 | `bandana` | Bandana | Head-worn | false | Red headband (`#ef4444`, `#dc2626`, `#b91c1c`) with a trailing knot/tail on the right side. | Tail hides when facing right; shifts up (`translate: 0 -1.75px`) to sit on forehead; has dedicated `blob-bandana-shadow` keyframes that sync tail visibility with eye direction |
+| `ponytail` | Ponytail | Head-worn | false | Centre-parted curtain fringe in slate (`#0e0d18` rim, `#454363` mass, `#7c7aa4` sheen) with a red-tied tail on the right (x10/x11, the bandana's columns) and translucent stubble on rows 6-7. | Parting, forehead and mouth are drawn by **omission** — never bake body colour in, or it breaks under hue rotation. `blob-ponytail-shadow` swings the tail to negative x and hides the far curtain when facing right (see below); `blob-ponytail-adjust` adds the headset's turn nudge. CSS is **generated** — see `design/gen-ponytail-animated.mjs` |
 | `magnifier` | Magnifying Glass | Hand-held | false | Circular glass lens (light blue `#87ceeb`, `#b0e0f0`, `#e0f4ff`) with brown handle (`#8b4513`). | Uses `magnifier-depth-busy/idle` z-index keyframes to go behind body when facing right |
 | `palette` | Paint Palette | Hand-held | false | Brown wooden palette (`#a16207`) with three paint dots: red, green, blue. | Depth keyframes; `translate(-0.5px, -0.5px)` offset |
 | `pencil` | Pencil | Hand-held | false | Yellow pencil body (`#fde047`, `#fbbf24`) with pink eraser (`#f9a8d4`, `#ec4899`), silver ferrule (`#9ca3af`, `#d1d5db`), wood section (`#f4a460`, `#cd853f`), and graphite tip (`#4b5563`). | Depth keyframes |
@@ -138,7 +139,33 @@ interface AccessoryDefinition {
 
 ### Head-worn vs hand-held
 
-- **Head-worn** (crown, bandana): Positioned on top of/around the bobbit's head. Follow the body transform directly. The bandana has special box-shadow keyframes to hide its trailing tail when the bobbit faces right.
+- **Head-worn** (crown, bandana, ponytail): Positioned on top of/around the bobbit's head. Follow the body transform directly. The bandana has special box-shadow keyframes to hide its trailing tail when the bobbit faces right.
+
+#### Right-facing occlusion (bandana / headset / ponytail)
+
+Three accessories change shape when the bobbit looks right, all on the same phase
+stops — `0 / 34 / 57 / 60 / 65 / 96 / 98` — synced to `blob-busy-eyes`. Note the
+**eyes-up-right beat at 60% gets the same treatment as eyes-right at 34%**: the head
+is still turned, so the far side is still hidden. Missing that is an easy bug.
+
+| Accessory | On the turn |
+|---|---|
+| `bandana` | Tail hidden; thinned at eyes-up so the pupils show |
+| `headset` | Far/right ear cup hidden; whole overlay nudged `2px` right |
+| `ponytail` | Tail **swings to negative x** (the head rotates right, so the back of it moves left in screen space), far curtain hidden, right-cheek stubble flattens to row 7 |
+
+**These keyframes are not masks.** Each re-declares the accessory's entire
+`box-shadow` per phase, so they cannot be shared between accessories — only the
+phase boundaries are reusable knowledge. `blob-bandana-shadow` is 7 near-identical
+copies of ~40 pixels. The ponytail's copies are **generated** by
+`design/gen-ponytail-animated.mjs` and spliced in by
+`design/apply-ponytail-css.mjs`, so edit the pixel source and re-run rather than
+hand-editing the lists in `app.css`.
+
+> **Refactor worth doing:** moving the tail to its own overlay element would let one
+> shared visibility keyframe replace all of this duplication. It rewrites shipped
+> bandana CSS, so land a browser test pinning tail visibility per phase first —
+> `blob-bandana-shadow` currently has none.
 - **Hand-held** (magnifier, palette, pencil, shield, set-square, flask): Positioned on the right side of the bobbit body. Use **depth keyframes** (`magnifier-depth-busy`, `magnifier-depth-idle`) to toggle `z-index` between `1` (in front) and `-1` (behind) when the bobbit faces right, creating the illusion of the item being held on the far side.
 
 ### addsHeight behavior
@@ -378,6 +405,7 @@ The second bubble is offset by 1s delay for a staggered effect.
 | `bobbit-squish` | 1.5s | ScaleX/scaleY oscillation during compaction |
 | `bobbit-eyes` | 6s | Blink + look right cycle for selected sessions |
 | `bobbit-eyes-squash` | 6s | Same as above but with squash transform for compacting state |
+| `bobbit-sidebar-accessory-turn-front` / `-right` | 6s | Compositor-only opacity swap for headset/ponytail right-facing frames, synchronized with the selected eye cycle |
 | `blob-shimmer` | 8s | Reused from chat blob for streaming sidebar bobbits |
 
 ---
@@ -388,23 +416,27 @@ The second bubble is offset by 1s delay for a staggered effect.
 
 **File**: `src/app/session-colors.ts`
 
-The `statusBobbit()` function generates a self-contained `html` template literal with inline styles. No external CSS classes — everything is inline for simplicity.
+`statusBobbit()` resolves identity/status and delegates to `renderSidebarBobbitCanvas()`. Each pixel layer is encoded once at high resolution, cached as a data URL, and displayed at the 1.6× CSS size.
 
 **Structure**:
 ```
-<span container>          ← flex container, filter (hue-rotate + saturation), non-idle status animation
-  <span sprite>           ← box-shadow pixel art, base transform, shimmer animation
-  <span eyeLayer?>        ← separate eye overlay for selected sessions (enables independent eye animation)
-  <span accessoryLayer?>  ← counter-hue-rotated accessory overlay
+<span container>                ← filter and status animation
+  <img bodyLayer>               ← cached body bitmap
+  <img blinkLayer?>             ← unread blink bitmap
+  <img eyeLayer?>               ← selected-session eye overlay
+  <img accessoryFront?>         ← cached normal accessory bitmap
+  <img accessoryRightFacing?>   ← optional cached occluded bitmap
 </span>
 ```
 
 **Key behaviors**:
-- Scale: 1.6× via `transform: scale(1.6)`
+- Scale: high-resolution canvas bitmap displayed at 1.6×
 - Idle sessions: `saturate(0.4)` filter and sleeping/idle styling, but no continuous `bobbit-breathe` animation
 - Streaming sessions: `bobbit-bob` animation + `blob-shimmer`
 - Compacting: `bobbit-squish` animation with squash transform
 - Selected session: Eye layer shown with `bobbit-eyes` animation (blink + look right)
+- Headset/ponytail selected session: two immutable accessory bitmaps swap opacity on the same CSS clock; this adds no JS timer or per-frame canvas work
+- Headset/ponytail unread inactive row: only the right-facing bitmap is rendered because the unread gaze is statically right
 - Unread inactive rows: the outer row wrapper may still run the unread pulse/tap animation, even when the bobbit itself is idle
 - Aborting: `saturate(0.3)` + `bobbit-cancel-fade` opacity pulse
 - Status colors: Yellow for starting, red for terminated (applied via different box-shadow colors, not hue-rotate)
@@ -586,7 +618,7 @@ In `idleBlob()`, the div is already rendered because it's in the chat blob DOM. 
 
 #### 6. Sidebar support (`src/app/session-colors.ts`)
 
-The sidebar `statusBobbit()` function automatically resolves accessories via `getAccessory(id)` and renders the box-shadow. No additional code needed unless the accessory requires special positioning logic (check the bandana/crown handling for reference).
+The sidebar `statusBobbit()` function automatically resolves accessories via `getAccessory(id)` and renders the cached canvas bitmap. Accessories needing right-facing occlusion may provide `sidebarRightFacingPixels`; the renderer swaps that cached frame in sync with the selected eye cycle and uses it directly for unread right-gazing rows.
 
 #### 7. Role assistant description (`src/server/agent/role-assistant.ts`)
 
