@@ -239,18 +239,30 @@ export function normalizeClaudeSdkRootResultUsage(input: unknown): ClaudeSdkUsag
 		const normalized: {
 			inputTokens?: number; outputTokens?: number; cacheReadTokens?: number;
 			cacheWriteTokens?: number; notionalCostUsd?: number; contextWindow?: number; maxOutputTokens?: number;
+			contextTokens?: number;
 		} = {};
-		const copy = (source: string, target: keyof typeof normalized) => {
+		const copy = (source: string, target: keyof typeof normalized): number | undefined => {
 			const value = nonNegativeNumber(entry[source]);
 			if (value !== undefined) normalized[target] = value;
+			return value;
 		};
-		copy("inputTokens", "inputTokens");
+		const modelInputTokens = copy("inputTokens", "inputTokens");
 		copy("outputTokens", "outputTokens");
-		copy("cacheReadInputTokens", "cacheReadTokens");
-		copy("cacheCreationInputTokens", "cacheWriteTokens");
+		const modelCacheReadTokens = copy("cacheReadInputTokens", "cacheReadTokens");
+		const modelCacheWriteTokens = copy("cacheCreationInputTokens", "cacheWriteTokens");
 		copy("costUSD", "notionalCostUsd");
-		copy("contextWindow", "contextWindow");
+		const contextWindow = copy("contextWindow", "contextWindow");
 		copy("maxOutputTokens", "maxOutputTokens");
+		if (modelInputTokens !== undefined && modelCacheReadTokens !== undefined && modelCacheWriteTokens !== undefined) {
+			// Anthropic defines input_tokens as content after the last cache
+			// breakpoint; total request input is input + cache read + cache write:
+			// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+			// A malformed provider value cannot occupy more than its declared window.
+			const contextTokens = modelInputTokens + modelCacheReadTokens + modelCacheWriteTokens;
+			normalized.contextTokens = contextWindow !== undefined && contextTokens > contextWindow
+				? contextWindow
+				: contextTokens;
+		}
 		normalizedModels[model] = normalized;
 	}
 	const notionalCostUsd = nonNegativeNumber(input.total_cost_usd);

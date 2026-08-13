@@ -10,6 +10,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { CostTracker, deriveCacheHitRate } from "../../src/server/agent/cost-tracker.ts";
+import { normalizeClaudeSdkRootResultUsage } from "../../src/server/agent/claude-sdk-event-translator.ts";
 import { ProjectContext } from "../../src/server/agent/project-context.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
@@ -485,14 +486,20 @@ describe("CostTracker", () => {
 	});
 
 	describe("authoritative SDK usage ledger", () => {
-		const result = (sourceResultId: string, contextTokens = 800) => ({
-			sourceResultId,
-			costBasis: "subscription-notional" as const,
-			total: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, notionalCostUsd: 0.42 },
-			modelUsage: {
-				"claude-sonnet": { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, notionalCostUsd: 0.42, contextWindow: 200_000, contextTokens },
-			},
-		});
+		const result = (uuid: string, model = "claude-sonnet", cacheReadInputTokens = 10) => {
+			const normalized = normalizeClaudeSdkRootResultUsage({
+				type: "result", uuid, session_id: "sdk-session", total_cost_usd: 0.42,
+				usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: cacheReadInputTokens, cache_creation_input_tokens: 0 },
+				modelUsage: {
+					[model]: {
+						inputTokens: 100, outputTokens: 20, cacheReadInputTokens, cacheCreationInputTokens: 0,
+						costUSD: 0.42, contextWindow: 200_000, maxOutputTokens: 16_384,
+					},
+				},
+			});
+			if (!normalized) throw new Error("expected a valid pinned SDK result");
+			return normalized;
+		};
 
 		it("persists the source-result ledger before accepting a replay after reload", () => {
 			const tracker = new CostTracker(stateDir, memfs);
@@ -505,24 +512,51 @@ describe("CostTracker", () => {
 			expect(replay.applied).toBe(false);
 			expect(replay.snapshot.inputTokens).toBe(100);
 			expect(replay.snapshot.byModel["claude-sonnet"].outputTokens).toBe(20);
-			expect(replay.snapshot.context.highWaterTokens).toBe(800);
+			expect(replay.snapshot.context.highWaterTokens).toBe(110);
 			expect(replay.snapshot.costBasis).toBe("subscription-notional");
 		});
 
 		it("keeps separate equal-valued results, model attribution, and context high-water", () => {
 			const tracker = new CostTracker(stateDir, memfs);
-			tracker.recordAuthoritativeUsage("sdk", result("one", 800));
-			const second = tracker.recordAuthoritativeUsage("sdk", {
-				...result("two", 400),
-				modelUsage: { "claude-opus": { inputTokens: 100, outputTokens: 20, contextWindow: 200_000, contextTokens: 400 } },
-			});
+			tracker.recordAuthoritativeUsage("sdk", result("one"));
+			const second = tracker.recordAuthoritativeUsage("sdk", result("two", "claude-opus", 0));
 			expect(second.applied).toBe(true);
 			expect(second.snapshot.inputTokens).toBe(200);
 			expect(second.snapshot.byModel["claude-sonnet"].inputTokens).toBe(100);
 			expect(second.snapshot.byModel["claude-opus"].inputTokens).toBe(100);
-			expect(second.snapshot.context.currentTokens).toBe(400);
-			expect(second.snapshot.context.highWaterTokens).toBe(800);
+			expect(second.snapshot.context.currentTokens).toBe(100);
+			expect(second.snapshot.context.highWaterTokens).toBe(110);
 			expect(second.snapshot.context.highWaterModel).toBe("claude-sonnet");
+		});
+
+		it("projects pinned SDK input composition into current and high-water model context", () => {
+			const tracker = new CostTracker(stateDir, memfs);
+			const normalize = (uuid: string, inputTokens: number, cacheReadInputTokens: number, cacheCreationInputTokens: number) => normalizeClaudeSdkRootResultUsage({
+				type: "result", uuid, session_id: "sdk-session",
+				usage: { input_tokens: inputTokens, output_tokens: 5, cache_read_input_tokens: cacheReadInputTokens, cache_creation_input_tokens: cacheCreationInputTokens },
+				modelUsage: {
+					"claude-sonnet": {
+						inputTokens, outputTokens: 5, cacheReadInputTokens, cacheCreationInputTokens,
+						costUSD: 0.01, contextWindow: 200_000, maxOutputTokens: 16_384,
+					},
+				},
+			});
+			const first = normalize("result-1", 60_000, 15_000, 5_000);
+			const second = normalize("result-2", 35_000, 4_000, 1_000);
+			expect(first).toBeDefined();
+			expect(second).toBeDefined();
+
+			tracker.recordAuthoritativeUsage("sdk", first!);
+			const outcome = tracker.recordAuthoritativeUsage("sdk", second!);
+
+			expect(outcome.snapshot.byModel["claude-sonnet"].inputTokens).toBe(95_000);
+			expect(outcome.snapshot.context).toMatchObject({
+				currentModel: "claude-sonnet",
+				currentTokens: 40_000,
+				highWaterModel: "claude-sonnet",
+				highWaterTokens: 80_000,
+				byModel: { "claude-sonnet": { contextWindow: 200_000, currentTokens: 40_000, highWaterTokens: 80_000 } },
+			});
 		});
 	});
 
