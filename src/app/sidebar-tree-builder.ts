@@ -595,7 +595,8 @@ function appendSpawnedGoalNode(leadNode: SidebarTreeNode<TeamLeadContext>, goal:
 	const cycleCutsByParentGoalId = new Map<string, string[]>();
 	const subtreeInput = descendantSubtreeInput(goal, spawnedCandidates, ctx.spawnedRootGoalIds, ctx.diagnostics, cycleCutsByParentGoalId);
 	const sanitized = sanitizeGoalForestInput(subtreeInput, project.id, new Map(spawnedCandidates.map(g => [g.id, project.id])), ctx.diagnostics, cycleCutsByParentGoalId);
-	const subtree = buildNestedGoalForest(sanitized, { maxDepth: ctx.input.defaultNestedDepth ?? DEFAULT_NESTED_DEPTH, includeArchived: true })
+	const maxDepth = nestedDepthForProject(project.id, ctx.input.nestedDepthByProject, ctx.input.defaultNestedDepth ?? DEFAULT_NESTED_DEPTH);
+	const subtree = buildNestedGoalForest(sanitized, { maxDepth, includeArchived: true })
 		.find(n => n.goal.id === goal.id) ?? { goal, depth: 0, children: [], descendantCount: 0 };
 	const childNode = convertGoalNode(subtree, leadNode, "team-lead-spawned", project, spawnedCandidates, cycleCutsByParentGoalId, ctx, leadNode.context.session.id);
 	if (!childNode) return;
