@@ -144,9 +144,60 @@ The SDK remains the transcript authority. Bobbit reads its official
 `getSessionInfo` and `getSessionMessages` APIs using the persisted session cwd.
 The information lookup establishes that the source exists, which distinguishes a
 valid empty conversation from an unavailable source. A pure adapter then feeds
-the established visible-snapshot pipeline. Consequently, live snapshots and
-archived SDK history have the same rendered shape without making a Pi transcript
-or a new history protocol. Pi history remains JSONL-backed.
+the established visible-snapshot pipeline. Consequently, live snapshots,
+archived SDK history, `GET /api/sessions/:id/transcript`, `read_session`, and
+identity-addressed SDK tool-content reads use one official-history projection;
+none creates or falls back to a Pi transcript. Pi history remains JSONL-backed.
+
+The projection preserves SDK UUID row identity, tool-use IDs,
+`parentToolUseId`, and `parentAgentId`. It applies the same server-side Bobbit
+MCP-name resolver to live events and history: for example,
+`mcp__bobbit__read` is presented as `read` in both paths. Foreign MCP and native
+names remain unchanged. A constrained SDK child remains an audit partition of
+its root session; it never creates a child session, task, worktree, or cost
+account. The browser receives this server projection and must not repair raw
+tool names or reconstruct transcript attribution.
+
+### Root-result usage and cost
+
+A finalized root SDK `result` is the only SDK accounting authority. Bobbit
+normalizes its usage, model usage, context, SDK session/result identity, and
+notional cost into a non-rendering internal record. It does not count assistant
+`message_end` frames, stream updates, child partitions, replayed snapshots, or
+`agent_end` without that record.
+
+`CostTracker` durably records the opaque source-result ID and the resulting
+aggregate in one atomic mutation. That mutation includes root totals, exact
+SDK-model buckets, current and high-water context, and cost-basis state. The
+private applied-ID ledger makes a repeated root result a no-op even after a
+bridge replacement or gateway restart; it is not part of the public transcript,
+REST, or WebSocket payload. See [Session usage and cost](session-cost.md) for
+the public snapshot shape and billed/notional semantics.
+
+The closed SDK environment reports subscription usage. Its SDK dollar estimate
+is `notionalCostUsd` with `costBasis: "subscription-notional"` and
+`totalCost: null`; it is not a billed API charge. A missing cost/basis remains
+unknown rather than `$0`. G10b owns visual treatment of these server fields;
+this runtime contract only publishes the durable REST, WebSocket, and state
+projection.
+
+### SDK compaction checkpoints
+
+The SDK owns compaction; Bobbit neither sends Pi `switch_session` nor exposes a
+manual SDK compact operation. When the SDK invokes `PreCompact`, Bobbit captures
+an SDK-specific pending checkpoint from the official normalized history and
+emits one canonical `compaction_start` marker. The checkpoint stores the
+pre-compaction root rows separately from Pi JSONL sidecars so the retained
+pre-history remains available through
+`GET /api/sessions/:id/transcript/before-compaction`.
+
+`PreCompact` alone does not prove completion. Bobbit marks the checkpoint
+complete, emits `compaction_end`, refreshes the message/state snapshot, and
+keeps the pre-history only after official SDK history has changed. On restart
+or reload it resumes with the same SDK UUID, hydrates the durable usage snapshot
+before messages, and reconciles any pending checkpoint from official history.
+That preserves stable transcript IDs, usage high-water marks, and audit
+attribution without replaying usage or relying on browser state.
 
 The lifecycle split is intentional:
 
@@ -170,16 +221,23 @@ conversation. On restore it leaves a dormant terminated session with a clear
 in-flight steers. Check that the configured SDK runtime can access the original
 conversation from the session's project context, then retry restoration; do not
 copy transcripts, inspect SDK storage, or add credentials to logs. This status
-also covers unavailable history reads, with sensitive error details sanitized.
+also covers unavailable history reads.
+
+At public REST boundaries, an unavailable SDK source returns the stable opaque
+response `503 { error: "SDK_SESSION_UNAVAILABLE", code:
+"SDK_SESSION_UNAVAILABLE" }`. Provider errors, credential locations, SDK
+session paths, and resume IDs remain private diagnostics. The same category
+settles startup, readiness, and prompt delivery instead of hanging or falling
+back to Pi. See [REST API — Claude SDK unavailable responses](rest-api.md#claude-sdk-unavailable-responses).
 
 ## Lifecycle and input delivery
 
 Starting an SDK session creates the query, begins event consumption, and waits for
 SDK initialization before the session is ready. Readiness is bounded (90 seconds)
 and startup, iterator, import, authentication, or provider failures settle pending
-calls with a sanitized `CLAUDE_AGENT_SDK_UNAVAILABLE` error. A provider that is not
-installed or cannot authenticate therefore fails when an SDK session is started,
-without delaying Pi sessions or leaving a session hung.
+calls with the sanitized `SDK_SESSION_UNAVAILABLE` category. A provider that is
+not installed or cannot authenticate therefore fails when an SDK session is
+started, without delaying Pi sessions or leaving a session hung.
 
 A prompt resolves only after its exact input row is accepted by the SDK input
 stream. Delivery has a deadline, so a row that the SDK does not pull fails instead
@@ -217,7 +275,7 @@ behavior is unchanged.
 destination, creating a worktree, or writing a new `SessionStore` row, an
 archived SDK source must have a valid UUID and exact SDK model tuple, and Bobbit
 preflights it through official `getSessionInfo`. A missing or expired source
-returns `404 SDK_SESSION_UNAVAILABLE` and leaves no destination or copied Pi
+returns `503 SDK_SESSION_UNAVAILABLE` and leaves no destination or copied Pi
 artifacts. Invalid stored metadata returns `422 RUNTIME_CONTINUE_UNSUPPORTED`.
 A confirmed source with zero messages is valid: Bobbit creates a fresh wrapper
 that uses the exact tuple and the same resume UUID. It does not copy Pi JSONL or
@@ -658,9 +716,12 @@ account or credentials:
 - `tests2/integration/session-runtime-route-boundary.test.ts` covers Continue
   preflight ordering, valid empty SDK sources, unavailable/no-destination
   behavior, and early SDK Fork rejection.
-- `tests/e2e/claude-agent-sdk-session-restart.spec.ts` runs a fake official SDK
-  through prompt/history, `PreCompact`, gateway crash/restart, snapshot equality,
-  resumed append, and co-resident Pi recovery.
+- `tests/e2e/claude-agent-sdk-session-restart.spec.ts` is the deterministic
+  parent demonstration. It uses the production bridge's fake SDK seam to cover
+  a canonical Bobbit `read` tool call, a real workflow-gate action, SDK-managed
+  compaction and retained pre-history, crash/restart/resume, WebSocket reload,
+  exactly-once root-result replay, opaque unavailable-provider failure, and a
+  co-resident Pi control session.
 - `tests2/core/controlled-model-fallback.test.ts` pins exact tuple read-back,
   verified-only persistence, live SDK capability metadata, explicit unsupported
   levels, and rollback behavior; `tests2/core/runtime-model-recovery-ownership.test.ts`
@@ -668,6 +729,16 @@ account or credentials:
 - `tests2/browser/journeys/claude-live-controls.journey.spec.ts` verifies a
   production SDK bridge with mixed advertised controls, wire-model selection,
   verified persistence across reload, and rollback of a failed model request.
+
+Run the deterministic parent demonstration directly from its fixed location:
+
+```bash
+npm run build
+npm run test:e2e:run -- tests/e2e/claude-agent-sdk-session-restart.spec.ts
+```
+
+It does not need a Claude account or credentials. A real-subscription smoke is
+additional evidence, not a replacement for this repeatable parent proof.
 
 Run the focused deterministic coverage with:
 

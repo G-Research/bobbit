@@ -11,7 +11,7 @@ import { redactSensitive } from "../auth/redact.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
-import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from "./protocol.js";
+import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage, SessionCostSnapshot } from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
@@ -169,7 +169,7 @@ function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, s
 	if (imageModel) {
 		data.imageGenerationModel = imageModel;
 	}
-	const withCost = sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
+	const withCost = withAuthoritativeSessionCost(sessionManager, sessionId, data) as Record<string, unknown>;
 	if (Object.keys(withCost).length > 0) {
 		send(ws, { type: "state", data: withCost });
 	}
@@ -180,8 +180,34 @@ function sendImageModelState(ws: WebSocket, sessionManager: SessionManager, sess
 	if (imageModel) sendStateWithCost(ws, sessionManager, sessionId, { imageGenerationModel: imageModel });
 }
 
-function sendStateWithCost(ws: WebSocket, sessionManager: SessionManager, sessionId: string, data: unknown): void {
-	send(ws, { type: "state", data: sessionManager.withSessionCostInState(sessionId, data) });
+/**
+ * State hydration and `cost_update` must expose the same server-owned usage
+ * projection. Prefer the manager's transport snapshot rather than rebuilding a
+ * parallel state-only shape; retain the legacy state helper as a fallback for
+ * rolling upgrades that have not yet implemented `cost_update` hydration.
+ */
+function withAuthoritativeSessionCost(
+	sessionManager: SessionManager,
+	sessionId: string,
+	data: unknown,
+	cost?: SessionCostSnapshot,
+): unknown {
+	const authoritative = cost ?? sessionManager.getSessionCostUpdate(sessionId)?.cost;
+	if (!authoritative) return sessionManager.withSessionCostInState(sessionId, data);
+	if (data && typeof data === "object" && !Array.isArray(data)) {
+		return { ...(data as Record<string, unknown>), serverCost: authoritative };
+	}
+	return { serverCost: authoritative };
+}
+
+function sendStateWithCost(
+	ws: WebSocket,
+	sessionManager: SessionManager,
+	sessionId: string,
+	data: unknown,
+	cost?: SessionCostSnapshot,
+): void {
+	send(ws, { type: "state", data: withAuthoritativeSessionCost(sessionManager, sessionId, data, cost) });
 }
 
 /**
@@ -300,9 +326,17 @@ async function sendCanonicalSessionState(
 	}
 }
 
-function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
+function sendSessionCostUpdate(
+	ws: WebSocket,
+	sessionManager: SessionManager,
+	sessionId: string,
+): SessionCostSnapshot | undefined {
 	const update = sessionManager.getSessionCostUpdate(sessionId);
-	if (update) send(ws, update);
+	if (update) {
+		send(ws, update);
+		return update.cost;
+	}
+	return undefined;
 }
 
 /**
@@ -333,7 +367,7 @@ function buildArchivedStateData(
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) data.imageGenerationModel = imageModel;
-	return sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
+	return withAuthoritativeSessionCost(sessionManager, sessionId, data) as Record<string, unknown>;
 }
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {

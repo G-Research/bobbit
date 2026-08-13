@@ -67,13 +67,15 @@ test.describe("compact cost WS hydration", () => {
 
 			const ws = await connectWs(sessionId);
 			try {
-				await ws.waitFor(costUpdateFor(sessionId), 5_000);
-				await ws.waitFor(stateCost(), 5_000);
+				const attachedCost = await ws.waitFor(costUpdateFor(sessionId), 5_000);
+				const attachedState = await ws.waitFor(stateCost(), 5_000);
+				expect(attachedState.data.serverCost).toEqual(attachedCost.cost);
 
 				const getStateCursor = ws.messageCount();
 				ws.send({ type: "get_state" });
-				await ws.waitForFrom(getStateCursor, costUpdateFor(sessionId), 5_000);
-				await ws.waitForFrom(getStateCursor, stateCost(), 5_000);
+				const getStateCost = await ws.waitForFrom(getStateCursor, costUpdateFor(sessionId), 5_000);
+				const getStateFrame = await ws.waitForFrom(getStateCursor, stateCost(), 5_000);
+				expect(getStateFrame.data.serverCost).toEqual(getStateCost.cost);
 
 				const resumeCursor = ws.messageCount();
 				ws.send({ type: "resume", fromSeq: -999 });
@@ -99,7 +101,8 @@ test.describe("compact cost WS hydration", () => {
 					(m) => m.type === "messages" && Array.isArray(m.data) && m.data.length === compactedTranscript.length,
 					5_000,
 				);
-				await ws.waitForFrom(refreshCursor, stateCost(), 5_000);
+				const compactedState = await ws.waitForFrom(refreshCursor, stateCost(), 5_000);
+				expect(compactedState.data.serverCost).toEqual(costFrame.cost);
 
 				const costIdx = ws.messages.indexOf(costFrame);
 				const messagesIdx = ws.messages.indexOf(messagesFrame);
@@ -129,13 +132,15 @@ test.describe("compact cost WS hydration", () => {
 
 			const ws = await connectWs(sessionId);
 			try {
-				await ws.waitFor(costUpdateFor(sessionId), 5_000);
-				await ws.waitFor((m) => m.type === "state" && m.data?.archived === true && m.data?.serverCost?.totalCost === TOTAL_COST, 5_000);
+				const attachedCost = await ws.waitFor(costUpdateFor(sessionId), 5_000);
+				const attachedState = await ws.waitFor((m) => m.type === "state" && m.data?.archived === true && m.data?.serverCost?.totalCost === TOTAL_COST, 5_000);
+				expect(attachedState.data.serverCost).toEqual(attachedCost.cost);
 
 				const cursor = ws.messageCount();
 				ws.send({ type: "get_state" });
-				await ws.waitForFrom(cursor, costUpdateFor(sessionId), 5_000);
-				await ws.waitForFrom(cursor, (m) => m.type === "state" && m.data?.archived === true && m.data?.serverCost?.totalCost === TOTAL_COST, 5_000);
+				const getStateCost = await ws.waitForFrom(cursor, costUpdateFor(sessionId), 5_000);
+				const getStateFrame = await ws.waitForFrom(cursor, (m) => m.type === "state" && m.data?.archived === true && m.data?.serverCost?.totalCost === TOTAL_COST, 5_000);
+				expect(getStateFrame.data.serverCost).toEqual(getStateCost.cost);
 			} finally {
 				await closeWs(ws);
 			}
