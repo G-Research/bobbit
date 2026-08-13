@@ -21,6 +21,8 @@ export interface SidebarViewPreferenceState {
 	statusShowBusy: boolean;
 	statusShowRead: boolean;
 	statusShowTeams: boolean;
+	/** Transient exact-session inclusion owned by the explicit reveal action. */
+	sidebarRevealSessionId?: string | null;
 	statusCollapsedSections?: Set<SidebarStatusSectionKey>;
 	filtersPopoverOpen?: boolean;
 }
@@ -113,6 +115,7 @@ export function setSidebarView(
 	view: SidebarSessionView,
 ): void {
 	preferenceState.sidebarSessionView = parseSidebarSessionView(view);
+	preferenceState.sidebarRevealSessionId = null;
 	preferenceState.filtersPopoverOpen = false;
 	safeSetItem(SIDEBAR_SESSION_VIEW_STORAGE_KEY, preferenceState.sidebarSessionView);
 }
@@ -128,6 +131,10 @@ export function setSidebarViewFilter(
 	value: boolean,
 ): boolean {
 	if (typeof value !== "boolean") return false;
+	// A manual filter choice supersedes the prior one-shot reveal inclusion.
+	// resetSidebarViewFilters intentionally clears it too; the reveal transaction
+	// installs its exact target only after that reset completes.
+	preferenceState.sidebarRevealSessionId = null;
 	if (view === "project") {
 		if (key === "showTeams") return false;
 		preferenceState[key] = value;
@@ -143,6 +150,19 @@ export function setSidebarViewFilter(
 	preferenceState[stateKey] = value;
 	safeSetItem(SIDEBAR_STATUS_FILTER_STORAGE_KEYS[key], String(value));
 	return true;
+}
+
+/** Restore one view's canonical defaults without disturbing the inactive view. */
+export function resetSidebarViewFilters(
+	preferenceState: SidebarViewPreferenceState,
+	view: SidebarSessionView,
+): void {
+	const defaults = view === "status" ? SIDEBAR_STATUS_FILTER_DEFAULTS : SIDEBAR_PROJECT_FILTER_DEFAULTS;
+	setSidebarViewFilter(preferenceState, view, "showArchived", defaults.showArchived);
+	setSidebarViewFilter(preferenceState, view, "showBusy", defaults.showBusy);
+	setSidebarViewFilter(preferenceState, view, "showRead", defaults.showRead);
+	if (view === "status") setSidebarViewFilter(preferenceState, view, "showTeams", SIDEBAR_STATUS_FILTER_DEFAULTS.showTeams);
+	preferenceState.filtersPopoverOpen = false;
 }
 
 /** Route existing Archived/Busy/Read shortcuts through whichever view is active. */

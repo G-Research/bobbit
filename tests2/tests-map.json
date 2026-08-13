@@ -102,6 +102,24 @@
       }
     },
     {
+      "path": "tests2/dom/sidebar-reveal-current.test.ts",
+      "reason": "Focused DOM coverage for current-session reveal filter reset, explicit ancestor expansion, disabled state, repeat emphasis, archived loading, and reduced-motion behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
+      "reason": "Deterministic production-renderer desktop journey covering exact action-scoped inclusion of categorically hidden team/archive targets, manual filter-authority restoration, explicit reveal of a seven-level descendant chain beneath a canonically stamped team-lead spawned goal beyond the default depth cap, durable depth and exact path persistence across a full reload with canonical fixture rehydration and unrelated project state preserved, collapsed live and status=terminated archived-child delegates in Project and Status views, terminal cache normalization, filter/search reset, keyboard highlight restoration, nearest scrolling, repeated emphasis, distinct cold archived hydration, reduced motion, cleanup, and mobile absence.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/fixtures/sidebar-actions-menu-mobile-fixture.spec.ts",
       "reason": "Independent mobile sidebar quick-action and hamburger-menu contract split from sidebar-actions-menu-fixture to keep both files below the strict 60-second per-spec wall cap without dropping assertions.",
       "execution": {
@@ -3203,6 +3221,10 @@
     },
     {
       "path": "tests2/browser/journeys/sidebar-status.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
