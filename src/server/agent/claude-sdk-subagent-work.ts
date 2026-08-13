@@ -137,7 +137,11 @@ function aggregatePhase(state: WorkState): ClaudeSdkSubagentPhase {
 }
 
 function publicWork(state: WorkState): ClaudeSdkEmbeddedWork {
-	const identities = [...state.identities.values()].map(({ phase: _phase, ...identity }) => identity);
+	const identities = [...state.identities.values()].map(({ parentToolUseId, agentId, agentType }) => ({
+		parentToolUseId,
+		...(agentId ? { agentId } : {}),
+		...(agentType ? { agentType } : {}),
+	}));
 	const first = identities[0];
 	const startedAt = [...state.identities.values()].map(value => value.startedAt).filter((value): value is number => value !== undefined).sort((a, b) => a - b)[0] ?? state.startedAt;
 	const stoppedAt = [...state.identities.values()].map(value => value.stoppedAt).filter((value): value is number => value !== undefined).sort((a, b) => b - a)[0] ?? state.stoppedAt;
@@ -232,6 +236,18 @@ export class ClaudeSdkSubagentWorkAssembler {
 		}];
 	}
 
+	ingestTerminal(
+		parentToolUseId: string,
+		terminal: { phase: ClaudeSdkSubagentPhase; error?: string },
+		identity?: ClaudeSdkSubagentIdentity,
+	): readonly ClaudeSdkEmbeddedWorkEvent[] {
+		if (!boundedId(parentToolUseId)) return [];
+		this.addIdentity(parentToolUseId, identity, terminal.phase);
+		const state = this.state(parentToolUseId);
+		if (!identity) state.phase = terminal.phase;
+		return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind: "terminal", identity, terminal }];
+	}
+
 	ingestLiveEvent(event: unknown): readonly ClaudeSdkEmbeddedWorkEvent[] {
 		if (!isRecord(event)) return [];
 		const parentToolUseId = eventParent(event);
@@ -247,11 +263,7 @@ export class ClaudeSdkSubagentWorkAssembler {
 			return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind: "tool_end", identity, toolEvent: event }];
 		}
 		if (type === "agent_end") {
-			const terminal = phaseForTerminal(isRecord(event.claudeSdk) ? event.claudeSdk.terminal : undefined);
-			this.addIdentity(parentToolUseId, identity, terminal.phase);
-			const state = this.state(parentToolUseId);
-			if (!identity) state.phase = terminal.phase;
-			return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind: "terminal", identity, terminal }];
+			return this.ingestTerminal(parentToolUseId, phaseForTerminal(isRecord(event.claudeSdk) ? event.claudeSdk.terminal : undefined), identity);
 		}
 		if ((type === "message_update" || type === "message_end") && isRecord(event.message)) {
 			const candidate = event.message as ClaudeAgentSdkHistoryMessage;

@@ -48,7 +48,7 @@ describe("Claude Agent SDK session access", () => {
 		expect(fixture.sdk.listSubagents).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
 		expect(fixture.sdk.getSubagentMessages).toHaveBeenCalledWith(SESSION_ID, "child-1", { dir: CWD });
 		await expect(readSdkSubagentMessages({ sessionId: SESSION_ID, cwd: CWD, agentId: "" }, fixture.deps)).rejects.toMatchObject({
-			message: expect.stringContaining("invalid SDK subagent identity"),
+			code: "SDK_SESSION_UNAVAILABLE",
 		});
 		await expect(readSdkSubagents({ sessionId: SESSION_ID, cwd: CWD }, sdkFixture({ listSubagents: vi.fn(async () => ["", 3] as any) }).deps)).rejects.toMatchObject({
 			message: expect.stringContaining("SDK_SESSION_UNAVAILABLE"),
