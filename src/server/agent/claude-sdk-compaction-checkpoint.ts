@@ -45,10 +45,11 @@ function stableJson(value: unknown): string {
 }
 
 function rootRows(messages: readonly unknown[]): Record<string, unknown>[] {
-	return messages.filter((message): message is Record<string, unknown> =>
-		!!message && typeof message === "object" && !Array.isArray(message)
-			&& !(typeof (message as Record<string, unknown>).parentToolUseId === "string" && (message as Record<string, unknown>).parentToolUseId.length > 0),
-	);
+	return messages.filter((message): message is Record<string, unknown> => {
+		if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+		const parentToolUseId = (message as Record<string, unknown>).parentToolUseId;
+		return typeof parentToolUseId !== "string" || parentToolUseId.length === 0;
+	});
 }
 
 function readAll(sessionId: string): ClaudeSdkCompactionCheckpoint[] {

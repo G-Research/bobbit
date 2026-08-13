@@ -9116,8 +9116,8 @@ export class SessionManager {
 	/** Resolve a pending SDK checkpoint only from changed official history. */
 	private async reconcileClaudeSdkCompaction(session: SessionInfo, knownMessages?: unknown, refresh = true): Promise<boolean> {
 		if (session.runtime !== "claude-agent-sdk" || !this._sessionWriterIsCurrent(session)) return false;
-		let messages = knownMessages;
-		if (!Array.isArray(messages)) {
+		let messages: readonly unknown[] | undefined = Array.isArray(knownMessages) ? knownMessages : undefined;
+		if (!messages) {
 			try {
 				const response = await session.rpcClient.getMessages();
 				if (!response?.success || !Array.isArray(response.data)) return false;
@@ -9126,6 +9126,7 @@ export class SessionManager {
 				return false;
 			}
 		}
+		if (!messages) return false;
 		const checkpoint = completeClaudeSdkCompactionCheckpoint(session.id, messages, this.clock.now());
 		if (!checkpoint || !this._sessionWriterIsCurrent(session)) return false;
 		session.isCompacting = false;
