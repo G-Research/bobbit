@@ -3146,6 +3146,15 @@
       }
     },
     {
+      "path": "tests2/core/prompt-extension-audit-store.test.ts",
+      "reason": "Prompt-extension authoring audit rotation coverage for bounded retained snapshots and redacted durable diffs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/budget-enforcement.test.ts",
       "reason": "Pure grant-gated budget enforcement reducer coverage for strict proposal validation, restrictive deterministic resolution, fail-closed pause and halt, revocation, hard-cap classification, and secret-free immutable audit metadata.",
       "execution": {

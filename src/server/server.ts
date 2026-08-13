@@ -8717,12 +8717,21 @@ async function handleApiRoute(
 	if (promptExtensionAuditMatch && req.method === "GET") {
 		if (!requireVerifiedPromptOperator()) return;
 		const sessionId = promptExtensionAuditMatch[1];
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const context = projectContextManager.getOrCreate(session.projectId);
+		if (!context) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
 		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
 		try {
-			const entries = [...projectContextManager.all()]
-				.flatMap(context => new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl).list(200))
-				.filter(entry => entry.sessionId === sessionId).sort((a, b) => a.at.localeCompare(b.at)).slice(-limit);
+			const entries = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl)
+				.listForSession(sessionId, limit);
 			json({ entries });
 		} catch { json({ error: "Prompt extension audit is unavailable", code: "PROMPT_EXTENSION_AUDIT_UNAVAILABLE" }, 503); }
 		return;
