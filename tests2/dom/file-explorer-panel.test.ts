@@ -441,6 +441,7 @@ describe("built-in file explorer panel", () => {
 		expect(root.textContent).toContain("Select a file to preview");
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("Explorer refreshed.");
 
+		root.remove();
 	});
 
 	it("queues one first-idle refresh that arrives during initialization", async () => {
