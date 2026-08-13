@@ -983,6 +983,8 @@ import {
 	substituteVars as _substituteVars,
 	isTransientReviewError,
 	isTransientQaError,
+	isTransientVerifierReviewError,
+	isTransientVerifierQaError,
 	matchExpectFailure,
 	groupStepsByPhase,
 	getSortedPhases,
@@ -2087,7 +2089,7 @@ const REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS = 20_000;
 const MAX_VERIFIER_SAME_SESSION_RESURRECTIONS = 3;
 
 function isRetryableLlmReviewRecovery(output: string): boolean {
-	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
+	return isTransientVerifierReviewError(output) || isRetryableGenericAgentError(output);
 }
 
 function isVerifierInfrastructureDisconnectError(output: string): boolean {
@@ -2100,7 +2102,7 @@ function isVerifierInfrastructureDisconnectError(output: string): boolean {
 
 function classifyLlmReviewRecoveryError(output: string): string {
 	if (isProviderBackoffError(output)) return "provider-backoff";
-	if (isTransientReviewError(output)) return "transient";
+	if (isTransientVerifierReviewError(output)) return "transient";
 	if (isRetryableGenericAgentError(output)) return "generic-runtime";
 	if (output.includes("Agent did not call verification_result")) return "missing-verification-result";
 	return "deterministic";
@@ -2801,7 +2803,7 @@ export class VerificationHarness {
 			// scratch instead of leaving it a terminal "could not be recovered"
 			// restart-interrupt (shouldRerunSessionStepOnResume).
 			const isTransient = step.type === "agent-qa"
-					? isTransientQaError(resumeResult?.output || "")
+					? isTransientVerifierQaError(resumeResult?.output || "")
 					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
 			const rerunnable = resumeResult?.status !== "timeout"
 				&& (isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || ""));
@@ -3272,7 +3274,7 @@ export class VerificationHarness {
 			const decision = shouldRetryVerificationStep({
 				passed: result.passed, output: result.output,
 				attempt, maxBoundedAttempts,
-				isTransient: isTransientReviewError,
+				isTransient: isTransientVerifierReviewError,
 			});
 			if (decision === "break") break;
 			const isBackoff = isProviderBackoffError(result.output);
@@ -3345,7 +3347,7 @@ export class VerificationHarness {
 			const decision = shouldRetryVerificationStep({
 				passed: result.passed, output: result.output,
 				attempt, maxBoundedAttempts,
-				isTransient: isTransientQaError,
+				isTransient: isTransientVerifierQaError,
 			});
 			if (decision === "break") break;
 			const isBackoff = isProviderBackoffError(result.output);
@@ -4936,7 +4938,7 @@ export class VerificationHarness {
 									const decision = shouldRetryVerificationStep({
 										passed: qaResult.passed, output: qaResult.output,
 										attempt, maxBoundedAttempts,
-										isTransient: isTransientQaError,
+										isTransient: isTransientVerifierQaError,
 									});
 									if (decision === "break") break;
 									const isBackoff = isProviderBackoffError(qaResult.output);
@@ -5063,7 +5065,7 @@ export class VerificationHarness {
 									const decision = shouldRetryVerificationStep({
 										passed: result.passed, output: result.output,
 										attempt, maxBoundedAttempts,
-										isTransient: isTransientReviewError,
+										isTransient: isTransientVerifierReviewError,
 									});
 									if (decision === "break") break;
 									const isBackoff = isProviderBackoffError(result.output);

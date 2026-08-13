@@ -2824,13 +2824,20 @@ export class SessionManager {
 
 	/** Purge verifier rows from the same canonical queue used for enqueue/cancel. */
 	private purgeVerifierPromptRows(sessionId: string, reason: string): void {
-		const owner = this._promptQueueOwner(sessionId);
-		if (owner) {
-			for (const row of owner.promptQueue.toArray()) {
+		// Teardown can observe a replacement owner after only part of SessionInfo
+		// has been assembled. Receipt fencing is still mandatory, but a missing or
+		// malformed queue must never prevent termination/restart from proceeding.
+		try {
+			const owner = this._promptQueueOwner(sessionId);
+			const rows = owner?.promptQueue?.toArray?.() ?? [];
+			for (const row of rows) {
 				if (row.source === "verification") this.removeVerifierPromptRow(sessionId, row.id);
 			}
+		} catch {
+			console.warn(`[session-manager] Best-effort verifier queue purge failed for ${sessionId}`);
+		} finally {
+			this.cancelAllVerifierPromptReceipts(sessionId, reason);
 		}
-		this.cancelAllVerifierPromptReceipts(sessionId, reason);
 	}
 
 	private settleVerifierPromptReceipt(sessionId: string, rowId: string, error?: Error): void {

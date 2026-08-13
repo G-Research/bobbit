@@ -34,6 +34,11 @@ import {
 	isRestartInterruptError,
 	isRetryableGenericAgentError,
 	isReviewerBusyError,
+	isVerifierBusyTransportError,
+	isVerifierPromptDispatchTimeoutError,
+	isVerifierRestartBeforeDispatchError,
+	isTransientVerifierReviewError,
+	isTransientVerifierQaError,
 	shouldRetryVerificationStep,
 } from "../../src/server/agent/verification-logic.ts";
 
@@ -275,55 +280,53 @@ describe("isTransientReviewError", () => {
 describe("isReviewerBusyError", () => {
 	const BUSY_REJECTION = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
 
-	it("matches only the reviewer busy rejection signature", () => {
-		assert.equal(isReviewerBusyError(`LLM review failed: ${BUSY_REJECTION}`), true);
+	it("matches the raw bridge rejection only", () => {
+		assert.equal(isReviewerBusyError(BUSY_REJECTION), true);
+		assert.equal(isReviewerBusyError(`LLM review failed: ${BUSY_REJECTION}`), false);
 		assert.equal(isReviewerBusyError("Agent is already processing"), false);
 		assert.equal(isReviewerBusyError("Specify streamingBehavior ('steer' or 'followUp')"), false);
 		assert.equal(isReviewerBusyError("Agent is processing a streamingBehavior setting"), false);
 	});
 
-	it("is a bounded transient for both review verifier kinds", () => {
+	it("keeps generic review and QA policies out of verifier transport contention", () => {
 		for (const isTransient of [isTransientReviewError, isTransientQaError]) {
-			assert.equal(isTransient(BUSY_REJECTION), true);
-			assert.equal(
-				shouldRetryVerificationStep({
-					passed: false,
-					output: BUSY_REJECTION,
-					attempt: 1,
-					maxBoundedAttempts: 3,
-					isTransient,
-				}),
-				"retry",
-			);
-			assert.equal(
-				shouldRetryVerificationStep({
-					passed: false,
-					output: BUSY_REJECTION,
-					attempt: 3,
-					maxBoundedAttempts: 3,
-					isTransient,
-				}),
-				"break",
-			);
+			assert.equal(isTransient(BUSY_REJECTION), false);
+			assert.equal(isTransient("LLM review failed: Verifier prompt verifier-row-123 did not dispatch within 60000ms"), false);
+		}
+	});
+
+	it("retries only verifier transport contention with the bounded policy", () => {
+		const busyOutput = `LLM review failed: ${BUSY_REJECTION}`;
+		const timeoutOutput = "LLM review failed: Verifier prompt verifier-row-123 did not dispatch within 60000ms";
+		for (const [output, classifier] of [
+			[busyOutput, isVerifierBusyTransportError],
+			[timeoutOutput, isVerifierPromptDispatchTimeoutError],
+		] as const) {
+			assert.equal(classifier(output), true);
+			for (const isTransient of [isTransientVerifierReviewError, isTransientVerifierQaError]) {
+				assert.equal(isTransient(output), true, "VERIFIER_BUSY_RACE_REPRO: verifier queue contention must not become a terminal content failure");
+				assert.equal(shouldRetryVerificationStep({ passed: false, output, attempt: 1, maxBoundedAttempts: 3, isTransient }), "retry");
+				assert.equal(shouldRetryVerificationStep({ passed: false, output, attempt: 3, maxBoundedAttempts: 3, isTransient }), "break");
+			}
 		}
 		assert.equal(isProviderBackoffError(BUSY_REJECTION), false);
 	});
 
-	it("treats a verifier receipt dispatch timeout as transient infrastructure contention", () => {
-		const output = "Verifier prompt verifier-row-123 did not dispatch within 60000ms";
-		for (const isTransient of [isTransientReviewError, isTransientQaError]) {
-			assert.equal(isTransient(output), true, "VERIFIER_BUSY_RACE_REPRO: a bounded queue-admission timeout must not become a terminal content failure");
-			assert.equal(
-				shouldRetryVerificationStep({
-					passed: false,
-					output,
-					attempt: 1,
-					maxBoundedAttempts: 3,
-					isTransient,
-				}),
-				"retry",
-			);
-		}
+	it("does not mistake a reviewer finding that quotes the busy text for transport contention", () => {
+		const finding = `LLM review failed: Summary: the agent reported \"${BUSY_REJECTION}\" while testing an unrelated workflow.`;
+		assert.equal(isVerifierBusyTransportError(finding), false);
+		assert.equal(isTransientVerifierReviewError(finding), false);
+		assert.equal(shouldRetryVerificationStep({
+			passed: false, output: finding, attempt: 1, maxBoundedAttempts: 3,
+			isTransient: isTransientVerifierReviewError,
+		}), "break");
+	});
+
+	it("classifies only explicit restart-before-dispatch envelopes as verifier interruptions", () => {
+		const interruption = "Reviewer agent was not ready / timed out while resuming after server restart: Verifier session reviewer-123 restarted before dispatch";
+		assert.equal(isVerifierRestartBeforeDispatchError(interruption), true);
+		assert.equal(isTransientVerifierReviewError(interruption), true);
+		assert.equal(isVerifierRestartBeforeDispatchError("Reviewer summary: Verifier session reviewer-123 restarted before dispatch"), false);
 	});
 
 	it("does not override terminal error categories", () => {
