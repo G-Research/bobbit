@@ -238,6 +238,54 @@ describe("reliable intent dispatch attempt settlement", () => {
 });
 
 describe("reliable intent abort and stale-attempt fences", () => {
+	it("persists and projects uncertainty synchronously at eligible Stop admission", async () => {
+		const replacement = barrier<void>();
+		const { manager, session, storeUpdates } = useHarness({
+			rpcClient: {
+				steer: vi.fn(async () => ({ success: true })),
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		await manager.deliverLiveSteer(session.id, "uncertain before abort", { intentId: "intent-stop-admission" });
+		session.inFlightSteerTexts.push({ text: "legacy pending", promptId: "legacy-prompt" });
+		manager._coordinateSessionReplacement = vi.fn(() => replacement.hold());
+
+		const stopping = manager.forceAbort(session.id);
+
+		expect(ledgerFor(session, "intent-stop-admission")).toMatchObject({
+			state: "uncertain",
+			retryable: false,
+		});
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: "intent-stop-admission", deliveryState: "uncertain", retryable: false }),
+		]);
+		expect(storeUpdates.at(-1)).toMatchObject({
+			inFlightSteerTexts: [expect.objectContaining({
+				intentId: "intent-stop-admission",
+				state: "uncertain",
+				retryable: false,
+			}), expect.objectContaining({ promptId: "legacy-prompt" })],
+		});
+		expect(manager.retryIntent(session.id, "intent-stop-admission")).toBe(false);
+		expect(session.promptQueue.toArray().some((row: any) => row.text === "legacy pending")).toBe(false);
+		expect(session.inFlightSteerTexts).toContainEqual({ text: "legacy pending", promptId: "legacy-prompt" });
+		expect(manager._coordinateSessionReplacement).toHaveBeenCalledTimes(1);
+
+		// A repeated Stop joins the same owner without another persistence/broadcast transition.
+		const updateCount = storeUpdates.length;
+		const repeated = manager.forceAbort(session.id);
+		expect(storeUpdates).toHaveLength(updateCount);
+
+		const lateStart = manager.prepareVisibleAgentEvent(session, userStart("uncertain before abort", "pi-stop-late"));
+		manager.handleAgentLifecycle(session, lateStart);
+		expect(lateStart.deliveryIntentId).toBe("intent-stop-admission");
+		expect(ledgerFor(session, "intent-stop-admission")).toBeUndefined();
+
+		replacement.release(undefined);
+		await Promise.all([stopping, repeated]);
+	});
+
 	it("does not restore or rebind an acknowledged steer stopped before its user start", async () => {
 		const steer = vi.fn(async () => ({ success: true }));
 		const { manager, session } = useHarness({

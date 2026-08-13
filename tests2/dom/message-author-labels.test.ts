@@ -131,6 +131,19 @@ describe("prompt author presentation selector", () => {
 });
 
 describe("prompt author badge DOM", () => {
+	it("reflects only explicit validated delivery occurrence identity on transcript rows", async () => {
+		const correlated = { ...prompt("modern", USER), deliveryIntentId: "intent-modern" };
+		const fallback = { ...prompt("fallback", USER), intentId: "intent-fallback" };
+		const legacy = prompt("legacy", USER);
+		const invalid = { ...prompt("invalid", USER), deliveryIntentId: "x".repeat(257) };
+		const list = await renderMessageList([correlated, fallback, legacy, invalid]);
+
+		expect(list.querySelectorAll('user-message[data-intent-id="intent-modern"]')).toHaveLength(1);
+		expect(list.querySelectorAll('user-message[data-intent-id="intent-fallback"]')).toHaveLength(1);
+		expect(Array.from(list.querySelectorAll("user-message")).map((row) => row.getAttribute("data-intent-id")))
+			.toEqual(["intent-modern", "intent-fallback", null, null]);
+	});
+
 	it("leaves all-human markup unlabelled", async () => {
 		const list = await renderMessageList([prompt("human", USER)]);
 		expect(list.querySelector(".prompt-author-badge")).toBeNull();
