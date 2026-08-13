@@ -847,6 +847,7 @@ interface OpenHeaderSessionActionsPopover {
 	element: SidebarActionsPopover;
 	actions: SessionActionDescriptor[];
 	refresh: () => SessionActionDescriptor[];
+	openedAt: number;
 	cleanup?: () => void;
 }
 
@@ -926,6 +927,19 @@ function refreshOpenHeaderSessionActionsPopover(): void {
 	renderApp();
 }
 
+/**
+ * The full header can render while the popover component is loading. Reacquire
+ * only the trigger for this session so an obsolete click cannot silently lose
+ * its menu or anchor it to a different open session.
+ */
+function connectedHeaderSessionActionsTrigger(input: Pick<OpenHeaderSessionActionsPopover, "sessionId"> & { trigger: HTMLElement }): HTMLElement | null {
+	const matches = (element: HTMLElement): boolean => element.isConnected
+		&& element.dataset.sessionId === input.sessionId;
+	if (matches(input.trigger)) return input.trigger;
+	return [...document.querySelectorAll<HTMLElement>('[data-testid="session-actions-trigger"]')]
+		.find(matches) ?? null;
+}
+
 async function openHeaderSessionActionsPopover(input: {
 	sessionId: string;
 	trigger: HTMLElement;
@@ -934,15 +948,20 @@ async function openHeaderSessionActionsPopover(input: {
 	sourceRects: SidebarActionsFlipRect[];
 }): Promise<void> {
 	if (isHeaderSessionActionsPopoverOpen(input.sessionId)) {
+		// A render can replay the originating header click while its trigger is
+		// replaced. Do not let that same interaction immediately toggle closed.
+		if (performance.now() - (_openHeaderSessionActionsPopover?.openedAt ?? 0) < 200) return;
 		closeHeaderSessionActionsPopover();
 		return;
 	}
 	closeHeaderSessionActionsPopover(false);
 	const requestId = ++_headerSessionActionsPopoverRequestId;
 	await import("../ui/components/SidebarActionsPopover.js");
-	if (requestId !== _headerSessionActionsPopoverRequestId || !input.trigger.isConnected) return;
+	if (requestId !== _headerSessionActionsPopoverRequestId) return;
+	const trigger = connectedHeaderSessionActionsTrigger(input);
+	if (!trigger || requestId !== _headerSessionActionsPopoverRequestId) return;
 	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
-	element.anchorEl = input.trigger;
+	element.anchorEl = trigger;
 	element.items = toHeaderPopoverItems(input.actions);
 	element.sourceRects = input.sourceRects;
 	element.open = true;
@@ -972,9 +991,21 @@ async function openHeaderSessionActionsPopover(input: {
 		element,
 		actions: input.actions,
 		refresh: input.refresh,
+		openedAt: performance.now(),
 		cleanup,
 	};
 	renderApp();
+
+	// Rendering the expanded state replaces the header button. Keep the popover
+	// anchored to that exact replacement before it binds its outside-click and
+	// Escape focus handling.
+	if (requestId !== _headerSessionActionsPopoverRequestId || _openHeaderSessionActionsPopover?.element !== element) return;
+	const renderedTrigger = connectedHeaderSessionActionsTrigger(input);
+	if (!renderedTrigger) {
+		closeHeaderSessionActionsPopover(false);
+		return;
+	}
+	element.anchorEl = renderedTrigger;
 }
 
 function renderHeaderSessionActionButton(action: SessionActionDescriptor, mobile = false) {
@@ -1050,6 +1081,7 @@ function renderHeaderSessionActions(input: {
 						type="button"
 						class="${input.mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground"
 						data-testid="session-actions-trigger"
+						data-session-id=${input.session.id}
 						aria-label="Session actions"
 						aria-haspopup="menu"
 						aria-expanded=${isHeaderSessionActionsPopoverOpen(input.session.id) ? "true" : "false"}

@@ -199,6 +199,42 @@ test.describe("Sidebar actions menu", () => {
 		await expect(page.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="session"][data-sidebar-actions-id="${sessionId}"]`)).toBeFocused({ timeout: 5_000 });
 	});
 
+	test("reacquires the exact header trigger when a render replaces it during lazy menu loading", async ({ page }) => {
+		const sessionId = await createSession();
+		sessionIds.push(sessionId);
+		await waitForSessionStatus(sessionId, "idle");
+		await openSession(page, sessionId);
+		const trigger = page.locator(`[data-testid="session-actions-trigger"][data-session-id="${sessionId}"]`).first();
+		await expect(trigger).toBeVisible({ timeout: 10_000 });
+
+		// The click reaches the old header trigger, then a render replaces it
+		// before the lazy popover import resolves. The menu must use the exact
+		// replacement for this session, including Escape focus restoration.
+		await page.evaluate((id) => {
+			const current = document.querySelector<HTMLElement>(`[data-testid="session-actions-trigger"][data-session-id="${id}"]`);
+			if (!current) throw new Error("header trigger was not rendered");
+			document.addEventListener("click", (event) => {
+				if (!(event.target instanceof Node) || !current.contains(event.target)) return;
+				const replacement = current.cloneNode(true) as HTMLElement;
+				current.replaceWith(replacement);
+				(window as any).__replacedHeaderTrigger = {
+					oldConnected: current.isConnected,
+					newConnected: replacement.isConnected,
+				};
+			}, { capture: true, once: true });
+		}, sessionId);
+
+		await trigger.click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		expect(await page.evaluate(() => (window as any).__replacedHeaderTrigger)).toEqual({ oldConnected: false, newConnected: true });
+		expect(await page.locator("sidebar-actions-popover").evaluate((element) => {
+			const anchor = (element as any).anchorEl as HTMLElement | null;
+			return { connected: anchor?.isConnected, sessionId: anchor?.dataset.sessionId };
+		})).toEqual({ connected: true, sessionId });
+		await page.keyboard.press("Escape");
+		await expect(page.locator(`[data-testid="session-actions-trigger"][data-session-id="${sessionId}"]`)).toBeFocused({ timeout: 5_000 });
+	});
+
 	test("desktop session and goal action-menu smokes keep real-app quick actions wired", async ({ page }) => {
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);
