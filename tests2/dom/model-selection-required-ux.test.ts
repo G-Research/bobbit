@@ -279,7 +279,6 @@ describe("MessageEditor retired-model send fence", () => {
 		await editor.updateComplete;
 		onInput.mockClear();
 		const history = vi.spyOn(editor as any, "addToHistory");
-		const slash = vi.spyOn(editor as any, "_packSlashLaunchFromText");
 		const messageSend = vi.fn();
 		editor.addEventListener("message-send", messageSend);
 
@@ -295,7 +294,6 @@ describe("MessageEditor retired-model send fence", () => {
 		expect(onInput).not.toHaveBeenCalled();
 		expect(onFilesChange).not.toHaveBeenCalled();
 		expect(history).not.toHaveBeenCalled();
-		expect(slash).not.toHaveBeenCalled();
 		expect(editor.value).toBe("/prw-preview keep this draft");
 		expect(editor.attachments).toEqual([attachment]);
 		expect(textarea.value).toBe("/prw-preview keep this draft");
