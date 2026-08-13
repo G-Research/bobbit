@@ -668,6 +668,30 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(queryCalls).toBe(0);
 	});
 
+	it("disposes an eagerly allocated tool surface when validation fails before surface attachment", async () => {
+		const { surface } = subagentSurfaceFixture();
+		let disposeCalls = 0;
+		const trackedSurface = { ...surface, dispose: () => { disposeCalls++; surface.dispose?.(); } };
+		const fixture = bridgeFixture({ claudeSdkToolSurface: trackedSurface, args: ["--extension", "unsupported"] });
+
+		await expect(fixture.bridge.start()).rejects.toMatchObject({
+			code: "SDK_SESSION_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE",
+		});
+		expect(disposeCalls).toBe(1);
+	});
+
+	it("disposes an eagerly allocated tool surface exactly once when stopped before start", async () => {
+		const { surface } = subagentSurfaceFixture();
+		let disposeCalls = 0;
+		const trackedSurface = { ...surface, dispose: () => { disposeCalls++; surface.dispose?.(); } };
+		const fixture = bridgeFixture({ claudeSdkToolSurface: trackedSurface });
+
+		await fixture.bridge.stop();
+		await fixture.bridge.stop();
+		expect(disposeCalls).toBe(1);
+	});
+
 	it("uses the strict isolated direct-bridge SDK surface", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);

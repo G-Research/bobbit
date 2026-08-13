@@ -608,7 +608,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.abortController.abort();
 		// This publishes an aborted terminal exactly once for each still-live
 		// admitted child before the policy observer is unsubscribed/disposed.
-		const surface = this.activeToolSurface ?? this.allocatedToolSurface;
+		const surface = this.activeToolSurface ?? this.allocatedToolSurface ?? this.options.claudeSdkToolSurface;
 		this.releaseSubagentLifecycle();
 		this.cleanupPromise = Promise.resolve()
 			.then(() => this.queryHandle?.close())
