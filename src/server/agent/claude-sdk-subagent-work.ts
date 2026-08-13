@@ -23,6 +23,8 @@ export interface ClaudeSdkEmbeddedWork {
 	readonly phase: ClaudeSdkSubagentPhase;
 	readonly startedAt?: number;
 	readonly stoppedAt?: number;
+	/** Fixed public failure detail; provider error text is never projected. */
+	readonly error?: "Subagent failed";
 	/** Ordered child-only source rows. Opaque SDK metadata remains on each row. */
 	readonly messages: readonly ClaudeAgentSdkHistoryMessage[];
 	readonly pendingToolCallIds: readonly string[];
@@ -60,6 +62,7 @@ export interface ClaudeSdkSubagentRecoveryOptions {
 }
 
 const MAX_ID_BYTES = 512;
+const SUBAGENT_FAILURE_DETAIL = "Subagent failed";
 export const MAX_RECOVERY_SUBAGENTS = 32;
 export const MAX_RECOVERY_CONCURRENCY = 4;
 export const MAX_RECOVERY_ROWS = 1_000;
@@ -122,6 +125,8 @@ type WorkState = {
 	phase: ClaudeSdkSubagentPhase;
 	startedAt?: number;
 	stoppedAt?: number;
+	/** Never retain provider-controlled terminal details in UI-bound work state. */
+	error?: "Subagent failed";
 	diagnostic?: ClaudeSdkEmbeddedWork["diagnostic"];
 };
 
@@ -160,6 +165,7 @@ function publicWork(state: WorkState): ClaudeSdkEmbeddedWork {
 		phase: aggregatePhase(state),
 		...(startedAt !== undefined ? { startedAt } : {}),
 		...(stoppedAt !== undefined ? { stoppedAt } : {}),
+		...(aggregatePhase(state) === "error" && state.error ? { error: state.error } : {}),
 		messages: [...state.messages.values()],
 		pendingToolCallIds: [...state.pendingToolCallIds],
 		...(state.diagnostic ? { diagnostic: state.diagnostic } : {}),
@@ -366,10 +372,15 @@ export class ClaudeSdkSubagentWorkAssembler {
 		identity?: ClaudeSdkSubagentIdentity,
 	): readonly ClaudeSdkEmbeddedWorkEvent[] {
 		if (!boundedId(parentToolUseId)) return [];
-		this.addIdentity(parentToolUseId, identity, terminal.phase);
+		const safeTerminal = terminal.phase === "error"
+			? { phase: terminal.phase, error: SUBAGENT_FAILURE_DETAIL } as const
+			: { phase: terminal.phase } as const;
+		this.addIdentity(parentToolUseId, identity, safeTerminal.phase);
 		const state = this.state(parentToolUseId);
-		if (!identity) state.phase = terminal.phase;
-		return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind: "terminal", identity, terminal }];
+		if (!identity) state.phase = safeTerminal.phase;
+		if (safeTerminal.phase === "error") state.error = SUBAGENT_FAILURE_DETAIL;
+		else if (!identity) state.error = undefined;
+		return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind: "terminal", identity, terminal: safeTerminal }];
 	}
 
 	ingestLiveEvent(event: unknown): readonly ClaudeSdkEmbeddedWorkEvent[] {
@@ -444,6 +455,20 @@ function rootAgentParentToolUseIds(messages: readonly ClaudeAgentSdkHistoryMessa
 	return parents;
 }
 
+/**
+ * Root Agent/Task results are the only durable terminal authority in history.
+ * A child row may name its parent but must never settle that parent's card.
+ */
+function rootSubagentTerminal(
+	message: ClaudeAgentSdkHistoryMessage,
+	parents: ReadonlySet<string>,
+): { parentToolUseId: string; phase: "completed" | "error" } | undefined {
+	if (message.role !== "toolResult" || message.parentToolUseId !== undefined) return undefined;
+	const parentToolUseId = toolResultId(message);
+	if (!parentToolUseId || !parents.has(parentToolUseId)) return undefined;
+	return { parentToolUseId, phase: message.isError === true ? "error" : "completed" };
+}
+
 /** Bounded official-SDK recovery for a snapshot with real root Agent/Task
  * parents. It never infers a parent from an agent id and returns only rows
  * annotated with an exact real root parent. */
@@ -479,6 +504,12 @@ export function projectClaudeSdkEmbeddedWork(messages: readonly ClaudeAgentSdkHi
 	for (const message of messages) {
 		if (boundedId(message.parentToolUseId)) assembler.ingestMessage(message);
 		else rootMessages.push(message);
+	}
+	// History can be replayed in either result/call order. Resolve only after
+	// the complete root call set is known, and only through exact tool-call ids.
+	for (const message of messages) {
+		const terminal = rootSubagentTerminal(message, parents);
+		if (terminal) assembler.ingestTerminal(terminal.parentToolUseId, terminal);
 	}
 	const workByParent = assembler.snapshot();
 	return {

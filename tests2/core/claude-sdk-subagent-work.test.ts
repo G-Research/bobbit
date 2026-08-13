@@ -9,7 +9,7 @@ import {
 	projectClaudeSdkEmbeddedWork,
 	recoverClaudeSdkEmbeddedWork,
 } from "../../src/server/agent/claude-sdk-subagent-work.ts";
-import type { ClaudeAgentSdkHistoryMessage } from "../../src/server/agent/claude-agent-sdk-history-adapter.ts";
+import { adaptSdkSessionMessages, type ClaudeAgentSdkHistoryMessage } from "../../src/server/agent/claude-agent-sdk-history-adapter.ts";
 import type { ClaudeAgentSdkSessionApi, SdkSessionMessage } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
 
 const SESSION_ID = "123e4567-e89b-42d3-a456-426614174000";
@@ -59,6 +59,63 @@ describe("Claude SDK embedded subagent work", () => {
 		expect(projection.workByParent.get(parentOne)?.messages[0]).toBe(childOne);
 		expect(projection.workByParent.get(parentTwo)?.messages).toEqual([childTwo]);
 		expect(projection.diagnostics).toEqual([]);
+	});
+
+	it("derives durable root Agent/Task completion and safe failures by exact tool-result id", () => {
+		const completedParent = "agent-completed";
+		const failedParent = "task-failed";
+		const unknownParent = "agent-unknown";
+		const root = assistant("root", undefined, "", [
+			{ type: "toolCall", id: completedParent, name: "Agent", arguments: {} },
+			{ type: "toolCall", id: failedParent, name: "Task", arguments: {} },
+			{ type: "toolCall", id: unknownParent, name: "Agent", arguments: {} },
+		]);
+		const child = assistant("child", failedParent, "child-1", [{ type: "text", text: "work" }]);
+		// Use the adapter's actual Pi-shaped toolResult fields, rather than a
+		// guessed SDK result envelope, for durable root terminal authority.
+		const adapted = adaptSdkSessionMessages([
+			{
+				type: "assistant", uuid: "adapter-root", session_id: SESSION_ID, parent_tool_use_id: null, parent_agent_id: null,
+				message: { model: "claude-test", content: [
+					{ type: "tool_use", id: completedParent, name: "Agent", input: {} },
+					{ type: "tool_use", id: failedParent, name: "Task", input: {} },
+				], stop_reason: "tool_use" },
+			},
+			{
+				type: "user", uuid: "root-completed", session_id: SESSION_ID, parent_tool_use_id: null, parent_agent_id: null,
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: completedParent, content: "completed", is_error: false }] },
+			},
+			{
+				type: "user", uuid: "root-failed", session_id: SESSION_ID, parent_tool_use_id: null, parent_agent_id: null,
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: failedParent, content: "provider secret: /private/path", is_error: true }] },
+			},
+		]);
+		const completed = adapted.find(row => row.role === "toolResult" && row.toolCallId === completedParent)!;
+		const failed = adapted.find(row => row.role === "toolResult" && row.toolCallId === failedParent)!;
+		expect(completed).toMatchObject({ role: "toolResult", toolCallId: completedParent, isError: false });
+		expect(failed).toMatchObject({ role: "toolResult", toolCallId: failedParent, isError: true });
+		const unrelated: ClaudeAgentSdkHistoryMessage = {
+			id: "root-unrelated", role: "toolResult", toolCallId: "not-an-agent-call", toolName: "Read",
+			isError: true, content: [], timestamp: 4,
+		};
+
+		const projection = projectClaudeSdkEmbeddedWork([root, child, completed, failed, unrelated]);
+		expect(projection.workByParent.get(completedParent)).toMatchObject({ phase: "completed" });
+		expect(projection.workByParent.get(completedParent)?.error).toBeUndefined();
+		expect(projection.workByParent.get(failedParent)).toMatchObject({ phase: "error", error: "Subagent failed" });
+		expect(JSON.stringify(projection.workByParent.get(failedParent))).not.toContain("provider secret");
+		expect(projection.workByParent.get(unknownParent)).toBeUndefined();
+
+		const childResult: ClaudeAgentSdkHistoryMessage = {
+			id: "child-result", role: "toolResult", toolCallId: unknownParent, toolName: "Agent",
+			parentToolUseId: unknownParent, parentAgentId: "child-2", isError: true, content: [], timestamp: 5,
+		};
+		const unknownProjection = projectClaudeSdkEmbeddedWork([
+			root,
+			assistant("unknown-child", unknownParent, "child-2", [{ type: "text", text: "still running" }]),
+			childResult,
+		]);
+		expect(unknownProjection.workByParent.get(unknownParent)).toMatchObject({ phase: "unknown" });
 	});
 
 	it("keeps multiple verified identities under one exact parent and never settles root state", () => {
