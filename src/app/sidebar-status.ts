@@ -141,9 +141,10 @@ export function selectSidebarStatusSections<TSession extends StatusSession = Sta
 		let unread: boolean | undefined;
 
 		if (!bypassFilters) {
-			// Filter order is normative: Archived, teams, Busy, Read.
-			if (!input.filters.showArchived && candidate.archived) continue;
-			if (!input.filters.showTeams && input.isTeamMember(session)) continue;
+			// Filter order is normative: Archived, teams, Busy, Read. The open
+			// session remains eligible so an explicit reveal can use default filters.
+			if (!input.filters.showArchived && candidate.archived && !active) continue;
+			if (!input.filters.showTeams && input.isTeamMember(session) && !active) continue;
 			busy = input.isBusy(session);
 			if (!input.filters.showBusy && busy && !active) continue;
 			unread = input.isUnread(session);
