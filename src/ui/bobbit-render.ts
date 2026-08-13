@@ -761,6 +761,7 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	else p = CANONICAL_PALETTE;
 
 	const isBusy = status === "streaming" || status === "busy" || isCompacting;
+	const isCancelling = isAborting && (status === "streaming" || isBusy);
 	// Idle / not-currently-viewed sessions render with sleeping eyes (closed)
 	// to match the chat blob's sleeping pose. noDesaturate previews (role
 	// manager etc.) keep awake eyes so the bobbit looks alive in selection UI.
@@ -923,7 +924,9 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 			}
 
 			const rightPixels = spriteData.sidebarRightFacingPixels;
-			animateSidebarTurn = !!rightPixels?.length && isSelected && !isCompacting;
+			// Normal compaction squishes without a gaze cycle. Cancelling compaction
+			// still uses bobbit-eyes-squash-s, so its right-facing beat must swap too.
+			animateSidebarTurn = !!rightPixels?.length && isSelected && (!isCompacting || isCancelling);
 			const showRightOnly = !!rightPixels?.length && unread && !isSelected;
 			if (!showRightOnly) {
 				accLeft = sidebarOriginX + frontBounds.xShift * S;
@@ -943,7 +946,6 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 
 	// Animation styles (same logic as before)
 	const isIdle = status === "idle" && !isCompacting && !isSelected && !noDesaturate;
-	const isCancelling = isAborting && (status === "streaming" || isBusy);
 	const filters: string[] = [];
 	if (hueRotate && status !== "starting" && status !== "terminated") filters.push(`hue-rotate(${hueRotate}deg)`);
 	if (isCancelling) filters.push("saturate(0.3)");

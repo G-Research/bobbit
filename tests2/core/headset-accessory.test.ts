@@ -104,6 +104,7 @@ describe("headset accessory", () => {
 		assert.match(render, /srcW: maxX - xShift \+ 1/, "sidebar accessory canvas includes negative x pixels");
 		assert.match(render, /fillRect\(\(x - bounds\.xShift\) \* HI/, "sidebar rasterization offsets by minX");
 		assert.match(render, /sidebarRightFacingPixels/, "sidebar consumes the right-facing frame");
+		assert.match(render, /isSelected && \(!isCompacting \|\| isCancelling\)/, "cancelling compaction keeps the eye/accessory turn synchronized");
 		assert.match(render, /`\$\{acc\.id\}\|right`/, "right-facing bitmap has a stable cache key");
 		assert.match(render, /left:\$\{sidebarOriginX\}px/, "sidebar body layers share adjusted x origin");
 		assert.match(render, /left:\$\{accLeft\}px/, "sidebar accessory layer uses minX-aware left edge");
