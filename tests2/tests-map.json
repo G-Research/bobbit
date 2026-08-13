@@ -4,8 +4,8 @@
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
   "censusTotal": 1143,
   "buckets": {
-    "daily": 67,
-    "v2-browser": 217,
+    "daily": 68,
+    "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 52,
+    "relocate": 53,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -2558,6 +2558,24 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-agent-sdk-sandbox-spawn.test.ts",
+      "reason": "Credential-free core coverage for the Claude SDK Docker-exec adapter: fixed wrapper and opaque SDK arguments, closed allowlisted environment, CWD and pipe validation, lifecycle abort cleanup, credential redaction, OAuth policy/API-key rejection, and exact image capability.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/claude-agent-sdk-sandbox-runtime.test.ts",
+      "reason": "Deterministic fake SDK/Docker integration coverage for sandbox fresh/worktree launches, isolated state, prompt/steer/interrupt/model/thinking/tool behavior, read-only container history, and replacement/resume plus early unavailable failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],
@@ -17612,6 +17630,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Process-isolated official Agent SDK and bundled Claude initialization inventory; verifies strict hostile-settings/MCP/plugin/memory isolation without a model turn."
+    },
+    {
+      "file": "tests/e2e/claude-agent-sdk-sandbox-runtime.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Controlled real-gateway Claude SDK Docker-sandbox journey covering unavailable credential/image failures, pooled-container launch, transcript ownership, Pi co-residency, and UUID-preserving restart recovery."
     }
   ]
 }

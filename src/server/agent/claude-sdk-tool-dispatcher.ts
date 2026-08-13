@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { Worker } from "node:worker_threads";
+import type { ChildProcess } from "node:child_process";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import { parseMcpToolName } from "../mcp/mcp-meta.js";
 import { bobbitDir } from "../bobbit-dir.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ClaudeSdkToolHandler } from "./claude-agent-sdk-tool-surface.js";
+import { spawnDockerExec, type DockerSpawn } from "./docker-exec-spawn.js";
+import { tryHostPathToContainer } from "./rpc-bridge.js";
 
 export interface ClaudeSdkExtensionManifestEntry {
 	/** Absolute, ToolManager-derived path; never a caller-supplied extension path. */
@@ -25,6 +29,19 @@ export interface ClaudeSdkExtensionSchema {
 	inputSchema: Record<string, unknown>;
 }
 
+export interface ClaudeSdkSandboxDispatcherOptions {
+	/** Current pooled-container identity, rebuilt after replacement/recovery. */
+	containerId: string;
+	/** Current translated `/workspace…` session working directory. */
+	cwd: string;
+	/** Existing mount mappings only; an unmapped trusted extension fails closed. */
+	builtinToolsDir?: string;
+	projectMarketPacksRoot?: string;
+	/** Deterministic test seams; production always reads the compiled worker and shared Docker spawn. */
+	spawn?: DockerSpawn;
+	workerSource?: string;
+}
+
 export interface ClaudeSdkExtensionDispatcherOptions {
 	cwd: string;
 	env: Record<string, string>;
@@ -32,6 +49,8 @@ export interface ClaudeSdkExtensionDispatcherOptions {
 	gatewayCredentials?: ClaudeSdkWorkerGatewayCredentials;
 	/** Immutable manifest derived from the selected ToolManager providers only. */
 	manifest: readonly ClaudeSdkExtensionManifestEntry[];
+	/** Present only after sandbox wiring; direct SDK sessions retain a host Worker. */
+	sandbox?: ClaudeSdkSandboxDispatcherOptions;
 }
 
 type Pending = {
@@ -146,11 +165,42 @@ export function buildClaudeSdkWorkerEnv(
 	return out;
 }
 
+/** Closed environment for a trusted extension process executing inside Docker. */
+function buildClaudeSdkSandboxWorkerEnv(
+	env: Record<string, string>,
+	credentials: ClaudeSdkWorkerGatewayCredentials,
+): Record<string, string> {
+	const hostDerived = buildClaudeSdkWorkerEnv(env, credentials);
+	const { PATH: _path, TMPDIR: _tmpdir, TMP: _tmp, TEMP: _temp, BOBBIT_DIR: _bobbitDir, ...authority } = hostDerived;
+	return {
+		HOME: "/home/node",
+		PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		TMPDIR: "/tmp",
+		TMP: "/tmp",
+		TEMP: "/tmp",
+		LANG: "C.UTF-8",
+		...authority,
+	};
+}
+
 /** Session-local adapter around Pi's public extension loader. */
+type DispatcherProcess = Worker | ChildProcess;
+
+type SandboxFrameReader = {
+	decoder: StringDecoder;
+	buffer: string;
+	failed: boolean;
+};
+
+// Tool results may legitimately exceed a pipe's typical 64 KiB chunk. Keep a
+// bounded incomplete-frame buffer so a malformed worker cannot retain stdout
+// indefinitely before its newline arrives.
+const MAX_SANDBOX_DISPATCH_FRAME_BYTES = 4 * 1024 * 1024;
+
 export class ClaudeSdkExtensionDispatcher {
-	private worker?: Worker;
-	private starting?: Promise<Worker>;
-	private startingWorker?: Worker;
+	private worker?: DispatcherProcess;
+	private starting?: Promise<DispatcherProcess>;
+	private startingWorker?: DispatcherProcess;
 	private sequence = 0;
 	private disposed = false;
 	private schemas: readonly ClaudeSdkExtensionSchema[] = [];
@@ -164,61 +214,169 @@ export class ClaudeSdkExtensionDispatcher {
 		return this.schemas;
 	}
 
-	private async getWorker(): Promise<Worker> {
+	private async getWorker(): Promise<DispatcherProcess> {
 		if (this.disposed) throw new Error("Bobbit extension dispatcher stopped");
 		if (this.worker) return this.worker;
-		if (!this.starting) {
-			this.starting = new Promise<Worker>((resolve, reject) => {
-				const compiledWorker = new URL("./claude-sdk-extension-worker.js", import.meta.url);
-				// Vitest executes TypeScript directly from src/, where tsc has not emitted
-				// a sibling .js worker. Production always uses the compiled worker.
-				const sourceWorker = new URL("./claude-sdk-extension-worker.ts", import.meta.url);
-				const useSourceWorker = !fs.existsSync(compiledWorker) && fs.existsSync(sourceWorker);
-				const workerEnv = buildClaudeSdkWorkerEnv(this.options.env, this.options.gatewayCredentials);
-				const worker = new Worker(useSourceWorker ? sourceWorker : compiledWorker, {
-					workerData: { cwd: this.options.cwd, env: workerEnv, manifest: this.options.manifest },
-					env: workerEnv,
-					...(useSourceWorker ? { execArgv: ["--import", "tsx"] } : {}),
-				});
-				this.startingWorker = worker;
-				const rejectStartup = (diagnostic?: unknown) => {
-					worker.off("message", onMessage);
-					if (this.startingWorker === worker) this.startingWorker = undefined;
-					void worker.terminate();
-					const detail = typeof diagnostic === "string" ? diagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) : "";
-					reject(new Error(`Bobbit extension dispatcher failed to start${detail ? ` (${detail})` : ""}`));
-				};
-				const onMessage = (message: any) => {
-					if (message?.type === "ready") {
-						if (!Array.isArray(message.schemas)) return rejectStartup();
+		if (!this.starting) this.starting = this.options.sandbox ? this.startSandboxWorker() : this.startHostWorker();
+		return this.starting;
+	}
+
+	private startHostWorker(): Promise<Worker> {
+		const compiledWorker = new URL("./claude-sdk-extension-worker.js", import.meta.url);
+		// Vitest executes TypeScript directly from src/, where tsc has not emitted
+		// a sibling .js worker. Production always uses the compiled worker.
+		const sourceWorker = new URL("./claude-sdk-extension-worker.ts", import.meta.url);
+		const useSourceWorker = !fs.existsSync(compiledWorker) && fs.existsSync(sourceWorker);
+		const workerEnv = buildClaudeSdkWorkerEnv(this.options.env, this.options.gatewayCredentials);
+		const worker = new Worker(useSourceWorker ? sourceWorker : compiledWorker, {
+			workerData: { cwd: this.options.cwd, env: workerEnv, manifest: this.options.manifest },
+			env: workerEnv,
+			...(useSourceWorker ? { execArgv: ["--import", "tsx"] } : {}),
+		});
+		return this.awaitReady(worker, listener => {
+			worker.on("message", listener);
+			return () => worker.off("message", listener);
+		}, () => worker.terminate(), message => worker.postMessage(message));
+	}
+
+	private startSandboxWorker(): Promise<ChildProcess> {
+		const sandbox = this.options.sandbox!;
+		const compiledWorker = new URL("./claude-sdk-extension-worker.js", import.meta.url);
+		if (!sandbox.workerSource && !fs.existsSync(compiledWorker)) throw new Error("Claude SDK sandbox dispatcher is unavailable: rebuild the server before starting a sandbox session");
+		const manifest = this.options.manifest.map(entry => {
+			const extensionPath = tryHostPathToContainer(entry.extensionPath, {
+				builtinToolsDir: sandbox.builtinToolsDir,
+				projectMarketPacksRoot: sandbox.projectMarketPacksRoot,
+			});
+			if (!extensionPath) throw new Error("Claude SDK sandbox dispatcher extension is not mounted in the current container");
+			return Object.freeze({ ...entry, extensionPath });
+		});
+		// The compiled worker source is evaluated by the image's Node runtime, so no
+		// server source or host path needs mounting into the pooled container. Its
+		// trusted extension imports are separately remapped above to existing mounts.
+		const source = sandbox.workerSource ?? fs.readFileSync(compiledWorker, "utf8");
+		const workerEnv = buildClaudeSdkSandboxWorkerEnv(this.options.env, this.options.gatewayCredentials ?? {});
+		const child = spawnDockerExec({
+			containerId: sandbox.containerId,
+			cwd: sandbox.cwd,
+			env: workerEnv,
+			command: ["node", "--input-type=module", "--eval", source],
+			spawn: sandbox.spawn,
+			logPrefix: "claude-sdk-tools",
+			drainStderr: true,
+		});
+		if (!child.stdin || !child.stdout) {
+			child.kill("SIGTERM");
+			throw new Error("Claude SDK sandbox dispatcher did not provide pipe stdio");
+		}
+		const reader: SandboxFrameReader = { decoder: new StringDecoder("utf8"), buffer: "", failed: false };
+		return this.awaitReady(child, listener => {
+			const onData = (chunk: Buffer) => this.readSandboxMessage(reader, chunk, listener);
+			child.stdout!.on("data", onData);
+			return () => child.stdout!.off("data", onData);
+		}, () => child.kill("SIGTERM"), message => this.send(child, message), {
+			cwd: sandbox.cwd,
+			env: workerEnv,
+			manifest,
+		}, reader);
+	}
+
+	private awaitReady<T extends DispatcherProcess>(worker: T, subscribe: (listener: (message: any) => void) => (() => void) | void, terminate: () => unknown, send: (message: unknown) => void, init?: unknown, sandboxReader?: SandboxFrameReader): Promise<T> {
+		this.startingWorker = worker;
+		return new Promise<T>((resolve, reject) => {
+			let settled = false;
+			let detach: (() => void) | undefined;
+			const onExit = () => rejectStartup("worker-exited");
+			const cleanupStartupListeners = () => {
+				detach?.();
+				worker.off("error", rejectStartup);
+				worker.off("exit", onExit);
+			};
+			const rejectStartup = (diagnostic?: unknown) => {
+				if (settled) return;
+				settled = true;
+				cleanupStartupListeners();
+				if (this.startingWorker === worker) this.startingWorker = undefined;
+				void terminate();
+				const detail = typeof diagnostic === "string" ? diagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) : "";
+				reject(new Error(`Bobbit extension dispatcher failed to start${detail ? ` (${detail})` : ""}`));
+			};
+			const onMessage = (message: any) => {
+				if (settled) return;
+				if (message?.type === "protocol-error") return rejectStartup("invalid-protocol");
+				if (message?.type === "ready") {
+					if (!Array.isArray(message.schemas)) return rejectStartup();
+					try {
 						if (Array.isArray(message.omittedConditional) && message.omittedConditional.length > 0) {
-							const omitted = message.omittedConditional
-								.filter((name: unknown): name is string => typeof name === "string")
-								.slice(0, 8)
-								.map((name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80));
+							const omitted = message.omittedConditional.filter((name: unknown): name is string => typeof name === "string").slice(0, 8).map((name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80));
 							console.warn(`[claude-sdk] ${message.omittedConditional.length} selected conditional tool registration(s) omitted${omitted.length ? `: ${omitted.join(",")}` : ""}`);
 						}
-						worker.off("message", onMessage);
-						if (this.disposed) return rejectStartup();
 						this.schemas = Object.freeze(message.schemas.map((schema: unknown) => {
 							if (!schema || typeof schema !== "object" || typeof (schema as ClaudeSdkExtensionSchema).name !== "string" || !(schema as ClaudeSdkExtensionSchema).inputSchema || typeof (schema as ClaudeSdkExtensionSchema).inputSchema !== "object") throw new Error("Invalid Claude SDK extension schema");
 							return Object.freeze({ name: (schema as ClaudeSdkExtensionSchema).name, inputSchema: (schema as ClaudeSdkExtensionSchema).inputSchema });
 						}));
-						this.startingWorker = undefined;
-						this.attach(worker);
-						this.worker = worker;
-						resolve(worker);
-					} else if (message?.type === "startup-error") rejectStartup(message.diagnostic);
-				};
-				worker.on("message", onMessage);
-				worker.once("error", rejectStartup);
-			});
-		}
-		return this.starting;
+					} catch {
+						return rejectStartup("invalid-schema");
+					}
+					settled = true;
+					cleanupStartupListeners();
+					this.startingWorker = undefined;
+					this.attach(worker, sandboxReader);
+					this.worker = worker;
+					resolve(worker);
+				} else if (message?.type === "startup-error") rejectStartup(message.diagnostic);
+			};
+			detach = subscribe(onMessage) ?? undefined;
+			worker.once("error", rejectStartup);
+			worker.once("exit", onExit);
+			if (init) send({ type: "init", ...(init as object) });
+		});
 	}
 
-	private attach(worker: Worker): void {
-		worker.on("message", (message: any) => {
+	private readSandboxMessage(reader: SandboxFrameReader, chunk: Buffer | string, listener: (message: any) => void): void {
+		if (reader.failed) return;
+		reader.buffer += reader.decoder.write(chunk);
+		if (Buffer.byteLength(reader.buffer) > MAX_SANDBOX_DISPATCH_FRAME_BYTES) {
+			reader.failed = true;
+			listener({ type: "protocol-error" });
+			return;
+		}
+		const lines = reader.buffer.split("\n");
+		reader.buffer = lines.pop() ?? "";
+		for (const line of lines) {
+			if (!line.startsWith("BOBBIT_SDK_DISPATCH:")) continue;
+			try {
+				const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
+				if (!message || typeof message !== "object") throw new Error("invalid protocol message");
+				listener(message);
+			} catch {
+				reader.failed = true;
+				listener({ type: "protocol-error" });
+				return;
+			}
+		}
+	}
+
+	private failSandboxProtocol(worker: DispatcherProcess): void {
+		if (this.worker === worker) this.worker = undefined;
+		if (this.startingWorker === worker) this.startingWorker = undefined;
+		this.starting = undefined;
+		this.failAll(new Error("Bobbit extension dispatcher protocol error"));
+		if (worker instanceof Worker) void worker.terminate();
+		else worker.kill("SIGTERM");
+	}
+
+	private send(worker: DispatcherProcess, message: unknown): void {
+		if (worker instanceof Worker) worker.postMessage(message);
+		else worker.stdin?.write(`BOBBIT_SDK_DISPATCH:${JSON.stringify(message)}\n`);
+	}
+
+	private attach(worker: DispatcherProcess, sandboxReader?: SandboxFrameReader): void {
+		const onMessage = (message: any) => {
+			if (message?.type === "protocol-error") {
+				this.failSandboxProtocol(worker);
+				return;
+			}
 			if (message?.type !== "result" || typeof message.id !== "number") return;
 			const pending = this.pending.get(message.id);
 			if (!pending) return;
@@ -226,13 +384,16 @@ export class ClaudeSdkExtensionDispatcher {
 			pending.abort?.();
 			if (message.error) pending.reject(new Error("Bobbit tool execution failed"));
 			else pending.resolve(message.result);
-		});
+		};
+		if (worker instanceof Worker) worker.on("message", onMessage);
+		else {
+			if (!sandboxReader) throw new Error("Claude SDK sandbox dispatcher is missing its stdout frame reader");
+			worker.stdout?.on("data", chunk => this.readSandboxMessage(sandboxReader, chunk, onMessage));
+		}
 		worker.on("error", error => this.failAll(error));
 		worker.on("exit", () => {
 			this.worker = undefined;
 			this.starting = undefined;
-			// A clean worker exit can still strand live RPCs; every exit is terminal
-			// for this worker generation and must settle each pending caller.
 			if (!this.disposed) this.failAll(new Error("Bobbit extension dispatcher exited"));
 		});
 	}
@@ -251,7 +412,7 @@ export class ClaudeSdkExtensionDispatcher {
 		if (this.disposed || context.signal?.aborted) throw new Error("Tool call cancelled.");
 		const id = ++this.sequence;
 		return new Promise<unknown>((resolve, reject) => {
-			const cancel = () => worker.postMessage({ type: "cancel", id });
+			const cancel = () => this.send(worker, { type: "cancel", id });
 			context.signal?.addEventListener("abort", cancel, { once: true });
 			this.pending.set(id, {
 				resolve,
@@ -264,7 +425,7 @@ export class ClaudeSdkExtensionDispatcher {
 				reject(new Error("Tool call cancelled."));
 				return;
 			}
-			worker.postMessage({ type: "invoke", id, name, args, toolUseId: context.toolUseId ?? `sdk-${id}` });
+			this.send(worker, { type: "invoke", id, name, args, toolUseId: context.toolUseId ?? `sdk-${id}` });
 		});
 	}
 
@@ -278,8 +439,12 @@ export class ClaudeSdkExtensionDispatcher {
 		this.starting = undefined;
 		this.startingWorker = undefined;
 		this.schemas = [];
-		if (worker) void worker.terminate();
-		if (startingWorker && startingWorker !== worker) void startingWorker.terminate();
+		if (worker instanceof Worker) void worker.terminate();
+		else worker?.kill("SIGTERM");
+		if (startingWorker && startingWorker !== worker) {
+			if (startingWorker instanceof Worker) void startingWorker.terminate();
+			else startingWorker.kill("SIGTERM");
+		}
 	}
 }
 

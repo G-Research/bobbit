@@ -1029,17 +1029,23 @@ export async function buildClaudeSdkSurfaceAfterPreflight<T>(
  * allowlist, so it never inherits this bearer token.
  */
 export function resolveClaudeSdkWorkerGatewayCredentials(
-	bridgeOptions: Pick<SessionBridgeOptions, "gatewayToken" | "gatewayUrl" | "env">,
+	bridgeOptions: Pick<SessionBridgeOptions, "sandboxed" | "gatewayToken" | "gatewayUrl" | "env">,
 ): { token?: string; url?: string } {
 	const present = (value: string | undefined): string | undefined => value?.trim() || undefined;
+	if (bridgeOptions.sandboxed) {
+		// Sandboxed SDK dispatch starts only after applySandboxWiring minted the
+		// session/project capability. Never read a host token, process env, or
+		// generic bridge env here: a missing scoped authority is a hard failure.
+		const token = present(bridgeOptions.gatewayToken);
+		const url = present(bridgeOptions.gatewayUrl);
+		if (!token || !url) throw new Error("Claude SDK sandbox dispatcher requires current scoped gateway authority");
+		return { token, url };
+	}
 	let url = present(bridgeOptions.gatewayUrl) ?? present(bridgeOptions.env?.BOBBIT_GATEWAY_URL) ?? present(process.env.BOBBIT_GATEWAY_URL);
 	if (!url) {
 		try { url = present(fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf8")); } catch { /* Gateway may not be published in test setup. */ }
 	}
-	return {
-		token: present(bridgeOptions.gatewayToken) ?? present(bridgeOptions.env?.BOBBIT_TOKEN) ?? readToken() ?? undefined,
-		url,
-	};
+	return { token: present(bridgeOptions.gatewayToken) ?? present(bridgeOptions.env?.BOBBIT_TOKEN) ?? readToken() ?? undefined, url };
 }
 
 export interface ClaudeSdkMcpAggregate {
@@ -1110,6 +1116,7 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 		? { args: [], env: {} }
 		: computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
+		const sdkSandboxed = plan.sandboxed === true || plan.bridgeOptions.sandboxed === true;
 		if (plan.agentArgs?.some(arg => arg === "--extension" || arg.startsWith("--extension="))) {
 			throw new Error("Claude Agent SDK does not accept extension arguments");
 		}
@@ -1177,11 +1184,21 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 			...(plan.bridgeOptions.env ?? {}),
 			BOBBIT_BUILTIN_TOOLS: [...new Set(builtinToolNames)].sort().join(","),
 		};
+		const gatewayCredentials = resolveClaudeSdkWorkerGatewayCredentials(plan.bridgeOptions);
 		extensionDispatcher = new ClaudeSdkExtensionDispatcher({
 			cwd: plan.cwd,
 			env: plan.bridgeOptions.env,
-			gatewayCredentials: resolveClaudeSdkWorkerGatewayCredentials(plan.bridgeOptions),
+			gatewayCredentials,
 			manifest,
+			...(sdkSandboxed ? {
+				sandbox: {
+					containerId: plan.bridgeOptions.containerId ?? "",
+					cwd: plan.bridgeOptions.cwd ?? "",
+					builtinToolsDir: ctx.toolManager.getBuiltinToolsDir(),
+					projectMarketPacksRoot: plan.bridgeOptions.projectMarketPacksRoot,
+					...plan.bridgeOptions.claudeSdkDispatcherTestDeps,
+				},
+			} : {}),
 		});
 		const surface = await buildClaudeSdkSurfaceAfterPreflight(
 			extensionDispatcher,
@@ -1357,7 +1374,9 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	await resolveToolActivation(plan, ctx);
+	// Sandboxed SDK dispatch owns filesystem/process tools and must be constructed
+	// only after wiring has supplied the current container CWD and scoped token.
+	if (!plan.sandboxed) await resolveToolActivation(plan, ctx);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1389,6 +1408,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 			plan.cwd = plan.bridgeOptions.cwd;
 			resolvePrompt(plan, ctx);
 		}
+		await resolveToolActivation(plan, ctx);
 	}
 
 	// Step 7: persist BEFORE spawning — if the spawn fails (e.g. Docker ENOENT),
@@ -1600,7 +1620,8 @@ export async function executeWorktreeAsync(
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	await resolveToolActivation(plan, ctx);
+	// See executePlan: sandbox SDK dispatch cannot start against host coordinates.
+	if (!plan.sandboxed) await resolveToolActivation(plan, ctx);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
@@ -1635,6 +1656,7 @@ export async function executeWorktreeAsync(
 			ctx.store.update(session.id, { cwd: session.cwd });
 			resolvePrompt(plan, ctx);
 		}
+		await resolveToolActivation(plan, ctx);
 	}
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.

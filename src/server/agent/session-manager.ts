@@ -25,7 +25,8 @@ import { SearchService } from "../search/search-service.js";
 import { hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
 import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
-import { readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
+import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
+import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
@@ -3021,6 +3022,24 @@ export class SessionManager {
 	}
 
 	/**
+	 * Return the final replacement CWD only after its sandbox decision has run.
+	 * A sandboxed SDK bridge must never hand a missing or host-local CWD to the
+	 * container dispatcher; that would silently rebuild a host Worker surface.
+	 */
+	private requireReplacementCwd(bridgeOptions: SessionBridgeOptions, operation: string): string {
+		const cwd = bridgeOptions.cwd;
+		if (typeof cwd !== "string" || cwd.trim() === "") {
+			throw new Error(`Cannot ${operation}: replacement working directory is unavailable`);
+		}
+		if (bridgeOptions.runtime === "claude-agent-sdk" && bridgeOptions.sandboxed && !isSandboxContainerCwd(cwd)) {
+			throw new ClaudeAgentSdkUnavailableError(
+				`SDK_SESSION_UNAVAILABLE: ${operation} has an invalid sandbox working directory`,
+			);
+		}
+		return cwd;
+	}
+
+	/**
 	 * Apply Docker sandbox wiring to bridge options.
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
 	 * Returns true if sandbox was applied, false if sandbox is not configured.
@@ -3070,6 +3089,10 @@ export class SessionManager {
 		}
 
 		const containerId = await sandbox.getContainerId();
+		const sdkRuntime = resolveSessionRuntime(bridgeOptions) === "claude-agent-sdk";
+		if (sdkRuntime && !(await sandbox.hasClaudeAgentSdkCapability())) {
+			throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: rebuild the Docker sandbox image before starting a Claude Agent SDK session");
+		}
 
 		// Read gateway URL and generate scoped token for the container.
 		const gwUrl = this.readGatewayUrlForAgent();
@@ -3078,9 +3101,14 @@ export class SessionManager {
 		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
 		if (scopedToken) {
 			bridgeOptions.gatewayToken = scopedToken;
+		} else if (sdkRuntime) {
+			// An SDK sandbox's dispatcher is a separate container process. It must
+			// receive only a current SandboxTokenStore capability, never the host
+			// admin token used by legacy Pi sandbox harnesses.
+			throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: scoped sandbox gateway authority is unavailable; restart the gateway and retry");
 		} else {
-			// Legacy/test harnesses may omit SandboxTokenStore; keep sandbox behavior
-			// unchanged there. Direct agents never use this admin fallback.
+			// Legacy/test harnesses may omit SandboxTokenStore; preserve Pi sandbox
+			// behavior while the SDK path above remains fail-closed.
 			const adminToken = readToken();
 			if (adminToken === null) {
 				throw new Error("Cannot read gateway credentials for sandbox");
@@ -3157,6 +3185,7 @@ export class SessionManager {
 		// empty ANTHROPIC_OAUTH_TOKEN entry opts in to one current, non-renewable
 		// auth.json entry. Project credentials win and never trigger host refresh.
 		const secretsStore = projectContext?.secretsStore ?? null;
+		let sdkOAuthAccessToken: string | undefined;
 		await withSandboxAgentAuthFileLock(projectId, async () => {
 			const readSandboxAuthPolicy = () => {
 				const entries = projectConfigStore.getSandboxTokens();
@@ -3181,22 +3210,57 @@ export class SessionManager {
 			};
 
 			let policy = readSandboxAuthPolicy();
-			const anthropicOAuthCurrent = policy.includeAnthropicAuth
+			const anthropicOAuthCurrent = !sdkRuntime && policy.includeAnthropicAuth
 				&& await refreshSandboxAnthropicOAuthCredential();
 
 			// Refresh is asynchronous, so the user may have configured an explicit
 			// project key while it was in flight. Re-read policy and credentials under
 			// this project's write lock before changing its shared auth.json.
 			policy = readSandboxAuthPolicy();
-			bridgeOptions.sandboxCredentials = policy.credentials;
-			ensureSandboxAgentAuthFile({
-				prefs: this.preferencesStore,
-				includeCodexAuth: policy.sandboxAuthPolicy.includeCodexAuth,
-				includeAnthropicAuth: anthropicOAuthCurrent && policy.includeAnthropicAuth,
-				includeGoogleAuth: policy.sandboxAuthPolicy.includeGoogleAuth,
-				scope: projectId,
-			});
+			if (sdkRuntime) {
+				// The SDK receives no generic sandbox credentials and cannot fall back
+				// to an API key. This opaque value exists only until its docker exec.
+				if (policy.credentials.ANTHROPIC_API_KEY || policy.credentials.ANTHROPIC_OAUTH_TOKEN) {
+					throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+				}
+				sdkOAuthAccessToken = await resolveSandboxClaudeAgentSdkOAuthAccessToken({
+					entries: projectConfigStore.getSandboxTokens(),
+					secrets: secretsStore?.getAll(),
+				});
+				delete bridgeOptions.sandboxCredentials;
+			} else {
+				bridgeOptions.sandboxCredentials = policy.credentials;
+			}
+			// The shared auth.json belongs to Pi. The SDK receives its isolated current
+			// access token through docker exec, so do not rewrite/remove Pi's entries.
+			if (!sdkRuntime) {
+				ensureSandboxAgentAuthFile({
+					prefs: this.preferencesStore,
+					includeCodexAuth: policy.sandboxAuthPolicy.includeCodexAuth,
+					includeAnthropicAuth: anthropicOAuthCurrent && policy.includeAnthropicAuth,
+					includeGoogleAuth: policy.sandboxAuthPolicy.includeGoogleAuth,
+					scope: projectId,
+				});
+			}
 		});
+
+		if (sdkRuntime) {
+			if (!sdkOAuthAccessToken || !bridgeOptions.gatewayToken || !bridgeOptions.gatewayUrl || !bridgeOptions.cwd) {
+				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE: enable the Anthropic OAuth sandbox token policy and sign in again");
+			}
+			bridgeOptions.claudeSdkSandboxLaunch = {
+				containerId,
+				cwd: bridgeOptions.cwd,
+				sessionId,
+				sessionSecret: bridgeOptions.env?.BOBBIT_SESSION_SECRET,
+				goalId: bridgeOptions.env?.BOBBIT_GOAL_ID,
+				gatewayToken: bridgeOptions.gatewayToken,
+				gatewayUrl: bridgeOptions.gatewayUrl,
+				oauthAccessToken: sdkOAuthAccessToken,
+			};
+		} else {
+			delete bridgeOptions.claudeSdkSandboxLaunch;
+		}
 
 		return true;
 	}
@@ -7618,6 +7682,11 @@ export class SessionManager {
 		if (persistedRuntime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
 			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: Claude Agent SDK session has no valid resume id");
 		}
+		// Persisted sandbox coordinates are untrusted input. SDK Docker launch must
+		// never normalize a malformed path back to /workspace or run host-local.
+		if (persistedRuntime === "claude-agent-sdk" && ps.sandboxed && !isSandboxContainerCwd(ps.cwd)) {
+			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: sandbox session has an invalid working directory");
+		}
 		const bridgeOptions: SessionBridgeOptions = {
 			cwd: ps.cwd,
 			runtime: persistedRuntime,
@@ -10452,25 +10521,10 @@ export class SessionManager {
 			}
 		}
 
-		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
-		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
-		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-		const respawnPersisted = this.resolveStoreForSession(id).get(id);
-		bridgeOptions.runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, modelProvider: respawnPersisted?.modelProvider });
-		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
-		if (bridgeOptions.runtime === "claude-agent-sdk") {
-			await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: respawnAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
-		} else {
-			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
-			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
-			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
-			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
-		}
-
 		// Pin one exact model/thinking tuple for the replacement. Model selection
 		// prefers the assigned role, while thinking independently prefers an explicit
 		// role override and otherwise preserves the last verified durable level.
+		const respawnPersisted = this.resolveStoreForSession(id).get(id);
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
@@ -10528,6 +10582,29 @@ export class SessionManager {
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
+
+		// SDK dispatch is itself a container process. Runtime selection and sandbox
+		// wiring must complete first so it receives only the fresh scoped descriptor,
+		// never host Worker coordinates or a legacy Pi admin-token fallback.
+		const replacementCwd = this.requireReplacementCwd(bridgeOptions, `assign role for session ${id}`);
+		await this.ensureMcpManagerForContext(session.projectId, replacementCwd);
+		if (bridgeOptions.runtime === "claude-agent-sdk") {
+			await resolveToolActivation({
+				id,
+				cwd: replacementCwd,
+				projectId: session.projectId,
+				goalId: session.goalId,
+				teamGoalId: session.teamGoalId,
+				roleName: role.name,
+				bridgeOptions,
+				effectiveAllowedTools: respawnAllowed,
+			} as SessionSetupPlan, this.buildPipelineContext(session.projectId, replacementCwd));
+		} else {
+			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementCwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
+			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		}
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -11225,13 +11302,34 @@ export class SessionManager {
 
 	/** Resolve the existing SDK bridge factory's deterministic history seam. */
 	private sdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
-		if (!this.claudeAgentSdkBridgeDepsFactory || !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
+		if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
 		const options: ClaudeAgentSdkBridgeOptions = {
 			runtime: "claude-agent-sdk",
 			cwd: ps.cwd,
 			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
 		};
-		return this.claudeAgentSdkBridgeDepsFactory(options).sessionAccess;
+		const base = this.claudeAgentSdkBridgeDepsFactory?.(options).sessionAccess ?? defaultClaudeAgentSdkSessionAccessDeps;
+		if (!ps.sandboxed) return base;
+		const sandbox = ps.projectId ? this.sandboxManager?.get(ps.projectId) : undefined;
+		const containerId = sandbox?.getStatus().containerId;
+		if (!containerId || !isSandboxContainerCwd(ps.cwd)) {
+			// Do not fall back to a host SDK store for a sandbox-owned transcript.
+			// A malformed persisted cwd must surface through the established SDK
+			// unavailable stub rather than being normalized or treated as empty history.
+			const reason = !containerId ? "sandbox container is unavailable" : "sandbox session has an invalid working directory";
+			return { ...base, sandboxSdk: {
+				getSessionInfo: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
+				getSessionMessages: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
+			} };
+		}
+		return {
+			...base,
+			sandboxSdk: createSandboxClaudeAgentSdkSessionAccess({
+				containerId,
+				cwd: ps.cwd,
+				bobbitSessionId: ps.id,
+			}),
+		};
 	}
 
 	/** Read SDK source metadata through the bridge factory's official SDK access seam. */
@@ -11257,7 +11355,11 @@ export class SessionManager {
 					cwd: ps.cwd,
 				}, this.sdkSessionAccessDeps(ps));
 				return this.buildVisibleMessageSnapshot(id, adaptSdkSessionMessages(messages));
-			} catch {
+			} catch (error) {
+				// Sandbox SDK history is authoritative in the container. Returning an
+				// empty snapshot here hides an unavailable container or bounded-reader
+				// failure as a valid empty conversation.
+				if (ps.sandboxed) throw error;
 				return [];
 			}
 		}
@@ -12899,23 +13001,6 @@ export class SessionManager {
 				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
 			};
 
-			// Force-abort recovery must preserve the original filesystem realm. A
-			// sandbox transcript uses container coordinates; downgrading the replacement
-			// to a host bridge makes the later existence check miss that transcript and
-			// can drain queued intent against empty history. Fail closed instead, leaving
-			// the durable sandbox flag/path intact for a later recovery attempt.
-			if (session.sandboxed) {
-				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
-					projectId: session.projectId,
-					goalId: session.goalId ?? session.teamGoalId,
-				});
-				if (!sandboxApplied) {
-					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
-				}
-			} else {
-				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
-			}
-
 			// Restore goal extension
 			if (session.goalId) {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
@@ -12936,7 +13021,7 @@ export class SessionManager {
 				}
 			}
 
-			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
+			// Restore the role and policy inputs used to build the replacement tool surface.
 			const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
 			// Derive the effective allowlist from the session/persisted allowlist when
 			// present — NOT from the role alone. A restricted child/delegate (or any
@@ -12961,23 +13046,7 @@ export class SessionManager {
 			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
 				? effective
 				: (effective.length > 0 ? effective : undefined);
-			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
-			// Choose the durable runtime before activating tools; SDK sessions require
-			// the in-process Bobbit MCP surface instead of Pi extension arguments.
-			bridgeOptions.runtime = resolveSessionRuntime({
-				runtime: forceRespawnPersisted?.runtime,
-				modelProvider: forceRespawnPersisted?.modelProvider,
-			});
-			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
-			if (bridgeOptions.runtime === "claude-agent-sdk") {
-				await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: forceAbortAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
-			} else {
-				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
-				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
-				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
-				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
-			}
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersistedModel =
@@ -13025,8 +13094,47 @@ export class SessionManager {
 			bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
 				? forceRespawnPersisted?.claudeAgentSdkSessionId
 				: undefined;
+
+			// Force-abort recovery must preserve the original filesystem realm. A
+			// sandbox transcript uses container coordinates; downgrading the replacement
+			// to a host bridge makes the later existence check miss that transcript and
+			// can drain queued intent against empty history. Runtime selection happens
+			// first so SDK wiring cannot fall through the legacy Pi/admin-token path.
+			if (session.sandboxed) {
+				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
+					projectId: session.projectId,
+					goalId: session.goalId ?? session.teamGoalId,
+				});
+				if (!sandboxApplied) {
+					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
+				}
+			} else {
+				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+			}
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
+
+			// The SDK dispatcher is a container-owned process. It must only be built
+			// after a current runtime, container CWD, and scoped authority exist.
+			const replacementCwd = this.requireReplacementCwd(bridgeOptions, `recover force-aborted session ${id}`);
+			await this.ensureMcpManagerForContext(session.projectId, replacementCwd);
+			if (bridgeOptions.runtime === "claude-agent-sdk") {
+				await resolveToolActivation({
+					id,
+					cwd: replacementCwd,
+					projectId: session.projectId,
+					goalId: session.goalId,
+					teamGoalId: session.teamGoalId,
+					roleName: session.role,
+					bridgeOptions,
+					effectiveAllowedTools: forceAbortAllowed,
+				} as SessionSetupPlan, this.buildPipelineContext(session.projectId, replacementCwd));
+			} else {
+				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, replacementCwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
+				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
+				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			}
 
 			const rpcClient = createSessionBridge(bridgeOptions);
 			let switchingSession = true;
@@ -13261,7 +13369,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
+import { ClaudeAgentSdkSandboxAuthUnavailableError, ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, resolveSandboxClaudeAgentSdkOAuthAccessToken, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

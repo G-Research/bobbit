@@ -19,15 +19,28 @@ interface WorkerData {
 }
 
 const port = parentPort;
-if (!port) throw new Error("Claude SDK extension worker requires parentPort");
-const config = workerData as WorkerData;
-// WorkerOptions.env replaces inheritance. Retain this assignment solely for
-// test workers whose host does not propagate worker env values.
-Object.assign(process.env, config.env);
-// Node deliberately forbids process.chdir() in worker threads. Pi builtins use
-// process.cwd() at registration and execution, so bind that public read-only
-// process view to the selected session directory without changing the host cwd.
-Object.defineProperty(process, "cwd", { value: () => config.cwd, configurable: false });
+let config: WorkerData;
+const PROTOCOL_PREFIX = "BOBBIT_SDK_DISPATCH:";
+
+function emit(message: unknown): void {
+	if (port) port.postMessage(message);
+	else process.stdout.write(`${PROTOCOL_PREFIX}${JSON.stringify(message)}\n`);
+}
+
+function configure(value: WorkerData): void {
+	if (!value || typeof value.cwd !== "string" || !value.env || !Array.isArray(value.manifest)) throw new Error("Claude SDK extension worker received invalid configuration");
+	config = value;
+	// WorkerOptions.env replaces inheritance. Retain this assignment solely for
+	// test workers whose host does not propagate worker env values.
+	Object.assign(process.env, config.env);
+	// Node deliberately forbids process.chdir() in worker threads. Pi builtins use
+	// process.cwd() at registration and execution, so bind that public read-only
+	// process view to the selected session directory without changing the host cwd.
+	if (port) Object.defineProperty(process, "cwd", { value: () => config.cwd, configurable: false });
+	else process.chdir(config.cwd);
+}
+
+if (port) configure(workerData as WorkerData);
 
 const tools = new Map<string, ToolDefinition>();
 const controllers = new Map<number, AbortController>();
@@ -37,16 +50,19 @@ const entriesByPath = new Map<string, ManifestEntry>();
 // actual duplicate registration below so no call can be substituted or owned
 // twice in one session.
 const allowedOwners = new Map<string, Set<string>>();
-for (const entry of config.manifest) {
-	const extensionPath = path.resolve(entry.extensionPath);
-	if (entriesByPath.has(extensionPath)) throw new Error("Claude SDK manifest contains duplicate extension paths");
-	entriesByPath.set(extensionPath, entry);
-	for (const name of entry.allowedToolNames) {
-		const lower = name.toLowerCase();
-		if (!lower) throw new Error("Claude SDK manifest contains an invalid allowed tool name");
-		const owners = allowedOwners.get(lower) ?? new Set<string>();
-		owners.add(extensionPath);
-		allowedOwners.set(lower, owners);
+
+function validateManifest(): void {
+	for (const entry of config.manifest) {
+		const extensionPath = path.resolve(entry.extensionPath);
+		if (entriesByPath.has(extensionPath)) throw new Error("Claude SDK manifest contains duplicate extension paths");
+		entriesByPath.set(extensionPath, entry);
+		for (const name of entry.allowedToolNames) {
+			const lower = name.toLowerCase();
+			if (!lower) throw new Error("Claude SDK manifest contains an invalid allowed tool name");
+			const owners = allowedOwners.get(lower) ?? new Set<string>();
+			owners.add(extensionPath);
+			allowedOwners.set(lower, owners);
+		}
 	}
 }
 
@@ -89,7 +105,8 @@ function extensionDiagnosticName(extensionPath: string): string {
 }
 
 async function initialize(): Promise<{ schemas: readonly { name: string; inputSchema: Record<string, unknown> }[]; omittedConditional: readonly string[] }> {
-	const jiti = createJiti(import.meta.url, { interopDefault: true, tryNative: false });
+	validateManifest();
+	const jiti = createJiti(process.cwd(), { interopDefault: true, tryNative: false });
 	let loadingPath = "";
 	const noOp = () => undefined;
 	const api = new Proxy({
@@ -153,12 +170,7 @@ async function initialize(): Promise<{ schemas: readonly { name: string; inputSc
 	return { schemas, omittedConditional };
 }
 
-void initialize().then(
-	({ schemas, omittedConditional }) => port.postMessage({ type: "ready", schemas, omittedConditional }),
-	() => port.postMessage({ type: "startup-error", diagnostic: startupDiagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) }),
-);
-
-port.on("message", async (message: any) => {
+async function handleMessage(message: any): Promise<void> {
 	if (message?.type === "cancel" && typeof message.id === "number") {
 		controllers.get(message.id)?.abort();
 		return;
@@ -166,24 +178,56 @@ port.on("message", async (message: any) => {
 	if (message?.type !== "invoke" || typeof message.id !== "number" || typeof message.name !== "string") return;
 	const tool = tools.get(message.name.toLowerCase());
 	if (!tool) {
-		port.postMessage({ type: "result", id: message.id, error: "unavailable" });
+		emit({ type: "result", id: message.id, error: "unavailable" });
 		return;
 	}
 	// SDK Zod shapes guide the model, but TypeBox remains the authority for the
 	// trusted extension's exact schema. Never let malformed SDK arguments enter
 	// an extension handler.
 	if (!Value.Check(tool.parameters as unknown as TSchema, message.args ?? {})) {
-		port.postMessage({ type: "result", id: message.id, error: "invalid-arguments" });
+		emit({ type: "result", id: message.id, error: "invalid-arguments" });
 		return;
 	}
 	const controller = new AbortController();
 	controllers.set(message.id, controller);
 	try {
 		const result = await tool.execute(message.toolUseId, message.args ?? {}, controller.signal, undefined, extensionContext(controller.signal, controller));
-		port.postMessage({ type: "result", id: message.id, result });
+		emit({ type: "result", id: message.id, result });
 	} catch {
-		port.postMessage({ type: "result", id: message.id, error: "failed" });
+		emit({ type: "result", id: message.id, error: "failed" });
 	} finally {
 		controllers.delete(message.id);
 	}
-});
+}
+
+function start(): void {
+	void initialize().then(
+		({ schemas, omittedConditional }) => emit({ type: "ready", schemas, omittedConditional }),
+		() => emit({ type: "startup-error", diagnostic: startupDiagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) }),
+	);
+}
+
+if (port) {
+	start();
+	port.on("message", message => { void handleMessage(message); });
+} else {
+	let input = "";
+	process.stdin.setEncoding("utf8");
+	process.stdin.on("data", chunk => {
+		input += chunk;
+		const lines = input.split("\n");
+		input = lines.pop() ?? "";
+		for (const line of lines) {
+			if (!line.startsWith(PROTOCOL_PREFIX)) continue;
+			try {
+				const message = JSON.parse(line.slice(PROTOCOL_PREFIX.length));
+				if (message?.type === "init") {
+					configure(message as WorkerData);
+					start();
+				} else void handleMessage(message);
+			} catch {
+				emit({ type: "startup-error", diagnostic: "invalid-protocol" });
+			}
+		}
+	});
+}
