@@ -2622,6 +2622,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		testPreparingDelayMs: gatewayRuntimeFlags.testPreparingDelayMs,
 		worktreeSetupRuntime,
 		previewPurgeOperation: previewOperations.purge,
+		claudeAgentSdkBridgeDepsFactory: gatewayDeps.claudeAgentSdkBridgeDepsFactory,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 
