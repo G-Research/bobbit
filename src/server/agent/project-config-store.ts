@@ -155,21 +155,21 @@ export interface Component {
 export type CommandStepStructural = {
 	name: string; type: "command"; component: string; command: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
-	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string; failureGuidance?: string;
 	env?: CommandEnvironment;
 };
 
 export type CommandStepComponentRun = {
 	name: string; type: "command"; component: string; run: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
-	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string; failureGuidance?: string;
 	env?: CommandEnvironment;
 };
 
 export type CommandStepFreeform = {
 	name: string; type: "command"; run: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
-	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string; failureGuidance?: string;
 	env?: CommandEnvironment;
 };
 
@@ -178,18 +178,18 @@ export type CommandStep = CommandStepStructural | CommandStepComponentRun | Comm
 export type LlmReviewStep = {
 	name: string; type: "llm-review"; prompt: string;
 	role?: string; phase?: number; expect?: "success" | "failure";
-	timeout?: number; optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	timeout?: number; optional?: boolean; label?: string; optionalLabel?: string; description?: string; failureGuidance?: string;
 };
 
 export type AgentQaStep = {
 	name: string; type: "agent-qa"; prompt: string;
 	role?: string; component?: string; phase?: number; timeout?: number;
-	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string; failureGuidance?: string;
 };
 
 export type HumanSignoffStep = {
 	name: string; type: "human-signoff"; prompt: string; label: string;
-	phase?: number; optional?: boolean; optionalLabel?: string; description?: string;
+	phase?: number; optional?: boolean; optionalLabel?: string; description?: string; failureGuidance?: string;
 };
 
 export type InlineVerifyStep = CommandStep | LlmReviewStep | AgentQaStep | HumanSignoffStep;

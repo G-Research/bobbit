@@ -1,14 +1,14 @@
 name: bobbit_read
 description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes."
 summary: "Read gateway state (goals/sessions/projects/…)"
-params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, includeArchived?, view?, probe?, verbose?]
+params: [operation, goalId?, sessionId?, taskId?, projectId?, workflowId?, q?, type?, limit?, offset?, after?, cursor?, archived?, include?, includeArchived?, view?, probe?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Bobbit
 grantPolicy: allow
 docs: |-
-  Read-only, gateway-wide introspection. Pick an `operation` and pass its required ids. Responses are compact by default; `verbose: true` restores full gateway JSON, with an explicit `limit <= 10` required for paged operations. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`.
+  Read-only, gateway-wide introspection. Use compact `list_*` operations to choose an entity id, then inspect that exact entity with its `get_*` operation. Addresses entities by explicit id (not the current goal), so it complements — never replaces — `task_list`/`gate_list`.
 detail_docs: >-
   ## Purpose
 
@@ -30,18 +30,13 @@ detail_docs: >-
 
   - `operation` — which read to run (see the catalogue below).
 
-  - `verbose` — full successful gateway JSON instead of the default compact
-  projection. On paged operations it requires an explicit `limit` from 1 to 10;
-  fetch further full data in small batches and watch token consumption. Cost
-  operations are already small and remain unchanged in compact mode.
-
   - Ids: `goalId`, `sessionId`, `taskId`, `projectId`, `workflowId` — supply the
   ones the chosen operation requires.
 
   - Semantic filters: `q` (free-text list/search filter), `type` (search result
   type), `archived` (list_goals archive opt-in), `include` (list_sessions and
   search archive opt-in, e.g. `archived`), `includeArchived` (REST-style search
-  archive opt-in), `view` (gates/tasks projection), `probe`
+  archive opt-in), `view` (goal/Git detail or gates/tasks projection), `probe`
   (maintenance_inspect selector).
 
   - Shared paging: `limit`, `offset`, `after`, `cursor`. List-style operations
@@ -50,15 +45,14 @@ detail_docs: >-
   (`limit=20`, maximum `100`) unless you pass `limit` explicitly.
 
   - REST vs tool paging: paging is forwarded to REST for `list_sessions`,
-  `list_goals`, and `search`. Other list-style operations are paged in the tool
-  after the gateway applies semantic filters such as `projectId`, `goalId`, or
-  `view`. If a response already contains REST page fields (`total`, `hasMore`,
-  `nextOffset`, `nextCursor`, or `pagination`), the tool treats it as REST-paged
-  and does **not** slice the array again.
+  `list_goals`, `search`, and `list_gates`. Other list-style operations are
+  paged in the tool after the gateway applies semantic filters. REST-paged
+  responses are annotated rather than re-sliced; `list_gates` additionally
+  enforces the requested bound if an endpoint returns an unsliced array.
 
-  - Cursor aliases: `cursor` is the generic cursor input; `after` is the gateway
-  query name used by archived session/goal paths. If both cursor and offset
-  inputs are present for a cursor-backed call, the cursor form wins.
+  - Cursor aliases: `cursor` is the generic cursor input; `after` is also
+  accepted. For `list_gates`, both are numeric absolute positions translated
+  to REST `offset`; precedence is `cursor`, then `after`, then `offset`.
 
 
   ## Archive visibility (hidden by default)
@@ -102,9 +96,9 @@ detail_docs: >-
   List-style operations return the endpoint's normal fields plus a
   `pagination` object. The primary item key is preserved (`sessions`, `goals`,
   `projects`, `workflows`, `roles`, `tools`, `gates`, `tasks`, `staff`,
-  `servers`, `results`, or probe-specific keys such as `worktrees`/`sample`).
-  Fallback tool-side paging happens only after the gateway has applied semantic
-  filters, and REST-paged responses are annotated rather than re-sliced.
+  `servers`, `results`, or probe-specific keys such as `items`, `worktrees`,
+  and `sample`). Fallback tool-side paging happens after semantic filtering;
+  REST-paged responses are normally annotated rather than re-sliced.
 
 
   `pagination` includes:
@@ -128,6 +122,43 @@ detail_docs: >-
   bounded an unpaged endpoint response.
 
 
+  ### Bounded summary views
+
+
+  `get_goal` with `view: "summary"` returns only available `id`, `title`,
+  `state`, `projectId`, `workflowId`, `parentGoalId`, `rootGoalId`, `paused`,
+  `archived`, `archivedAt`, `setupStatus`, `setupError`, `createdAt`, and
+  `updatedAt`. It excludes `spec`, workflow detail, paths, config/provider data,
+  and branch/merge internals. Omitted and non-summary views, including `full`,
+  keep the established detail projection and untruncated spec.
+
+
+  `goal_git_status` with `view: "summary"` returns one scalar `aggregate` with
+  branch/upstream, ahead/behind, change-count, clean/merged/unpushed/partial/
+  untracked flags, textual `summary`, and derived `changedFiles`. Available
+  freshness fields (`observedAt`, `refreshedAt`, `stale`, `source`, `ageMs`) and
+  compact `lastError` remain. Per-file `status` and root/`repos`/`data` aliases
+  are omitted. Omitted and non-summary views, including `full`, retain the
+  legacy projection and compatibility aliases.
+
+
+  ### `list_gates` paging
+
+
+  Paging applies to summary, omitted, and full views; `view` changes item detail,
+  not page size. Root `gates` is the sole paged gate collection. Summary output
+  retains count-only progress metadata and omits `summary.gates`; `total` is the
+  full authorized, goal-scoped count.
+
+
+  Non-negative integer `cursor` and `after` values are absolute offsets;
+  precedence is `cursor`, then `after`, then `offset`. Offset pages return
+  `nextOffset` and equivalent `nextCursor` when more rows remain. Cursor pages
+  report `mode: "cursor"`, the
+  consumed `cursor`, and only `nextCursor`. Terminal pages set `hasMore: false`
+  and omit continuation markers. Calls without controls use the list defaults.
+
+
   ## Operation catalogue
 
   | operation | GET path | required | semantic filters / paging |
@@ -140,13 +171,13 @@ detail_docs: >-
 
   | `list_goals` | `/api/goals` (`?projectId`, `?archived`, `?q`, paging) | — | `projectId`, `q`, `limit`, `offset`; archived hidden unless `archived=true` (then `after`/`cursor`) |
 
-  | `get_goal` | `/api/goals/:goalId` | `goalId` | — |
+  | `get_goal` | `/api/goals/:goalId` | `goalId` | `view` (`summary` is bounded; omitted/`full` preserve detail) |
 
   | `goal_cost` | `/api/goals/:goalId/cost` | `goalId` | — |
 
-  | `goal_git_status` | `/api/goals/:goalId/git-status` | `goalId` | — |
+  | `goal_git_status` | `/api/goals/:goalId/git-status` | `goalId` | `view` (`summary` is scalar/deduplicated; omitted/`full` preserve legacy output) |
 
-  | `goal_commits` | `/api/goals/:goalId/commits` | `goalId` | — |
+  | `goal_commits` | `/api/goals/:goalId/commits` | `goalId` | `limit` (forwarded to REST) |
 
   | `goal_pr_status` | `/api/goals/:goalId/pr-status` | `goalId` | — |
 
@@ -170,7 +201,7 @@ detail_docs: >-
 
   | `list_tools` | `/api/tools` (`?projectId`) | — | `projectId`, `limit`, `offset` (tool-side fallback) |
 
-  | `list_gates` | `/api/goals/:goalId/gates` (`?view`) | `goalId` | `view`, `limit`, `offset` (tool-side fallback) |
+  | `list_gates` | `/api/goals/:goalId/gates` (`?view`, paging) | `goalId` | `view`, `limit`, `offset`, numeric `cursor`/`after`; root `gates` is canonical |
 
   | `list_tasks` | `/api/goals/:goalId/tasks` (`?view`) | `goalId` | `view`, `limit`, `offset` (tool-side fallback) |
 
@@ -207,9 +238,15 @@ detail_docs: >-
 
   `orphaned_worktrees` (paged `worktrees`), `orphaned_sessions` (paged
   `sessions`), `expired_archives`, `orphaned_index_rows` (`?projectId`, paged
-  `sample`), `worktrees`, `archived_session_worktrees` (paged `worktrees`),
-  `worktree_pool` (`?projectId`), `sandbox_pool`, `sandbox_status`
-  (`?projectId`), `search_stats` (`?projectId`).
+  `sample`), `worktrees` (paged root `items`), `archived_session_worktrees`
+  (paged root `items`), `worktree_pool` (`?projectId`), `sandbox_pool`,
+  `sandbox_status` (`?projectId`), `search_stats` (`?projectId`).
+
+
+  The compact archived-session worktree response uses root `items` as its sole
+  worktree collection. Nested session worktrees and worktree aliases are
+  suppressed while compact counts and session/group identity remain. Direct
+  REST responses are unchanged.
 
 
   ## Overlap policy (use the dedicated tool instead)
@@ -223,11 +260,14 @@ detail_docs: >-
 
   ## Notes / Gotchas
 
-  - Successful responses use compact, operation-specific projections by default:
-  ids, state, errors, recency, action fields, and pagination remain available;
-  long text is previewed and embedded workflow snapshots are omitted. Pass
-  `verbose: true` for full JSON. Paged verbose reads fail before fetch unless
-  `limit` is explicitly 1–10.
+  - List responses are compact discovery views with ids, state, relationships,
+  concise diagnostics, timestamps, and pagination. Choose one id and use the
+  matching `get_*` operation for useful detail about that exact entity.
+
+  - Intentional compact contract changes: `list_gates` is always bounded and no
+  longer repeats `summary.gates`; Git summary has one aggregate and no file
+  aliases; worktree inventory probes page canonical root `items`; archived
+  worktree output suppresses nested duplicates. Direct REST remains unchanged.
 
   - On failure, the tool surfaces `{ error, code }` as one readable line
   including the HTTP status.

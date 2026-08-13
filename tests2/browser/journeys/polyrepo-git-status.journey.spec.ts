@@ -133,22 +133,33 @@ async function expectNamedRepoSections(
   ).toBeVisible();
 }
 
-async function expectExplicitFetch(
+async function expectPassiveDropdownRevalidation(
   requests: string[],
   surface: string,
 ): Promise<void> {
   await expect
     .poll(
       () =>
-        requests.some(
-          (request) => new URL(request).searchParams.get("fetch") === "true",
-        ),
+        requests.some((request) => {
+          const params = new URL(request).searchParams;
+          return (
+            params.get("untracked") === "1" &&
+            params.get("intent") === "visible" &&
+            params.get("fetch") !== "true"
+          );
+        }),
       {
         timeout: 5_000,
-        message: `${surface} Git widget should explicitly request fetch=true`,
+        message: `${surface} Git dropdown should request passive visible SWR details`,
       },
     )
     .toBe(true);
+  expect(
+    requests.every(
+      (request) => new URL(request).searchParams.get("fetch") !== "true",
+    ),
+    `${surface} Git dropdown must not force remote refresh`,
+  ).toBe(true);
 }
 
 test.describe("Journey: Polyrepo Git status widgets", () => {
@@ -189,7 +200,7 @@ test.describe("Journey: Polyrepo Git status widgets", () => {
         .locator("pi-chat-panel git-status-widget")
         .first();
       await expectNamedRepoSections(page, sessionWidget, names);
-      await expectExplicitFetch(requests, "session");
+      await expectPassiveDropdownRevalidation(requests, "session");
 
       const requestCountBeforeReload = requests.length;
       await page.reload();
@@ -333,7 +344,7 @@ test.describe("Journey: Polyrepo Git status widgets", () => {
         .locator(".dashboard-git-row git-status-widget")
         .first();
       await expectNamedRepoSections(page, dashboardWidget, ["number-lib"]);
-      await expectExplicitFetch(requests, "goal dashboard");
+      await expectPassiveDropdownRevalidation(requests, "goal dashboard");
 
       const requestCountBeforeReload = requests.length;
       await page.reload();

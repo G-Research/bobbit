@@ -11,7 +11,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import {
 	computeServerPrebundleKey,
@@ -20,7 +21,13 @@ import {
 	validateServerPrebundle,
 	validateServerPrebundleManifest,
 } from "../../scripts/testing-v2/server-prebundle.mjs";
+import {
+	bundledRepoSourceFiles,
+	resolveBundledSource,
+	serverRuntimeRepoSourceFiles,
+} from "../../scripts/testing-v2/repo-source-closure.mjs";
 
+const ACTUAL_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const BASE_SERVER = "export { sharedValue as value } from '../shared/value.js';\n";
 const BASE_SHARED = "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue;\n";
 const BASE_FOUNDATION = "export const foundationValue = 1;\n";
@@ -140,6 +147,28 @@ afterAll(() => {
 });
 
 describe.sequential("server test prebundle cache", () => {
+	it("shares the runtime-only repository source closure resolver", () => {
+		const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
+		const serverEntry = join(repoRoot, "src", "server", "server.ts");
+		assert.equal(resolveBundledSource("../../src/server/server.js", runtimeEntry, repoRoot), serverEntry);
+		assert.deepEqual(
+			serverRuntimeRepoSourceFiles(repoRoot),
+			bundledRepoSourceFiles(repoRoot, [runtimeEntry]),
+			"the runtime helper must add no prebundle entry roots",
+		);
+	});
+
+	it("includes actual transitive shared runtime sources without unrelated server or UI sources", () => {
+		const closure = serverRuntimeRepoSourceFiles(ACTUAL_REPO_ROOT);
+		assert.equal(closure.every(isAbsolute), true, "the reusable closure must return absolute paths");
+		const files = new Set(closure.map((file: string) => relative(ACTUAL_REPO_ROOT, file).replace(/\\/g, "/")));
+		assert.equal(files.has("tests2/harness/server-runtime-entry.ts"), true);
+		assert.equal(files.has("src/server/server.ts"), true);
+		assert.equal(files.has("src/shared/base-path.ts"), true, "a transitive src/shared runtime dependency must be included");
+		assert.equal(files.has("src/server/cli.ts"), false, "an unrelated server entry must not enter the runtime closure");
+		assert.equal(files.has("src/ui/components/GitStatusWidget.ts"), false, "unrelated UI must not enter the runtime closure");
+	});
+
 	it("keys the exact bundled source closure by content", () => {
 		try {
 			const baseline = computeServerPrebundleKey(repoRoot);

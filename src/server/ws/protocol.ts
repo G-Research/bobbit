@@ -11,6 +11,33 @@ export interface GateResetReopenOutcome {
 	state: GoalState;
 }
 
+export const MODEL_SELECTION_REQUIRED = "MODEL_SELECTION_REQUIRED" as const;
+export const MODEL_SELECTION_RECOVERY_FAILED = "MODEL_SELECTION_RECOVERY_FAILED" as const;
+
+/** A processless session whose exact persisted text model is no longer selectable. */
+export interface ModelSelectionRequiredCondition {
+	code: typeof MODEL_SELECTION_REQUIRED;
+	provider: string;
+	modelId: string;
+}
+
+/** Orthogonal session conditions; these do not replace the lifecycle status. */
+export type SessionCondition = ModelSelectionRequiredCondition;
+
+export function isModelSelectionRequiredCondition(value: unknown): value is ModelSelectionRequiredCondition {
+	if (!value || typeof value !== "object") return false;
+	const condition = value as Partial<ModelSelectionRequiredCondition>;
+	return condition.code === MODEL_SELECTION_REQUIRED
+		&& typeof condition.provider === "string"
+		&& condition.provider.length > 0
+		&& typeof condition.modelId === "string"
+		&& condition.modelId.length > 0;
+}
+
+export function modelSelectionRequiredMessage(condition: ModelSelectionRequiredCondition): string {
+	return `Model ${condition.provider}/${condition.modelId} is unavailable for this session. Choose a replacement model to continue.`;
+}
+
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
 
@@ -116,12 +143,16 @@ export interface ChannelInfo {
 	closeReason?: string;
 }
 
+export interface SessionStreamCapabilities {
+	assistantStreamDelta?: 1;
+}
+
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
 	// `clientKind` is routing/product metadata for connection setup. It is not an
 	// unspoofable browser authority signal; endpoint auth still comes from the bearer
 	// token plus server-side session/surface/capability checks.
-	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel" }
+	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel"; capabilities?: SessionStreamCapabilities }
 	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
 	| { type: "steer"; text: string }
 	| { type: "steer_queued"; messageId: string }
@@ -198,9 +229,37 @@ export interface SnapshotServerTiming {
 	msgCount: number;
 }
 
+/** Redacted failure categories exposed by the server-owned remote-state coordinator. */
+export type RemoteStateLastError = "offline" | "auth" | "rate_limited" | "unavailable";
+
+/**
+ * Public coordinator projection. `data` is the existing safe Git or PR status
+ * projection only; canonical keys, remotes, refs, stderr, tokens, and review
+ * bodies are never part of this protocol.
+ */
+export interface RemoteStateSnapshot {
+	data?: unknown;
+	observedAt: number;
+	refreshedAt?: number;
+	stale: boolean;
+	source: "repository" | "pr";
+	lastError?: RemoteStateLastError;
+	ageMs: number;
+}
+
+/** Entity-addressed coordinator completion, safe for session and viewer sockets. */
+export interface RemoteStateSnapshotMessage {
+	type: "remote_state_snapshot";
+	/** Runtime discriminator used by consumers; snapshot.source remains metadata. */
+	resource: "git" | "pr";
+	sessionId?: string;
+	goalId?: string;
+	snapshot: RemoteStateSnapshot;
+}
+
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok"; surfaceTokenKey?: string }
+	| { type: "auth_ok"; surfaceTokenKey?: string; capabilities?: SessionStreamCapabilities }
 	| { type: "ext_surface_token_result"; requestId: string; ok: boolean; token?: string; error?: string }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
 	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }
@@ -220,7 +279,8 @@ export type ServerMessage =
 	| { type: "resume_gap"; lastSeq: number }
 	| { type: "client_joined"; clientId: string }
 	| { type: "client_left"; clientId: string }
-	| { type: "error"; message: string; code: string }
+	/** A pre-auth gateway state error may include a bounded retry hint. */
+	| { type: "error"; message: string; code: string; retryAfterMs?: number }
 	| {
 		type: "session_status";
 		status: "idle" | "streaming" | "aborting" | "preparing" | "archived" | "starting" | "terminated";
@@ -242,8 +302,9 @@ export type ServerMessage =
 	/** Sent to ALL authenticated clients when a visible session is created so
 	 * session navigation can refresh immediately instead of waiting for polling. */
 	| { type: "session_created"; sessionId: string; projectId?: string }
-	/** Broad invalidation fallback for session-list changes. */
-	| { type: "sessions_changed"; projectId?: string }
+	/** Broad invalidation fallback for session-list changes. Optional fields let
+	 * clients patch a known row immediately while retaining refresh authority. */
+	| { type: "sessions_changed"; projectId?: string; sessionId?: string; user_tags?: string[] }
 	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
 	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
@@ -274,6 +335,7 @@ export type ServerMessage =
 	| { type: "inbox.entry.added"; staffId: string; entry: InboxEntry }
 	| { type: "inbox.entry.updated"; staffId: string; entry: InboxEntry }
 	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
+	| RemoteStateSnapshotMessage
 	| { type: "pr_status_changed"; goalId: string }
 	| { type: "tool_permission_needed"; id?: string; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; requestCount?: number; seq?: number; ts?: number }
 	| { type: "tool_permission_settled"; toolName: string; group?: string; status: "granted" | "denied" | "expired" | "superseded" | "cancelled" | "error"; reason?: string }

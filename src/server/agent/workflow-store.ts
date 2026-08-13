@@ -66,6 +66,8 @@ export interface VerifyStep {
 	optionalLabel?: string;
 	role?: string;
 	description?: string;
+	/** Static workflow-authored Markdown shown to the team lead only when this step fails. */
+	failureGuidance?: string;
 	/** Structural reference: which component to run from. */
 	component?: string;
 	/** Structural reference: which command on that component to invoke. */
@@ -157,6 +159,7 @@ function normalizeStep(raw: unknown): VerifyStep {
 
 	if (typeof r.role === "string") step.role = r.role;
 	if (typeof r.description === "string") step.description = r.description;
+	if (typeof r.failureGuidance === "string") step.failureGuidance = r.failureGuidance;
 	if (typeof r.component === "string") step.component = r.component;
 	if (typeof r.command === "string") step.command = r.command;
 	if (type === "command") {
@@ -381,6 +384,7 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.optionalLabel !== undefined) out.optionalLabel = s.optionalLabel;
 	if (s.role !== undefined) out.role = s.role;
 	if (s.description !== undefined) out.description = s.description;
+	if (s.failureGuidance !== undefined) out.failureGuidance = s.failureGuidance;
 	if (s.subgoal) {
 		const sg: Record<string, unknown> = {
 			planId: s.subgoal.planId,

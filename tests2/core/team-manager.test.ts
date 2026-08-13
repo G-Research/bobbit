@@ -1691,16 +1691,31 @@ describe("TeamManager", () => {
 			return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
 		}
 
+		/**
+		 * Git can report a canonical worktree spelling while creation retains the
+		 * caller's spelling. Missing/stale registrations remain lexical because
+		 * `worktree list` may intentionally retain them during lifecycle cleanup.
+		 */
+		function canonicalWorktreePath(worktreePath: string): string {
+			const lexicalPath = path.resolve(worktreePath);
+			try {
+				return fs.realpathSync.native(lexicalPath);
+			} catch (error: unknown) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return lexicalPath;
+				throw error;
+			}
+		}
+
 		function listedWorktreePaths(repoPath: string): string[] {
 			return runGit(["worktree", "list", "--porcelain"], repoPath)
 				.split(/\r?\n/)
 				.filter((line) => line.startsWith("worktree "))
-				.map((line) => path.resolve(line.slice("worktree ".length)));
+				.map((line) => canonicalWorktreePath(line.slice("worktree ".length)));
 		}
 
 		function assertRegisteredWorktree(repoPath: string, worktreePath: string): void {
 			assert.ok(
-				listedWorktreePaths(repoPath).includes(path.resolve(worktreePath)),
+				listedWorktreePaths(repoPath).includes(canonicalWorktreePath(worktreePath)),
 				`${worktreePath} should remain registered in git worktree list`,
 			);
 		}
@@ -1796,6 +1811,34 @@ describe("TeamManager", () => {
 		// - complete: all-worker cleanup while team state and registered worktree survive
 		// - persistence: real HEAD SHA survives the TeamStore reload boundary
 		// - multi-member: three independently registered branches and worktree paths
+		it("recognizes a registered worktree through an owned symlink or junction alias", async () => {
+			const fixture = createGitFixture();
+			const { team } = createRepoTeam(fixture);
+			await team.startTeam("goal-1");
+			const result = await team.spawnRole("goal-1", "coder", "Verify canonical worktree registration");
+			assert.ok(result.worktreePath, "spawn must create a worktree");
+
+			const lexicalPath = path.resolve(result.worktreePath);
+			const missingPath = path.join(lexicalPath, "stale-worktree");
+			assert.equal(canonicalWorktreePath(missingPath), path.resolve(missingPath));
+
+			const aliasRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-team-worktree-alias-"));
+			fs.rmSync(aliasRoot, { recursive: true, force: true });
+			try {
+				fs.symlinkSync(
+					path.dirname(lexicalPath),
+					aliasRoot,
+					process.platform === "win32" ? "junction" : "dir",
+				);
+				const aliasedWorktreePath = path.join(aliasRoot, path.basename(lexicalPath));
+				assert.notEqual(aliasedWorktreePath, lexicalPath, "fixture must use a distinct lexical spelling");
+				assert.equal(canonicalWorktreePath(aliasedWorktreePath), canonicalWorktreePath(lexicalPath));
+				assertRegisteredWorktree(fixture.repoPath, aliasedWorktreePath);
+			} finally {
+				fs.rmSync(aliasRoot, { recursive: true, force: true });
+			}
+		});
+
 		it("should create a worktree and session for a coder role", async () => {
 			const fixture = createGitFixture();
 			const { sm, team } = createRepoTeam(fixture);
@@ -2033,7 +2076,10 @@ describe("TeamManager", () => {
 				assert.equal(new Set(results.map((result) => result.worktreePath)).size, roles.length);
 				const registeredPaths = new Set(listedWorktreePaths(fixture.repoPath));
 				for (const result of results) {
-					assert.ok(registeredPaths.has(path.resolve(result.worktreePath!)), `${result.worktreePath} should be registered`);
+					assert.ok(
+						registeredPaths.has(canonicalWorktreePath(result.worktreePath!)),
+						`${result.worktreePath} should be registered`,
+					);
 				}
 			});
 		});

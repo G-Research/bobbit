@@ -6,6 +6,10 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
+import {
+	GitTemplateHandoffReporter,
+	type GitTemplateHandoffCertifier,
+} from "../harness/git-template-handoff-proof.js";
 
 type ProjectConfig = {
 	test: {
@@ -23,6 +27,12 @@ type ProjectConfig = {
 		};
 	};
 };
+
+type HandoffTestModule = Parameters<GitTemplateHandoffReporter["onTestModuleStart"]>[0];
+
+function handoffModule(moduleId: string): HandoffTestModule {
+	return { moduleId } as HandoffTestModule;
+}
 
 type LoadedConfig = {
 	FIXED_UNIT_WORKERS: number;
@@ -95,21 +105,31 @@ function collectSourceDependencyGraph(roots: string[]): Set<string> {
 	return visited;
 }
 const originalE2eFlag = process.env.BOBBIT_V2_E2E_VITEST;
+const originalRetryFreeFlag = process.env.BOBBIT_V2_RETRY_FREE;
 const originalWorkerFlag = process.env.VITEST_MAX_WORKERS;
 let normal: LoadedConfig;
 let withNonExactE2eFlag: LoadedConfig;
 let withE2e: LoadedConfig;
+let withNonExactRetryFreeFlag: LoadedConfig;
+let withRetryFree: LoadedConfig;
 
 function restoreEnvironment(): void {
 	if (originalE2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
 	else process.env.BOBBIT_V2_E2E_VITEST = originalE2eFlag;
+	if (originalRetryFreeFlag === undefined) delete process.env.BOBBIT_V2_RETRY_FREE;
+	else process.env.BOBBIT_V2_RETRY_FREE = originalRetryFreeFlag;
 	if (originalWorkerFlag === undefined) delete process.env.VITEST_MAX_WORKERS;
 	else process.env.VITEST_MAX_WORKERS = originalWorkerFlag;
 }
 
-async function loadConfig(e2eFlag?: string): Promise<LoadedConfig> {
+async function loadConfig({ e2eFlag, retryFreeFlag }: {
+	e2eFlag?: string;
+	retryFreeFlag?: string;
+} = {}): Promise<LoadedConfig> {
 	if (e2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
 	else process.env.BOBBIT_V2_E2E_VITEST = e2eFlag;
+	if (retryFreeFlag === undefined) delete process.env.BOBBIT_V2_RETRY_FREE;
+	else process.env.BOBBIT_V2_RETRY_FREE = retryFreeFlag;
 	delete process.env.VITEST_MAX_WORKERS;
 	vi.resetModules();
 	return await import("../../vitest.config.ts") as LoadedConfig;
@@ -118,8 +138,10 @@ async function loadConfig(e2eFlag?: string): Promise<LoadedConfig> {
 beforeAll(async () => {
 	try {
 		normal = await loadConfig();
-		withNonExactE2eFlag = await loadConfig("true");
-		withE2e = await loadConfig("1");
+		withNonExactE2eFlag = await loadConfig({ e2eFlag: "true" });
+		withE2e = await loadConfig({ e2eFlag: "1" });
+		withNonExactRetryFreeFlag = await loadConfig({ retryFreeFlag: "true" });
+		withRetryFree = await loadConfig({ retryFreeFlag: "1" });
 	} finally {
 		restoreEnvironment();
 		vi.resetModules();
@@ -189,6 +211,61 @@ describe("direct unit-stage scheduling", () => {
 		}
 	});
 
+	it("certifies Git handoff only for the complete inventory with the resolved worker count", async () => {
+		assert.match(
+			configSource,
+			/new GitTemplateHandoffReporter\(coordinatorGitTemplate, MAX_WORKERS, execution\.unit\)/,
+			"the coordinator must inject the resolved cap and exact canonical inventory",
+		);
+		assert.doesNotMatch(
+			configSource,
+			/new GitTemplateHandoffReporter\(coordinatorGitTemplate, FIXED_UNIT_WORKERS/,
+			"lowered complete-suite runs must not retain the fixed default expectation",
+		);
+
+		const inventory = [
+			"tests2/core/git-template-handoff-probe-a.test.ts",
+			"tests2/core/git-template-handoff-probe-b.test.ts",
+			"tests2/core/git-template-handoff-probe-c.test.ts",
+		];
+		const descriptor = { path: "/run/git-template/repo", digest: "a".repeat(64) };
+		for (const [env, expectedWorkers] of [
+			[{}, 3],
+			[{ VITEST_MAX_WORKERS: "1" }, 1],
+			[{ VITEST_MAX_WORKERS: "2" }, 2],
+		] as const) {
+			const certifications: number[] = [];
+			const certifier: GitTemplateHandoffCertifier = (_descriptor, workers) => {
+				certifications.push(workers);
+			};
+			const reporter = new GitTemplateHandoffReporter(
+				descriptor,
+				normal.resolveMaxWorkers(env),
+				inventory,
+				certifier,
+			);
+
+			reporter.onTestRunStart();
+			reporter.onTestModuleStart(handoffModule(`C:\\repo\\${inventory[0]}?focused`));
+			await reporter.onTestRunEnd();
+			assert.deepEqual(certifications, [], "focused selection must not certify or fail on missing companions");
+
+			reporter.onTestRunStart();
+			for (const path of inventory) {
+				reporter.onTestModuleStart(handoffModule(`file:///repo/${path}#complete`));
+			}
+			await reporter.onTestRunEnd();
+			assert.deepEqual(certifications, [expectedWorkers]);
+
+			reporter.onTestRunStart();
+			for (const path of [...inventory, "tests2/core/unexpected.test.ts"]) {
+				reporter.onTestModuleStart(handoffModule(`/repo/${path}`));
+			}
+			await reporter.onTestRunEnd();
+			assert.deepEqual(certifications, [expectedWorkers], "non-canonical supersets must not certify");
+		}
+	});
+
 	it("uses one process-scoped transform cache across this run's projects and forks", () => {
 		const thisProcessCache = normal.resolveVitestModuleCachePath(process.pid);
 		const anotherProcessCache = normal.resolveVitestModuleCachePath(process.pid + 1);
@@ -202,7 +279,7 @@ describe("direct unit-stage scheduling", () => {
 		);
 	});
 
-	it("keeps retry three across exactly four normal projects", () => {
+	it("keeps default retry three across exactly four normal projects", () => {
 		const actual = projects(normal);
 		assert.deepEqual(
 			actual.map(({ name }) => name),
@@ -223,6 +300,19 @@ describe("direct unit-stage scheduling", () => {
 				{ name: "v2-integration", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
 				{ name: "v2-isolated", environment: "node", pool: "forks", isolate: true, maxWorkers: 1, retry: 3 },
 			],
+		);
+	});
+
+	it("disables retries only for the exact retry-free qualification flag", () => {
+		assert.deepEqual(
+			projects(withNonExactRetryFreeFlag).map(({ retry }) => retry),
+			[3, 3, 3, 3],
+			"non-exact retry-free values must retain normal workflow retries",
+		);
+		assert.deepEqual(
+			projects(withRetryFree).map(({ retry }) => retry),
+			[0, 0, 0, 0],
+			"the exact retry-free flag must disable retries for every unit project",
 		);
 	});
 
@@ -264,6 +354,7 @@ describe("direct unit-stage scheduling", () => {
 					"tests2/core/marketplace-install.test.ts",
 					"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 					"tests2/core/team-manager.test.ts",
+					"tests2/integration/affected-runner-boundary.test.ts",
 					"tests2/integration/base-path-cli-entrypoint.test.ts",
 					"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 				],

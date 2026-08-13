@@ -16,6 +16,7 @@ import {
 } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
+import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, renderConfigScopeRow, revertOverride } from "./config-scope.js";
 
 // ============================================================================
@@ -1216,7 +1217,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 		nextGates[gateIdx] = nextGate;
 		inst.editGates = nextGates;
 		notifyControlledChange(inst);
-		if (rerender || saveAttempted) renderApp();
+		if (rerender) renderApp();
 	};
 
 	const stepType = step.type || "command";
@@ -1229,6 +1230,10 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 			: html`Empty = the greater of 1200s or the component <code>qa_max_duration_minutes + 5m</code> per active attempt/reminder/recovery turn. An explicit positive integer overrides this and may be shorter. Provider backoff is excluded.`;
 	const timeoutFieldId = `wf-step-timeout-${gateIdx}-${stepIdx}`;
 	const timeoutHintId = `${timeoutFieldId}-hint`;
+	const failureGuidanceFieldId = `wf-step-failure-guidance-${gateIdx}-${stepIdx}`;
+	const failureGuidanceHintId = `${failureGuidanceFieldId}-hint`;
+	const hasFailureGuidance = typeof step.failureGuidance === "string" && step.failureGuidance.trim().length > 0;
+	if (readOnly && hasFailureGuidance) ensureMarkdownBlock();
 	const showRoleField = stepType === "llm-review" || stepType === "agent-qa" || stepType === "human-signoff";
 	const showComponentField = stepType === "command" || stepType === "agent-qa";
 	const componentOptions = projectComponentNames;
@@ -1380,6 +1385,31 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 							${errs.label ? html`<div class="wf-field-error" data-testid="wf-step-label-error">${errs.label}</div>` : nothing}
 						</div>
 					` : nothing}
+
+					${readOnly
+						? hasFailureGuidance ? html`
+							<details class="wf-vstep-advanced" data-testid="wf-step-failure-guidance-details">
+								<summary class="wf-vstep-advanced-summary">Failure guidance</summary>
+								<div class="wf-vstep-advanced-fields">
+									<markdown-block .content=${step.failureGuidance!}></markdown-block>
+								</div>
+							</details>
+						` : nothing
+						: html`
+							<div class="wf-field">
+								<label class="wf-field-label" for=${failureGuidanceFieldId}>Failure guidance</label>
+								<textarea id=${failureGuidanceFieldId} class="wf-textarea" data-testid="wf-step-failure-guidance" rows="3"
+									.value=${step.failureGuidance || ""}
+									placeholder="Explain how to diagnose and remediate this step…"
+									aria-describedby=${failureGuidanceHintId}
+									@click=${(e: Event) => e.stopPropagation()}
+									@input=${(e: Event) => {
+										const value = (e.target as HTMLTextAreaElement).value;
+										updateStep({ failureGuidance: value.trim().length > 0 ? value : undefined });
+									}}></textarea>
+								<div id=${failureGuidanceHintId} class="wf-field-hint" data-testid="wf-step-failure-guidance-hint">Sent to the team lead only if this step fails. Markdown is supported. Guidance is advisory and does not reset or revisit gates.</div>
+							</div>
+						`}
 
 					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || step.env || (step.phase != null && step.phase !== 0) || (saveAttempted && Object.keys(errs).length > 0))}>
 						<summary class="wf-vstep-advanced-summary">Advanced</summary>

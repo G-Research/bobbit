@@ -8,6 +8,7 @@ import { packIdFromRoot } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
+import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 
@@ -36,6 +37,35 @@ export interface GoalProvisionedCtx {
 	metadata: GoalMetadata;
 }
 
+export interface HookScopeAncestryEntry {
+	readonly id: string;
+	readonly title?: string;
+}
+
+export interface HookScopeComponent {
+	readonly name: string;
+	readonly repo: string;
+	readonly relativePath?: string;
+}
+
+export interface HookScopeGoal {
+	readonly id: string;
+	readonly title?: string;
+	/** Root-to-leaf when complete; a safe leaf portion when ancestry is broken. */
+	readonly ancestry?: readonly HookScopeAncestryEntry[];
+	/** Present only for a complete contiguous root-to-leaf ancestry. */
+	readonly depth?: number;
+	/** Existing effective ancestry-merged metadata, cloned and deeply frozen. */
+	readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface HookScopeContext {
+	readonly project?: { readonly id: string; readonly name?: string };
+	readonly goal?: HookScopeGoal;
+	readonly role?: string;
+	readonly component?: HookScopeComponent;
+}
+
 export interface HookCtx {
 	sessionId: string;
 	projectId?: string;
@@ -58,7 +88,12 @@ export interface HookCtx {
 	config: Record<string, unknown>;
 	runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
 	gateway: { baseUrl: string; token: string };
+	/** Optional project-safe, advisory snapshot for ordinary lifecycle hooks. */
+	readonly scopeContext?: HookScopeContext;
 }
+
+/** Existing dispatch fields, without per-provider values or event-local scope. */
+export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
 
 export interface HubDiagnostic {
 	providerId: string;
@@ -88,6 +123,7 @@ export class LifecycleHub {
 	private readonly globalMaxTokens: number;
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
+	private readonly scopeContextResolver?: HookScopeContextResolver;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -99,6 +135,8 @@ export class LifecycleHub {
 		 *  Omitted ⇒ no provider is ever filtered by goal metadata (today's
 		 *  behaviour). See {@link GoalMetadataResolver}. */
 		goalMetadataResolver?: GoalMetadataResolver;
+		/** Best-effort project-safe scope resolver for ordinary lifecycle events. */
+		scopeContextResolver?: HookScopeContextResolver;
 		/** Factory for a LEAST-PRIVILEGE, provider-scoped server Host API (store-only:
 		 *  `capabilities.store === true`, `session`/`agents` false/unavailable). Built
 		 *  per provider invocation so a hook reaches its own pack's durable store
@@ -113,6 +151,7 @@ export class LifecycleHub {
 		this.globalMaxTokens = deps.globalMaxTokens ?? 4_000;
 		this.providerHostApi = deps.providerHostApi;
 		this.goalMetadataResolver = deps.goalMetadataResolver;
+		this.scopeContextResolver = deps.scopeContextResolver;
 	}
 
 	/**
@@ -198,8 +237,17 @@ export class LifecycleHub {
 
 	async dispatch(
 		hook: LifecycleHook,
-		base: Omit<HookCtx, "budget" | "config" | "gateway">,
+		base: HookDispatchBase,
+		scopeInput?: Readonly<HookScopeResolutionInput>,
 	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
+		let scopeContext: HookScopeContext | undefined;
+		if (this.scopeContextResolver) {
+			try {
+				scopeContext = this.scopeContextResolver(scopeInput ?? base);
+			} catch {
+				console.warn("[lifecycle-hub] scopeContextResolver threw; continuing without scope context");
+			}
+		}
 		const disabled = this.disabledProviders(base.goalId, base.projectId);
 		const providers = this.registry.listProviders(base.projectId).filter((p) => !disabled.has(p.id) && p.hooks.includes(hook));
 		const diagnostics: HubDiagnostic[] = [];
@@ -209,6 +257,7 @@ export class LifecycleHub {
 		for (const provider of providers) {
 			const hookCtx: HookCtx = {
 				...base,
+				...(scopeContext ? { scopeContext } : {}),
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
 				gateway: this.gatewayInfo(),

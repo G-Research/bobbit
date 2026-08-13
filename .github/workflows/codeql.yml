@@ -7,6 +7,7 @@ on:
     branches: [main]
   schedule:
     - cron: '27 4 * * 1' # weekly, Monday 04:27 UTC
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -33,7 +34,7 @@ jobs:
         uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           languages: ${{ matrix.language }}
-          queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1

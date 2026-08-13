@@ -150,10 +150,37 @@ export function clientConfig(cfg: EffectiveConfig): ClientConfig {
 }
 
 // ── Pack-store helpers (shared by provider + routes; same pack-scoped store). ──
+export interface StoreReadDiagnostic {
+	/** Stable, path- and secret-free store diagnostic code. */
+	code: string;
+	retryable?: boolean;
+	recoverable?: boolean;
+}
+
+export type StoreReadResult<T> =
+	| { state: "absent" }
+	| { state: "present"; value: T }
+	| { state: "error"; diagnostic: StoreReadDiagnostic };
+
+const UNAVAILABLE_READ_DIAGNOSTIC: StoreReadDiagnostic = { code: "STORE_READ_IO", retryable: true };
+
+/** Pack-scoped durable-store capability. `get` remains legacy/lossy; durable
+ * decisions must use `read`, which proves absence separately from failure. */
 export interface StoreLike {
 	get<T = unknown>(key: string): Promise<T | null>;
+	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(key: string, value: T): Promise<void>;
 	list?(prefix?: string): Promise<string[]>;
+}
+
+/** A transport failure is also unknown state. Do not expose its exception: the
+ * host's structured diagnostic is preferred, and this fallback stays safe. */
+export async function readStore<T>(store: StoreLike, key: string): Promise<StoreReadResult<T>> {
+	try {
+		return await store.read<T>(key);
+	} catch {
+		return { state: "error", diagnostic: UNAVAILABLE_READ_DIAGNOSTIC };
+	}
 }
 
 export interface QueueEntry {
@@ -170,23 +197,25 @@ export const LAST_ERROR_KEY = "last-error";
 export const CONFIG_KEY = "provider-config:memory";
 export const QUEUE_CAP = 100;
 
-export type QueueLoadResult = { loaded: true; queue: QueueEntry[] } | { loaded: false };
+export type QueueLoadResult =
+	| { loaded: true; queue: QueueEntry[]; source: "absent" | "present" }
+	| { loaded: false; diagnostic: StoreReadDiagnostic };
 
-/** Load a queue snapshot for a mutation. A failed read is distinct from a
- * legitimately empty queue so callers never overwrite an unknown snapshot. */
-export async function loadQueueForMutation(store: StoreLike): Promise<QueueLoadResult> {
-	try {
-		const v = await store.get<QueueEntry[]>(QUEUE_KEY);
-		return { loaded: true, queue: Array.isArray(v) ? v : [] };
-	} catch {
-		return { loaded: false };
-	}
+const INVALID_QUEUE_DIAGNOSTIC: StoreReadDiagnostic = { code: "HINDSIGHT_QUEUE_INVALID", recoverable: true };
+
+/** Load a queue snapshot. Store errors and invalid present values deliberately
+ * remain unknown: no caller may replace them with an empty queue. */
+export async function loadQueue(store: StoreLike): Promise<QueueLoadResult> {
+	const result = await readStore<unknown>(store, QUEUE_KEY);
+	if (result.state === "error") return { loaded: false, diagnostic: result.diagnostic };
+	if (result.state === "absent") return { loaded: true, queue: [], source: "absent" };
+	if (!Array.isArray(result.value)) return { loaded: false, diagnostic: INVALID_QUEUE_DIAGNOSTIC };
+	return { loaded: true, queue: result.value as QueueEntry[], source: "present" };
 }
 
-/** Best-effort queue read for non-mutating consumers such as routes and drains. */
-export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {
-	const result = await loadQueueForMutation(store);
-	return result.loaded ? result.queue : [];
+/** Alias retained to make mutation call sites explicit. */
+export async function loadQueueForMutation(store: StoreLike): Promise<QueueLoadResult> {
+	return loadQueue(store);
 }
 
 export type QueueSaveResult = { durable: true } | { durable: false };
@@ -288,13 +317,23 @@ export function redactConfig(cfg: EffectiveConfig): Record<string, unknown> {
 	return { ...rest, apiKeySet: typeof apiKey === "string" && apiKey.length > 0 };
 }
 
-/** Effective config for the routes (store overrides over flat defaults). */
-export async function loadEffectiveConfig(store: StoreLike): Promise<EffectiveConfig> {
-	let stored: unknown;
-	try {
-		stored = await store.get(CONFIG_KEY);
-	} catch {
-		stored = undefined;
-	}
-	return resolveConfig({ ...CONFIG_DEFAULTS, ...(isObj(stored) ? stored : {}) });
+export type EffectiveConfigLoadResult =
+	| { available: true; config: EffectiveConfig; overrides: Record<string, unknown> }
+	| { available: false; diagnostic: StoreReadDiagnostic };
+
+const INVALID_CONFIG_DIAGNOSTIC: StoreReadDiagnostic = { code: "HINDSIGHT_CONFIG_INVALID", recoverable: true };
+
+/** Load persisted config without ever treating an unreadable snapshot as defaults.
+ * Defaults apply only to a proven store miss; a malformed present value remains
+ * unavailable so a config SET cannot overwrite it. */
+export async function loadEffectiveConfig(store: StoreLike): Promise<EffectiveConfigLoadResult> {
+	const result = await readStore<unknown>(store, CONFIG_KEY);
+	if (result.state === "error") return { available: false, diagnostic: result.diagnostic };
+	if (result.state === "absent") return { available: true, config: resolveConfig(CONFIG_DEFAULTS), overrides: {} };
+	if (!isObj(result.value)) return { available: false, diagnostic: INVALID_CONFIG_DIAGNOSTIC };
+	return {
+		available: true,
+		overrides: result.value,
+		config: resolveConfig({ ...CONFIG_DEFAULTS, ...result.value }),
+	};
 }

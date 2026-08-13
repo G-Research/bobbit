@@ -63,18 +63,26 @@ be dead — so we force a reload to re-bootstrap from scratch.
 This path is inherently loop-safe: the reloaded page is a *fresh* navigation, so
 its next `pageshow` fires with `persisted === false` and does not re-trigger.
 
-### Mechanism 2 — resume-staleness watchdog
+### Mechanism 2 — bounded resume-staleness probe
 
 This is the subtle case: the app *did* mount on a previous run (so `#app` has
 content and mechanism 3 sees nothing wrong), but iOS froze the JS event loop and
 on resume the reactive machinery never restarts. The page looks painted but is
 dead.
 
-To detect this we run a **liveness heartbeat**: a `requestAnimationFrame` loop
-that stamps `lastAliveMs = Date.now()` on every frame. A frozen page's rAF loop
-is paused, so its heartbeat stops advancing. On resume we restart the heartbeat
-and, after a short probe delay, ask: *did the heartbeat advance past the moment
-we resumed?* If not, the page is a frozen mounted snapshot and we reload.
+A standalone PWA does **not** run a permanent lifecycle heartbeat. Instead, each
+resume signal starts bounded work: one liveness `requestAnimationFrame` and one
+delayed probe (currently 1.5 seconds). If the frame runs, its timestamp proves
+that the event loop resumed. When the delayed probe runs, it asks whether that
+one frame was observed after this resume. A qualifying long-suspended mounted
+page whose frame never arrives is treated as a frozen snapshot and reloaded.
+
+Each probe owns a monotonic generation and its own liveness observation. A newer
+resume cancels the previous frame and timer; even if a cancelled callback is
+later delivered, its stale generation cannot satisfy, clear, or complete the
+newer probe. The timer also cancels a still-pending frame before making the
+reload decision. Environments without rAF record one local liveness observation
+instead of creating fallback recurring work.
 
 Suspend/resume is tracked redundantly via `pagehide`, `freeze`, `resume`, and
 `visibilitychange` to cover iOS's partial Page Lifecycle support — whichever
@@ -88,17 +96,35 @@ The "should I reload?" decision is factored out as the **pure, unit-testable**
    last reload → never reload.
 2. **Dead bootstrap** — nothing painted (`!appMounted`) → reload.
 3. **Mounted-but-frozen snapshot** — the page is mounted AND the suspend was
-   *long* (gap ≥ stale threshold) AND the heartbeat did **not** advance since
-   resume → reload.
-4. **Otherwise** → don't reload. In particular, a mounted page whose heartbeat
-   advanced after resume is treated as **alive** and is never reloaded,
-   regardless of how long the suspend was.
+   *long* (gap ≥ stale threshold) AND this resume did **not** observe a live
+   frame → reload.
+4. **Otherwise** → don't reload. In particular, a mounted page that observes a
+   frame after resume is treated as **alive** and is never reloaded, regardless
+   of how long the suspend was.
 
 The long-suspend requirement (stale threshold, currently 30 minutes) exists so
 that ordinary quick tab switches — where the page is still alive and the
 existing visibility-resync handles any dead socket — never trigger a reload.
-Only a long suspend *combined with* a stalled heartbeat is treated as a frozen
-snapshot.
+Only a long suspend *combined with* a stalled one-shot probe is treated as a
+frozen snapshot.
+
+#### Lifecycle callback budget
+
+The bounded design keeps iOS recovery while removing foreground wakeups that do
+not contribute to a recovery decision. In the controlled diagnosis, the old
+60 Hz heartbeat produced about 1,200 callbacks per 20 seconds; the replacement
+has no steady-state lifecycle callbacks:
+
+| State | Lifecycle rAF work | Probe timer work | Reload outcome |
+|---|---:|---:|---|
+| Visible standalone steady state | 0 | 0 | None |
+| One healthy resume | At most 1 request and 1 callback | 1 callback | None |
+| One stalled resume | 1 request and no observed callback | 1 callback | At most 1 guarded reload |
+| Competing resumes | Bounded per signal; older callbacks are inert | Only the newest may complete | At most 1 guarded reload |
+
+These are callback budgets for the lifecycle recovery module, not global page
+budgets. Rendering, WebSocket recovery, and the inline boot watchdog retain
+their separate owners.
 
 ### Mechanism 3 — inline boot watchdog
 
@@ -154,47 +180,45 @@ handlers recover a *live* page whose socket died while backgrounded — reloadin
 there would be wasteful and would risk duplicate-message bugs (see the detailed
 comments in `_onVisibilityChange`).
 
-A live page whose heartbeat advances after resume is explicitly treated as alive
-by `shouldReloadOnResume()` and is **never** reloaded by this feature — that case
-belongs entirely to the visibility-resync handlers. Do not add a reload path for
-the live-page case here, and do not add socket-reconnect logic to
-`pwa-lifecycle.ts`.
+A live page whose one-shot resume frame is observed is explicitly treated as
+alive by `shouldReloadOnResume()` and is **never** reloaded by this feature —
+that case belongs entirely to the visibility-resync handlers. Do not add a
+reload path for the live-page case here, and do not add socket-reconnect logic
+to `pwa-lifecycle.ts`.
 
 ## Testing
 
-True iOS standalone freeze/kill behavior cannot be reproduced in a headless
-browser, so verification of the end-to-end recovery is **manual on a real iOS
-device**: install the PWA, background it long enough for iOS to freeze/kill the
-WebKit process, relaunch, and confirm the app recovers without manual
-termination. The automated tests cover the pieces that *can* be tested in
-isolation:
+Automated tests use the real lifecycle module with injected clocks and browser
+signals. They assert decisions and callback counts; they do not use battery
+runtime or cross-machine timing thresholds.
 
-- **Pure decision unit tests** — `tests/pwa-lifecycle.spec.ts` exercises
-  `shouldReloadOnResume()` against a `file://` fixture
-  (`tests/fixtures/pwa-lifecycle.html`) that inlines the function: loop-guard
-  override, dead-bootstrap reload, mounted-but-frozen reload, and the
-  alive-after-resume no-reload case.
-- **Source/fixture drift guard** — the fixture hand-copies the pure function, so
-  a guard test in the same file extracts the function body from *both*
-  `src/app/pwa-lifecycle.ts` and the fixture, canonicalizes away formatting /
-  `export` / TS types, and asserts the core logic matches. This stops the
-  hand-copied fixture from silently drifting from the source of truth.
-- **Browser E2E** — `tests/e2e/ui/pwa-lifecycle.spec.ts` injects standalone mode
-  before app scripts run and observes forced reloads via the production test seam
-  `window.__bobbitReloadHook` (which avoids real navigation and the read-only
-  `Location` object). It covers: persisted `pageshow` forces exactly one reload
-  and writes the cooldown guard; the cooldown / module guard blocks a repeat
-  persisted `pageshow`; the `sessionStorage` cooldown guard **survives a real
-  reload** and blocks a second reload (proving the guard, not the in-memory flag,
-  breaks loops); non-standalone pages never reload; a live page survives a quick
-  hidden→visible cycle without reloading; and a healthy boot clears the inline
-  boot watchdog.
+- **DOM lifecycle coverage** — `tests2/dom/pwa-lifecycle.test.ts` imports the
+  real `shouldReloadOnResume()` and pins cooldown precedence and boundaries,
+  dead bootstrap, healthy and stalled long resumes, quick suspend, and missing
+  hidden timestamp. Its fake rAF/timer harness also pins zero work on visible
+  installation; exact one-frame/one-timer healthy, quick, and stalled budgets;
+  generation isolation under force-delivered stale callbacks; one guarded
+  reload; and no later work after the module reload guard trips.
+- **Browser lifecycle coverage** —
+  `tests2/browser/fixtures/pwa-lifecycle.spec.ts` injects standalone mode before
+  app scripts run and observes reload requests through
+  `window.__bobbitReloadHook`. It covers persisted `pageshow`, same-instance and
+  real-reload cooldown, non-standalone gating, quick visibility recovery,
+  document-level `freeze`/`resume` wiring, and boot-watchdog clearing after
+  `#app` receives content.
+
+True installed-iOS freeze, process reclamation, and relaunch behavior cannot be
+established by headless Chromium. Retain manual verification on a real iOS
+device: check a quick background/relaunch remains responsive without an
+unnecessary recovery, then check a greater-than-30-minute suspend or
+freeze/kill/relaunch recovers without requiring the user to terminate the PWA.
+This device pass remains required when changing recovery timing or event wiring.
 
 ## Key files
 
 - `src/app/pwa-lifecycle.ts` — all three mechanisms, the pure
-  `shouldReloadOnResume()` decision, `isStandalone()`, the heartbeat, and
-  `markAppBooted()`.
+  `shouldReloadOnResume()` decision, `isStandalone()`, the bounded resume probe,
+  and `markAppBooted()`.
 - `src/app/main.ts` — calls `installPwaLifecycleRecovery()` and `markAppBooted()`
   during bootstrap; also clears the inline watchdog under Vite HMR so it never
   fights dev full-reloads.

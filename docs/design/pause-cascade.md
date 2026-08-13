@@ -23,14 +23,14 @@ When a goal is paused:
 
 - **Sessions are soft-aborted.** All sessions associated with the goal and its subtree receive a graceful abort signal.
 - **In-flight verifications are cancelled.** Gate verifications that are running or awaiting a reviewer are cancelled.
-- **Spawns are blocked.** Every spawn path (team start, child spawn, integration) returns `409 GOAL_PAUSED` while the goal remains paused. This includes both REST and agent-tool paths.
-- **Prompts are rejected.** `POST /api/goals/:id/team/prompt` and `POST /api/sessions/:id/prompt` return `409 GOAL_PAUSED` when the target session's goal is paused (see [Prompt rejection](#prompt-rejection)).
+- **Spawns are blocked, with one explicit-start exception.** An authorized operator's `POST /api/goals/:id/team/start` may first run the canonical single-goal resume lifecycle and then start that goal's team. It never resumes descendants, and scheduler-owned `blocked` remains scheduler-owned. Bearer credentials and agent-tool callers cannot use this exception; all other spawn paths still return `409 GOAL_PAUSED`. See [Explicit start lifecycle](../rest-api.md#explicit-start-lifecycle).
+- **Prompts are rejected.** `POST /api/goals/:id/team/prompt` and `POST /api/sessions/:id/prompt` continue to return `409 GOAL_PAUSED` when the target session's goal is paused (see [Prompt rejection](#prompt-rejection)).
 - **Boot-resume nudges are skipped.** After a gateway restart, paused restored leads are not nudged to continue.
 - **Pause is durable.** The paused state survives gateway restart and is restored from persisted goal state.
 
 ## What resume does
 
-Resume re-enables spawns and prompt delivery but does **not** auto-restart sessions. Operators must manually start or prompt sessions after resuming a goal.
+Resume generally re-enables spawns and prompt delivery but does **not** auto-restart sessions. The narrow exception is an authorized explicit team start: it resumes only the requested eligible goal before starting or returning its team; other sessions and descendants remain untouched.
 
 ## Prompt rejection
 

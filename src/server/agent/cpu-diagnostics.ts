@@ -2,9 +2,12 @@ import { promises as fs } from "node:fs";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import path from "node:path";
-import { monitorEventLoopDelay, performance, type EventLoopUtilization } from "node:perf_hooks";
+import { constants, monitorEventLoopDelay, PerformanceObserver, performance, type EventLoopUtilization } from "node:perf_hooks";
 
 const DEFAULT_FLUSH_MS = 1000;
+/** Always-on guard threshold. Kept separate from opt-in JSONL CPU diagnostics. */
+export const DEFAULT_EVENT_LOOP_LAG_WARN_MS = 250;
+const EVENT_LOOP_LAG_SAMPLE_MS = 250;
 
 interface CpuDiagnosticsConfig {
 	enabled: boolean;
@@ -43,6 +46,8 @@ export interface CpuDiagnostics {
 	recordRest(label: string, status: number, durationMs: number, responseBytes?: number): void;
 	recordWsBroadcast(label: string, type: string, counters: WsBroadcastCounters): void;
 	recordTimer(label: string, durationMs: number, counters?: Record<string, number>): void;
+	/** Record a store/index checkpoint. `bytes` is the serialized payload size. */
+	recordPersistence(label: string, durationMs: number, bytes: number, counters?: Record<string, number>): void;
 	recordChildProcess(label: string, durationMs: number, metadata?: Record<string, string | number>): void;
 	/** Snapshot immediately and resolve once this and all earlier snapshots have been written. */
 	flush(reason?: string): Promise<void>;
@@ -55,6 +60,21 @@ export interface CpuDiagnosticsIo {
 	appendFile(filePath: string, data: string): Promise<void>;
 	writeStderr(data: string): Promise<void>;
 }
+
+interface GcPerformanceEntry {
+	duration: number;
+	detail?: { kind?: number };
+}
+
+interface GcPerformanceObserver {
+	observe(options: { entryTypes: Array<"gc"> }): void;
+	takeRecords(): GcPerformanceEntry[];
+	disconnect(): void;
+}
+
+type GcPerformanceObserverFactory = (
+	callback: (entries: readonly GcPerformanceEntry[]) => void,
+) => GcPerformanceObserver;
 
 interface TimedBucket {
 	count: number;
@@ -89,6 +109,10 @@ export interface CpuDiagnosticsSnapshot {
 	delayP50Ms: number;
 	delayP95Ms: number;
 	delayMaxMs: number;
+	gcCount: number;
+	gcMajorCount: number;
+	gcDurationMs: number;
+	gcMaxMs: number;
 	rssMb: number;
 	heapUsedMb: number;
 	heapTotalMb: number;
@@ -99,12 +123,14 @@ export interface CpuDiagnosticsSnapshot {
 	ws: Record<string, unknown>;
 	timers: Record<string, unknown>;
 	child: Record<string, unknown>;
+	persistence: Record<string, unknown>;
 }
 
 const disabledDiagnostics: CpuDiagnostics = {
 	recordRest() { /* no-op */ },
 	recordWsBroadcast() { /* no-op */ },
 	recordTimer() { /* no-op */ },
+	recordPersistence() { /* no-op */ },
 	recordChildProcess() { /* no-op */ },
 	flush() { return Promise.resolve(); },
 	shutdown() { return Promise.resolve(); },
@@ -126,6 +152,10 @@ const realCpuDiagnosticsIo: CpuDiagnosticsIo = {
 		});
 	},
 };
+
+const realGcPerformanceObserverFactory: GcPerformanceObserverFactory = callback => new PerformanceObserver(
+	list => callback(list.getEntries()),
+);
 
 function safeNumber(value: number): number {
 	return Number.isFinite(value) ? value : 0;
@@ -200,11 +230,17 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 	private rest = new Map<string, RestBucket>();
 	private ws = new Map<string, CounterBucket>();
 	private timers = new Map<string, TimedBucket & { counters: Record<string, number> }>();
+	private persistence = new Map<string, TimedBucket & { bytes: number; counters: Record<string, number> }>();
 	private child = new Map<string, ChildBucket>();
 	private lastCpu = process.cpuUsage();
 	private lastWall = performance.now();
 	private lastElu: EventLoopUtilization = performance.eventLoopUtilization();
 	private delay: ReturnType<typeof monitorEventLoopDelay>;
+	private gcObserver: GcPerformanceObserver | null = null;
+	private gcCount = 0;
+	private gcMajorCount = 0;
+	private gcDurationMs = 0;
+	private gcMaxMs = 0;
 	private timer: ReturnType<Clock["setInterval"]> | null = null;
 	private shutdownPromise: Promise<void> | null = null;
 	private writeQueue: Promise<void> = Promise.resolve();
@@ -217,11 +253,18 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		private readonly clock: Clock = realClock,
 		config: CpuDiagnosticsConfig = RUNTIME_CONFIG,
 		private readonly io: CpuDiagnosticsIo = realCpuDiagnosticsIo,
+		gcObserverFactory: GcPerformanceObserverFactory = realGcPerformanceObserverFactory,
 	) {
 		this.outFile = config.jsonlPath;
 		if (this.outFile) this.enqueueOutputDirectory();
 		this.delay = monitorEventLoopDelay({ resolution: 20 });
 		this.delay.enable();
+		try {
+			this.gcObserver = gcObserverFactory(entries => this.accumulateGcEntries(entries));
+			this.gcObserver.observe({ entryTypes: ["gc"] });
+		} catch {
+			this.gcObserver = null;
+		}
 		this.timer = this.clock.setInterval(() => {
 			// flush owns and logs write failures, so this scheduled promise cannot reject.
 			void this.flush("tick");
@@ -273,6 +316,17 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		}
 	}
 
+	recordPersistence(label: string, durationMs: number, bytes: number, counters?: Record<string, number>): void {
+		const bucket = bucketFor(this.persistence, label, (): TimedBucket & { bytes: number; counters: Record<string, number> } => ({ ...newTimedBucket(), bytes: 0, counters: {} }));
+		pushSample(bucket, durationMs);
+		if (Number.isFinite(bytes) && bytes > 0) bucket.bytes += bytes;
+		if (counters) {
+			for (const [name, value] of Object.entries(counters)) {
+				if (Number.isFinite(value)) bucket.counters[name] = (bucket.counters[name] ?? 0) + value;
+			}
+		}
+	}
+
 	recordChildProcess(label: string, durationMs: number, metadata?: Record<string, string | number>): void {
 		const bucket = bucketFor(this.child, label, (): ChildBucket => ({ ...newTimedBucket(), metadata: {} }));
 		pushSample(bucket, durationMs);
@@ -308,11 +362,27 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 			this.timer = null;
 		}
 		try { this.delay.disable(); } catch { /* best-effort */ }
+		const gcObserver = this.gcObserver;
+		if (gcObserver) {
+			try { this.accumulateGcEntries(gcObserver.takeRecords()); } catch { /* best-effort */ }
+			try { gcObserver.disconnect(); } catch { /* best-effort */ }
+			this.gcObserver = null;
+		}
 		process.off("beforeExit", this.beforeExitHandler);
 		process.off("exit", this.exitHandler);
 		if (singleton === this) singleton = null;
 		this.shutdownPromise = this.flush(reason);
 		return this.shutdownPromise;
+	}
+
+	private accumulateGcEntries(entries: readonly GcPerformanceEntry[]): void {
+		for (const entry of entries) {
+			const durationMs = safeNumber(entry.duration);
+			this.gcCount++;
+			if (entry.detail?.kind === constants.NODE_PERFORMANCE_GC_MAJOR) this.gcMajorCount++;
+			this.gcDurationMs += durationMs;
+			if (durationMs > this.gcMaxMs) this.gcMaxMs = durationMs;
+		}
 	}
 
 	private buildSnapshot(reason?: string): CpuDiagnosticsSnapshot {
@@ -339,6 +409,10 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 			delayP50Ms: round(this.delay.percentile(50) / 1e6),
 			delayP95Ms: round(this.delay.percentile(95) / 1e6),
 			delayMaxMs: round(this.delay.max / 1e6),
+			gcCount: this.gcCount,
+			gcMajorCount: this.gcMajorCount,
+			gcDurationMs: round(this.gcDurationMs),
+			gcMaxMs: round(this.gcMaxMs),
 			rssMb: mb(memory.rss),
 			heapUsedMb: mb(memory.heapUsed),
 			heapTotalMb: mb(memory.heapTotal),
@@ -348,9 +422,14 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 			ws: this.snapshotWs(),
 			timers: this.snapshotTimers(),
 			child: this.snapshotChild(),
+			persistence: this.snapshotPersistence(),
 		};
 		if (reason) snapshot.reason = reason;
 		try { this.delay.reset(); } catch { /* best-effort */ }
+		this.gcCount = 0;
+		this.gcMajorCount = 0;
+		this.gcDurationMs = 0;
+		this.gcMaxMs = 0;
 		return snapshot;
 	}
 
@@ -390,10 +469,19 @@ class EnabledCpuDiagnostics implements CpuDiagnostics {
 		return out;
 	}
 
+	private snapshotPersistence(): Record<string, unknown> {
+		const out: Record<string, unknown> = {};
+		for (const [label, bucket] of this.persistence) {
+			out[label] = { ...summarizeTimed(bucket), bytes: bucket.bytes, ...bucket.counters };
+		}
+		return out;
+	}
+
 	private resetBuckets(): void {
 		this.rest.clear();
 		this.ws.clear();
 		this.timers.clear();
+		this.persistence.clear();
 		this.child.clear();
 	}
 
@@ -449,9 +537,16 @@ export function cpuDiagnosticsEnabled(env?: NodeJS.ProcessEnv): boolean {
 }
 
 /** Create an isolated diagnostics instance without mutating the process-wide singleton. */
-export function createCpuDiagnostics(options: { env: NodeJS.ProcessEnv; clock?: Clock; io?: CpuDiagnosticsIo }): CpuDiagnostics {
+export function createCpuDiagnostics(options: {
+	env: NodeJS.ProcessEnv;
+	clock?: Clock;
+	io?: CpuDiagnosticsIo;
+	gcObserverFactory?: GcPerformanceObserverFactory;
+}): CpuDiagnostics {
 	const config = cpuDiagnosticsConfig(options.env);
-	return config.enabled ? new EnabledCpuDiagnostics(options.clock, config, options.io) : disabledDiagnostics;
+	return config.enabled
+		? new EnabledCpuDiagnostics(options.clock, config, options.io, options.gcObserverFactory)
+		: disabledDiagnostics;
 }
 
 export function getCpuDiagnostics(clock?: Clock): CpuDiagnostics {
@@ -462,3 +557,116 @@ export function getCpuDiagnostics(clock?: Clock): CpuDiagnostics {
 
 export const CPU_DIAGNOSTICS_ENABLED = ENABLED;
 export const CPU_DIAGNOSTICS_FLUSH_MS = FLUSH_MS;
+
+/**
+ * Cheap, process-wide event-loop guard. Unlike the JSONL CPU diagnostics this
+ * is deliberately always on: it keeps a small perf-hooks histogram and only
+ * writes a warning after a task blocks the loop for a material amount of time.
+ *
+ * Call `recordEventLoopOperation()` around known synchronous work. That makes
+ * the warning name the responsible operation instead of merely reporting a
+ * vague delayed timer after the fact.
+ */
+export interface EventLoopLagMonitor {
+	recordOperation(label: string, durationMs: number, metadata?: Record<string, number>): void;
+	isSaturated(): boolean;
+	retryAfterMs(): number;
+	shutdown(): void;
+}
+
+export interface EventLoopLagMonitorOptions {
+	thresholdMs?: number;
+	sampleMs?: number;
+	now?: () => number;
+	warn?: (message: string) => void;
+}
+
+class DefaultEventLoopLagMonitor implements EventLoopLagMonitor {
+	private readonly thresholdMs: number;
+	private readonly sampleMs: number;
+	private readonly now: () => number;
+	private readonly warn: (message: string) => void;
+	private readonly delay = monitorEventLoopDelay({ resolution: 20 });
+	private readonly timer: NodeJS.Timeout;
+	private lastOperation = "unknown";
+	private lastOperationAt = 0;
+	private lastWarningAt = 0;
+	private saturatedUntil = 0;
+
+	constructor(options: EventLoopLagMonitorOptions = {}) {
+		this.thresholdMs = options.thresholdMs ?? DEFAULT_EVENT_LOOP_LAG_WARN_MS;
+		this.sampleMs = options.sampleMs ?? EVENT_LOOP_LAG_SAMPLE_MS;
+		this.now = options.now ?? Date.now;
+		this.warn = options.warn ?? ((message) => console.warn(message));
+		this.delay.enable();
+		this.timer = setInterval(() => this.observeDelay(), this.sampleMs);
+		this.timer.unref();
+	}
+
+	recordOperation(label: string, durationMs: number, metadata?: Record<string, number>): void {
+		if (!Number.isFinite(durationMs) || durationMs < 0) return;
+		const now = this.now();
+		this.lastOperation = label || "unknown";
+		this.lastOperationAt = now;
+		if (durationMs < this.thresholdMs) return;
+		this.saturatedUntil = Math.max(this.saturatedUntil, now + this.retryWindowMs(durationMs));
+		this.lastWarningAt = now;
+		const fields = metadata
+			? ` ${Object.entries(metadata).filter(([, value]) => Number.isFinite(value)).map(([key, value]) => `${key}=${value}`).join(" ")}`
+			: "";
+		this.warn(`[event-loop-lag] blocked ${durationMs.toFixed(1)}ms during ${this.lastOperation}.${fields}`);
+	}
+
+	isSaturated(): boolean {
+		return this.now() < this.saturatedUntil;
+	}
+
+	retryAfterMs(): number {
+		return Math.max(0, this.saturatedUntil - this.now());
+	}
+
+	shutdown(): void {
+		clearInterval(this.timer);
+		try { this.delay.disable(); } catch { /* best-effort */ }
+	}
+
+	private observeDelay(): void {
+		const maxMs = this.delay.max / 1e6;
+		try { this.delay.reset(); } catch { /* best-effort */ }
+		if (!Number.isFinite(maxMs) || maxMs < this.thresholdMs) return;
+		const now = this.now();
+		this.saturatedUntil = Math.max(this.saturatedUntil, now + this.retryWindowMs(maxMs));
+		// A measured operation already emitted the useful, responsible warning.
+		if (now - this.lastWarningAt < this.sampleMs * 2) return;
+		const operation = now - this.lastOperationAt < this.sampleMs * 4 ? this.lastOperation : "unknown operation";
+		this.lastWarningAt = now;
+		this.warn(`[event-loop-lag] observed ${maxMs.toFixed(1)}ms delay after ${operation}.`);
+	}
+
+	private retryWindowMs(delayMs: number): number {
+		return Math.max(this.sampleMs, Math.min(5_000, Math.ceil(delayMs)));
+	}
+}
+
+let lagMonitor: EventLoopLagMonitor | null = null;
+
+/** Create an isolated monitor for tests without changing the process singleton. */
+export function createEventLoopLagMonitor(options?: EventLoopLagMonitorOptions): EventLoopLagMonitor {
+	return new DefaultEventLoopLagMonitor(options);
+}
+
+/** Start the process-wide always-on lag monitor lazily. */
+export function getEventLoopLagMonitor(): EventLoopLagMonitor {
+	if (!lagMonitor) lagMonitor = new DefaultEventLoopLagMonitor();
+	return lagMonitor;
+}
+
+/** Attribute a known synchronous main-thread operation to the lag guard. */
+export function recordEventLoopOperation(label: string, durationMs: number, metadata?: Record<string, number>): void {
+	getEventLoopLagMonitor().recordOperation(label, durationMs, metadata);
+}
+
+export function shutdownEventLoopLagMonitor(): void {
+	lagMonitor?.shutdown();
+	lagMonitor = null;
+}

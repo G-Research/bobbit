@@ -1012,11 +1012,11 @@ import { dispatchTrackedSystemPrompt } from "./session-manager.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
-import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
+import { buildVerificationFailureMessage, type FailureStepLike } from "./notify-team-lead-failure.js";
 
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
-import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
+import { applyRuntimeSessionThinkingSelection } from "../ws/runtime-model-selection.js";
 import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
@@ -1027,22 +1027,6 @@ import {
 	type GateStepDiagnostics,
 	type GateStepDiagnosticsPaths,
 } from "../gate-diagnostics.js";
-
-/**
- * Clamp a thinking-level value against the resolved reviewer/QA model. When
- * the model string is in canonical `provider/modelId` form, infer reasoning
- * metadata and clamp. When no model is resolvable, return the value as-is
- * (the agent will fall back to its built-in default).
- */
-function clampReviewThinking(level: string | undefined, modelStr: string | undefined): string | undefined {
-	if (!level) return level;
-	if (!modelStr) return level;
-	const slash = modelStr.indexOf("/");
-	if (slash <= 0) return level;
-	const provider = modelStr.slice(0, slash);
-	const modelId = modelStr.slice(slash + 1);
-	return clampThinkingLevelForModel(level, provider, modelId);
-}
 
 function controlledSessionModelFallback(prefs: PreferencesStore | undefined): { enabled: boolean; model?: string } | undefined {
 	if (!prefs) return undefined;
@@ -4345,7 +4329,12 @@ export class VerificationHarness {
 		goalId: string,
 		gateId: string,
 		status: string,
-		failureContext?: { steps?: ReadonlyArray<{ name: string; type: string; passed: boolean; output?: string }>; goalBranch?: string },
+		failureContext?: {
+			steps?: ReadonlyArray<FailureStepLike>;
+			goalBranch?: string;
+			/** False when the reported rows were synthesized outside workflow execution. */
+			workflowAligned?: boolean;
+		},
 	): void {
 		if (!this.notifyTeamLeadFn) return;
 		// Notify the goal's OWN team-lead first (intra-team signal).
@@ -4353,7 +4342,13 @@ export class VerificationHarness {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
 		} else {
 			const steps = failureContext?.steps ?? [];
-			const message = buildVerificationFailureMessage(gateId, steps);
+			const frozenGate = failureContext?.workflowAligned === false
+				? undefined
+				: this.projectContextManager
+					?.getContextForGoal(goalId)
+					?.goalStore.get(goalId)
+					?.workflow?.gates.find((gate) => gate.id === gateId);
+			const message = buildVerificationFailureMessage(gateId, steps, frozenGate?.verify);
 			this.notifyTeamLeadFn(goalId, message);
 		}
 	}
@@ -5234,7 +5229,11 @@ export class VerificationHarness {
 				status: "failed",
 			});
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "failed");
-			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch });
+			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", {
+				steps: [errorStep],
+				goalBranch,
+				workflowAligned: false,
+			});
 		}
 	}
 
@@ -5579,7 +5578,8 @@ export class VerificationHarness {
 			const _preInitialThinkingRaw = (_preRoleThinking && _validLevels.includes(_preRoleThinking))
 				? _preRoleThinking
 				: ((_preReviewThinkingPref && _validLevels.includes(_preReviewThinkingPref)) ? _preReviewThinkingPref : "off");
-			const _preInitialThinking = clampReviewThinking(_preInitialThinkingRaw, _preInitialModel) ?? _preInitialThinkingRaw;
+			// SessionManager owns the final exact-row clamp after all spawn args are assembled.
+			const _preInitialThinking = _preInitialThinkingRaw;
 			const reviewerMeta = buildVerificationReviewerMeta({
 				kind: "llm-review",
 				roleName,
@@ -5684,18 +5684,11 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				// Clamp against the reviewer's resolved model so xhigh on a model
-				// that doesn't support it degrades to high before the RPC.
-				level = clampReviewThinking(level, roleModel_r ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
-				if (_preInitialThinking === level) {
-					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${sessionId}`);
-				} else {
-					try {
-						await session.rpcClient.setThinkingLevel(level);
-						console.log(`[verification] Set review thinking level "${level}" for ${sessionId}${roleThinking_r ? " (role override)" : ""}`);
-					} catch (err) {
-						console.error(`[verification] Failed to set review thinking level:`, err);
-					}
+				try {
+					const tuple = await applyRuntimeSessionThinkingSelection(this.sessionManager!, session, level);
+					console.log(`[verification] Applied exact review thinking level "${tuple.thinkingLevel}" for ${sessionId}${roleThinking_r ? " (role override)" : ""}`);
+				} catch (err) {
+					console.error(`[verification] Failed to set review thinking level:`, err);
 				}
 			}
 
@@ -6029,7 +6022,8 @@ export class VerificationHarness {
 			const _preQaInitialThinkingRaw = (_preQaRoleThinking && _qaValidLevels.includes(_preQaRoleThinking))
 				? _preQaRoleThinking
 				: ((_preQaReviewThinkPref && _qaValidLevels.includes(_preQaReviewThinkPref)) ? _preQaReviewThinkPref : "off");
-			const _preQaInitialThinking = clampReviewThinking(_preQaInitialThinkingRaw, _preQaInitialModel) ?? _preQaInitialThinkingRaw;
+			// SessionManager owns the final exact-row clamp after all spawn args are assembled.
+			const _preQaInitialThinking = _preQaInitialThinkingRaw;
 			const qaReviewerMeta = buildVerificationReviewerMeta({
 				kind: "agent-qa",
 				roleName: qaRoleName,
@@ -6126,15 +6120,10 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				level = clampReviewThinking(level, roleModel_q ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
-				if (_preQaInitialThinking === level) {
-					console.log(`[verification] QA thinking level "${level}" already pinned at spawn for ${qaSessionId}`);
-				} else {
-					try {
-						await session.rpcClient.setThinkingLevel(level);
-					} catch (err) {
-						console.error(`[verification] Failed to set QA thinking level:`, err);
-					}
+				try {
+					await applyRuntimeSessionThinkingSelection(this.sessionManager!, session, level);
+				} catch (err) {
+					console.error(`[verification] Failed to set QA thinking level:`, err);
 				}
 			}
 

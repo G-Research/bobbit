@@ -5,6 +5,9 @@ import {
 	type GatewaySession,
 	type Goal,
 	type Project,
+	type RemotePrStatus,
+	type RemoteStateError,
+	type RemoteStateMetadata,
 } from "./state.js";
 // Re-export for back-compat: many call sites import `gatewayFetch` from
 // `./api.js`. The implementation now lives in `./gateway-fetch.js` (tiny,
@@ -12,6 +15,7 @@ import {
 // import it without pulling the entire app-shell graph.
 import { activeGatewayConnection, appUrl, gatewayFetch, gatewayWsUrl } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 export { gatewayFetch };
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -22,6 +26,7 @@ import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 import { showHeaderToast } from "./header-toast.js";
 import { ensureProjectPlayFinishSoundOverride } from "./play-finish-sound.js";
+import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -39,6 +44,8 @@ import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject } from "./headquarters.js";
+import { normalizeTags, removeTag, replaceTag } from "../shared/session-tags.js";
+import { sidebarNeedsArchivedSessions } from "./sidebar-view-preferences.js";
 
 function configApiProjectId(projectId?: string | null): string {
 	const selected = projectId || state.activeProjectId || HEADQUARTERS_PROJECT_ID;
@@ -51,11 +58,52 @@ const _prevSessionStatus = new Map<string, string>();
 /** Throttle PR status polling — don't hit GitHub API on every session poll. */
 let _lastPrRefresh = 0;
 const PR_POLL_INTERVAL_MS = 60_000;
+/** Active session/dashboard demand; canonical server records arbitrate external reads. */
+export const ACTIVE_PR_POLL_INTERVAL_MS = 20_000;
 
 /** Reset PR poll throttle so next session poll triggers an immediate refresh.
  *  Called on visibilitychange (tab becomes visible) to avoid stale badges. */
 export function resetPrPollThrottle(): void {
 	_lastPrRefresh = 0;
+}
+
+export type RemoteStateIntent = "automatic" | "visible" | "explicit" | "sidebar";
+
+export interface RemoteStateSnapshot<T> extends RemoteStateMetadata {
+	/** Omitted while a coordinator record is cold or has failed without last-good data. */
+	data?: T | null;
+}
+
+function safeRemoteStateError(value: unknown): RemoteStateError | undefined {
+	const category = typeof value === "object" && value ? (value as { category?: unknown }).category : value;
+	return category === "offline" || category === "auth" || category === "rate_limited" || category === "unavailable"
+		? category
+		: undefined;
+}
+
+/**
+ * Accept the coordinator's public envelope while retaining support for a plain
+ * response during rolling upgrades. Only safe metadata crosses this boundary.
+ */
+export function parseRemoteStateSnapshot<T>(value: unknown): RemoteStateSnapshot<T> {
+	const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+	// Cold coordinator envelopes intentionally omit `data`. Metadata is therefore
+	// the discriminator; legacy flat PR/Git responses carry none of these fields.
+	const isEnvelope = "observedAt" in record || "refreshedAt" in record || "stale" in record || "source" in record || "lastError" in record || "ageMs" in record;
+	const metadata: RemoteStateMetadata = {
+		...(typeof record.observedAt === "number" || typeof record.observedAt === "string" ? { observedAt: record.observedAt } : {}),
+		...(typeof record.refreshedAt === "number" || typeof record.refreshedAt === "string" ? { refreshedAt: record.refreshedAt } : {}),
+		...(typeof record.ageMs === "number" && Number.isFinite(record.ageMs) ? { ageMs: record.ageMs } : {}),
+		...(typeof record.stale === "boolean" ? { stale: record.stale } : {}),
+		...(typeof record.source === "string" ? { source: record.source } : {}),
+		...(safeRemoteStateError(record.lastError) ? { lastError: safeRemoteStateError(record.lastError) } : {}),
+	};
+	return { ...(isEnvelope && !("data" in record) ? {} : { data: (isEnvelope ? record.data : value) as T | null }), ...metadata };
+}
+
+function appendRemoteStateIntent(qs: string, intent: RemoteStateIntent | undefined): string {
+	if (!intent) return qs;
+	return `${qs ? `${qs}&` : "?"}intent=${encodeURIComponent(intent)}`;
 }
 
 export type SidebarCopyLinkTitle = "Copy session link" | "Copy goal link";
@@ -187,7 +235,11 @@ function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
 	if (data.available === true) {
 		const url = (data as { url?: unknown }).url;
 		const kind = (data as { kind?: unknown }).kind;
-		if (typeof url === "string" && (kind === "pr" || kind === "branch")) return { available: true, url, kind };
+		if (typeof url === "string" && kind === "branch") return { available: true, url, kind };
+		if (kind === "pr") {
+			const safeUrl = sanitizePullRequestUrl(url);
+			if (safeUrl) return { available: true, url: safeUrl, kind };
+		}
 	}
 	if (data.available === false) {
 		const reason = (data as { reason?: unknown }).reason;
@@ -197,7 +249,7 @@ function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
 }
 
 export function getCachedGoalGithubLink(goalId: string): GoalGithubLinkResponse | undefined {
-	const prUrl = state.prStatusCache.get(goalId)?.url;
+	const prUrl = sanitizePullRequestUrl(state.prStatusCache.get(goalId)?.url);
 	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
 	return getFreshGoalGithubLinkCacheEntry(goalId)?.value;
 }
@@ -213,7 +265,7 @@ export function clearGoalGithubLinkCache(goalId?: string): void {
 }
 
 export async function fetchGoalGithubLink(goalId: string, opts?: { force?: boolean; skipRender?: boolean }): Promise<GoalGithubLinkResponse> {
-	const prUrl = state.prStatusCache.get(goalId)?.url;
+	const prUrl = sanitizePullRequestUrl(state.prStatusCache.get(goalId)?.url);
 	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
 
 	if (!opts?.force) {
@@ -280,6 +332,196 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status };
 		renderApp();
 	}
+}
+
+type SessionWithUserTags = Omit<GatewaySession, "user_tags"> & { user_tags?: unknown };
+type SessionTagsSnapshot = {
+	hadOwnProperty: boolean;
+	value: unknown;
+};
+type LoadedSessionTagsSnapshot = {
+	live: SessionTagsSnapshot[];
+	archived: SessionTagsSnapshot[];
+};
+
+type SessionPinMutation = {
+	pinned: boolean;
+	resolve: () => void;
+};
+type SessionPinMutationState = {
+	committed: LoadedSessionTagsSnapshot;
+	queue: SessionPinMutation[];
+	processing: boolean;
+	refreshAfterIdle: boolean;
+};
+
+/** One serialized queue per session; unrelated sessions remain concurrent. */
+const sessionPinMutations = new Map<string, SessionPinMutationState>();
+
+function userTagsEqual(left: readonly string[] | undefined, right: readonly string[]): boolean {
+	return !!left && left.length === right.length && left.every((tag, index) => tag === right[index]);
+}
+
+function patchSessionTagsInList(
+	list: GatewaySession[],
+	sessionId: string,
+	getTags: (session: SessionWithUserTags) => string[],
+): { list: GatewaySession[]; changed: boolean } {
+	let changed = false;
+	const next = list.map((session) => {
+		if (session.id !== sessionId) return session;
+		const current = session as SessionWithUserTags;
+		const userTags = getTags(current);
+		if (userTagsEqual(Array.isArray(current.user_tags) ? current.user_tags : undefined, userTags)) return session;
+		changed = true;
+		return { ...session, user_tags: [...userTags] } as GatewaySession;
+	});
+	return { list: changed ? next : list, changed };
+}
+
+function patchLoadedSessionUserTags(sessionId: string, userTags: readonly string[]): boolean {
+	const authoritativeTags = normalizeTags(userTags);
+	const live = patchSessionTagsInList(state.gatewaySessions, sessionId, () => authoritativeTags);
+	const archived = patchSessionTagsInList(state.archivedSessions, sessionId, () => authoritativeTags);
+	if (live.changed) state.gatewaySessions = live.list;
+	if (archived.changed) state.archivedSessions = archived.list;
+	return live.changed || archived.changed;
+}
+
+function captureLoadedSessionUserTags(sessionId: string): LoadedSessionTagsSnapshot {
+	const capture = (list: GatewaySession[]): SessionTagsSnapshot[] => list
+		.filter((session) => session.id === sessionId)
+		.map((session) => {
+			const row = session as SessionWithUserTags;
+			return {
+				hadOwnProperty: Object.prototype.hasOwnProperty.call(row, "user_tags"),
+				value: Array.isArray(row.user_tags) ? [...row.user_tags] : row.user_tags,
+			};
+		});
+	return { live: capture(state.gatewaySessions), archived: capture(state.archivedSessions) };
+}
+
+function patchLoadedSessionPin(sessionId: string, pinned: boolean): boolean {
+	const update = (session: SessionWithUserTags) => pinned
+		? replaceTag(session.user_tags, "pinned", "true")
+		: removeTag(session.user_tags, "pinned");
+	const live = patchSessionTagsInList(state.gatewaySessions, sessionId, update);
+	const archived = patchSessionTagsInList(state.archivedSessions, sessionId, update);
+	if (live.changed) state.gatewaySessions = live.list;
+	if (archived.changed) state.archivedSessions = archived.list;
+	return live.changed || archived.changed;
+}
+
+function restoreLoadedSessionUserTags(sessionId: string, snapshot: LoadedSessionTagsSnapshot): void {
+	const restore = (list: GatewaySession[], snapshots: SessionTagsSnapshot[]): GatewaySession[] => {
+		let matchIndex = 0;
+		return list.map((session) => {
+			if (session.id !== sessionId) return session;
+			const previous = snapshots[matchIndex++];
+			if (!previous) return session;
+			const restored = { ...session } as SessionWithUserTags;
+			if (previous.hadOwnProperty) {
+				restored.user_tags = Array.isArray(previous.value) ? [...previous.value] : previous.value;
+			} else {
+				delete restored.user_tags;
+			}
+			return restored as GatewaySession;
+		});
+	};
+	state.gatewaySessions = restore(state.gatewaySessions, snapshot.live);
+	state.archivedSessions = restore(state.archivedSessions, snapshot.archived);
+}
+
+function latestPendingPinIntent(mutationState: SessionPinMutationState): boolean | undefined {
+	return mutationState.queue.at(-1)?.pinned;
+}
+
+/** Overlay pending local intent on list snapshots without suppressing their other fields. */
+function overlayPendingSessionPins(sessions: GatewaySession[]): GatewaySession[] {
+	let changed = false;
+	const next = sessions.map((session) => {
+		const mutationState = sessionPinMutations.get(session.id);
+		const pinned = mutationState ? latestPendingPinIntent(mutationState) : undefined;
+		if (pinned === undefined) return session;
+		mutationState!.refreshAfterIdle = true;
+		const tags = pinned ? replaceTag(session.user_tags, "pinned", "true") : removeTag(session.user_tags, "pinned");
+		if (userTagsEqual(Array.isArray(session.user_tags) ? session.user_tags : undefined, tags)) return session;
+		changed = true;
+		return { ...session, user_tags: tags };
+	});
+	return changed ? next : sessions;
+}
+
+async function drainSessionPinMutations(sessionId: string, mutationState: SessionPinMutationState): Promise<void> {
+	if (mutationState.processing) return;
+	mutationState.processing = true;
+	while (mutationState.queue.length > 0) {
+		const mutation = mutationState.queue[0]!;
+		let failure: unknown;
+		try {
+			const response = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ pinned: mutation.pinned }),
+			});
+			if (!response.ok) {
+				throw await errorFromResponse(response, `Failed to ${mutation.pinned ? "pin" : "unpin"} session: ${response.status}`);
+			}
+			const body = await response.json().catch(() => null) as { user_tags?: unknown } | null;
+			if (!body || !Array.isArray(body.user_tags)) throw new Error("Pin response did not include user_tags");
+			patchLoadedSessionUserTags(sessionId, body.user_tags);
+			mutationState.committed = captureLoadedSessionUserTags(sessionId);
+		} catch (error) {
+			failure = error;
+			restoreLoadedSessionUserTags(sessionId, mutationState.committed);
+		}
+
+		mutationState.queue.shift();
+		const pendingIntent = latestPendingPinIntent(mutationState);
+		if (pendingIntent !== undefined) {
+			// A settlement may expose an older server state. Re-apply the newest
+			// admitted click until its own serialized request settles.
+			patchLoadedSessionPin(sessionId, pendingIntent);
+		}
+		renderApp();
+
+		// Preserve the existing newest-failure toast policy: an older failure with
+		// a newer admitted intent is silent, while the final failed intent reports.
+		if (failure && pendingIntent === undefined) {
+			console.error(`[sidebar] Failed to ${mutation.pinned ? "pin" : "unpin"} session:`, failure);
+			await flashSidebarToast(`Couldn't ${mutation.pinned ? "pin" : "unpin"} session`);
+		}
+		mutation.resolve();
+	}
+	mutationState.processing = false;
+	if (mutationState.queue.length === 0) {
+		sessionPinMutations.delete(sessionId);
+		if (mutationState.refreshAfterIdle) scheduleSessionListRefreshFromPush();
+	} else {
+		void drainSessionPinMutations(sessionId, mutationState);
+	}
+}
+
+/**
+ * Optimistically apply the latest click, while serializing durable writes per
+ * session against one committed rollback baseline.
+ */
+export function setSessionPinned(sessionId: string, pinned: boolean): Promise<void> {
+	let mutationState = sessionPinMutations.get(sessionId);
+	if (!mutationState) {
+		mutationState = {
+			committed: captureLoadedSessionUserTags(sessionId),
+			queue: [],
+			processing: false,
+			refreshAfterIdle: false,
+		};
+		sessionPinMutations.set(sessionId, mutationState);
+	}
+	const completion = new Promise<void>((resolve) => mutationState!.queue.push({ pinned, resolve }));
+	patchLoadedSessionPin(sessionId, pinned);
+	renderApp();
+	void drainSessionPinMutations(sessionId, mutationState);
+	return completion;
 }
 
 const SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS = 100;
@@ -386,7 +628,16 @@ export function startSessionListPushSync(): void {
 	ws.addEventListener("message", (event) => {
 		try {
 			const msg = JSON.parse(event.data as string);
-			if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
+			if (msg?.type === "remote_state_snapshot") {
+				if (applyRemoteStateSnapshotMessage(msg)) renderApp();
+			} else if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
+				if (msg.type === "sessions_changed" && typeof msg.sessionId === "string" && Array.isArray(msg.user_tags)) {
+					// The payload may describe an earlier serialized write. Keep the
+					// newest admitted local intent visible until its queue is idle.
+					const pendingMutation = sessionPinMutations.get(msg.sessionId);
+					if (pendingMutation) pendingMutation.refreshAfterIdle = true;
+					else if (patchLoadedSessionUserTags(msg.sessionId, msg.user_tags)) renderApp();
+				}
 				scheduleSessionListRefreshFromPush();
 			} else if (msg?.type === "staff_changed") {
 				scheduleStaffListRefreshFromPush();
@@ -508,7 +759,7 @@ export async function refreshSessions(): Promise<void> {
 			// Generation matches — nothing to do
 		} else {
 			sessionsChanged = true;
-			const newSessions: GatewaySession[] = sessionsData.sessions || [];
+			const newSessions: GatewaySession[] = overlayPendingSessionPins(sessionsData.sessions || []);
 
 			// Warm each source-project override without delaying session state,
 			// transitions, badges, or completion of this refresh.
@@ -537,7 +788,7 @@ export async function refreshSessions(): Promise<void> {
 			state.gatewaySessions = newSessions;
 
 			// Merge archived delegates of live sessions into state.archivedSessions
-			const archivedDelegates: GatewaySession[] = sessionsData.archivedDelegates || [];
+			const archivedDelegates: GatewaySession[] = overlayPendingSessionPins(sessionsData.archivedDelegates || []);
 			if (archivedDelegates.length > 0) {
 				const existingIds = new Set(state.archivedSessions.map(s => s.id));
 				for (const d of archivedDelegates) {
@@ -660,8 +911,10 @@ export async function refreshSessions(): Promise<void> {
 			.catch(() => {});
 	}
 
-	// Lazy-load archived sessions + goals on initial load only if user had "Show archived" persisted
-	if (isInitial && state.showArchived && !_archivedSessionsLoaded) {
+	// Lazy-load archived sessions + goals on initial load when either independent
+	// view persisted Show Archived. A restored By Status view must not wait for a
+	// view switch before its archived rows become available.
+	if (isInitial && sidebarNeedsArchivedSessions(state) && !_archivedSessionsLoaded) {
 		fetchArchivedSessions();
 		fetchArchivedGoalsPaginated();
 	}
@@ -695,7 +948,7 @@ export function clearArchivedSessionsState(): void {
 
 /** Fetch archived sessions from the API (paginated). */
 export async function fetchArchivedSessions(): Promise<void> {
-	if (state.showArchived && state.searchQuery.trim()) {
+	if (state.archivedSearchDemand && state.searchQuery.trim()) {
 		scheduleArchivedRemoteSearch(state.searchQuery);
 		return;
 	}
@@ -754,7 +1007,8 @@ function isArchivedSessionRecord(session: GatewaySession): boolean {
 
 function mergeArchivedSessionsIntoState(sessions: GatewaySession[]): void {
 	if (sessions.length === 0) return;
-	const incoming = new Map(sessions.map((s) => [s.id, s]));
+	const incomingSessions = overlayPendingSessionPins(sessions);
+	const incoming = new Map(incomingSessions.map((s) => [s.id, s]));
 	const seen = new Set<string>();
 	state.archivedSessions = state.archivedSessions.map((s) => {
 		const next = incoming.get(s.id);
@@ -762,14 +1016,14 @@ function mergeArchivedSessionsIntoState(sessions: GatewaySession[]): void {
 		seen.add(s.id);
 		return next;
 	});
-	for (const session of sessions) {
+	for (const session of incomingSessions) {
 		if (!seen.has(session.id)) state.archivedSessions.push(session);
 	}
 }
 
 function archivedSearchStillCurrent(query: string, runId: number): boolean {
 	return runId === _archivedSearchRunId
-		&& state.showArchived
+		&& state.archivedSearchDemand
 		&& state.searchQuery.trim() === query;
 }
 
@@ -779,7 +1033,7 @@ export function scheduleArchivedRemoteSearch(query: string, delay = ARCHIVED_SEA
 		clearTimeout(_archivedSearchTimer);
 		_archivedSearchTimer = null;
 	}
-	if (!trimmed || !state.showArchived) {
+	if (!trimmed || !state.archivedSearchDemand) {
 		clearArchivedSearchState();
 		return;
 	}
@@ -801,14 +1055,14 @@ export function scheduleArchivedRemoteSearch(query: string, delay = ARCHIVED_SEA
 
 export async function fetchArchivedSearchGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
 	const query = state.searchQuery.trim();
-	if (!query || !state.showArchived) return;
+	if (!query || !state.archivedSearchDemand) return;
 	state.archivedSearchQuery = query;
 	await fetchArchivedSearchGoalsPage(limit, afterCursor, query, _archivedSearchRunId);
 }
 
 export async function fetchArchivedSearchSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
 	const query = state.searchQuery.trim();
-	if (!query || !state.showArchived) return;
+	if (!query || !state.archivedSearchDemand) return;
 	state.archivedSearchQuery = query;
 	await fetchArchivedSearchSessionsPage(limit, afterCursor, query, _archivedSearchRunId);
 }
@@ -870,17 +1124,51 @@ async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: numbe
 // SEARCH API
 // ============================================================================
 
-export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<{ results: any[]; total: number }> {
+export type SearchUnavailableReason = "rebuilding" | "backpressure" | "degraded" | "worker-backoff" | "initializing" | "closed" | string;
+
+export type SearchApiResponse =
+	| { available: true; results: any[]; total: number }
+	| { available: false; reason: SearchUnavailableReason; state?: string; retryAfterMs?: number };
+
+function retryAfterMs(response: Response): number | undefined {
+	const raw = response.headers.get("Retry-After");
+	if (!raw) return undefined;
+	const seconds = Number(raw);
+	if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+	const date = Date.parse(raw);
+	return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+/** Query search without disguising a recoverable 503 as an empty result set. */
+export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<SearchApiResponse> {
+	const params = new URLSearchParams({ q: query, includeArchived: "true" });
+	if (type && type !== "all") params.set("type", type);
+	if (limit !== undefined) params.set("limit", String(limit));
+	if (offset !== undefined) params.set("offset", String(offset));
 	try {
-		const params = new URLSearchParams({ q: query, includeArchived: "true" });
-		if (type && type !== "all") params.set("type", type);
-		if (limit !== undefined) params.set("limit", String(limit));
-		if (offset !== undefined) params.set("offset", String(offset));
 		const res = await gatewayFetch(`/api/search?${params}`);
-		if (!res.ok) return { results: [], total: 0 };
-		return await res.json();
-	} catch {
-		return { results: [], total: 0 };
+		if (res.status === 503) {
+			const body = await res.json().catch(() => ({})) as { error?: unknown; reason?: unknown; state?: unknown };
+			if (body.error === "search-unavailable") {
+				return {
+					available: false,
+					reason: typeof body.reason === "string" ? body.reason : "degraded",
+					state: typeof body.state === "string" ? body.state : undefined,
+					retryAfterMs: retryAfterMs(res),
+				};
+			}
+		}
+		if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+		const body = await res.json() as { results?: unknown; total?: unknown };
+		return {
+			available: true,
+			results: Array.isArray(body.results) ? body.results : [],
+			total: typeof body.total === "number" ? body.total : 0,
+		};
+	} catch (err) {
+		// A transport failure must not turn an existing or pending search into a
+		// misleading "No matches" result either.
+		return { available: false, reason: "degraded", state: err instanceof Error ? err.message : undefined };
 	}
 }
 
@@ -895,6 +1183,9 @@ export interface SearchStats {
 	engine: string;
 	engineVersion: string;
 	state: "ready" | "rebuilding" | "disabled" | "error" | "initializing" | "closed" | string;
+	/** The worker is recovering, so stats are intentionally not queryable yet. */
+	degraded?: boolean;
+	unavailableReason?: SearchUnavailableReason | null;
 }
 
 export async function searchStats(projectId?: string): Promise<SearchStats | null> {
@@ -1216,7 +1507,7 @@ export async function promoteProject(id: string, name?: string): Promise<Project
 // ============================================================================
 
 export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
-	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+	if (afterCursor === undefined && state.archivedSearchDemand && state.searchQuery.trim()) {
 		scheduleArchivedRemoteSearch(state.searchQuery);
 		return;
 	}
@@ -1262,7 +1553,7 @@ export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: numb
 }
 
 export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
-	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+	if (afterCursor === undefined && state.archivedSearchDemand && state.searchQuery.trim()) {
 		scheduleArchivedRemoteSearch(state.searchQuery);
 		return;
 	}
@@ -1272,7 +1563,7 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 		const res = await gatewayFetch(`/api/sessions?${params}`);
 		if (!res.ok) return;
 		const data = await res.json();
-		const sessions: GatewaySession[] = (data.sessions || []).filter((s: any) => s.archived === true);
+		const sessions: GatewaySession[] = overlayPendingSessionPins((data.sessions || []).filter((s: any) => s.archived === true));
 		if (afterCursor !== undefined) {
 			// Append
 			const existingIds = new Set(state.archivedSessions.map(s => s.id));
@@ -1288,7 +1579,7 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 		}
 
 		// Merge archived delegates from the response (BFS-enriched by server)
-		const archivedDelegates: GatewaySession[] = data.archivedDelegates || [];
+		const archivedDelegates: GatewaySession[] = overlayPendingSessionPins(data.archivedDelegates || []);
 		if (archivedDelegates.length > 0) {
 			const existingIds = new Set(state.archivedSessions.map(s => s.id));
 			for (const d of archivedDelegates) {
@@ -1481,27 +1772,38 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 
 	const results = await Promise.all(
 		goalsWithBranch.map(async (g) => {
+			const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("sidebar", g.id, "pr"));
 			try {
-				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1`);
-				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
-				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
-				const data = await res.json();
-				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string; mergeable?: string; viewerCanMergeAsAdmin?: boolean }, noPr: false };
+				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1&intent=sidebar`);
+				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true, ticket };
+				if (!res.ok) return { goalId: g.id, pr: null, noPr: false, ticket };
+				const snapshot = parseRemoteStateSnapshot<RemotePrStatus>(await res.json());
+				const data = snapshot.data;
+				const pr = data && typeof data === "object" && typeof data.state === "string"
+					? { ...data, ...snapshot, state: data.state, url: sanitizePullRequestUrl(data.url) }
+					: null;
+				return { goalId: g.id, pr, noPr: data === null && !snapshot.stale && !snapshot.lastError, ticket };
 			} catch {
-				return { goalId: g.id, pr: null, noPr: false };
+				return { goalId: g.id, pr: null, noPr: false, ticket };
 			}
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, pr, noPr } of results) {
+	for (const { goalId, pr, noPr, ticket } of results) {
+		if (!remoteStateRequestOrder.isCurrent(ticket)) continue;
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
 			if (!prev
 				|| prev.state !== pr.state
 				|| prev.reviewDecision !== pr.reviewDecision
 				|| prev.mergeable !== pr.mergeable
-				|| prev.viewerCanMergeAsAdmin !== pr.viewerCanMergeAsAdmin) {
+				|| prev.viewerCanMergeAsAdmin !== pr.viewerCanMergeAsAdmin
+				|| prev.stale !== pr.stale
+				|| prev.lastError !== pr.lastError
+				|| prev.refreshedAt !== pr.refreshedAt
+				|| prev.observedAt !== pr.observedAt
+				|| prev.ageMs !== pr.ageMs) {
 				state.prStatusCache.set(goalId, pr);
 				changed = true;
 			}
@@ -1516,6 +1818,44 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 	} finally {
 		_prRefreshInFlight = false;
 	}
+}
+
+/**
+ * Apply a server broadcast without issuing another remote read. The protocol
+ * deliberately addresses public goal IDs; it never exposes coordinator keys.
+ */
+export function applyRemoteStateSnapshotMessage(message: unknown): boolean {
+	if (!message || typeof message !== "object") return false;
+	const msg = message as Record<string, unknown>;
+	if (msg.type !== "remote_state_snapshot" || typeof msg.goalId !== "string") return false;
+	const body = msg.snapshot && typeof msg.snapshot === "object" ? msg.snapshot : msg;
+	const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(body);
+	const resource = typeof msg.resource === "string" ? msg.resource
+		: typeof msg.remoteState === "string" ? msg.remoteState
+			: typeof msg.kind === "string" ? msg.kind
+				: snapshot.data && typeof snapshot.data.branch === "string" ? "git" : "pr";
+	if (resource !== "pr" && resource !== "pr_status") return false;
+
+	remoteStateRequestOrder.supersede(remoteStateRequestKey("sidebar", msg.goalId, "pr"));
+	const previous = state.prStatusCache.get(msg.goalId);
+	if (snapshot.data && typeof snapshot.data.state === "string") {
+		const next: RemotePrStatus = {
+			...snapshot.data,
+			...snapshot,
+			state: snapshot.data.state,
+			url: sanitizePullRequestUrl(snapshot.data.url),
+		};
+		if (JSON.stringify(previous) === JSON.stringify(next)) return false;
+		state.prStatusCache.set(msg.goalId, next);
+		return true;
+	}
+	// A failed refresh is stale-while-revalidate: retain a last good sidebar
+	// badge rather than clearing it. A clean empty value still removes it.
+	if (snapshot.data === null && !snapshot.lastError && previous) {
+		state.prStatusCache.delete(msg.goalId);
+		return true;
+	}
+	return false;
 }
 
 // ============================================================================
@@ -1568,6 +1908,8 @@ export interface GitStatusData extends GitStatusEntry {
  */
 export type GitStatusResult =
 	| { kind: 'ok'; data: GitStatusData }
+	/** A cold coordinator record is awaiting its completion broadcast. */
+	| { kind: 'pending'; metadata: RemoteStateMetadata }
 	| { kind: 'not-a-repo' }
 	| { kind: 'error'; status?: number; message: string };
 
@@ -1580,15 +1922,20 @@ function buildGitStatusQuery(opts?: { fetch?: boolean; untracked?: boolean }): s
 
 export async function fetchGitStatus(
 	sessionId: string,
-	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal },
+	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal; intent?: RemoteStateIntent },
 ): Promise<GitStatusResult> {
-	const qs = buildGitStatusQuery(opts);
+	const qs = appendRemoteStateIntent(buildGitStatusQuery(opts), opts?.intent ?? (opts?.fetch ? "explicit" : "automatic"));
 	try {
 		const res = await gatewayFetch(`/api/sessions/${sessionId}/git-status${qs}`, { signal: opts?.signal });
 		if (res.ok) {
 			try {
-				const data = await res.json();
-				return { kind: 'ok', data };
+				const snapshot = parseRemoteStateSnapshot<GitStatusData>(await res.json());
+				const { data, ...metadata } = snapshot;
+				// A cold SWR envelope deliberately omits data. It is neither an empty
+				// repository nor a transient client error: the coordinator's single
+				// in-flight refresh will install the result through its WS broadcast.
+				if (!Object.prototype.hasOwnProperty.call(snapshot, "data")) return { kind: 'pending', metadata };
+				return { kind: 'ok', data: { ...(data ?? {}), ...metadata } as GitStatusData };
 			} catch (err) {
 				return { kind: 'error', status: res.status, message: (err as Error).message };
 			}
@@ -1613,15 +1960,17 @@ export async function fetchGitStatus(
 
 export async function fetchGoalGitStatus(
 	goalId: string,
-	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal },
+	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal; intent?: RemoteStateIntent },
 ): Promise<GitStatusResult> {
-	const qs = buildGitStatusQuery(opts);
+	const qs = appendRemoteStateIntent(buildGitStatusQuery(opts), opts?.intent ?? (opts?.fetch ? "explicit" : "automatic"));
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/git-status${qs}`, { signal: opts?.signal });
 		if (res.ok) {
 			try {
-				const data = await res.json();
-				return { kind: 'ok', data };
+				const snapshot = parseRemoteStateSnapshot<GitStatusData>(await res.json());
+				const { data, ...metadata } = snapshot;
+				if (!Object.prototype.hasOwnProperty.call(snapshot, "data")) return { kind: 'pending', metadata };
+				return { kind: 'ok', data: { ...(data ?? {}), ...metadata } as GitStatusData };
 			} catch (err) {
 				return { kind: 'error', status: res.status, message: (err as Error).message };
 			}
@@ -1965,19 +2314,60 @@ export async function refreshAgentSession(sessionId: string, opts?: { force?: bo
 // TEAM API
 // ============================================================================
 
+function startTeamFailureMessage(code?: string): string {
+	switch (code) {
+		case "GOAL_PAUSED":
+		case "TEAM_START_RESUME_FAILED":
+		case "TEAM_START_RESUME_UNAVAILABLE":
+			return "The goal could not be resumed automatically. Resume it, then try starting the team again.";
+		case "GOAL_ARCHIVED":
+			return "Archived goals cannot start a team.";
+		case "GOAL_COMPLETE":
+		case "GOAL_SHELVED":
+		case "GOAL_BLOCKED":
+			return "This goal cannot start a team in its current state.";
+		case "GOAL_SETUP_INCOMPLETE":
+			return "Finish goal setup before starting the team.";
+		case "NOT_TEAM_LEAD":
+			return "Only the goal's team lead or an authorized operator can resume and start this team.";
+		case "TEAM_DISABLED":
+			return "Enable team mode for this goal before starting a team.";
+		case "TEAM_LEAD_UNAVAILABLE":
+			return "The existing team lead is unavailable. Stop the team before starting a replacement.";
+		case "SPEC_REQUIRED":
+			return "Add a goal specification, then try starting the team again.";
+		case "GOAL_NOT_FOUND":
+			return "This goal is no longer available. Refresh and try again.";
+		default:
+			return "The team could not be started. Try again, or refresh if the problem persists.";
+	}
+}
+
 export async function startTeam(goalId: string): Promise<string | null> {
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/team/start`, {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/team/start`, {
 			method: "POST",
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		const data = await res.json();
-		await refreshSessions();
+		if (typeof data?.sessionId !== "string" || !data.sessionId) {
+			throw new Error("The team start request did not return a session.");
+		}
 		return data.sessionId;
 	} catch (err) {
-		const { message, code, stack } = errorDetails(err);
-		showConnectionError("Failed to start team", message, { code, stack });
+		const code = errorDetails(err).code ?? "TEAM_START_FAILED";
+		// The server error can include implementation details (including a stack).
+		// Keep the actionable code, but never expose those details in this user flow.
+		void showConnectionError("Failed to start team", startTeamFailureMessage(code), { code });
 		return null;
+	} finally {
+		// Resume can persist before later team setup fails. Refresh on both paths so
+		// every surface reflects that committed lifecycle change without a reload.
+		try {
+			await refreshSessions();
+		} catch (err) {
+			console.warn("[start-team] Failed to refresh goals and sessions", err);
+		}
 	}
 }
 
@@ -2111,6 +2501,8 @@ export interface VerifyStep {
 	optionalLabel?: string;
 	role?: string;
 	description?: string;
+	/** Static workflow-authored Markdown sent to the team lead only when this step fails. */
+	failureGuidance?: string;
 	/** Structural reference: which component to run from (Phase 2). */
 	component?: string;
 	/** Structural reference: which command on that component to invoke (Phase 2). */

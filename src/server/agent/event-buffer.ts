@@ -7,28 +7,56 @@ export interface BufferedEvent {
 	event: unknown;
 }
 
-/** Circular buffer of recent agent events for reconnection catch-up. */
+interface RetainedEvent {
+	entry: BufferedEvent;
+	/** Cached UTF-8 byte length of the entry's serialized wire shape. */
+	bytes: number;
+}
+
+/** Recent agent events for reconnection catch-up, bounded by count and bytes. */
 export class EventBuffer {
 	/** Floor sentinel reserved for snapshot ordering. All snapshot `_order`
 	 *  values are strictly less than every live `seq` (which starts at 1).
 	 *  See docs/design/unified-message-ordering-reducer.md §3.2. */
 	static readonly SNAPSHOT_ORDER_FLOOR = -1_000_000_000;
 
-	private buffer: BufferedEvent[] = [];
-	private maxSize: number;
+	/** Match the existing 2 MiB resume replay budget: retaining more cannot be
+	 *  replayed and only increases old-generation heap pressure. */
+	static readonly DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+
+	private buffer: RetainedEvent[] = [];
+	private readonly maxSize: number;
+	private readonly byteLimit: number;
+	private bytesRetained = 0;
+	/** Highest assigned seq that is intentionally not retained. A client whose
+	 *  cursor predates this seq must recover through `resume_gap`/snapshot. */
+	private lastUnretainedSeq = 0;
 	private nextSeq = 1;
 
-	constructor(maxSize = 1000) {
-		this.maxSize = maxSize;
+	constructor(maxSize = 1000, maxBytes = EventBuffer.DEFAULT_MAX_BYTES) {
+		this.maxSize = Number.isFinite(maxSize) ? Math.max(0, Math.floor(maxSize)) : 0;
+		this.byteLimit = Number.isFinite(maxBytes) ? Math.max(0, Math.floor(maxBytes)) : 0;
 	}
 
 	/** Append an event, assigning it a monotonic `seq` and wall-clock `ts`.
-	 *  Returns the stored entry so callers can attach seq/ts to the broadcast. */
+	 *  Returns the entry so callers can attach seq/ts to the broadcast, even if
+	 *  it is too large to retain. An oversized/unserializable event clears the
+	 *  retained window so canResumeFrom() cannot claim a replay across its gap. */
 	push(event: unknown): BufferedEvent {
 		const entry: BufferedEvent = { seq: this.nextSeq++, ts: Date.now(), event };
-		this.buffer.push(entry);
-		if (this.buffer.length > this.maxSize) {
-			this.buffer.shift();
+		const bytes = this.estimateSerializedBytes(entry);
+
+		if (bytes > this.byteLimit || this.maxSize === 0) {
+			this.dropAllRetained();
+			this.lastUnretainedSeq = entry.seq;
+			return entry;
+		}
+
+		this.buffer.push({ entry, bytes });
+		this.bytesRetained += bytes;
+		while (this.buffer.length > this.maxSize || this.bytesRetained > this.byteLimit) {
+			const evicted = this.buffer.shift();
+			if (evicted) this.bytesRetained -= evicted.bytes;
 		}
 		return entry;
 	}
@@ -39,12 +67,14 @@ export class EventBuffer {
 	 *  Stamps a monotonic `seq` and wall-clock `ts` without touching the ring.
 	 *  See docs/design/unified-message-ordering-reducer.md §3.1. */
 	pushFrame(): { seq: number; ts: number } {
-		return { seq: this.nextSeq++, ts: Date.now() };
+		const frame = { seq: this.nextSeq++, ts: Date.now() };
+		this.lastUnretainedSeq = frame.seq;
+		return frame;
 	}
 
 	/** All buffered entries, oldest first. */
 	getAll(): BufferedEvent[] {
-		return [...this.buffer];
+		return this.buffer.map(retained => retained.entry);
 	}
 
 	/** Return entries whose `seq > fromSeq`, preserving buffer order. */
@@ -52,11 +82,11 @@ export class EventBuffer {
 		if (this.buffer.length === 0) return [];
 		// If fromSeq is older than our oldest retained - 1, we cannot resume.
 		// Callers should check canResumeFrom first; we return all as a best-effort.
-		const first = this.buffer[0].seq;
-		if (fromSeq < first - 1) return [...this.buffer];
+		const first = this.buffer[0].entry.seq;
+		if (fromSeq < first - 1) return this.getAll();
 		const out: BufferedEvent[] = [];
-		for (const e of this.buffer) {
-			if (e.seq > fromSeq) out.push(e);
+		for (const retained of this.buffer) {
+			if (retained.entry.seq > fromSeq) out.push(retained.entry);
 		}
 		return out;
 	}
@@ -64,16 +94,20 @@ export class EventBuffer {
 	/** True if `fromSeq` falls inside the retained window (i.e. we still hold
 	 *  `fromSeq + 1`, or the buffer is empty meaning no events were missed). */
 	canResumeFrom(fromSeq: number): boolean {
+		// A pushFrame/oversized event after the client's cursor is an explicit hole:
+		// it is recoverable only from the authoritative snapshot path.
+		if (fromSeq < this.lastUnretainedSeq) return false;
 		// Empty buffer: resume is only safe if the client is already caught up
 		// (fromSeq === lastSeq). Otherwise events were evicted or never seen.
 		if (this.buffer.length === 0) return fromSeq === this.lastSeq;
 		// Non-empty: we need at least seq === fromSeq + 1 retained,
 		// i.e. the oldest retained entry has seq <= fromSeq + 1.
-		return this.buffer[0].seq <= fromSeq + 1;
+		return this.buffer[0].entry.seq <= fromSeq + 1;
 	}
 
 	clear(): void {
-		this.buffer = [];
+		this.dropAllRetained();
+		this.lastUnretainedSeq = 0;
 		this.nextSeq = 1;
 	}
 
@@ -95,8 +129,33 @@ export class EventBuffer {
 		return this.buffer.length;
 	}
 
+	/** Estimated serialized UTF-8 bytes currently retained. */
+	get retainedBytes(): number {
+		return this.bytesRetained;
+	}
+
+	/** Configured serialized-byte retention budget. */
+	get maxBytes(): number {
+		return this.byteLimit;
+	}
+
 	/** Highest seq assigned so far (0 if nothing has been pushed). */
 	get lastSeq(): number {
 		return this.nextSeq - 1;
+	}
+
+	private estimateSerializedBytes(entry: BufferedEvent): number {
+		try {
+			return Buffer.byteLength(JSON.stringify(entry), "utf8");
+		} catch {
+			// Circular values and BigInts cannot be replayed as JSON. Treat them as
+			// oversized so they do not make the retained window falsely resumable.
+			return Number.POSITIVE_INFINITY;
+		}
+	}
+
+	private dropAllRetained(): void {
+		this.buffer = [];
+		this.bytesRetained = 0;
 	}
 }

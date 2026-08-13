@@ -492,8 +492,8 @@ place.
 verbs with no dependency on the subgoal feature. Pause:
 
 - soft-aborts the subtree's sessions and cancels in-flight verifications,
-- makes every spawn path return `409 GOAL_PAUSED`,
-- rejects prompts to sessions on the paused goal (see below), and
+- makes every spawn path return `409 GOAL_PAUSED`, except an authorized explicit `POST /api/goals/:id/team/start`, which composes the canonical single-goal resume lifecycle without resuming descendants; scheduler-owned `blocked` remains scheduler-owned, and Bearer or agent-tool callers cannot use the exception (see [Explicit start lifecycle](rest-api.md#explicit-start-lifecycle)),
+- rejects prompts to sessions on the paused goal with `409 GOAL_PAUSED` (see below), and
 - keeps the pause durable across gateway restart.
 
 Restart restores persisted active teams and re-subscribes their existing leads.

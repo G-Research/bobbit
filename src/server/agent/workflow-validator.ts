@@ -37,6 +37,7 @@ export interface ValidatorVerifyStep {
 	phase?: number;
 	expect?: string;
 	description?: string;
+	failureGuidance?: string;
 	subgoal?: unknown;
 	[k: string]: unknown;
 }
@@ -313,7 +314,7 @@ export function validateWorkflowDefinition(
 			const prefix = `Workflow "${wfId}", gate "${gateId}", step ${stepIndex + 1}`;
 			if (!isNonEmptyString(stepValue.name)) fail(`${prefix}: step must have a non-empty name`);
 			const type = stepValue.type === undefined ? "command" : stepValue.type;
-			for (const stringField of ["run", "prompt", "role", "label", "optionalLabel", "description", "component", "command"] as const) {
+			for (const stringField of ["run", "prompt", "role", "label", "optionalLabel", "description", "failureGuidance", "component", "command"] as const) {
 				if (stepValue[stringField] !== undefined && typeof stepValue[stringField] !== "string") fail(`${prefix}: ${stringField} must be a string`);
 			}
 			if (stepValue.optional !== undefined && typeof stepValue.optional !== "boolean") fail(`${prefix}: optional must be a boolean`);

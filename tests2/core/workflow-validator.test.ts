@@ -127,7 +127,14 @@ describe("workflow-validator — positive cases", () => {
 			gates: [{
 				id: "verify",
 				name: "Verify",
-				verify: [{ name: "Legacy test", type: "command", component: "legacy", command: "test", timeout: 1 }],
+				verify: [{
+					name: "Legacy test",
+					type: "command",
+					component: "legacy",
+					command: "test",
+					timeout: 1,
+					failureGuidance: "Inspect the retained log.\n\nThen retry the focused test.",
+				}],
 			}],
 		};
 
@@ -412,6 +419,30 @@ describe("workflow-validator — negative cases", () => {
 		assert.match(errs[0].message, /unknown step type "wat"/);
 		// human-signoff must appear in the accepted-set hint so authors know about it.
 		assert.match(errs[0].message, /human-signoff/);
+	});
+
+	it("accepts string failure guidance and rejects malformed non-string guidance", () => {
+		const valid: ValidatorWorkflow = {
+			id: "guided",
+			name: "Guided",
+			gates: [{
+				id: "verify",
+				name: "Verify",
+				verify: [{
+					name: "Command",
+					type: "command",
+					run: "true",
+					failureGuidance: "Inspect the retained log.\n\nRetry only this check.",
+				}],
+			}],
+		};
+		assert.deepEqual(validateWorkflow(valid, components), []);
+
+		const malformed = structuredClone(valid) as unknown as Record<string, any>;
+		malformed.gates[0].verify[0].failureGuidance = ["not", "markdown"];
+		const errs = validateWorkflow(malformed as ValidatorWorkflow, components);
+		assert.ok(errs.some(error => /failureGuidance must be a string/.test(error.message)),
+			`expected failureGuidance string error, got: ${errs.map(error => error.message).join("; ")}`);
 	});
 
 	it.each([

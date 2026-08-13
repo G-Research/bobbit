@@ -4,15 +4,15 @@
 
 The e2e config (`playwright-e2e.config.ts`) defines three Playwright projects:
 
-- **`api`** — In-process gateway, no browser. Runs API E2E specs. Workers: 4,
+- **`api`** — In-process gateway, no browser. Runs API E2E specs. Workers: 2,
   `fullyParallel: true`.
 - **`api-realpush`** — Same as `api` but with real `git push --delete`
   (no `BOBBIT_TEST_NO_PUSH=1`). Owns `goal-archive-branch-cleanup`.
 - **`browser`** — In-process gateway + Chromium UI. Runs UI specs. Workers: 3,
   `fullyParallel: false`.
 
-The committed config runs `retries: 3` everywhere (top-level) — see
-[Retries: deliberate margin for concurrent suites](#retries-deliberate-margin-for-concurrent-suites).
+The committed config defaults to `retries: 3` — see
+[Retries: developer/workflow protection](#retries-developerworkflow-protection).
 
 ## No quarantine, no skip-for-flake
 
@@ -29,34 +29,26 @@ these, file a goal and stop. The top-level `retries: 3` (below) is a
 resilience margin for concurrent runs, **not** a licence to leave a
 first-attempt flake un-root-caused.
 
-## Retries: deliberate margin for concurrent suites
+## Retries: developer/workflow protection
 
-The committed config runs `retries: 3` everywhere, and this is the
-deliberate current policy — **not** temporary debt. The rationale: the
-dev laptop must support running up to ~4 e2e suites **concurrently**
-(overlapping worktrees / parallel goals). Under that mutual contention a
-suite can hit a transient cross-suite race (CPU/FS pressure, a
-goal-assistant cold-start timeout) that has nothing to do with a real
-bug. `retries: 3` absorbs those transients so one suite's blip doesn't
-red-light an otherwise-green concurrent run.
+The committed `retries: 3` default protects ordinary developer and workflow
+runs under concurrent load. It is a productivity margin, not evidence that a
+failure is acceptable or a substitute for root-causing a first-attempt flake.
 
-The deterministic-wait hardening (see `docs/testing-strategy.md` →
-*Flake hardening*) keeps the **first-attempt** failure rate low, so
-retries are a margin, not a crutch. Measured evidence:
+Qualification uses the repository wrapper, not a direct Playwright command:
 
-- A single retries-free full suite runs ~6.5–7.0 min wall
-  (~1270–1279 passed, ~6 skipped).
-- **Two** full suites run concurrently at the committed `retries: 3`
-  both passed (exit 0): one with 0 failed / 1 flaky-retried, the other
-  0 failed / 2 flaky-retried; ~9.5–10.0 min each under mutual
-  contention. So under concurrency the suite absorbs ~1–2 transient
-  flakes each with 0 hard failures.
+```bash
+BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
+```
 
-Retries are **not** being reduced to 0, and worker counts are **not**
-being raised to chase a sub-5-min single-suite time: raising parallelism
-would manufacture the very contention this budget avoids and hurt
-concurrent-suite robustness. A sub-5-min single-suite wall was therefore
-not pursued and is explicitly out of scope under this policy.
+The exact flag makes every retry-capable E2E group retry-free; Group A has no
+retry control. A qualification record must report zero observed retries for
+this invocation. Do not use a default-retry or retried run as qualification
+evidence.
+
+Worker counts and the developer default are not tuned to chase a shorter
+single-suite wall: additional parallelism creates the contention this policy
+is intended to absorb.
 
 ## Profiler (`BOBBIT_E2E_PROFILE=1`)
 
