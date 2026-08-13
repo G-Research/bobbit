@@ -216,7 +216,7 @@ async function rollbackRuntimeTuple(
 	});
 	await rpcClient.setThinkingLevel(target.thinkingLevel);
 	const rolledBack = await readRuntimeModelBridgeSnapshot(rpcClient);
-	if (!tuplesEqual(rolledBack, target)) {
+	if (!rolledBack || !tuplesEqual(rolledBack, target)) {
 		throw new Error(
 			`runtime selection rollback read-back mismatch: expected ${target.provider}/${target.id}/${target.thinkingLevel}, ` +
 			`agent reports ${rolledBack?.provider ?? "?"}/${rolledBack?.id ?? "?"}/${rolledBack?.thinkingLevel ?? "?"}`,
