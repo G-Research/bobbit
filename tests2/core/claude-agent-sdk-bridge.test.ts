@@ -379,6 +379,40 @@ describe("ClaudeAgentSdkBridge", () => {
 		await fixture.bridge.stop();
 	});
 
+	it("uses a fixed failure detail for provider-controlled child terminal errors", async () => {
+		const fixture = bridgeFixture();
+		const query = await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const providerError = "Authorization: Bearer sensitive-bearer-token sk-ant-api03-sensitive-key /home/node/.claude/credentials.json";
+
+		const projected = (fixture.bridge as any).subagentProjectionEvent({
+			type: "agent_end",
+			parentToolUseId: "agent-use-1",
+			claudeSdk: { terminal: { error: providerError } },
+		}, { uuid: "child-terminal", parent_agent_id: "child-1", error: providerError, subtype: "error" });
+		expect(projected).toMatchObject({
+			claudeSdk: { terminal: { terminalReason: "error", error: "Subagent failed" } },
+		});
+
+		query.emit({
+			type: "result", parent_tool_use_id: "agent-use-1", parent_agent_id: "child-1",
+			error: providerError, subtype: "error",
+		});
+		await flushMicrotasks();
+
+		const frames = observed.filter(event => event.type === "claude_sdk_subagent_work");
+		expect(frames).toEqual([expect.objectContaining({
+			parentToolUseId: "agent-use-1", kind: "terminal",
+			terminal: { phase: "error", error: "Subagent failed" },
+		})]);
+		const payload = JSON.stringify({ projected, frames });
+		for (const sentinel of ["Authorization", "Bearer", "sk-ant", "/home/node/.claude/credentials.json"]) {
+			expect(payload).not.toContain(sentinel);
+		}
+		await fixture.bridge.stop();
+	});
+
 	it("terminal cleanup aborts a live verified child once before disposing its observer", async () => {
 		const { policy, surface } = subagentSurfaceFixture();
 		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });

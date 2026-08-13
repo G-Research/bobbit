@@ -103,12 +103,13 @@ describe("Claude SDK embedded subagent card", () => {
 			agentId: "sdk-child-1",
 			displayLabel: "Backend parity reviewer",
 			state: "failed",
-			failureReason: "Child tool failed",
+			failureReason: "Subagent failed",
 			orderedMessages: [{ type: "toolCall", id: "dangling", name: "grep", arguments: { pattern: "x" } }],
 		}];
 		await settle(host);
 		expect(toggle.getAttribute("aria-expanded")).toBe("false");
-		expect(card.querySelector('[role="alert"]')?.textContent).toContain("Child tool failed");
+		expect(card.querySelector('[role="alert"]')?.textContent).toContain("Subagent failed");
+		expect(card.textContent).not.toMatch(/Authorization|Bearer|sk-ant|\/home\/node\/\.claude\/credentials\.json/);
 		expect(card.querySelector('[data-tool-name="grep"]')?.textContent).toContain("Tool call ended before a result was received.");
 	});
 });
