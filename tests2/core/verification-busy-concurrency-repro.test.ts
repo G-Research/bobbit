@@ -264,6 +264,39 @@ describe("verifier busy concurrency reproductions", () => {
 		assert.doesNotMatch(`${alphaResult.output}\n${betaResult.output}`, /Agent is already processing/i);
 	});
 
+	it("cancels one exact queued receipt when dispatch admission times out", async () => {
+		const stateDir = makeStateDir("verifier-busy-dispatch-timeout-");
+		const manager = makeSessionManager(stateDir);
+		const transport = new BusyPiTransport();
+		const goalId = "goal-busy-dispatch-timeout";
+		const { harness } = makeHarness([goalId], stateDir, manager);
+		const session = putReviewer(manager, transport, "reviewer-dispatch-timeout", goalId);
+		session.status = "streaming";
+		session.promptQueue.enqueue("ordinary durable queue row");
+
+		const dispatch = harness.dispatchVerifierPrompt(session, "timed-out verifier receipt", {
+			goalId,
+			gateId: "review-gate",
+			signalId: "signal-dispatch-timeout",
+			stepName: "Busy review",
+			verifierKind: "llm-review",
+			promptKind: "reminder",
+		});
+		await eventually(
+			() => session.promptQueue.toArray().some((row: any) => row.text === "timed-out verifier receipt"),
+			"VERIFIER_BUSY_CONCURRENCY_REPRO: receipt must remain durable while the reviewer streams",
+		);
+		manager._testClock.advance(60_000);
+		await assert.rejects(dispatch, /Verifier prompt .* did not dispatch within 60000ms/);
+
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.text),
+			["ordinary durable queue row"],
+			"VERIFIER_BUSY_CONCURRENCY_REPRO: timeout cancellation removes only the verifier-owned row",
+		);
+		assert.equal(transport.commands.length, 0, "the queued receipt must not dispatch after its owner timed out");
+	});
+
 	it("terminates a queued followUp on cancel/re-signal and fences its late verdict from the replacement", async () => {
 		const stateDir = makeStateDir("verifier-busy-resignal-");
 		const manager = makeSessionManager(stateDir);
