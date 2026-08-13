@@ -63,11 +63,16 @@ describe("Claude Agent SDK sandbox spawn", () => {
 			containerId: "sandbox-current",
 			cwd: "/workspace-wt/team/session",
 			env: {
+			HOME: "/home/node",
+			PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			TMPDIR: "/tmp",
+			LANG: "C.UTF-8",
 			BOBBIT_SESSION_ID: "session-1",
 			BOBBIT_TOKEN: "scoped-gateway-token",
 			BOBBIT_GATEWAY_URL: "http://gateway.test",
 			CLAUDE_CODE_OAUTH_TOKEN: "oauth-access-token",
 			CLAUDE_CONFIG_DIR: "/bobbit-state/claude-agent-sdk/session-1",
+			CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
 			UNDEFINED_VALUE: undefined,
 			"invalid-name": "ignored",
 		},
@@ -96,11 +101,16 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		expect(options).toMatchObject({ stdio: ["pipe", "pipe", "pipe"] });
 		expect(args).toEqual([
 			"exec", "-i",
+			"-e", "HOME=/home/node",
+			"-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"-e", "TMPDIR=/tmp",
+			"-e", "LANG=C.UTF-8",
 			"-e", "BOBBIT_SESSION_ID=session-1",
 			"-e", "BOBBIT_TOKEN=scoped-gateway-token",
 			"-e", "BOBBIT_GATEWAY_URL=http://gateway.test",
 			"-e", "CLAUDE_CODE_OAUTH_TOKEN=oauth-access-token",
 			"-e", "CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/session-1",
+			"-e", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1",
 			"-e", "CLAUDE_AGENT_SDK_CLIENT_APP=bobbit-sdk",
 			"-e", "CLAUDE_AGENT_SDK_VERSION=0.3.222",
 			"-e", "CLAUDE_CODE_ENTRYPOINT=sdk",
@@ -131,6 +141,7 @@ describe("Claude Agent SDK sandbox spawn", () => {
 			BOBBIT_SESSION_SECRET: "session-secret",
 			CLAUDE_CONFIG_DIR: "/bobbit-state/claude-agent-sdk/session-closed",
 			CLAUDE_AGENT_SDK_CLIENT_APP: "bobbit",
+			CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
 		});
 		expect(JSON.stringify(env)).not.toContain("host-key");
 		expect(JSON.stringify(env)).not.toContain("gateway-token");
@@ -164,6 +175,9 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		const spawn = vi.fn(() => dockerChild());
 		expect(() => spawnDockerExec({
 			containerId: "sandbox", cwd: "/host/project", env: {}, command: ["command"], spawn: spawn as any,
+		})).toThrow("Docker sandbox working directory is invalid");
+		expect(() => spawnDockerExec({
+			containerId: "sandbox", cwd: "/workspace/../../host", env: {}, command: ["command"], spawn: spawn as any,
 		})).toThrow("Docker sandbox working directory is invalid");
 		expect(spawn).not.toHaveBeenCalled();
 

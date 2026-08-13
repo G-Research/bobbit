@@ -16,7 +16,12 @@ export interface DockerExecCommand {
 
 /** Docker accepts no host paths here: setup must have translated this first. */
 export function isSandboxContainerCwd(cwd: string | undefined): cwd is string {
-	return typeof cwd === "string" && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+	if (typeof cwd !== "string") return false;
+	const segments = cwd.split("/");
+	if (segments[0] !== "" || (segments[1] !== "workspace" && segments[1] !== "workspace-wt")) return false;
+	// Do not normalize persisted paths: traversal or duplicate separators could
+	// otherwise turn a hostile container CWD into an apparently safe one.
+	return segments.slice(2).every(segment => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
 function validEnvName(name: string): boolean {

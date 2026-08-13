@@ -96,19 +96,36 @@ export async function readSdkSessionMessages(
 }
 
 const execFileAsync = promisify(execFile);
-const MAX_SANDBOX_SDK_ACCESS_BYTES = 1_000_000;
+/** Each container invocation serializes at most one SDK API page. */
+export const SANDBOX_SDK_HISTORY_PAGE_SIZE = 100;
+export const MAX_SANDBOX_SDK_HISTORY_MESSAGES = 1_000;
+export const MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES = 16 * 1024 * 1024;
 const SANDBOX_SDK_READER = `
-const [operation, sessionId, cwd] = process.argv.slice(1);
+const [operation, sessionId, cwd, limitText, offsetText, includeSystemText] = process.argv.slice(1);
 const sdk = await import("@anthropic-ai/claude-agent-sdk");
+const limit = Number(limitText);
+const offset = Number(offsetText);
+const options = { dir: cwd, ...(operation === "messages" ? {
+  limit,
+  offset,
+  ...(includeSystemText === "true" ? { includeSystemMessages: true } : {}),
+} : {}) };
 const value = operation === "info"
-  ? await sdk.getSessionInfo(sessionId, { dir: cwd })
-  : await sdk.getSessionMessages(sessionId, { dir: cwd });
+  ? await sdk.getSessionInfo(sessionId, options)
+  : await sdk.getSessionMessages(sessionId, options);
 process.stdout.write(JSON.stringify(value ?? null));
 `;
+
+function boundedNonNegativeInteger(value: number | undefined, fallback: number): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
 
 /**
  * Read SDK-owned state in the pooled container. This command has no OAuth or
  * gateway environment and only invokes SDK read APIs against the stable mount.
+ * History is deliberately fetched page-by-page so neither the container nor the
+ * host serializes an unbounded transcript in one operation.
  */
 export function createSandboxClaudeAgentSdkSessionAccess(input: {
 	containerId: string;
@@ -122,28 +139,56 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 	const dir = `/bobbit-state/claude-agent-sdk/${input.bobbitSessionId}`;
 	const execute = input.exec ?? (async (args: string[]) => {
 		const { stdout } = await execFileAsync("docker", args, {
-			maxBuffer: MAX_SANDBOX_SDK_ACCESS_BYTES,
+			maxBuffer: MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES,
 			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 		});
 		return stdout;
 	});
-	const read = async <T>(operation: "info" | "messages", sessionId: string): Promise<T> => {
+	const read = async <T>(request: {
+		operation: "info" | "messages";
+		sessionId: string;
+		limit?: number;
+		offset?: number;
+		includeSystemMessages?: boolean;
+	}): Promise<T> => {
 		const output = await execute([
 			"exec", "-i", "-w", input.cwd,
 			"-e", "HOME=/home/node", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"-e", `CLAUDE_CONFIG_DIR=${dir}`,
-			input.containerId, "node", "--input-type=module", "-e", SANDBOX_SDK_READER, operation, sessionId, input.cwd,
+			input.containerId, "node", "--input-type=module", "-e", SANDBOX_SDK_READER,
+			request.operation, request.sessionId, input.cwd,
+			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
 		]);
-		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_ACCESS_BYTES) throw new Error("sandbox SDK response exceeds limit");
+		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("sandbox SDK response page exceeds limit");
 		try { return JSON.parse(output) as T; }
 		catch { throw new Error("sandbox SDK returned invalid JSON"); }
 	};
 	return {
-		getSessionInfo: async (sessionId) => (await read<SdkSessionInfo | null>("info", sessionId)) ?? undefined,
-		getSessionMessages: async (sessionId) => {
-			const messages = await read<unknown>("messages", sessionId);
-			if (!Array.isArray(messages)) throw new Error("sandbox SDK messages are invalid");
-			return messages as SdkSessionMessage[];
+		getSessionInfo: async (sessionId) => (await read<SdkSessionInfo | null>({ operation: "info", sessionId })) ?? undefined,
+		getSessionMessages: async (sessionId, options) => {
+			const requested = boundedNonNegativeInteger(options?.limit, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
+			const target = Math.min(requested, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
+			let offset = boundedNonNegativeInteger(options?.offset, 0);
+			let bytes = 0;
+			const messages: SdkSessionMessage[] = [];
+			while (messages.length < target) {
+				const limit = Math.min(SANDBOX_SDK_HISTORY_PAGE_SIZE, target - messages.length);
+				const page = await read<unknown>({
+					operation: "messages", sessionId, limit, offset,
+					includeSystemMessages: options?.includeSystemMessages,
+				});
+				if (!Array.isArray(page)) throw new Error("sandbox SDK messages are invalid");
+				if (page.length > limit) throw new Error("sandbox SDK returned more messages than requested");
+				const pageBytes = Buffer.byteLength(JSON.stringify(page));
+				if (bytes + pageBytes > MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES) {
+					throw new Error("sandbox SDK history exceeds cumulative byte limit");
+				}
+				bytes += pageBytes;
+				messages.push(...page as SdkSessionMessage[]);
+				if (page.length < limit) break;
+				offset += page.length;
+			}
+			return messages;
 		},
 	};
 }

@@ -236,6 +236,74 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
 	});
 
+	it("keeps shared Pi auth byte-identical while SDK wiring uses an isolated OAuth descriptor", async () => {
+		const hostAccess = "sdk-current-access";
+		useHostAuth(completePiOAuthCredential(hostAccess, Date.now() + 60_000));
+		let entries: Array<{ key: string; enabled: boolean; value?: string }> = [
+			{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true },
+		];
+		const piAuthPath = sandboxAgentAuthPath("project-sdk");
+		mkdirSync(path.dirname(piAuthPath), { recursive: true });
+		const piAuth = JSON.stringify({ anthropic: { type: "oauth", access: "pi-access", refresh: "pi-refresh", expires: 2 }, "openai-codex": { type: "oauth", access: "pi-codex" } });
+		writeFileSync(piAuthPath, piAuth, "utf8");
+		const hasClaudeAgentSdkCapability = vi.fn(async () => true);
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => entries,
+		};
+		manager.sandboxTokenStore = null;
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({ getContainerId: async () => "container-sdk", hasClaudeAgentSdkCapability }),
+		};
+		const bridgeOptions: any = {
+			runtime: "claude-agent-sdk",
+			cwd: "/workspace-wt/sdk",
+			env: { BOBBIT_SESSION_SECRET: "session-secret", BOBBIT_GOAL_ID: "goal-sdk" },
+			sandboxCredentials: { SHOULD_BE_REMOVED: "legacy-generic-secret" },
+		};
+
+		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-sdk", { projectId: "project-sdk" }), true);
+		assert.equal(hasClaudeAgentSdkCapability.mock.calls.length, 1);
+		assert.equal("sandboxCredentials" in bridgeOptions, false);
+		assert.deepEqual(bridgeOptions.claudeSdkSandboxLaunch, {
+			containerId: "container-sdk",
+			cwd: "/workspace-wt/sdk",
+			sessionId: "session-sdk",
+			sessionSecret: "session-secret",
+			goalId: "goal-sdk",
+			gatewayToken: "a".repeat(64),
+			gatewayUrl: "http://127.0.0.1:3001",
+			oauthAccessToken: hostAccess,
+		});
+		assert.equal(readFileSync(piAuthPath, "utf8"), piAuth, "SDK wiring must not rewrite Pi's shared auth state");
+
+		entries = [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true, value: "project-credential" }];
+		await assert.rejects(
+			() => manager.applySandboxWiring({ runtime: "claude-agent-sdk", cwd: "/workspace", env: {} }, "session-sdk-denied", { projectId: "project-sdk" }),
+			(error: any) => error?.code === "CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+		);
+		assert.equal(readFileSync(piAuthPath, "utf8"), piAuth, "rejected SDK wiring must not mutate Pi auth state");
+	});
+
+	it("maps malformed persisted SDK sandbox CWD history to the unavailable stub", async () => {
+		const manager: any = new SessionManager();
+		manager.sandboxManager = { get: () => ({ getStatus: () => ({ containerId: "container-sdk" }) }) };
+		const deps = manager.sdkSessionAccessDeps({
+			id: "session-invalid-cwd",
+			projectId: "project-sdk",
+			sandboxed: true,
+			cwd: "/workspace/../../host",
+			claudeAgentSdkSessionId: "00000000-0000-4000-8000-000000000021",
+		});
+		await assert.rejects(
+			() => deps.sandboxSdk.getSessionMessages("00000000-0000-4000-8000-000000000021"),
+			(error: any) => error?.code === "CLAUDE_AGENT_SDK_UNAVAILABLE" && /invalid working directory/.test(error.message),
+		);
+	});
+
 	it("leaves non-Anthropic startup untouched and makes API-key tombstone recovery best effort", async () => {
 		useHostAuth({ type: "oauth_rejected", rejected: "a".repeat(64), version: 1 });
 		process.env.ANTHROPIC_API_KEY = "test-api-key";

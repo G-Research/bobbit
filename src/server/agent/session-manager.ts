@@ -26,6 +26,7 @@ import { hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, ty
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
 import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
 import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
+import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
@@ -3207,13 +3208,17 @@ export class SessionManager {
 			} else {
 				bridgeOptions.sandboxCredentials = policy.credentials;
 			}
-			ensureSandboxAgentAuthFile({
-				prefs: this.preferencesStore,
-				includeCodexAuth: policy.sandboxAuthPolicy.includeCodexAuth,
-				includeAnthropicAuth: !sdkRuntime && anthropicOAuthCurrent && policy.includeAnthropicAuth,
-				includeGoogleAuth: policy.sandboxAuthPolicy.includeGoogleAuth,
-				scope: projectId,
-			});
+			// The shared auth.json belongs to Pi. The SDK receives its isolated current
+			// access token through docker exec, so do not rewrite/remove Pi's entries.
+			if (!sdkRuntime) {
+				ensureSandboxAgentAuthFile({
+					prefs: this.preferencesStore,
+					includeCodexAuth: policy.sandboxAuthPolicy.includeCodexAuth,
+					includeAnthropicAuth: anthropicOAuthCurrent && policy.includeAnthropicAuth,
+					includeGoogleAuth: policy.sandboxAuthPolicy.includeGoogleAuth,
+					scope: projectId,
+				});
+			}
 		});
 
 		if (sdkRuntime) {
@@ -7654,6 +7659,11 @@ export class SessionManager {
 		if (persistedRuntime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
 			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: Claude Agent SDK session has no valid resume id");
 		}
+		// Persisted sandbox coordinates are untrusted input. SDK Docker launch must
+		// never normalize a malformed path back to /workspace or run host-local.
+		if (persistedRuntime === "claude-agent-sdk" && ps.sandboxed && !isSandboxContainerCwd(ps.cwd)) {
+			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: sandbox session has an invalid working directory");
+		}
 		const bridgeOptions: SessionBridgeOptions = {
 			cwd: ps.cwd,
 			runtime: persistedRuntime,
@@ -11271,11 +11281,14 @@ export class SessionManager {
 		if (!ps.sandboxed) return base;
 		const sandbox = ps.projectId ? this.sandboxManager?.get(ps.projectId) : undefined;
 		const containerId = sandbox?.getStatus().containerId;
-		if (!containerId) {
+		if (!containerId || !isSandboxContainerCwd(ps.cwd)) {
 			// Do not fall back to a host SDK store for a sandbox-owned transcript.
+			// A malformed persisted cwd must surface through the established SDK
+			// unavailable stub rather than being normalized or treated as empty history.
+			const reason = !containerId ? "sandbox container is unavailable" : "sandbox session has an invalid working directory";
 			return { ...base, sandboxSdk: {
-				getSessionInfo: async () => { throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: sandbox container is unavailable"); },
-				getSessionMessages: async () => { throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: sandbox container is unavailable"); },
+				getSessionInfo: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
+				getSessionMessages: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
 			} };
 		}
 		return {
@@ -11311,7 +11324,11 @@ export class SessionManager {
 					cwd: ps.cwd,
 				}, this.sdkSessionAccessDeps(ps));
 				return this.buildVisibleMessageSnapshot(id, adaptSdkSessionMessages(messages));
-			} catch {
+			} catch (error) {
+				// Sandbox SDK history is authoritative in the container. Returning an
+				// empty snapshot here hides an unavailable container or bounded-reader
+				// failure as a valid empty conversation.
+				if (ps.sandboxed) throw error;
 				return [];
 			}
 		}

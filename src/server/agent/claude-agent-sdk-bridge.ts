@@ -169,6 +169,8 @@ export function buildClaudeAgentSdkEnv(options: Pick<ClaudeAgentSdkBridgeOptions
 			...(launch.sessionSecret ? { BOBBIT_SESSION_SECRET: launch.sessionSecret } : {}),
 			CLAUDE_CONFIG_DIR: `/bobbit-state/claude-agent-sdk/${launch.sessionId}`,
 			CLAUDE_AGENT_SDK_CLIENT_APP: "bobbit",
+			// Keep foreground helpers bounded to one level in the container too.
+			CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
 		};
 	}
 	const env: Record<string, string> = {};
@@ -360,14 +362,14 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				...(sandboxLaunch ? { spawnClaudeCodeProcess: (this.deps.createDockerSpawn ?? createClaudeSdkDockerSpawn)({
 					containerId: sandboxLaunch.containerId,
 					cwd: sandboxLaunch.cwd,
+					// Docker does not inherit the SDK replacement environment. Forward the
+					// complete closed allowlist, then add only this exec's authority.
 					env: {
-						BOBBIT_SESSION_ID: sandboxLaunch.sessionId,
-						BOBBIT_SESSION_SECRET: sandboxLaunch.sessionSecret,
+						...env,
 						BOBBIT_GOAL_ID: sandboxLaunch.goalId,
 						BOBBIT_TOKEN: sandboxLaunch.gatewayToken,
 						BOBBIT_GATEWAY_URL: sandboxLaunch.gatewayUrl,
 						CLAUDE_CODE_OAUTH_TOKEN: sandboxLaunch.oauthAccessToken,
-						CLAUDE_CONFIG_DIR: env.CLAUDE_CONFIG_DIR,
 					},
 					command: ["/usr/local/bin/bobbit-claude-agent-sdk"],
 					logPrefix: "claude-agent-sdk",

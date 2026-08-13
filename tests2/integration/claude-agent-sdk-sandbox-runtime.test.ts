@@ -157,7 +157,15 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		});
 		expect(second.input).toMatchObject({ containerId: "container-worktree", cwd: "/workspace-wt/goal-branch" });
 		expect(first.options.args).toEqual(["--sdk-protocol", "opaque-sdk-argument"]);
-		expect(first.input.env.CLAUDE_CONFIG_DIR).toBe("/bobbit-state/claude-agent-sdk/fresh-session");
+		expect(first.input.env).toMatchObject({
+			HOME: "/home/node",
+			PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			TMPDIR: "/tmp",
+			LANG: "C.UTF-8",
+			CLAUDE_CONFIG_DIR: "/bobbit-state/claude-agent-sdk/fresh-session",
+			CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
+			CLAUDE_CODE_OAUTH_TOKEN: OAUTH,
+		});
 		expect(second.input.env.CLAUDE_CONFIG_DIR).toBe("/bobbit-state/claude-agent-sdk/worktree-session");
 		expect(first.input.env.CLAUDE_CODE_OAUTH_TOKEN).toBe(OAUTH);
 		for (const launch of [first, second]) {
@@ -234,6 +242,26 @@ describe("Claude Agent SDK sandbox runtime", () => {
 			expect(args.join(" ")).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/history-session");
 			expect(args.join(" ")).not.toMatch(/OAUTH|BOBBIT_TOKEN|ANTHROPIC_API_KEY/);
 		}
+	});
+
+	it("pages container history under explicit bounds so ordinary multi-megabyte histories remain readable", async () => {
+		const offsets: number[] = [];
+		const access = createSandboxClaudeAgentSdkSessionAccess({
+			containerId: "container-history-pages",
+			cwd: "/workspace",
+			bobbitSessionId: "history-pages",
+			exec: async (args) => {
+				const operation = args.at(-6);
+				if (operation === "info") return JSON.stringify({ sessionId: SDK_ID, summary: "SDK owned", lastModified: 1 });
+				const offset = Number(args.at(-2));
+				offsets.push(offset);
+				const makeMessage = (index: number) => ({ type: "assistant", uuid: `message-${index}`, session_id: SDK_ID, message: { content: "x".repeat(15_000) }, parent_tool_use_id: null, parent_agent_id: null });
+				return JSON.stringify(offset === 0 ? Array.from({ length: 100 }, (_, index) => makeMessage(index)) : [makeMessage(100)]);
+			},
+		});
+		const messages = await access.getSessionMessages(SDK_ID);
+		expect(messages).toHaveLength(101);
+		expect(offsets).toEqual([0, 100]);
 	});
 
 	it("rebuilds launch authority for replacement and rejects missing image or OAuth before querying", async () => {
