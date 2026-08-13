@@ -20,12 +20,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { GatewayCredentialResolutionError, resolveGatewayCredential } from "./gateway-credential-resolver.js";
-import { publishManagedAigwProvider, removeManagedAigwProvider } from "./aigw-models-json.js";
+import {
+	publishManagedAigwProvider,
+	publishManagedGatewayProvider,
+	removeManagedAigwProvider,
+	removeManagedGatewayProvider,
+} from "./aigw-models-json.js";
 export { GatewayCredentialResolutionError, resolveGatewayCredential };
 import type { PreferencesStore } from "./preferences-store.js";
 
@@ -704,22 +708,33 @@ export async function getGatewayStatus(prefs: PreferencesStore, gateway: ModelGa
 export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<Record<string, GatewayStatus>> {
 	const enabled = getEnabledGateways(prefs);
 	const enabledNames = new Set(enabled.map((gateway) => gateway.name));
-	const data = readModelsJson();
-	if (!data.providers) data.providers = {};
-	const before = { ...data.providers };
+	const modelsPath = getModelsJsonPath();
+	const source = fs.existsSync(modelsPath) ? fs.readFileSync(modelsPath, "utf-8") : undefined;
+	const data = source === undefined ? { providers: {} } : parseJsonc(source) as Record<string, any>;
+	// An all-gateway outage has no publication work and must leave even an
+	// unreadable user file alone. Any attempted publication/removal below goes
+	// through the JSONC ownership helpers and fails closed on that same input.
+	const before = data && typeof data === "object" && data.providers && typeof data.providers === "object"
+		? data.providers as Record<string, unknown>
+		: {};
+	let published = source;
 	// A config change can require a stale managed block to be pruned even while
 	// every live gateway is down. Track that separately from discovery success:
 	// a pure outage leaves the file byte-identical, while an explicit removal,
 	// rename, disable, or URL mismatch is durably published.
 	let prunedProviders = false;
 	for (const name of new Set([...managedProviderNames(prefs), "aigw"])) {
-		if (!enabledNames.has(name) && Object.prototype.hasOwnProperty.call(data.providers, name)) {
-			delete data.providers[name];
-			prunedProviders = true;
+		if (!enabledNames.has(name)) {
+			const result = name === "aigw"
+				? removeManagedAigwProvider(published ?? "{}\n")
+				: removeManagedGatewayProvider(published ?? "{}\n", name);
+			published = result.text;
+			prunedProviders ||= result.removed;
 		}
 	}
 	const status: Record<string, GatewayStatus> = {};
 	const successfulAigwDiscoveries: Array<{ wellKnown: WellKnownConfig | null; models: AigwModel[] }> = [];
+	const successfulPublications: Array<{ gateway: ModelGateway; models: AigwModel[] }> = [];
 	let successfulDiscoveries = 0;
 	for (const gateway of enabled) {
 		try {
@@ -728,18 +743,18 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 			const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
 			const aigwDiscovery = gateway.type === "aigw" ? await discoverAigwResult(gateway.url, credential) : undefined;
 			const models = aigwDiscovery?.models ?? await discoverGatewayModels(gateway, credential);
-			data.providers[gateway.name] = gateway.type === "aigw"
-				? buildAigwProviderBlock(gateway, models, providerApiKey(prefs, gateway))
-				: buildOpenAiCompatibleProviderBlock(gateway, models, providerApiKey(prefs, gateway));
 			if (aigwDiscovery) successfulAigwDiscoveries.push(aigwDiscovery);
+			successfulPublications.push({ gateway, models });
 			successfulDiscoveries++;
 			status[gateway.name] = models.length ? { state: "reachable", models } : { state: "empty", models: [] };
 		} catch (error) {
 			const retained = before[gateway.name];
-			if (hasMatchingRetainedProvider(retained, gateway)) data.providers[gateway.name] = retained;
-			else if (Object.prototype.hasOwnProperty.call(data.providers, gateway.name)) {
-				delete data.providers[gateway.name];
-				prunedProviders = true;
+			if (!hasMatchingRetainedProvider(retained, gateway)) {
+				const result = gateway.name === "aigw"
+					? removeManagedAigwProvider(published ?? "{}\n")
+					: removeManagedGatewayProvider(published ?? "{}\n", gateway.name);
+				published = result.text;
+				prunedProviders ||= result.removed;
 			}
 			const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models) ? retained.models as AigwModel[] : [];
 			status[gateway.name] = {
@@ -749,12 +764,22 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 			};
 		}
 	}
+	// Construct every managed edit before the one atomic write. A user-owned
+	// provider collision therefore leaves both the file and preferences intact.
+	for (const { gateway, models } of successfulPublications) {
+		const provider = gateway.type === "aigw"
+			? buildAigwProviderBlock(gateway, models, providerApiKey(prefs, gateway))
+			: buildOpenAiCompatibleProviderBlock(gateway, models, providerApiKey(prefs, gateway));
+		published = gateway.name === "aigw"
+			? publishManagedAigwProvider(published, provider)
+			: publishManagedGatewayProvider(published, gateway.name, provider);
+	}
 	// A total outage must not rewrite a valid catalog (or accidentally publish an
 	// empty one). It must still publish configuration-driven pruning so removed
 	// or mismatched managed providers cannot remain selectable until recovery.
 	if (enabled.length > 0 && successfulDiscoveries === 0 && !prunedProviders) return status;
 	// Write before publishing managed names or changing DNS/env runtime authority.
-	writeModelsJson(data);
+	writeModelsJsonText(published ?? "{}\n");
 	prefs.set(MANAGED_PROVIDERS_PREF_KEY, [...enabledNames]);
 	for (const discovery of successfulAigwDiscoveries) {
 		if (discovery.wellKnown?.model) seedDefaultModelsFromWellKnown(discovery.wellKnown, discovery.models, prefs);
@@ -762,7 +787,8 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 	if (successfulAigwDiscoveries.length > 0) normalizeAigwModelPreferences(prefs);
 	const aigw = enabled.find((gateway) => gateway.type === "aigw");
 	if (aigw) {
-		replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(data.providers[aigw.name]));
+		const providers = parseJsonc(published ?? "{}")?.providers;
+		replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(providers?.[aigw.name]));
 		setBedrockEnvVars(aigw.url);
 	} else {
 		replaceAigwProviderDnsGuardHosts([]);
@@ -1872,7 +1898,9 @@ export async function discoverOpenAiCompatibleModels(baseUrl: string, authorizat
 	if (!data?.data || !Array.isArray(data.data)) throw new Error("Unexpected response format from /v1/models — expected { data: [...] }");
 	return data.data.map((item: any) => {
 		if (!item || typeof item.id !== "string" || !item.id) throw new Error("Unexpected response format from /v1/models — each model requires a string id");
-		const meta = inferMeta(item.id);
+		// Plain OpenAI-compatible discovery shares the conservative legacy
+		// `/v1/models` metadata defaults, but never its AIGW routing decisions.
+		const meta = inferLegacyAigwMeta(item.id);
 		const context = item.context_length || item.context_window;
 		const maxTokens = item.max_tokens || item.max_completion_tokens;
 		return {

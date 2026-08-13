@@ -13,6 +13,7 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
+import { parse as parseJsonc } from "jsonc-parser";
 // Pi also exposes provider-scoped `Models` with async catalog refresh/auth.
 // Bobbit intentionally stays on these synchronous static-catalog reads: its own
 // registry composes that snapshot with AI Gateway and local-provider discovery,
@@ -27,7 +28,6 @@ import {
 	gatewayHasConfiguredApiKey,
 	getAigwUrl,
 	getGatewayApiKeyExpression,
-	inferMeta,
 	isExclusiveMode,
 	listGateways,
 	resolveGatewayCredential,
@@ -275,7 +275,7 @@ function registryGateways(prefs: PreferencesStore): ModelGateway[] {
  */
 function readRetainedGatewayModels(gateway: ModelGateway, hasCredential: boolean): ApiModel[] {
 	try {
-		const data = JSON.parse(fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8"));
+		const data = parseJsonc(fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8"));
 		const provider = data?.providers?.[gateway.name];
 		const activeUrl = comparableGatewayUrl(gateway);
 		const retainedUrl = comparableAigwUrl(provider?.baseUrl);
@@ -520,19 +520,22 @@ async function assembleModels(
 			);
 			const discovered = await discoverGatewayModels(gateway, credential);
 			for (const model of discovered) {
-				const meta = inferMeta(model.id);
+				// Discovery owns the conservative metadata fallback for generic
+				// gateways. Do not re-infer here: registry assembly must preserve
+				// the exact provider/type contract selected at discovery.
 				results.push({
 					id: model.id,
 					name: model.name,
 					provider: gateway.name,
 					api: "openai-completions",
 					baseUrl: model.baseUrl || comparableGatewayUrl(gateway) || gateway.url,
-					contextWindow: Math.max(meta.contextWindow, model.contextWindow || 0),
-					maxTokens: Math.max(meta.maxTokens, model.maxTokens || 0),
-					reasoning: meta.reasoning || model.reasoning || false,
-					...(meta.thinkingLevelMap ?? model.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap ?? model.thinkingLevelMap } : {}),
-					input: meta.input || ["text"],
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
+					reasoning: model.reasoning,
+					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
+					input: model.input,
 					cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					...(model.compat ? { compat: model.compat } : {}),
 					authenticated: true,
 				});
 			}

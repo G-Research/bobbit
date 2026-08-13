@@ -166,7 +166,10 @@ describe("named gateway validation and migration", () => {
 		prefs.set("_managedGatewayProviders", ["removed-gateway"]);
 		const file = path.join(dir, "models.json");
 		fs.writeFileSync(file, JSON.stringify({ providers: {
-			"removed-gateway": { baseUrl: "http://127.0.0.1:9999/v1", models: [{ id: "stale" }] },
+			"removed-gateway": {
+				"x-bobbit-managed": { kind: "aigw-publication", version: 1 },
+				baseUrl: "http://127.0.0.1:9999/v1", models: [{ id: "stale" }],
+			},
 			foreign: { baseUrl: "https://example.test/v1", models: [{ id: "untouched" }] },
 		} }, null, 2));
 		const before = fs.readFileSync(file, "utf8");
@@ -202,7 +205,7 @@ describe("named gateway validation and migration", () => {
 
 	it("leaves existing single-AIGW models.json bytes unchanged through migration", () => {
 		const prefs = new PreferencesStore(path.join(dir, "state"));
-		writeAigwModelsJson("http://localhost:1111/v1", [{ id: "qwen", name: "Qwen", api: "openai-completions", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 2048 }]);
+		writeAigwModelsJson("http://localhost:1111/v1", [{ id: "qwen", name: "Qwen", api: "openai-completions", baseUrl: "http://localhost:1111/v1", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 2048 }]);
 		const file = path.join(dir, "models.json");
 		const before = fs.readFileSync(file, "utf8");
 		prefs.set("aigw.url", "http://localhost:1111/v1");

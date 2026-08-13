@@ -46,21 +46,23 @@ describe("authoritative metadata retirement production boundary", () => {
 		}
 	});
 
-	it("allows model-family inference only at the legacy /v1/models boundary", () => {
+	it("allows model-family inference only at unauthoritative /v1/models discovery boundaries", () => {
 		const references = productionSources().flatMap(({ file, source }) =>
 			[...source.matchAll(/inferLegacyAigwMeta\s*\(/g)].map((match) => ({ file, index: match.index })),
 		);
-		assert.equal(references.length, 2, "expected exactly one declaration and one legacy fallback call");
+		assert.equal(references.length, 3, "expected one declaration and one fallback call for each /v1/models discovery path");
 		assert.deepEqual(
 			[...new Set(references.map((reference) => reference.file))],
 			["src/server/agent/aigw-manager.ts"],
-			"no direct-Pi, well-known, custom, state-frame, or thinking path may infer model-family metadata",
+			"no direct-Pi, well-known, custom, state-frame, registry, or thinking path may infer model-family metadata",
 		);
 
 		const source = fs.readFileSync(AIGW_MANAGER, "utf8");
 		const legacyRequest = source.indexOf("const modelsUrl =");
-		assert.ok(legacyRequest >= 0, "legacy /v1/models discovery boundary should remain explicit");
-		assert.ok(references[1].index > legacyRequest, "the sole call must remain after legacy /v1/models discovery begins");
+		const genericRequest = source.indexOf("export async function discoverOpenAiCompatibleModels");
+		assert.ok(legacyRequest >= 0 && genericRequest >= 0, "both unauthoritative /v1/models discovery boundaries should remain explicit");
+		assert.ok(references[1].index > legacyRequest, "the AIGW fallback call must follow its /v1/models request");
+		assert.ok(references[2].index > genericRequest, "the generic fallback call must stay within generic discovery");
 		const wellKnown = source.slice(source.indexOf("export function translateWellKnown"), legacyRequest);
 		assert.equal(
 			/inferLegacyAigwMeta\s*\(/.test(wellKnown),
