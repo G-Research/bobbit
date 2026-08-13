@@ -260,6 +260,46 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		}
 	});
 
+	it("publishes lifecycle records only for admitted entries and terminalizes live children once", () => {
+		const { policy } = policyFixture();
+		const events: any[] = [];
+		const unsubscribe = policy.subscribe((event: unknown) => events.push(event));
+		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
+
+		// Invalid/unadmitted hooks never create an observable identity.
+		expect(policy.onStart(child)).toBe(false);
+		policy.onStop(child);
+		expect(events).toEqual([]);
+
+		expect(policy.admit("Agent", {
+			subagent_type: child.agent_type, prompt: "Inspect this change", run_in_background: false,
+		}, { toolUseId: "agent-use-1", permissionMode: "default" })).toBe(true);
+		expect(policy.onStart(child)).toBe(true);
+		expect(events).toEqual([expect.objectContaining({
+			kind: "start",
+			entry: expect.objectContaining({ agentId: "child-1", agentType: child.agent_type, toolUseId: "agent-use-1" }),
+			at: expect.any(Number),
+		})]);
+
+		// Clearing an active policy terminalizes the exact registry entry once;
+		// repeated terminal cleanup and an old stop hook cannot duplicate it.
+		policy.clear();
+		policy.clear();
+		policy.onStop(child);
+		expect(events.map(event => event.kind)).toEqual(["start", "aborted"]);
+		expect(events[1]).toEqual(expect.objectContaining({
+			entry: expect.objectContaining({ agentId: "child-1", toolUseId: "agent-use-1" }),
+		}));
+
+		unsubscribe();
+		policy.admit("Agent", {
+			subagent_type: child.agent_type, prompt: "Inspect again", run_in_background: false,
+		}, { toolUseId: "agent-use-2", permissionMode: "default" });
+		policy.onStart(child);
+		policy.onStop(child);
+		expect(events.map(event => event.kind)).toEqual(["start", "aborted"]);
+	});
+
 	it("requires a registered matching child, keeps its tool subset read-only, audits bounded fields, and clears on stop", async () => {
 		const { policy, audit } = policyFixture();
 		const surface = sdkSurface.buildClaudeSdkToolSurface({
