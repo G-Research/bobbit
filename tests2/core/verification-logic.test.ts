@@ -33,6 +33,7 @@ import {
 	// process not yet up) that must leave the gate pending, not failed.
 	isRestartInterruptError,
 	isRetryableGenericAgentError,
+	isReviewerBusyError,
 	shouldRetryVerificationStep,
 } from "../../src/server/agent/verification-logic.ts";
 
@@ -263,6 +264,77 @@ describe("isTransientReviewError", () => {
 
 		for (const { output, message } of variants) {
 			assert.equal(isTransientReviewError(output), true, message);
+		}
+	});
+});
+
+// ===================================================================
+// reviewer busy contention
+// ===================================================================
+
+describe("isReviewerBusyError", () => {
+	const BUSY_REJECTION = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+
+	it("matches only the reviewer busy rejection signature", () => {
+		assert.equal(isReviewerBusyError(`LLM review failed: ${BUSY_REJECTION}`), true);
+		assert.equal(isReviewerBusyError("Agent is already processing"), false);
+		assert.equal(isReviewerBusyError("Specify streamingBehavior ('steer' or 'followUp')"), false);
+		assert.equal(isReviewerBusyError("Agent is processing a streamingBehavior setting"), false);
+	});
+
+	it("is a bounded transient for both review verifier kinds", () => {
+		for (const isTransient of [isTransientReviewError, isTransientQaError]) {
+			assert.equal(isTransient(BUSY_REJECTION), true);
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output: BUSY_REJECTION,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					isTransient,
+				}),
+				"retry",
+			);
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output: BUSY_REJECTION,
+					attempt: 3,
+					maxBoundedAttempts: 3,
+					isTransient,
+				}),
+				"break",
+			);
+		}
+		assert.equal(isProviderBackoffError(BUSY_REJECTION), false);
+	});
+
+	it("does not override terminal error categories", () => {
+		const terminalBusyEnvelopes = [
+			"authentication failed",
+			"missing API key",
+			"configuration error: review model is not configured",
+			"unsupported provider",
+			"unsupported model",
+			"invalid request",
+			"schema validation failed",
+			"content policy violation",
+			"user cancelled the turn",
+		];
+
+		for (const terminal of terminalBusyEnvelopes) {
+			const output = `${BUSY_REJECTION} ${terminal}`;
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					isTransient: isTransientReviewError,
+				}),
+				"break",
+				`Expected terminal category to win: ${terminal}`,
+			);
 		}
 	});
 });

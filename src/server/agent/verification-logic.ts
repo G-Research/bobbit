@@ -349,7 +349,21 @@ export const QA_NON_TRANSIENT_PATTERNS = [
 	"Agent did not call verification_result",
 ];
 
+/**
+ * Identify the bridge's explicit reviewer-contention rejection. Both clauses
+ * are required: a generic "already processing" status is not enough to
+ * retry, and a streamingBehavior reference alone may describe configuration.
+ *
+ * This is deliberately separate from provider backoff. Contention retries use
+ * the ordinary bounded verification retry policy rather than a rate-limit
+ * backoff loop.
+ */
+export function isReviewerBusyError(output: string): boolean {
+	return !!output && /\bAgent is already processing\.\s*Specify streamingBehavior\b/i.test(output);
+}
+
 function matchesAnyTransient(output: string): boolean {
+	if (isReviewerBusyError(output)) return true;
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
 	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
 	if (TRANSIENT_INFRA_ERROR_REGEXES.some(re => re.test(output))) return true;
