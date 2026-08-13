@@ -201,73 +201,93 @@ stamps `_order` on the merged frame.
 
 ## Pre-compaction history — `GET …/transcript/before-compaction`
 
-The full `.jsonl` is still on disk; only the agent's `getMessages()`
-abandons the orphaned entries. A dedicated REST route slices the file
-at the compaction boundary and returns the orphaned slice, paginated.
+The route has one public envelope for both runtimes, but each runtime retains
+history from its own authoritative source. This preserves abandoned context for
+audit without making the browser reconstruct it or making one runtime depend on
+the other's storage. See [the canonical REST endpoint row](rest-api.md) and
+[SDK compaction checkpoints](claude-agent-sdk-sessions.md#sdk-compaction-checkpoints).
 
-See [docs/rest-api.md](rest-api.md) for the canonical endpoint row.
-Query params: `compactionId` (required, sidecar entry id), `cursor`
-(from previous response's `nextCursor`), `limit` (1..200, default 50).
-Response envelope:
+Query parameters are `compactionId` (required), `cursor` (the preceding
+response's `nextCursor`), `limit` (default 50, range 1..200), and optional
+`verbose=true` or `verbose=1`. Every response has this envelope:
 
 ```json
 {
   "total": 47,
   "returned": 50,
   "nextCursor": 50,
-  "messages": [
-    { "index": 0, "role": "user", "ts": "2026-05-12T14:00:00Z", "text": "…" }
-  ]
+  "messages": []
 }
 ```
 
-`nextCursor` is `null` when no more pages are available.
+`nextCursor` is `null` when no more pages are available. Authorization matches
+`GET /api/sessions/:id/transcript` and `read_session`: after normal bearer or
+session authentication, any caller on the same gateway that can reach the
+target session may read its history, even across `projectId` values.
 
-Authorization matches the sibling `GET /api/sessions/:id/transcript`
-route and `read_session`: after normal bearer/session authentication,
-any authenticated caller on the same gateway that can reach the target
-session may read pre-compaction history, even when caller and target
-`projectId` values differ. Reads still use the target session's
-sandbox-aware transcript file context.
+### Pi history
+
+Pi's `compactionId` names a host-side compaction-sidecar row. The full Pi
+`.jsonl` remains the transcript authority even though `getMessages()` omits the
+orphaned branch. `readOrphanedBeforeCompaction` resolves the boundary in this
+order:
+
+1. Resolve the sidecar row's `firstKeptEntryId` against the parsed JSONL.
+2. If it is absent or stale, resolve the first in-file `type: "compaction"`
+   marker's `firstKeptEntryId`.
+3. If that id is absent or unresolvable, use the marker itself. This covers
+   retained-tail-only checkpoints and stale compatibility ids.
+
+Everything before the resolved boundary is the orphaned slice. Only
+`type: "message"` entries are returned; the marker and other non-message JSONL
+entries are skipped. If no boundary resolves, the route returns an empty
+envelope rather than fabricating history. Compact Pi rows use the normal
+`{ index, role, ts, text }` preview; verbose rows expose the renderer-ready raw
+content and message data.
+
+### SDK history
+
+The SDK has no Pi JSONL or Pi entry ids. At SDK `PreCompact`, Bobbit captures
+normalized **root** rows from the official SDK history in a durable host-side
+checkpoint. The checkpoint id becomes `compactionId` on the canonical
+`__compaction_summary` marker, so the same id works in the live card and after
+reload or restart. A checkpoint is completed only after official SDK history
+changes; `PreCompact` alone is not a completion signal.
+
+For a completed or pending SDK marker, the route retrieves the checkpoint from
+host storage. It does not inspect a Pi `agentSessionFile`, use `sessionFileRead`,
+or read SDK/provider history at request time. This keeps pre-compaction history
+available after reload or gateway restart even if the active SDK bridge is not
+needed to answer the request.
+
+Compact SDK rows are:
+
+```json
+{ "index": 0, "role": "user", "ts": null, "content": "text content" }
+```
+
+With `verbose=true` or `verbose=1`, an SDK row instead retains the raw
+`content` and includes `message`, the captured normalized root row. The shared
+envelope and pagination remain unchanged; only the message projection reflects
+the runtime's canonical source.
 
 Route-specific structured errors are `session_not_found` (404),
 `transcript_unavailable` (404), `compaction_not_found` (404),
 `invalid_params` (400), and `internal_error` (500).
 
-Implementation: `readOrphanedBeforeCompaction` in
-`src/server/agent/transcript-reader.ts`. The reader resolves the split in this
-order:
-
-1. **Sidecar id** — resolve the sidecar entry's `firstKeptEntryId` against the
-   parsed `.jsonl`; everything strictly before the matched entry is orphaned.
-2. **In-file id** — if the sidecar id is absent or stale, find the first in-file
-   `type: "compaction"` entry and resolve that entry's `firstKeptEntryId`.
-3. **Marker checkpoint** — if the in-file id is absent or unresolvable, use the
-   compaction marker itself as the split. This covers Pi `0.81` checkpoints that
-   materialize only `retainedTail`, as well as stale compatibility ids.
-
-If no split resolves, the envelope returns `total: 0`; the card hides the expand
-affordance rather than fabricating history.
-
-Only `type: "message"` entries from the orphaned slice are surfaced.
-The compaction marker entry itself, and any non-message entries that
-might appear in pi-coding-agent's JSONL between user/assistant turns,
-are walked past and skipped in the response.
-
 ## Sandbox interaction
 
-The sidecar is **always host-side**. It lives under the gateway's
-`<stateDir>` and is written / read by the gateway process — no
-sandbox-FS plumbing is required. This is the same pattern the
-skill-sidecar uses, and works for both single-repo and sandboxed
-sessions.
+Pi and SDK use different host-side durable metadata, so sandbox handling applies
+only where Pi needs its authoritative JSONL:
 
-The transcript file itself may be inside the sandbox container. The
-endpoint reads it via the existing `sessionFileRead` helper in
-`src/server/agent/session-fs.ts`, which dispatches host vs
-`docker exec cat` based on `SessionFsContext.sandboxed`. The
-dead-container recovery path (`containerPathToHost`) covers sessions
-whose container has been GC'd.
+- **Pi** — its compaction sidecar is host-side under `<stateDir>`, while the
+  `.jsonl` may be in a sandbox container. The route reads that file through
+  `sessionFileRead`, which selects host access or `docker exec cat` from
+  `SessionFsContext.sandboxed`; `containerPathToHost` covers a GC'd container.
+- **SDK** — its checkpoint is host-side under `<stateDir>` and contains the
+  captured normalized root rows. Requests read that checkpoint directly after
+  reload or restart. They never use Pi sandbox file access, `agentSessionFile`,
+  or provider history to serve pre-compaction rows.
 
 ## Client UI
 

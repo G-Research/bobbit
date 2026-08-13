@@ -35,6 +35,36 @@ function annotations(message: SdkSessionMessage): Pick<ClaudeAgentSdkHistoryMess
 	};
 }
 
+/**
+ * SDK history is durable after a session's selected tool surface may have
+ * changed. `mcp__bobbit__` is Bobbit's reserved server identity, so retain its
+ * canonical suffix for historical projection without trying to re-create an
+ * old tool surface. Foreign MCP and native names remain unchanged.
+ */
+export function canonicalizeClaudeSdkHistoryToolName(name: unknown): unknown {
+	if (typeof name !== "string") return name;
+	const match = /^mcp__bobbit__([a-z][a-z0-9_-]*)$/i.exec(name);
+	return match ? match[1] : name;
+}
+
+function canonicalizeHistoryRow(row: ClaudeAgentSdkHistoryMessage): ClaudeAgentSdkHistoryMessage {
+	const canonical = canonicalizeClaudeSdkHistoryToolName;
+	const toolName = canonical(row.toolName);
+	const content = Array.isArray(row.content)
+		? row.content.map((block) => {
+			if (!isRecord(block)) return block;
+			if (block.type === "toolCall" || block.type === "tool_use") {
+				const name = canonical(block.name);
+				return name === block.name ? block : { ...block, name };
+			}
+			return block;
+		})
+		: row.content;
+	return toolName === row.toolName && content === row.content
+		? row
+		: { ...row, ...(toolName !== row.toolName ? { toolName } : {}), content };
+}
+
 function userMessage(message: SdkSessionMessage): ClaudeAgentSdkHistoryMessage | undefined {
 	if (!isRecord(message.message) || !("content" in message.message)) return undefined;
 	return {
@@ -64,7 +94,7 @@ function messagesFromTranslation(
 	const rows = translated.events.flatMap((event) => {
 		if (event.type !== "message_end" || !isRecord(event.message)) return [];
 		const row = event.message as unknown as ClaudeAgentSdkHistoryMessage;
-		return [{ ...row, ...annotations(message) }];
+		return [canonicalizeHistoryRow({ ...row, ...annotations(message) })];
 	});
 	return { state: translated.state, messages: rows };
 }
@@ -85,7 +115,7 @@ export function adaptSdkSessionMessages(messages: readonly SdkSessionMessage[]):
 			if (translated.messages.length > 0) snapshot.push(...translated.messages);
 			else {
 				const row = userMessage(message);
-				if (row) snapshot.push(row);
+				if (row) snapshot.push(canonicalizeHistoryRow(row));
 			}
 			continue;
 		}
