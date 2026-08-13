@@ -3022,6 +3022,24 @@ export class SessionManager {
 	}
 
 	/**
+	 * Return the final replacement CWD only after its sandbox decision has run.
+	 * A sandboxed SDK bridge must never hand a missing or host-local CWD to the
+	 * container dispatcher; that would silently rebuild a host Worker surface.
+	 */
+	private requireReplacementCwd(bridgeOptions: SessionBridgeOptions, operation: string): string {
+		const cwd = bridgeOptions.cwd;
+		if (typeof cwd !== "string" || cwd.trim() === "") {
+			throw new Error(`Cannot ${operation}: replacement working directory is unavailable`);
+		}
+		if (bridgeOptions.runtime === "claude-agent-sdk" && bridgeOptions.sandboxed && !isSandboxContainerCwd(cwd)) {
+			throw new ClaudeAgentSdkUnavailableError(
+				`SDK_SESSION_UNAVAILABLE: ${operation} has an invalid sandbox working directory`,
+			);
+		}
+		return cwd;
+	}
+
+	/**
 	 * Apply Docker sandbox wiring to bridge options.
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
 	 * Returns true if sandbox was applied, false if sandbox is not configured.
@@ -10568,20 +10586,21 @@ export class SessionManager {
 		// SDK dispatch is itself a container process. Runtime selection and sandbox
 		// wiring must complete first so it receives only the fresh scoped descriptor,
 		// never host Worker coordinates or a legacy Pi admin-token fallback.
-		await this.ensureMcpManagerForContext(session.projectId, bridgeOptions.cwd);
+		const replacementCwd = this.requireReplacementCwd(bridgeOptions, `assign role for session ${id}`);
+		await this.ensureMcpManagerForContext(session.projectId, replacementCwd);
 		if (bridgeOptions.runtime === "claude-agent-sdk") {
 			await resolveToolActivation({
 				id,
-				cwd: bridgeOptions.cwd,
+				cwd: replacementCwd,
 				projectId: session.projectId,
 				goalId: session.goalId,
 				teamGoalId: session.teamGoalId,
 				roleName: role.name,
 				bridgeOptions,
 				effectiveAllowedTools: respawnAllowed,
-			} as SessionSetupPlan, this.buildPipelineContext(session.projectId, bridgeOptions.cwd));
+			} as SessionSetupPlan, this.buildPipelineContext(session.projectId, replacementCwd));
 		} else {
-			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, bridgeOptions.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
+			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementCwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
 			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -13097,20 +13116,21 @@ export class SessionManager {
 
 			// The SDK dispatcher is a container-owned process. It must only be built
 			// after a current runtime, container CWD, and scoped authority exist.
-			await this.ensureMcpManagerForContext(session.projectId, bridgeOptions.cwd);
+			const replacementCwd = this.requireReplacementCwd(bridgeOptions, `recover force-aborted session ${id}`);
+			await this.ensureMcpManagerForContext(session.projectId, replacementCwd);
 			if (bridgeOptions.runtime === "claude-agent-sdk") {
 				await resolveToolActivation({
 					id,
-					cwd: bridgeOptions.cwd,
+					cwd: replacementCwd,
 					projectId: session.projectId,
 					goalId: session.goalId,
 					teamGoalId: session.teamGoalId,
 					roleName: session.role,
 					bridgeOptions,
 					effectiveAllowedTools: forceAbortAllowed,
-				} as SessionSetupPlan, this.buildPipelineContext(session.projectId, bridgeOptions.cwd));
+				} as SessionSetupPlan, this.buildPipelineContext(session.projectId, replacementCwd));
 			} else {
-				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, bridgeOptions.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
+				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, replacementCwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
 				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };

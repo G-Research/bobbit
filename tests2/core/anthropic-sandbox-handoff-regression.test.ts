@@ -356,6 +356,146 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.match(roleBody, /catch \(err\) \{\n\t\t\tunsub\(\);\n\t\t\tawait rpcClient\.stop\(\)\.catch/, "failed staged role candidates must be disposed without replacing the original bridge");
 	});
 
+	it("passes freshly wired SDK authority to role and force-abort dispatch, and disposes a failed role candidate", async () => {
+		vi.resetModules();
+		const bridgeFactory = vi.fn();
+		const activate = vi.fn(async () => {});
+		try {
+			vi.doMock("../../src/server/agent/session-runtime.ts", async (importOriginal) => ({
+				...(await importOriginal()),
+				createSessionBridge: bridgeFactory,
+			}));
+			vi.doMock("../../src/server/agent/session-setup.ts", async (importOriginal) => ({
+				...(await importOriginal()),
+				resolveToolActivation: activate,
+			}));
+			const { SessionManager: IsolatedSessionManager } = await import("../../src/server/agent/session-manager.ts");
+			const manager: any = new IsolatedSessionManager();
+			managers.push(manager);
+			const resumeId = "00000000-0000-4000-8000-000000000031";
+			const records = new Map<string, any>();
+			manager._testStore = {
+				get: vi.fn((id: string) => records.get(id)),
+				update: vi.fn((id: string, patch: any) => Object.assign(records.get(id), patch)),
+				put: vi.fn(), archive: vi.fn(),
+			};
+			manager.assemblePrompt = vi.fn(() => undefined);
+			manager.resolveSessionRole = vi.fn(() => undefined);
+			manager.resolveEffectiveAllowedTools = vi.fn(() => []);
+			manager.ensureMcpManagerForContext = vi.fn(async () => {});
+			manager.buildPipelineContext = vi.fn(() => ({}));
+			manager.applyDirectProviderEnv = vi.fn(async () => {});
+			manager.requireCurrentCatalogSpawnModel = vi.fn(async (model: string) => model);
+			manager.resolveCurrentCatalogThinkingLevel = vi.fn(async () => "off");
+			manager.tryAutoSelectModel = vi.fn(async () => undefined);
+			manager.tryApplyDefaultThinkingLevel = vi.fn(async () => undefined);
+			manager.drainQueue = vi.fn();
+			manager.handleAgentLifecycle = vi.fn();
+			manager._reconcileAfterAbort = vi.fn();
+			const wiring = vi.fn(async (options: any, id: string) => {
+				expect(options.runtime).toBe("claude-agent-sdk");
+				expect(options.claudeAgentSdkSessionId).toBe(resumeId);
+				options.sandboxed = true;
+				options.cwd = `/workspace-wt/${id}`;
+				options.containerId = `container-${id}`;
+				options.gatewayToken = `scoped-${id}`;
+				options.gatewayUrl = "http://sandbox.gateway.test";
+				options.claudeSdkSandboxLaunch = {
+					containerId: `container-${id}`,
+					cwd: `/workspace-wt/${id}`,
+					sessionId: id,
+					gatewayToken: `scoped-${id}`,
+					gatewayUrl: "http://sandbox.gateway.test",
+					oauthAccessToken: "current-oauth",
+				};
+				return true;
+			});
+			manager.applySandboxWiring = wiring;
+			const candidate = (start = vi.fn(async () => {})) => ({
+				start,
+				stop: vi.fn(async () => {}),
+				onEvent: vi.fn(() => vi.fn()),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+				getMessages: vi.fn(async () => ({ success: true, data: { messages: [] } })),
+			});
+			const live = (id: string, old: any, status: "idle" | "streaming" = "idle") => ({
+				id, title: id, cwd: "/workspace", projectId: "project-sdk", sandboxed: true,
+				runtime: "claude-agent-sdk", status, statusVersion: 0, clients: new Set(),
+				promptQueue: { toArray: () => [], enqueue: vi.fn() }, eventBuffer: { size: 0, push: vi.fn(() => ({ seq: 1, ts: 1 })) },
+				inFlightSteerTexts: [], unsubscribe: vi.fn(), rpcClient: old, lastActivity: Date.now(),
+			});
+			const persisted = (id: string) => ({
+				id, title: id, cwd: "/workspace", projectId: "project-sdk", sandboxed: true,
+				runtime: "claude-agent-sdk", modelProvider: "claude-agent-sdk", modelId: "sandbox-sonnet",
+				effectiveThinkingLevel: "off", claudeAgentSdkSessionId: resumeId,
+				createdAt: Date.now(), lastActivity: Date.now(),
+			});
+
+			const roleId = "sdk-role-replacement";
+			records.set(roleId, persisted(roleId));
+			const roleOld = candidate();
+			const roleReplacement = candidate();
+			bridgeFactory.mockReturnValueOnce(roleReplacement);
+			manager.sessions.set(roleId, live(roleId, roleOld));
+			await expect(manager.assignRole(roleId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).resolves.toBe(true);
+
+			const forceId = "sdk-force-replacement";
+			records.set(forceId, persisted(forceId));
+			const forceOld = candidate(vi.fn(() => new Promise(() => {})));
+			forceOld.abort = vi.fn(() => new Promise(() => {}));
+			const forceReplacement = candidate();
+			bridgeFactory.mockReturnValueOnce(forceReplacement);
+			manager.sessions.set(forceId, live(forceId, forceOld, "streaming"));
+			await expect(manager.forceAbort(forceId, 1)).resolves.toBeUndefined();
+
+			expect(wiring).toHaveBeenCalledTimes(2);
+			for (const [index, id] of [roleId, forceId].entries()) {
+				const plan = activate.mock.calls[index]?.[0];
+				expect(plan).toMatchObject({ id, cwd: `/workspace-wt/${id}`, roleName: index === 0 ? "sandbox-role" : undefined });
+				expect(plan.bridgeOptions).toMatchObject({
+					sandboxed: true, containerId: `container-${id}`, gatewayToken: `scoped-${id}`,
+					claudeAgentSdkSessionId: resumeId,
+					claudeSdkSandboxLaunch: expect.objectContaining({ containerId: `container-${id}`, cwd: `/workspace-wt/${id}`, gatewayToken: `scoped-${id}` }),
+				});
+				expect(JSON.stringify(plan.bridgeOptions)).not.toContain("admin");
+			}
+			expect(roleOld.stop).toHaveBeenCalledTimes(1);
+			expect(forceOld.stop).toHaveBeenCalledTimes(1);
+
+			const failedId = "sdk-role-candidate-failure";
+			records.set(failedId, persisted(failedId));
+			const failedOld = candidate();
+			const failedCandidate = candidate(vi.fn(async () => { throw new Error("candidate startup failed"); }));
+			bridgeFactory.mockReturnValueOnce(failedCandidate);
+			manager.sessions.set(failedId, live(failedId, failedOld));
+			await expect(manager.assignRole(failedId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).rejects.toThrow("candidate startup failed");
+			expect(failedCandidate.stop).toHaveBeenCalledTimes(1);
+			expect(failedOld.stop).not.toHaveBeenCalled();
+			expect(manager.sessions.get(failedId)?.rpcClient).toBe(failedOld);
+
+			const invalidId = "sdk-invalid-replacement-cwd";
+			records.set(invalidId, persisted(invalidId));
+			const invalidOld = candidate();
+			manager.sessions.set(invalidId, live(invalidId, invalidOld));
+			manager.applySandboxWiring = vi.fn(async (options: any) => {
+				options.sandboxed = true;
+				options.cwd = "/host/must-not-dispatch";
+				return true;
+			});
+			const activationCount = activate.mock.calls.length;
+			await expect(manager.assignRole(invalidId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).rejects.toMatchObject({
+				code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+				message: expect.stringContaining("invalid sandbox working directory"),
+			});
+			expect(activate).toHaveBeenCalledTimes(activationCount);
+			expect(invalidOld.stop).not.toHaveBeenCalled();
+		} finally {
+			vi.doUnmock("../../src/server/agent/session-runtime.ts");
+			vi.doUnmock("../../src/server/agent/session-setup.ts");
+			vi.resetModules();
+		}
+	});
+
 	it("maps malformed persisted SDK sandbox CWD history to the unavailable stub", async () => {
 		const manager: any = new SessionManager();
 		manager.sandboxManager = { get: () => ({ getStatus: () => ({ containerId: "container-sdk" }) }) };
