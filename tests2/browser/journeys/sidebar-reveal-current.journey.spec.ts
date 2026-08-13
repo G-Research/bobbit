@@ -17,10 +17,12 @@ const IDS = {
 	teamGoal: "reveal-nested-team-goal",
 	teamLead: "reveal-team-lead",
 	delegate: "reveal-team-delegate",
+	statusMember: "reveal-status-team-member",
 	unrelatedGoal: "reveal-filler-00",
 	unrelatedTeamGoal: "reveal-unrelated-team-goal",
 	unrelatedTeamLead: "reveal-unrelated-team-lead",
 	unrelatedTeamDelegate: "reveal-unrelated-team-delegate",
+	unrelatedStatusMember: "reveal-unrelated-status-team-member",
 	archived: "reveal-cold-archived",
 	unrelatedArchived: "reveal-unrelated-archived",
 	deepProject: "reveal-deep-project",
@@ -220,6 +222,50 @@ async function injectNestedTarget(page: Page, view: "project" | "status" = "proj
 		state.sidebarSessionView = desiredView === "project" ? "status" : "project";
 	}, { ids: IDS, desiredView: view });
 	await renderInjectedView(page, view);
+	await expect(revealButton(page)).toBeEnabled();
+}
+
+async function injectStatusMemberTarget(page: Page): Promise<void> {
+	await page.evaluate((ids) => {
+		const state = (window as any).__bobbitState;
+		const session = (id: string, title: string, createdAt: number, teamGoalId: string, teamLeadSessionId: string) => ({
+			id,
+			title,
+			cwd: "/tmp/sidebar-reveal-current",
+			projectId: ids.project,
+			goalId: teamGoalId,
+			teamGoalId,
+			teamLeadSessionId,
+			role: "coder",
+			status: "idle",
+			createdAt,
+			lastActivity: createdAt,
+			lastReadAt: createdAt + 1,
+			clientCount: 0,
+			server_tags: [],
+			user_tags: [],
+		});
+		// These are ordinary team members with canonical ownership fields. Keep
+		// the delegate-only Project target intact: delegateOf alone is deliberately
+		// not team membership and must remain eligible when Show teams is off.
+		const members = [
+			session(ids.statusMember, "Reveal current team member", 1_007, ids.teamGoal, ids.teamLead),
+			session(ids.unrelatedStatusMember, "Unrelated team member", 1_008, ids.unrelatedTeamGoal, ids.unrelatedTeamLead),
+		];
+		state.gatewaySessions = [
+			...state.gatewaySessions.filter((value: any) => !members.some(member => member.id === value.id)),
+			...members,
+		];
+		(window as any).__revealCanonicalSessions = state.gatewaySessions.map((value: any) => ({ ...value }));
+		(window as any).__revealActiveSessionId = ids.statusMember;
+		state.selectedSessionId = ids.statusMember;
+		state.connectingSessionId = ids.statusMember;
+		state.remoteAgent = null;
+		state.keyboardNavActiveId = null;
+		state.sidebarRevealSessionId = null;
+		window.history.replaceState({}, "", `#/session/${ids.statusMember}`);
+		(window as any).__renderRevealFixture();
+	}, IDS);
 	await expect(revealButton(page)).toBeEnabled();
 }
 
@@ -512,24 +558,30 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		for (const key of pathKeys) expect(await storedExpansion(page, key), key).toBe("expanded");
 		expect(await storedExpansion(page, unrelatedKey)).toBe("collapsed");
 
+		// Status categorical coverage needs a canonical member. The nested Project
+		// target above intentionally has only delegateOf, which is not team membership.
+		await injectStatusMemberTarget(page);
 		await page.getByTestId("sidebar-view-status").evaluate((button: HTMLButtonElement) => button.click());
 		await expectFilters(page, { archived: false, busy: true, read: true, teams: false });
-		await expect(navRow(page, IDS.delegate), `${MARK}: default Status categories hide the active team member before reveal`).toHaveCount(0);
-		await expect(navRow(page, IDS.unrelatedTeamDelegate), `${MARK}: default Status categories hide unrelated team members`).toHaveCount(0);
+		await expect(navRow(page, IDS.statusMember), `${MARK}: default Status categories hide the active canonical team member before reveal`).toHaveCount(0);
+		await expect(navRow(page, IDS.unrelatedStatusMember), `${MARK}: default Status categories hide an unrelated canonical team member`).toHaveCount(0);
 		await expect(navRow(page, IDS.unrelatedArchived), `${MARK}: default Status categories hide unrelated archives`).toHaveCount(0);
+		await expect(navRow(page, IDS.delegate), `${MARK}: delegateOf alone remains visible when Show teams is off`).toBeVisible();
 
 		await activateReveal(page);
-		const statusRow = navRow(page, IDS.delegate);
-		await expect(statusRow, `${MARK}: explicit Status reveal narrowly includes the active team member`).toBeVisible();
-		await expect(navRow(page, IDS.unrelatedTeamDelegate), `${MARK}: explicit Status reveal does not include unrelated team members`).toHaveCount(0);
+		const statusRow = navRow(page, IDS.statusMember);
+		await expect(statusRow, `${MARK}: explicit Status reveal narrowly includes the active canonical team member`).toBeVisible();
+		await expect(navRow(page, IDS.unrelatedStatusMember), `${MARK}: explicit Status reveal does not include an unrelated canonical team member`).toHaveCount(0);
 		await expect(navRow(page, IDS.unrelatedArchived), `${MARK}: explicit Status reveal does not include unrelated archives`).toHaveCount(0);
+		await expect(navRow(page, IDS.delegate), `${MARK}: exact inclusion leaves the non-member delegate eligible`).toBeVisible();
 
 		// A real categorical filter gesture ends the one-action inclusion. Turning
 		// archives on proves normal filter authority: the archive appears while the
-		// still-filtered team target disappears.
+		// still-filtered canonical team target disappears.
 		await page.getByTestId("sidebar-filters-button").click();
 		await page.getByTestId("sidebar-filter-archived").locator("input").check();
-		await expect(navRow(page, IDS.delegate), `${MARK}: manual category interaction clears narrow inclusion`).toHaveCount(0);
+		await expect(navRow(page, IDS.statusMember), `${MARK}: manual category interaction clears narrow inclusion`).toHaveCount(0);
+		await expect(navRow(page, IDS.unrelatedStatusMember), `${MARK}: manual category interaction keeps unrelated members filtered`).toHaveCount(0);
 		await expect(navRow(page, IDS.unrelatedArchived), `${MARK}: manual category interaction restores normal filter authority`).toBeVisible();
 		await page.getByTestId("sidebar-filter-archived").locator("input").uncheck();
 		await page.keyboard.press("Escape");
@@ -542,14 +594,14 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		await heading.click();
 		await expect(heading).toHaveAttribute("aria-expanded", "false");
 		await setFilters(page, { archived: true, busy: false, read: false, teams: true });
-		await search.fill("status-query-that-cannot-match-current-delegate");
+		await search.fill("status-query-that-cannot-match-current-member");
 		await page.evaluate(() => { (window as any).__bobbitState.keyboardNavActiveId = "session:elsewhere"; });
 
 		await activateReveal(page);
 		await expect.poll(() => page.evaluate(() => (window as any).__bobbitState.searchQuery)).toBe("");
 		await expectFilters(page, { archived: false, busy: true, read: true, teams: false });
 		await expect(page.locator(`[data-status-section="${statusSection}"] .sidebar-status-heading`)).toHaveAttribute("aria-expanded", "true");
-		await expect(navRow(page, IDS.delegate)).toHaveAttribute("data-nav-active", "true");
+		await expect(navRow(page, IDS.statusMember)).toHaveAttribute("data-nav-active", "true");
 		const collapsed = await page.evaluate(() => JSON.parse(localStorage.getItem("bobbit-status-collapsed-sections") || "[]"));
 		expect(collapsed).not.toContain(statusSection);
 		expect(await storedExpansion(page, unrelatedKey), `${MARK}: Status leaves unrelated Project state alone`).toBe("collapsed");
