@@ -26,6 +26,9 @@ const IDS = {
 	archived: "reveal-cold-archived",
 	unrelatedArchived: "reveal-unrelated-archived",
 	deepProject: "reveal-deep-project",
+	deepTeamGoal: "reveal-deep-team-goal",
+	deepTeamLead: "reveal-deep-team-lead",
+	deepSpawnedRoot: "reveal-deep-spawned-root",
 	deepGoalPrefix: "reveal-deep-goal-",
 	deepSession: "reveal-deep-session",
 } as const;
@@ -347,33 +350,52 @@ async function injectDeepTarget(page: Page): Promise<string[]> {
 			cwd: project.rootPath,
 			projectId: project.id,
 			state: "in-progress",
-			spec: "Seven-goal explicit depth reveal fixture.",
+			spec: "Seven-level spawned-goal reveal fixture.",
 			createdAt,
 			updatedAt: createdAt,
 			...extra,
 		});
-		const fillers = Array.from({ length: 24 }, (_, index) =>
-			goal(`reveal-deep-filler-${String(index).padStart(2, "0")}`, `Deep filler ${index}`, index + 1));
-		const chain = deepGoalIds.map((id, index) => goal(id, `Deep chain ${index + 1}`, 1_000 + index, {
-			...(index > 0 ? { parentGoalId: deepGoalIds[index - 1] } : {}),
-			subgoalsAllowed: true,
-		}));
-		state.projects = [...state.projects.filter((value: any) => value.id !== project.id), project];
-		state.goals = [...fillers, ...chain];
-		state.gatewaySessions = [{
-			id: ids.deepSession,
-			title: "Deepest current session",
+		const session = (id: string, title: string, createdAt: number, extra: Record<string, unknown> = {}) => ({
+			id,
+			title,
 			cwd: project.rootPath,
 			projectId: project.id,
-			goalId: deepGoalIds.at(-1),
 			status: "idle",
-			createdAt: 2_000,
-			lastActivity: 2_000,
-			lastReadAt: 2_001,
+			createdAt,
+			lastActivity: createdAt,
+			lastReadAt: createdAt + 1,
 			clientCount: 0,
 			server_tags: [],
 			user_tags: [],
-		}];
+			...extra,
+		});
+		const fillers = Array.from({ length: 24 }, (_, index) =>
+			goal(`reveal-deep-filler-${String(index).padStart(2, "0")}`, `Deep filler ${index}`, index + 1));
+		const teamGoal = goal(ids.deepTeamGoal, "Deep spawning team", 900, {
+			team: true,
+			teamLeadSessionId: ids.deepTeamLead,
+			subgoalsAllowed: true,
+			maxNestingDepth: 9,
+		});
+		const spawnedRoot = goal(ids.deepSpawnedRoot, "Deep spawned root", 1_000, {
+			parentGoalId: ids.deepTeamGoal,
+			spawnedBySessionId: ids.deepTeamLead,
+			subgoalsAllowed: true,
+		});
+		const chain = deepGoalIds.map((id, index) => goal(id, `Deep descendant ${index + 1}`, 1_001 + index, {
+			parentGoalId: index === 0 ? ids.deepSpawnedRoot : deepGoalIds[index - 1],
+			subgoalsAllowed: true,
+		}));
+		state.projects = [...state.projects.filter((value: any) => value.id !== project.id), project];
+		state.goals = [...fillers, teamGoal, spawnedRoot, ...chain];
+		state.gatewaySessions = [
+			session(ids.deepTeamLead, "Deep spawning lead", 901, {
+				goalId: ids.deepTeamGoal,
+				teamGoalId: ids.deepTeamGoal,
+				role: "team-lead",
+			}),
+			session(ids.deepSession, "Deepest current session", 2_000, { goalId: deepGoalIds.at(-1) }),
+		];
 		state.archivedSessions = [];
 		(window as any).__revealCanonicalSessions = state.gatewaySessions.map((value: any) => ({ ...value }));
 		(window as any).__revealCanonicalGoals = state.goals.map((value: any) => ({ ...value }));
@@ -607,17 +629,21 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		expect(await storedExpansion(page, unrelatedKey), `${MARK}: Status leaves unrelated Project state alone`).toBe("collapsed");
 	});
 
-	test("explicit reveal exceeds the default depth cap for a seven-goal chain without changing another project", async ({ page }) => {
+	test("explicit reveal exceeds the spawned-goal depth cap and persists only the seven-level team path", async ({ page }) => {
 		await openFixture(page);
 		const deepGoalIds = await injectDeepTarget(page);
 		const unrelatedProjectKey = treeKey("project", IDS.project);
 		await clickTreeToggle(page, unrelatedProjectKey);
 		expect(await storedExpansion(page, unrelatedProjectKey)).toBe("collapsed");
 
-		// The builder's default cap is five: the sixth-depth target goal and its
-		// session are absent from the canonical production model before the click.
-		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", deepGoalIds[5]))).toBe(true);
-		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", deepGoalIds[6]))).toBe(false);
+		// This is canonical team ownership, not a plain forest: the root is stamped
+		// to its team's lead and is rendered beneath that lead. The spawned subtree's
+		// default cap is five, so descendant level six and the deepest session clip.
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", IDS.deepTeamGoal))).toBe(true);
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("team-lead", IDS.deepTeamLead))).toBe(true);
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", IDS.deepSpawnedRoot))).toBe(true);
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", deepGoalIds[4]))).toBe(true);
+		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), treeKey("goal", deepGoalIds[5]))).toBe(false);
 		expect(await page.evaluate((key) => (window as any).__revealTreeHas(key), `sidebar-tree/v1/session/${encodeURIComponent(IDS.deepSession)}`)).toBe(false);
 		await expect(navRow(page, IDS.deepSession)).toHaveCount(0);
 
@@ -626,13 +652,23 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		await installRevealProbes(page, IDS.deepSession);
 		await activateReveal(page);
 
-		const pathKeys = [treeKey("project", IDS.deepProject), ...deepGoalIds.map(id => treeKey("goal", id))];
-		await expect(navRow(page, IDS.deepSession), `${MARK}: explicit reveal renders the depth-capped target`).toBeVisible({ timeout: 3_000 });
+		const pathKeys = [
+			treeKey("project", IDS.deepProject),
+			treeKey("goal", IDS.deepTeamGoal),
+			treeKey("team-lead", IDS.deepTeamLead),
+			treeKey("goal", IDS.deepSpawnedRoot),
+			...deepGoalIds.map(id => treeKey("goal", id)),
+		];
+		const resolvedPath = await page.evaluate((sessionId) => (window as any).__revealTreeAncestors(sessionId), IDS.deepSession);
+		expect(resolvedPath, `${MARK}: canonical project/team-lead/spawned/goal path`).toEqual([...pathKeys].reverse());
+		await expect(navRow(page, IDS.deepSession), `${MARK}: explicit reveal renders the clipped spawned target`).toBeVisible({ timeout: 3_000 });
 		await expect(navRow(page, IDS.deepSession)).toHaveAttribute("data-nav-active", "true");
 		await expectRowWithinSidebar(page, IDS.deepSession);
 		await expect.poll(() => page.evaluate(() => (window as any).__revealEmphasisCount)).toBeGreaterThanOrEqual(1);
-		for (const key of pathKeys) expect(await storedExpansion(page, key), key).toBe("expanded");
-		expect(await storedExpansion(page, unrelatedProjectKey), `${MARK}: deep reveal leaves another project collapsed`).toBe("collapsed");
+		const stored = await page.evaluate((storageKey) => JSON.parse(localStorage.getItem(storageKey) || "{}").expansion ?? {}, TREE_STATE_KEY);
+		const expectedStored: Record<string, string> = { [unrelatedProjectKey]: "collapsed" };
+		for (const key of pathKeys) expectedStored[key] = "expanded";
+		expect(stored, `${MARK}: reveal persists exactly its path and preserves the unrelated collapse`).toEqual(expectedStored);
 		const deepScroll = await page.evaluate(() => (window as any).__revealScrollCalls.at(-1));
 		expect(deepScroll).toMatchObject({ options: { behavior: "smooth", block: "nearest" }, wasWithin: false, overflowing: true });
 	});
