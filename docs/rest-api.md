@@ -1753,19 +1753,17 @@ The preview side-panel iframe is fed by a per-session content mount served from 
 
 #### Historical `preview_open` snapshot markers
 
-A successful `preview_open` result includes a v3 marker that lets its preview card reopen the historical preview, preferring an immutable artifact when its identity is present. The normal payload stores the complete mount route and host-invariant path:
+A successful `preview_open` result includes a v3 marker that lets its preview card reopen the historical preview from its immutable artifact. Current writers emit only this canonical compact shape:
 
 ```json
-{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
+{"kind":"preview","url":"/preview/<sid>/","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
 ```
 
-`entry` is a raw single filename, not a percent-encoded URL segment. The writer stores it verbatim and encodes it exactly once when forming a full route; the reader preserves it verbatim and encodes it exactly once when reconstructing a compact route. This makes literal-percent names such as `100%.html` and `%41.html`, Unicode names, and URL-significant characters refer to their original files rather than to decoded or double-encoded names. Compaction compares the raw or encoded suffix consistently, so it applies to every accepted filename rather than only ASCII names.
+The directory URL, canonical `entry`, `contentHash`, and `artifactId` preserve both the resolved file and its replay identity without a duplicate `path`. `entry` is a raw single filename, not a percent-encoded route segment. It is encoded exactly once when the reader rebuilds `/preview/<sid>/<encoded-entry>`, so literal-percent names such as `%41.html`, Unicode, and URL-significant characters resolve to their original files.
 
-The complete marker block has a hard 250 UTF-8-byte cap so tool output stays bounded. The writer selects the first lossless payload in its compatibility-preserving order: a normal full route when it fits, then compact forms that remove duplicated route/path data and use the validated `aid` or `a` artifact-id aliases. Readers also recognize the historical `artifact_id` spelling. Valid `contentHash` and artifact identity are replay metadata, not expendable space-saving fields: neither is silently dropped. If no lossless form can fit, `preview_open` fails with `PREVIEW_SNAPSHOT_CAP`, naming the affected filename and the byte-budget reason instead of emitting a truncated or dead marker.
+The complete marker block has a hard 250 UTF-8-byte cap so tool output stays bounded. A writer first uses the raw entry and may use a bounded reversible entry envelope when that saves space. Its last compact form may omit `entry` only with valid canonical `contentHash` and `artifactId`, and only beside trusted parameters from that same `preview_open` call; the renderer then derives and validates the basename from `file` (or `inline.html` for `html`). It otherwise fails with `PREVIEW_SNAPSHOT_CAP`, naming the filename and byte-budget reason rather than dropping replay identity or writing a dead marker. See [Current write contract](preview-architecture.md#current-write-contract) for the entry envelope and safety rules.
 
-The usual compact form is `url: "/preview/<sid>/"` with a safe raw `entry`; it may omit the redundant `path`. For a long filename, the final compact form can omit `entry` as well, but only when both validated `contentHash` and artifact identity remain. That form is meaningful only beside the parameters of its own `preview_open` call: the renderer obtains the trusted raw basename from `file` (or `inline.html` for `html`), then validates and reconstructs the route. A standalone historical marker without its entry remains strict and malformed rather than guessing a file.
-
-The compact URL is an encoding for a marker, not a relaxation of preview routing. The reader reconstructs `/preview/<sid>/<encoded-entry>` and passes it through the same strict preview-route validation as a full URL. A compact URL without a safe explicit entry or permitted same-tool fallback, traversal-shaped data, invalid metadata, or an invalid artifact route remains malformed. This read compatibility is necessary because historical markers cannot be rewritten; recognized same-origin/base-path forms are reduced to the validated internal route rather than used as public navigation URLs.
+Compact marker URLs are not relaxed navigation rules: reconstructed routes still pass strict preview-route validation. Historical transcript markers remain readable because the reader accepts legacy full routes and `path`, `e`, `artifact_id`, `aid`, and `a` aliases. Those spellings are reader compatibility only; new writers never emit them.
 
 | Method | Path | Description |
 |---|---|---|

@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1139,
+  "censusTotal": 1140,
   "buckets": {
-    "daily": 65,
+    "daily": 66,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 50,
+    "relocate": 51,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -2913,7 +2913,7 @@
     },
     {
       "path": "tests2/core/preview-snapshot-generality.test.ts",
-      "reason": "Focused writer/reader regression matrix for compact preview v3 markers: raw reserved, Unicode, percent, and long filenames retain the compact route plus validated hash/artifact identity under the 250-byte cap, with trusted preview_open fallback only for entry-omitted long markers and explicit no-silent-degradation cap failure.",
+      "reason": "Focused writer/reader regression matrix for all realistic preview v3 filenames: raw reserved, Unicode, percent, dotted, and long names retain a self-contained compact marker with canonical hash/artifact identity under the 250-byte cap; unsafe and incompressible entries fail loudly at write time.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3116,6 +3116,24 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/operator-pause-durability-repro.test.ts",
+      "reason": "Failing-first durability and auto-unblock regression coverage for operator-paused goals with unmet dependencies, while retaining migration of provenance-free legacy dependency pauses.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/crash-restart.journey.spec.ts",
+      "reason": "Real browser and gateway-restart journey proving an operator pause applied in the dashboard to a dependency-blocked child retains its persisted provenance and paused dashboard affordance after restart.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
       }
     }
   ],
