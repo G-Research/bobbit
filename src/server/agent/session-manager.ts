@@ -114,7 +114,11 @@ let sessionManagerModuleClock: Clock = realClock;
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
-import { truncateLargeToolContent } from "./truncate-large-content.js";
+import {
+	truncateClaudeSdkSubagentWork,
+	truncateClaudeSdkSubagentWorkInSnapshot,
+	truncateLargeToolContent,
+} from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
@@ -7167,10 +7171,13 @@ export class SessionManager {
 
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
 		if (isRetryableAgentEnd(event)) return;
-		// Child-work frames already contain the server-owned, bounded semantic
-		// projection. Preserve their opaque source metadata verbatim; generic tool
-		// truncation is for root transcript rows and must not rewrite this audit data.
-		emitSessionEvent(session, isClaudeSdkSubagentWorkEvent(event) ? event : truncateLargeToolContent(event));
+		// Child work stays outside root lifecycle/accounting, but its renderable
+		// message and tool payloads must be bounded before EventBuffer/WS replay.
+		// The truncation clone preserves opaque identity, parent, usage, and cost
+		// metadata unchanged.
+		emitSessionEvent(session, isClaudeSdkSubagentWorkEvent(event)
+			? truncateClaudeSdkSubagentWork(event)
+			: truncateLargeToolContent(event));
 	}
 
 	/**
@@ -9086,8 +9093,10 @@ export class SessionManager {
 	 */
 	private extractAssistantText(messages: unknown[]): string {
 		const texts: string[] = [];
-		for (const msg of messages as Array<{ role?: string; content?: unknown }>) {
-			if (msg?.role !== "assistant") continue;
+		for (const msg of messages as Array<{ role?: string; content?: unknown; parentToolUseId?: unknown }>) {
+			// SDK child rows can be appended after root rows during recovery. Output
+			// consumers (team wait/delegate/REST) are root prose only.
+			if (msg?.role !== "assistant" || (typeof msg.parentToolUseId === "string" && msg.parentToolUseId.length > 0)) continue;
 			const content = msg.content;
 			if (typeof content === "string") {
 				texts.push(content);
@@ -10128,7 +10137,7 @@ export class SessionManager {
 			latestMessageUpdate: live?.latestMessageUpdate,
 			inFlightSteerTexts: live?.inFlightSteerTexts,
 		});
-		return stripArchivedSnapshotCorrelations(visible);
+		return stripArchivedSnapshotCorrelations(truncateClaudeSdkSubagentWorkInSnapshot(visible));
 	}
 
 	/**

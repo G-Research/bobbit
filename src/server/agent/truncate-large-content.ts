@@ -150,6 +150,96 @@ function truncateMessageContentBlock(block: any, threshold: number): any {
 }
 
 /**
+ * Child SDK history normally has Pi-shaped content blocks, but tolerate a
+ * legacy string row without allowing it to bypass the transport boundary.
+ * Keep the row shape renderable while recording the same truncation metadata
+ * used for text blocks.
+ */
+function truncateMessage(message: any, threshold: number): any {
+	if (!message || typeof message !== "object" || Array.isArray(message)) return message;
+	if (typeof message.content === "string") {
+		if (message._truncated || message.content.length <= threshold) return message;
+		const preview = message.content.slice(0, PREVIEW_LENGTH);
+		return { ...message, content: preview, _truncated: true, _originalLength: message.content.length, preview };
+	}
+	if (!Array.isArray(message.content)) return message;
+	let changed = false;
+	const content = message.content.map((block: any) => {
+		const truncated = truncateMessageContentBlock(block, threshold);
+		if (truncated !== block) changed = true;
+		return truncated;
+	});
+	return changed ? { ...message, content } : message;
+}
+
+function truncateToolEvent(event: any, threshold: number): any {
+	if (!event || typeof event !== "object" || Array.isArray(event)) return event;
+	const tool = { name: event.toolName };
+	const args = truncateToolPayload(event.args, tool, threshold);
+	let result = event.result;
+	if (result && typeof result === "object" && !Array.isArray(result)) {
+		const content = result.content;
+		let truncatedContent = content;
+		if (Array.isArray(content)) {
+			let changed = false;
+			truncatedContent = content.map((block: any) => {
+				const truncated = truncateMessageContentBlock(block, threshold);
+				if (truncated !== block) changed = true;
+				return truncated;
+			});
+			if (!changed) truncatedContent = content;
+		} else if (isLargeString(content, threshold)) {
+			truncatedContent = truncatedStringDescriptor(content);
+		}
+		if (truncatedContent !== content) result = { ...result, content: truncatedContent };
+	}
+	return args === event.args && result === event.result ? event : {
+		...event,
+		...(args !== event.args ? { args } : {}),
+		...(result !== event.result ? { result } : {}),
+	};
+}
+
+/**
+ * Bound the payload-bearing fields of a semantic SDK child-work frame before
+ * it enters EventBuffer or a WebSocket replay. Identity, parent, usage, and
+ * cost metadata are copied unchanged; only renderable content is replaced.
+ */
+export function truncateClaudeSdkSubagentWork(event: any, threshold: number = LARGE_CONTENT_THRESHOLD): any {
+	if (event?.type !== "claude_sdk_subagent_work") return event;
+	const message = truncateMessage(event.message, threshold);
+	const toolEvent = truncateToolEvent(event.toolEvent, threshold);
+	return message === event.message && toolEvent === event.toolEvent ? event : {
+		...event,
+		...(message !== event.message ? { message } : {}),
+		...(toolEvent !== event.toolEvent ? { toolEvent } : {}),
+	};
+}
+
+/**
+ * Apply the same immutable boundary to nested SDK work retained in a visible
+ * snapshot. Root messages stay the responsibility of the ordinary snapshot
+ * truncation pipeline; this handles only the child-only sidecar envelope.
+ */
+export function truncateClaudeSdkSubagentWorkInSnapshot(snapshot: any, threshold: number = LARGE_CONTENT_THRESHOLD): any {
+	if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) || !Array.isArray(snapshot.subagentWork)) return snapshot;
+	let changed = false;
+	const subagentWork = snapshot.subagentWork.map((work: any) => {
+		if (!work || typeof work !== "object" || Array.isArray(work) || !Array.isArray(work.messages)) return work;
+		let workChanged = false;
+		const messages = work.messages.map((message: any) => {
+			const truncated = truncateMessage(message, threshold);
+			if (truncated !== message) workChanged = true;
+			return truncated;
+		});
+		if (!workChanged) return work;
+		changed = true;
+		return { ...work, messages };
+	});
+	return changed ? { ...snapshot, subagentWork } : snapshot;
+}
+
+/**
  * Truncate large content inside a list of persisted messages (as returned by
  * the agent's `get_messages` RPC). Used when sending history to clients on
  * session open / reconnect / tab wake — previously, the full untruncated
