@@ -417,6 +417,43 @@ function deliveryIntentId(value: any): string | undefined {
 	return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
+/**
+ * A user-shaped in-flight steer spliced into a server snapshot is continuity
+ * evidence, not Pi's correlated user-message echo. Older servers expose only
+ * `_inFlightSteer`; current servers also stamp the explicit recovery marker.
+ */
+function isDeliveryRecoveryProjection(value: any): boolean {
+	return value?._inFlightSteer === true && !!deliveryIntentId(value);
+}
+
+function deliveryRecoveryOutboxRow(message: any): QueuedMessage | undefined {
+	const id = deliveryIntentId(message);
+	const text = extractText(message);
+	if (!id || !text) return undefined;
+	const sequence = Number.isSafeInteger(message?.sequence) && message.sequence >= 0
+		? message.sequence
+		: undefined;
+	return {
+		id,
+		text,
+		isSteered: true,
+		createdAt: typeof message?.createdAt === "number" && Number.isFinite(message.createdAt)
+			? message.createdAt
+			: sequence ?? 0,
+		kind: "steer",
+		...(message?.targetTurn === "continuation" || message?.targetTurn === "next-turn"
+			? { targetTurn: message.targetTurn }
+			: {}),
+		...(sequence === undefined ? {} : { sequence }),
+		...(message?.deliveryState ? { deliveryState: message.deliveryState } : {}),
+		...(message?.deliveryReason ? { deliveryReason: message.deliveryReason } : {}),
+		...(message?.deliveryError ? { deliveryError: message.deliveryError } : {}),
+		...(typeof message?.retryable === "boolean" ? { retryable: message.retryable } : {}),
+		...(message?.source ? { source: message.source } : {}),
+		...(message?.author ? { author: message.author } : {}),
+	};
+}
+
 function persistedOutboxRow(row: QueuedMessage): Record<string, unknown> {
 	const copy: Record<string, unknown> = { ...row };
 	// The resend frame already owns payload bodies. Keeping a second copy in the
@@ -2138,18 +2175,59 @@ export class RemoteAgent {
 					// that scales with transcript length. Opt-in; no-op when disarmed.
 					bootTimingMeta({ sessionId: this._sessionId, transcriptMessages: msgs.length });
 					bootMark(`snapshot-received(${msgs.length} msgs)`);
+
+					// Structured in-flight rows are server recovery projections, not
+					// correlated Pi user-message surfacing. Project them into the durable
+					// outbox by occurrence identity and keep them out of the transcript;
+					// legacy rows (which have no identity) retain their historical
+					// transcript fallback. Install the replacement carrier before the
+					// reducer drops any prior snapshot artifact, then notify once after
+					// both state owners have converged so no blank or duplicate frame is
+					// observable.
+					const recoveryRows: QueuedMessage[] = [];
+					const transcriptRows: any[] = [];
+					for (const message of msgs) {
+						if (isDeliveryRecoveryProjection(message)) {
+							const row = deliveryRecoveryOutboxRow(message);
+							if (row) {
+								recoveryRows.push(row);
+								continue;
+							}
+						}
+						transcriptRows.push(message);
+					}
+					const recovered = this._acceptProjectedRows(recoveryRows.map((row) => {
+						const previous = this._deliveryProjection.get(row.id)
+							?? this._serverQueue.find((candidate) => candidate.id === row.id)
+							?? this._pendingOutbox.find((entry) => entry.row?.id === row.id)?.row;
+						if (!previous) return row;
+						return {
+							...row,
+							...previous,
+							// Snapshot ledger evidence advances lifecycle/order fields while the
+							// accepted projection retains richer payload metadata and createdAt.
+							...(row.targetTurn ? { targetTurn: row.targetTurn } : {}),
+							...(row.sequence === undefined ? {} : { sequence: row.sequence }),
+							...(row.deliveryState ? { deliveryState: row.deliveryState } : {}),
+							...(row.retryable === undefined ? {} : { retryable: row.retryable }),
+						};
+					}));
+					for (const row of recovered) this._deliveryProjection.set(row.id, row);
+
 					// Server snapshot is authoritative for any id it contains. The
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
-					this.apply({ type: "snapshot", messages: msgs });
-					// A snapshot user row carrying the occurrence id is already surfaced.
-					// Drop its outbox carrier only after the reducer owns that real row.
-					for (const message of msgs) {
+					this.apply({ type: "snapshot", messages: transcriptRows });
+					// Only a real snapshot transcript row may settle the outbox. The
+					// recovery rows above deliberately remain pending until a correlated
+					// Pi user start (or a later real transcript snapshot) is surfaced.
+					for (const message of transcriptRows) {
 						const intentId = deliveryIntentId(message);
 						if (intentId && (message?.role === "user" || message?.role === "user-with-attachments")) {
 							this._settleSurfacedIntent(intentId);
 						}
 					}
+					if (recovered.length > 0) this.onQueueUpdate?.(this.getQueue());
 					bootMark("snapshot-applied");
 					// The reducer triggers a re-render via rAF; mark + flush after it
 					// paints so the table captures the full reload incl. MessageList.

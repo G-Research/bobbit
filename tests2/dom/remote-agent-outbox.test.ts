@@ -33,7 +33,7 @@ function makeAgent(readyState: number) {
 const snapshot = (ra: any) => ({
 	outboxLen: ra._pendingOutbox.length,
 	sent: ra.__sentFrames.map((s: string) => JSON.parse(s)),
-	queue: ra.getQueue(),
+	queue: ra.getQueue().map((row: any) => ({ ...row })),
 	messages: ra._state.messages.length,
 	providerAuthRequired: ra._state.providerAuthRequired,
 	autoRetryPending: ra._state.autoRetryPending,
@@ -182,8 +182,126 @@ describe("RemoteAgent provider auth recovery", () => {
 	});
 });
 
+describe("RemoteAgent recovery snapshot delivery", () => {
+	const acceptedSteer = (id: string, sequence: number) => ({
+		id,
+		text: "same steer",
+		isSteered: true,
+		createdAt: sequence,
+		kind: "steer",
+		targetTurn: "continuation",
+		sequence,
+		deliveryState: "dispatching",
+	});
+	const recoveryRow = (id: string, attemptId: string, sequence: number) => ({
+		id: `inflight-steer:${id}`,
+		role: "user",
+		content: [{ type: "text", text: "same steer" }],
+		deliveryIntentId: id,
+		deliveryAttemptId: attemptId,
+		deliveryState: "dispatching",
+		targetTurn: "continuation",
+		sequence,
+		kind: "steer",
+		isSteered: true,
+		_inFlightSteer: true,
+		_deliveryRecoveryProjection: true,
+	});
+
+	it("keeps identical structured recovery rows in the outbox until each real correlated Pi start", async () => {
+		const ra = makeAgent(OPEN);
+		await ra.handleServerMessage({
+			type: "delivery_outbox",
+			outbox: [acceptedSteer("intent-a", 1), acceptedSteer("intent-b", 2)],
+		});
+
+		await ra.handleServerMessage({
+			type: "messages",
+			data: [
+				recoveryRow("intent-a", "attempt-a", 1),
+				recoveryRow("intent-b", "attempt-b", 2),
+			],
+		});
+
+		expect(ra.getQueue().map((row: any) => row.id)).toEqual(["intent-a", "intent-b"]);
+		expect(ra.getQueue().map((row: any) => row.text)).toEqual(["same steer", "same steer"]);
+		expect(ra._state.messages).toHaveLength(0);
+
+		ra.handleAgentEvent({
+			type: "message_start",
+			message: {
+				id: "pi-user-a",
+				role: "user",
+				content: [{ type: "text", text: "same steer" }],
+				deliveryIntentId: "intent-a",
+				deliveryAttemptId: "attempt-a",
+			},
+		});
+
+		expect(ra.getQueue().map((row: any) => row.id)).toEqual(["intent-b"]);
+		expect(ra._state.messages).toHaveLength(1);
+		expect(ra._state.messages[0]).toMatchObject({ id: "pi-user-a", deliveryIntentId: "intent-a" });
+
+		ra.handleAgentEvent({
+			type: "message_start",
+			message: {
+				id: "pi-user-b",
+				role: "user",
+				content: [{ type: "text", text: "same steer" }],
+				deliveryIntentId: "intent-b",
+				deliveryAttemptId: "attempt-b",
+			},
+		});
+
+		expect(ra.getQueue()).toHaveLength(0);
+		expect(ra._state.messages.map((message: any) => message.deliveryIntentId)).toEqual(["intent-a", "intent-b"]);
+	});
+
+	it("settles on a real correlated transcript snapshot row without a duplicate carrier", async () => {
+		const ra = makeAgent(OPEN);
+		await ra.handleServerMessage({
+			type: "delivery_outbox",
+			outbox: [acceptedSteer("intent-real-snapshot", 1)],
+		});
+		await ra.handleServerMessage({
+			type: "messages",
+			data: [{
+				id: "pi-real-snapshot",
+				role: "user",
+				content: [{ type: "text", text: "same steer" }],
+				deliveryIntentId: "intent-real-snapshot",
+				deliveryAttemptId: "attempt-real-snapshot",
+			}],
+		});
+
+		expect(ra.getQueue()).toHaveLength(0);
+		expect(ra._state.messages).toHaveLength(1);
+		expect(ra._state.messages[0]).toMatchObject({
+			id: "pi-real-snapshot",
+			deliveryIntentId: "intent-real-snapshot",
+		});
+	});
+
+	it("preserves legacy in-flight snapshot rows as transcript recovery carriers", async () => {
+		const ra = makeAgent(OPEN);
+		await ra.handleServerMessage({
+			type: "messages",
+			data: [{
+				id: "inflight-steer:0:legacy",
+				role: "user",
+				content: [{ type: "text", text: "legacy" }],
+				_inFlightSteer: true,
+			}],
+		});
+
+		expect(ra.getQueue()).toHaveLength(0);
+		expect(ra._state.messages).toHaveLength(1);
+		expect(ra._state.messages[0]).toMatchObject({ id: "inflight-steer:0:legacy", _inFlightSteer: true });
+	});
+});
+
 describe("RemoteAgent send outbox (S2)", () => {
-	it("offline prompt is queued as a pending pill (no drop, no false 'sent' bubble) and flushes on reconnect", async () => {
+	it("offline prompt stays visible through reconnect send until server acceptance", async () => {
 		const ra = makeAgent(CLOSED);
 		await ra.prompt("lost-xyz");
 		const offline = snapshot(ra);
@@ -200,8 +318,11 @@ describe("RemoteAgent send outbox (S2)", () => {
 		expect(offline.queue[0].text).toBe("lost-xyz");
 		expect(offline.queue[0].unsent).toBe(true);
 		expect(offline.queueUpdateCount).toBeGreaterThan(0);
-		// After reconnect flush: delivered exactly once, outbox cleared.
-		expect(afterFlush.outboxLen).toBe(0);
+		// A socket write is not delivery or server acceptance. The same occurrence
+		// remains visible and durable until a matching server projection arrives.
+		expect(afterFlush.outboxLen).toBe(1);
+		expect(afterFlush.queue).toHaveLength(1);
+		expect(afterFlush.queue[0].unsent).toBe(false);
 		expect(afterFlush.sent).toHaveLength(1);
 		expect(afterFlush.sent[0]).toMatchObject({ type: "prompt", text: "lost-xyz" });
 	});
@@ -226,15 +347,17 @@ describe("RemoteAgent send outbox (S2)", () => {
 
 		let afterFailure = snapshot(ra);
 		expect(afterFailure.sent.map((frame: any) => frame.text)).toEqual(["first"]);
-		expect(afterFailure.outboxLen).toBe(2);
-		expect(afterFailure.queue.map((row: any) => row.text)).toEqual(["second", "third"]);
+		expect(afterFailure.outboxLen).toBe(3);
+		expect(afterFailure.queue.map((row: any) => row.text)).toEqual(["first", "second", "third"]);
+		expect(afterFailure.queue.map((row: any) => row.unsent)).toEqual([false, true, true]);
 
 		ra.ws.readyState = OPEN;
 		ra.ws.send = (data: string) => ra.__sentFrames.push(data);
 		ra._flushOutbox();
 		afterFailure = snapshot(ra);
-		expect(afterFailure.outboxLen).toBe(0);
+		expect(afterFailure.outboxLen).toBe(3);
 		expect(afterFailure.sent.map((frame: any) => frame.text)).toEqual(["first", "second", "third"]);
+		expect(afterFailure.queue.map((row: any) => row.unsent)).toEqual([false, false, false]);
 	});
 
 	it("only prompt/steer/retry are buffered; control frames are dropped", async () => {
@@ -254,13 +377,21 @@ describe("RemoteAgent send outbox (S2)", () => {
 		expect(r.queue.find((q: any) => q.text === "s1").isSteered).toBe(true);
 	});
 
-	it("outbox is bounded at OUTBOX_MAX (oldest dropped)", async () => {
+	it("rejects rows beyond durable OUTBOX_MAX visibly instead of dropping older intent", async () => {
 		const ra = makeAgent(CLOSED);
-		for (let i = 0; i < 60; i++) (ra as any).send({ type: "prompt", text: `m${i}` });
+		for (let i = 0; i < 60; i++) await ra.prompt(`m${i}`);
 		const snap = snapshot(ra);
-		expect(snap.outboxLen).toBe(50); // OUTBOX_MAX
-		expect(snap.queue[0]?.text).toBe("m10"); // m0..m9 evicted
-		expect(snap.queue[snap.queue.length - 1]?.text).toBe("m59");
+		expect(snap.outboxLen).toBe(60);
+		expect(snap.queue).toHaveLength(60);
+		expect(snap.queue[0]).toMatchObject({ text: "m0", deliveryState: "local" });
+		expect(snap.queue[49]).toMatchObject({ text: "m49", deliveryState: "local" });
+		expect(snap.queue[50]).toMatchObject({
+			text: "m50",
+			deliveryState: "failed",
+			retryable: false,
+		});
+		expect(snap.queue[50].deliveryError).toMatch(/storage is full/i);
+		expect(snap.queue.at(-1)?.text).toBe("m59");
 	});
 
 	it("removeQueued drops a pending-unsent row locally", async () => {
