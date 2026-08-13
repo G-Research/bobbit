@@ -49,6 +49,8 @@ import {
 	setFirstClassParentExpanded,
 	setArchivedParentExpanded,
 	sidebarTreeExpansionInput,
+	getSidebarExplicitRevealDepth,
+	setSidebarExplicitRevealDepth,
 } from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
 import { collectEligibleStatusSessions, selectSidebarStatusSections, type SidebarStatusSections, type StatusCandidate } from "./sidebar-status.js";
@@ -1528,17 +1530,19 @@ function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 
 /**
  * Per-project key for the "Show N more child goals" expansion state.
- * When the user clicks the truncation row, we bump the depth cap by 5 to
- * surface the next layer of nesting. Persists in module memory for the
- * lifetime of the SPA — losing this on reload is fine, the cap default of
- * 5 is the documented limit anyway.
+ * Ordinary truncation-row expansion remains in memory; only the depth needed
+ * by an explicit session reveal is durable in the unified tree-state record.
  */
 const _expandedNestedDepthByProject: Map<string, number> = new Map();
 const DEFAULT_NESTED_DEPTH_CAP = 5;
 const NESTED_DEPTH_INCREMENT = 5;
 
 function _getNestedDepthCap(projectId: string): number {
-	return _expandedNestedDepthByProject.get(projectId) ?? DEFAULT_NESTED_DEPTH_CAP;
+	return Math.max(
+		DEFAULT_NESTED_DEPTH_CAP,
+		_expandedNestedDepthByProject.get(projectId) ?? 0,
+		getSidebarExplicitRevealDepth(projectId) ?? 0,
+	);
 }
 
 function _expandNestedDepth(projectId: string): void {
@@ -1622,11 +1626,16 @@ export function materializeExplicitSidebarSessionDepth(sessionId: string): boole
 		requiredDepth = Math.max(requiredDepth, depth);
 	}
 
-	let cap = _getNestedDepthCap(preferredProjectId);
-	if (requiredDepth <= cap) return false;
-	while (cap < requiredDepth) cap += NESTED_DEPTH_INCREMENT;
-	_expandedNestedDepthByProject.set(preferredProjectId, cap);
-	return true;
+	// Persist only the target path's required bucket. A larger in-memory cap may
+	// have come from ordinary Show More clicks and must not become durable merely
+	// because the explicit target happens to fit within it.
+	let explicitCap = Math.max(
+		DEFAULT_NESTED_DEPTH_CAP,
+		getSidebarExplicitRevealDepth(preferredProjectId) ?? 0,
+	);
+	if (requiredDepth <= explicitCap) return false;
+	while (explicitCap < requiredDepth) explicitCap += NESTED_DEPTH_INCREMENT;
+	return setSidebarExplicitRevealDepth(preferredProjectId, explicitCap);
 }
 
 /** Render the "Show N more child goals…" affordance when the depth cap clipped. */
