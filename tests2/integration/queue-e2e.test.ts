@@ -177,6 +177,46 @@ test.describe("Queue E2E", () => {
 		expect(latestQueue(second).map((row: any) => row.text)).toEqual(["msg 3", "msg 1", "msg 2"]);
 	});
 
+	it("keeps reliable reorder coherent across projection, persistence, restore, and drain", async () => {
+		const first = client();
+		const second = client();
+		const { value, prompt } = session({ status: "streaming", clients: [first, second] });
+		for (const [index, text] of ["reliable 1", "reliable 2", "reliable 3"].entries()) {
+			await manager.enqueuePrompt(value.id, text, { intentId: `intent-${index + 1}` });
+		}
+		const rows = value.promptQueue.toArray();
+		manager.reorderQueue(value.id, [rows[2].id, rows[0].id, rows[1].id]);
+
+		expect(latestQueue(first).map((row: any) => row.id)).toEqual(["intent-3", "intent-1", "intent-2"]);
+		expect(latestQueue(second).map((row: any) => row.id)).toEqual(["intent-3", "intent-1", "intent-2"]);
+		expect(value.promptQueue.toArray().map((row: any) => [row.id, row.sequence])).toEqual([
+			["intent-3", 1], ["intent-1", 2], ["intent-2", 3],
+		]);
+		const restored = new PromptQueue(value.promptQueue.toArray());
+		expect(restored.dequeueForTarget("next-turn")?.id).toBe("intent-3");
+		expect(restored.dequeueForTarget("next-turn")?.id).toBe("intent-1");
+		expect(restored.dequeueForTarget("next-turn")?.id).toBe("intent-2");
+
+		value.inFlightSteerTexts = [{
+			text: "already dispatching A", promptId: "ledger-A", intentId: "ledger-A", attemptId: "attempt-A",
+			dispatchEpoch: Number.MAX_SAFE_INTEGER - 2, createdAt: Number.MAX_SAFE_INTEGER - 2, state: "dispatching",
+		}, {
+			text: "already dispatching B", promptId: "ledger-B", intentId: "ledger-B", attemptId: "attempt-B",
+			dispatchEpoch: Number.MAX_SAFE_INTEGER - 1, createdAt: Number.MAX_SAFE_INTEGER - 1, state: "dispatching",
+		}];
+		expect(manager.projectDeliveryOutbox(value.id).map((row: any) => row.id)).toEqual([
+			"intent-3", "intent-1", "intent-2", "ledger-A", "ledger-B",
+		]);
+		value.inFlightSteerTexts = [];
+
+		for (const expected of ["reliable 3", "reliable 1", "reliable 2"]) {
+			value.status = "idle";
+			manager.drainQueue(value);
+			await Promise.resolve();
+			expect(prompt.mock.calls.at(-1)?.[0]).toBe(expected);
+		}
+	});
+
 	it("story 13: abort with no queue — agent goes idle, no extra messages", () => {
 		const conn = client();
 		const { value } = session({ status: "aborting", clients: [conn] });

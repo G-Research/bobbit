@@ -64,6 +64,32 @@ describe("reliable intent queue identity and restore contract", () => {
 		expect(queue.toArray().map((row: any) => row.id)).toEqual(["failed-original", "later"]);
 		expect(queue.toArray()[0]).toEqual(failed);
 	});
+
+	it("makes explicit reorder durable by resequencing only within each reliable lane", () => {
+		const queue = new PromptQueue();
+		for (const row of [
+			intentRow({ id: "P1", text: "prompt one", sequence: 10 }),
+			intentRow({ id: "S1", text: "steer one", kind: "steer", targetTurn: "continuation", sequence: 20 }),
+			intentRow({ id: "P2", text: "prompt two", sequence: 30 }),
+			intentRow({ id: "S2", text: "steer two", kind: "steer", targetTurn: "continuation", sequence: 40 }),
+		]) queueApi(queue).enqueueExisting(row);
+
+		queueApi(queue).reorderByIds(["P2", "S2", "P1", "S1"], { resequenceReliableLanes: true });
+		const reordered = queue.toArray() as any[];
+		expect(reordered.map((row) => row.id)).toEqual(["P2", "S2", "P1", "S1"]);
+		expect(reordered.map((row) => [row.id, row.targetTurn, row.sequence])).toEqual([
+			["P2", "next-turn", 10],
+			["S2", "continuation", 20],
+			["P1", "next-turn", 30],
+			["S1", "continuation", 40],
+		]);
+
+		const restored = new PromptQueue(reordered);
+		expect(queueApi(restored).dequeueForTarget("continuation")?.id).toBe("S2");
+		expect(queueApi(restored).dequeueForTarget("continuation")?.id).toBe("S1");
+		expect(queueApi(restored).dequeueForTarget("next-turn")?.id).toBe("P2");
+		expect(queueApi(restored).dequeueForTarget("next-turn")?.id).toBe("P1");
+	});
 });
 
 describe("reliable intent target-turn lanes", () => {

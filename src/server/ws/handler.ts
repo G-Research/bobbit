@@ -139,6 +139,12 @@ export function buildResolvedModelStateModel(provider: string, id: string, base?
 	return model;
 }
 
+type ReliableIntentClientMessage =
+	| ClientMessage
+	| { type: "prompt"; text: string; intentId?: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
+	| { type: "steer"; text: string; intentId?: string }
+	| { type: "retry_intent"; intentId: string };
+
 type ModelSelectionRecoveryManager = SessionManager & {
 	recoverModelSelectionRequired(
 		sessionId: string,
@@ -150,7 +156,28 @@ type ModelSelectionRecoveryManager = SessionManager & {
 		condition?: ModelSelectionRequiredCondition;
 		activationInProgress: boolean;
 	};
+	/** Reliable-turn APIs are implemented by SessionManager; kept optional here so
+	 * this transport remains rolling-upgrade compatible with restored sessions. */
+	retryIntent?(sessionId: string, intentId: string): Promise<unknown> | unknown;
 };
+
+function acceptedIntentId(msg: unknown): string {
+	const intentId = (msg as { intentId?: unknown } | null)?.intentId;
+	return typeof intentId === "string" && intentId.length > 0 && intentId.length <= 256
+		? intentId
+		: randomUUID();
+}
+
+function intentProjection(
+	sessionManager: SessionManager,
+	sessionId: string,
+	intentId: string,
+): Record<string, unknown> | undefined {
+	const project = (sessionManager as any).projectDeliveryOutbox;
+	if (typeof project !== "function") return undefined;
+	return project.call(sessionManager, sessionId)
+		.find((row: { id: string }) => row.id === intentId) as unknown as Record<string, unknown> | undefined;
+}
 
 function sessionModelSelectionRequired(
 	session: unknown,
@@ -473,7 +500,7 @@ function getViewerGoalIds(ws: WebSocket): Set<string> {
 	return next;
 }
 
-function handleViewerMessage(ws: WebSocket, msg: ClientMessage): void {
+function handleViewerMessage(ws: WebSocket, msg: ReliableIntentClientMessage): void {
 	const viewerMsg = msg as unknown as { type?: string; goalId?: unknown };
 	if (viewerMsg.type === "subscribe_goal") {
 		if (typeof viewerMsg.goalId === "string" && viewerMsg.goalId.trim()) {
@@ -539,6 +566,7 @@ const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame
 const SESSION_WORK_MESSAGE_TYPES = [
 	"prompt",
 	"steer",
+	"retry_intent",
 	"steer_queued",
 	"remove_queued",
 	"reorder_queue",
@@ -557,15 +585,15 @@ const SESSION_WORK_MESSAGE_TYPES = [
 	"grant_tool_permission",
 	"ext_session_write_permit",
 	"ext_session_post",
-] as const satisfies readonly ClientMessage["type"][];
+] as const satisfies readonly ReliableIntentClientMessage["type"][];
 
-type SessionWorkMessage = Extract<ClientMessage, {
+type SessionWorkMessage = Extract<ReliableIntentClientMessage, {
 	type: typeof SESSION_WORK_MESSAGE_TYPES[number];
 }>;
 
-const SESSION_WORK_MESSAGE_TYPE_SET: ReadonlySet<ClientMessage["type"]> = new Set(SESSION_WORK_MESSAGE_TYPES);
+const SESSION_WORK_MESSAGE_TYPE_SET: ReadonlySet<ReliableIntentClientMessage["type"]> = new Set(SESSION_WORK_MESSAGE_TYPES);
 
-function isSessionWorkMessage(msg: ClientMessage): msg is SessionWorkMessage {
+function isSessionWorkMessage(msg: ReliableIntentClientMessage): msg is SessionWorkMessage {
 	return SESSION_WORK_MESSAGE_TYPE_SET.has(msg.type);
 }
 
@@ -739,7 +767,69 @@ export function handleWebSocketConnection(
 		send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
 	};
 
-	const rejectInvalidPromptText = (msg: ClientMessage): boolean => {
+	const sendIntentUpdate = (
+		intent: Record<string, unknown>,
+		settlement?: "surfaced" | "failed" | "cancelled",
+	): void => {
+		send(ws, {
+			type: "intent_update",
+			sessionId,
+			intent,
+			...(settlement ? { settlement } : {}),
+		} as unknown as ServerMessage);
+	};
+
+	const launchAcceptedDelivery = (
+		intentId: string,
+		delivery: Promise<unknown> | unknown,
+	): void => {
+		// SessionManager admission is synchronous up to its first await: by this
+		// point the exact occurrence is persisted and projected, while Pi delivery
+		// continues independently. A duplicate frame resolves to the same row.
+		const accepted = intentProjection(sessionManager, sessionId, intentId);
+		let receiptSent = false;
+		if (accepted) {
+			sendIntentUpdate(accepted);
+			receiptSent = true;
+		}
+		void Promise.resolve(delivery).then(() => {
+			// Cold restore/replacement admission may cross an await before persistence.
+			// Emit its receipt when the authoritative manager finally exposes the row.
+			if (receiptSent) return;
+			const admitted = intentProjection(sessionManager, sessionId, intentId);
+			if (admitted) {
+				sendIntentUpdate(admitted);
+				return;
+			}
+			// A delayed duplicate may arrive after the occurrence was surfaced or
+			// explicitly dismissed. Return its durable body-free disposition so the
+			// originating tab clears its pre-acceptance spool without resurrection.
+			const settlement = sessionManager.intentSettlement(sessionId, intentId);
+			if (settlement) {
+				sendIntentUpdate({
+					id: intentId,
+					deliveryState: settlement === "cancelled" ? "cancelled" : "received",
+					deliveryReason: settlement === "cancelled" ? "dismissed" : "already-settled",
+				}, settlement);
+			}
+		}, (error) => {
+			const failed = intentProjection(sessionManager, sessionId, intentId);
+			if (failed) sendIntentUpdate(failed, failed.deliveryState === "failed" ? "failed" : undefined);
+			console.warn(`[ws-handler] intent delivery did not settle session=${sessionId} intent=${intentId} outcome=${failed?.deliveryState ?? "retained"}`);
+			void error;
+		});
+	};
+
+	const rejectInvalidIntentId = (msg: ReliableIntentClientMessage): boolean => {
+		if (msg.type !== "prompt" && msg.type !== "steer" && msg.type !== "retry_intent") return false;
+		const intentId = (msg as { intentId?: unknown }).intentId;
+		if (intentId === undefined && msg.type !== "retry_intent") return false;
+		if (typeof intentId === "string" && intentId.length > 0 && intentId.length <= 256) return false;
+		send(ws, { type: "error", message: "Intent ID must be a non-empty string of at most 256 characters", code: "INVALID_INTENT_ID" });
+		return true;
+	};
+
+	const rejectInvalidPromptText = (msg: ReliableIntentClientMessage): boolean => {
 		if (msg.type !== "prompt" && msg.type !== "steer" && msg.type !== "ext_session_post") {
 			return false;
 		}
@@ -795,7 +885,7 @@ export function handleWebSocketConnection(
 		}
 	}, 5000);
 
-	const handleMessage = async (msg: ClientMessage, frameBytes: number, commandSignal?: AbortSignal): Promise<void> => {
+	const handleMessage = async (msg: ReliableIntentClientMessage, frameBytes: number, commandSignal?: AbortSignal): Promise<void> => {
 		// First message must be auth
 		if (!authenticated) {
 			if (msg.type !== "auth") {
@@ -939,7 +1029,21 @@ export function handleWebSocketConnection(
 
 			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
-			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+			const deliveryOutbox = typeof (sessionManager as any).projectDeliveryOutbox === "function"
+				? sessionManager.projectDeliveryOutbox(sessionId)
+				: session.promptQueue?.toArray?.() ?? [];
+			send(ws, { type: "queue_update", sessionId, queue: deliveryOutbox } as unknown as ServerMessage);
+			send(ws, { type: "delivery_outbox", sessionId, outbox: deliveryOutbox } as unknown as ServerMessage);
+			const cancelledIntentIds = typeof (sessionManager as any).cancelledIntentIds === "function"
+				? sessionManager.cancelledIntentIds(sessionId)
+				: [];
+			for (const intentId of cancelledIntentIds) {
+				sendIntentUpdate({
+					id: intentId,
+					deliveryState: "cancelled",
+					deliveryReason: "dismissed",
+				}, "cancelled");
+			}
 			replayManualRetryRequiredOnAttach(ws, session);
 
 			// Rehydrate any on-disk proposal drafts for this session so the
@@ -1122,6 +1226,12 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "prompt": {
+					const intentId = acceptedIntentId(msg);
+					const existingIntent = intentProjection(sessionManager, sessionId, intentId);
+					if (existingIntent) {
+						sendIntentUpdate(existingIntent);
+						break;
+					}
 					// Fence unavailable-model capsules before mention/skill/attachment
 					// preprocessing or SessionManager's authoritative acceptance boundary.
 					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
@@ -1275,7 +1385,7 @@ export function handleWebSocketConnection(
 						: undefined;
 
 					if (commandSignal?.aborted) return;
-					await sessionManager.enqueuePrompt(sessionId, originalText, {
+					const delivery = (sessionManager.enqueuePrompt as any)(sessionId, originalText, {
 						images: sendImages.length ? sendImages : undefined,
 						attachments: sendAttachments.length ? sendAttachments : undefined,
 						skillExpansions: expansions.length ? expansions : undefined,
@@ -1286,10 +1396,18 @@ export function handleWebSocketConnection(
 						author: LOCAL_USER_AUTHOR,
 						// Assistant auto-kickoff prompts opt out of first-message title-gen.
 						suppressTitleGen: msg.suppressTitleGen === true,
+						intentId,
 					});
+					launchAcceptedDelivery(intentId, delivery);
 					break;
 				}
 				case "steer": {
+					const intentId = acceptedIntentId(msg);
+					const existingIntent = intentProjection(sessionManager, sessionId, intentId);
+					if (existingIntent) {
+						sendIntentUpdate(existingIntent);
+						break;
+					}
 					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
 					if (modelSelectionCondition) {
 						send(ws, {
@@ -1299,27 +1417,45 @@ export function handleWebSocketConnection(
 						});
 						break;
 					}
-					// Live steer: if agent is streaming, send directly via RPC
-					// (real-time interrupt, bypasses queue intentionally).
-					// Otherwise enqueue as a steered message and drain if idle.
-					if (session.status === "streaming") {
-						// The live-steer boundary defaults to Bobbit's trusted local-user identity;
-						// keep the transport call shape compatible with the low-latency WS path.
-						await sessionManager.deliverLiveSteer(sessionId, msg.text);
-					} else {
-						await sessionManager.enqueuePrompt(sessionId, msg.text, {
+					// Admission always lands in SessionManager's durable outbox before its
+					// asynchronous Pi delivery. Compaction is an active turn, so a steer
+					// submitted during automatic compaction retains continuation targeting.
+					const delivery = session.status === "streaming" || session.isCompacting
+						? (sessionManager.deliverLiveSteer as any)(sessionId, msg.text, {
+							source: "user",
+							author: LOCAL_USER_AUTHOR,
+							intentId,
+						})
+						: (sessionManager.enqueuePrompt as any)(sessionId, msg.text, {
 							isSteered: true,
 							source: "user",
 							author: LOCAL_USER_AUTHOR,
+							intentId,
 						});
+					launchAcceptedDelivery(intentId, delivery);
+					break;
+				}
+				case "retry_intent": {
+					const manager = sessionManager as ModelSelectionRecoveryManager;
+					if (!manager.retryIntent) {
+						send(ws, { type: "error", message: "Intent retry is unavailable", code: "INTENT_RETRY_UNAVAILABLE" });
+						break;
 					}
+					const retry = manager.retryIntent(sessionId, msg.intentId);
+					if (retry === false && !intentProjection(sessionManager, sessionId, msg.intentId)) {
+						send(ws, { type: "error", message: "Intent is unknown or not retryable", code: "INTENT_NOT_RETRYABLE" });
+						break;
+					}
+					launchAcceptedDelivery(msg.intentId, retry);
 					break;
 				}
 				case "steer_queued":
 					sessionManager.steerQueued(sessionId, msg.messageId);
 					break;
 				case "remove_queued":
-					sessionManager.removeQueued(sessionId, msg.messageId);
+					if (!sessionManager.removeQueued(sessionId, msg.messageId)) {
+						send(ws, { type: "error", message: "Intent could not be dismissed", code: "INTENT_DISMISS_FAILED" });
+					}
 					break;
 				case "reorder_queue":
 					sessionManager.reorderQueue(sessionId, msg.messageIds);
@@ -1468,6 +1604,10 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "compact": {
+					if (session.isCompacting || session.status === "aborting") {
+						send(ws, { type: "error", message: "Compaction is already active or the turn is stopping", code: "COMPACTION_ACTIVE" });
+						break;
+					}
 					// Fire-and-forget: don't block the WS message loop.
 					//
 					// pi-coding-agent 0.74.0+ emits its OWN `compaction_start` and
@@ -1482,13 +1622,18 @@ export function handleWebSocketConnection(
 					// card to "complete" twice and (because the agent's lands
 					// before this handler finishes) showing the finished render
 					// during the still-in-flight compaction. So we DO NOT
-					// broadcast wrapper events here — we only need to:
-					//   1. Flip `session.isCompacting` so server-side state matches.
-					//   2. Append the manual sidecar row (session-manager skips
-					//      manual on its own compaction_end branch).
+					// broadcast wrapper events here. We mark admission compacting before
+					// the RPC and delegate every clear/release outcome to SessionManager's
+					// idempotent finisher. This handler retains only the legacy sidecar
+					// fallback for runtimes that omit the manual compaction_end payload.
 					const startedAtMs = Date.now();
 					const compactionId = makeCompactionId(startedAtMs);
 					session.isCompacting = true;
+					// Fence admission synchronously, before Pi can emit compaction_start.
+					// SessionManager uses this reason to target manual-compaction steers
+					// at the next turn rather than the interrupted continuation lane.
+					(session as any)._reliableCompactionId = compactionId;
+					(session as any)._reliableCompactionReason = "manual";
 					// Stash the shared compactionId on the session BEFORE awaiting the
 					// RPC so session-manager's manual `compaction_end` branch can stamp
 					// the broadcast event with it. That lets the client's live
@@ -1509,9 +1654,17 @@ export function handleWebSocketConnection(
 							const compactResult = await compactionRpcClient.compact(120_000);
 							console.log(`[ws-handler] Compact RPC resolved for session ${sessionId}`);
 							const endedAtMs = Date.now();
-							session.isCompacting = false;
 							const finalization = (session as any)._compactionFinalization as Promise<void> | undefined;
 							if (finalization) await finalization;
+							const finishCompaction = (sessionManager as any).finishCompactionAndRelease as
+								| ((target: typeof session, id: string, opts?: { reason?: string }) => Promise<unknown> | unknown)
+								| undefined;
+							if (finishCompaction) {
+								await finishCompaction.call(sessionManager, session, compactionId, { reason: "manual" });
+							} else {
+								// Fail closed: no competing handler-owned clear/drain boundary.
+								console.error(`[ws-handler] compaction finisher unavailable session=${sessionId} compaction=${compactionId}`);
+							}
 							if (sessionManager.getSession(sessionId) !== session || session.rpcClient !== compactionRpcClient) return;
 							// session-manager's manual `compaction_end` branch owns the
 							// authoritative Pi lookup and sidecar append before its
@@ -1546,7 +1699,14 @@ export function handleWebSocketConnection(
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
 							const endedAtMs = Date.now();
-							session.isCompacting = false;
+							const finishCompaction = (sessionManager as any).finishCompactionAndRelease as
+								| ((target: typeof session, id: string, opts?: { reason?: string }) => Promise<unknown> | unknown)
+								| undefined;
+							if (finishCompaction) {
+								await finishCompaction.call(sessionManager, session, compactionId, { reason: "manual" });
+							} else {
+								console.error(`[ws-handler] compaction finisher unavailable session=${sessionId} compaction=${compactionId}`);
+							}
 							(session as any)._manualCompactionId = undefined;
 							(session as any)._manualCompactionRpcClient = undefined;
 							(session as any)._manualCompactionBaselinePromise = undefined;
@@ -2187,11 +2347,11 @@ export function handleWebSocketConnection(
 			});
 			return;
 		}
-		const msg = parsed as ClientMessage;
+		const msg = parsed as ReliableIntentClientMessage;
 
-		// Validate text-bearing commands before they enter Markdown parsing, a
-		// session queue, or the extension-post permit flow.
-		if (authenticated && rejectInvalidPromptText(msg)) return;
+		// Validate occurrence identity and text-bearing commands before they enter
+		// Markdown parsing, a session queue, or the extension-post permit flow.
+		if (authenticated && (rejectInvalidIntentId(msg) || rejectInvalidPromptText(msg))) return;
 
 		const dispatch = (signal?: AbortSignal) => handleMessage(msg, frameBytes, signal);
 		const liveSession = authenticated && sessionId !== "__viewer__"
@@ -2208,6 +2368,7 @@ export function handleWebSocketConnection(
 			&& (msg.type === "prompt"
 				|| msg.type === "steer"
 				|| msg.type === "retry"
+				|| msg.type === "retry_intent"
 				|| msg.type === "restart_agent"
 				|| msg.type === "set_thinking_level")
 		) {
@@ -2233,6 +2394,7 @@ export function handleWebSocketConnection(
 		}
 		const serialisedSessionCommand = msg.type === "prompt" ||
 			msg.type === "retry" ||
+			msg.type === "retry_intent" ||
 			msg.type === "set_model" ||
 			msg.type === "set_thinking_level" ||
 			(msg.type === "steer" && !liveStreamingSteer);

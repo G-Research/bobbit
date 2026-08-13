@@ -44,6 +44,17 @@ function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
 }
 
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
+export type IntentKind = "prompt" | "steer";
+export type IntentTargetTurn = "continuation" | "next-turn";
+export type IntentDeliveryState =
+	| "local"
+	| "queued"
+	| "dispatching"
+	| "received"
+	| "uncertain"
+	| "failed"
+	| "cancelled";
+
 export interface QueuedMessage {
 	id: string;
 	text: string;
@@ -51,6 +62,12 @@ export interface QueuedMessage {
 	attachments?: unknown[];
 	isSteered: boolean;
 	dispatched?: boolean;
+	kind?: IntentKind;
+	targetTurn?: IntentTargetTurn;
+	deliveryState?: IntentDeliveryState;
+	deliveryError?: string;
+	/** Legacy pre-acceptance marker; normalized to the local delivery state. */
+	unsent?: boolean;
 	source?: PromptSource;
 	author?: MessageAuthor;
 	createdAt: number;
@@ -107,6 +124,8 @@ export class MessageEditor extends LitElement {
 
 	@property() sessionId?: string;
 	@property() isStreaming = false;
+	@property() isCompacting = false;
+	@property() isAborting = false;
 	@property() currentModel?: Model<any>;
 	@property() thinkingLevel: ThinkingLevel = "off";
 	@property() showAttachmentButton = true;
@@ -128,6 +147,7 @@ export class MessageEditor extends LitElement {
 	@property() onSteerSend?: (text: string) => boolean | Promise<boolean>;
 	@property() onRemoveQueued?: (id: string) => void;
 	@property() onEditQueued?: (msg: QueuedMessage) => void;
+	@property() onRetryQueued?: (msg: QueuedMessage) => void;
 	@property() onReorder?: (messageIds: string[]) => void;
 	@property() attachments: Attachment[] = [];
 	@property({ type: Array }) queuedMessages: QueuedMessage[] = [];
@@ -874,6 +894,41 @@ export class MessageEditor extends LitElement {
 		this.requestUpdate();
 	};
 
+	private _intentKind(msg: QueuedMessage): IntentKind {
+		return msg.kind ?? (msg.isSteered ? "steer" : "prompt");
+	}
+
+	private _intentTarget(msg: QueuedMessage): IntentTargetTurn {
+		return msg.targetTurn ?? (this._intentKind(msg) === "steer" ? "continuation" : "next-turn");
+	}
+
+	private _intentState(msg: QueuedMessage): IntentDeliveryState {
+		if (msg.deliveryState) return msg.deliveryState;
+		if (msg.unsent) return "local";
+		return msg.dispatched ? "dispatching" : "queued";
+	}
+
+	private _intentStatus(msg: QueuedMessage): string {
+		const state = this._intentState(msg);
+		switch (state) {
+			case "local": return "Waiting for connection";
+			case "dispatching": return "Sending…";
+			case "received": return "Adding to chat…";
+			case "uncertain": return "Awaiting delivery confirmation";
+			case "failed": return "Not delivered";
+			case "cancelled": return "Cancelled";
+			case "queued":
+			default:
+				if (this.isAborting) return "Stopping current turn — message remains queued";
+				if (this.isCompacting) return this._intentTarget(msg) === "continuation"
+					? "Compacting — steer queued for current turn"
+					: "Compacting — queued for next turn";
+				return this._intentTarget(msg) === "continuation"
+					? "Steer queued for current turn"
+					: "Queued for next turn";
+		}
+	}
+
 	private handleTextareaInput = (e: Event) => {
 		const textarea = e.target as HTMLTextAreaElement;
 		this.value = textarea.value;
@@ -954,7 +1009,7 @@ export class MessageEditor extends LitElement {
 			if (!this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {
 				this.handleSend();
 			}
-		} else if (e.key === "Escape" && this.isStreaming) {
+		} else if (e.key === "Escape" && (this.isStreaming || this.isCompacting) && !this.isAborting) {
 			e.preventDefault();
 			this.onAbort?.();
 		} else if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey && this._history.length > 0 && this._isCursorOnVisualTopRow()) {
@@ -1497,14 +1552,17 @@ export class MessageEditor extends LitElement {
 			: "";
 
 		const hasContent = this.value.trim() || this.attachments.length > 0;
-		const abortButton = this.isStreaming
+		const hasActiveTurn = this.isStreaming || this.isCompacting || this.isAborting;
+		const stopLabel = this.isAborting ? "Stopping current turn" : "Stop current turn";
+		const abortButton = hasActiveTurn
 			? Button({
 					variant: "ghost",
 					size: "icon",
-					onClick: this.onAbort,
-					title: "Stop streaming",
-					children: icon(Square, "sm"),
-					className: "h-8 w-8 shrink-0",
+					onClick: this.isAborting ? undefined : this.onAbort,
+					disabled: this.isAborting,
+					title: stopLabel,
+					children: html`${icon(this.isAborting ? Loader2 : Square, "sm", this.isAborting ? "animate-spin" : "")}<span class="sr-only">${stopLabel}</span>`,
+					className: "stop-current-turn h-8 w-8 shrink-0",
 				})
 			: "";
 		const sendButton = Button({
@@ -1554,48 +1612,67 @@ export class MessageEditor extends LitElement {
 						: ""
 				}
 
-				<!-- Queued messages -->
+				<!-- Server-projected message outbox. A row remains here until the
+				     correlated user message is surfaced in the transcript. -->
 				${this.queuedMessages.length > 0 ? html`
-					<div class="px-3 pt-2 pb-1 flex flex-col gap-1.5">
+					<div
+						class="message-outbox px-3 pt-2 pb-1 flex flex-col gap-1.5"
+						data-testid="message-outbox"
+						role="list"
+						aria-label="Message outbox"
+						aria-live="polite"
+					>
 						${(this._dragPreviewOrder
 							? this._dragPreviewOrder.map(id => this.queuedMessages.find(m => m.id === id)).filter(Boolean) as QueuedMessage[]
 							: this.queuedMessages
-						).map((msg) => html`
-							<div class="queue-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${msg.isSteered ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground${this._draggedPillId === msg.id ? " opacity-50" : ""}" style="${this._draggedPillId === msg.id ? "opacity: 0.5" : ""}"
-								data-pill-id="${msg.id}"
-								data-steered="${msg.isSteered}"
-								draggable="${!msg.isSteered}"
+						).map((msg) => {
+							const kind = this._intentKind(msg);
+							const targetTurn = this._intentTarget(msg);
+							const deliveryState = this._intentState(msg);
+							const status = this._intentStatus(msg);
+							const canReorder = !msg.isSteered && deliveryState === "queued";
+							const isFailed = deliveryState === "failed";
+							const isCancelled = deliveryState === "cancelled";
+							const isUncertain = deliveryState === "uncertain";
+							return html`
+							<div
+								class="queue-pill intent-row flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${kind === "steer" ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground${this._draggedPillId === msg.id ? " opacity-50" : ""}"
+								style="${this._draggedPillId === msg.id ? "opacity: 0.5" : ""}"
+								data-testid="intent-row"
+								data-pill-id=${msg.id}
+								data-intent-id=${msg.id}
+								data-intent-kind=${kind}
+								data-target-turn=${targetTurn}
+								data-delivery-state=${deliveryState}
+								data-steered=${msg.isSteered ? "true" : "false"}
+								role="listitem"
+								draggable=${canReorder ? "true" : "false"}
 								@dragstart=${(e: DragEvent) => this._handlePillDragStart(e, msg)}
 								@dragover=${(e: DragEvent) => this._handlePillDragOver(e, msg.id)}
 								@drop=${(e: DragEvent) => this._handlePillDrop(e, msg.id)}
 								@dragend=${this._handlePillDragEnd}
 							>
-								${!msg.isSteered ? html`<span class="drag-handle shrink-0 cursor-grab text-muted-foreground/50 hover:text-muted-foreground transition-colors">${icon(GripVertical, "xs")}</span>` : nothing}
-								<span class="pill-text flex-1 truncate font-mono">${msg.text}</span>
-								${msg.isSteered
-									? html`<span class="sent-indicator shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[0.65rem] font-medium text-amber-600 dark:text-amber-400">${icon(Zap, "xs")} Sent</span>`
-									: html`
-										<button
-											draggable="false"
-											@click=${() => this.onSteer?.(msg)}
-											class="steer-btn shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.65rem] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
-											title="Send now — interrupts the current turn"
-										>${icon(Zap, "xs")} Steer</button>
-										<button
-											draggable="false"
-											@click=${() => this.onEditQueued?.(msg)}
-											class="edit-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer"
-											title="Edit message"
-										>${icon(Pencil, "xs")}</button>
-										<button
-											draggable="false"
-											@click=${() => this.onRemoveQueued?.(msg.id)}
-											class="remove-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
-											title="Remove from queue"
-										>${icon(X, "xs")}</button>
-									`}
-							</div>
-						`)}
+								${canReorder ? html`<span class="drag-handle shrink-0 cursor-grab text-muted-foreground/50 hover:text-muted-foreground transition-colors" aria-hidden="true">${icon(GripVertical, "xs")}</span>` : nothing}
+								<span class="pill-text min-w-0 flex-1 truncate font-mono" title=${msg.text}>${msg.text}</span>
+								<span
+									class="intent-status shrink-0 text-[0.65rem] font-medium ${isFailed || isCancelled ? "text-destructive" : kind === "steer" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}"
+									data-testid="intent-status"
+									role=${isFailed ? "alert" : "status"}
+									title=${msg.deliveryError || status}
+								>${status}</span>
+								${isUncertain ? html`
+									<button type="button" draggable="false" @click=${() => this.onRemoveQueued?.(msg.id)} class="remove-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-destructive/10 hover:text-destructive cursor-pointer" aria-label="Dismiss unconfirmed delivery">Dismiss</button>
+								` : isFailed || isCancelled ? html`
+									<button type="button" draggable="false" @click=${() => this.onRetryQueued?.(msg)} class="retry-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-primary/10 hover:text-primary cursor-pointer" aria-label="Retry">Retry</button>
+									${isFailed ? html`<button type="button" draggable="false" @click=${() => this.onEditQueued?.(msg)} class="edit-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-primary/10 hover:text-primary cursor-pointer" aria-label="Edit">Edit</button>` : nothing}
+									<button type="button" draggable="false" @click=${() => this.onRemoveQueued?.(msg.id)} class="remove-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-destructive/10 hover:text-destructive cursor-pointer" aria-label="Dismiss">Dismiss</button>
+								` : deliveryState === "queued" && kind === "prompt" ? html`
+									<button type="button" draggable="false" @click=${() => this.onSteer?.(msg)} class="steer-btn shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.65rem] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer" title="Send now — interrupts the current turn">${icon(Zap, "xs")} Steer</button>
+									<button type="button" draggable="false" @click=${() => this.onEditQueued?.(msg)} class="edit-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-primary hover:bg-primary/10 transition-colors cursor-pointer" title="Edit message" aria-label="Edit">${icon(Pencil, "xs")}</button>
+									<button type="button" draggable="false" @click=${() => this.onRemoveQueued?.(msg.id)} class="remove-btn shrink-0 p-1 rounded text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer" title="Dismiss message" aria-label="Dismiss">${icon(X, "xs")}</button>
+								` : nothing}
+							</div>`;
+						})}
 					</div>
 				` : ""}
 
