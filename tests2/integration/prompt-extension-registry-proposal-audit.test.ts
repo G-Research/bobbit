@@ -601,13 +601,15 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			expect(afterUnrelatedInjection.entries).not.toEqual(expect.arrayContaining([
 				expect.objectContaining({ id: "unrelated-project-record" }),
 			]));
-			expect((await apiFetch(`/api/sessions/${sessionA}/proposal/project/accept-extension-sections`, {
+			const acceptance = await apiFetch(`/api/sessions/${sessionA}/proposal/project/accept-extension-sections`, {
 				method: "POST", headers: operatorHeaders(humanCookie), body: JSON.stringify({ projectId: projectB.id }),
-			})).status).toBe(200);
+			});
+			expect(acceptance.status, `${REPRO}: cross-project approval response: ${await acceptance.clone().text()}`).toBe(200);
 			const acceptedCrossProjectAudit = await readJson(await apiFetch(`/api/sessions/${sessionA}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
 			expect(acceptedCrossProjectAudit.entries).toEqual(expect.arrayContaining([
 				expect.objectContaining({ id: crossProjectEntry?.id, projectId: projectB.id, status: "accepted" }),
 			]));
+			expect(targetAuditStore.get("unrelated-project-record")).toMatchObject({ status: "requested" });
 
 			sessionB = await createSession({ projectId: projectB.id });
 			const agentB = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionB) };
@@ -656,6 +658,8 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 				method: "PUT", body: JSON.stringify({ scope: "server", packName, disabled: {} }),
 			}).catch(() => {});
 			fs.rmSync(packDir, { recursive: true, force: true });
+			fs.rmSync(rootA, { recursive: true, force: true });
+			fs.rmSync(rootB, { recursive: true, force: true });
 		}
 	});
 
