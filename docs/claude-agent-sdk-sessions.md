@@ -356,6 +356,73 @@ the live Bobbit MCP server. See the
 [composer slash interception design](design/claude-sdk-composer-slash-intercept.md)
 for the full ownership, collision, reload, and failure behavior.
 
+## Bundled skills and constrained SDK helpers
+
+At the pinned Agent SDK `0.3.222` / Claude `2.1.222`, Bobbit enables only this
+reviewed Claude-owned bundled-skill list:
+
+```text
+batch, claude-api, code-review, dataviz, debug, deep-research, design-sync,
+doctor, fewer-permission-prompts, loop, run, run-skill-generator, simplify,
+update-config, verify
+```
+
+The list is an SDK context filter and version pin, not discovery of Bobbit
+`SKILL.md` files. Bobbit continues to own its commands and skill expansion as
+described above; bundled slash commands are diagnostic only and never become
+composer autocomplete, launchers, or durable command state. A new bundled skill
+requires review and an intentional inventory update.
+
+`Agent` is available only for three immutable, programmatic projections of
+existing scoped Bobbit roles. They are query-local helpers, not Bobbit sessions,
+team members, tasks, worktrees, or cost accounts.
+
+| SDK type | Source role | Model | Effort | Max turns |
+| --- | --- | --- | --- | ---: |
+| `bobbit-protocol-scout` | `claude-protocol-scout` | `inherit` | `high` | 6 |
+| `bobbit-backend-parity-reviewer` | `backend-parity-reviewer` | `inherit` | `medium` | 4 |
+| `bobbit-billing-safety-auditor` | `billing-safety-auditor` | `inherit` | `medium` | 4 |
+
+For every bridge generation, session setup resolves the source prompt through
+the existing role cascade and fixes the projection's prompt, `model: "inherit"`,
+effort, `maxTurns`, `background: false`, and `permissionMode: "default"`.
+Each has the bundled-skill pin and no memory, observer, custom MCP server, or
+caller override. Its read-only Bobbit-tool ceiling may include only root-selected
+and pre-allowed `mcp__bobbit__read`, `mcp__bobbit__find`, and
+`mcp__bobbit__grep`; it has no `bash`, write/edit, web, team, task, worktree,
+gate, or managed-MCP tool.
+
+Root `Agent` admission accepts only one of those exact types, a bounded prompt,
+and `run_in_background: false`. The call is correlated by its tool-use id with a
+pending admission and must match the subsequent `SubagentStart` id/type before
+the child gains its ceiling. Only one child can be live, the SDK process sets
+spawn depth to one, and a child cannot invoke `Agent` or create a grandchild.
+Native `Task` and every `Task*` operation remain disallowed at registration,
+`canUseTool`, and `PreToolUse`; a legacy `Task` diagnostic label never grants a
+native task store or lifecycle.
+
+The active-child registry is bridge-local and is cleared on a root terminal,
+stop, failure, replacement, or disposal. Child frames retain their
+`parent_tool_use_id` / `parentToolUseId` / `parentAgentId` partitioning, so a
+child terminal cannot end the root turn. Bounded audit rows correlate the root
+session and Agent tool-use id with child id/type, partition, outcome, and
+duration; they deliberately exclude child prompts, responses, arguments, paths,
+environment, and credentials.
+
+All setup and admission failures fail closed. Missing, invalid, colliding, or
+malformed approved-role inputs prevent SDK bridge readiness rather than omitting
+or substituting a definition. Built-in, filesystem, unknown, nested,
+background, override-bearing, unregistered, or over-limit requests, as well as
+child tools outside the three-tool ceiling, are denied before dispatch.
+
+The real initialization inventory has one version-specific reporting nuance:
+in Claude `2.1.222`, the configured projections appear in both `init.agents`
+and `initialization.agents`, while `Agent` is omitted from diagnostic
+`init.tools`. This diagnostic omission does not change the configured `Agent`
+admission path. The literal inventory remains the upgrade review boundary. See
+[Claude Agent SDK skills and subagents (D3/D4)](design/claude-agent-sdk-skills-subagents.md)
+for the complete failure matrix and acceptance coverage.
+
 ## Tool ownership and permissions
 
 SDK sessions expose the Bobbit tool catalogue through one live, in-process SDK
@@ -367,14 +434,14 @@ routes first. It then adapts that immutable selection to the official SDK
 handlers remain the execution owners.
 
 This gives the model one owner for each capability. Claude native `Bash`, file
-and search/editor tools, web tools, question and plan tools, task/subagent,
-worktree, background/scheduler/control tools, `NotebookEdit`, and `ToolSearch`
-are suppressed. `Skill` is the only retained native tool. `Agent` is reserved
-and disallowed, and the SDK receives `agents: {}`. Bobbit replacements such as
-`bash`, `read`, `find`, `grep`, `web_fetch`, `web_search`, and
-`ask_user_choices` are separate Bobbit MCP tools rather than aliases of native
-ones. This prevents ambiguous tool choices and preserves Bobbit's sandbox,
-rendering, policy, and UI ownership.
+and search/editor tools, web tools, question and plan tools, worktree,
+background/scheduler/control tools, `NotebookEdit`, and `ToolSearch` are
+suppressed. `Skill` and the constrained `Agent` admission point above are the
+only retained native tools; `Task` and all `Task*` operations remain denied.
+Bobbit replacements such as `bash`, `read`, `find`, `grep`, `web_fetch`,
+`web_search`, and `ask_user_choices` are separate Bobbit MCP tools rather than
+aliases of native ones. This prevents ambiguous tool choices and preserves
+Bobbit's sandbox, rendering, policy, and UI ownership.
 
 The native inventory is intentionally version-pinned to the installed Claude
 Agent SDK and bundled Claude binary. A dependency upgrade is not routine for
@@ -435,8 +502,8 @@ allowlists alone are not an execution boundary:
 
 1. **Registration and `allowedTools`.** Only selected non-`never` tools are
    adapted. `allowedTools` contains only raw names for `allow` tools; `ask`
-   tools are absent. The SDK gets only native `Skill`, the complete native
-   disallow list, and no tool aliases.
+   tools are absent. The SDK gets native `Skill`, the constrained root `Agent`
+   admission point, the complete native disallow list, and no tool aliases.
 2. **`canUseTool`.** Each raw SDK call is normalized and rechecked. An `allow`
    tool is approved. An `ask` tool calls the existing
    `SessionManager.requestToolGrant()` path with its canonical Bobbit name,
@@ -448,10 +515,10 @@ allowlists alone are not an execution boundary:
    expiry, and grant errors deny that invocation and settle the existing card.
 3. **`PreToolUse`.** The hook normalizes and checks again immediately before
    execution. It rejects native, foreign, malformed, unselected, `never`, and
-   subagent-origin calls even if another SDK permission path says allow. An
-   `ask` approval is bound to the exact SDK tool-use id and canonical name, then
-   consumed by the hook; a direct callback bypass without that approval remains
-   `ask`.
+   any subagent-origin call outside the registered child's exact ceiling, even
+   if another SDK permission path says allow. An `ask` approval is bound to the
+   exact SDK tool-use id and canonical name, then consumed by the hook; a direct
+   callback bypass without that approval remains `ask`.
 
 An SDK one-time approval is never added to the query's `allowedTools` or a
 surface callback cache; it permits one exact `PreToolUse` consumption. The
@@ -481,10 +548,9 @@ its credential in Bobbit state or logs.
 
 This isolation does not imply that the bundled Claude runtime reports no built-in
 skills, agents, or slash commands. The real initialization inventory pins the
-exact version-specific built-ins that the SDK reports. `agents: {}` and the
-reserved `Agent` tool prevent Bobbit from configuring or exposing a native
-subagent execution surface; hostile user, project, plugin, MCP, and memory
-fixtures must still be absent from the inventory.
+exact version-specific built-ins that the SDK reports, while Bobbit exposes only
+the three programmatic projections described above. Hostile user, project,
+plugin, MCP, and memory fixtures must still be absent from the inventory.
 
 The trusted extension worker is intentionally a different boundary. It may
 receive the gateway URL and credential needed to run already trusted,
@@ -558,6 +624,10 @@ The following regressions document the tool-surface contracts:
 - `tests2/core/claude-agent-sdk-tool-surface.test.ts` pins the native policy,
   naming, collision failure, explicit-empty allowlist, three ceilings, and SDK
   option isolation.
+- `tests2/core/claude-agent-sdk-skills-subagents.test.ts` pins the bundled
+  skill and programmatic-agent inventories, role bounds, foreground admission,
+  one-child lifecycle registry, child read/find/grep ceiling, partitioned audit,
+  and rejected unconstrained paths.
 - `tests2/integration/claude-agent-sdk-tool-permissions.test.ts` covers
   canonical dispatch/rendering, existing permission events, cancellation,
   one-time grants, trusted-worker schema preflight, managed MCP operation
@@ -570,14 +640,16 @@ The following regressions document the tool-surface contracts:
   `never`/subagent defenses.
 - `tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts` starts the official
   SDK/bundled Claude in a process-isolated hostile-settings fixture and compares
-  a literal initialization inventory: version, tools, reported built-ins,
-  managed MCP server, plugins, settings, and auto-memory posture.
+  a literal initialization inventory: version, tools, bundled skills, reported
+  and programmatic agents, managed MCP server, plugins, settings, and auto-memory
+  posture.
 
 Run the focused deterministic coverage with:
 
 ```bash
 npx vitest run --config vitest.config.ts --silent=passed-only \
   tests2/core/claude-agent-sdk-tool-surface.test.ts \
+  tests2/core/claude-agent-sdk-skills-subagents.test.ts \
   tests2/integration/claude-agent-sdk-tool-permissions.test.ts \
   tests2/integration/claude-agent-sdk-permission-card-journey.test.ts
 npm run check

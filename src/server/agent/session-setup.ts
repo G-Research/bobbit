@@ -52,7 +52,7 @@ import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, computeToolPolicies, type EffectiveTool } from "./tool-activation.js";
-import { buildClaudeSdkToolSurface, type ClaudeSdkToolEntryInput } from "./claude-agent-sdk-tool-surface.js";
+import { buildClaudeSdkSubagentPolicy, buildClaudeSdkToolSurface, type ClaudeSdkToolEntryInput } from "./claude-agent-sdk-tool-surface.js";
 import { buildClaudeSdkExtensionManifest, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler } from "./claude-sdk-tool-dispatcher.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
@@ -1187,12 +1187,24 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 			extensionDispatcher,
 			entries,
 			resolvedProviders,
-			() => buildClaudeSdkToolSurface({
-				sessionId: plan.id,
-				restriction: allowed === undefined ? "unrestricted" : "restricted",
-				entries,
-				requestToolGrant: (toolName, group, options) => ctx.requestToolGrant!(plan.id, toolName, group, options),
-			}),
+			() => {
+				const subagentRoles = Object.fromEntries([
+					"claude-protocol-scout", "backend-parity-reviewer", "billing-safety-auditor",
+				].map(name => [name, lookupRole(name, plan, ctx)]));
+				const subagentPolicy = buildClaudeSdkSubagentPolicy({
+					sessionId: plan.id,
+					roles: subagentRoles,
+					entries,
+					goalBranch: plan.branch,
+				});
+				return buildClaudeSdkToolSurface({
+					sessionId: plan.id,
+					restriction: allowed === undefined ? "unrestricted" : "restricted",
+					entries,
+					subagentPolicy,
+					requestToolGrant: (toolName, group, options) => ctx.requestToolGrant!(plan.id, toolName, group, options),
+				});
+			},
 		);
 		plan.bridgeOptions.claudeSdkToolSurface = Object.freeze({ ...surface, dispose: () => {
 			surface.dispose?.();
