@@ -10,6 +10,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import { convertTools } from "@earendil-works/pi-ai/api/google-shared";
+import { Type } from "typebox";
 import { describe, it } from "vitest";
 import {
 	generateToolResultErrorBridgeExtension,
@@ -18,14 +22,27 @@ import {
 } from "../../src/server/agent/tool-result-error-bridge-extension.js";
 
 async function loadGeneratedExtension(): Promise<(pi: any) => void> {
-	const source = generateToolResultErrorBridgeExtension();
-	const mod = await import(`data:text/javascript,${encodeURIComponent(source)}`);
-	return mod.default;
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-generated-error-bridge-"));
+	const filePath = path.join(root, "bridge.mjs");
+	try {
+		fs.writeFileSync(filePath, generateToolResultErrorBridgeExtension(), "utf-8");
+		const mod = await import(`${pathToFileURL(filePath).href}?nonce=${Date.now()}-${Math.random()}`);
+		return mod.default;
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
 }
 
-function makePi() {
+function makePi(toolInfos: any[] = []) {
 	const handlers = new Map<string, Function>();
+	const events = new Map<string, Function>();
 	const pi: any = {
+		on(event: string, handler: Function) {
+			events.set(event, handler);
+		},
+		getAllTools() {
+			return toolInfos;
+		},
 		tool(spec: any, handler?: Function) {
 			const name = typeof spec === "string" ? spec : spec.name;
 			const fn = handler ?? spec.handler ?? spec.execute;
@@ -33,7 +50,22 @@ function makePi() {
 		},
 	};
 	pi.tools = { register: (...args: any[]) => pi.tool(...args) };
-	return { pi, handlers };
+	return { pi, handlers, events };
+}
+
+async function installSchemaBridge(parameters: unknown): Promise<void> {
+	const activate = await loadGeneratedExtension();
+	const { pi, events } = makePi([{ name: "test", parameters }]);
+	activate(pi);
+	await events.get("session_start")!({ type: "session_start", reason: "startup" });
+}
+
+function copyEnumerablePayload(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(copyEnumerablePayload);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, copyEnumerablePayload(entry)]));
+	}
+	return value;
 }
 
 describe("tool result error bridge extension", () => {
@@ -68,6 +100,123 @@ describe("tool result error bridge extension", () => {
 		pi.tool({ name: "x" }, async () => ({ content: [{ type: "text", text: "ok" }] }));
 
 		assert.deepEqual(await handlers.get("x")!({}), { content: [{ type: "text", text: "ok" }] });
+	});
+
+	it("names every unknown field without changing provider schema payloads", async () => {
+		const parameters = Type.Object({ operation: Type.Literal("health") }, { additionalProperties: false });
+		const providerSchema = JSON.stringify(parameters);
+		const providerPayload = copyEnumerablePayload(parameters);
+		const googlePayload = convertTools([{
+			name: "bobbit_read",
+			description: "Read gateway state",
+			parameters,
+		}], true);
+		await installSchemaBridge(parameters);
+		const tool = {
+			name: "bobbit_read",
+			parameters,
+			execute: async () => ({ content: [] }),
+		};
+
+		assert.deepEqual(
+			validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "valid",
+				name: "bobbit_read",
+				arguments: { operation: "health" },
+			}),
+			{ operation: "health" },
+		);
+		assert.throws(
+			() => validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "invalid",
+				name: "bobbit_read",
+				arguments: { operation: "health", verbose: true, include_tool_results: true },
+			}),
+			(error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				assert.match(message, /Unrecognized field: verbose/);
+				assert.match(message, /Unrecognized field: include_tool_results/);
+				assert.doesNotMatch(message, /must not have additional properties/);
+				return true;
+			},
+		);
+		assert.equal(JSON.stringify(parameters), providerSchema);
+		assert.deepEqual(copyEnumerablePayload(parameters), providerPayload);
+		assert.deepEqual(convertTools([{
+			name: "bobbit_read",
+			description: "Read gateway state",
+			parameters,
+		}], true), googlePayload);
+		assert.deepEqual(Object.keys(parameters.properties), ["operation"]);
+		assert.equal((parameters as any).additionalProperties, false);
+		assert.doesNotMatch(JSON.stringify(parameters), /~refine|bobbitUnknownFields/);
+	});
+
+	it("preserves declared pattern properties while naming truly unknown fields", async () => {
+		const parameters = Type.Object(
+			{ operation: Type.Literal("health") },
+			{
+				additionalProperties: false,
+				patternProperties: { "^x-": Type.String() },
+			},
+		);
+		const providerPayload = copyEnumerablePayload(parameters);
+		await installSchemaBridge(parameters);
+		const tool = { name: "bobbit_read", parameters };
+
+		assert.deepEqual(
+			validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "pattern-valid",
+				name: "bobbit_read",
+				arguments: { operation: "health", "x-label": "kept" },
+			}),
+			{ operation: "health", "x-label": "kept" },
+		);
+		assert.throws(
+			() => validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "pattern-invalid",
+				name: "bobbit_read",
+				arguments: { operation: "health", "x-label": 42 },
+			}),
+			(error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				assert.doesNotMatch(message, /Unrecognized field: x-label/);
+				return true;
+			},
+		);
+		assert.throws(
+			() => validateToolArguments(tool as any, {
+				type: "toolCall",
+				id: "unknown",
+				name: "bobbit_read",
+				arguments: { operation: "health", other: true },
+			}),
+			/Unrecognized field: other/,
+		);
+		assert.deepEqual(copyEnumerablePayload(parameters), providerPayload);
+	});
+
+	it("preserves normal validation messages for recognized fields", async () => {
+		const parameters = Type.Object({ operation: Type.Literal("health") }, { additionalProperties: false });
+		await installSchemaBridge(parameters);
+		assert.throws(
+			() => validateToolArguments({ name: "bobbit_read", parameters } as any, {
+				type: "toolCall",
+				id: "missing",
+				name: "bobbit_read",
+				arguments: {},
+			}),
+			(error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				assert.match(message, /operation:/);
+				assert.doesNotMatch(message, /Unrecognized field/);
+				return true;
+			},
+		);
 	});
 
 	it("repairs tampered cached bridge source before reuse", () => {

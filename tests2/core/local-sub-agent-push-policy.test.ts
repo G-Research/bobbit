@@ -233,7 +233,7 @@ describe("local-only host worktree primitives", () => {
 			const stateDir = path.join(root, "state");
 			memoryFs.mkdirSync(stateDir, { recursive: true });
 			const { state, runner } = fakeGitRunner([repo]);
-			const store = new GoalStore(stateDir);
+			const store = new GoalStore(stateDir, undefined, { persistence: "json" });
 			const manager = new GoalManager(store, undefined, stateDir, {
 				commandRunner: runner,
 				remotePolicy: { skipNonLocalRemoteGit: true },
@@ -265,7 +265,7 @@ describe("local-only host worktree primitives", () => {
 			const stateDir = path.join(root, "state");
 			memoryFs.mkdirSync(stateDir, { recursive: true });
 			const { state, runner } = fakeGitRunner([repo]);
-			const store = new GoalStore(stateDir);
+			const store = new GoalStore(stateDir, undefined, { persistence: "json" });
 			const manager = new GoalManager(store, undefined, stateDir, {
 				commandRunner: runner,
 				remotePolicy: { skipNonLocalRemoteGit: true },

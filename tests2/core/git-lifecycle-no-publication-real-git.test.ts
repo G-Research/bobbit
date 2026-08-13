@@ -218,7 +218,7 @@ describe("real Git lifecycle operations preserve deleted remote branches", () =>
 		explicitlyPublishThenDelete(fixture, parentWorktree, parentBranch);
 
 		const stateDir = path.join(fixture.root, "goal-state");
-		const store = new GoalStore(stateDir);
+		const store = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const now = Date.now();
 		store.put({
 			id: "parent",

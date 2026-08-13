@@ -1,27 +1,32 @@
 name: review_open
-description: "Open inline or file markdown for annotation/comments"
+description: "Open one or more Markdown files as a single review"
 summary: "Open markdown in the review pane"
-params: [markdown?, file?, title?, replace?]
+params: [markdown?, file?, files?, title?, replace?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Review
 docs: |-
-  Pass `markdown` for inline content or `file` to load from disk. Each unique title creates a new tab; same title replaces content (unless replace=false).
+  Pass `markdown` or `file` for a one-file review, or a non-empty `files[]` array for a multi-file review. A review owns one primary workspace tab; its files are secondary navigation tabs. Review Markdown is stored in the owning session and the tool result contains only a bounded reopenable receipt.
 detail_docs: |-
   ## Parameters
   | Name | Type | Required | Description |
   |------|------|----------|-------------|
-  | title | string | No | Tab label. Defaults to filename or "Review" |
-  | markdown | string | No | Inline markdown content |
-  | file | string | No | Path to a markdown file on disk |
-  | replace | boolean | No | Replace existing tab content (default: true) |
-  
-  Exactly one of `markdown` or `file` should be provided. If both, `markdown` takes priority.
-  
+  | title | string | No | Review title. Defaults to the filename for a legacy file call, otherwise "Review" |
+  | markdown | string | No | Inline Markdown for a one-file review |
+  | file | string | No | Path to a Markdown file for a one-file review |
+  | files | array | No | Non-empty ordered files; each entry has optional `title` and exactly one of `markdown` or `file` |
+  | replace | boolean | No | Replace an existing same-title review (default: true) |
+
+  Supply exactly one top-level source mode: `markdown`, `file`, or `files`. File-entry titles default to an explicit title, the file basename, or `File N`, in that order.
+
+  A review may contain up to 64 files and up to 10 MiB cumulative Markdown, counted as UTF-8 bytes. Exactly 10 MiB is accepted; larger reviews fail without opening or partially saving a review. Review and file titles must be non-empty and at most 320 UTF-8 bytes.
+
+  Successful calls persist the canonical Markdown in the authenticated owning session. The visible tool result is a bounded receipt that can re-open the exact review after reload or reconnect; it never embeds the Markdown bodies.
+
   ## Examples
   ```
   review_open(title="Architecture", markdown="# Architecture\n\nOur system uses...")
   review_open(file="docs/api.md")
-  review_open(title="Updated", markdown="# V2", replace=true)
+  review_open(title="Release", files=[{"title":"Summary","markdown":"# Summary"},{"file":"docs/changes.md"}])
   ```

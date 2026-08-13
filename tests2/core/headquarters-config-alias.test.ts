@@ -130,8 +130,8 @@ describe("Headquarters storage and config aliasing", () => {
 		withEnv({ BOBBIT_DIR: undefined, BOBBIT_PI_DIR: undefined }, () => {
 			setProjectRoot(serverRoot);
 			const headquartersRoot = path.join(serverRoot, ".bobbit", "headquarters");
-			const hq = new ProjectContext(minimalProject(HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, headquartersRoot, { kind: "headquarters" }));
-			const normal = new ProjectContext(minimalProject("normal", "Normal", serverRoot));
+			const hq = new ProjectContext(minimalProject(HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_NAME, headquartersRoot, { kind: "headquarters" }), { fsImpl: memoryFs });
+			const normal = new ProjectContext(minimalProject("normal", "Normal", serverRoot), { fsImpl: memoryFs });
 
 			assert.equal(path.resolve(hq.bobbitDir), path.resolve(bobbitDir()));
 			assert.equal(path.resolve(hq.stateDir), path.resolve(bobbitStateDir()));

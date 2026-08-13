@@ -69,6 +69,7 @@ const NON_CLAUDE_MODEL = {
 	id: "qwen3-coder",
 	name: "Qwen 3 Coder",
 	api: "openai-completions",
+	baseUrl: "https://aigw.example/v1",
 	reasoning: false,
 	input: ["text"] as ("text" | "image")[],
 	contextWindow: 1_000_000,
@@ -78,7 +79,9 @@ const NON_CLAUDE_MODEL = {
 const CLAUDE_MODEL = {
 	id: "aws/us.anthropic.claude-sonnet-4-5-v1:0",
 	name: "Claude Sonnet 4.5 (aws)",
-	api: "openai-completions",
+	api: "bedrock-converse-stream",
+	baseUrl: "https://aigw.example/aws",
+	wireId: "us.anthropic.claude-sonnet-4-5-v1:0",
 	reasoning: true,
 	input: ["text", "image"] as ("text" | "image")[],
 	contextWindow: 1_000_000,
@@ -125,7 +128,7 @@ describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
 			data.providers.aigw.headers["x-opencode-session"],
 			EXPECTED_HEADER_VALUE,
 		);
-		// And the Claude model is routed through bedrock-converse-stream.
+		// And the authoritative Claude transport is retained.
 		const claudeEntry = data.providers.aigw.models[0];
 		assert.equal(claudeEntry.api, "bedrock-converse-stream");
 		assert.equal(claudeEntry.headers, undefined);

@@ -29,7 +29,7 @@ export interface MemFs extends FsLikeShape {
 // import of gateway-deps (keeps the DOM/happy-dom projects free of server code).
 type FsLikeShape = Pick<typeof fs,
 	| "existsSync" | "mkdirSync" | "readFileSync" | "writeFileSync" | "appendFileSync"
-	| "readdirSync" | "statSync" | "lstatSync" | "renameSync" | "rmSync" | "unlinkSync" | "copyFileSync"
+	| "readdirSync" | "statSync" | "lstatSync" | "linkSync" | "renameSync" | "rmSync" | "unlinkSync" | "copyFileSync"
 > & {
 	promises: Pick<typeof fs.promises,
 		| "access" | "mkdir" | "readFile" | "writeFile" | "appendFile"
@@ -38,6 +38,8 @@ type FsLikeShape = Pick<typeof fs,
 
 const enoent = (op: string, p: string): Error =>
 	Object.assign(new Error(`ENOENT: no such file or directory, ${op} '${p}'`), { code: "ENOENT", path: p });
+const eexist = (op: string, p: string): Error =>
+	Object.assign(new Error(`EEXIST: file already exists, ${op} '${p}'`), { code: "EEXIST", path: p });
 
 export function createMemFs(): MemFs {
 	const files = new Map<string, string>();
@@ -95,6 +97,12 @@ export function createMemFs(): MemFs {
 			return { isDirectory: () => isDir, isFile: () => isFile, size, mtimeMs: Date.now(), mtime: new Date() } as fs.Stats;
 		},
 		lstatSync(p: fs.PathLike, _opts?: any) { return api.statSync(p) as any; },
+		linkSync(from: fs.PathLike, to: fs.PathLike) {
+			const a = norm(from); const b = norm(to);
+			if (!files.has(a)) throw enoent("link", a);
+			if (files.has(b) || dirs.has(b)) throw eexist("link", b);
+			ensureParents(b); files.set(b, files.get(a)!);
+		},
 		renameSync(from: fs.PathLike, to: fs.PathLike) {
 			const a = norm(from); const b = norm(to);
 			if (!files.has(a) && !dirs.has(a)) throw enoent("rename", a);

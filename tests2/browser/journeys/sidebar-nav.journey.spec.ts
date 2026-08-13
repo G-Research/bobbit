@@ -257,13 +257,14 @@ test.describe("Journey: Sidebar Navigation", () => {
 	});
 
 	// Ported from sidebar-filters.spec.ts (audit: sidebar-nav GAP / BR58): the
-	// Filters popover exposes a "Show Read" toggle row with its stable testid.
-	test("Filters popover exposes the Show Read toggle", async ({ page }) => {
+	// Filters popover exposes a sentence-cased "Show read" toggle row with its stable testid.
+	test("Filters popover exposes the Show read toggle", async ({ page }) => {
 		await openApp(page);
 		await expect(filtersButton(page)).toBeVisible({ timeout: 10_000 });
 		await openFiltersPopover(page);
 		const readToggle = page.locator("[data-testid='sidebar-filter-read']").first();
 		await expect(readToggle).toBeVisible({ timeout: 10_000 });
+		await expect(readToggle).toContainText("Show read");
 		await expect(readToggle.locator("input[type='checkbox']")).toHaveCount(1);
 	});
 

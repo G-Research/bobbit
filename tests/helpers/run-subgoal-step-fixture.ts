@@ -75,7 +75,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 	fs.mkdirSync(configDir);
 	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
 
-	const goalStore = new GoalStore(stateDir);
+	const goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 	const cfg = new ProjectConfigStore(configDir);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([

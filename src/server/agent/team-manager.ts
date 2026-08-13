@@ -503,8 +503,9 @@ export class TeamManager {
 		} else {
 			const dir = stateDir ?? bobbitStateDir();
 			this.localStore = new TeamStore(dir);
-			// Non-PCM test path: create a local GoalManager from the same stateDir
-			this._localGoalManager = new GoalManager(new GoalStore(dir), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock });
+			// Non-PCM test path: create a local GoalManager from the same stateDir.
+			// Keep fixtures on JSON even though their stateDir uses the real filesystem.
+			this._localGoalManager = new GoalManager(new GoalStore(dir, undefined, { persistence: "json" }), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock });
 		}
 		this.restorePromise = this.restoreTeams().then(() => {
 			this.restoreCompleted = true;

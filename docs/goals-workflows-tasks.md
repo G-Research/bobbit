@@ -1100,9 +1100,11 @@ State is per-project — each project has its own copies of these files in `<pro
 | Location | What |
 |---|---|
 | `defaults/workflows/*.yaml` | Workflow templates (repo-local, version controlled) |
-| `<project>/.bobbit/state/goals.json` | Goals with snapshotted workflows (includes `projectId`) |
-| `<project>/.bobbit/state/gates.json` | Gate state and signal history |
-| `<project>/.bobbit/state/tasks.json` | Tasks with workflow gate links |
+| `<project>/.bobbit/state/goals.sqlite` | Goal definitions and snapshotted workflows, one transactional JSON-payload row per goal. Validated legacy `goals.json` and `.pre-migration` recovery are imported automatically and retained under collision-safe backup names. |
+| `<project>/.bobbit/state/gates.sqlite` | Gate state and signal history, one transactional row per gate. Legacy `gates.json` plus `.pre-migration` recovery are imported automatically, then retained under atomically claimed, collision-safe backup names. |
+| `<project>/.bobbit/state/tasks.sqlite` | Task state and workflow gate links, one transactional JSON-payload row per task. Validated legacy `tasks.json` and `.pre-migration` recovery are imported automatically and retained under collision-safe backup names. |
+
+The three stores keep separate per-project databases and in-memory read models. Real-filesystem construction selects SQLite automatically; injected/memfs unit fixtures retain their JSON adapters. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md) and [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md).
 
 ## Key source files
 
@@ -1112,8 +1114,9 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/workflow-manager.ts` | Workflow CRUD, DAG validation, cloning |
 | `src/server/agent/verification-harness.ts` | Async verification orchestration (command + LLM review + agent-qa, session lifecycle, artifact population) |
 | `src/server/agent/verification-logic.ts` | Pure verification logic — variable substitution, phase grouping, optional step skipping, cache reuse, error pattern matching (unit-testable without server state) |
+| `src/server/agent/goal-store.ts` | In-memory goal read model, SQLite production persistence, JSON fixture adapter, and legacy migration |
 | `src/server/agent/gate-store.ts` | Gate state, reset, and signal history persistence |
-| `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
+| `src/server/agent/task-store.ts` | In-memory task read model, SQLite production persistence, JSON fixture adapter, and workflow gate links |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
 | `src/app/goal-dashboard.ts` | Goal dashboard gate pipeline, focused route state, expanded gate/signal sections |
