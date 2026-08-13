@@ -149,7 +149,7 @@ describe("Claude SDK embedded subagent work", () => {
 		expect(peakActive).toBeLessThanOrEqual(MAX_RECOVERY_CONCURRENCY);
 		const limits = getSubagentMessages.mock.calls.map(([, , options]) => options?.limit);
 		expect(limits.every(limit => typeof limit === "number" && limit > 0)).toBe(true);
-		expect(limits.reduce((total, limit) => total + limit!, 0)).toBeLessThanOrEqual(MAX_RECOVERY_ROWS);
+		expect(limits.reduce<number>((total, limit) => total + (limit ?? 0), 0)).toBeLessThanOrEqual(MAX_RECOVERY_ROWS);
 		expect(recovered).toHaveLength(1 + MAX_RECOVERY_ROWS);
 	});
 
