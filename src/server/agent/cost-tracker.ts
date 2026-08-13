@@ -1,5 +1,6 @@
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { walkGoalSubtree } from "./goal-subtree.js";
@@ -191,6 +192,21 @@ function cloneModelUsage(model: ModelUsageSnapshot): ModelUsageSnapshot {
 	return { ...model };
 }
 
+/** Clone a ledger entry before building an authoritative commit candidate. */
+function cloneRawCost(raw: RawSessionCost): RawSessionCost {
+	return {
+		...raw,
+		costBasisHistory: raw.costBasisHistory ? [...raw.costBasisHistory] : undefined,
+		byModel: raw.byModel
+			? Object.fromEntries(Object.entries(raw.byModel).map(([model, usage]) => [model, cloneModelUsage(usage)]))
+			: undefined,
+		context: raw.context
+			? { ...raw.context, byModel: Object.fromEntries(Object.entries(raw.context.byModel).map(([model, context]) => [model, { ...context }])) }
+			: undefined,
+		appliedSourceResultIds: raw.appliedSourceResultIds ? [...raw.appliedSourceResultIds] : undefined,
+	};
+}
+
 function withUsageSnapshot(raw: RawSessionCost): SessionUsageSnapshot {
 	const { appliedSourceResultIds: _appliedSourceResultIds, ...publicRaw } = raw;
 	const basis = raw.costBasis ?? "api-billed";
@@ -348,6 +364,30 @@ export class CostTracker {
 		(this.saveTimer as { unref?: () => void }).unref?.();
 	}
 
+	/** Serialize a complete raw ledger snapshot; derived fields never reach disk. */
+	private serializeCosts(costs: ReadonlyMap<string, RawSessionCost> = this.costs): string {
+		const data: Record<string, RawSessionCost> = {};
+		for (const [id, cost] of costs) {
+			const entry: RawSessionCost = {
+				inputTokens: cost.inputTokens,
+				outputTokens: cost.outputTokens,
+				cacheReadTokens: cost.cacheReadTokens,
+				cacheWriteTokens: cost.cacheWriteTokens,
+				totalCost: cost.totalCost,
+			};
+			if (cost.goalId) entry.goalId = cost.goalId;
+			if (typeof cost.firstSeenAt === "number") entry.firstSeenAt = cost.firstSeenAt;
+			if (typeof cost.notionalCostUsd === "number") entry.notionalCostUsd = cost.notionalCostUsd;
+			if (cost.costBasis) entry.costBasis = cost.costBasis;
+			if (cost.costBasisHistory) entry.costBasisHistory = [...cost.costBasisHistory];
+			if (cost.byModel) entry.byModel = Object.fromEntries(Object.entries(cost.byModel).map(([model, usage]) => [model, cloneModelUsage(usage)]));
+			if (cost.context) entry.context = { ...cost.context, byModel: Object.fromEntries(Object.entries(cost.context.byModel).map(([model, context]) => [model, { ...context }])) };
+			if (cost.appliedSourceResultIds) entry.appliedSourceResultIds = [...cost.appliedSourceResultIds];
+			data[id] = entry;
+		}
+		return JSON.stringify(data, null, 2);
+	}
+
 	private saveNow(): void {
 		if (!this.dirty) return;
 		const savingGeneration = this.generation;
@@ -355,35 +395,43 @@ export class CostTracker {
 			if (!this.fs.existsSync(this.storeDir)) {
 				this.fs.mkdirSync(this.storeDir, { recursive: true });
 			}
-			// Persist the raw counters plus the stamped `goalId` / `firstSeenAt`
-			// (needed for tree-cost rollups + legacy backfill to survive reload).
-			// Derived fields (cacheHitRate) are NEVER written — recomputed on read.
-			const data: Record<string, RawSessionCost> = {};
-			for (const [id, cost] of this.costs) {
-				const entry: RawSessionCost = {
-					inputTokens: cost.inputTokens,
-					outputTokens: cost.outputTokens,
-					cacheReadTokens: cost.cacheReadTokens,
-					cacheWriteTokens: cost.cacheWriteTokens,
-					totalCost: cost.totalCost,
-				};
-				if (cost.goalId) entry.goalId = cost.goalId;
-				if (typeof cost.firstSeenAt === "number") entry.firstSeenAt = cost.firstSeenAt;
-				if (typeof cost.notionalCostUsd === "number") entry.notionalCostUsd = cost.notionalCostUsd;
-				if (cost.costBasis) entry.costBasis = cost.costBasis;
-				if (cost.costBasisHistory) entry.costBasisHistory = [...cost.costBasisHistory];
-				if (cost.byModel) entry.byModel = Object.fromEntries(Object.entries(cost.byModel).map(([model, usage]) => [model, cloneModelUsage(usage)]));
-				if (cost.context) entry.context = { ...cost.context, byModel: Object.fromEntries(Object.entries(cost.context.byModel).map(([model, context]) => [model, { ...context }])) };
-				if (cost.appliedSourceResultIds) entry.appliedSourceResultIds = [...cost.appliedSourceResultIds];
-				data[id] = entry;
-			}
-			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			this.fs.writeFileSync(this.storeFile, this.serializeCosts(), "utf-8");
 			// A synchronous injected writer can still trigger a nested mutation.
 			// Do not let this older save clear that newer dirty generation.
 			if (this.generation === savingGeneration) this.dirty = false;
 		} catch (err) {
 			// Keep dirty state so the next mutation or graceful flush retries.
 			console.error("[cost-tracker] Failed to save costs:", err);
+		}
+	}
+
+	/**
+	 * Commit an authoritative SDK candidate before it becomes observable in
+	 * memory. Renaming a same-directory owner-only temporary file is atomic on
+	 * the supported local filesystems, so a restart sees either full snapshot.
+	 */
+	private commitAuthoritativeCandidate(sessionId: string, candidate: RawSessionCost): boolean {
+		const candidateCosts = new Map(this.costs);
+		candidateCosts.set(sessionId, candidate);
+		const tempFile = `${this.storeFile}.${randomUUID()}.tmp`;
+		let committed = false;
+		try {
+			if (!this.fs.existsSync(this.storeDir)) {
+				this.fs.mkdirSync(this.storeDir, { recursive: true });
+			}
+			this.fs.writeFileSync(tempFile, this.serializeCosts(candidateCosts), { encoding: "utf-8", mode: 0o600, flag: "wx" });
+			this.fs.renameSync(tempFile, this.storeFile);
+			committed = true;
+			return true;
+		} catch (err) {
+			// A failed persistence must not acknowledge a root result: its retry is
+			// the only safe recovery path when the durable ledger was not replaced.
+			console.error("[cost-tracker] Failed to commit authoritative usage:", err);
+			return false;
+		} finally {
+			if (!committed) {
+				try { if (this.fs.existsSync(tempFile)) this.fs.unlinkSync(tempFile); } catch { /* best-effort temp cleanup */ }
+			}
 		}
 	}
 
@@ -426,9 +474,9 @@ export class CostTracker {
 	}
 
 	/**
-	 * Atomically apply one SDK root-result observation. The source id is persisted
-	 * with the aggregate in the same synchronous save, so bridge replay after a
-	 * restart cannot count the same provider result twice.
+	 * Atomically apply one SDK root-result observation. The source id is committed
+	 * with the aggregate by temp-file rename, so bridge replay after a restart
+	 * cannot count the same provider result twice.
 	 */
 	recordAuthoritativeUsage(sessionId: string, record: AuthoritativeUsageRecord, goalId?: string): { applied: boolean; snapshot: SessionUsageSnapshot } {
 		if (!record.sourceResultId || !record.total || !record.modelUsage || typeof record.modelUsage !== "object"
@@ -436,19 +484,21 @@ export class CostTracker {
 			const current = this.costs.get(sessionId) ?? emptyRaw();
 			return { applied: false, snapshot: withUsageSnapshot(current) };
 		}
-		const existing = this.costs.get(sessionId) ?? emptyRaw();
-		const applied = new Set(existing.appliedSourceResultIds ?? []);
+		const current = this.costs.get(sessionId);
+		const existing = current ?? emptyRaw();
+		const candidate = cloneRawCost(existing);
+		const applied = new Set(candidate.appliedSourceResultIds ?? []);
 		if (applied.has(record.sourceResultId)) return { applied: false, snapshot: withUsageSnapshot(existing) };
 
-		existing.inputTokens += record.total.inputTokens ?? 0;
-		existing.outputTokens += record.total.outputTokens ?? 0;
-		existing.cacheReadTokens += record.total.cacheReadTokens ?? 0;
-		existing.cacheWriteTokens += record.total.cacheWriteTokens ?? 0;
+		candidate.inputTokens += record.total.inputTokens ?? 0;
+		candidate.outputTokens += record.total.outputTokens ?? 0;
+		candidate.cacheReadTokens += record.total.cacheReadTokens ?? 0;
+		candidate.cacheWriteTokens += record.total.cacheWriteTokens ?? 0;
 		if (typeof record.total.notionalCostUsd === "number" && Number.isFinite(record.total.notionalCostUsd)) {
-			existing.notionalCostUsd = Math.round(((existing.notionalCostUsd ?? 0) + record.total.notionalCostUsd) * 1_000_000) / 1_000_000;
+			candidate.notionalCostUsd = Math.round(((candidate.notionalCostUsd ?? 0) + record.total.notionalCostUsd) * 1_000_000) / 1_000_000;
 		}
 		for (const [model, usage] of Object.entries(record.modelUsage)) {
-			const bucket = existing.byModel?.[model] ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, notionalCostUsd: null, contextWindow: null, maxOutputTokens: null };
+			const bucket = candidate.byModel?.[model] ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, notionalCostUsd: null, contextWindow: null, maxOutputTokens: null };
 			bucket.inputTokens += usage.inputTokens ?? 0;
 			bucket.outputTokens += usage.outputTokens ?? 0;
 			bucket.cacheReadTokens += usage.cacheReadTokens ?? 0;
@@ -456,10 +506,10 @@ export class CostTracker {
 			if (typeof usage.notionalCostUsd === "number" && Number.isFinite(usage.notionalCostUsd)) bucket.notionalCostUsd = Math.round(((bucket.notionalCostUsd ?? 0) + usage.notionalCostUsd) * 1_000_000) / 1_000_000;
 			if (typeof usage.contextWindow === "number" && Number.isFinite(usage.contextWindow)) bucket.contextWindow = usage.contextWindow;
 			if (typeof usage.maxOutputTokens === "number" && Number.isFinite(usage.maxOutputTokens)) bucket.maxOutputTokens = usage.maxOutputTokens;
-			existing.byModel = { ...(existing.byModel ?? {}), [model]: bucket };
+			candidate.byModel = { ...(candidate.byModel ?? {}), [model]: bucket };
 
 			if (typeof usage.contextTokens === "number" && Number.isFinite(usage.contextTokens)) {
-				const context = existing.context ?? emptyContext();
+				const context = candidate.context ?? emptyContext();
 				const modelContext = context.byModel[model] ?? { contextWindow: null, currentTokens: null, highWaterTokens: null };
 				modelContext.currentTokens = usage.contextTokens;
 				modelContext.contextWindow = bucket.contextWindow;
@@ -471,23 +521,29 @@ export class CostTracker {
 					context.highWaterModel = model;
 				}
 				context.byModel[model] = modelContext;
-				existing.context = context;
+				candidate.context = context;
 			}
 		}
-		if (goalId && !existing.goalId) existing.goalId = goalId;
-		if (!existing.firstSeenAt) existing.firstSeenAt = Date.now();
-		existing.costBasis = record.costBasis;
-		existing.costBasisHistory = [...new Set([...(existing.costBasisHistory ?? []), record.costBasis])];
+		if (goalId && !candidate.goalId) candidate.goalId = goalId;
+		if (!candidate.firstSeenAt) candidate.firstSeenAt = Date.now();
+		candidate.costBasis = record.costBasis;
+		candidate.costBasisHistory = [...new Set([...(candidate.costBasisHistory ?? []), record.costBasis])];
 		applied.add(record.sourceResultId);
-		existing.appliedSourceResultIds = [...applied];
-		this.costs.set(sessionId, existing);
+		candidate.appliedSourceResultIds = [...applied];
+
+		// The durable aggregate and source-id ledger are the commit point. Never
+		// expose the candidate in memory or acknowledge it until this succeeds.
+		if (!this.commitAuthoritativeCandidate(sessionId, candidate)) {
+			return { applied: false, snapshot: withUsageSnapshot(existing) };
+		}
+		this.costs.set(sessionId, candidate);
 		this.generation++;
-		this.dirty = true;
-		// Do not debounce the idempotency key: the root result is terminal and may
-		// be replayed immediately by a replacement bridge or after process restart.
+		// The atomic snapshot included every pending entry, including any legacy
+		// Pi counters. Preserve Pi's debounced write path; only cancel its timer
+		// after this successful full-store commit.
+		this.dirty = false;
 		this.cancelScheduledSave();
-		this.saveNow();
-		return { applied: true, snapshot: withUsageSnapshot(existing) };
+		return { applied: true, snapshot: withUsageSnapshot(candidate) };
 	}
 
 	/** Additive authoritative usage projection used by SDK-aware transports. */
