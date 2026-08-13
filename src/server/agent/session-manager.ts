@@ -26,7 +26,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import {
 	canonicalContainerAgentSessionPath,
 	sessionFileDelete,
@@ -1464,6 +1464,7 @@ export async function dispatchTrackedPrompt(
 		source?: PromptSource;
 		author?: MessageAuthor;
 		whenReady?: boolean;
+		streamingBehavior?: PromptStreamingBehavior;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -1477,8 +1478,12 @@ export async function dispatchTrackedPrompt(
 
 	try {
 		const response = opts.whenReady
-			? await session.rpcClient.promptWhenReady(prepared.piText, undefined)
-			: await session.rpcClient.prompt(prepared.piText);
+			? opts.streamingBehavior
+				? await session.rpcClient.promptWhenReady(prepared.piText, undefined, { streamingBehavior: opts.streamingBehavior })
+				: await session.rpcClient.promptWhenReady(prepared.piText, undefined)
+			: opts.streamingBehavior
+				? await session.rpcClient.prompt(prepared.piText, undefined, undefined, opts.streamingBehavior)
+				: await session.rpcClient.prompt(prepared.piText);
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
@@ -1504,6 +1509,7 @@ export function dispatchTrackedSystemPrompt(
 	opts: {
 		source?: SystemPromptSource;
 		whenReady?: boolean;
+		streamingBehavior?: PromptStreamingBehavior;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -8813,6 +8819,7 @@ export class SessionManager {
 			await dispatchTrackedSystemPrompt(session, continuationPrompt, {
 				source: "system",
 				whenReady: true,
+				streamingBehavior: "followUp",
 				now: () => this.clock.now(),
 			});
 			// Keep the boot marker until agent_start so the team boot-resume pass cannot

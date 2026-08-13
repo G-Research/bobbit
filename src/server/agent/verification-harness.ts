@@ -3079,6 +3079,7 @@ export class VerificationHarness {
 				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
 					source: "verification",
 					whenReady: true,
+					streamingBehavior: "followUp",
 					now: () => this.clock.now(),
 				});
 				// Reminder dispatch is fire-and-forget on the RPC channel; the session
@@ -3143,6 +3144,7 @@ export class VerificationHarness {
 					await dispatchTrackedSystemPrompt(session, fallbackPrompt, {
 						source: "verification",
 						whenReady: true,
+						streamingBehavior: "followUp",
 						now: () => this.clock.now(),
 					});
 					fallbackStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
@@ -5425,6 +5427,7 @@ export class VerificationHarness {
 				await dispatchTrackedSystemPrompt(session, args.prompt, {
 					source: "verification",
 					whenReady: typeof session.rpcClient.promptWhenReady === "function",
+					streamingBehavior: "followUp",
 					now: () => this.clock.now(),
 				});
 
@@ -5658,9 +5661,11 @@ export class VerificationHarness {
 				}
 			});
 
-			// Send kickoff prompt
+			// Send kickoff prompt. Pi may already be streaming its startup turn;
+			// followUp atomically queues this verifier-owned turn rather than rejecting it.
 			await dispatchTrackedSystemPrompt(session, kickoff, {
 				source: "verification",
+				streamingBehavior: "followUp",
 				now: () => this.clock.now(),
 			});
 
@@ -5707,6 +5712,7 @@ export class VerificationHarness {
 				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
 				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
 					source: "verification",
+					streamingBehavior: "followUp",
 					now: () => this.clock.now(),
 				});
 				// Wait for the agent to actually pick up the reminder before racing
@@ -6093,9 +6099,11 @@ export class VerificationHarness {
 				}
 			});
 
-			// Send kickoff prompt
+			// Send kickoff prompt. Pi may already be streaming its startup turn;
+			// followUp atomically queues this verifier-owned turn rather than rejecting it.
 			await dispatchTrackedSystemPrompt(session, kickoff, {
 				source: "verification",
+				streamingBehavior: "followUp",
 				now: () => this.clock.now(),
 			});
 
@@ -6144,6 +6152,7 @@ export class VerificationHarness {
 				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
 				await dispatchTrackedSystemPrompt(session, qaReminderPrompt, {
 					source: "verification",
+					streamingBehavior: "followUp",
 					now: () => this.clock.now(),
 				});
 				const started = await this.sessionManager!.waitForStreaming(qaSessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
