@@ -529,7 +529,9 @@ Hindsight is the reference composition, not a Hindsight-specific runtime type:
   endpoint or the injected ready endpoint, never a runner implementation.
 - EP-7 declares local-model provider, model id, base URL, context/output
   limits, resident keep-alive behavior, OCI image reference, and database mode.
-  API keys, registry credentials, and external database URLs are write-only
+  Hindsight's `apiKey` is an external-service-only bearer token; it is never
+  materialized for local, Docker, or Compose. Local-model keys, registry
+  credentials, and external database URLs are separately declared write-only
   secrets. A loopback HTTP model endpoint needs no placeholder API key.
 - OCI references are syntax-validated at save time. An unpinned tag produces a
   mutable-tag warning but is not rejected; only explicit start/restart may

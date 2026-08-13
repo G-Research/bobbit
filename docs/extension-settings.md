@@ -7,7 +7,7 @@ pack its own settings API or exposing credentials through ordinary project confi
 The boundary is deliberately narrow: declarations are flat, values are primitives, and secrets
 are write-only. This keeps configuration reviewable in Market while ensuring an extension in one
 project cannot inherit another project's configuration. It is separate from install-scope pack
-activation and from [extension capability grants](extension-capability-grants.md): settings can
+activation and from [extension capability grants](rest-api.md#extension-capability-grants): settings can
 make an installed contribution eligible to run, but never install a pack or confer authority.
 
 ## For pack authors
@@ -286,16 +286,24 @@ or starts a runtime. Local and Docker modes require an external PostgreSQL datab
 use its owned durable volume or an external database.
 
 For compatibility, an old Hindsight provider PackStore override is considered only before that
-project gets a Hindsight target row. Before that boundary, undeclared primitive legacy runtime
-settings, including the former `mode`, can remain in the provider's runtime overlay without being
-project settings or public API fields. Generic settings never write the legacy record. Once a
-project has a row, including one created to clear a value, every legacy value is excluded: there
-is no cross-project or legacy secret fallback. The old pack `config` route is read-only migration
-diagnostics; it cannot write configuration or expose legacy values.
+project gets a Hindsight target row. The settings owner reads only fields still declared by the
+current provider schema: declared public values remain legacy effective values and declared secret
+bytes are runtime-usable but exposed publicly only as `secretSet`. Retired, unknown, malformed,
+and undeclared legacy values—including old model-key names—are discarded. They cannot enter a
+runtime, public projection, `project.yaml`, or the owner-only secret file.
+
+The first successful project mutation creates the target row and transfers the declared legacy
+public values and secrets in that mutation's paired public/owner-only publication. An explicit
+replacement or `null` clear in the same request wins over the legacy snapshot. After the row
+exists, including an empty row created by a clear, legacy fallback is permanently excluded: no
+later save or project can resurrect a global value or secret. Generic settings never write the
+legacy record, and the old pack `config` route is read-only migration diagnostics; it cannot write
+configuration or expose legacy bytes.
 
 Consequently, projects can use different Hindsight configurations, endpoints, and write-only
 secrets. Disabling Hindsight in one project removes only that project's resolved provider; it does
 not disable or alter a configured provider in another project. This configuration isolation is
 separate from Hindsight's own optional memory-recall scope, which governs remote bank query tags
-rather than Bobbit settings ownership. See [Hindsight memory pack](hindsight-memory.md) for
-provider behavior.
+rather than Bobbit settings ownership. `apiKey` is a declared Hindsight secret for external mode
+only; it is not a local-model or managed-runtime credential. See [Hindsight memory pack](hindsight-memory.md)
+for provider behavior.

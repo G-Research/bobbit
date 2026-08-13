@@ -1,6 +1,6 @@
 # Hindsight experience integration
 
-**Status:** implementation design for H-4. **Dependencies checked:** the branch exports EP-6’s project-owned pack-principal capability resolver (`createExtensionCapabilityGrantResolver`) and EP-7’s revisioned, write-only extension settings (`ExtensionSettingsStore` and `/api/projects/:projectId/extension-settings`). It also exports the generic `ServiceRuntimeSupervisor` and `ServiceRuntimeStatus`. If any of those public contracts is absent when this work is rebased, stop and report the dependency rather than adding a Hindsight-private authorization, secret, settings, or activation system.
+**Status:** historical implementation design for H-4. H-4 is delivered; use the operational [Hindsight memory pack](../hindsight-memory.md), [managed service runtimes](../managed-runtimes.md), and [project extension settings](../extension-settings.md) as the current contract. This record preserves the design rationale and must not override those references.
 
 ## Decision
 

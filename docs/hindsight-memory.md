@@ -36,7 +36,7 @@ are never returned in settings, runtime status, diagnostics, route results, or l
 
 | Setting group | Settings | Notes |
 |---|---|---|
-| Service endpoint | `runtimeMode`, `externalUrl`, `apiKey` | `externalUrl` is used in `external` mode. `apiKey` is an optional Hindsight bearer token and is never shown after saving. |
+| Service endpoint | `runtimeMode`, `externalUrl`, `apiKey` | `externalUrl` is used in `external` mode. `apiKey` is an optional **external-service-only** Hindsight bearer token: it is never sent to a local, Docker, or Compose runtime, and is never shown after saving. |
 | Memory behavior | `bank`, `namespace`, `autoRecall`, `autoRetain`, `recallBudget`, `timeoutMs`, `retainEveryNTurns`, `retainMaxDelayMs` | Defaults are bank `bobbit`, namespace `default`, automatic recall/retain enabled, a 1200-token recall request budget, a 1500 ms client timeout, one turn per retain batch, and a 60-second maximum batch delay. |
 | Local inference | `localLlmProvider`, `localLlmModelId`, `localLlmBaseUrl`, `localLlmApiKey`, `localLlmContextTokens`, `localLlmMaxOutputTokens`, `localLlmResidency`, `localLlmKeepAlive` | The provider is `openai-compatible` or `ollama`. Settings select a model; saving them does not contact it. |
 | Image and registry | `ociImage`, `registryCredentials` | Used by Docker or Compose only when an explicit start/restart resolves the image. |
@@ -62,6 +62,11 @@ For every managed mode, the runtime status is one of `stopped`, `starting`, `rea
 unhealthy, blocked, or unavailable runtime does not fall back to an external or paid provider;
 reads return an explicit unavailable result and writes fail or use their existing durable
 provider queue where applicable. The agent session stays usable instead of waiting for recovery.
+
+`apiKey` has no managed-mode fallback. The Hindsight client attaches it only when
+`runtimeMode: external`; local, Docker, and Compose use their ready runtime endpoint without
+that bearer token. Managed credentials are limited to their separately declared write-only model,
+registry, and database secret fields.
 
 The service descriptor probes `/health` with a bounded request and has manual start policy. It
 may retry a failed managed start within its bounded runtime policy, but it never begins work merely
@@ -219,6 +224,18 @@ outcome on goal completion. Remote failure is non-fatal only after the retry ite
 durably; unreadable durable state is reported as unavailable rather than mistaken for an empty
 queue.
 
+### Epic completion map
+
+| Item | Delivered surface | Key invariant |
+|---|---|---|
+| H-2 — IDs, cleanup, stray memories | Collision-safe, project-partitioned pending/queue identities; deadline-bound sweep and scope-preserving stranded recovery. | A prefix/list result is revalidated against the complete identity, so records cannot cross projects, goals, banks, or namespaces. |
+| H-3 — remaining hardening | Generic Extension Host mutation, deadline, lifecycle-delivery, and tri-state-read foundations. | A failed or unreadable durable operation is never reported as a committed or empty result. See [foundation provenance](design/hindsight-foundation-provenance.md). |
+| H-4 — panel, tools, managed runtime | This panel, the five tools, typed routes, and the mode-independent local/Docker/Compose runtime. | UI and tools consume redacted EP-7 settings, live EP-6 grants, and the shared ready-endpoint contract; they do not own a client lifecycle. |
+| H-5 — goal completion | Host-originated `goalCompleted` delivery and `hindsight_retain_outcome`. | The durable completion marker follows remote success or a confirmed durable queue entry, never a failed/unknown write. |
+| H-6 — goal recall | Authoritative session project/goal scope for normal browse, recall, and reflection. | Missing scope fails closed before a remote call; `scope: all` is explicit and needs `memory.read.all`. |
+
+The H-2, H-5, and H-6 mechanics are detailed in [Hindsight memory completion](design/hindsight-memory-completion.md). H-3 is an outcome audit rather than a replay of the old hardening package; H-4 is the operational surface documented here.
+
 ## Agent tools
 
 Hindsight contributes exactly these tools. Each is a thin adapter over the same authenticated
@@ -261,6 +278,15 @@ Data-plane routes stop within their bounded route deadline. An inactive external
 returns an empty inactive result for reads; a managed runtime that is not ready returns
 `SERVICE_UNHEALTHY`. Neither case constructs a client, starts a runtime, or falls back to a
 different endpoint.
+
+## Release hold: human managed-mode verification
+
+Automated coverage proves the generic adapter matrix and degraded behavior, but this epic must
+not merge to `main` until a human has tested **both Hindsight Docker and Hindsight Compose** on
+the target environment. For each mode, explicitly start the service, verify a ready state and a
+retain/recall round trip, stop and restart it, and confirm the expected storage survives. Record
+that result in the parent PR. A Docker/Compose prerequisite failure or an automated skip is not a
+substitute for this hold.
 
 ## See also
 

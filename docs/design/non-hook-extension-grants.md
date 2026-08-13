@@ -357,7 +357,7 @@ packs remain visible; legacy rows display as Hook and new rows display as Pack.
 | `tests2/integration/extension-capability-grants.test.ts` | Cover active-pack-only generic routes, signed-operator mutation requirements, stale revoke, audit/outbox recovery, server projections, invalidation, and shared lifecycle/panel-route/tool resolver seams. |
 | `tests2/browser/e2e/extension-capability-grants.spec.ts` | Extend the existing Market journey to grant, reload, revoke, and audit a pack capability through the Pack row, while retaining the legacy Hook assertion. |
 | `tests2/tests-map.json` | Refresh registered-test inventory entries/reasons via the repository inventory generator for every changed or newly added focused test; do not hand-edit generated counts. |
-| `docs/extension-capability-grants.md`, `docs/rest-api.md` | Document the compatibility union, closed pack vocabulary, generic routes/audit, exact stale revoke, operator requirement, and resolver contract. |
+| `docs/rest-api.md` | Document the compatibility union, closed pack vocabulary, generic routes/audit, exact stale revoke, operator requirement, and resolver contract. |
 | `docs/extension-host-authoring.md`, `docs/marketplace.md`, `docs/extension-settings.md` | Document that a pack declares no authority, where the existing Market Pack row exposes grants, and that settings/activation remain separate ceilings. |
 | `docs/service-extension-runtime.md`, `docs/extension-platform.md`, `docs/design/extension-platform-parent.md` | Document the `service.manage` fence, Hindsight's public resolver handoff, revocation behavior, and the parent-platform dependency without adding Hindsight-local state. |
 
