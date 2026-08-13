@@ -364,16 +364,32 @@ test.describe("extension settings API", () => {
 		const grantsBefore = await readJson(await apiFetch(`/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`));
 
 		const legacyUrl = "https://legacy-hindsight.example.test";
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl });
-		const beforeRecord = target(await settings(projectB.id));
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, autoRecall: false, apiKey: SECRET_A });
+		const beforeRecord = target(await settings(projectA.id));
 		expect(beforeRecord.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "legacy" });
+		expect(runtimeProviderIds(gateway, projectA.id)).toContain(PROVIDER_ID);
 
+		// A partial first save adopts the exact legacy snapshot before its explicit
+		// project mutation. Runtime activation and the settings projection agree.
 		const aInitial = await settings(projectA.id);
-		const aSaved = await patchTarget(projectA.id, aInitial.revision, {
-			externalUrl: "https://project-a-hindsight.example.test",
-			apiKey: SECRET_A,
-		});
+		const aSaved = await patchTarget(projectA.id, aInitial.revision, { requiredName: "project-a" });
 		expect(aSaved.status).toBe(200);
+		const aSavedBody = await readJson(aSaved);
+		expect(aSavedBody.target.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "project" });
+		expect(aSavedBody.target.fields.find((field: any) => field.key === "autoRecall")).toMatchObject({ value: false, source: "project" });
+		expect(JSON.stringify(aSavedBody)).not.toContain(SECRET_A);
+		expect(fs.readFileSync(path.join(projectA.rootPath, ".bobbit", "config", "project.yaml"), "utf8")).not.toContain(SECRET_A);
+		expect(runtimeProviderIds(gateway, projectA.id)).toContain(PROVIDER_ID);
+
+		// A clear stays clear in the project row; it must never fall back to the
+		// old pack-scoped value after ownership has transferred.
+		const aCleared = await patchTarget(projectA.id, aSavedBody.revision, { externalUrl: null });
+		expect(aCleared.status).toBe(200);
+		const aClearedBody = await readJson(aCleared);
+		expect(aClearedBody.target).toMatchObject({ configuration: { state: "requires-config", missing: ["externalUrl"] } });
+		expect(aClearedBody.target.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ source: "default" });
+		expect(runtimeProviderIds(gateway, projectA.id)).not.toContain(PROVIDER_ID);
+
 		const bInitial = await settings(projectB.id);
 		const bSaved = await patchTarget(projectB.id, bInitial.revision, {
 			externalUrl: "https://project-b-hindsight.example.test",
@@ -383,7 +399,7 @@ test.describe("extension settings API", () => {
 
 		const a = target(await settings(projectA.id));
 		const b = target(await settings(projectB.id));
-		expect(a.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: "https://project-a-hindsight.example.test", source: "project" });
+		expect(a.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ source: "default" });
 		expect(b.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: "https://project-b-hindsight.example.test", source: "project" });
 		expect(JSON.stringify(a)).not.toContain(SECRET_A);
 		expect(JSON.stringify(b)).not.toContain(SECRET_B);
