@@ -153,6 +153,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.useRealTimers();
 	_setSubgoalsEnabledForTesting(false);
 	for (const key of touchedTreeKeys.splice(0)) clearSidebarTreePreference(key);
 	setRenderApp(() => {});
@@ -647,5 +648,63 @@ describe("reveal current sidebar session control", () => {
 		expect(row.scrollIntoView).toHaveBeenCalledWith({ block: "nearest", behavior: "auto" });
 		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(true);
 		expect(row.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(true);
+	});
+
+	it("cleans a superseded reduced-motion row without stripping the new target emphasis", async () => {
+		vi.useFakeTimers();
+		stubMotion(true);
+		state.projects = [project("p")];
+		state.gatewaySessions = [session("first"), session("second")];
+		document.body.innerHTML = `
+			<aside class="sidebar-edge">
+				<div data-nav-id="session:first"></div>
+				<div data-nav-id="session:second"></div>
+			</aside>
+		`;
+		const first = document.querySelector<HTMLElement>('[data-nav-id="session:first"]')!;
+		const second = document.querySelector<HTMLElement>('[data-nav-id="session:second"]')!;
+
+		openSession("first");
+		await revealCurrentSidebarSession();
+		expect(first.classList.contains("sidebar-reveal-emphasis")).toBe(true);
+		expect(first.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(true);
+
+		vi.advanceTimersByTime(100);
+		openSession("second");
+		await revealCurrentSidebarSession();
+
+		expect(first.classList.contains("sidebar-reveal-emphasis")).toBe(false);
+		expect(first.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(false);
+		expect(second.classList.contains("sidebar-reveal-emphasis")).toBe(true);
+		expect(second.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(true);
+
+		vi.advanceTimersByTime(140);
+		expect(first.classList.contains("sidebar-reveal-emphasis")).toBe(false);
+		expect(first.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(false);
+		expect(second.classList.contains("sidebar-reveal-emphasis")).toBe(true);
+		expect(second.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(true);
+	});
+
+	it("keeps a replayed row emphasized past the old cleanup and removes it with the new cleanup", async () => {
+		vi.useFakeTimers();
+		stubMotion(true);
+		state.projects = [project("p")];
+		state.gatewaySessions = [session("target")];
+		openSession("target");
+		const row = mountSessionRow("target");
+		const addClass = vi.spyOn(row.classList, "add");
+
+		await revealCurrentSidebarSession();
+		vi.advanceTimersByTime(100);
+		await revealCurrentSidebarSession();
+		expect(addClass.mock.calls.filter(args => args.includes("sidebar-reveal-emphasis"))).toHaveLength(2);
+
+		vi.advanceTimersByTime(140);
+		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(true);
+		expect(row.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(true);
+
+		vi.advanceTimersByTime(100);
+		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(false);
+		expect(row.classList.contains("sidebar-reveal-emphasis--reduced")).toBe(false);
 	});
 });
