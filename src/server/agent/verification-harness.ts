@@ -1007,7 +1007,7 @@ import {
 	type CommandRecoveryMode,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
-import { dispatchTrackedSystemPrompt } from "./session-manager.js";
+import { dispatchTrackedSystemPrompt, type SessionInfo } from "./session-manager.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
@@ -3076,10 +3076,14 @@ export class VerificationHarness {
 			// `pending` when the rerun context is unavailable).
 			let reminderStarted = false;
 			try {
-				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
-					source: "verification",
+				await this.dispatchVerifierPrompt(session, reminderPrompt, {
+					goalId: v.goalId,
+					gateId: v.gateId,
+					signalId: v.signalId,
+					stepName: step.name,
+					verifierKind: step.type === "agent-qa" ? "agent-qa" : "llm-review",
+					promptKind: useRestartContinuationPrompt ? "restart-resume" : "reminder",
 					whenReady: true,
-					now: () => this.clock.now(),
 				});
 				// Reminder dispatch is fire-and-forget on the RPC channel; the session
 				// stays `idle` for a tick before transitioning to `streaming`. This fixed
@@ -3140,10 +3144,14 @@ export class VerificationHarness {
 				console.log(`[verification] Restart continuation for resumed session ${step.sessionId} ended without verification_result, sending ${fallbackKind} fallback reminder...`);
 				let fallbackStarted = false;
 				try {
-					await dispatchTrackedSystemPrompt(session, fallbackPrompt, {
-						source: "verification",
+					await this.dispatchVerifierPrompt(session, fallbackPrompt, {
+						goalId: v.goalId,
+						gateId: v.gateId,
+						signalId: v.signalId,
+						stepName: step.name,
+						verifierKind: step.type === "agent-qa" ? "agent-qa" : "llm-review",
+						promptKind: "fallback",
 						whenReady: true,
-						now: () => this.clock.now(),
 					});
 					fallbackStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
 				} catch (resumeErr) {
@@ -5268,6 +5276,46 @@ export class VerificationHarness {
 		return resolveReviewStepTimeoutSec(step, qaMinutes);
 	}
 
+	/**
+	 * Admit a verifier-owned turn through SessionManager's durable queue. Pi's
+	 * `followUp` mode is part of the same RPC command, so a ready-but-streaming
+	 * reviewer accepts this exact intent instead of rejecting it for a raw retry.
+	 * The direct fallback exists for narrow test/session-manager shims only.
+	 */
+	private async dispatchVerifierPrompt(
+		session: SessionInfo,
+		text: string,
+		args: {
+			goalId?: string;
+			gateId?: string;
+			signalId?: string;
+			stepName: string;
+			verifierKind: "llm-review" | "agent-qa";
+			promptKind: "kickoff" | "reminder" | "restart-resume" | "fallback" | "resurrection";
+			whenReady?: boolean;
+			attempt?: number;
+		},
+	): Promise<unknown> {
+		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1}`;
+		const manager = this.sessionManager;
+		if (manager && typeof manager.enqueuePrompt === "function") {
+			console.log(`[verification][verifier-dispatch] ${fields} mode=queued decision=followUp`);
+			return manager.enqueuePrompt(session.id, text, {
+				source: "verification",
+				coldStart: args.whenReady,
+				streamingBehavior: "followUp",
+				suppressTitleGen: true,
+			});
+		}
+		console.log(`[verification][verifier-dispatch] ${fields} mode=direct decision=followUp`);
+		return dispatchTrackedSystemPrompt(session, text, {
+			source: "verification",
+			whenReady: args.whenReady,
+			streamingBehavior: "followUp",
+			now: () => this.clock.now(),
+		});
+	}
+
 	/** Distinguish a real idle turn from expiry of its active-thinking allowance. */
 	private async waitForReviewTurn(
 		sessionId: string,
@@ -5386,6 +5434,7 @@ export class VerificationHarness {
 	}
 
 	private async recoverVerifierAfterProcessDeath(args: {
+		goalId?: string;
 		sessionId: string;
 		stepName: string;
 		label: string;
@@ -5419,10 +5468,13 @@ export class VerificationHarness {
 				const session = sessionManager.getSession(args.sessionId);
 				if (!session?.rpcClient) throw new Error("Session missing after same-session resurrection");
 
-				await dispatchTrackedSystemPrompt(session, args.prompt, {
-					source: "verification",
+				await this.dispatchVerifierPrompt(session, args.prompt, {
+					goalId: args.goalId,
+					stepName: args.stepName,
+					verifierKind: args.label === "Agent QA" ? "agent-qa" : "llm-review",
+					promptKind: "resurrection",
 					whenReady: typeof session.rpcClient.promptWhenReady === "function",
-					now: () => this.clock.now(),
+					attempt,
 				});
 
 				// Readiness, restart, prompt delivery, and this fixed settle window are
@@ -5655,10 +5707,12 @@ export class VerificationHarness {
 				}
 			});
 
-			// Send kickoff prompt
-			await dispatchTrackedSystemPrompt(session, kickoff, {
-				source: "verification",
-				now: () => this.clock.now(),
+			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
+			await this.dispatchVerifierPrompt(session, kickoff, {
+				goalId,
+				stepName: step.name,
+				verifierKind: "llm-review",
+				promptKind: "kickoff",
 			});
 
 			// Kickoff transport is outside the allowance. Once dispatched, distinguish
@@ -5702,9 +5756,12 @@ export class VerificationHarness {
 				const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
 				const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
-					source: "verification",
-					now: () => this.clock.now(),
+				await this.dispatchVerifierPrompt(session, reminderPrompt, {
+					goalId,
+					stepName: step.name,
+					verifierKind: "llm-review",
+					promptKind: "reminder",
+					attempt: reminderNum,
 				});
 				// Wait for the agent to actually pick up the reminder before racing
 				// against waitForIdle — see _tryResumeFromSession for rationale. Give
@@ -5774,6 +5831,7 @@ export class VerificationHarness {
 			if (isProcessDeath) {
 				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${msg}`);
 				const recovered = await this.recoverVerifierAfterProcessDeath({
+					goalId,
 					sessionId,
 					stepName: step.name,
 					label: "LLM review",
@@ -6090,10 +6148,12 @@ export class VerificationHarness {
 				}
 			});
 
-			// Send kickoff prompt
-			await dispatchTrackedSystemPrompt(session, kickoff, {
-				source: "verification",
-				now: () => this.clock.now(),
+			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
+			await this.dispatchVerifierPrompt(session, kickoff, {
+				goalId,
+				stepName: step.name,
+				verifierKind: "agent-qa",
+				promptKind: "kickoff",
 			});
 
 			// Kickoff transport is outside the allowance. Each active QA turn gets
@@ -6139,9 +6199,12 @@ export class VerificationHarness {
 				const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
 				const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await dispatchTrackedSystemPrompt(session, qaReminderPrompt, {
-					source: "verification",
-					now: () => this.clock.now(),
+				await this.dispatchVerifierPrompt(session, qaReminderPrompt, {
+					goalId,
+					stepName: step.name,
+					verifierKind: "agent-qa",
+					promptKind: "reminder",
+					attempt: reminderNum,
 				});
 				const started = await this.sessionManager!.waitForStreaming(qaSessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
 				if (!started) continue;
@@ -6206,6 +6269,7 @@ export class VerificationHarness {
 			if (isProcessDeath && qaSessionId) {
 				console.error(`[verification] QA agent process died during "${step.name}" (session ${qaSessionId}): ${msg}`);
 				const recovered = await this.recoverVerifierAfterProcessDeath({
+					goalId,
 					sessionId: qaSessionId,
 					stepName: step.name,
 					label: "Agent QA",

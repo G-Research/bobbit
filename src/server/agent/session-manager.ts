@@ -26,7 +26,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import {
 	canonicalContainerAgentSessionPath,
 	sessionFileDelete,
@@ -1432,6 +1432,7 @@ export async function dispatchTrackedPrompt(
 		source?: PromptSource;
 		author?: MessageAuthor;
 		whenReady?: boolean;
+		streamingBehavior?: PromptStreamingBehavior;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -1445,8 +1446,12 @@ export async function dispatchTrackedPrompt(
 
 	try {
 		const response = opts.whenReady
-			? await session.rpcClient.promptWhenReady(prepared.piText, undefined)
-			: await session.rpcClient.prompt(prepared.piText);
+			? opts.streamingBehavior
+				? await session.rpcClient.promptWhenReady(prepared.piText, undefined, { streamingBehavior: opts.streamingBehavior })
+				: await session.rpcClient.promptWhenReady(prepared.piText, undefined)
+			: opts.streamingBehavior
+				? await session.rpcClient.prompt(prepared.piText, undefined, undefined, opts.streamingBehavior)
+				: await session.rpcClient.prompt(prepared.piText);
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
@@ -1472,6 +1477,7 @@ export function dispatchTrackedSystemPrompt(
 	opts: {
 		source?: SystemPromptSource;
 		whenReady?: boolean;
+		streamingBehavior?: PromptStreamingBehavior;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -5185,6 +5191,9 @@ export class SessionManager {
 		 *  RpcBridge.promptWhenReady, so the boot-resume nudge actually lands
 		 *  instead of timing out on the default 30s. */
 		coldStart?: boolean;
+		/** Pi atomic delivery mode. `followUp` appends to an active SDK turn
+		 * rather than rejecting this accepted intent as "already processing". */
+		streamingBehavior?: PromptStreamingBehavior;
 		/** When true, this prompt must NOT trigger first-message auto-title
 		 *  generation. Set for assistant auto-kickoff prompts so naming fires on
 		 *  the first GENUINE user message rather than the kickoff text. Does NOT
@@ -5411,6 +5420,8 @@ export class SessionManager {
 				source,
 				author,
 				accepted.id,
+				undefined,
+				opts?.streamingBehavior,
 			);
 			return { status: "dispatched" };
 		}
@@ -5461,7 +5472,7 @@ export class SessionManager {
 						target.lastPromptSource = opts?.source ?? "user";
 						if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
 						try {
-							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, undefined, opts?.streamingBehavior);
 						} catch (err) {
 							target.lastTurnErrored = true;
 							target.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
@@ -5547,7 +5558,7 @@ export class SessionManager {
 					// where attachments aren't tracked on SessionInfo), fall back to
 					// the synthetic phrase so we never re-send blank/invalid content.
 					const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
-					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior);
 					return { status: "dispatched" };
 				}
 			}
@@ -5558,7 +5569,7 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior);
 			return { status: "dispatched" };
 		}
 
@@ -5567,7 +5578,7 @@ export class SessionManager {
 		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior);
 			return { status: "dispatched" };
 		}
 
@@ -6088,6 +6099,7 @@ export class SessionManager {
 		author: MessageAuthor = LOCAL_USER_AUTHOR,
 		durableQueueRowId?: string,
 		promptId = promptAttemptId("prompt"),
+		streamingBehavior?: PromptStreamingBehavior,
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
@@ -6118,8 +6130,12 @@ export class SessionManager {
 			// generous timeout so a boot-resume nudge lands instead of timing out
 			// on the default 30s. Everything else (recovery, rethrow) is identical.
 			const resp = coldStart
-				? await session.rpcClient.promptWhenReady(prepared.piText, images)
-				: await session.rpcClient.prompt(prepared.piText, images);
+				? streamingBehavior
+					? await session.rpcClient.promptWhenReady(prepared.piText, images, { streamingBehavior })
+					: await session.rpcClient.promptWhenReady(prepared.piText, images)
+				: streamingBehavior
+					? await session.rpcClient.prompt(prepared.piText, images, undefined, streamingBehavior)
+					: await session.rpcClient.prompt(prepared.piText, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				if (acceptedBeforeAckFailure(reason)) return;
@@ -8527,6 +8543,7 @@ export class SessionManager {
 			await dispatchTrackedSystemPrompt(session, continuationPrompt, {
 				source: "system",
 				whenReady: true,
+				streamingBehavior: "followUp",
 				now: () => this.clock.now(),
 			});
 			// Keep the boot marker until agent_start so the team boot-resume pass cannot
