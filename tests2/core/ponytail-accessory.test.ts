@@ -121,6 +121,17 @@ describe("ponytail accessory", () => {
 		for (const [, , c] of px) assert.ok(allowed.has(c), `unexpected ponytail colour ${c}`);
 	});
 
+	it("provides a minimal right-facing sidebar frame", () => {
+		const right = ACCESSORY_PONYTAIL.sidebarRightFacingPixels ?? [];
+		const rightHas = (x: number, y: number) => right.some(([px, py]) => px === x && py === y);
+		assert.ok(right.length > 0 && right.length < px.length, "right frame is a pixel subset");
+		assert.ok(rightHas(1, 3) && rightHas(1, 4), "near/left curtain remains visible");
+		assert.ok(!rightHas(7, 3) && !rightHas(8, 4), "far/right curtain is occluded");
+		assert.ok(!right.some(([x, y]) => x >= 9 && y >= 2), "right-side tail is occluded");
+		assert.ok(rightHas(7, 1) && rightHas(8, 1), "crown remains intact");
+		assert.ok(rightHas(7, 7), "bottom jaw sweep remains visible");
+	});
+
 	it("is allowed as a staff accessory", () => {
 		assert.equal(normalizeStaffAccessory("ponytail"), "ponytail");
 	});
@@ -168,6 +179,8 @@ describe("ponytail accessory", () => {
 		const render = read("src/ui/bobbit-render.ts");
 		const divs = render.match(/bobbit-blob__ponytail/g) ?? [];
 		assert.ok(divs.length >= 2, "ponytail div in both bobbit-render templates");
+		assert.match(render, /sidebarRightFacingPixels/, "sidebar consumes the occluded frame");
+		assert.match(render, /showRightOnly = !!rightPixels\?\.length && unread && !isSelected/, "unread right gaze renders only the occluded frame");
 		assert.match(read("src/ui/components/StreamingMessageContainer.ts"), /bobbit-blob__ponytail/);
 
 		const rm = read("src/app/role-manager.css");
