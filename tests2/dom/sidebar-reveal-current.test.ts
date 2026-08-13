@@ -425,6 +425,171 @@ describe("reveal current sidebar session control", () => {
 		expect(persisted.expansion?.[sidebarTreeKey(unrelatedProject)]).toBe("collapsed");
 	});
 
+	it("recreates all sidebar modules and restores only the explicitly revealed project's deep cap", async () => {
+		const projects = [project("p"), project("unrelated")];
+		const goals = [
+			goal("team", { projectId: "p", team: true, createdAt: 1 }),
+			goal("spawned", { projectId: "p", parentGoalId: "team", spawnedBySessionId: "lead", createdAt: 2 }),
+			...Array.from({ length: 7 }, (_, index) => goal(`deep-${index + 1}`, {
+				projectId: "p",
+				parentGoalId: index === 0 ? "spawned" : `deep-${index}`,
+				createdAt: index + 3,
+			})),
+			goal("unrelated-team", { projectId: "unrelated", team: true, createdAt: 20 }),
+			goal("unrelated-spawned", {
+				projectId: "unrelated",
+				parentGoalId: "unrelated-team",
+				spawnedBySessionId: "unrelated-lead",
+				createdAt: 21,
+			}),
+			...Array.from({ length: 7 }, (_, index) => goal(`unrelated-deep-${index + 1}`, {
+				projectId: "unrelated",
+				parentGoalId: index === 0 ? "unrelated-spawned" : `unrelated-deep-${index}`,
+				createdAt: index + 22,
+			})),
+		];
+		const sessions = [
+			session("lead", { projectId: "p", goalId: "team", teamGoalId: "team", role: "team-lead", createdAt: 30 }),
+			session("target", { projectId: "p", goalId: "deep-7", createdAt: 31 }),
+			session("unrelated-lead", {
+				projectId: "unrelated",
+				goalId: "unrelated-team",
+				teamGoalId: "unrelated-team",
+				role: "team-lead",
+				createdAt: 32,
+			}),
+			session("unrelated-target", { projectId: "unrelated", goalId: "unrelated-deep-7", createdAt: 33 }),
+		];
+		const targetPath: SidebarTreeNodeKey[] = [
+			{ kind: "project", projectId: "p" },
+			{ kind: "goal", goalId: "team" },
+			{ kind: "team-lead", sessionId: "lead" },
+			{ kind: "goal", goalId: "spawned" },
+			...Array.from({ length: 7 }, (_, index): SidebarTreeNodeKey => ({ kind: "goal", goalId: `deep-${index + 1}` })),
+		];
+		const unrelatedProject: SidebarTreeNodeKey = { kind: "project", projectId: "unrelated" };
+		const targetSessionKey = sidebarTreeKey({ kind: "session", sessionId: "target" });
+		const unrelatedDeepGoalKey = sidebarTreeKey({ kind: "goal", goalId: "unrelated-deep-7" });
+
+		vi.resetModules();
+		let freshStateModule = await import("../../src/app/state.js");
+		let freshTreeState = await import("../../src/app/sidebar-tree-state.js");
+		let freshSubgoals = await import("../../src/app/subgoals-flag.js");
+		let freshSidebar = await import("../../src/app/sidebar.js");
+		let freshReveal = await import("../../src/app/sidebar-reveal.js");
+		freshSubgoals._setSubgoalsEnabledForTesting(true);
+		freshStateModule.state.projects = projects;
+		freshStateModule.state.goals = goals;
+		freshStateModule.state.gatewaySessions = sessions;
+		freshStateModule.state.archivedSessions = [];
+		freshStateModule.state.sidebarSessionView = "project";
+		freshStateModule.state.showArchived = false;
+		freshStateModule.state.showBusy = true;
+		freshStateModule.state.showRead = true;
+		freshStateModule.state.selectedSessionId = "target";
+		freshStateModule.state.connectingSessionId = "target";
+		freshStateModule.state.remoteAgent = null;
+		freshStateModule.setRenderApp(() => {});
+		window.location.hash = "#/session/target";
+		for (const key of targetPath) freshTreeState.setSidebarTreeExpanded(key, false);
+		freshTreeState.setSidebarTreeExpanded(unrelatedProject, false);
+		expect(freshSidebar.buildSidebarTreeModel().flatByKey.has(targetSessionKey)).toBe(false);
+		mountSessionRow("target");
+
+		await freshReveal.revealCurrentSidebarSession();
+		expect(freshSidebar.buildSidebarTreeModel().flatByKey.has(targetSessionKey)).toBe(true);
+
+		// Discard module memory and rebuild all canonical inputs from storage.
+		vi.resetModules();
+		freshStateModule = await import("../../src/app/state.js");
+		freshTreeState = await import("../../src/app/sidebar-tree-state.js");
+		freshSubgoals = await import("../../src/app/subgoals-flag.js");
+		freshSidebar = await import("../../src/app/sidebar.js");
+		freshSubgoals._setSubgoalsEnabledForTesting(true);
+		freshStateModule.state.projects = projects;
+		freshStateModule.state.goals = goals;
+		freshStateModule.state.gatewaySessions = sessions;
+		freshStateModule.state.archivedSessions = [];
+		freshStateModule.state.sidebarSessionView = "project";
+		freshStateModule.state.showArchived = false;
+		freshStateModule.state.showBusy = true;
+		freshStateModule.state.showRead = true;
+		freshStateModule.state.sidebarRevealSessionId = null;
+		freshStateModule.setRenderApp(() => {});
+
+		const reloaded = freshSidebar.buildSidebarTreeModel();
+		expect(reloaded.flatByKey.has(targetSessionKey), "durable target-project depth must survive module/state recreation").toBe(true);
+		expect(reloaded.flatByKey.has(unrelatedDeepGoalKey), "unrelated project depth must remain at the default cap").toBe(false);
+		for (const key of targetPath) expect(freshTreeState.isSidebarTreeExpanded(key), sidebarTreeKey(key)).toBe(true);
+		expect(freshTreeState.isSidebarTreeExpanded(unrelatedProject)).toBe(false);
+		freshSubgoals._setSubgoalsEnabledForTesting(false);
+	});
+
+	it("normalizes a cached terminated delegate after exact hydration fails and reveals its archived child path once", async () => {
+		state.projects = [project("p")];
+		state.gatewaySessions = [
+			session("parent", { projectId: "p", createdAt: 1 }),
+			session("target", {
+				projectId: "p",
+				delegateOf: "parent",
+				status: "terminated",
+				archived: false,
+				createdAt: 2,
+			}),
+		];
+		openSession("target");
+		state.showArchived = true;
+		state.searchQuery = "filtered";
+
+		const path: SidebarTreeNodeKey[] = [
+			{ kind: "project", projectId: "p" },
+			{ kind: "project-sessions", projectId: "p" },
+			{ kind: "session-children", sessionId: "parent", childClass: "archived-delegate" },
+		];
+		for (const key of path) setTreeExpanded(key, false);
+
+		const requests: string[] = [];
+		vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			requests.push(url);
+			if (url.includes("/api/sessions/target")) return Response.json({ error: "not found" }, { status: 404 });
+			if (url.includes("/api/sessions?")) return Response.json({ sessions: [], total: 0, hasMore: false });
+			if (url.includes("/api/goals?")) return Response.json({ goals: [], total: 0, hasMore: false });
+			return Response.json({ error: "not found" }, { status: 404 });
+		}));
+		const row = mountSessionRow("target");
+
+		await expect(revealCurrentSidebarSession()).resolves.toBeUndefined();
+
+		expect(requests.some(url => url.includes("/api/sessions/target"))).toBe(true);
+		expect(state.gatewaySessions.some(value => value.id === "target")).toBe(false);
+		expect(state.archivedSessions.filter(value => value.id === "target")).toEqual([
+			expect.objectContaining({ id: "target", status: "terminated", archived: false }),
+		]);
+		expect([...state.gatewaySessions, ...state.archivedSessions].filter(value => value.id === "target")).toHaveLength(1);
+		expect(state.searchQuery).toBe("");
+		expect(state.showArchived).toBe(false);
+		for (const key of path) expect(isSidebarTreeExpanded(key), sidebarTreeKey(key)).toBe(true);
+
+		const model = buildSidebarTreeModel();
+		const targetNode = model.flatByKey.get(sidebarTreeKey({ kind: "session", sessionId: "target" }));
+		expect(targetNode).toBeDefined();
+		const actualAncestors: string[] = [];
+		let parentKey = targetNode?.parentKey ?? null;
+		while (parentKey) {
+			actualAncestors.push(parentKey);
+			parentKey = model.flatByKey.get(parentKey)?.parentKey ?? null;
+		}
+		expect(actualAncestors).toEqual([...path].reverse().map(sidebarTreeKey));
+
+		const persisted = JSON.parse(localStorage.getItem(SIDEBAR_TREE_STATE_STORAGE_KEY) || "{}") as {
+			expansion?: Record<string, string>;
+		};
+		for (const key of path) expect(persisted.expansion?.[sidebarTreeKey(key)]).toBe("expanded");
+		expect(row.scrollIntoView).toHaveBeenCalledWith({ block: "nearest", behavior: "smooth" });
+		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(true);
+	});
+
 	it("cold-loads an exact archived session and canonical archive pages before revealing it", async () => {
 		state.projects = [project("p")];
 		openSession("cold-archived");
