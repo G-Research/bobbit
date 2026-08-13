@@ -130,29 +130,53 @@ describe("selectSidebarStatusSections", () => {
 		assert.deepEqual(ids(afterHiddenActivityChurn.unread), ["active-new", "active-old"], "hidden timestamps must not reorder shimmer-only rows");
 	});
 
-	it("keeps only the canonical active archived team target exempt from every visibility gate", () => {
+	it("keeps categorical archive/team filters active for the open row until an explicit reveal", () => {
 		const candidates = [
-			candidate("active-target", {
+			candidate("active-archived-team", {
+				server_tags: ["team-kind=member", "activity-state=busy", "read-state=read"],
+			}, true),
+			candidate("active-live", {
+				server_tags: ["activity-state=busy", "read-state=read"],
+			}),
+			candidate("unread-visible", { server_tags: ["read-state=unread"] }),
+		];
+
+		const categoricallyHidden = select(candidates, {
+			activeSessionId: "active-archived-team",
+			filters: { showArchived: false, showTeams: false, showBusy: false, showRead: false },
+		});
+		assert.deepEqual(ids(categoricallyHidden.unread), ["unread-visible"]);
+		assert.deepEqual(ids(categoricallyHidden.read), []);
+
+		const busyReadExempt = select(candidates, {
+			activeSessionId: "active-live",
+			filters: { showArchived: false, showTeams: false, showBusy: false, showRead: false },
+		});
+		assert.deepEqual(ids(busyReadExempt.read), ["active-live"], "Busy/Read retain the established active-row exemption");
+	});
+
+	it("admits only the exact action-scoped reveal target through archive/team gates", () => {
+		const candidates = [
+			candidate("target", {
 				server_tags: ["team-kind=member", "activity-state=busy", "read-state=read"],
 			}, true),
 			candidate("archived-other", { server_tags: ["read-state=unread"] }, true),
 			candidate("member-other", { server_tags: ["team-kind=member", "read-state=unread"] }),
-			candidate("busy-other", { server_tags: ["activity-state=busy", "read-state=unread"] }),
-			candidate("read-other", { server_tags: ["read-state=read"] }),
 			candidate("unread-visible", { server_tags: ["read-state=unread"] }),
 		];
 		const sections = select(candidates, {
-			activeSessionId: "active-target",
+			activeSessionId: "target",
+			revealSessionId: "target",
 			filters: { showArchived: false, showTeams: false, showBusy: false, showRead: false },
-		});
+		} as Partial<Parameters<typeof selectSidebarStatusSections>[0]>);
 
 		assert.deepEqual(ids(sections.unread), ["unread-visible"]);
-		assert.deepEqual(ids(sections.read), ["active-target"]);
+		assert.deepEqual(ids(sections.read), ["target"]);
 		assert.deepEqual(ids(sections.pinned), []);
 		assert.equal(
 			[...sections.pinned, ...sections.unread, ...sections.read].some(value => value.session.id.endsWith("-other")),
 			false,
-			"the exemption must be scoped to the exact active session id",
+			"the categorical exception must neither follow activeSessionId alone nor include unrelated rows",
 		);
 	});
 
