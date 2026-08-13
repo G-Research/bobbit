@@ -334,6 +334,28 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.equal(dispatchGoalProvisioned.mock.calls.length, 0, "missing scoped authority must stop before goal dispatcher execution");
 	});
 
+	it("wires SDK role and force-abort replacements before constructing their dispatcher", () => {
+		const source = readFileSync(path.resolve("src/server/agent/session-manager.ts"), "utf8");
+		const roleStart = source.indexOf("private async _assignRoleStaged(");
+		const roleEnd = source.indexOf("\n\ttryGenerateTitleFromPrompt(", roleStart);
+		const roleBody = source.slice(roleStart, roleEnd);
+		const forceStart = source.indexOf("private async _forceAbortOwned(");
+		const forceEnd = source.indexOf("\n\t/**\n\t * One-shot migration", forceStart);
+		const forceBody = source.slice(forceStart, forceEnd);
+
+		for (const [label, body] of [["role assignment", roleBody], ["force abort", forceBody]] as const) {
+			const runtime = body.indexOf("bridgeOptions.runtime = requireReplacementRuntime(");
+			const sandbox = body.indexOf("const sandboxApplied = await this.applySandboxWiring(");
+			const dispatcher = body.indexOf("await resolveToolActivation({");
+			assert.ok(runtime >= 0, `${label} must select the durable runtime`);
+			assert.ok(sandbox > runtime, `${label} must wire the SDK sandbox after runtime selection`);
+			assert.ok(dispatcher > sandbox, `${label} must not construct the dispatcher before sandbox authority exists`);
+			assert.ok(body.indexOf("bridgeOptions.claudeAgentSdkSessionId", runtime) < sandbox, `${label} must preserve the persisted opaque SDK resume id before wiring`);
+		}
+		assert.match(roleBody, /roleName:\s*role\.name/, "role dispatcher must use the newly assigned role policy");
+		assert.match(roleBody, /catch \(err\) \{\n\t\t\tunsub\(\);\n\t\t\tawait rpcClient\.stop\(\)\.catch/, "failed staged role candidates must be disposed without replacing the original bridge");
+	});
+
 	it("maps malformed persisted SDK sandbox CWD history to the unavailable stub", async () => {
 		const manager: any = new SessionManager();
 		manager.sandboxManager = { get: () => ({ getStatus: () => ({ containerId: "container-sdk" }) }) };

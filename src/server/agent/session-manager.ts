@@ -10503,25 +10503,10 @@ export class SessionManager {
 			}
 		}
 
-		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
-		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
-		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-		const respawnPersisted = this.resolveStoreForSession(id).get(id);
-		bridgeOptions.runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, modelProvider: respawnPersisted?.modelProvider });
-		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
-		if (bridgeOptions.runtime === "claude-agent-sdk") {
-			await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: respawnAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
-		} else {
-			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
-			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
-			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
-			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
-		}
-
 		// Pin one exact model/thinking tuple for the replacement. Model selection
 		// prefers the assigned role, while thinking independently prefers an explicit
 		// role override and otherwise preserves the last verified durable level.
+		const respawnPersisted = this.resolveStoreForSession(id).get(id);
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
@@ -10579,6 +10564,28 @@ export class SessionManager {
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
+
+		// SDK dispatch is itself a container process. Runtime selection and sandbox
+		// wiring must complete first so it receives only the fresh scoped descriptor,
+		// never host Worker coordinates or a legacy Pi admin-token fallback.
+		await this.ensureMcpManagerForContext(session.projectId, bridgeOptions.cwd);
+		if (bridgeOptions.runtime === "claude-agent-sdk") {
+			await resolveToolActivation({
+				id,
+				cwd: bridgeOptions.cwd,
+				projectId: session.projectId,
+				goalId: session.goalId,
+				teamGoalId: session.teamGoalId,
+				roleName: role.name,
+				bridgeOptions,
+				effectiveAllowedTools: respawnAllowed,
+			} as SessionSetupPlan, this.buildPipelineContext(session.projectId, bridgeOptions.cwd));
+		} else {
+			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, bridgeOptions.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
+			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		}
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -12975,23 +12982,6 @@ export class SessionManager {
 				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
 			};
 
-			// Force-abort recovery must preserve the original filesystem realm. A
-			// sandbox transcript uses container coordinates; downgrading the replacement
-			// to a host bridge makes the later existence check miss that transcript and
-			// can drain queued intent against empty history. Fail closed instead, leaving
-			// the durable sandbox flag/path intact for a later recovery attempt.
-			if (session.sandboxed) {
-				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
-					projectId: session.projectId,
-					goalId: session.goalId ?? session.teamGoalId,
-				});
-				if (!sandboxApplied) {
-					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
-				}
-			} else {
-				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
-			}
-
 			// Restore goal extension
 			if (session.goalId) {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
@@ -13012,7 +13002,7 @@ export class SessionManager {
 				}
 			}
 
-			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
+			// Restore the role and policy inputs used to build the replacement tool surface.
 			const role = this.resolveSessionRole(session.role, session.assistantType, session.projectId);
 			// Derive the effective allowlist from the session/persisted allowlist when
 			// present — NOT from the role alone. A restricted child/delegate (or any
@@ -13037,23 +13027,7 @@ export class SessionManager {
 			const forceAbortAllowed: EffectiveTool[] | undefined = Array.isArray(forceAbortAllowedNames)
 				? effective
 				: (effective.length > 0 ? effective : undefined);
-			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
-			// Choose the durable runtime before activating tools; SDK sessions require
-			// the in-process Bobbit MCP surface instead of Pi extension arguments.
-			bridgeOptions.runtime = resolveSessionRuntime({
-				runtime: forceRespawnPersisted?.runtime,
-				modelProvider: forceRespawnPersisted?.modelProvider,
-			});
-			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
-			if (bridgeOptions.runtime === "claude-agent-sdk") {
-				await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: forceAbortAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
-			} else {
-				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
-				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
-				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
-				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
-			}
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersistedModel =
@@ -13101,8 +13075,46 @@ export class SessionManager {
 			bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
 				? forceRespawnPersisted?.claudeAgentSdkSessionId
 				: undefined;
+
+			// Force-abort recovery must preserve the original filesystem realm. A
+			// sandbox transcript uses container coordinates; downgrading the replacement
+			// to a host bridge makes the later existence check miss that transcript and
+			// can drain queued intent against empty history. Runtime selection happens
+			// first so SDK wiring cannot fall through the legacy Pi/admin-token path.
+			if (session.sandboxed) {
+				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
+					projectId: session.projectId,
+					goalId: session.goalId ?? session.teamGoalId,
+				});
+				if (!sandboxApplied) {
+					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
+				}
+			} else {
+				this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+			}
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
+
+			// The SDK dispatcher is a container-owned process. It must only be built
+			// after a current runtime, container CWD, and scoped authority exist.
+			await this.ensureMcpManagerForContext(session.projectId, bridgeOptions.cwd);
+			if (bridgeOptions.runtime === "claude-agent-sdk") {
+				await resolveToolActivation({
+					id,
+					cwd: bridgeOptions.cwd,
+					projectId: session.projectId,
+					goalId: session.goalId,
+					teamGoalId: session.teamGoalId,
+					roleName: session.role,
+					bridgeOptions,
+					effectiveAllowedTools: forceAbortAllowed,
+				} as SessionSetupPlan, this.buildPipelineContext(session.projectId, bridgeOptions.cwd));
+			} else {
+				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, bridgeOptions.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
+				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
+				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			}
 
 			const rpcClient = createSessionBridge(bridgeOptions);
 			let switchingSession = true;
