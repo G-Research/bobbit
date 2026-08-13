@@ -317,6 +317,98 @@ function applyDelta(message: JsonObject, assistantEvent: JsonObject, checkpoint?
 }
 
 /**
+ * Reconstruct a cumulative update from Pi 0.84's JSON/RPC delta-only frame.
+ *
+ * Pi deliberately removes both `message` and `assistantMessageEvent.partial`
+ * from `message_update` on the wire. The preceding assistant
+ * `message_start.message` is therefore required. Exact `message_end.message`
+ * frames do not pass through this helper and remain terminal authority.
+ */
+export function reconstructPiAssistantMessageUpdate(event: unknown, previousMessage: unknown): unknown {
+	if (!isObject(event) || event.type !== "message_update" || "message" in event
+		|| !isObject(event.assistantMessageEvent) || !isObject(previousMessage)) return event;
+
+	const assistantEvent = event.assistantMessageEvent;
+	const eventType = assistantEvent.type;
+	if (typeof eventType !== "string" || !SUPPORTED_TYPES.has(eventType)) return event;
+
+	const baseline = clone(previousMessage);
+	const content = contentOf(baseline);
+	if (!content) return event;
+
+	const index = assistantEvent.contentIndex;
+	const at = Number.isInteger(index) ? index as number : -1;
+	let checkpoint: JsonObject | undefined;
+
+	// Start deltas no longer carry the new block through `partial`, so create the
+	// minimum schema-valid block. Provider-specific metadata is restored by the
+	// authoritative toolcall_end/message_end frames.
+	if (at >= 0 && (eventType === "text_start" || eventType === "thinking_start" || eventType === "toolcall_start")) {
+		checkpoint = eventType === "text_start"
+			? { type: "text", text: "" }
+			: eventType === "thinking_start"
+				? { type: "thinking", thinking: "" }
+				: { type: "toolCall", id: "", name: "", arguments: {}, partialJson: "" };
+	} else if (at >= 0 && (eventType === "text_end" || eventType === "thinking_end")) {
+		const block = content[at];
+		if (isObject(block)) checkpoint = blockWithout(block, eventType === "text_end" ? "text" : "thinking");
+	}
+
+	// Be tolerant of providers that begin with a delta instead of the matching
+	// start event. This still requires the authoritative message_start baseline.
+	if (at === content.length && (eventType === "text_delta" || eventType === "thinking_delta" || eventType === "toolcall_delta")) {
+		content.push(eventType === "text_delta"
+			? { type: "text", text: "" }
+			: eventType === "thinking_delta"
+				? { type: "thinking", thinking: "" }
+				: { type: "toolCall", id: "", name: "", arguments: {}, partialJson: "" });
+	}
+
+	const message = applyDelta(baseline, assistantEvent, checkpoint);
+	if (!message) return event;
+	return {
+		...event,
+		message,
+		assistantMessageEvent: { ...assistantEvent, partial: message },
+	};
+}
+
+/** Stateful Pi JSON/RPC stream adapter. One instance is scoped to one process. */
+export class PiAssistantStreamNormalizer {
+	private previousMessage: unknown;
+
+	normalize(event: unknown): unknown {
+		if (!isObject(event) || typeof event.type !== "string") return event;
+
+		if (event.type === "message_start") {
+			this.previousMessage = isObject(event.message) && event.message.role === "assistant"
+				? clone(event.message)
+				: undefined;
+			return event;
+		}
+
+		if (event.type === "message_update") {
+			const normalized = isObject(event.message)
+				? event
+				: reconstructPiAssistantMessageUpdate(event, this.previousMessage);
+			if (isObject(normalized) && isObject(normalized.message)) {
+				this.previousMessage = clone(normalized.message);
+			}
+			return normalized;
+		}
+
+		if (event.type === "message_end" || event.type === "agent_end" || event.type === "process_exit") {
+			this.reset();
+		}
+		return event;
+	}
+
+	reset(): void {
+		this.previousMessage = undefined;
+	}
+}
+
+/**
  * Remove cumulative `message` and `assistantMessageEvent.partial` snapshots.
  * `previousMessage` is the preceding reconstructed message, when available.
  * A self-contained frame carries that predecessor as its live-only baseline so
