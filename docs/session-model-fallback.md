@@ -57,10 +57,12 @@ Controlled fallback applies while Bobbit prepares or restores a session, before 
 - Role model overrides (`role.model`) for ordinary sessions, team agents, staff agents, and verification sub-sessions.
 - Review/QA defaults such as `default.reviewModel` when no role model override applies.
 - Spawn-pinned models passed to the agent process at startup through the bridge's initial model option.
-- Restored or respawned sessions whose persisted tuple is re-applied at startup.
+- Restored or respawned sessions whose persisted tuple is re-applied at startup, except for the cold-restore condition below.
 - Forked or continued sessions that inherit a tuple from the source session.
 
-Spawn-pinned and inherited models are explicit because they represent a previous user or caller selection. Bobbit verifies the complete model/thinking tuple before the session becomes idle/live. If verification fails, the setup-time controlled fallback rules apply.
+Before cold restore, Bobbit checks a complete persisted tuple against the current session-selectable catalog. If a completed catalog authoritatively omits it, the session enters `MODEL_SELECTION_REQUIRED` without starting Pi or attempting controlled fallback, regardless of `allowSessionModelFallback`. The durable tuple stays unchanged until an exact currently selectable replacement is verified. Catalog assembly or discovery errors are not authoritative omissions; exact AIGW rows from an eligible matching marked publication, or from the current process's same-URL discovery snapshot when the target cannot supply them, remain eligible for ordinary restore. The in-memory snapshot does not survive restart, never bypasses an unmarked target, and is unavailable for malformed target configuration. See [Saved sessions after authoritative model removal](ai-gateway-routing.md#saved-sessions-after-authoritative-model-removal) and [Restored session requires a model](debugging.md#restored-session-requires-a-model).
+
+Spawn-pinned and inherited models are explicit because they represent a previous user or caller selection. Bobbit verifies the complete model/thinking tuple before the session becomes idle/live. For ordinary setup outside that recovery condition, a verification failure follows the setup-time controlled fallback rules.
 
 Runtime model switching from the picker is deliberately excluded. Once a session is live, `allowSessionModelFallback` does not permit replacing the user's picker request with `default.sessionModel` or any provider-selected alternative.
 
@@ -102,8 +104,9 @@ If the superseded bridge cannot be stopped or the newer bridge cannot be verifie
 Bobbit persists and displays only complete verified tuples:
 
 - During setup, exact selection persists the selected tuple; a successful controlled fallback persists the verified `default.sessionModel` tuple and its effective thinking level.
-- During live picker selection, only the exact requested tuple may replace durable state. There is no successful live fallback outcome.
-- On live selection failure, the prior durable tuple remains unchanged while complete correction frames reconcile attached clients to verified state. If recovery cannot establish a safe live runtime, normal termination/archive events replace further state reconciliation.
+- A `MODEL_SELECTION_REQUIRED` capsule keeps the unavailable persisted tuple visible and unchanged. Its exact replacement becomes durable only after startup, transcript rehydration, thinking clamp, and model read-back succeed; failure preserves the capsule and old tuple.
+- During ordinary live picker selection, only the exact requested tuple may replace durable state. There is no successful live fallback outcome.
+- On ordinary live selection failure, the prior durable tuple remains unchanged while complete correction frames reconcile attached clients to verified state. If recovery cannot establish a safe live runtime, normal termination/archive events replace further state reconciliation.
 
 Setup-time fallback attempts are logged with the failed selected model, the fact that controlled fallback was enabled, and the `default.sessionModel` target. Successful setup fallback also logs that the session is running on `default.sessionModel` because the selected setup model failed.
 

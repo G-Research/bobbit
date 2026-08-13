@@ -89,7 +89,7 @@ test("POST /api/maintenance/cleanup-worktrees rejects malformed canonical cleanu
 	expect(await legacyShape.json()).toHaveProperty("cleaned");
 });
 
-describe("cleanup-worktrees validation preserves one shared legacy orphan", () => {
+describe("cleanup-worktrees validation preserves one shared unproven session-shaped worktree", () => {
 	const baseDir = join(maintenanceBaseDir, "validation-core");
 	const repoPath = join(baseDir, "repo");
 	const worktreePath = join(baseDir, "orphan-worktree");
@@ -144,13 +144,8 @@ describe("cleanup-worktrees validation preserves one shared legacy orphan", () =
 		validationGit.registerRepo(repoPath);
 		validationGit.addWorktree(repoPath, worktreePath, branch);
 		baseline = await snapshotLegacyOrphan();
-		expect(baseline).toMatchObject({ pathExists: true, branchExists: true });
+		expect(baseline).toMatchObject({ pathExists: true, branchExists: true, inventory: [] });
 		expect(baseline.worktreePaths).toContain(normalizePath(worktreePath));
-		expect(baseline.inventory).toContainEqual({
-			path: normalizePath(worktreePath),
-			branch,
-			repoPath: normalizePath(repoPath),
-		});
 	});
 
 	afterAll(() => {

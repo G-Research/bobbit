@@ -1,12 +1,13 @@
 import { gatewayFetch, gatewayNativeTransportSupport, gatewayUrl, previewRouteFromStoredValue } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { isReviewArtifactIdentity, isReviewArtifactPayloadId, reviewArtifactTabId } from "../shared/review-artifact-identity.js";
 import { activeSessionId, renderApp, state } from "./state.js";
 import {
 	INBOX_PANEL_TAB_ID,
 	assistantProposalType,
 	buildPanelWorkspaceTabs,
-	isLivePreviewTab,
 	panelWorkspaceSessionKey,
+	previewArtifactIdFromTab,
 	previewContentHashFromTab,
 	previewEntryLabel,
 	previewTabDisplayTitle,
@@ -14,7 +15,7 @@ import {
 	previewTabVersionFromId,
 	proposalPanelTabId,
 	reviewDocumentIdFromPanelTab,
-	reviewPanelTabId,
+	reviewPanelTabIdFromReviewId,
 	reviewTitleFromPanelTab,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
@@ -31,7 +32,8 @@ export interface SidePanelWorkspaceTab {
 	source:
 		| { type: "preview"; sessionId: string; entry: string; live?: boolean; historical?: boolean; version?: number; artifactId?: string; contentHash?: string; path?: string; url?: string; toolUseId?: string; blockIndex?: number }
 		| { type: "proposal"; sessionId: string; proposalType: SidePanelProposalType; rev?: number; historical?: boolean }
-		| { type: "review"; sessionId: string; documentId: string; title: string }
+		| { type: "review"; sessionId: string; reviewId: string; documentId?: string; title: string; toolCallId?: string; payloadId?: string; contentHash?: string }
+		| { type: "review"; sessionId: string; reviewId?: undefined; documentId: string; title: string; toolCallId?: undefined; payloadId?: undefined; contentHash?: undefined }
 		| { type: "inbox"; sessionId: string; staffId?: string }
 		| { type: "pack"; sessionId: string; packId: string; panelId: string; instanceKey: string; singleton?: boolean; params?: Record<string, unknown> };
 	state?: Record<string, unknown>;
@@ -205,10 +207,42 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 		};
 	}
 	if (kind === "review") {
-		const documentId = stringValue(source.documentId);
-		const title = stringValue(source.title) || base.title.replace(/^Review:\s*/, "");
-		if (!documentId || !title) return null;
-		return { ...base, kind, source: { type: "review", sessionId, documentId, title } };
+		if (!id.startsWith("review:")) return null;
+		const routeReviewId = decodeComponent(id.slice("review:".length));
+		const rawToolCallId = source.toolCallId;
+		const rawPayloadId = source.payloadId;
+		const rawContentHash = source.contentHash;
+		const artifactFieldCount = ["toolCallId", "payloadId", "contentHash"]
+			.filter((key) => Object.prototype.hasOwnProperty.call(source, key)).length;
+		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
+		const artifactBacked = artifactFieldCount === 3;
+		const rawSourceReviewId = stringValue(source.reviewId);
+		const sourceReviewId = artifactBacked ? rawSourceReviewId : rawSourceReviewId.trim();
+		const legacyDocumentId = stringValue(source.documentId).trim();
+		const title = stringValue(source.title) || stringValue(source.reviewTitle) || base.title.replace(/^Review:\s*/, "");
+		if (sourceReviewId && routeReviewId !== sourceReviewId) return null;
+		const reviewId = sourceReviewId || legacyDocumentId;
+		if (!reviewId || !title) return null;
+		if (artifactBacked) {
+			if (!isReviewArtifactIdentity(reviewId, "reviewId")
+				|| !isReviewArtifactIdentity(rawToolCallId, "toolCallId")
+				|| !isReviewArtifactPayloadId(rawPayloadId)
+				|| typeof rawContentHash !== "string" || !/^[a-f0-9]{64}$/.test(rawContentHash)
+				|| id !== reviewArtifactTabId(reviewId)
+				|| !isReviewArtifactIdentity(base.state?.activeFileId, "fileId")) return null;
+		}
+		return {
+			...base,
+			id: artifactBacked ? reviewArtifactTabId(reviewId)! : reviewPanelTabIdFromReviewId(reviewId),
+			kind,
+			source: {
+				type: "review",
+				sessionId,
+				reviewId,
+				title,
+				...(artifactBacked ? { toolCallId: rawToolCallId as string, payloadId: rawPayloadId as string, contentHash: rawContentHash as string } : {}),
+			},
+		};
 	}
 	if (kind === "inbox") {
 		return { ...base, id: INBOX_PANEL_TAB_ID, kind, source: { type: "inbox", sessionId, ...(stringValue(source.staffId) ? { staffId: stringValue(source.staffId) } : {}) } };
@@ -341,9 +375,8 @@ function hydrateActivePreviewMirror(workspace: SidePanelWorkspace, legacyTabs: P
 	);
 	if (!entry) return;
 	const contentHash = previewContentHashFromTab(activeTab);
-	const artifactId = stringValue(tabState.artifactId) || stringValue(source.artifactId);
+	const artifactId = previewArtifactIdFromTab(activeTab);
 	const mtime = finiteNumber(tabState.mtime) ?? finiteNumber(source.mtime);
-	const isLiveTab = isLivePreviewTab(activeTab);
 
 	state.isPreviewSession = true;
 	state.previewPanelEntry = entry;
@@ -352,7 +385,7 @@ function hydrateActivePreviewMirror(workspace: SidePanelWorkspace, legacyTabs: P
 	if (mtime != null) state.previewPanelMtime = mtime;
 	else if (!state.previewPanelMtime) state.previewPanelMtime = now();
 	if (contentHash) (state as any).previewPanelContentHash = contentHash;
-	state.previewPanelArtifactId = !isLiveTab && artifactId ? artifactId : "";
+	state.previewPanelArtifactId = artifactId;
 	(state as any).previewPanelMountedTabId = activeTab.id;
 }
 
@@ -536,13 +569,25 @@ function sidePanelTabFromLegacyMirror(tab: PanelWorkspaceTab, sessionId: string)
 	}
 	if (tab.kind === "review") {
 		const title = reviewTitleFromPanelTab(tab) || tab.title.replace(/^Review:\s*/, "") || "Review";
-		const documentId = reviewDocumentIdFromPanelTab(tab) || title;
+		const reviewId = reviewDocumentIdFromPanelTab(tab) || title;
+		const source = asRecord(tab.source) || {};
+		const toolCallId = stringValue(source.toolCallId).trim();
+		const payloadId = stringValue(source.payloadId).trim();
+		const contentHash = stringValue(source.contentHash).trim();
+		const artifactFieldCount = Number(!!toolCallId) + Number(!!payloadId) + Number(!!contentHash);
+		if (artifactFieldCount !== 0 && artifactFieldCount !== 3) return null;
 		return {
-			id: reviewPanelTabId(documentId),
+			id: reviewPanelTabIdFromReviewId(reviewId),
 			kind: "review",
 			title: `Review: ${title}`,
 			label: `Review: ${title}`,
-			source: { type: "review", sessionId, documentId, title },
+			source: {
+				type: "review",
+				sessionId,
+				reviewId,
+				title,
+				...(artifactFieldCount === 3 ? { toolCallId, payloadId, contentHash } : {}),
+			},
 			state: cloneJsonRecord(tab.state),
 			updatedAt,
 		};
@@ -667,7 +712,10 @@ function mutationBody(extra: Record<string, unknown>, workspace: SidePanelWorksp
 	});
 }
 
-export async function hydrateSidePanelWorkspace(sessionId: string): Promise<SidePanelWorkspace> {
+export async function hydrateSidePanelWorkspace(
+	sessionId: string,
+	options: { throwOnError?: boolean } = {},
+): Promise<SidePanelWorkspace> {
 	mutationState.delete(panelWorkspaceSessionKey(sessionId));
 	if (!useServerWorkspaceApi()) {
 		const workspace = state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] || emptyWorkspace(sessionId);
@@ -689,6 +737,7 @@ export async function hydrateSidePanelWorkspace(sessionId: string): Promise<Side
 		return workspace;
 	} catch (err) {
 		console.warn("[side-panel] hydrate failed", err);
+		if (options.throwOnError) throw err;
 		const fallback = state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] || emptyWorkspace(sessionId);
 		state.sidePanelWorkspaceBySession[panelWorkspaceSessionKey(sessionId)] = fallback;
 		syncCompatibilityMirrors(fallback);
@@ -706,10 +755,11 @@ export async function openSidePanelTab(tab: SidePanelWorkspaceTab, options: Open
 	const sessionId = tab.source.sessionId;
 	const base = mutationBaseWorkspace(sessionId);
 	const focus = options.focus !== false;
-	if (focus) {
-		// Explicit open/update events are authoritative focus changes. A recently
-		// captured tab click may still be guarding against stale WS/REST payloads;
-		// clear it so it cannot pull focus back to the old tab.
+	const localSelection = (state as any).__lastSidePanelUserActiveSelection as { sessionId?: string } | undefined;
+	if (focus && localSelection?.sessionId === panelWorkspaceSessionKey(sessionId)) {
+		// Explicit open/update events are authoritative focus changes within their
+		// owning session. Keep another session's guard so a background open cannot
+		// let a delayed foreground payload pull focus back to an older tab.
 		delete (state as any).__lastSidePanelUserActiveSelection;
 	}
 	const optimistic = upsertTab(base, tab, focus, options.placeAfterActive !== false);

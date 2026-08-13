@@ -1,12 +1,12 @@
 // v2-native browser coverage for workflow-authored verification failure guidance.
 
-import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
-import fs from "node:fs";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import path from "node:path";
 import { buildBundle } from "./fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const PROJECT_ENTRY = path.resolve("tests/ui-fixtures/goal-workflow-editor-entry.ts");
+const EMBED_ENTRY = path.resolve("tests/ui-fixtures/workflow-failure-guidance-embed-entry.ts");
 const WORKFLOW_SRC = path.resolve("src/app/workflow-page.ts");
 const API_SRC = path.resolve("src/app/api.ts");
 const STATE_SRC = path.resolve("src/app/state.ts");
@@ -14,8 +14,29 @@ const CONFIG_SCOPE_SRC = path.resolve("src/app/config-scope.ts");
 const SAFE_MARKDOWN_SRC = path.resolve("src/ui/lazy/safe-markdown-block.ts");
 const LIT_SRC = path.resolve("node_modules/lit/index.js");
 
+const RUN_ROOT = process.env.BOBBIT_E2E_TMP_ROOT;
+if (!RUN_ROOT) throw new Error("BOBBIT_E2E_TMP_ROOT must identify the coordinator-owned browser run root");
+const BUNDLE_DIR = path.join(RUN_ROOT, "ui-fixtures", "workflow-failure-guidance");
+const PROJECT_BUNDLE = path.join(BUNDLE_DIR, "project-bundle.js");
+const EMBED_BUNDLE = path.join(BUNDLE_DIR, "embed-bundle.js");
+
 const GUIDANCE = "Inspect the **retained trace** first.\n\nRe-run only the failing journey.";
 const CUSTOM_GUIDANCE = "Check the **custom goal logs** before retrying.";
+
+test.describe.configure({ retries: 0 });
+
+test.beforeAll(() => {
+	buildBundle({
+		entry: PROJECT_ENTRY,
+		outfile: PROJECT_BUNDLE,
+		deps: [PROJECT_ENTRY, WORKFLOW_SRC, API_SRC, STATE_SRC, CONFIG_SCOPE_SRC],
+	});
+	buildBundle({
+		entry: EMBED_ENTRY,
+		outfile: EMBED_BUNDLE,
+		deps: [EMBED_ENTRY, WORKFLOW_SRC, API_SRC, STATE_SRC, CONFIG_SCOPE_SRC, SAFE_MARKDOWN_SRC, LIT_SRC],
+	});
+});
 
 type FixtureWorkflow = {
 	id: string;
@@ -46,86 +67,6 @@ function workflow(failureGuidance?: string): FixtureWorkflow {
 			}],
 		}],
 	};
-}
-
-function sourceImport(from: string, target: string): string {
-	const relative = path.relative(path.dirname(from), target)
-		.replace(/\\/g, "/")
-		.replace(/\.ts$/, ".js");
-	return relative.startsWith(".") ? relative : `./${relative}`;
-}
-
-function embedFixtureSource(entry: string): string {
-	const litImport = JSON.stringify(sourceImport(entry, LIT_SRC));
-	const workflowImport = JSON.stringify(sourceImport(entry, WORKFLOW_SRC));
-	const stateImport = JSON.stringify(sourceImport(entry, STATE_SRC));
-	const safeMarkdownImport = JSON.stringify(sourceImport(entry, SAFE_MARKDOWN_SRC));
-	return `
-		import { html, render } from ${litImport};
-		import { clearWorkflowEditorController, renderWorkflowEditor, renderWorkflowInspector } from ${workflowImport};
-		import { setRenderApp } from ${stateImport};
-		import ${safeMarkdownImport};
-
-		let projectWorkflow;
-		let inlineWorkflow = null;
-		let customizing = false;
-		const clone = (value) => JSON.parse(JSON.stringify(value));
-
-		function draw() {
-			const current = inlineWorkflow || projectWorkflow;
-			render(html\`
-				<button data-testid="fixture-customize" @click=\${() => {
-					inlineWorkflow = clone(projectWorkflow);
-					customizing = true;
-					clearWorkflowEditorController();
-					draw();
-				}}>Customise for this goal</button>
-				<div data-testid="fixture-surface">
-					\${customizing
-						? renderWorkflowEditor({
-							workflow: current,
-							scope: "goal-draft",
-							onChange: (next) => { inlineWorkflow = clone(next); },
-						})
-						: renderWorkflowInspector({ workflow: current, scope: "goal-draft" })}
-				</div>
-			\`, document.getElementById("app"));
-		}
-
-		setRenderApp(draw);
-		window.__loadFailureGuidanceEmbed = (next) => {
-			projectWorkflow = clone(next);
-			inlineWorkflow = null;
-			customizing = false;
-			clearWorkflowEditorController();
-			draw();
-		};
-		window.__failureGuidanceInlineWorkflow = () => clone(inlineWorkflow);
-		window.__failureGuidanceEmbedReady = true;
-	`;
-}
-
-function buildProjectBundle(testInfo: TestInfo): string {
-	const bundle = testInfo.outputPath("fixture-bundles", "workflow-failure-guidance-project-bundle.js");
-	buildBundle({
-		entry: PROJECT_ENTRY,
-		outfile: bundle,
-		deps: [PROJECT_ENTRY, WORKFLOW_SRC, API_SRC, STATE_SRC, CONFIG_SCOPE_SRC],
-	});
-	return bundle;
-}
-
-function buildEmbedBundle(testInfo: TestInfo): string {
-	const entry = testInfo.outputPath("fixture-bundles", "workflow-failure-guidance-embed-entry.ts");
-	const bundle = testInfo.outputPath("fixture-bundles", "workflow-failure-guidance-embed-bundle.js");
-	fs.mkdirSync(path.dirname(entry), { recursive: true });
-	fs.writeFileSync(entry, embedFixtureSource(entry));
-	buildBundle({
-		entry,
-		outfile: bundle,
-		deps: [entry, WORKFLOW_SRC, API_SRC, STATE_SRC, CONFIG_SCOPE_SRC, SAFE_MARKDOWN_SRC, LIT_SRC],
-	});
-	return bundle;
 }
 
 function editor(page: Page): Locator {
@@ -165,9 +106,8 @@ async function save(page: Page): Promise<any> {
 	return lastPutBody(page);
 }
 
-test("authors, type-switches, saves, reloads, and clears failure guidance", async ({ page }, testInfo) => {
-	const projectBundle = buildProjectBundle(testInfo);
-	await loadProjectWorkflow(page, workflow(), projectBundle);
+test("authors, type-switches, saves, reloads, and clears failure guidance", async ({ page }) => {
+	await loadProjectWorkflow(page, workflow(), PROJECT_BUNDLE);
 
 	const guidance = step(page).getByTestId("wf-step-failure-guidance");
 	const hint = step(page).getByTestId("wf-step-failure-guidance-hint");
@@ -192,7 +132,7 @@ test("authors, type-switches, saves, reloads, and clears failure guidance", asyn
 	await loadProjectWorkflow(page, {
 		...saved,
 		id: "failure-guidance-workflow",
-	}, projectBundle);
+	}, PROJECT_BUNDLE);
 	await expect(step(page).getByTestId("wf-step-failure-guidance")).toHaveValue(GUIDANCE);
 
 	await step(page).getByTestId("wf-step-failure-guidance").fill("  \n  ");
@@ -200,10 +140,9 @@ test("authors, type-switches, saves, reloads, and clears failure guidance", asyn
 	expect(cleared.gates[0].verify[0].failureGuidance).toBeUndefined();
 });
 
-test("goal customisation round-trips guidance and the inspector keeps it in default-closed details", async ({ page }, testInfo) => {
-	const embedBundle = buildEmbedBundle(testInfo);
+test("goal customisation round-trips guidance and the inspector keeps it in default-closed details", async ({ page }) => {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
-	await page.addScriptTag({ path: embedBundle });
+	await page.addScriptTag({ path: EMBED_BUNDLE });
 	await page.waitForFunction(() => (window as any).__failureGuidanceEmbedReady === true);
 	await page.evaluate((wf) => (window as any).__loadFailureGuidanceEmbed(wf), workflow(GUIDANCE));
 

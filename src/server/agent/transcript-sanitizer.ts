@@ -41,6 +41,12 @@ import { trustedAgentSessionsRoots } from "./agent-session-path.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+	activeTranscriptBranch,
+	parseTranscript,
+	type ParsedTranscriptLine,
+} from "./transcript-tree.js";
 
 /**
  * Compute the effective text of a pi-coding-agent message `content`.
@@ -109,75 +115,12 @@ export interface SanitizeResult {
 	rewritten: number;
 }
 
-interface ParsedTranscriptLine {
-	lineIndex: number;
-	entry: any;
-	id: string | null;
-	parentId: string | null;
-}
-
 interface ProjectedTranscriptRecord {
 	/** JSONL line containing this record (and owning it when retainedTailIndex is set). */
 	lineIndex: number;
 	/** Position inside the owning Pi 0.81 compaction's `retainedTail`, when embedded. */
 	retainedTailIndex?: number;
 	entry: any;
-}
-
-function parseTranscriptLines(lines: string[]): ParsedTranscriptLine[] {
-	const parsed: ParsedTranscriptLine[] = [];
-	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-		const trimmed = lines[lineIndex].trim();
-		if (!trimmed) continue;
-		try {
-			const entry = JSON.parse(trimmed);
-			if (!entry || typeof entry !== "object") continue;
-			parsed.push({
-				lineIndex,
-				entry,
-				id: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : null,
-				parentId: typeof entry.parentId === "string" && entry.parentId.length > 0 ? entry.parentId : null,
-			});
-		} catch {
-			// Malformed and non-JSON lines are opaque transcript data.
-		}
-	}
-	return parsed;
-}
-
-/**
- * Return the parent-linked branch ending at Pi's current leaf. Session headers
- * are not tree entries. Ordinarily the last parsed, id-bearing non-header
- * record is the leaf. Pi 0.81 harness JSONL can instead end in a `leaf` control
- * record whose `targetId` selects an earlier entry (or null for an empty
- * branch); the control record itself is not part of the active branch.
- * Missing targets/parents and cycles terminate the walk conservatively.
- */
-function activeTranscriptBranch(parsed: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
-	let leafId: string | null = null;
-	const byId = new Map<string, ParsedTranscriptLine>();
-	for (const record of parsed) {
-		if (!record.id || record.entry.type === "session") continue;
-		byId.set(record.id, record);
-		if (record.entry.type === "leaf") {
-			leafId = typeof record.entry.targetId === "string" && record.entry.targetId.length > 0
-				? record.entry.targetId
-				: null;
-		} else {
-			leafId = record.id;
-		}
-	}
-	if (!leafId) return [];
-
-	const reverseBranch: ParsedTranscriptLine[] = [];
-	const visited = new Set<string>();
-	let current: ParsedTranscriptLine | undefined = byId.get(leafId);
-	while (current?.id && !visited.has(current.id)) {
-		reverseBranch.push(current);
-		visited.add(current.id);
-		current = current.parentId ? byId.get(current.parentId) : undefined;
-	}
-	return reverseBranch.reverse();
 }
 
 function projectedContextBranch(branch: ParsedTranscriptLine[]): ProjectedTranscriptRecord[] {
@@ -276,7 +219,7 @@ function orphanToolResultLocations(branch: ParsedTranscriptLine[]): OrphanToolRe
 			continue;
 		}
 
-		const message = entry.message;
+		const message = entry.message as Record<string, any>;
 		if (message.role === "assistant") {
 			pendingToolCallIds = assistantToolCallIds(message.content);
 			continue;
@@ -319,7 +262,7 @@ function orphanToolResultLocations(branch: ParsedTranscriptLine[]): OrphanToolRe
 function repairOrphanToolResults(content: string): SanitizeResult {
 	if (!content) return { content, changed: false, rewritten: 0 };
 	const lines = content.split("\n");
-	const parsed = parseTranscriptLines(lines);
+	const parsed = parseTranscript(content);
 	const activeBranch = activeTranscriptBranch(parsed);
 	const orphanLocations = orphanToolResultLocations(activeBranch);
 	const removedLineIndexes = orphanLocations.lineIndexes;
@@ -342,7 +285,7 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	// more inactive branches. Repair every surviving direct child of the removed
 	// chain; limiting this pass to activeBranch would leave those branches with a
 	// dangling parentId and make them impossible for Pi to resume later.
-	for (const record of parsed) {
+	for (const record of parsed.records) {
 		if (removedLineIndexes.has(record.lineIndex)) continue;
 		let changed = false;
 
@@ -778,6 +721,78 @@ export async function sanitizeAgentTranscriptFile(
 		(file, rewritten) => `Repaired ${rewritten} poisoned transcript record(s) in ${file}`,
 		rootPolicy,
 	);
+}
+
+function writeAll(fd: number, data: Buffer): void {
+	let offset = 0;
+	while (offset < data.length) {
+		const written = fs.writeSync(fd, data, offset, data.length - offset, null);
+		if (!Number.isSafeInteger(written) || written <= 0) {
+			throw new Error("Transcript snapshot staging write was incomplete");
+		}
+		offset += written;
+	}
+}
+
+/**
+ * Stage a recovery snapshot beside its target, then atomically replace the
+ * target. The exclusive, unpredictable temporary name and no-follow open keep
+ * staging inside the already-validated directory without trusting an existing
+ * entry. Until rename succeeds, the original transcript inode is untouched.
+ */
+function replaceTranscriptSnapshotAtomic(realPath: string, content: string): void {
+	const directory = path.dirname(realPath);
+	const temporaryPath = path.join(
+		directory,
+		`.${path.basename(realPath)}.bobbit-rollback-${process.pid}-${randomUUID()}.tmp`,
+	);
+	const NOFOLLOW = (fs.constants as any).O_NOFOLLOW ?? 0;
+	const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW;
+	let fd: number | undefined;
+	let temporaryCreated = false;
+	try {
+		fd = fs.openSync(temporaryPath, flags, 0o600);
+		temporaryCreated = true;
+		if (!fs.fstatSync(fd).isFile()) throw new Error("Transcript snapshot staging entry is not a regular file");
+		writeAll(fd, Buffer.from(content, "utf8"));
+		fs.fsyncSync(fd);
+		fs.closeSync(fd);
+		fd = undefined;
+		fs.renameSync(temporaryPath, realPath);
+		temporaryCreated = false;
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* retain the primary staging failure */ }
+		}
+		if (temporaryCreated) {
+			try { fs.unlinkSync(temporaryPath); } catch { /* best-effort cleanup of this invocation's exclusive temp */ }
+		}
+	}
+}
+
+/**
+ * Restore a caller-owned transcript snapshot through the sanitizer's existing
+ * trusted-root and no-follow boundary. Recovery uses this only to roll back
+ * sanitizer changes made by a provisional model activation. Snapshot bytes are
+ * staged beside the target and atomically published so a failed write cannot
+ * truncate or partially overwrite the current transcript.
+ */
+export function restoreAgentTranscriptSnapshot(
+	ctx: SessionFsContext,
+	filePath: string,
+	content: string,
+	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
+): boolean {
+	try {
+		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
+		const realPath = resolveSafeSessionsPath(hostPath, rootPolicy);
+		if (realPath === null) return false;
+		replaceTranscriptSnapshotAtomic(realPath, content);
+		return true;
+	} catch (err) {
+		console.warn(`[transcript-sanitizer] Failed to restore recovery snapshot ${filePath}:`, err);
+		return false;
+	}
 }
 
 /**

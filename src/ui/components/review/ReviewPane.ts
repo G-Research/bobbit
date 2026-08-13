@@ -1,185 +1,250 @@
 import { html, LitElement } from "lit";
 import { property, state } from "lit/decorators.js";
 import {
-  buildReviewDecisionPayloadForDocument,
-  getAnnotationBucketForDocument,
+  buildReviewDecisionPayloadForReview,
   getDocumentAnnotationCountForDocument,
-  getTotalAnnotationCount,
+  getReviewAnnotationCount,
 } from "./AnnotationStore.js";
 import { ensureReviewComponents } from "../../../app/lazy-review.js";
 import type {
   ReviewDecision,
   ReviewDecisionEventDetail,
   ReviewDocumentModel,
+  ReviewFileModel,
+  ReviewGroupModel,
+  ReviewSource,
 } from "./review-types.js";
 import "./review-pane.css";
 
+let overflowMenuSequence = 0;
+
+// Final comments are review-level drafts. Keep them outside individual pane
+// instances so eager mobile panes and desktop/mobile remounts share one exact
+// owner keyed by session + review identity.
+const finalCommentsByReview = new Map<string, string>();
+
+function finalCommentKey(sessionId: string, reviewId: string): string {
+  return `${sessionId}\u0000${reviewId}`;
+}
+
+export function reviewFinalComment(sessionId: string, reviewId: string): string {
+  return finalCommentsByReview.get(finalCommentKey(sessionId, reviewId)) || "";
+}
+
+export function reviewFinalCommentCount(sessionId: string, reviewId: string): number {
+  return reviewFinalComment(sessionId, reviewId).trim() ? 1 : 0;
+}
+
+export function discardReviewFinalComment(sessionId: string, reviewId: string): void {
+  finalCommentsByReview.delete(finalCommentKey(sessionId, reviewId));
+}
+
 /**
- * <review-pane> — Tabbed container for review documents with review decision controls.
- *
- * Renders a horizontal tab bar, the active `<review-document>`, and a bottom
- * action bar. Uses light DOM for consistent styling with the app theme.
+ * <review-pane> renders one selected review. The app workspace owns primary
+ * review tabs; this component only renders the review's navigation-only files.
  */
 export class ReviewPane extends LitElement {
+  /** Canonical grouped-review input. */
+  @property({ attribute: false })
+  review: ReviewGroupModel | null = null;
+
+  /** Compatibility inputs for the original single-document/group mirror. */
   @property({ attribute: false })
   documents: Map<string, ReviewDocumentModel> = new Map();
-
   @property({ type: String }) activeTab = "";
   @property({ type: String }) sessionId = "";
 
   @state() private _overflowOpen = false;
-  @state() private _annotationCounts: Map<string, number> = new Map();
-  @state() private _finalCommentsByTitle: Map<string, string> = new Map();
+  @state() private _visibleFileCount = 5;
   @state() private _validationError = "";
+
+  private readonly _overflowMenuId = `review-file-overflow-${++overflowMenuSequence}`;
+  private _restoreOverflowFocus = false;
+  private _overflowListenersInstalled = false;
+  private _overflowResizeObserver: ResizeObserver | null = null;
+  private _observedTabBar: HTMLElement | null = null;
+  private _overflowMeasurementQueued = false;
 
   createRenderRoot() {
     return this;
   }
 
-  private _boundCacheReady = () => this._refreshCounts();
+  private _boundCacheReady = (event: Event) => {
+    const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+    if (!detail?.sessionId || detail.sessionId === this.sessionId) this.requestUpdate();
+  };
+  private _boundOutsidePointer = (event: Event) => this._onOutsidePointer(event);
+  private _boundDocumentKeydown = (event: Event) => this._onDocumentKeydown(event as KeyboardEvent);
 
   connectedCallback(): void {
     super.connectedCallback();
-    // Trigger the heavy review-document chunk on first mount; the
-    // <review-document> tag below stays unknown until the chunk lands
-    // and customElements upgrades it. Lit preserves the property
-    // bindings across upgrade.
     void ensureReviewComponents();
-    this._refreshCounts();
     window.addEventListener("annotation-cache-ready", this._boundCacheReady);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener("annotation-cache-ready", this._boundCacheReady);
+    this._removeOverflowListeners();
+    this._overflowResizeObserver?.disconnect();
+    this._overflowResizeObserver = null;
+    this._observedTabBar = null;
   }
 
   protected updated(changed: Map<string, unknown>): void {
-    if (changed.has("documents") || changed.has("sessionId")) {
-      this._refreshCounts();
-    }
-    if (changed.has("documents")) {
-      this._pruneFinalCommentDrafts();
-    }
-    if (changed.has("activeTab")) {
+    if (changed.has("review") || changed.has("activeTab")) {
       this._validationError = "";
+      if (this._overflowOpen) this._closeOverflow(false);
+    }
+    this._syncOverflowMeasurement();
+    if (changed.has("_overflowOpen")) {
+      if (this._overflowOpen) this._openRenderedOverflow();
+      else {
+        this._removeOverflowListeners();
+        if (this._restoreOverflowFocus) {
+          this._restoreOverflowFocus = false;
+          this.querySelector<HTMLButtonElement>(".review-tab-overflow-trigger")?.focus();
+        }
+      }
     }
   }
 
-  private _annotationBucketFor(title: string, doc: ReviewDocumentModel): string {
-    return getAnnotationBucketForDocument(this.sessionId, title, doc, this.documents);
+  private _compatibilityReview(): ReviewGroupModel | null {
+    if (this.review) return this.review;
+    const entries = [...this.documents.entries()];
+    if (entries.length === 0) return null;
+    const first = entries[0]![1];
+    const files: ReviewFileModel[] = entries.map(([key, document]) => ({
+      fileId: document.fileId || document.documentId || key,
+      title: document.title || key,
+      markdown: document.markdown,
+    }));
+    const active = this.documents.get(this.activeTab);
+    const activeFileId = active?.fileId || active?.documentId || (this.documents.has(this.activeTab) ? this.activeTab : files[0]!.fileId);
+    const source: ReviewSource = first.source || { kind: "markdown-review", sessionId: this.sessionId };
+    return {
+      reviewId: first.reviewId || first.documentId || files[0]!.fileId,
+      title: first.title || "Review",
+      files,
+      activeFileId,
+      source,
+    };
   }
 
-  private _annotationCountFor(title: string, doc: ReviewDocumentModel): number {
-    return getDocumentAnnotationCountForDocument(this.sessionId, title, doc, this.documents);
+  private _activeFile(review: ReviewGroupModel | null): ReviewFileModel | null {
+    if (!review) return null;
+    return review.files.find((file) => file.fileId === review.activeFileId) || review.files[0] || null;
   }
 
-  private _refreshCounts(): void {
-    const counts = new Map<string, number>();
-    for (const [title, doc] of this.documents) {
-      counts.set(title, this._annotationCountFor(title, doc));
-    }
-    this._annotationCounts = counts;
+  private _documentFor(review: ReviewGroupModel, file: ReviewFileModel): ReviewDocumentModel {
+    return {
+      title: file.title,
+      markdown: file.markdown,
+      source: review.source,
+      documentId: file.fileId,
+      fileId: file.fileId,
+      reviewId: review.reviewId,
+    };
   }
 
-  private _pruneFinalCommentDrafts(): void {
-    let changed = false;
-    const next = new Map<string, string>();
-    for (const [title, comment] of this._finalCommentsByTitle) {
-      if (this.documents.has(title)) next.set(title, comment);
-      else changed = true;
-    }
-    if (changed) this._finalCommentsByTitle = next;
+  private _annotationCountFor(review: ReviewGroupModel, file: ReviewFileModel): number {
+    return getDocumentAnnotationCountForDocument(
+      this.sessionId,
+      file.fileId,
+      this._documentFor(review, file),
+      new Map(review.files.map((candidate) => [candidate.fileId, this._documentFor(review, candidate)])),
+    );
   }
 
-  private _finalCommentFor(title: string): string {
-    return this._finalCommentsByTitle.get(title) || "";
+  private _finalCommentFor(reviewId: string): string {
+    return reviewFinalComment(this.sessionId, reviewId);
   }
 
-  private _setFinalComment(title: string, comment: string): void {
-    const next = new Map(this._finalCommentsByTitle);
-    if (comment) next.set(title, comment);
-    else next.delete(title);
-    this._finalCommentsByTitle = next;
+  private _setFinalComment(reviewId: string, comment: string): void {
+    const key = finalCommentKey(this.sessionId, reviewId);
+    if (comment) finalCommentsByReview.set(key, comment);
+    else finalCommentsByReview.delete(key);
+    this.requestUpdate();
   }
 
-  private _deleteFinalComment(title: string): void {
-    if (!this._finalCommentsByTitle.has(title)) return;
-    const next = new Map(this._finalCommentsByTitle);
-    next.delete(title);
-    this._finalCommentsByTitle = next;
+  private _deleteFinalComment(reviewId: string): void {
+    discardReviewFinalComment(this.sessionId, reviewId);
+    this.requestUpdate();
   }
 
-  private _hasFinalComment(title: string): boolean {
-    return this._finalCommentFor(title).trim().length > 0;
+  private _reviewUnsentCommentCount(review: ReviewGroupModel): number {
+    return getReviewAnnotationCount(this.sessionId, review)
+      + (this._finalCommentFor(review.reviewId).trim() ? 1 : 0);
   }
 
-  private _unsentCommentCountForDocument(title: string): number {
-    const doc = this.documents.get(title);
-    const inlineCount = doc ? this._annotationCountFor(title, doc) : 0;
-    return inlineCount + (this._hasFinalComment(title) ? 1 : 0);
+  /** Exact seam used by primary workspace close confirmation. */
+  _unsentCommentCountForReview(reviewOrId: ReviewGroupModel | string): number {
+    const mountedReview = this._compatibilityReview();
+    const review = typeof reviewOrId === "string"
+      ? (mountedReview?.reviewId === reviewOrId ? mountedReview : null)
+      : reviewOrId;
+    return review ? this._reviewUnsentCommentCount(review) : Number.NaN;
   }
 
-  private _totalUnsentCommentCount(): number {
-    let total = getTotalAnnotationCount(this.sessionId, this.documents);
-    for (const [title] of this.documents) {
-      if (this._hasFinalComment(title)) total += 1;
-    }
-    return total;
+  /** Remove only one successfully closed review's in-memory final draft. */
+  _discardFinalCommentForReview(reviewId: string): void {
+    this._deleteFinalComment(reviewId);
+  }
+
+  /** Compatibility seam for legacy file-keyed workspace tabs. */
+  _unsentCommentCountForDocument(identity: string): number {
+    const review = this._compatibilityReview();
+    if (!review) return 0;
+    const matches = review.reviewId === identity
+      || review.files.some((file) => file.fileId === identity || file.title === identity);
+    return matches ? this._reviewUnsentCommentCount(review) : 0;
   }
 
   private _onAnnotationChange(): void {
     this._validationError = "";
-    this._refreshCounts();
+    this.requestUpdate();
   }
 
-  private _displayTitle(key: string): string {
-    return this.documents.get(key)?.title || key;
-  }
-
-  private _switchTab(title: string): void {
-    this._overflowOpen = false;
+  private _switchFile(reviewId: string, fileId: string): void {
+    this._closeOverflow(true);
     this._validationError = "";
-    this.dispatchEvent(
-      new CustomEvent("review-tab-change", {
-        detail: { title },
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    this.dispatchEvent(new CustomEvent("review-file-change", {
+      detail: { reviewId, fileId },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
-  private _onFinalCommentInput(e: Event): void {
-    const activeDoc = this.documents.get(this.activeTab) || null;
-    if (!activeDoc) return;
-    const finalComment = (e.target as HTMLTextAreaElement).value;
-    this._setFinalComment(this.activeTab, finalComment);
+  private _onFinalCommentInput(event: Event): void {
+    const review = this._compatibilityReview();
+    if (!review) return;
+    const finalComment = (event.target as HTMLTextAreaElement).value;
+    this._setFinalComment(review.reviewId, finalComment);
     if (finalComment.trim()) this._validationError = "";
   }
 
   private _submitDecision(decision: ReviewDecision): void {
-    const activeDoc = this.documents.get(this.activeTab) || null;
-    if (!activeDoc) return;
+    const review = this._compatibilityReview();
+    const activeFile = this._activeFile(review);
+    if (!review || !activeFile) return;
 
-    const finalComment = this._finalCommentFor(this.activeTab).trim();
-    const annotationBucket = this._annotationBucketFor(this.activeTab, activeDoc);
-    const activeCount = this._annotationCountFor(this.activeTab, activeDoc);
-    if (decision === "reject" && activeCount === 0 && !finalComment) {
+    const finalComment = this._finalCommentFor(review.reviewId).trim();
+    const inlineCount = getReviewAnnotationCount(this.sessionId, review);
+    if (decision === "reject" && inlineCount === 0 && !finalComment) {
       this._validationError = "Add a final comment or at least one inline comment before rejecting.";
       return;
     }
 
     this._validationError = "";
-    const payload = buildReviewDecisionPayloadForDocument(
-      this.sessionId,
-      annotationBucket,
-      activeDoc,
-      decision,
-      finalComment,
-    );
-    const detail: ReviewDecisionEventDetail = {
-      document: activeDoc,
-      source: activeDoc.source,
+    const payload = buildReviewDecisionPayloadForReview(this.sessionId, review, decision, finalComment);
+    const activeDocument = this._documentFor(review, activeFile);
+    const detail: ReviewDecisionEventDetail & { reviewId: string; fileId: string; sessionId: string } = {
+      review,
+      reviewId: review.reviewId,
+      fileId: activeFile.fileId,
+      sessionId: this.sessionId,
+      document: activeDocument,
+      source: review.source,
       payload,
       decision: payload.decision,
       finalComment: payload.finalComment,
@@ -187,154 +252,293 @@ export class ReviewPane extends LitElement {
       feedback: payload.feedback,
     };
 
-    const decisionEvent = new CustomEvent<ReviewDecisionEventDetail>("review-decision", {
+    const wasNotCanceled = this.dispatchEvent(new CustomEvent("review-decision", {
       detail,
       bubbles: true,
       composed: true,
       cancelable: true,
-    });
-    const wasNotCanceled = this.dispatchEvent(decisionEvent);
+    }));
 
-    // Compatibility bridge for the existing markdown review flow. New app-level
-    // review-decision handlers can call preventDefault() to own routing without
-    // receiving a duplicate legacy review-submit event.
-    if (wasNotCanceled && (!activeDoc.source || activeDoc.source.kind === "markdown-review")) {
-      this.dispatchEvent(
-        new CustomEvent("review-submit", {
-          detail: { feedback: payload.feedback, payload },
-          bubbles: true,
-          composed: true,
-        }),
-      );
-    }
-  }
-
-  private _closeTab(title: string, e: Event): void {
-    e.stopPropagation();
-    const count = this._unsentCommentCountForDocument(title);
-    const displayTitle = this._displayTitle(title);
-    if (count > 0) {
-      if (!confirm(`Close "${displayTitle}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
-    }
-    this._deleteFinalComment(title);
-    this.dispatchEvent(
-      new CustomEvent("review-close-tab", {
-        detail: { title },
+    // Preserve arbitrary Markdown review routing until the app-level grouped
+    // handler owns the event by preventing its default action.
+    if (wasNotCanceled && review.source.kind === "markdown-review") {
+      this.dispatchEvent(new CustomEvent("review-submit", {
+        detail: { review, reviewId: review.reviewId, sessionId: this.sessionId, feedback: payload.feedback, payload },
         bubbles: true,
         composed: true,
-      }),
-    );
+      }));
+    }
   }
 
   private _dismiss(): void {
-    const totalCount = this._totalUnsentCommentCount();
-    if (totalCount > 0) {
-      if (!confirm(`Dismiss review? ${totalCount} unsent comment${totalCount !== 1 ? "s" : ""} will be lost.`)) return;
-    }
-    this._finalCommentsByTitle = new Map();
-    this.dispatchEvent(
-      new CustomEvent("review-dismiss", {
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    const review = this._compatibilityReview();
+    if (!review) return;
+    const unsentCommentCount = this._reviewUnsentCommentCount(review);
+    if (unsentCommentCount > 0
+      && !confirm(`Dismiss "${review.title}"? ${unsentCommentCount} unsent comment${unsentCommentCount !== 1 ? "s" : ""} will be lost.`)) return;
+    // The app discards this draft only after authoritative workspace cleanup.
+    // A terminal close failure must leave it available for a manual retry.
+    this.dispatchEvent(new CustomEvent("review-dismiss", {
+      detail: { review, reviewId: review.reviewId, sessionId: this.sessionId, unsentCommentCount },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
-  private _toggleOverflow(e: Event): void {
-    e.stopPropagation();
-    this._overflowOpen = !this._overflowOpen;
+  private _toggleOverflow(event: Event): void {
+    event.stopPropagation();
+    if (this._overflowOpen) this._closeOverflow(true);
+    else this._overflowOpen = true;
+  }
+
+  private _syncOverflowMeasurement(): void {
+    const bar = this.querySelector<HTMLElement>(".review-tab-bar");
+    if (bar !== this._observedTabBar) {
+      this._overflowResizeObserver?.disconnect();
+      this._overflowResizeObserver = null;
+      this._observedTabBar = bar;
+      if (bar && typeof ResizeObserver !== "undefined") {
+        this._overflowResizeObserver = new ResizeObserver(() => this._queueOverflowMeasurement());
+        this._overflowResizeObserver.observe(bar);
+      }
+    }
+    if (bar) this._queueOverflowMeasurement();
+  }
+
+  private _queueOverflowMeasurement(): void {
+    if (this._overflowMeasurementQueued) return;
+    this._overflowMeasurementQueued = true;
+    queueMicrotask(() => {
+      this._overflowMeasurementQueued = false;
+      if (this.isConnected) this._measureVisibleFileCount();
+    });
+  }
+
+  private _measureVisibleFileCount(): void {
+    const review = this._compatibilityReview();
+    const bar = this._observedTabBar;
+    if (!review || !bar || review.files.length < 2) return;
+
+    const barWidth = bar.getBoundingClientRect().width || bar.clientWidth;
+    // DOM-only test environments have no layout engine. Preserve the historical
+    // five-item fallback there; real layout always follows the measured prefix.
+    if (!(barWidth > 0)) {
+      const fallback = Math.min(5, review.files.length);
+      if (fallback !== this._visibleFileCount) this._visibleFileCount = fallback;
+      return;
+    }
+
+    const style = getComputedStyle(bar);
+    const measuredPadding = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+    // Match the component's authored bounds even during the brief stylesheet
+    // loading race (and in CSS-free fixture shells).
+    const padding = Math.max(24, measuredPadding);
+    const gap = Math.max(2, Number.parseFloat(style.columnGap || style.gap) || 0);
+    const availableWidth = Math.max(0, barWidth - padding);
+    const measurements = [...bar.querySelectorAll<HTMLElement>(".review-tab-measure")];
+    const widths = review.files.map((file, index) => {
+      const measured = measurements[index]?.getBoundingClientRect().width || measurements[index]?.offsetWidth || 0;
+      const badgeWidth = this._annotationCountFor(review, file) > 0 ? 24 : 0;
+      const naturalWidth = measured || 24 + file.title.length * 7 + badgeWidth;
+      return Math.min(168, Math.max(128, naturalWidth));
+    });
+    const allTabsWidth = widths.reduce((total, width) => total + width, 0) + gap * Math.max(0, widths.length - 1);
+    let nextVisibleCount = review.files.length;
+
+    if (allTabsWidth > availableWidth) {
+      const moreMeasure = bar.querySelector<HTMLElement>(".review-tab-overflow-measure");
+      const measuredMoreWidth = moreMeasure?.getBoundingClientRect().width || moreMeasure?.offsetWidth || 0;
+      const moreWidth = Math.max(40, measuredMoreWidth);
+      let usedWidth = 0;
+      nextVisibleCount = 0;
+      for (const width of widths) {
+        const candidateTabsWidth = usedWidth + (nextVisibleCount > 0 ? gap : 0) + width;
+        const candidateTotal = candidateTabsWidth + gap + moreWidth;
+        if (candidateTotal > availableWidth) break;
+        usedWidth = candidateTabsWidth;
+        nextVisibleCount += 1;
+      }
+    }
+
+    if (nextVisibleCount !== this._visibleFileCount) {
+      if (nextVisibleCount >= review.files.length && this._overflowOpen) this._closeOverflow(false);
+      this._visibleFileCount = nextVisibleCount;
+    }
+  }
+
+  private _closeOverflow(restoreFocus: boolean): void {
+    if (!this._overflowOpen) return;
+    this._restoreOverflowFocus = restoreFocus;
+    const menu = this.querySelector<HTMLElement>(`#${this._overflowMenuId}`);
+    try {
+      if (menu && typeof (menu as HTMLElement & { hidePopover?: () => void }).hidePopover === "function") {
+        (menu as HTMLElement & { hidePopover: () => void }).hidePopover();
+      }
+    } catch { /* render removal is the fallback */ }
+    this._overflowOpen = false;
+  }
+
+  private _openRenderedOverflow(): void {
+    const trigger = this.querySelector<HTMLButtonElement>(".review-tab-overflow-trigger");
+    const menu = this.querySelector<HTMLElement>(`#${this._overflowMenuId}`);
+    if (!trigger || !menu) return;
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = 240;
+    const viewportWidth = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+    menu.style.top = `${Math.max(0, rect.bottom + 4)}px`;
+    menu.style.left = `${Math.max(8, Math.min(rect.right - menuWidth, viewportWidth - menuWidth - 8))}px`;
+    try {
+      if (typeof (menu as HTMLElement & { showPopover?: () => void }).showPopover === "function") {
+        (menu as HTMLElement & { showPopover: () => void }).showPopover();
+      }
+    } catch { /* already open or unsupported; authored CSS remains the fallback */ }
+    this._installOverflowListeners();
+    const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    (items.find((item) => item.dataset.active === "true") || items[0])?.focus();
+  }
+
+  private _installOverflowListeners(): void {
+    if (this._overflowListenersInstalled) return;
+    this._overflowListenersInstalled = true;
+    document.addEventListener("click", this._boundOutsidePointer);
+    document.addEventListener("keydown", this._boundDocumentKeydown);
+  }
+
+  private _removeOverflowListeners(): void {
+    if (!this._overflowListenersInstalled) return;
+    this._overflowListenersInstalled = false;
+    document.removeEventListener("click", this._boundOutsidePointer);
+    document.removeEventListener("keydown", this._boundDocumentKeydown);
+  }
+
+  private _onOutsidePointer(event: Event): void {
+    if (!this._overflowOpen) return;
+    const path = event.composedPath();
+    const trigger = this.querySelector(".review-tab-overflow-trigger");
+    const menu = this.querySelector(`#${this._overflowMenuId}`);
+    if (path.includes(trigger as EventTarget) || path.includes(menu as EventTarget)) return;
+    this._closeOverflow(false);
+  }
+
+  private _onDocumentKeydown(event: KeyboardEvent): void {
+    if (!this._overflowOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this._closeOverflow(true);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const menu = this.querySelector<HTMLElement>(`#${this._overflowMenuId}`);
+    const items = [...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') || [])];
+    if (items.length === 0) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home" ? 0
+      : event.key === "End" ? items.length - 1
+        : event.key === "ArrowUp" ? (current <= 0 ? items.length - 1 : current - 1)
+          : (current + 1) % items.length;
+    items[next]?.focus();
   }
 
   render() {
-    const titles = Array.from(this.documents.keys());
-    const activeDoc = this.documents.get(this.activeTab);
-    const activeCount = activeDoc ? this._annotationCountFor(this.activeTab, activeDoc) : 0;
-    const activeFinalComment = activeDoc ? this._finalCommentFor(this.activeTab) : "";
-
-    // Split tabs: visible (first 5) and overflow (rest)
-    const MAX_VISIBLE = 5;
-    const visibleTitles = titles.slice(0, MAX_VISIBLE);
-    const overflowTitles = titles.slice(MAX_VISIBLE);
+    const review = this._compatibilityReview();
+    const activeFile = this._activeFile(review);
+    const activeFinalComment = review ? this._finalCommentFor(review.reviewId) : "";
+    const totalCount = review ? getReviewAnnotationCount(this.sessionId, review) : 0;
+    const annotationCounts = new Map<string, number>();
+    if (review) {
+      for (const file of review.files) annotationCounts.set(file.fileId, this._annotationCountFor(review, file));
+    }
+    const files = review?.files || [];
+    const visibleFiles = files.slice(0, Math.min(this._visibleFileCount, files.length));
+    const overflowFiles = files.slice(visibleFiles.length);
 
     return html`
       <div class="review-pane">
-        <div class="review-tab-bar">
-          ${visibleTitles.map((title) => {
-            const count = this._annotationCounts.get(title) || 0;
-            return html`
+        ${review && files.length > 1 ? html`
+          <div class="review-tab-bar" role="tablist" aria-label="Files in ${review.title}">
+            ${visibleFiles.map((file) => html`
               <button
-                class="review-tab ${title === this.activeTab ? "review-tab--active" : ""}"
-                @click=${() => this._switchTab(title)}
-                title=${this._displayTitle(title)}
+                type="button"
+                role="tab"
+                aria-selected=${file.fileId === activeFile?.fileId ? "true" : "false"}
+                class="review-tab ${file.fileId === activeFile?.fileId ? "review-tab--active" : ""}"
+                @click=${() => this._switchFile(review.reviewId, file.fileId)}
+                title=${file.title}
               >
-                <span class="review-tab-label">${this._displayTitle(title)}</span>
-                ${count > 0
-                  ? html`<span class="review-tab-badge">${count}</span>`
+                <span class="review-tab-label">${file.title}</span>
+                ${(annotationCounts.get(file.fileId) || 0) > 0
+                  ? html`<span class="review-tab-badge">${annotationCounts.get(file.fileId)}</span>`
                   : ""}
-                <span
-                  class="review-tab-close"
-                  @click=${(e: Event) => this._closeTab(title, e)}
-                  title="Close tab"
-                >×</span>
               </button>
-            `;
-          })}
-          ${overflowTitles.length > 0
-            ? html`
-                <div class="review-tab-overflow-container">
-                  <button
-                    class="review-tab review-tab-overflow-trigger"
-                    @click=${this._toggleOverflow}
-                    title="More tabs"
-                  >...</button>
-                  ${this._overflowOpen
-                    ? html`
-                        <div class="review-tab-overflow">
-                          ${overflowTitles.map((title) => {
-                            const count = this._annotationCounts.get(title) || 0;
-                            return html`
-                              <button
-                                class="review-tab-overflow-item ${title === this.activeTab ? "review-tab--active" : ""}"
-                                @click=${() => this._switchTab(title)}
-                              >
-                                ${this._displayTitle(title)}
-                                ${count > 0
-                                  ? html`<span class="review-tab-badge">${count}</span>`
-                                  : ""}
-                              </button>
-                            `;
-                          })}
-                        </div>
-                      `
+            `)}
+            ${overflowFiles.length > 0 ? html`
+              <button
+                type="button"
+                class="review-tab review-tab-overflow-trigger"
+                @click=${this._toggleOverflow}
+                aria-label="More tabs"
+                title="More tabs"
+                aria-haspopup="menu"
+                aria-expanded=${this._overflowOpen ? "true" : "false"}
+                aria-controls=${this._overflowMenuId}
+              >…</button>
+            ` : ""}
+            <div class="review-tab-measurements" aria-hidden="true">
+              ${files.map((file) => html`
+                <span class="review-tab-measure">
+                  <span class="review-tab-label">${file.title}</span>
+                  ${(annotationCounts.get(file.fileId) || 0) > 0
+                    ? html`<span class="review-tab-badge">${annotationCounts.get(file.fileId)}</span>`
                     : ""}
-                </div>
-              `
-            : ""}
-        </div>
+                </span>
+              `)}
+              <span class="review-tab-overflow-measure">…</span>
+            </div>
+          </div>
+          ${this._overflowOpen ? html`
+            <div
+              id=${this._overflowMenuId}
+              class="review-tab-overflow"
+              role="menu"
+              aria-label="More files in ${review.title}"
+              popover="auto"
+            >
+              ${overflowFiles.map((file) => html`
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="review-tab-overflow-item ${file.fileId === activeFile?.fileId ? "review-tab--active" : ""}"
+                  data-active=${file.fileId === activeFile?.fileId ? "true" : "false"}
+                  @click=${() => this._switchFile(review.reviewId, file.fileId)}
+                >
+                  <span class="review-tab-label">${file.title}</span>
+                  ${(annotationCounts.get(file.fileId) || 0) > 0
+                    ? html`<span class="review-tab-badge">${annotationCounts.get(file.fileId)}</span>`
+                    : ""}
+                </button>
+              `)}
+            </div>
+          ` : ""}
+        ` : ""}
 
         <div class="review-document-area">
-          ${activeDoc
-            ? html`
-                <review-document
-                  .markdown=${activeDoc.markdown}
-                  .sessionId=${this.sessionId}
-                  .docTitle=${this._annotationBucketFor(this.activeTab, activeDoc)}
-                  @annotation-change=${this._onAnnotationChange}
-                ></review-document>
-              `
-            : html`
-                <div class="review-empty">
-                  <p>No document selected.</p>
-                </div>
-              `}
+          ${activeFile ? html`
+            <review-document
+              .markdown=${activeFile.markdown}
+              .sessionId=${this.sessionId}
+              .docTitle=${activeFile.fileId}
+              @annotation-change=${this._onAnnotationChange}
+            ></review-document>
+          ` : html`<div class="review-empty"><p>No review selected.</p></div>`}
         </div>
 
         <div class="review-submit-bar">
           <div class="review-submit-summary">
             <span class="review-submit-count">
-              ${activeCount > 0
-                ? `${activeCount} comment${activeCount !== 1 ? "s" : ""} on active document`
-                : "No inline comments on active document"}
+              ${totalCount > 0
+                ? `${totalCount} inline comment${totalCount !== 1 ? "s" : ""} across this review`
+                : "No inline comments on this review"}
             </span>
           </div>
 
@@ -356,28 +560,10 @@ export class ReviewPane extends LitElement {
             : ""}
 
           <div class="review-submit-actions">
-            <button
-              class="review-submit-btn review-submit-btn--compat"
-              disabled
-              hidden
-              aria-hidden="true"
-              tabindex="-1"
-              type="button"
-            ></button>
-            <button
-              class="review-dismiss-btn"
-              @click=${this._dismiss}
-            >Dismiss</button>
-            <button
-              class="review-reject-btn"
-              ?disabled=${!activeDoc}
-              @click=${() => this._submitDecision("reject")}
-            >Reject</button>
-            <button
-              class="review-approve-btn"
-              ?disabled=${!activeDoc}
-              @click=${() => this._submitDecision("approve")}
-            >Approve</button>
+            <button class="review-submit-btn review-submit-btn--compat" disabled hidden aria-hidden="true" tabindex="-1" type="button"></button>
+            <button class="review-dismiss-btn" ?disabled=${!review} @click=${this._dismiss}>Dismiss</button>
+            <button class="review-reject-btn" ?disabled=${!activeFile} @click=${() => this._submitDecision("reject")}>Reject</button>
+            <button class="review-approve-btn" ?disabled=${!activeFile} @click=${() => this._submitDecision("approve")}>Approve</button>
           </div>
         </div>
       </div>
@@ -385,12 +571,6 @@ export class ReviewPane extends LitElement {
   }
 }
 
-// Guarded registration (not @customElement): keeps this module import-safe when
-// `customElements` is transiently undefined — a lazy import resolving in the
-// happy-dom teardown gap (v2-dom pool:forks/isolate:false window churn) otherwise
-// throws an unhandled "customElements is not defined" that fails the run despite
-// every test passing. In the browser customElements is always present, so this
-// registers identically to @customElement.
 if (typeof customElements !== "undefined" && !customElements.get("review-pane")) {
   customElements.define("review-pane", ReviewPane);
 }

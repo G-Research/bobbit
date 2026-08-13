@@ -123,14 +123,13 @@ const ROOT_SPECS: RootSpec[] = [
 		"movePreviewDirectoryContents",
 	].map((name) => ({ file: "src/server/preview/mount.ts", name, required: true })),
 
-	// Boot sweeper, pool initialization/reclaim/fill/drain, inventory and shared cleanup.
+	// Boot sweeper, pool initialization/fill/drain, inventory and shared cleanup.
 	{ file: "src/server/agent/worktree-sweeper.ts", name: "sweepOrphanedWorktrees", required: true },
 	{ file: "src/server/agent/worktree-pool.ts", className: "WorktreePool", name: "constructor", required: true },
 	...[
 		"resolveRepositoryPaths",
 		"initialize",
 		"startFilling",
-		"reclaimOrphaned",
 		"replenish",
 		"_fill",
 		"stop",

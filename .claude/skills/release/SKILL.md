@@ -101,9 +101,7 @@ Run, in this order, and **stop on any failure**:
 
 ```bash
 npm ci                          # clean install, lockfile authoritative
-npm audit --omit=dev            # zero vulnerabilities in root runtime deps
 npm run build                   # full build; emits declarations used by test type-checks
-npm run audit:packed-consumer   # zero vulnerabilities in a fresh tarball consumer
 npm run check                   # type-check server + web + tests against fresh dist
 npm run test:unit               # fast unit suite
 npm run test:browser            # Playwright browser journeys
@@ -111,13 +109,12 @@ npm run test:e2e                # API + worktree/Docker/MCP/restart E2E
 ```
 
 Rules:
-- **Both audits must show 0 vulnerabilities** at every severity. The packed-consumer command installs the just-built tarball under normal npm settings because a clean root audit cannot see dependency-owned shrinkwrap findings. Any finding blocks publish; there are no release exceptions.
-- Registry advisory availability is deliberately release-only, not part of normal unit, browser, or E2E gates. If the advisory service or clean consumer install is unavailable, stop the release rather than skipping the packed-consumer audit.
+- Runtime registry audits are deliberately outside the release process. Do not run `npm audit` or `audit:packed-consumer` as release gates; mutable advisory data must not change eligibility for an unchanged commit.
 - Don't skip browser or E2E tests "because they're slow" — releases are the one place flakes bite users.
-- Build must precede both `audit:packed-consumer` and `check`: the audit packs built output, while `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations.
+- Build must precede `check` because `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations.
 - If any test fails, the failure is the bug. Fix it or abort the release; do not retry hoping it's flaky.
 
-Long-running steps (`build`, `audit:packed-consumer`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
+Long-running steps (`build`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
 
 ## 3. Decide whether to bump the binary sub-packages
 
@@ -278,8 +275,8 @@ Notes:
 
 **STOP. Merging is the publish.** The squash merge pushes the release commit to
 `main`, and that push is the release trigger:
-`.github/workflows/release-publish.yml` validates, builds, tests, and packs the
-commit without OIDC authority, then publishes the verified tarball without
+`.github/workflows/release-publish.yml` validates, builds, type-checks, and packs
+the commit without OIDC authority, then publishes the verified tarball without
 running lifecycle scripts, creates the `v<new-version>` tag, and creates the
 GitHub release. Nothing after this point is reversible — npm version
 numbers are immutable and release tags cannot be moved or deleted.
@@ -388,7 +385,7 @@ Report to the user:
 - Version + tag + GitHub release URL (`gh release view v<new-version> --json url -q .url`)
 - npm package URL (`https://www.npmjs.com/package/@gresearch/bobbit/v/<new-version>`) — provenance is attached automatically by CI
 - Whether binaries were republished, and which versions
-- Root and packed-consumer audit results (both must be clean)
+- Required build, type-check, unit, browser, and E2E gate results
 
 ## Rules / best practices
 
