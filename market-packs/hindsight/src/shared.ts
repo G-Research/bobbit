@@ -58,7 +58,17 @@ export function runtimeModeFor(cfg: EffectiveConfig): ManagedRuntimeMode | undef
 function readyEndpoint(runtime?: RuntimeContext): string | undefined { return runtime?.state === "ready" && typeof runtime.endpoint === "string" && runtime.endpoint.trim() ? runtime.endpoint : undefined; }
 export function isActive(cfg: EffectiveConfig, runtime?: RuntimeContext): boolean { return cfg.runtimeMode === "external" ? !!cfg.externalUrl?.trim() : readyEndpoint(runtime) !== undefined; }
 export function isConfigured(cfg: EffectiveConfig): boolean { return cfg.runtimeMode !== "external" || !!cfg.externalUrl?.trim(); }
-export function clientConfig(cfg: EffectiveConfig, runtime?: RuntimeContext): ClientConfig { const endpoint = cfg.runtimeMode === "external" ? (cfg.externalUrl ?? "") : (readyEndpoint(runtime) ?? ""); return { baseUrl: endpoint.replace(/\/+$/, ""), ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}), namespace: cfg.namespace, timeoutMs: cfg.timeoutMs }; }
+/** The external service bearer token is never a managed-runtime credential. */
+export function clientConfig(cfg: EffectiveConfig, runtime?: RuntimeContext): ClientConfig {
+	const external = cfg.runtimeMode === "external";
+	const endpoint = external ? (cfg.externalUrl ?? "") : (readyEndpoint(runtime) ?? "");
+	return {
+		baseUrl: endpoint.replace(/\/+$/, ""),
+		...(external && cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
+		namespace: cfg.namespace,
+		timeoutMs: cfg.timeoutMs,
+	};
+}
 
 export interface StoreReadDiagnostic { code: string; retryable?: boolean; recoverable?: boolean }
 export type StoreReadResult<T> = { state: "absent" } | { state: "present"; value: T; version?: number } | { state: "error"; diagnostic: StoreReadDiagnostic };
