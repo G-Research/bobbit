@@ -81,6 +81,12 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/packages/protobufjs-fixed/package.json" },
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/package.json" },
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/npm-shrinkwrap.json" },
+	{ consumer: "tests2/core/claude-sdk-event-translator.test.ts", input: "tests2/fixtures/claude-sdk-event-translator/interleaved-subagents.json" },
+	{ consumer: "tests2/core/claude-sdk-event-translator.test.ts", input: "tests2/fixtures/claude-sdk-event-translator/root-tool-lifecycle.json" },
+	{ consumer: "tests2/core/claude-sdk-event-translator.test.ts", input: "tests2/fixtures/claude-sdk-event-translator/streamed-tool-input.json" },
+	{ consumer: "tests2/core/claude-sdk-event-translator.test.ts", input: "tests2/fixtures/claude-sdk-event-translator/terminal-and-permission.json" },
+	{ consumer: "tests2/core/claude-sdk-event-translator.test.ts", input: "src/server/agent/session-manager.ts" },
+	{ consumer: "tests2/core/claude-sdk-event-translator.test.ts", input: "src/server/agent/session-setup.ts" },
 ] as const;
 
 const DIRECT_DYNAMIC_FAMILY_IDS = [
@@ -215,7 +221,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(60);
+		expect(declared).toHaveLength(66);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
