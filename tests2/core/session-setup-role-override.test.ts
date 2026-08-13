@@ -51,24 +51,29 @@ const SESSION_SETUP_SRC = readFileSync(
 );
 
 /**
- * Extract the model + thinking-level resolution block from
- * `_resolveBridgeOptions`. We grab everything between the "Pin model +
- * thinking level…" comment anchor and the closing "}" of the function, then
- * isolate the two if/else if chains.
+ * Extract only the model and thinking-level resolver chains from
+ * `_resolveBridgeOptions`. Runtime setup lives between these chains and has
+ * independent imports/dependencies; evaluating it here made this focused
+ * source test depend on `resolveSessionRuntime` being in a `new Function`
+ * scope. Keep the test coupled to the production chains it verifies, not to
+ * unrelated bridge setup.
  */
 function extractResolverBlock(): string {
-	// Anchor on a comment unique to the block under test.
-	const startMarker = "// Pin model + thinking level at spawn time";
-	const startIdx = SESSION_SETUP_SRC.indexOf(startMarker);
-	assert.ok(startIdx >= 0, "anchor comment not found in session-setup.ts — has the file been refactored?");
+	const anchor = "// Pin model + thinking level at spawn time";
+	const anchorIdx = SESSION_SETUP_SRC.indexOf(anchor);
+	assert.ok(anchorIdx >= 0, "anchor comment not found in session-setup.ts — has the file been refactored?");
 
-	// Slice from the anchor to the closing `}` of the function body.  We
-	// stop at the next `^}\n` at column zero — the function-level closing
-	// brace.
-	const tail = SESSION_SETUP_SRC.slice(startIdx);
-	const endIdx = tail.indexOf("\n}\n");
-	assert.ok(endIdx >= 0, "could not find end of _resolveBridgeOptions");
-	return tail.slice(0, endIdx);
+	const modelStart = SESSION_SETUP_SRC.indexOf("\tif (plan.initialModel", anchorIdx);
+	const runtimeStart = SESSION_SETUP_SRC.indexOf("\n\tplan.bridgeOptions.runtime = resolveSessionRuntime", modelStart);
+	const thinkingStart = SESSION_SETUP_SRC.indexOf("\tif (plan.initialThinkingLevel)", runtimeStart);
+	assert.ok(modelStart >= 0 && runtimeStart >= 0 && thinkingStart >= 0,
+		"could not locate model, runtime, and thinking-level setup in _resolveBridgeOptions");
+
+	// The first tab-indented closing brace after the thinking resolver ends its
+	// if/else chain (the next column-zero brace closes the function).
+	const thinkingEnd = SESSION_SETUP_SRC.indexOf("\n\t}\n", thinkingStart);
+	assert.ok(thinkingEnd >= 0, "could not find end of thinking-level resolver");
+	return SESSION_SETUP_SRC.slice(modelStart, runtimeStart) + "\n" + SESSION_SETUP_SRC.slice(thinkingStart, thinkingEnd + 3);
 }
 
 const RESOLVER_BLOCK = extractResolverBlock();
