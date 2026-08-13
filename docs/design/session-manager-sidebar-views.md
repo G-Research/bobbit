@@ -60,6 +60,7 @@ The control row MUST match the mock's density and labels:
 ```
 
 - The two view controls form one minimal segmented selector.
+- Control labels use a compact but clearly legible `0.8333em` size.
 - Filters remains a separate button in the same row.
 - Switching views closes an open filter popover but does not clear search.
 - There is no session-count or sort-summary row below the controls.
@@ -81,18 +82,18 @@ type SidebarSessionView = "project" | "status";
 
 ### 4.3 Status section headings
 
-By Status renders non-interactive headings in this exact order:
+By Status renders collapsible headings in this exact order:
 
 1. Pinned — includes the Lucide `Pin` icon.
-2. Unread.
-3. Read.
+2. Unread — includes a mail icon.
+3. Read — includes an opened-mail icon.
 
-Each visible heading contains its label and visible count. Headings use the mock's compact uppercase/tracking treatment and do not look like selectable tabs.
+Each visible heading contains a disclosure chevron, icon, label, and visible count. Its typography and base padding match the By Project group headings; Unread and Read add slight lower breathing room before their rows. A horizontal rule appears above every visible section except the first, never inline with the title. Expansion defaults on and persists locally per section.
 
 - Hide a heading when its section has no rows.
 - Do not reserve blank space for an empty section.
 - If no sessions remain after search and filters, render one compact empty state: `No sessions match this search and filter.`
-- Do not add project names, goal names, role labels, busy labels, tag chips, or status badges to the canonical session row.
+- In By Status only, goal-owned agents promote the uppercase goal title to the first line with a goal icon in the owning project's accent colour; the agent/session title moves to a quiet second line. The two-line text block is vertically centred against the sprite's layout box, with the pixel sprite optically nudged slightly upward, and Status rows retain clear whitespace between them. Standalone sessions remain single-line and carry a smaller identity icon in the owning project's accent colour, optically nudged slightly downward: ordinary sessions use the session/chat icon, while staff sessions use the staff icon. Do not add a `Goal` label, project names, role labels, busy labels, tag chips, or status badges.
 
 ## 5. Session tag contract
 
@@ -230,7 +231,7 @@ The flattened population includes each eligible session exactly once, including:
 
 Deduplicate by session ID. If a live and archived collection both contain the same ID, the live record wins.
 
-By Status has no tree indentation, chevrons, project/goal headers, team-child nesting, or expansion state. A child or delegate is a normal flat row in this view. Its row action eligibility and read-only behavior remain unchanged.
+By Status has no tree indentation, project/goal headers, or team-child nesting. Its three flat status sections have independent persisted expansion state. A child or delegate is a normal flat row in this view, with owning-goal membership inherited from its canonical tree ancestors when the session record does not carry a goal ID. Its row action eligibility and read-only behavior remain unchanged.
 
 ### 8.2 Filter order
 
@@ -263,9 +264,13 @@ The classification is independent of activity state. A busy session can be Pinne
 
 Sort each section independently by:
 
+Rows that visibly render a last-activity value use:
+
 1. `lastActivity` descending;
 2. `createdAt` descending;
 3. `id` ascending as a deterministic final tie-breaker.
+
+Rows showing the active/busy shimmer instead of a last-activity value form a stable cluster ahead of timestamp rows and sort by `createdAt` descending, then `id` ascending. Hidden `lastActivity` churn therefore does not rearrange several simultaneously active agents when the user has no visible timestamp change with which to understand that movement. When a row transitions between shimmer and timestamp presentation, it rejoins the corresponding ordering policy.
 
 Do not sort pinned rows by the time they were pinned. Do not sort unread ahead of pinned. Do not apply project, goal, title, role, or manual ordering inside a section.
 
@@ -276,6 +281,10 @@ Real-time activity, read-state, archive-state, team-state, or pin-state changes 
 - Opening an unread session uses the existing mark-read path and moves it to Read when the authoritative/optimistic state changes.
 - A newly unread non-pinned row moves to Unread.
 - Updated activity may change a row's position within its current section.
+
+Meaningful ordering changes use a 280 ms FLIP translation (`transform` only, ease-out) so rows preserve spatial continuity without delaying authoritative data. The row whose presentation signature changed also receives a subtle 650 ms project-identity trace: a 5% surface tint and a 24% two-pixel inset rail. Displaced rows that did not themselves change move without the trace.
+
+For the duration of a row's FLIP movement, pointer-generated `click` and `auxclick` events targeting that row or any descendant are canceled in the capture phase. This applies equally to the row body and its action buttons, preventing an element that moved under the pointer from accepting an unintended action. Keyboard-generated activation remains available. Reduced-motion users receive the immediate final ordering with no movement, trace, or temporary click suppression.
 
 ### 8.5 By Status filters
 

@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, Bot, Goal as GoalIcon, LayoutDashboard, Link, Menu, MessagesSquare, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
 import type { GoalContext, SessionChildrenContext, SessionContext, SidebarTreeNode, TeamLeadContext } from "./sidebar-tree-builder.js";
@@ -23,7 +23,7 @@ import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLi
 import { buildArchivedSessionActions, buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
-import { isSessionReadFilterable } from "../shared/session-tags.js";
+import { isSessionReadFilterable, sessionShowsLastActivity } from "../shared/session-tags.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
@@ -411,8 +411,7 @@ export function renderSandboxIndicator(status: string) {
 
 /** Render terse relative time with optional unseen indicator dot. */
 export function renderSessionTime(session: GatewaySession, selected = false) {
-	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
-	if (isActive) return renderActiveShimmer();
+	if (!sessionShowsLastActivity(session)) return renderActiveShimmer();
 	const time = terseRelativeTime(session.lastActivity);
 	if (!time) return "";
 	const unseen = hasUnseenActivity(session);
@@ -994,7 +993,41 @@ export type RenderSessionTreeOptions = {
 	childGroupNodes?: SidebarTreeNode<SessionChildrenContext>[];
 	/** Render canonical row content without tree chevrons, recursion, or child discovery. */
 	flat?: boolean;
+	/** Optional owning-goal context promoted above the agent title in flat Status rows. */
+	goalTitle?: string;
+	/** Owning-project accent used by the goal or standalone-session identity icon. */
+	projectColor?: string;
+	/** Flat Status rows distinguish staff agents from ordinary sessions. */
+	statusIdentity?: "session" | "staff";
+	/** Stable presentation signature used to trace meaningful live changes. */
+	statusMotionSignature?: string;
 };
+
+function renderStatusGoalTitle(goalTitle: string | undefined, projectColor: string | undefined, mobile: boolean): TemplateResult | typeof nothing {
+	if (!goalTitle) return nothing;
+	return html`
+		<div
+			class="sidebar-status-goal-title flex items-center gap-1 min-w-0 font-medium uppercase tracking-wider"
+			data-testid="sidebar-status-goal-title"
+			title=${goalTitle}
+			style=${`font-size:${mobile ? "1.1667em" : "0.8333em"};`}
+		>
+			<span class="sidebar-status-goal-title-icon shrink-0" style=${`color:${projectColor || "var(--muted-foreground)"};`}>${icon(GoalIcon, mobile ? "sm" : "xs")}</span>
+			<span class="truncate">${renderHighlightedText(goalTitle.toUpperCase(), state.searchQuery)}</span>
+		</div>
+	`;
+}
+
+function renderStatusIdentityIcon(identity: "session" | "staff" | undefined, projectColor: string | undefined, mobile: boolean): TemplateResult | typeof nothing {
+	if (!identity || !projectColor) return nothing;
+	const identityIcon = identity === "staff" ? Bot : MessagesSquare;
+	return html`<span
+		class="sidebar-status-session-title-icon shrink-0"
+		data-testid="sidebar-status-session-title-icon"
+		data-status-identity=${identity}
+		style=${`color:${projectColor};`}
+	>${icon(identityIcon, mobile ? "sm" : "xs")}</span>`;
+}
 
 function isSessionChildrenNode(node: SidebarTreeNode): node is SidebarTreeNode<SessionChildrenContext> {
 	return node.kind === "session-children";
@@ -1076,6 +1109,8 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-status-motion-row=${flat ? "true" : nothing}
+			data-status-motion-signature=${flat ? treeOptions?.statusMotionSignature ?? "" : nothing}
 			data-tree-key=${treeOptions?.treeNode?.key ?? nothing}
 			data-tree-parent-key=${treeOptions?.treeNode?.parentKey ?? nothing}
 			data-tree-depth=${treeOptions?.treeNode?.logicalDepth ?? nothing}
@@ -1083,9 +1118,9 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 			data-sidebar-actions-row-root
 			data-nav-id=${navId}
 			data-nav-active=${navActive ? "true" : "false"}
-			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
+			class="${mobile ? "" : "group relative"} ${treeOptions?.goalTitle ? "sidebar-status-goal-row" : ""} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${navActive ? `bg-secondary text-foreground sidebar-session-active${hasChildren && !flat ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:var(--sidebar-chevron-w);"
+			style=${`padding-left:var(--sidebar-chevron-w);${flat ? `--sidebar-status-motion-accent:${treeOptions?.projectColor || "var(--muted-foreground)"};` : ""}`}
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
 			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
@@ -1094,13 +1129,18 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 				class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"
 				@click=${(e: Event) => { e.stopPropagation(); if (hasFirstClassChild) toggleFirstClassParentExpanded(session.id); else toggleArchivedParentExpanded(session.id); renderApp(); }}
 			><span class="sidebar-chevron-glyph">${childrenExpanded ? "▾" : "▸"}</span></span>` : ""}
-			<div class="shrink-0 flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">
+			<div class="${treeOptions?.goalTitle ? "sidebar-status-goal-sprite" : ""} shrink-0 flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">
 				${connecting || preparing
 					? html`<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session), true)}
 			</div>
-			<div class="flex-1 min-w-0 flex flex-col justify-center">
-				<div class="flex items-center gap-1 min-w-0 font-normal"><span class="flex-1 min-w-0 truncate ${preparing ? "text-muted-foreground/60 italic" : ""}" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${preparing ? "preparing…" : renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+			<div class="${treeOptions?.goalTitle ? "sidebar-status-goal-copy" : ""} flex-1 min-w-0 flex flex-col justify-center">
+				${treeOptions?.goalTitle ? html`
+					<div class="flex items-center gap-1 min-w-0">${renderStatusGoalTitle(treeOptions.goalTitle, treeOptions.projectColor, mobile)}${mobile ? html`<span class="flex-1"></span>${renderSessionTime(session)}` : ""}</div>
+					<div class="sidebar-status-agent-title min-w-0 truncate ${preparing ? "text-muted-foreground/60 italic" : ""}" data-testid="sidebar-session-title-text" style=${`font-size:${mobile ? "1em" : "0.75em"};`}>${preparing ? "preparing…" : renderSessionTitle(displayTitle, isActive, state.searchQuery)}</div>
+				` : html`
+					<div class="flex items-center gap-1 min-w-0 font-normal">${flat ? renderStatusIdentityIcon(treeOptions?.statusIdentity, treeOptions?.projectColor, mobile) : nothing}<span class="flex-1 min-w-0 truncate ${preparing ? "text-muted-foreground/60 italic" : ""}" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${preparing ? "preparing…" : renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+				`}
 			</div>
 			${mobile
 				? buttons
@@ -1109,6 +1149,7 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
 					</div>`}
+			${flat ? html`<span class="sidebar-status-change-trace" aria-hidden="true"></span>` : nothing}
 		</div>
 		${shouldRenderChildArea ? (treeChildGroups
 			? renderTreeSessionChildrenGroups(treeChildGroups, { showArchivedGroupHeader: liveChildren.length > 0 && hasArchivedChildGroup })
@@ -1224,6 +1265,8 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-status-motion-row=${flat ? "true" : nothing}
+			data-status-motion-signature=${flat ? treeOptions?.statusMotionSignature ?? "" : nothing}
 			data-tree-key=${treeOptions?.treeNode?.key ?? nothing}
 			data-tree-parent-key=${treeOptions?.treeNode?.parentKey ?? nothing}
 			data-tree-depth=${treeOptions?.treeNode?.logicalDepth ?? nothing}
@@ -1231,9 +1274,9 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			data-sidebar-actions-row-root
 			data-nav-id=${archivedNavId}
 			data-nav-active=${active ? "true" : "false"}
-			class="group relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
+			class="group ${treeOptions?.goalTitle ? "sidebar-status-goal-row" : ""} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
-			style="padding-left:var(--sidebar-chevron-w); filter:grayscale(1); opacity:0.75;"
+			style=${`padding-left:var(--sidebar-chevron-w);filter:grayscale(1);opacity:0.75;${flat ? `--sidebar-status-motion-accent:${treeOptions?.projectColor || "var(--muted-foreground)"};` : ""}`}
 			@click=${() => connectToSession(session.id, true, { readOnly: true })}
 		>
 			${hasChildren ? html`<span
@@ -1241,10 +1284,15 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 				@click=${(e: Event) => { e.stopPropagation(); if (treeOptions?.treeNode?.kind === "team-lead") toggleTeamLeadExpanded(session.id); else toggleArchivedParentExpanded(session.id); renderApp(); }}
 				title="${expanded ? "Collapse" : "Expand"}"
 			><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>` : ""}
-			<div class="shrink-0 flex items-center justify-center">
+			<div class="${treeOptions?.goalTitle ? "sidebar-status-goal-sprite" : ""} shrink-0 flex items-center justify-center">
 				${statusBobbit("terminated", false, session.id, active, false, session.role === "team-lead", session.role === "coder", session.accessory, false, false, true)}
 			</div>
-			<div class="flex-1 min-w-0 font-normal truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderHighlightedText(displayTitle, state.searchQuery)}</div>
+			<div class="${treeOptions?.goalTitle ? "sidebar-status-goal-copy" : ""} flex-1 min-w-0 flex flex-col justify-center font-normal">
+				${treeOptions?.goalTitle ? html`
+					${renderStatusGoalTitle(treeOptions.goalTitle, treeOptions.projectColor, mobile)}
+					<div class="sidebar-status-agent-title truncate" style=${`font-size:${mobile ? "1em" : "0.75em"};`}>${renderHighlightedText(displayTitle, state.searchQuery)}</div>
+				` : html`<div class="flex items-center gap-1 min-w-0" style="${mobile ? "font-size: 1.3333em;" : ""}">${flat ? renderStatusIdentityIcon(treeOptions?.statusIdentity, treeOptions?.projectColor, mobile) : nothing}<span class="truncate">${renderHighlightedText(displayTitle, state.searchQuery)}</span></div>`}
+			</div>
 			${mobile
 				? html`${archivedTime}${buttons}`
 				: html`
@@ -1252,6 +1300,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
 					</div>`}
+			${flat ? html`<span class="sidebar-status-change-trace" aria-hidden="true"></span>` : nothing}
 		</div>
 	`;
 }

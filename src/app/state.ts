@@ -6,7 +6,7 @@ import type { SidePanelWorkspace } from "./side-panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 import { type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
-import { loadSidebarSessionView, loadSidebarStatusFilter } from "./sidebar-view-preferences.js";
+import { loadSidebarSessionView, loadSidebarStatusCollapsedSections, loadSidebarStatusFilter } from "./sidebar-view-preferences.js";
 import {
 	clearSidebarTreePreference,
 	getSidebarTreePreference,
@@ -486,6 +486,8 @@ export const state = {
 	statusShowBusy: loadSidebarStatusFilter("showBusy"),
 	statusShowRead: loadSidebarStatusFilter("showRead"),
 	statusShowTeams: loadSidebarStatusFilter("showTeams"),
+	/** Independently persisted expansion state for the three By Status groups. */
+	statusCollapsedSections: loadSidebarStatusCollapsedSections(),
 	/** Whether the sidebar filters popover is open */
 	filtersPopoverOpen: false,
 	/** Whether the archived section is expanded */

@@ -51,6 +51,7 @@ import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type Sideb
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
 import { setArchivedSectionExpanded, setUngroupedExpanded, sidebarTreeExpansionInput, toggleProjectExpanded } from "./sidebar-tree-state.js";
+import { animateSidebarStatusChanges, captureSidebarStatusMotion, installSidebarStatusMotionClickGuard } from "./sidebar-status-motion.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
 // route. Lazy-load via the shared widgets registrar so their combined
@@ -579,8 +580,8 @@ function renderMobileLanding() {
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
 			${renderProjectReorderLiveRegion()}
-			<div class="w-full max-w-xl mx-auto px-2 py-2 pb-16 flex flex-col gap-0.5">
-				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
+			<div class="w-full max-w-xl mx-auto px-2 pt-1 pb-16 flex flex-col gap-0.5">
+				<div class="flex flex-col gap-0.5 px-1 pb-1 mb-0.5 border-b border-border/30">
 					${(() => {
 						const isRolesActive = isRouteActive("roles", "role-edit");
 						const isToolsActive = isRouteActive("tools", "tool-edit");
@@ -2234,6 +2235,8 @@ function renderArchivedBanner() {
 export function doRenderApp(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
+	installSidebarStatusMotionClickGuard();
+	const sidebarStatusMotion = captureSidebarStatusMotion(app);
 
 	// Dynamic page title.
 	// In a regular browser tab, suffix with " · Bobbit" so the tab tells you which app.
@@ -2444,9 +2447,14 @@ export function doRenderApp(): void {
 			const deskGoalTitle = deskGoalId ? state.goals.find(g => g.id === deskGoalId)?.title : undefined;
 			return html`
 				<div class="flex items-center gap-2 px-3 min-w-0 flex-1">
-					<div class="flex flex-col min-w-0 py-1">
-						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}${(deskSession?.status === "preparing" || deskSession?.status === "starting") ? html`<span class="shrink-0 text-muted-foreground/70 italic" style="font-size:0.85em;">preparing…</span>` : ""}</span>
-						${deskGoalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider">${deskGoalTitle}</span>` : ""}
+					<div class="flex items-center gap-1 min-w-0 py-1" data-testid="desktop-session-header-title-line">
+						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" data-testid="desktop-session-header-title" title=${headerTitle}><span class="truncate">${headerTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}${(deskSession?.status === "preparing" || deskSession?.status === "starting") ? html`<span class="shrink-0 text-muted-foreground/70 italic" style="font-size:0.85em;">preparing…</span>` : ""}</span>
+						${deskGoalTitle ? html`
+							<span class="inline-flex items-center gap-1 min-w-0 leading-none" style="position:relative;top:1px;">
+								<span class="shrink-0 text-muted-foreground/40" style="margin-inline:2px;position:relative;top:-2px;" aria-hidden="true" data-testid="desktop-session-header-goal-separator">·</span>
+								<span class="min-w-0 text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider" data-testid="desktop-session-header-goal-title" title=${deskGoalTitle}>${deskGoalTitle}</span>
+							</span>
+						` : ""}
 					</div>
 				</div>
 			`;
@@ -3489,6 +3497,8 @@ export function doRenderApp(): void {
 			</div>
 		`, app);
 	}
+
+	animateSidebarStatusChanges(sidebarStatusMotion, app);
 
 	// Attach SortableJS to the panel tab bar (if present). We look up the
 	// element after each render rather than relying on lit's ref directive

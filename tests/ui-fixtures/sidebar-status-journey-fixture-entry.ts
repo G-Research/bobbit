@@ -2,12 +2,14 @@ import { html, render } from "lit";
 import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { doRenderApp } from "../../src/app/render.js";
 import { markSessionVisited } from "../../src/app/render-helpers.js";
+import { animateSidebarStatusChanges, captureSidebarStatusMotion, installSidebarStatusMotionClickGuard } from "../../src/app/sidebar-status-motion.js";
 import { buildSidebarStatusSections, renderSidebarStatusContent, renderSidebarViewControls } from "../../src/app/sidebar.js";
 import {
 	setProjects,
 	setRenderApp,
 	state,
 	type GatewaySession,
+	type Goal,
 	type Project,
 } from "../../src/app/state.js";
 import {
@@ -17,8 +19,10 @@ import {
 } from "../../src/app/sidebar-tree-state.js";
 import {
 	SIDEBAR_SESSION_VIEW_STORAGE_KEY,
+	SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY,
 	SIDEBAR_STATUS_FILTER_STORAGE_KEYS,
 	loadSidebarSessionView,
+	loadSidebarStatusCollapsedSections,
 	loadSidebarStatusFilter,
 } from "../../src/app/sidebar-view-preferences.js";
 
@@ -29,6 +33,17 @@ const PROJECT: Project = {
 	rootPath: "/tmp/sidebar-status-journey",
 	colorLight: "#2563eb",
 	colorDark: "#60a5fa",
+};
+const GOAL_ID = "sidebar-status-goal";
+const GOAL: Goal = {
+	id: GOAL_ID,
+	title: "Improve session manager sidebar",
+	cwd: PROJECT.rootPath,
+	projectId: PROJECT_ID,
+	state: "in-progress",
+	spec: "Status fixture goal",
+	createdAt: 1,
+	updatedAt: 1,
 };
 
 const IDS = {
@@ -52,6 +67,7 @@ const STAFF_RUNTIME_TITLE = "Underlying Staff Runtime";
 
 const VIEW_KEYS = [
 	SIDEBAR_SESSION_VIEW_STORAGE_KEY,
+	SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY,
 	...Object.values(SIDEBAR_STATUS_FILTER_STORAGE_KEYS),
 	"bobbit-show-archived",
 	"bobbit-show-busy",
@@ -180,7 +196,7 @@ function fixtureSessions(): GatewaySession[] {
 	return [
 		createSession({ id: IDS.pinnedNew, title: "Pinned Newest", status: "idle", createdAt: 91, lastActivity: 9_100, user_tags: persistedPinTags.get(IDS.pinnedNew) ?? ["pinned=true"] }),
 		createSession({ id: IDS.pinnedOld, title: "Pinned Older", status: "idle", createdAt: 81, lastActivity: 8_100, user_tags: persistedPinTags.get(IDS.pinnedOld) ?? ["pinned=true"] }),
-		createSession({ id: IDS.unreadNew, title: "Unread Newest", status: "idle", createdAt: 71, lastActivity: 7_100, lastReadAt: 1, lastTurnErrored: true, consecutiveErrorTurns: 3 }),
+		createSession({ id: IDS.unreadNew, title: "Unread Newest", status: "idle", createdAt: 71, lastActivity: 7_100, lastReadAt: 1, lastTurnErrored: true, consecutiveErrorTurns: 3, goalId: GOAL_ID }),
 		createSession({ id: IDS.unreadOld, title: "Unread Older", status: "idle", createdAt: 61, lastActivity: 6_100, lastReadAt: 1, lastTurnErrored: true, consecutiveErrorTurns: 3 }),
 		createSession({ id: IDS.readNew, title: "Read Newest", status: "idle", createdAt: 51, lastActivity: 5_100 }),
 		createSession({ id: IDS.readOld, title: "Read Older", status: "idle", createdAt: 41, lastActivity: 4_100 }),
@@ -209,6 +225,7 @@ function loadPreferences(): void {
 	state.statusShowBusy = loadSidebarStatusFilter("showBusy");
 	state.statusShowRead = loadSidebarStatusFilter("showRead");
 	state.statusShowTeams = loadSidebarStatusFilter("showTeams");
+	state.statusCollapsedSections = loadSidebarStatusCollapsedSections();
 	state.showArchived = localStorage.getItem("bobbit-show-archived") === "true";
 	state.showBusy = localStorage.getItem("bobbit-show-busy") !== "false";
 	state.showRead = localStorage.getItem("bobbit-show-read") !== "false";
@@ -253,7 +270,7 @@ async function resetFixture(options: {
 		connectionStatus: "connected",
 		gatewaySessions: fixtureSessions(),
 		archivedSessions: [fixtureArchivedSession()],
-		goals: [],
+		goals: [{ ...GOAL }],
 		selectedSessionId: null,
 		connectingSessionId: null,
 		remoteAgent: null,
@@ -300,13 +317,22 @@ function markFixtureSessionRead(sessionId: string): void {
 	renderFixture();
 }
 
+function reorderUnreadFixtureRows(): void {
+	const session = state.gatewaySessions.find((candidate) => candidate.id === IDS.unreadOld);
+	if (session) session.lastActivity = 7_200;
+	renderFixture();
+}
+
 function renderMobileStatusFixture(): void {
 	setRenderApp(renderMobileStatusFixture);
 	state.sidebarSessionView = "status";
 	localStorage.setItem(SIDEBAR_SESSION_VIEW_STORAGE_KEY, "status");
 	const app = document.getElementById("app");
 	if (!app) throw new Error("#app missing");
+	installSidebarStatusMotionClickGuard();
+	const motion = captureSidebarStatusMotion(app);
 	render(html`<div class="sidebar-root">${renderSidebarViewControls("mobile")}${renderSidebarStatusContent(buildSidebarStatusSections(undefined, "mobile"))}</div>`, app);
+	animateSidebarStatusChanges(motion, app);
 }
 
 setRenderApp(renderFixture);
@@ -316,6 +342,7 @@ setRenderApp(renderFixture);
 (window as any).__resetSidebarStatusJourney = resetFixture;
 (window as any).__reloadSidebarStatusJourney = simulateReload;
 (window as any).__markSidebarStatusSessionRead = markFixtureSessionRead;
+(window as any).__reorderSidebarStatusUnreadRows = reorderUnreadFixtureRows;
 (window as any).__renderMobileSidebarStatusJourney = renderMobileStatusFixture;
 (window as any).__releaseSidebarStatusStaffResponse = () => {
 	releaseStaffResponse?.();
