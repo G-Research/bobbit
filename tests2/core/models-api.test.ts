@@ -19,7 +19,7 @@ const stateDir = path.resolve("/memfs/models-test");
 
 // Import after setup
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { discoverModelsForConfig, findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(stateDir, memfs);
 
@@ -44,6 +44,7 @@ describe("Model registry", () => {
 			assert.equal(typeof m.reasoning, "boolean", `reasoning should be boolean`);
 			assert.ok(Array.isArray(m.input), `input should be an array`);
 			assert.equal(typeof m.authenticated, "boolean", `authenticated should be boolean`);
+			assert.ok(m.runtime === "pi" || m.runtime === "claude-agent-sdk", `runtime should be derived for ${m.provider}/${m.id}`);
 			// cost object
 			assert.equal(typeof m.cost, "object", `cost should be object`);
 			assert.equal(typeof m.cost.input, "number", `cost.input should be number`);
@@ -66,10 +67,20 @@ describe("Model registry", () => {
 			assert.ok(pi, `Pi should contain ${provider}/${id}`);
 			const registry = models.find(model => model.provider === provider && model.id === id);
 			assert.ok(registry, `registry should contain ${provider}/${id}`);
-			const { authenticated, ...authoritativeFields } = registry;
+			const { authenticated, runtime, ...authoritativeFields } = registry;
 			assert.equal(typeof authenticated, "boolean");
+			assert.equal(runtime, "pi", `${provider}/${id} should derive the Pi runtime`);
 			assert.deepEqual(authoritativeFields, pi, `${provider}/${id} must remain exact`);
 		}
+	});
+
+	it("derives Claude Agent SDK runtime on manual discovery rows without making runtime selectable", async () => {
+		const [model] = await discoverModelsForConfig({
+			id: "sdk", name: "claude-agent-sdk", type: "manual", baseUrl: "http://localhost:1",
+			models: [{ id: "sonnet", name: "Sonnet" }],
+		});
+		assert.equal(model.runtime, "claude-agent-sdk");
+		assert.equal(model.provider, "claude-agent-sdk");
 	});
 
 	it("does not add any direct OpenAI rows beyond Pi's current catalogs", () => {
