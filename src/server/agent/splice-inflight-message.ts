@@ -89,11 +89,21 @@ function hasStructuredSteerOccurrence(
 	record: InFlightSteerRecord,
 	bindings: readonly PromptAuthorBinding[],
 ): boolean {
-	const syntheticId = `inflight-steer:${record.promptId}`;
-	if (messages.some((message) => message?._inFlightSteer === true && message.id === syntheticId)) return true;
+	const occurrenceId = record.intentId ?? record.promptId;
+	const syntheticId = `inflight-steer:${occurrenceId}`;
+	if (messages.some((message) => message?._inFlightSteer === true && (
+		message.deliveryIntentId === occurrenceId
+		|| (record.attemptId !== undefined && message.deliveryAttemptId === record.attemptId)
+		|| message.id === syntheticId
+	))) return true;
 
 	const binding = bindings.find((candidate) =>
-		candidate.promptId === record.promptId && candidate.settlement?.outcome === "echoed",
+		(record.attemptId !== undefined
+			? candidate.attemptId === record.attemptId
+			: record.intentId !== undefined
+				? candidate.intentId === record.intentId
+				: candidate.promptId === record.promptId)
+		&& candidate.settlement?.outcome === "echoed",
 	);
 	if (!binding?.settlement) return false;
 
@@ -196,16 +206,21 @@ export function spliceInFlightSteers(
 		}
 
 		const author: MessageAuthor | undefined = isMessageAuthor(record.author) ? record.author : undefined;
+		const occurrenceId = record.intentId ?? record.promptId;
 		additions.push({
-			// New structured entries use their stable prompt identity. Keep the
-			// legacy content-derived shape so reconnect behaviour is unchanged for
-			// old persisted string ledgers.
+			// Modern structured entries use accepted occurrence identity. Keep the
+			// legacy content-derived shape for string ledgers and prompt-id shape for
+			// pre-intent structured rows.
 			id: legacy
 				? `inflight-steer:${i}:${text.slice(0, 32)}`
-				: `inflight-steer:${record.promptId}`,
+				: `inflight-steer:${occurrenceId}`,
 			role: "user",
 			content: [{ type: "text", text }],
 			...(author ? { author } : {}),
+			...(record.intentId === undefined ? {} : { deliveryIntentId: record.intentId }),
+			...(record.attemptId === undefined ? {} : { deliveryAttemptId: record.attemptId }),
+			...(record.state === undefined ? {} : { deliveryState: record.state }),
+			...(record.targetTurn === undefined ? {} : { targetTurn: record.targetTurn }),
 			_inFlightSteer: true,
 		});
 		i++;
