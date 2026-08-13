@@ -41,8 +41,10 @@ export interface ProjectExtensionSettingsConfigStore {
 }
 
 export interface ExtensionSettingsEffectiveOptions {
-  /** Legacy global values are considered only while a project has no target record. */
+  /** Legacy global public values are considered only while a project has no target record. */
   legacyValues?: Readonly<Record<string, ExtensionSettingValue>>;
+  /** Legacy secret bytes are runtime-only and considered only before project ownership. */
+  legacySecrets?: Readonly<Record<string, string>>;
   /** Declared secret fields: excluded from the public effective values. */
   secretFields?: readonly string[];
 }
@@ -62,10 +64,16 @@ export interface ExtensionSettingsMutation {
   /** `undefined` clears a declared optional non-secret field. */
   values?: Readonly<Record<string, ExtensionSettingValue | undefined>>;
   /**
-   * A trusted legacy snapshot captured by the settings owner. It is copied only
-   * when this mutation creates a target record, then the explicit mutation wins.
+   * A trusted, declared legacy public snapshot captured by the settings owner.
+   * It is copied only when this mutation creates a target record, then the
+   * explicit mutation wins.
    */
   legacyValues?: Readonly<Record<string, ExtensionSettingValue>>;
+  /**
+   * A trusted, declared legacy secret snapshot. It transfers to the owner-only
+   * store in this mutation's paired publication; explicit changes win.
+   */
+  legacySecrets?: ExtensionSettingsSecretChanges;
   /** `undefined` clears a declared secret field. Never place these values in an API projection. */
   secrets?: ExtensionSettingsSecretChanges;
 }
@@ -183,11 +191,12 @@ function assertMutation(mutation: ExtensionSettingsMutation): void {
       if (!isSafeSettingField(key) || !isPrimitiveValue(value)) throw new ExtensionSettingsMutationError();
     }
   }
-  if (mutation.secrets !== undefined) {
-    if (!isPlainObject(mutation.secrets)) throw new ExtensionSettingsMutationError();
+  for (const secrets of [mutation.legacySecrets, mutation.secrets]) {
+    if (secrets === undefined) continue;
+    if (!isPlainObject(secrets)) throw new ExtensionSettingsMutationError();
     // Validate all secret values before publishing the public revision. The
     // secret owner repeats this defense at its persistence boundary.
-    validateExtensionSettingsSecretChanges(mutation.ref, mutation.secrets);
+    validateExtensionSettingsSecretChanges(mutation.ref, secrets);
   }
 }
 
@@ -262,7 +271,13 @@ export class ExtensionSettingsStore {
     }
 
     const secretSet: Record<string, boolean> = {};
-    for (const field of secretFields) secretSet[field] = this.secretStore.has(ref, field);
+    for (const field of secretFields) {
+      const owned = this.secretStore.has(ref, field);
+      // The public projection proves only presence. A declared legacy secret
+      // remains runtime-usable before its first project mutation, but its bytes
+      // never enter this result or project.yaml.
+      secretSet[field] = owned || (!hasProjectRecord && typeof options.legacySecrets?.[field] === "string");
+    }
     return { ...(record?.enabled !== undefined ? { enabled: record.enabled } : {}), hasProjectRecord, values, sources, secretSet };
   }
 
@@ -281,7 +296,10 @@ export class ExtensionSettingsStore {
     const effective = this.getEffective(ref, defaults, options);
     const values = { ...effective.values };
     for (const field of options.secretFields ?? []) {
-      const value = this.secretStore.getForRuntime(ref, field);
+      const owned = this.secretStore.getForRuntime(ref, field);
+      // Owner-only data always wins. Legacy fallback exists solely before a
+      // project target record is created and only for caller-declared fields.
+      const value = owned ?? (!effective.hasProjectRecord ? options.legacySecrets?.[field] : undefined);
       if (value !== undefined) values[field] = value;
     }
     return values;
@@ -344,11 +362,17 @@ export class ExtensionSettingsStore {
     // this order could leave durable secret changes with no public rollback.
     this.projectConfigStore.mutate(draft => draft.setExtensionSettings(candidate));
 
-    const secretMutations = mutations.flatMap(mutation =>
-      mutation.secrets && Object.keys(mutation.secrets).length > 0
-        ? [{ ref: mutation.ref, changes: mutation.secrets }]
-        : [],
-    );
+    const secretMutations = mutations.flatMap(mutation => {
+      const key = extensionSettingsTargetKey(mutation.ref);
+      // Transfer declared legacy secrets exactly when project ownership begins.
+      // An explicit replacement or clear in this request wins over the legacy
+      // snapshot, so a clear cannot be resurrected by fallback data.
+      const changes = {
+        ...(current.targets[key] === undefined ? mutation.legacySecrets : {}),
+        ...mutation.secrets,
+      };
+      return Object.keys(changes).length > 0 ? [{ ref: mutation.ref, changes }] : [];
+    });
     try {
       // Always publish the envelope. Otherwise a public-only endpoint change
       // would leave a stale secret identity that runtime could not safely pair.

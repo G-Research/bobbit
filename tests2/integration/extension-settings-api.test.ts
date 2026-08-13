@@ -60,12 +60,15 @@ function target(body: any): any {
 	return targetByRef(body, "provider", PROVIDER_ID);
 }
 
-function runtimeProviderIds(gateway: any, projectId: string): string[] {
+function runtimeProviders(gateway: any, projectId: string): any[] {
 	const registry = gateway.sessionManager.lifecycleHub?.registry;
 	expect(registry, "gateway lifecycle hub exposes the live project resolver").toBeTruthy();
 	return registry.listProviders(projectId)
-		.filter((provider: any) => provider.packRoot?.endsWith(PACK_ID))
-		.map((provider: any) => provider.id);
+		.filter((provider: any) => provider.packRoot?.endsWith(PACK_ID));
+}
+
+function runtimeProviderIds(gateway: any, projectId: string): string[] {
+	return runtimeProviders(gateway, projectId).map((provider: any) => provider.id);
 }
 
 function writeFixturePack(headquartersDir: string): void {
@@ -364,29 +367,59 @@ test.describe("extension settings API", () => {
 		const grantsBefore = await readJson(await apiFetch(`/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`));
 
 		const legacyUrl = "https://legacy-hindsight.example.test";
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, autoRecall: false, apiKey: SECRET_A });
+		const retiredSecret = "RETIRED_LLM_KEY_MUST_NEVER_ESCAPE";
+		const undeclaredSecret = "UNDECLARED_KEY_MUST_NEVER_ESCAPE";
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), {
+			externalUrl: legacyUrl,
+			autoRecall: false,
+			apiKey: SECRET_A,
+			llmApiKey: retiredSecret,
+			undeclaredCredential: undeclaredSecret,
+		});
 		// PackStore writes are deliberately out-of-band. Exercise the same cache
 		// invalidation and lazy resolver rebuild that a Marketplace mutation uses.
 		await notifyPackFilesystemMutation(initialServerPackOrder);
 		const beforeRecord = target(await settings(projectA.id));
 		expect(beforeRecord.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "legacy" });
-		expect(runtimeProviderIds(gateway, projectA.id)).toContain(PROVIDER_ID);
+		expect(beforeRecord.fields.find((field: any) => field.key === "apiKey")).toMatchObject({ secretSet: true });
+		expect(JSON.stringify(beforeRecord)).not.toContain(SECRET_A);
+		expect(JSON.stringify(beforeRecord)).not.toContain(retiredSecret);
+		expect(JSON.stringify(beforeRecord)).not.toContain(undeclaredSecret);
+		const legacyRuntime = runtimeProviders(gateway, projectA.id).find((provider: any) => provider.id === PROVIDER_ID);
+		expect(legacyRuntime?.config).toMatchObject({ externalUrl: legacyUrl, autoRecall: false, apiKey: SECRET_A });
+		expect(legacyRuntime?.config).not.toHaveProperty("llmApiKey");
+		expect(legacyRuntime?.config).not.toHaveProperty("undeclaredCredential");
 
-		// A partial first save adopts the exact legacy snapshot before its explicit
-		// project mutation. Runtime activation and the settings projection agree.
+		// A partial first save transfers declared public and secret values to their
+		// project/owner-only stores in the same paired generation.
 		const aInitial = await settings(projectA.id);
 		const aSaved = await patchTarget(projectA.id, aInitial.revision, { requiredName: "project-a" });
 		expect(aSaved.status).toBe(200);
 		const aSavedBody = await readJson(aSaved);
 		expect(aSavedBody.target.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "project" });
 		expect(aSavedBody.target.fields.find((field: any) => field.key === "autoRecall")).toMatchObject({ value: false, source: "project" });
+		expect(aSavedBody.target.fields.find((field: any) => field.key === "apiKey")).toMatchObject({ secretSet: true });
 		expect(JSON.stringify(aSavedBody)).not.toContain(SECRET_A);
-		expect(fs.readFileSync(path.join(projectA.rootPath, ".bobbit", "config", "project.yaml"), "utf8")).not.toContain(SECRET_A);
-		expect(runtimeProviderIds(gateway, projectA.id)).toContain(PROVIDER_ID);
+		const projectYaml = fs.readFileSync(path.join(projectA.rootPath, ".bobbit", "config", "project.yaml"), "utf8");
+		expect(projectYaml).not.toContain(SECRET_A);
+		expect(projectYaml).not.toContain(retiredSecret);
+		expect(projectYaml).not.toContain(undeclaredSecret);
+		const ownedRuntime = runtimeProviders(gateway, projectA.id).find((provider: any) => provider.id === PROVIDER_ID);
+		expect(ownedRuntime?.config).toMatchObject({ externalUrl: legacyUrl, apiKey: SECRET_A });
+		expect(ownedRuntime?.config).not.toHaveProperty("llmApiKey");
+		expect(ownedRuntime?.config).not.toHaveProperty("undeclaredCredential");
 
-		// A clear stays clear in the project row; it must never fall back to the
-		// old pack-scoped value after ownership has transferred.
-		const aCleared = await patchTarget(projectA.id, aSavedBody.revision, { externalUrl: null });
+		// An explicit clear wins over the first-generation legacy transfer and the
+		// target can never fall back to the retired PackStore record afterwards.
+		const aClearedSecret = await patchTarget(projectA.id, aSavedBody.revision, { apiKey: null });
+		expect(aClearedSecret.status).toBe(200);
+		const aClearedSecretBody = await readJson(aClearedSecret);
+		expect(aClearedSecretBody.target.fields.find((field: any) => field.key === "apiKey")).toMatchObject({ secretSet: false });
+		const clearedRuntime = runtimeProviders(gateway, projectA.id).find((provider: any) => provider.id === PROVIDER_ID);
+		expect(clearedRuntime?.config).not.toHaveProperty("apiKey");
+
+		// A public clear likewise stays clear in the project row.
+		const aCleared = await patchTarget(projectA.id, aClearedSecretBody.revision, { externalUrl: null });
 		expect(aCleared.status).toBe(200);
 		const aClearedBody = await readJson(aCleared);
 		expect(aClearedBody.target).toMatchObject({ configuration: { state: "requires-config", missing: ["externalUrl"] } });
