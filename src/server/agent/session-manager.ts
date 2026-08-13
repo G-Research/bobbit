@@ -7587,6 +7587,10 @@ export class SessionManager {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
 			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
+			// Manual recovery belongs only to an explicit Retry's newly accepted
+			// durable row. Automatic retries keep their bounded budget, whether
+			// they consume ordinary recovered work or redrive a verifier's same row.
+			const manualRecoveryRequired = acceptedRetry !== undefined;
 			await this.dispatchDirectPrompt(
 				session,
 				retryText,
@@ -7599,7 +7603,7 @@ export class SessionManager {
 				acceptedRetry?.id ?? recoveredVerifierRow?.id,
 				undefined,
 				recoveredVerifierRow?.streamingBehavior,
-				!recoveredVerifierRow,
+				manualRecoveryRequired,
 			);
 		} else {
 			// Fallback (e.g. session predates error tracking)
