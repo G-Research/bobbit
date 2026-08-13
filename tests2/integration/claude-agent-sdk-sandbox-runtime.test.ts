@@ -288,7 +288,7 @@ describe("Claude Agent SDK sandbox runtime", () => {
 				query: (() => { queryCalls++; throw new Error("host SDK must not start"); }) as never,
 				clock: { now: () => 0, setTimeout, setInterval, clearTimeout, clearInterval },
 			});
-			await expect(bridge.start()).rejects.toMatchObject({ code: "CLAUDE_AGENT_SDK_UNAVAILABLE", message: expect.not.stringContaining(OAUTH) });
+			await expect(bridge.start()).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: expect.not.stringContaining(OAUTH) });
 		}
 		expect(queryCalls).toBe(0);
 	});

@@ -19,6 +19,7 @@ import {
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import type { ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
+import { ClaudeAgentSdkUnavailableError, normalizeClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
 import { createClaudeSdkDockerSpawn, isSandboxContainerCwd, type ClaudeSdkDockerSpawn } from "./docker-exec-spawn.js";
 
@@ -40,12 +41,20 @@ export interface ClaudeAgentSdkSandboxLaunch {
 	oauthAccessToken: string;
 }
 
+/** A provider-owned compaction boundary for the SessionManager coordinator. */
+export interface ClaudeSdkPreCompactObservation {
+	readonly source: "claude-agent-sdk";
+	readonly trigger?: string;
+	/** SDK custom instructions are a provider summary, not the lost transcript span. */
+	readonly summary?: string;
+}
+
 export interface ClaudeAgentSdkBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-agent-sdk";
 	/** Created after sandbox setup; contains only the current per-process OAuth access token. */
 	claudeSdkSandboxLaunch?: ClaudeAgentSdkSandboxLaunch;
 	claudeAgentSdkSessionId?: string;
-	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
+	onBeforeCompact?: (input: ClaudeSdkPreCompactObservation) => Promise<void>;
 	/** Session-local Bobbit MCP surface. Direct bridge tests receive an equally strict empty surface. */
 	claudeSdkToolSurface?: ClaudeSdkToolSurface;
 }
@@ -60,13 +69,7 @@ export interface ClaudeAgentSdkBridgeDeps {
 	createDockerSpawn?: (input: ClaudeSdkDockerSpawn) => ReturnType<typeof createClaudeSdkDockerSpawn>;
 }
 
-export class ClaudeAgentSdkUnavailableError extends Error {
-	readonly code = "CLAUDE_AGENT_SDK_UNAVAILABLE";
-	constructor(message = "Claude Agent SDK is unavailable") {
-		super(message);
-		this.name = "ClaudeAgentSdkUnavailableError";
-	}
-}
+export { ClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 
 const CLAUDE_SDK_FIXED_TOKEN_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 const CLAUDE_SDK_EFFORT_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
@@ -249,9 +252,8 @@ class AsyncInputQueue implements AsyncIterable<SDKUserMessage> {
 	}
 }
 
-function errorMessage(error: unknown): string {
-	const raw = error instanceof Error ? error.message : String(error);
-	return raw.replace(/(token|secret|key|authorization)\s*[:=]\s*[^\s,;]+/ig, "$1=<redacted>").slice(0, 500);
+function boundedString(value: unknown, maxLength = 2_000): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value.slice(0, maxLength) : undefined;
 }
 
 function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
@@ -340,7 +342,16 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				? this.options.initialModel.slice("claude-agent-sdk/".length) : undefined;
 			const preCompact = this.options.onBeforeCompact ? [{ hooks: [async (input: unknown) => {
 				const compact = input as import("@anthropic-ai/claude-agent-sdk").PreCompactHookInput;
-				await this.options.onBeforeCompact?.({ summary: compact.custom_instructions ?? undefined });
+				// This is a provider-owned checkpoint observation. The callback's
+				// coordinator decides persistence/refresh; do not emit Pi compaction
+				// completion events merely because the SDK is about to compact.
+				const trigger = boundedString((compact as { trigger?: unknown }).trigger, 120);
+				const summary = boundedString(compact.custom_instructions);
+				await this.options.onBeforeCompact?.({
+					source: "claude-agent-sdk",
+					...(trigger ? { trigger } : {}),
+					...(summary ? { summary } : {}),
+				});
 				return {};
 			}] }] : undefined;
 			const env = buildClaudeAgentSdkEnv(this.options);
@@ -522,7 +533,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 
 	private fail(error: unknown): void {
 		if (this.state === "failed" || this.state === "stopped") return;
-		const wrapped = error instanceof ClaudeAgentSdkUnavailableError ? error : new ClaudeAgentSdkUnavailableError(errorMessage(error));
+		const wrapped = normalizeClaudeAgentSdkUnavailableError(error);
 		this.terminalError = wrapped;
 		this.state = "failed";
 		this.rejectTerminal(wrapped);
@@ -536,7 +547,15 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		if (this.state === "failed" || this.state === "stopped") throw this.terminalError ?? new Error("Claude Agent SDK bridge stopped");
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			await Promise.race([this.ready, new Promise<void>((_, reject) => { timer = this.deps.clock.setTimeout(() => reject(new Error("Claude Agent SDK readiness timed out")), overallTimeoutMs); })]);
+			// This deadline belongs only to this caller. `startInternal()` owns the
+			// terminal startup deadline, so a short-lived steer must not poison a
+			// still-viable cold query for other callers.
+			await Promise.race([this.ready, new Promise<void>((_, reject) => {
+				timer = this.deps.clock.setTimeout(
+					() => reject(new ClaudeAgentSdkUnavailableError("Claude Agent SDK unavailable: readiness timed out")),
+					overallTimeoutMs,
+				);
+			})]);
 		} finally { if (timer) this.deps.clock.clearTimeout(timer); }
 	}
 
@@ -621,10 +640,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			}, this.deps.sessionAccess);
 			return { success: true, data: adaptSdkSessionMessages(messages) };
 		} catch (error) {
-			const message = error instanceof ClaudeAgentSdkUnavailableError
-				? error.message
-				: `SDK_SESSION_UNAVAILABLE: read session messages: ${errorMessage(error)}`;
-			return unsupported(message);
+			return unsupported(normalizeClaudeAgentSdkUnavailableError(error).message);
 		}
 	}
 	async sendCommand(): Promise<any> { return unsupported("Claude Agent SDK does not support Pi RPC commands"); }

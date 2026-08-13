@@ -14,7 +14,9 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
+	createGoal,
 	createSession,
+	deleteGoal,
 	deleteSession,
 	connectWs,
 	WsConnection,
@@ -109,6 +111,147 @@ test("/api/sessions/:id/cost REST snapshot includes cacheHitRate", async () => {
 		expect(typeof body.cacheHitRate).toBe("number");
 		expect(body.cacheHitRate).toBeGreaterThanOrEqual(0);
 		expect(body.cacheHitRate).toBeLessThanOrEqual(1);
+	}
+});
+
+test("cost_update hydration preserves the complete manager-owned usage projection", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	const manager = gateway.sessionManager as any;
+	const snapshot = {
+		inputTokens: 500,
+		outputTokens: 125,
+		cacheReadTokens: 250,
+		cacheWriteTokens: 75,
+		totalCost: null,
+		notionalCostUsd: 0.0125,
+		costBasis: "subscription-notional",
+		byModel: {
+			"claude-agent-sdk/claude-sonnet-4-6": {
+				inputTokens: 500,
+				outputTokens: 125,
+				cacheReadTokens: 250,
+				cacheWriteTokens: 75,
+				notionalCostUsd: 0.0125,
+			},
+		},
+		context: {
+			currentTokens: 875,
+			currentModel: "claude-agent-sdk/claude-sonnet-4-6",
+			highWaterTokens: 1_024,
+			highWaterModel: "claude-agent-sdk/claude-sonnet-4-6",
+			byModel: {
+				"claude-agent-sdk/claude-sonnet-4-6": {
+					contextWindow: 200_000,
+					currentTokens: 875,
+					highWaterTokens: 1_024,
+				},
+			},
+		},
+		cacheHitRate: 1 / 3,
+	};
+	const getCostUpdate = manager.getSessionCostUpdate.bind(manager);
+	const withCostInState = manager.withSessionCostInState.bind(manager);
+	manager.getSessionCostUpdate = (sessionId: string) => sessionId === targetSessionId
+		? { type: "cost_update", sessionId, cost: snapshot }
+		: getCostUpdate(sessionId);
+	// The handler must use the same projection as cost_update, not a parallel
+	// state-only reconstruction that can lose nullable/basis/context fields.
+	manager.withSessionCostInState = (sessionId: string, data: unknown) => sessionId === targetSessionId
+		? data
+		: withCostInState(sessionId, data);
+
+	let ws: WsConnection | undefined;
+	try {
+		ws = await connectWs(targetSessionId);
+		const costFrame = await ws.waitFor(
+			(m) => m.type === "cost_update" && m.sessionId === targetSessionId,
+			5_000,
+		);
+		const stateFrame = await ws.waitFor(
+			(m) => m.type === "state" && m.data?.serverCost?.costBasis === "subscription-notional",
+			5_000,
+		);
+		expect(costFrame.cost).toEqual(snapshot);
+		expect(stateFrame.data.serverCost).toEqual(costFrame.cost);
+		expect(stateFrame.data.serverCost.totalCost).toBeNull();
+
+		const cursor = ws.messageCount();
+		ws.send({ type: "get_state" });
+		const refreshedCost = await ws.waitForFrom(
+			cursor,
+			(m) => m.type === "cost_update" && m.sessionId === targetSessionId,
+			5_000,
+		);
+		const refreshedState = await ws.waitForFrom(
+			cursor,
+			(m) => m.type === "state" && m.data?.serverCost?.costBasis === "subscription-notional",
+			5_000,
+		);
+		expect(refreshedState.data.serverCost).toEqual(refreshedCost.cost);
+	} finally {
+		ws?.close();
+		manager.getSessionCostUpdate = getCostUpdate;
+		manager.withSessionCostInState = withCostInState;
+		await deleteSession(targetSessionId).catch(() => {});
+	}
+});
+
+test("session and task cost REST snapshots use the public usage projection", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	let goalId: string | undefined;
+	try {
+		const session = gateway.sessionManager.getSession(targetSessionId);
+		if (!session?.projectId) throw new Error("Test session has no project");
+		gateway.sessionManager.getCostTracker(session.projectId).recordAuthoritativeUsage(targetSessionId, {
+			sourceResultId: `rest-public-projection-${targetSessionId}`,
+			costBasis: "subscription-notional",
+			total: { inputTokens: 500, outputTokens: 125, cacheReadTokens: 250, cacheWriteTokens: 75, notionalCostUsd: 0.0125 },
+			modelUsage: {
+				"claude-agent-sdk/claude-sonnet-4-6": {
+					inputTokens: 500, outputTokens: 125, cacheReadTokens: 250, cacheWriteTokens: 75,
+					notionalCostUsd: 0.0125, contextTokens: 875, contextWindow: 200_000,
+				},
+			},
+		});
+
+		const sessionResponse = await apiFetch(`/api/sessions/${targetSessionId}/cost`);
+		expect(sessionResponse.status).toBe(200);
+		const sessionCost = await sessionResponse.json();
+		expect(sessionCost).toMatchObject({
+			inputTokens: 500,
+			totalCost: null,
+			notionalCostUsd: 0.0125,
+			costBasis: "subscription-notional",
+		});
+		expect(sessionCost).not.toHaveProperty("appliedSourceResultIds");
+
+		const goal = await createGoal({ title: "Public task cost projection" });
+		goalId = goal.id;
+		const taskResponse = await apiFetch(`/api/goals/${goalId}/tasks`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Expose public cost", type: "implementation" }),
+		});
+		expect(taskResponse.status).toBe(201);
+		const task = await taskResponse.json();
+		const assignResponse = await apiFetch(`/api/tasks/${task.id}/assign`, {
+			method: "POST",
+			body: JSON.stringify({ sessionId: targetSessionId }),
+		});
+		expect(assignResponse.status).toBe(200);
+
+		const taskCostResponse = await apiFetch(`/api/tasks/${task.id}/cost`);
+		expect(taskCostResponse.status).toBe(200);
+		const taskCost = await taskCostResponse.json();
+		expect(taskCost).toMatchObject({
+			inputTokens: 500,
+			totalCost: null,
+			notionalCostUsd: 0.0125,
+			costBasis: "subscription-notional",
+		});
+		expect(taskCost).not.toHaveProperty("appliedSourceResultIds");
+	} finally {
+		if (goalId) await deleteGoal(goalId).catch(() => {});
+		await deleteSession(targetSessionId).catch(() => {});
 	}
 });
 

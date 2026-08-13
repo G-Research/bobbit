@@ -64,6 +64,12 @@ import {
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
 import {
+	beginClaudeSdkCompactionCheckpoint,
+	claudeSdkCompactionSpan,
+	completeClaudeSdkCompactionCheckpoint,
+	mergeClaudeSdkCompactionCheckpoints,
+} from "./claude-sdk-compaction-checkpoint.js";
+import {
 	SessionStore,
 	normalizePersistedInFlightSteers,
 	type InFlightSteerRecord,
@@ -82,7 +88,7 @@ import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, 
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
-import { CostTracker, type SessionCost } from "./cost-tracker.js";
+import { CostTracker, type AuthoritativeUsageRecord, type SessionUsageSnapshot } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -627,21 +633,8 @@ function redactDispatchFailureReason(reason: string, providerAuthFailure: boolea
  *
  * See goal `goal-fix-lastac-724b3421` for the bug this guards against.
  */
-/**
- * Semantic SDK child-work frames are transport-only at the root-session
- * boundary. They belong to an existing parent tool card, not to the root turn:
- * never let their nested message/tool payloads advance root activity, lifecycle,
- * queue, status, transcript, or accounting state.
- */
-export function isClaudeSdkSubagentWorkEvent(event: unknown): event is { type: "claude_sdk_subagent_work" } {
-	return !!event
-		&& typeof event === "object"
-		&& !Array.isArray(event)
-		&& (event as { type?: unknown }).type === "claude_sdk_subagent_work";
-}
-
 export function isUserVisibleActivity(event: any): boolean {
-	if (!event || typeof event.type !== "string" || isClaudeSdkSubagentWorkEvent(event)) return false;
+	if (!event || typeof event.type !== "string") return false;
 	switch (event.type) {
 		case "message_update":
 		case "message_end":
@@ -2839,6 +2832,7 @@ export class SessionManager {
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
+			beginClaudeSdkCompaction: (sessionId, input) => this.beginClaudeSdkCompaction(sessionId, input),
 			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 			requestToolGrant: (sessionId, toolName, toolGroup, options) => this.requestToolGrant(sessionId, toolName, toolGroup, options),
 			costTracker: resolvedCostTracker,
@@ -3291,12 +3285,12 @@ export class SessionManager {
 		throw new Error("No cost tracker available");
 	}
 
-	/** Return persisted cumulative cost for a session, without creating a zero-cost record. */
-	getSessionCost(sessionId: string): SessionCost | undefined {
+	/** Return the authoritative persisted usage projection without creating a zero record. */
+	getSessionCost(sessionId: string): SessionUsageSnapshot | undefined {
 		const live = this.sessions.get(sessionId);
 		if (live) {
 			try {
-				const cost = this.resolveCostTracker(live).getSessionCost(sessionId);
+				const cost = this.resolveCostTracker(live).getSessionUsage(sessionId);
 				if (cost) return cost;
 			} catch {
 				// Fall through to persisted/store scans below.
@@ -3306,7 +3300,7 @@ export class SessionManager {
 		const persisted = this.getPersistedSession(sessionId);
 		if (persisted?.projectId || !this.projectContextManager) {
 			try {
-				const cost = this.getCostTracker(persisted?.projectId).getSessionCost(sessionId);
+				const cost = this.getCostTracker(persisted?.projectId).getSessionUsage(sessionId);
 				if (cost) return cost;
 			} catch {
 				// Fall through to cross-project scan.
@@ -3315,7 +3309,7 @@ export class SessionManager {
 
 		if (this.projectContextManager) {
 			for (const ctx of this.projectContextManager.all()) {
-				const cost = ctx.costTracker.getSessionCost(sessionId);
+				const cost = ctx.costTracker.getSessionUsage(sessionId);
 				if (cost) return cost;
 			}
 		}
@@ -3343,7 +3337,8 @@ export class SessionManager {
 			sessionId,
 			goalId: live?.goalId ?? persisted?.goalId,
 			taskId: this.resolveTaskIdForSession(sessionId),
-			cost,
+			// The usage transport slice widens this legacy protocol field additively.
+			cost: cost as any,
 		};
 	}
 
@@ -5515,11 +5510,6 @@ export class SessionManager {
 		event: any,
 		opts?: { replacementOwnedTerminal?: boolean; deferQueueDrain?: boolean },
 	): void {
-		// Embedded SDK child work is sequenced and broadcast like any live frame,
-		// but it is deliberately not a root agent event. In particular, its nested
-		// `message`/tool payload must not settle prompt delivery or alter root state.
-		if (isClaudeSdkSubagentWorkEvent(event)) return;
-
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
 		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
@@ -7158,10 +7148,7 @@ export class SessionManager {
 
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
 		if (isRetryableAgentEnd(event)) return;
-		// Child-work frames already contain the server-owned, bounded semantic
-		// projection. Preserve their opaque source metadata verbatim; generic tool
-		// truncation is for root transcript rows and must not rewrite this audit data.
-		emitSessionEvent(session, isClaudeSdkSubagentWorkEvent(event) ? event : truncateLargeToolContent(event));
+		emitSessionEvent(session, truncateLargeToolContent(event));
 	}
 
 	/**
@@ -7169,42 +7156,55 @@ export class SessionManager {
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
-		// G10b preserves child usage/cost as opaque source metadata. G8 remains the
-		// sole accounting owner, so nested work must never enter this root tracker.
-		if (isClaudeSdkSubagentWorkEvent(event)) return;
-		// Message updates repeat the same usage on every streaming chunk, so only
-		// completed assistant messages are accounted. Pi 0.81 additionally reports
-		// summarizer usage once on each completed compaction event.
+		// SDK accounting has exactly one authority: the root result annotation
+		// emitted by its translator. Never fall through to assistant message_end;
+		// those frames can be streamed, replayed, or belong to an SDK child.
+		if (session.runtime === "claude-agent-sdk") {
+			if (!this._sessionWriterIsCurrent(session)) return;
+			const record = event?.claudeSdkUsage as AuthoritativeUsageRecord | undefined;
+			// A root result is an authoritative post-compaction observation. Its
+			// completion still requires changed official history (never the frame alone).
+			if (record && session.rpcClient) void this.reconcileClaudeSdkCompaction(session);
+			if (!record || typeof record.sourceResultId !== "string" || !record.total || !record.modelUsage
+				|| (record.costBasis !== "subscription-notional" && record.costBasis !== "api-notional" && record.costBasis !== "unknown")) return;
+			const outcome = this.resolveCostTracker(session).recordAuthoritativeUsage(
+				session.id,
+				record,
+				session.goalId ?? session.teamGoalId,
+			);
+			// A detached/replaced bridge may finish while the synchronous ledger write
+			// is in flight. It is permitted to leave its durable duplicate marker, but
+			// it must not publish a stale snapshot.
+			if (!outcome.applied || !this._sessionWriterIsCurrent(session)) return;
+			broadcast(session.clients, {
+				type: "cost_update",
+				sessionId: session.id,
+				goalId: session.goalId,
+				taskId: this.resolveTaskIdForSession(session.id),
+				cost: outcome.snapshot as any,
+			});
+			return;
+		}
+
+		// Pi's established completed-assistant + completed-compaction accounting is
+		// intentionally byte-for-byte unchanged.
 		const assistantMessageEnd = event.type === "message_end" && event.message?.role === "assistant";
 		const compactionEnd = event.type === "compaction_end" || event.type === "auto_compaction_end";
 		if (!assistantMessageEnd && !compactionEnd) return;
-		const usage = assistantMessageEnd
-			? (event.message?.usage ?? event.usage)
-			: (event.result?.usage ?? event.usage);
+		const usage = assistantMessageEnd ? (event.message?.usage ?? event.usage) : (event.result?.usage ?? event.usage);
 		if (!usage) return;
-
-		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)
-		const costValue = typeof usage.cost === "number" ? usage.cost
-			: typeof usage.cost?.total === "number" ? usage.cost.total
-			: undefined;
+		const costValue = typeof usage.cost === "number" ? usage.cost : typeof usage.cost?.total === "number" ? usage.cost.total : undefined;
 		if (costValue === undefined) return;
-
-		const sessionCostTracker = this.resolveCostTracker(session);
-		const stampGoalId = session.goalId ?? session.teamGoalId;
-		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
+		const cumulativeCost = this.resolveCostTracker(session).recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
 			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
 			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
 			cost: costValue,
-		}, stampGoalId);
-
+		}, session.goalId ?? session.teamGoalId);
 		broadcast(session.clients, {
-			type: "cost_update",
-			sessionId: session.id,
-			goalId: session.goalId,
-			taskId: this.resolveTaskIdForSession(session.id),
-			cost: cumulativeCost,
+			type: "cost_update", sessionId: session.id, goalId: session.goalId,
+			taskId: this.resolveTaskIdForSession(session.id), cost: cumulativeCost,
 		});
 	}
 
@@ -7494,9 +7494,14 @@ export class SessionManager {
 				await this._restoreSessionCoalesced(ps);
 				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Restored SDK session: "${ps.title}" (${ps.id})`);
 			} catch (err) {
-				const msg = err instanceof Error ? (err.stack || err.message) : String(err);
+				// Provider/SDK failures may contain local paths or SDK diagnostics. The
+				// dormant capsule is user-visible and therefore receives only a stable
+				// recovery category; queues and steers remain durable on the session row.
+				const message = err instanceof ClaudeAgentSdkUnavailableError && err.message.includes("SDK_SESSION_UNAVAILABLE")
+					? err.message
+					: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK session could not be restored";
 				console.error(`[session-manager] Failed to restore SDK session "${ps.title}":`, err);
-				this.addDormantSession(ps, msg);
+				this.addDormantSession(ps, message);
 			}
 			return;
 		}
@@ -8248,6 +8253,9 @@ export class SessionManager {
 		session.promptAuthorReplayBindings = undefined;
 		session.lastKeylessPromptAuthorEnd = undefined;
 		restoring = false;
+		// Reconcile an interrupted SDK compaction from official resumed history;
+		// Pi keeps its existing JSONL replay/sidecar path untouched.
+		if (session.runtime === "claude-agent-sdk") void this.reconcileClaudeSdkCompaction(session);
 		broadcastStatus(session, "idle");
 
 		// `switch_session` replays durable user message echoes and `_consumeSteerEcho`
@@ -9124,7 +9132,9 @@ export class SessionManager {
 	 * newer-sequence request cannot be clobbered by an older completion.
 	 *
 	 * Callers must treat `data` as immutable and freshly apply in-flight overlays,
-	 * sidecar merges, truncation, ordering stamps, and serialization.
+	 * sidecar merges, truncation, ordering stamps, and serialization. SDK compaction
+	 * markers are the one exception: they are canonical, durable server records and
+	 * belong in the base snapshot so direct, live, and restored reads agree.
 	 */
 	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
 		const seq = session.eventBuffer.lastSeq;
@@ -9134,7 +9144,14 @@ export class SessionManager {
 		const promise = (async (): Promise<{ success: boolean; data?: unknown; error?: string }> => {
 			const response = await session.rpcClient.getMessages();
 			if (!response?.success) return response;
-			return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+			const data = normalizeToolResultErrorSnapshot(response.data);
+			// A reload is an authoritative SDK-history observation. Reconcile a
+			// pending provider compaction before returning its canonical snapshot.
+			await this.reconcileClaudeSdkCompaction(session, data, false);
+			const canonicalData = session.runtime === "claude-agent-sdk" && Array.isArray(data)
+				? mergeClaudeSdkCompactionCheckpoints(session.id, data)
+				: data;
+			return { ...response, data: canonicalData };
 		})();
 		session.messagesSnapshotCache = { seq, promise };
 		promise.then(
@@ -9150,6 +9167,47 @@ export class SessionManager {
 			},
 		);
 		return promise;
+	}
+
+	/** Capture an SDK-owned PreCompact boundary before the provider mutates history. */
+	private async beginClaudeSdkCompaction(sessionId: string, input: { trigger?: string }): Promise<{ span?: string }> {
+		const session = this.sessions.get(sessionId);
+		if (!session || session.runtime !== "claude-agent-sdk" || !this._sessionWriterIsCurrent(session)) return {};
+		const response = await session.rpcClient.getMessages();
+		if (!response?.success || !Array.isArray(response.data)) {
+			throw new ClaudeAgentSdkUnavailableError(response?.error ?? "SDK_SESSION_UNAVAILABLE: cannot capture compaction history");
+		}
+		const checkpoint = beginClaudeSdkCompactionCheckpoint(session.id, {
+			trigger: input.trigger,
+			messages: response.data,
+			startedAtMs: this.clock.now(),
+		});
+		if (!checkpoint) throw new Error("Unable to durably capture Claude SDK compaction checkpoint");
+		session.isCompacting = true;
+		this.emitAgentEvent(session, { type: "compaction_start", reason: checkpoint.trigger, compactionId: checkpoint.id });
+		return { span: claudeSdkCompactionSpan(checkpoint) };
+	}
+
+	/** Resolve a pending SDK checkpoint only from changed official history. */
+	private async reconcileClaudeSdkCompaction(session: SessionInfo, knownMessages?: unknown, refresh = true): Promise<boolean> {
+		if (session.runtime !== "claude-agent-sdk" || !this._sessionWriterIsCurrent(session)) return false;
+		let messages: readonly unknown[] | undefined = Array.isArray(knownMessages) ? knownMessages : undefined;
+		if (!messages) {
+			try {
+				const response = await session.rpcClient.getMessages();
+				if (!response?.success || !Array.isArray(response.data)) return false;
+				messages = response.data;
+			} catch {
+				return false;
+			}
+		}
+		if (!messages) return false;
+		const checkpoint = completeClaudeSdkCompactionCheckpoint(session.id, messages, this.clock.now());
+		if (!checkpoint || !this._sessionWriterIsCurrent(session)) return false;
+		session.isCompacting = false;
+		this.emitAgentEvent(session, { type: "compaction_end", reason: checkpoint.trigger, compactionId: checkpoint.id });
+		if (refresh) void this.refreshAfterCompaction(session);
+		return true;
 	}
 
 	/** Query the agent for its session file and save metadata to disk */
@@ -11325,7 +11383,7 @@ export class SessionManager {
 	}
 
 	/** Resolve the existing SDK bridge factory's deterministic history seam. */
-	private sdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
+	getSdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
 		if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
 		const options: ClaudeAgentSdkBridgeOptions = {
 			runtime: "claude-agent-sdk",
@@ -11364,7 +11422,7 @@ export class SessionManager {
 		return readSdkSessionInfo({
 			sessionId: ps.claudeAgentSdkSessionId,
 			cwd: ps.cwd,
-		}, this.sdkSessionAccessDeps(ps));
+		}, this.getSdkSessionAccessDeps(ps));
 	}
 
 	/** Read archived SDK history from the official SDK store; Pi remains JSONL-backed. */
@@ -11377,7 +11435,7 @@ export class SessionManager {
 				const messages = await readSdkSessionMessages({
 					sessionId: ps.claudeAgentSdkSessionId,
 					cwd: ps.cwd,
-				}, this.sdkSessionAccessDeps(ps));
+				}, this.getSdkSessionAccessDeps(ps));
 				return this.buildVisibleMessageSnapshot(id, adaptSdkSessionMessages(messages));
 			} catch (error) {
 				// Sandbox SDK history is authoritative in the container. Returning an

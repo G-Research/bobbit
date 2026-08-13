@@ -39,6 +39,8 @@ export interface ReadTranscriptParams {
 }
 
 export interface CompactToolUse {
+	/** Stable provider tool-use identity when the source supplies one. */
+	id?: string;
 	name: string;
 	inputPreview: string;
 }
@@ -66,9 +68,14 @@ export interface CompactToolResult {
 
 export interface CompactMessage {
 	index: number;
+	/** Stable provider/session message identity when available. */
+	id?: string;
 	role: string;
 	ts: string | null;
 	text: string;
+	/** SDK child-stream attribution; absent for ordinary root/Pi rows. */
+	parentToolUseId?: string;
+	parentAgentId?: string;
 	author?: MessageAuthor;
 	toolUses?: CompactToolUse[];
 	toolResults?: CompactToolResult[];
@@ -76,9 +83,14 @@ export interface CompactMessage {
 
 export interface VerboseMessage {
 	index: number;
+	/** Stable provider/session message identity when available. */
+	id?: string;
 	role: string;
 	ts: string | null;
 	content: unknown;
+	/** SDK child-stream attribution; absent for ordinary root/Pi rows. */
+	parentToolUseId?: string;
+	parentAgentId?: string;
 	author?: MessageAuthor;
 	/** Full pi-coding-agent message object (`entry.message`). Carries
 	 *  toolCallId/toolName/details/isError for toolResult rows and any
@@ -160,10 +172,10 @@ function flattenText(content: unknown): string {
 			parts.push(`[RESULT: ${body.has ? (typeof c === "string" ? c : safeStringify(c)) : ""}]`);
 		} else if (t === "text" && typeof b.text === "string") {
 			parts.push(b.text);
-		} else if (t === "tool_use") {
+		} else if (t === "tool_use" || t === "toolCall") {
 			const name = typeof b.name === "string" ? b.name : "?";
 			let input = "";
-			try { input = JSON.stringify(b.input ?? {}); } catch { input = ""; }
+			try { input = JSON.stringify(b.input ?? b.arguments ?? {}); } catch { input = ""; }
 			parts.push(`[TOOL: ${name} ${input}]`);
 		}
 	}
@@ -366,6 +378,53 @@ export function parseJsonl(content: string): RawMessage[] {
 	return messages;
 }
 
+export interface ReadTranscriptMessagesOptions {
+	/** Provider-owned normalized rows (for example official SDK history). */
+	messages: readonly Record<string, unknown>[];
+	authorContext?: TranscriptAuthorResolutionContext;
+}
+
+function timestampString(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
+	return undefined;
+}
+
+/**
+ * Run provider-owned normalized rows through the exact pagination, filter,
+ * redaction, and author projection used for Pi JSONL. This is a projection
+ * adapter only: it never writes a provider transcript or falls back to Pi.
+ */
+export async function readTranscriptMessages(
+	params: ReadTranscriptParams,
+	opts: ReadTranscriptMessagesOptions,
+): Promise<ReadTranscriptEnvelope> {
+	const jsonl = opts.messages.map((message) => JSON.stringify({
+		type: "message",
+		...(typeof message.id === "string" && message.id ? { id: message.id } : {}),
+		...(timestampString(message.timestamp) ? { ts: timestampString(message.timestamp) } : {}),
+		message,
+	})).join("\n");
+	if (jsonl) {
+		return readTranscript(params, {
+			readContent: async () => jsonl,
+			authorContext: opts.authorContext,
+		});
+	}
+
+	// Retain parameter validation even for a confirmed empty provider history.
+	await readTranscript(params, { readContent: async () => JSON.stringify({ type: "message", message: { role: "system", content: "" } }) });
+	const envelope: ReadTranscriptEnvelope = {
+		total: 0,
+		returned: 0,
+		offsetStart: -1,
+		offsetEnd: -1,
+		messages: [],
+	};
+	if (params.pattern && params.pattern.length > 0) envelope.matchCount = 0;
+	return envelope;
+}
+
 // ── Compact rendering ──
 
 function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTIONS): CompactMessage {
@@ -396,12 +455,13 @@ function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTION
 				}
 			} else if (t === "text" && typeof b.text === "string") {
 				textParts.push(b.text);
-			} else if (t === "tool_use") {
+			} else if (t === "tool_use" || t === "toolCall") {
 				const name = blockToolName(b) ?? "?";
 				let inputPreview = "";
-				try { inputPreview = JSON.stringify(b.input ?? {}).slice(0, PREVIEW_LIMIT); }
+				try { inputPreview = JSON.stringify(b.input ?? b.arguments ?? {}).slice(0, PREVIEW_LIMIT); }
 				catch { inputPreview = ""; }
-				toolUses.push({ name, inputPreview });
+				const id = blockToolUseId(b);
+				toolUses.push({ ...(id ? { id } : {}), name, inputPreview });
 			}
 		}
 		text = textParts.join("\n").trim();
@@ -410,6 +470,12 @@ function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTION
 	if (text.length > TEXT_LIMIT) text = text.slice(0, TEXT_LIMIT) + "…";
 
 	const out: CompactMessage = { index: m.index, role: m.role, ts: m.ts, text };
+	const id = firstString(m.fullMessage, ["id"]) ?? m.entryId ?? undefined;
+	const parentToolUseId = firstString(m.fullMessage, ["parentToolUseId", "parent_tool_use_id"]);
+	const parentAgentId = firstString(m.fullMessage, ["parentAgentId", "parent_agent_id"]);
+	if (id) out.id = id;
+	if (parentToolUseId) out.parentToolUseId = parentToolUseId;
+	if (parentAgentId) out.parentAgentId = parentAgentId;
 	if (m.author) out.author = m.author;
 	if (toolUses.length > 0) out.toolUses = toolUses;
 	if (toolResults.length > 0) out.toolResults = toolResults;
@@ -458,6 +524,12 @@ function toVerbose(
 	options: RenderOptions = DEFAULT_RENDER_OPTIONS,
 ): VerboseMessage {
 	const out: VerboseMessage = { index: m.index, role: m.role, ts: m.ts, content: redactVerboseContent(m.content, m, options) };
+	const id = firstString(m.fullMessage, ["id"]) ?? m.entryId ?? undefined;
+	const parentToolUseId = firstString(m.fullMessage, ["parentToolUseId", "parent_tool_use_id"]);
+	const parentAgentId = firstString(m.fullMessage, ["parentAgentId", "parent_agent_id"]);
+	if (id) out.id = id;
+	if (parentToolUseId) out.parentToolUseId = parentToolUseId;
+	if (parentAgentId) out.parentAgentId = parentAgentId;
 	if (m.author) out.author = m.author;
 	if (includeFullMessage) {
 		out.message = m.author && m.fullMessage.author !== m.author
