@@ -239,6 +239,7 @@ export function normalizeClaudeSdkRootResultUsage(input: unknown): ClaudeSdkUsag
 		const normalized: {
 			inputTokens?: number; outputTokens?: number; cacheReadTokens?: number;
 			cacheWriteTokens?: number; notionalCostUsd?: number; contextWindow?: number; maxOutputTokens?: number;
+			contextTokens?: number;
 		} = {};
 		const copy = (source: string, target: keyof typeof normalized) => {
 			const value = nonNegativeNumber(entry[source]);
@@ -251,6 +252,9 @@ export function normalizeClaudeSdkRootResultUsage(input: unknown): ClaudeSdkUsag
 		copy("costUSD", "notionalCostUsd");
 		copy("contextWindow", "contextWindow");
 		copy("maxOutputTokens", "maxOutputTokens");
+		// SDK 0.3.222 does not declare this field, but a bridge may explicitly
+		// provide it as an extension. Preserve it without inferring a value.
+		copy("contextTokens", "contextTokens");
 		normalizedModels[model] = normalized;
 	}
 	const notionalCostUsd = nonNegativeNumber(input.total_cost_usd);

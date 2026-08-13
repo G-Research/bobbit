@@ -10,6 +10,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { CostTracker, deriveCacheHitRate } from "../../src/server/agent/cost-tracker.ts";
+import { normalizeClaudeSdkRootResultUsage } from "../../src/server/agent/claude-sdk-event-translator.ts";
 import { ProjectContext } from "../../src/server/agent/project-context.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
@@ -523,6 +524,37 @@ describe("CostTracker", () => {
 			expect(second.snapshot.context.currentTokens).toBe(400);
 			expect(second.snapshot.context.highWaterTokens).toBe(800);
 			expect(second.snapshot.context.highWaterModel).toBe("claude-sonnet");
+		});
+
+		it("projects an explicit SDK contextTokens extension into the current and high-water model context", () => {
+			const tracker = new CostTracker(stateDir, memfs);
+			const normalize = (uuid: string, contextTokens: number) => normalizeClaudeSdkRootResultUsage({
+				type: "result", uuid, session_id: "sdk-session",
+				usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 2, cache_creation_input_tokens: 1 },
+				modelUsage: {
+					"claude-sonnet": {
+						inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 2, cacheCreationInputTokens: 1,
+						costUSD: 0.01, contextWindow: 200_000, maxOutputTokens: 16_384,
+						contextTokens,
+					},
+				},
+			});
+			const first = normalize("result-1", 80_000);
+			const second = normalize("result-2", 40_000);
+			expect(first).toBeDefined();
+			expect(second).toBeDefined();
+
+			tracker.recordAuthoritativeUsage("sdk", first!);
+			const outcome = tracker.recordAuthoritativeUsage("sdk", second!);
+
+			expect(outcome.snapshot.byModel["claude-sonnet"].inputTokens).toBe(20);
+			expect(outcome.snapshot.context).toMatchObject({
+				currentModel: "claude-sonnet",
+				currentTokens: 40_000,
+				highWaterModel: "claude-sonnet",
+				highWaterTokens: 80_000,
+				byModel: { "claude-sonnet": { contextWindow: 200_000, currentTokens: 40_000, highWaterTokens: 80_000 } },
+			});
 		});
 	});
 
