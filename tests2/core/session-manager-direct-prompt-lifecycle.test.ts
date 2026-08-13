@@ -31,6 +31,11 @@ const { sendDelegatePrompt } = await import("../../src/server/agent/session-setu
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const {
+	isTransientVerifierReviewError,
+	isVerifierBusyTransportError,
+	shouldRetryVerificationStep,
+} = await import("../../src/server/agent/verification-logic.ts");
+const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
@@ -1697,6 +1702,48 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		const binding = readAuthorSidecar(session.id)[0];
 		assert.equal(binding?.source, "verification");
 		assert.deepEqual(binding?.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO parks one verifier row after three busy drain rejections without duplicate delivery", async () => {
+		const manager = makeManager();
+		const busy = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+		const prompt = vi.fn(async () => ({ success: false, error: busy }));
+		const { session } = putSession(manager, {
+			id: "s-verifier-busy-drain-cap",
+			rpcClient: { prompt },
+		});
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "deliver exactly one contention-bound verifier turn");
+		const parkedOutcome = receipt.dispatched.then(
+			() => assert.fail("VERIFIER_BUSY_RACE_REPRO: bounded busy recovery must park rather than falsely acknowledge the verifier row"),
+			(error: Error) => error,
+		);
+		await flushAsyncWork();
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [receipt.rowId],
+			"VERIFIER_BUSY_RACE_REPRO: first rejection restores the original durable row");
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [receipt.rowId],
+			"VERIFIER_BUSY_RACE_REPRO: second rejection reuses rather than duplicates the durable row");
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+
+		const parkedError = await parkedOutcome;
+		const verifierOutput = `LLM review failed: ${parkedError.message}`;
+		assert.equal(prompt.mock.calls.length, 3, "VERIFIER_BUSY_RACE_REPRO: initial dispatch plus two bounded redrains only");
+		assert.equal(session.promptQueue.length, 0,
+			"VERIFIER_BUSY_RACE_REPRO: terminal parking hands the one rejected row to the verifier retry loop without stale replay");
+		assert.equal(readAuthorSidecar(session.id).filter((binding) => binding.promptId === receipt.rowId).length, 1,
+			"VERIFIER_BUSY_RACE_REPRO: repeated redrains retain one author binding for the exact row");
+		assert.equal(isVerifierBusyTransportError(verifierOutput), true);
+		assert.equal(isTransientVerifierReviewError(verifierOutput), true);
+		assert.equal(shouldRetryVerificationStep({
+			passed: false,
+			output: verifierOutput,
+			attempt: 1,
+			maxBoundedAttempts: 3,
+			isTransient: isTransientVerifierReviewError,
+		}), "retry", "VERIFIER_BUSY_RACE_REPRO: parked contention returns to the verifier's bounded retry loop");
 	});
 
 	it("VERIFIER_BUSY_RACE_REPRO keeps a verifier receipt queued behind a real streaming turn until agent_end drains its exact row", async () => {
