@@ -15,9 +15,9 @@ The pack is enabled by default. It appears in Market under **Built-in (shipped)*
 
 ## Session root, path safety, and trust
 
-The explorer root is the bound session's server-derived working directory: the session worktree when present, otherwise the session cwd. The browser cannot choose or override it. Path-bearing route requests accept only canonical relative paths with `/` separators; they reject absolute paths, drive paths, backslashes, NUL, empty or dot segments, `..`, duplicate separators, and repository metadata segments named `.git`. The root itself is represented by an empty path and displayed as **Session files**, never as an absolute path.
+The explorer opens at the bound session's server-derived working directory: the session worktree when present, otherwise the session cwd. Users can then navigate read-only to any filesystem directory accessible to the Bobbit server process. Its canonical absolute path and current relative location share one clickable breadcrumb row, with adjacent up-one-level and edit controls. Once a root is selected, path-bearing list/read/search/diff requests accept only canonical relative paths with `/` separators; they reject absolute paths, drive paths, backslashes, NUL, empty or dot segments, `..`, duplicate separators, and repository metadata segments named `.git`. Absolute paths are accepted only by explicit root navigation. The current root itself is represented by an empty relative path.
 
-The route layer fails closed if the server does not supply a working directory. For each filesystem operation it canonicalizes the root and binds it to stable device/inode identity when the filesystem provides one. If root identity is unavailable, it instead rechecks the root's directory kind, exact canonical path, and containment around operations; child and opened-file identity checks remain strict. It verifies canonical containment throughout and closes acquired handles after success, failure, or late completion. Search classifies candidates with `lstat` before traversing them. Regular-file reads use a no-follow open where the platform exposes one, then verify descriptor identity and containment before reading bytes. A detected namespace change returns a safe retryable error; an outside-root resolution is rejected without exposing its absolute path.
+The route layer fails closed if the server does not supply an initial working directory. For each filesystem operation it canonicalizes the root and binds it to stable device/inode identity when the filesystem provides one. If root identity is unavailable, it instead rechecks the root's directory kind, exact canonical path, and containment around operations; child and opened-file identity checks remain strict. It verifies canonical containment throughout and closes acquired handles after success, failure, or late completion. Search classifies candidates with `lstat` before traversing them. Regular-file reads use a no-follow open where the platform exposes one, then verify descriptor identity and containment before reading bytes. A detected namespace change returns a safe retryable error; an outside-root resolution is rejected without exposing its absolute path.
 
 These checks are pack-local defense in depth, not a formal hostile-concurrency containment guarantee. Portable Node.js does not provide one cross-platform equivalent of Linux `openat2`-style, descriptor-relative traversal, particularly across Windows reparse-point behavior. A process able to replace filesystem namespaces concurrently may still create races between portable path checks. A strict guarantee would require a server-owned, OS-native rooted filesystem broker, which the explorer does not add.
 
@@ -29,7 +29,7 @@ See [Extension Host authoring](extension-host-authoring.md#worked-example-the-fi
 
 ## Path bar
 
-The full-width path bar sits below the panel header and remains visible beside either Files or Preview. Its breadcrumb strip stays on one line, scrolls horizontally, and ellipsizes long segments with the complete segment available as a tooltip.
+The full-width breadcrumb row is the panel's only path chrome and remains visible beside either Files or Preview. It stays on one line, scrolls horizontally, and ellipsizes long segments with the complete absolute path available as a tooltip.
 
 ### Breadcrumb navigation
 
@@ -107,12 +107,14 @@ Outside a Git worktree the control is disabled with an accessible reason and nor
 
 Right-click any tree row, or press `Shift+F10` or the Context Menu key on a focused row, to open **Path actions**. The menu targets files, directories, symlinks, special entries, and virtual deleted paths without changing selection, roving focus, expansion, or preview. Pointer menus open at the pointer; keyboard menus open next to the row. The menu is clamped to the viewport.
 
-The menu contains only:
+For real directories, the menu starts with **Set root**, which makes that directory the explorer root and refreshes the path breadcrumb and tree. Virtual deleted directories cannot be selected as roots.
+
+The menu also contains:
 
 - **Copy relative path** — the complete canonical `/`-separated relative path; and
-- **Copy filename** — the final path segment, including its extension.
+- **Copy filename** (or **Copy folder name**) — the final path segment, including its extension when present.
 
-It never copies an absolute path, display ellipsis, or rename source path.
+Copy actions never use an absolute path, display ellipsis, or rename source path.
 
 | Key | Behavior |
 |---|---|
@@ -167,7 +169,7 @@ Deleted paths no longer present on disk are represented by virtual tree entries 
 
 ## Refresh and restored state
 
-**Refresh explorer** recomputes the root listing, Git status, expanded directory listings, selected preview, and any active search. It preserves valid expansion and selection where possible and prunes paths that disappeared. Generation checks prevent old list, path, search, and preview responses from repainting newer state.
+**Refresh panel** in the containing tab controls recomputes the root listing, Git status, expanded directory listings, selected preview, and any active search. It preserves valid expansion and selection where possible and prunes paths that disappeared. Generation checks prevent old list, path, search, and preview responses from repainting newer state.
 
 The panel also subscribes to the bound session's status. The first observed `idle` triggers one refresh; later non-idle-to-`idle` transitions do the same, making agent-created changes visible without a filesystem watcher. Consecutive `idle` events do not repeatedly refresh.
 
@@ -177,11 +179,11 @@ Within the current page, the singleton panel instance is cached per session. Reo
 
 ## Responsive and accessibility behavior
 
-Below a 680 px panel width, Files and Preview become separate panes. Opening a file shows Preview; **Back to files** restores the originating tree row or active search input. The panel header and path bar stay visible in both panes.
+Below a 680 px panel width, Files and Preview become separate panes. Opening a file shows Preview; **Back to files** restores the originating tree row or active search input. The unified breadcrumb row stays visible in both panes.
 
-Below 480 px, only the visible **Session files** subtitle is hidden. Below 360 px, Changed and Collapse become icon-only but retain full accessible names and tooltips. Below 300 px, Search takes its own toolbar row rather than shrinking below 120 px. The toolbar has no fixed height, so wrapped controls and 200% zoom are not clipped.
+Below 480 px, the breadcrumb collapses to its final directory segment. Below 360 px, Changed and Collapse become icon-only but retain full accessible names and tooltips. Below 300 px, Search takes its own toolbar row rather than shrinking below 120 px. The toolbar has no fixed height, so wrapped controls and 200% zoom are not clipped.
 
-Native breadcrumb and toolbar buttons remain keyboard accessible. Search owns composite focus while results are active. Polite live output announces counts and successful actions; actionable path, search, and clipboard failures use assertive alerts. Absolute paths are not placed in visible or accessible names.
+Native breadcrumb and toolbar buttons remain keyboard accessible. Search owns composite focus while results are active. Polite live output announces counts and successful actions; actionable path, search, and clipboard failures use assertive alerts. The canonical session root is the only absolute path placed in visible or accessible UI; file operations, search results, previews, and copy actions remain relative to it.
 
 ## Bounded work
 
