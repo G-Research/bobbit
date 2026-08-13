@@ -304,7 +304,7 @@ export class PromptQueue {
 		return this.queue.length === 0;
 	}
 
-	reorderByIds(messageIds: string[]): void {
+	reorderByIds(messageIds: string[], opts?: { resequenceReliableLanes?: boolean }): void {
 		const byId = new Map(this.queue.map(m => [m.id, m]));
 		const reordered: QueuedMessage[] = [];
 		const seen = new Set<string>();
@@ -316,6 +316,20 @@ export class PromptQueue {
 			if (!seen.has(msg.id)) reordered.push(msg);
 		}
 		this.queue = reordered;
+		if (opts?.resequenceReliableLanes) this.resequenceReliableLanes();
+	}
+
+	/**
+	 * Make an explicit visible reorder durable for lane-aware dequeue. Reassign
+	 * only the queued rows' existing sequence slots: lane membership and the
+	 * independently ordered in-flight ledger remain untouched.
+	 */
+	private resequenceReliableLanes(): void {
+		for (const targetTurn of ["continuation", "next-turn"] as const) {
+			const rows = this.queue.filter((row) => row.targetTurn === targetTurn && validSequence(row.sequence));
+			const sequenceSlots = rows.map((row) => row.sequence!).sort((left, right) => left - right);
+			for (let index = 0; index < rows.length; index++) rows[index].sequence = sequenceSlots[index];
+		}
 	}
 
 	/**

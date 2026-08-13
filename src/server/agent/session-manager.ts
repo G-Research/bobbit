@@ -1617,8 +1617,9 @@ export function reconcilePersistedIntentRestore(
 
 /**
  * Merge the persisted queue and dispatch ledger into one occurrence projection.
- * Queue rows win duplicate IDs, while accepted occurrence time and lane sequence
- * keep rows stable as an occurrence moves from the queue into the ledger.
+ * Queue rows win duplicate IDs. Each durable owner's order is authoritative:
+ * explicit queue reorder and in-flight dispatch order must survive projection.
+ * Accepted time is used only to merge the two already-ordered streams.
  */
 function projectReliableDeliveryOutbox(
 	queued: ReliableQueuedMessage[],
@@ -1647,16 +1648,22 @@ function projectReliableDeliveryOutbox(
 			suppressTitleGen: record.suppressTitleGen,
 		}));
 
-	return [...queued, ...inFlight].sort((left, right) => {
-		const created = (left.createdAt ?? 0) - (right.createdAt ?? 0);
-		if (created !== 0) return created;
-		if (left.targetTurn === right.targetTurn) {
-			const sequence = (left.sequence ?? Number.MAX_SAFE_INTEGER)
-				- (right.sequence ?? Number.MAX_SAFE_INTEGER);
-			if (sequence !== 0) return sequence;
+	const projection: ReliableQueuedMessage[] = [];
+	let queuedIndex = 0;
+	let inFlightIndex = 0;
+	while (queuedIndex < queued.length && inFlightIndex < inFlight.length) {
+		const queuedRow = queued[queuedIndex];
+		const inFlightRow = inFlight[inFlightIndex];
+		if ((queuedRow.createdAt ?? 0) <= (inFlightRow.createdAt ?? 0)) {
+			projection.push(queuedRow);
+			queuedIndex += 1;
+		} else {
+			projection.push(inFlightRow);
+			inFlightIndex += 1;
 		}
-		return left.id.localeCompare(right.id);
-	});
+	}
+	projection.push(...queued.slice(queuedIndex), ...inFlight.slice(inFlightIndex));
+	return projection;
 }
 
 function batchPromptId(prefix: string, rows: QueuedMessage[]): string {
@@ -6458,21 +6465,27 @@ export class SessionManager {
 	 * because the turn was torn down. The next drainQueue picks the rows up as
 	 * a steered batch via `_dispatchSteer`, redispatching exactly once.
 	 */
+	/** Mark only modern exact attempts ambiguous; legacy recovery stays at its established boundary. */
+	private _markModernInFlightAttemptsUncertain(session: SessionInfo): boolean {
+		let changed = false;
+		for (const record of (session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[]) {
+			if (record.intentId && (record.state !== "uncertain" || record.retryable !== false)) {
+				record.state = "uncertain";
+				record.retryable = false;
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
 	private _reconcileInFlightSteers(
 		session: SessionInfo,
 		opts?: { outcome?: "ambiguous" | "proven-no-start"; retargetContinuation?: boolean },
 	): void {
 		const ledger = (session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[];
 		if (opts?.outcome !== "proven-no-start") {
-			let changed = false;
+			let changed = this._markModernInFlightAttemptsUncertain(session);
 			const legacy = ledger.filter((record) => !record.intentId);
-			for (const record of ledger) {
-				if (record.intentId) {
-					record.state = "uncertain";
-					record.retryable = false;
-					changed = true;
-				}
-			}
 			// Compatibility: old ledgers have no attempt barrier and retain their
 			// established restart behavior. Modern occurrences fail closed uncertain.
 			if (legacy.length > 0) {
@@ -6657,11 +6670,11 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Reorder queued messages to match the given ID list. */
+	/** Reorder queued messages and the durable within-lane dispatch sequence. */
 	reorderQueue(sessionId: string, messageIds: string[]): void {
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
-		session.promptQueue.reorderByIds(messageIds);
+		session.promptQueue.reorderByIds(messageIds, { resequenceReliableLanes: true });
 		this.broadcastQueue(session);
 	}
 
@@ -15030,6 +15043,15 @@ export class SessionManager {
 		const session = this.sessions.get(id);
 		if (!session && !coordinator) return;
 
+		const eligible = !!coordinator || !!session && (session.status === "streaming" || session.isCompacting);
+		// Stop admission is the ambiguity boundary. Persist and project every
+		// unresolved modern attempt before replacement ownership or abort RPC can
+		// produce a terminal event. Exact late starts and proven-no-start recovery
+		// continue to settle the same ledger occurrence afterward.
+		if (eligible && session && this._markModernInFlightAttemptsUncertain(session)) {
+			this.broadcastQueue(session);
+		}
+
 		// A Stop accepted while restore has removed SessionInfo is still a real
 		// cancellation. Mark it synchronously so the active host/sandbox restore
 		// disposes its staged bridge before commit, then serialize the public call
@@ -15056,7 +15078,7 @@ export class SessionManager {
 		// Outside a replacement, an idle abort remains a no-op. During replacement,
 		// queue behind the current owner so Stop has deterministic invocation order
 		// and can never race a staged bridge commit.
-		if (session && session.status !== "streaming" && !session.isCompacting && !coordinator) return;
+		if (!eligible) return;
 		await this._coordinateSessionReplacement(id, "force-abort", (token) =>
 			this._forceAbortOwned(id, gracePeriodMs, token), {
 				coalesceKey: "force-abort",
