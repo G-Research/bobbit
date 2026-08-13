@@ -12,6 +12,7 @@ import {
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
 import { RpcBridge } from "../../src/server/agent/rpc-bridge.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { CostTracker } from "../../src/server/agent/cost-tracker.ts";
 
 const SDK_SESSION_ID = "00000000-0000-4000-8000-000000000004";
 
@@ -117,6 +118,34 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		]);
 	});
 
+	it("accounts only a canonical SDK root result once", () => {
+		const manager: any = Object.create(SessionManager.prototype);
+		const tracker = new CostTracker(path.join(root(), "usage"));
+		const session: any = {
+			id: "sdk-ledger", runtime: "claude-agent-sdk", clients: new Set(),
+			goalId: "goal-1", lifecycleGeneration: 0,
+		};
+		manager.sessions = new Map([[session.id, session]]);
+		manager._sessionRespawnGenerations = new Map();
+		manager.resolveCostTracker = () => tracker;
+		manager.resolveTaskIdForSession = () => undefined;
+		const rootResult = {
+			type: "agent_end",
+			claudeSdkUsage: {
+				sourceResultId: "sdk-uuid/result-uuid", costBasis: "subscription-notional",
+				total: { inputTokens: 12, outputTokens: 4, notionalCostUsd: 0.01 },
+				modelUsage: { "claude-sonnet": { inputTokens: 12, outputTokens: 4, contextTokens: 16, contextWindow: 200_000 } },
+			},
+		};
+		manager.trackCostFromEvent(session, rootResult);
+		manager.trackCostFromEvent(session, rootResult);
+		manager.trackCostFromEvent(session, { type: "message_end", message: { role: "assistant", usage: { inputTokens: 999, cost: 999 } } });
+		const usage = tracker.getSessionUsage(session.id)!;
+		expect(usage.inputTokens).toBe(12);
+		expect(usage.totalCost).toBeNull();
+		expect(usage.context.highWaterTokens).toBe(16);
+	});
+
 	it("keeps queued and in-flight steer rows when an unavailable SDK restore becomes dormant", async () => {
 		const session = {
 			...persistedSdkSession("sdk-unavailable"),
@@ -182,8 +211,8 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		manager.sessions.set(session.id, session);
 
 		await expect(manager.persistSessionMetadata(session)).rejects.toMatchObject({
-			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-			message: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK did not provide a valid resumable session id",
+			code: "SDK_SESSION_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE",
 		});
 		expect(update).not.toHaveBeenCalled();
 		expect(session.rpcClient.getState).toHaveBeenCalledTimes(1);

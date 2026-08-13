@@ -86,12 +86,51 @@ export interface QueuedMessage {
 	suppressTitleGen?: boolean;
 }
 
+/** Server-owned classification for the cumulative cost projection. */
+export type SessionCostBasis = "api-billed" | "api-notional" | "subscription-notional" | "unknown";
+
+/** Cumulative usage attributed to one authoritative model identity. */
+export interface ModelUsageSnapshot {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	/** A provider/SDK estimate, never evidence of an invoice. */
+	notionalCostUsd: number | null;
+}
+
+/** Authoritative context measurements for a single model. */
+export interface ModelContextSnapshot {
+	contextWindow: number | null;
+	currentTokens: number | null;
+	highWaterTokens: number | null;
+}
+
+/** Current and durable high-water context measurements. */
+export interface SessionContextSnapshot {
+	currentTokens: number | null;
+	currentModel: string | null;
+	highWaterTokens: number | null;
+	highWaterModel: string | null;
+	byModel: Record<string, ModelContextSnapshot>;
+}
+
+/**
+ * Cumulative server-owned usage projection shared by REST, `state.serverCost`,
+ * and `cost_update`. Legacy token counters remain for older consumers.
+ */
 export interface SessionCostSnapshot {
 	inputTokens: number;
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
-	totalCost: number;
+	/** Billed amount only when the provider establishes one; unknown is `null`. */
+	totalCost: number | null;
+	/** SDK/provider estimate; never render it as a billed amount. */
+	notionalCostUsd?: number | null;
+	costBasis?: SessionCostBasis;
+	byModel?: Record<string, ModelUsageSnapshot>;
+	context?: SessionContextSnapshot;
 	/** Derived on read by current servers; optional for older persisted/WS payloads. */
 	cacheHitRate?: number | null;
 }

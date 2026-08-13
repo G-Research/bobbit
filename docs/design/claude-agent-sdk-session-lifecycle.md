@@ -120,7 +120,7 @@ export interface ClaudeAgentSdkBridgeOptions extends SessionBridgeOptions {
 
 export class ClaudeAgentSdkBridge implements IRpcBridge { /* ... */ }
 export class ClaudeAgentSdkUnavailableError extends Error {
-  readonly code = "CLAUDE_AGENT_SDK_UNAVAILABLE";
+  readonly code = "SDK_SESSION_UNAVAILABLE";
 }
 ```
 
