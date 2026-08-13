@@ -66,6 +66,7 @@ import {
 	beginClaudeSdkCompactionCheckpoint,
 	claudeSdkCompactionSpan,
 	completeClaudeSdkCompactionCheckpoint,
+	mergeClaudeSdkCompactionCheckpoints,
 } from "./claude-sdk-compaction-checkpoint.js";
 import {
 	SessionStore,
@@ -9062,7 +9063,9 @@ export class SessionManager {
 	 * newer-sequence request cannot be clobbered by an older completion.
 	 *
 	 * Callers must treat `data` as immutable and freshly apply in-flight overlays,
-	 * sidecar merges, truncation, ordering stamps, and serialization.
+	 * sidecar merges, truncation, ordering stamps, and serialization. SDK compaction
+	 * markers are the one exception: they are canonical, durable server records and
+	 * belong in the base snapshot so direct, live, and restored reads agree.
 	 */
 	async getMessagesSnapshotBase(session: SessionInfo): Promise<{ success: boolean; data?: unknown; error?: string }> {
 		const seq = session.eventBuffer.lastSeq;
@@ -9074,9 +9077,12 @@ export class SessionManager {
 			if (!response?.success) return response;
 			const data = normalizeToolResultErrorSnapshot(response.data);
 			// A reload is an authoritative SDK-history observation. Reconcile a
-			// pending provider compaction before returning its visible snapshot.
+			// pending provider compaction before returning its canonical snapshot.
 			await this.reconcileClaudeSdkCompaction(session, data, false);
-			return { ...response, data };
+			const canonicalData = session.runtime === "claude-agent-sdk" && Array.isArray(data)
+				? mergeClaudeSdkCompactionCheckpoints(session.id, data)
+				: data;
+			return { ...response, data: canonicalData };
 		})();
 		session.messagesSnapshotCache = { seq, promise };
 		promise.then(

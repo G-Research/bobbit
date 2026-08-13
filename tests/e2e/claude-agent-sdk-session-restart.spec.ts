@@ -512,7 +512,9 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			const afterRestartPrompt = await gateway.sessionManager.getMessagesSnapshotBase(restoredSdk);
 			expect(afterRestartPrompt.success).toBe(true);
 			expect(JSON.stringify(afterRestartPrompt.data)).toContain("SDK_TRANSLATED:SDK_AFTER_RESTART");
-			const messagesBeforeRestartPrompt = beforeCompact.data as Array<unknown>;
+			// SDK owns the compacted history. A resumed prompt extends the canonical
+			// post-compaction checkpoint snapshot, not the provider-discarded prefix.
+			const messagesBeforeRestartPrompt = afterCompact.data as Array<unknown>;
 			const messagesAfterRestartPrompt = afterRestartPrompt.data as Array<unknown>;
 			expect(messagesAfterRestartPrompt.slice(0, messagesBeforeRestartPrompt.length)).toEqual(messagesBeforeRestartPrompt);
 
