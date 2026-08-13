@@ -1,82 +1,62 @@
 // ============================================================================
-// SIDEBAR REVEAL ON NAV
+// SIDEBAR REVEAL
 //
-// Bridges *route navigation* to the sidebar tree: when the app navigates to a
-// session or goal route — on initial deep-links AND in-app hash/route changes
-// (clicks, keyboard-nav landings, browser back/forward) — this module
-//   (1) expands every collapsed ancestor of the target row so it is rendered,
-//   (2) scrolls the row into view with `scrollIntoView({ block: "nearest" })`.
-//
-// Expansion is *ephemeral*: it only ever calls
-// `expandSidebarTreeNode(key, { explicit: false })`, which no-ops when the node
-// already has a stored preference (so an explicit user *collapse* is never
-// overwritten) and when the node's default is already expanded. Only ancestors
-// on the path to the target are touched — unrelated collapsed nodes stay put.
-//
-// The keyboard-nav model (`state.keyboardNavActiveId`, `data-nav-active`,
-// `getVisibleNavOrder`, the override-clear listener) is never mutated here — we
-// only read the DOM and flip ephemeral expansion prefs. A monotonic
-// `revealToken` guarantees a superseded navigation's in-flight rAF callbacks
-// no-op, so exactly one reveal runs per navigation.
-//
-// A session route can point at THREE different sidebar row kinds, all of which
-// carry `data-nav-id="session:<id>"` but resolve to different tree shapes:
-//   1. a `session/<id>` tree node       — team members, delegates, verifiers…
-//   2. a `team-lead/<id>` tree node      — team-lead sessions (no session node)
-//   3. a staff row under `project-staff` — staff sessions (NO tree node at all;
-//      excluded from the tree via `liveSessionsNoStaff`)
-// Resolution is therefore an ordered set of *ancestor resolvers*: each takes the
-// current tree model and returns the list of ancestor node-keys to expand
-// ephemerally, or null when it cannot resolve the target. `attemptReveal` runs
-// them in order and uses the first non-null result; if all return null it
-// retries (data still loading) and eventually no-ops gracefully.
+// Route-driven reveals persistently force-expand only the resolved target path,
+// overriding explicit collapses without disturbing unrelated tree state. The
+// desktop target control reuses the same resolver/rAF pipeline in explicit mode:
+// it also resets only the active view, restores the active keyboard row, scrolls
+// smoothly, and replays a one-shot emphasis.
 // ============================================================================
 
-import { renderApp, state } from "./state.js";
+import { renderApp, state, activeSessionId, type GatewaySession, type Goal } from "./state.js";
 import { getRouteFromHash, type AppRoute } from "./routing.js";
-import { buildSidebarTreeModel } from "./sidebar.js";
+import {
+	buildSidebarStatusSections,
+	buildSidebarTreeModel,
+	handleSidebarSearchClear,
+	materializeExplicitSidebarSessionDepth,
+} from "./sidebar.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 import { sidebarTreeKey, type SidebarTreeNodeKey } from "./sidebar-tree-builder.js";
+import {
+	archivedGoalsLoaded,
+	archivedSessionsLoaded,
+	fetchArchivedGoalsPaginated,
+	fetchArchivedSessions,
+	gatewayFetch,
+} from "./api.js";
+import {
+	resetSidebarViewFilters,
+	setSidebarStatusSectionExpanded,
+	type SidebarSessionView,
+	type SidebarStatusSectionKey,
+} from "./sidebar-view-preferences.js";
 
-/** Max retry attempts for both the model-lookup and the DOM-scroll polls.
- *
- * Each call site invokes the reveal only AFTER awaiting the relevant data load
- * (`refreshSessions` / `loadDashboardData` / `connectToSession`), so the target
- * node is normally present on the very first attempt and the row commits within
- * a frame or two. The generous bound (~0.5s at 60fps) only matters for the rare
- * deep-link case where session/goal data streams in slightly after the reveal
- * fires; it stays bounded (`revealToken` still guarantees exactly-once). */
 const MAX_ATTEMPTS = 30;
+const EMPHASIS_DURATION_MS = 680;
+const REDUCED_EMPHASIS_DURATION_MS = 240;
 
-/** The tree model shape the resolvers read (from `buildSidebarTreeModel`). */
 type SidebarTreeModel = ReturnType<typeof buildSidebarTreeModel>;
-
-/** Resolve a route target to the ordered list of ancestor node-keys that must
- *  be expanded ephemerally for the target row to render, or null when the
- *  target cannot be resolved against this model (e.g. data not loaded yet, or
- *  the route is a different row kind). */
 type AncestorResolver = (model: SidebarTreeModel) => SidebarTreeNodeKey[] | null;
 
 interface PendingReveal {
-	/** DOM `data-nav-id` of the target row (`session:<id>` / `goal:<id>`). */
 	navId: string;
-	/** Ordered ancestor resolvers; first non-null result wins. */
 	resolvers: AncestorResolver[];
+	mode?: "automatic" | "explicit";
+	sessionId?: string;
+	view?: SidebarSessionView;
 }
 
 let pending: PendingReveal | null = null;
 let revealToken = 0;
+const activeEmphasisCleanups = new WeakMap<HTMLElement, () => void>();
+let activeEmphasisCleanup: (() => void) | null = null;
 
-/** Schedule a callback on the next animation frame (falls back to setTimeout
- *  in non-DOM / test environments without `requestAnimationFrame`). */
 function nextFrame(cb: () => void): void {
 	if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => cb());
 	else setTimeout(cb, 16);
 }
 
-/** Walk a node's `parentKey` chain, returning the ordered list of ancestor
- *  node-keys (nearest-first). A `seen` guard defends against any pathological
- *  cycle in `parentKey`. Returns null when the starting node is absent. */
 function ancestorsOf(model: SidebarTreeModel, startKey: string): SidebarTreeNodeKey[] | null {
 	const node = model.flatByKey.get(startKey);
 	if (!node) return null;
@@ -93,10 +73,17 @@ function ancestorsOf(model: SidebarTreeModel, startKey: string): SidebarTreeNode
 	return out;
 }
 
-/** Resolve the reveal target for a route, or null when the route is not a
- *  session / goal destination. Session routes carry an ordered set of
- *  resolvers (session node → team-lead node → staff row); goal routes resolve
- *  via the single `goal/<id>` node walk. */
+function targetForSession(sessionId: string): PendingReveal {
+	return {
+		navId: `session:${sessionId}`,
+		resolvers: [
+			(model) => ancestorsOf(model, sidebarTreeKey({ kind: "session", sessionId })),
+			(model) => ancestorsOf(model, sidebarTreeKey({ kind: "team-lead", sessionId })),
+			() => resolveStaffAncestors(sessionId),
+		],
+	};
+}
+
 function targetForRoute(route: AppRoute): PendingReveal | null {
 	if ((route.view === "goal" || route.view === "goal-dashboard") && route.goalId) {
 		const goalId = route.goalId;
@@ -105,30 +92,12 @@ function targetForRoute(route: AppRoute): PendingReveal | null {
 			resolvers: [(model) => ancestorsOf(model, sidebarTreeKey({ kind: "goal", goalId }))],
 		};
 	}
-	if (route.view === "session" && route.sessionId) {
-		const sessionId = route.sessionId;
-		return {
-			navId: `session:${sessionId}`,
-			resolvers: [
-				// 1. Regular session node (members, delegates, verifiers, children…).
-				(model) => ancestorsOf(model, sidebarTreeKey({ kind: "session", sessionId })),
-				// 2. Team-lead node — same walk, different tree key.
-				(model) => ancestorsOf(model, sidebarTreeKey({ kind: "team-lead", sessionId })),
-				// 3. Staff row — no tree node exists; map the session id to its staff
-				//    entry and return the project + project-staff section ancestors.
-				() => resolveStaffAncestors(sessionId),
-			],
-		};
-	}
+	if (route.view === "session" && route.sessionId) return targetForSession(route.sessionId);
 	return null;
 }
 
-/** Resolve a staff session id to the ancestor node-keys of its staff row. Staff
- *  sessions are excluded from the tree, so we locate the staff entry whose
- *  `currentSessionId` matches and return its `project` + `project-staff`
- *  section keys directly. Null when it is not a (project-scoped) staff session. */
 function resolveStaffAncestors(sessionId: string): SidebarTreeNodeKey[] | null {
-	const staff = state.staffList.find((s) => s.currentSessionId === sessionId);
+	const staff = state.staffList.find((item) => item.currentSessionId === sessionId);
 	if (!staff || !staff.projectId) return null;
 	return [
 		{ kind: "project", projectId: staff.projectId },
@@ -136,15 +105,9 @@ function resolveStaffAncestors(sessionId: string): SidebarTreeNodeKey[] | null {
 	];
 }
 
-/**
- * Public entry point. Expand the collapsed ancestor tree for the route's
- * target row and scroll it into view. Safe to call from any route branch and
- * from cold-start boot; a no-op for non-session/goal routes.
- */
+/** Automatic route reveal persistently force-expands only the resolved target path. */
 export function revealSidebarTargetForRoute(route: AppRoute = getRouteFromHash()): void {
 	const target = targetForRoute(route);
-	// Bump the token on every call so any earlier in-flight reveal is cancelled
-	// (guards "exactly once per navigation").
 	const token = ++revealToken;
 	if (!target) {
 		pending = null;
@@ -154,13 +117,178 @@ export function revealSidebarTargetForRoute(route: AppRoute = getRouteFromHash()
 	attemptReveal(token, 0);
 }
 
-/** Bounded rAF poll: run the target's ancestor resolvers against the
- *  (unfiltered) tree model, expand the resolved ancestor chain ephemerally,
- *  then hand off to the scroll poll. Retries while every resolver returns null
- *  (data loading async on a deep-link, or not a staff session either). */
+function isTerminalOrArchived(session: GatewaySession | undefined): boolean {
+	return Boolean(session && (session.archived === true || session.status === "archived" || session.status === "terminated"));
+}
+
+function mergeSessionIntoCanonicalCache(session: GatewaySession): void {
+	const terminal = isTerminalOrArchived(session);
+	const target = terminal ? state.archivedSessions : state.gatewaySessions;
+	const other = terminal ? state.gatewaySessions : state.archivedSessions;
+	const index = target.findIndex(item => item.id === session.id);
+	if (index >= 0) target[index] = { ...target[index], ...session };
+	else target.push(session);
+	const duplicate = other.findIndex(item => item.id === session.id);
+	if (duplicate >= 0) other.splice(duplicate, 1);
+}
+
+function mergeGoalIntoCanonicalCache(goal: Goal): void {
+	const index = state.goals.findIndex(item => item.id === goal.id);
+	if (index >= 0) state.goals[index] = { ...state.goals[index], ...goal };
+	else state.goals.push(goal);
+}
+
+function explicitRevealIsCurrent(token: number, sessionId: string, view: SidebarSessionView): boolean {
+	return token === revealToken && activeSessionId() === sessionId && state.sidebarSessionView === view;
+}
+
+async function fetchExactSession(sessionId: string): Promise<GatewaySession | null> {
+	try {
+		const response = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+		if (!response.ok) return null;
+		const value = await response.json().catch(() => null) as GatewaySession | null;
+		return value?.id === sessionId ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+async function fetchExactGoal(goalId: string): Promise<Goal | null> {
+	try {
+		const response = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}`);
+		if (!response.ok) return null;
+		const value = await response.json().catch(() => null) as Goal | null;
+		return value?.id === goalId ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Hydrate cold terminal/archive placement without introducing another cache owner. */
+async function hydrateExplicitTarget(token: number, sessionId: string, view: SidebarSessionView): Promise<boolean> {
+	let session = state.gatewaySessions.find(item => item.id === sessionId)
+		?? state.archivedSessions.find(item => item.id === sessionId);
+	let fetched: GatewaySession | null = null;
+	if (!session || isTerminalOrArchived(session)) fetched = await fetchExactSession(sessionId);
+	if (!explicitRevealIsCurrent(token, sessionId, view)) return false;
+	if (fetched) session = fetched;
+	if (!session) return false;
+
+	if (isTerminalOrArchived(session)) {
+		await Promise.all([
+			archivedSessionsLoaded() ? Promise.resolve() : fetchArchivedSessions(),
+			archivedGoalsLoaded() ? Promise.resolve() : fetchArchivedGoalsPaginated(),
+		]);
+		if (!explicitRevealIsCurrent(token, sessionId, view)) return false;
+	}
+	// Normalize the known target too: its exact endpoint may be temporarily
+	// unavailable even though the route's canonical cache still has placement.
+	mergeSessionIntoCanonicalCache(session);
+
+	// Walk only placement references. Missing parents/leads and goal ancestors
+	// are hydrated by their exact endpoints, then merged into the same caches.
+	const seenSessions = new Set<string>();
+	const seenGoals = new Set<string>();
+	const sessionQueue = [sessionId];
+	const goalQueue: string[] = [];
+	while (sessionQueue.length > 0 || goalQueue.length > 0) {
+		while (sessionQueue.length > 0) {
+			const relatedId = sessionQueue.pop()!;
+			if (seenSessions.has(relatedId)) continue;
+			seenSessions.add(relatedId);
+			let related = state.gatewaySessions.find(item => item.id === relatedId)
+				?? state.archivedSessions.find(item => item.id === relatedId);
+			if (!related) {
+				related = await fetchExactSession(relatedId) ?? undefined;
+				if (!explicitRevealIsCurrent(token, sessionId, view)) return false;
+				if (!related) continue;
+				mergeSessionIntoCanonicalCache(related);
+			} else if (isTerminalOrArchived(related)) {
+				// This queue walks stable ids rather than either cache array, so moving a
+				// terminal relationship record between caches cannot invalidate traversal.
+				mergeSessionIntoCanonicalCache(related);
+			}
+			for (const parentId of [related.parentSessionId, related.delegateOf, related.teamLeadSessionId]) {
+				if (parentId && !seenSessions.has(parentId)) sessionQueue.push(parentId);
+			}
+			for (const relatedGoalId of [related.goalId, related.teamGoalId]) {
+				if (relatedGoalId && !seenGoals.has(relatedGoalId)) goalQueue.push(relatedGoalId);
+			}
+		}
+		while (goalQueue.length > 0) {
+			const relatedGoalId = goalQueue.pop()!;
+			if (seenGoals.has(relatedGoalId)) continue;
+			seenGoals.add(relatedGoalId);
+			let goal = state.goals.find(item => item.id === relatedGoalId);
+			if (!goal) {
+				goal = await fetchExactGoal(relatedGoalId) ?? undefined;
+				if (!explicitRevealIsCurrent(token, sessionId, view)) return false;
+				if (!goal) continue;
+				mergeGoalIntoCanonicalCache(goal);
+			}
+			if (goal.parentGoalId && !seenGoals.has(goal.parentGoalId)) goalQueue.push(goal.parentGoalId);
+			if (goal.spawnedBySessionId && !seenSessions.has(goal.spawnedBySessionId)) sessionQueue.push(goal.spawnedBySessionId);
+		}
+	}
+	return explicitRevealIsCurrent(token, sessionId, view);
+}
+
+function statusSectionForSession(sessionId: string): SidebarStatusSectionKey | null {
+	const sections = buildSidebarStatusSections();
+	if (sections.pinned.some(candidate => candidate.session.id === sessionId)) return "pinned";
+	if (sections.unread.some(candidate => candidate.session.id === sessionId)) return "unread";
+	if (sections.read.some(candidate => candidate.session.id === sessionId)) return "read";
+	return null;
+}
+
+/** Explicit desktop-control transaction for the currently open session. */
+export async function revealCurrentSidebarSession(): Promise<void> {
+	const sessionId = activeSessionId();
+	if (!sessionId) return;
+	const view = state.sidebarSessionView;
+	const token = ++revealToken;
+	pending = null;
+
+	handleSidebarSearchClear(false);
+	resetSidebarViewFilters(state, view);
+	// Install the categorical exception only after the reset setters have
+	// cleared any prior action, and before this transaction's first render.
+	state.sidebarRevealSessionId = sessionId;
+	state.keyboardNavActiveId = `session:${sessionId}`;
+	renderApp();
+
+	if (!await hydrateExplicitTarget(token, sessionId, view)) {
+		if (state.sidebarRevealSessionId === sessionId && explicitRevealIsCurrent(token, sessionId, view)) {
+			state.sidebarRevealSessionId = null;
+			renderApp();
+		}
+		return;
+	}
+	materializeExplicitSidebarSessionDepth(sessionId);
+	const target: PendingReveal = { ...targetForSession(sessionId), mode: "explicit", sessionId, view };
+	pending = target;
+
+	if (view === "status") {
+		const section = statusSectionForSession(sessionId);
+		if (!section || !explicitRevealIsCurrent(token, sessionId, view)) return;
+		setSidebarStatusSectionExpanded(state, section, true);
+		renderApp();
+		attemptScroll(target.navId, token, 0);
+		return;
+	}
+	attemptReveal(token, 0);
+}
+
+function pendingIsCurrent(token: number, current: PendingReveal): boolean {
+	if (token !== revealToken) return false;
+	if (current.mode !== "explicit") return true;
+	return Boolean(current.sessionId && current.view && explicitRevealIsCurrent(token, current.sessionId, current.view));
+}
+
 function attemptReveal(token: number, attempt: number): void {
 	if (token !== revealToken || !pending) return;
 	const current = pending;
+	if (!pendingIsCurrent(token, current)) return;
 	const model = buildSidebarTreeModel();
 	let ancestors: SidebarTreeNodeKey[] | null = null;
 	for (const resolve of current.resolvers) {
@@ -171,35 +299,71 @@ function attemptReveal(token: number, attempt: number): void {
 		if (attempt < MAX_ATTEMPTS) nextFrame(() => attemptReveal(token, attempt + 1));
 		return;
 	}
-	// Expand each resolved ancestor ephemerally (never overwrites an explicit
-	// collapse; no-ops when the node's default is already expanded).
-	for (const key of ancestors) expandSidebarTreeNode(key, { explicit: false });
+	// Both route navigation and the desktop control are explicit reveal intent:
+	// force-expand and persist only the resolved path, including nodes the user
+	// previously collapsed. The ancestor resolver keeps unrelated state intact.
+	for (const key of ancestors) {
+		expandSidebarTreeNode(key, { explicit: true });
+	}
 	renderApp();
 	attemptScroll(current.navId, token, 0);
 }
 
-/** Bounded rAF poll: locate the target row in the DOM and scroll it into
- *  view. Retries because lit commits the DOM asynchronously after `renderApp`. */
+function reducedMotionPreferred(): boolean {
+	return typeof window !== "undefined"
+		&& typeof window.matchMedia === "function"
+		&& window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function replayEmphasis(row: HTMLElement, reducedMotion: boolean): void {
+	activeEmphasisCleanup?.();
+	row.classList.remove("sidebar-reveal-emphasis", "sidebar-reveal-emphasis--reduced");
+	void row.offsetWidth;
+	row.classList.add("sidebar-reveal-emphasis");
+	if (reducedMotion) row.classList.add("sidebar-reveal-emphasis--reduced");
+
+	const cleanup = () => {
+		row.removeEventListener("animationend", onAnimationEnd);
+		if (activeEmphasisCleanups.get(row) === cleanup) {
+			activeEmphasisCleanups.delete(row);
+			row.classList.remove("sidebar-reveal-emphasis", "sidebar-reveal-emphasis--reduced");
+		}
+		if (activeEmphasisCleanup === cleanup) activeEmphasisCleanup = null;
+	};
+	const onAnimationEnd = (event: AnimationEvent) => {
+		if (event.target === row) cleanup();
+	};
+	activeEmphasisCleanups.set(row, cleanup);
+	activeEmphasisCleanup = cleanup;
+	row.addEventListener("animationend", onAnimationEnd);
+	setTimeout(cleanup, reducedMotion ? REDUCED_EMPHASIS_DURATION_MS : EMPHASIS_DURATION_MS + 80);
+}
+
 function attemptScroll(navId: string, token: number, attempt: number): void {
 	if (token !== revealToken) return;
+	const current = pending;
+	if (current?.navId === navId && !pendingIsCurrent(token, current)) return;
 	const row = navRowForId(navId);
 	if (row) {
-		row.scrollIntoView({ block: "nearest" });
+		if (current?.mode === "explicit") {
+			const reducedMotion = reducedMotionPreferred();
+			row.scrollIntoView({ block: "nearest", behavior: reducedMotion ? "auto" : "smooth" });
+			replayEmphasis(row, reducedMotion);
+		} else {
+			row.scrollIntoView({ block: "nearest" });
+		}
 		if (pending && pending.navId === navId) pending = null;
 		return;
 	}
 	if (attempt < MAX_ATTEMPTS) nextFrame(() => attemptScroll(navId, token, attempt + 1));
 }
 
-/** Locate a sidebar row by its `data-nav-id`. Scans (rather than using a CSS
- *  selector) to avoid escaping bugs with ids containing special characters —
- *  mirrors `navRowForId` in `sidebar-nav.ts`. */
 function navRowForId(navId: string): HTMLElement | null {
 	if (typeof document === "undefined") return null;
 	const sidebar = document.querySelector(".sidebar-edge");
 	if (!sidebar) return null;
-	for (const el of sidebar.querySelectorAll<HTMLElement>("[data-nav-id]")) {
-		if (el.getAttribute("data-nav-id") === navId) return el;
+	for (const element of sidebar.querySelectorAll<HTMLElement>("[data-nav-id]")) {
+		if (element.getAttribute("data-nav-id") === navId) return element;
 	}
 	return null;
 }

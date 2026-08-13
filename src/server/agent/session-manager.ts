@@ -14136,6 +14136,17 @@ export class SessionManager {
 		// and returns gracefully without force-kill.
 		void (async () => { await session.rpcClient.abort(); })().catch(() => {});
 
+		// Ask for the transcript path opportunistically while the grace timer is
+		// already running. A wedged bridge commonly blocks every RPC, not only
+		// abort(). Never await this snapshot after the grace boundary: doing so
+		// would leave the session visibly "aborting" and postpone stop() until the
+		// bridge command timeout. The durable store remains the fallback when this
+		// best-effort request does not settle in time.
+		let stateBeforeKill: any;
+		void (async () => {
+			try { stateBeforeKill = await session.rpcClient.getState(); } catch { /* use durable path */ }
+		})();
+
 		const settled = await settledPromise;
 
 		if (settled) {
@@ -14155,16 +14166,15 @@ export class SessionManager {
 		// Graceful abort didn't work — force kill and restart the agent
 		console.log(`[session-manager] Force-aborting session ${id} — killing agent process`);
 
-		// Get the agent session file before killing so we can restore.
-		// Path is in the agent's coordinate system — no translation needed.
+		// Prefer an agent-reported transcript path when the best-effort snapshot
+		// completed during the grace period. Otherwise retain the durable path and
+		// kill immediately; recovery must never wait on the bridge being replaced.
+		// Paths remain in the agent's coordinate system — no translation needed.
 		const persistedBeforeAbort = this.resolveStoreForSession(id).get(id);
 		let agentSessionFile = persistedBeforeAbort?.agentSessionFile;
-		try {
-			const stateResp = await session.rpcClient.getState();
-			if (stateResp.success && stateResp.data?.sessionFile) {
-				agentSessionFile = stateResp.data.sessionFile;
-			}
-		} catch { /* retain the durable transcript path */ }
+		if (stateBeforeKill?.success && stateBeforeKill.data?.sessionFile) {
+			agentSessionFile = stateBeforeKill.data.sessionFile;
+		}
 
 		// Kill the process. Force-abort reuses this SessionInfo for the replacement,
 		// so cancel old-bridge activity transactions before stop can resolve a stale
