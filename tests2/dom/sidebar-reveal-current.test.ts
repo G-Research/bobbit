@@ -541,12 +541,18 @@ describe("reveal current sidebar session control", () => {
 		state.showArchived = true;
 		state.searchQuery = "filtered";
 
-		const path: SidebarTreeNodeKey[] = [
+		const expansionPath: SidebarTreeNodeKey[] = [
 			{ kind: "project", projectId: "p" },
 			{ kind: "project-sessions", projectId: "p" },
 			{ kind: "session-children", sessionId: "parent", childClass: "archived-delegate" },
 		];
-		for (const key of path) setTreeExpanded(key, false);
+		const ancestorPath: SidebarTreeNodeKey[] = [
+			expansionPath[0],
+			expansionPath[1],
+			{ kind: "session", sessionId: "parent" },
+			expansionPath[2],
+		];
+		for (const key of expansionPath) setTreeExpanded(key, false);
 
 		const requests: string[] = [];
 		vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -569,7 +575,7 @@ describe("reveal current sidebar session control", () => {
 		expect([...state.gatewaySessions, ...state.archivedSessions].filter(value => value.id === "target")).toHaveLength(1);
 		expect(state.searchQuery).toBe("");
 		expect(state.showArchived).toBe(false);
-		for (const key of path) expect(isSidebarTreeExpanded(key), sidebarTreeKey(key)).toBe(true);
+		for (const key of expansionPath) expect(isSidebarTreeExpanded(key), sidebarTreeKey(key)).toBe(true);
 
 		const model = buildSidebarTreeModel();
 		const targetNode = model.flatByKey.get(sidebarTreeKey({ kind: "session", sessionId: "target" }));
@@ -580,12 +586,13 @@ describe("reveal current sidebar session control", () => {
 			actualAncestors.push(parentKey);
 			parentKey = model.flatByKey.get(parentKey)?.parentKey ?? null;
 		}
-		expect(actualAncestors).toEqual([...path].reverse().map(sidebarTreeKey));
+		expect(actualAncestors).toEqual([...ancestorPath].reverse().map(sidebarTreeKey));
 
 		const persisted = JSON.parse(localStorage.getItem(SIDEBAR_TREE_STATE_STORAGE_KEY) || "{}") as {
 			expansion?: Record<string, string>;
 		};
-		for (const key of path) expect(persisted.expansion?.[sidebarTreeKey(key)]).toBe("expanded");
+		for (const key of expansionPath) expect(persisted.expansion?.[sidebarTreeKey(key)]).toBe("expanded");
+		expect(persisted.expansion?.[sidebarTreeKey({ kind: "session", sessionId: "parent" })]).toBeUndefined();
 		expect(row.scrollIntoView).toHaveBeenCalledWith({ block: "nearest", behavior: "smooth" });
 		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(true);
 	});
