@@ -9,7 +9,7 @@
  * intended gating mechanism — mirrors `defaults/tools/tasks/extension.ts` which
  * uses `BOBBIT_GOAL_ID` the same way.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";

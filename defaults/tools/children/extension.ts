@@ -12,7 +12,7 @@
  * tool-group-policy default is `ask` so projects that override the
  * cascade get a prompt rather than a silent allow.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readGatewayCreds, apiCall, apiCallDetailed } from "../_shared/gateway.js";
 

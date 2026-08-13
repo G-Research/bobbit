@@ -10,7 +10,7 @@
  * Loaded automatically via --extension when the session has `activate_skill`
  * in its allowedTools list (or no restrictions).
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
