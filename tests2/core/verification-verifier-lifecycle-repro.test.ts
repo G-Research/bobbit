@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+const { RpcBridge } = await import("../../src/server/agent/rpc-bridge.js");
 
 const MARKER = "VERIFIER_LIFECYCLE_REPRO";
 
@@ -72,6 +73,24 @@ function qaRoleStore() {
 }
 
 describe("verifier lifecycle reproductions", () => {
+	it("VERIFIER_BUSY_RACE_REPRO forwards atomic followUp behavior to Pi", async () => {
+		const commands: Record<string, unknown>[] = [];
+		const bridge = new RpcBridge({}) as any;
+		bridge.sendCommand = async (command: Record<string, unknown>) => {
+			commands.push(command);
+			return { success: true };
+		};
+		bridge.waitForReady = async () => {};
+
+		await bridge.prompt("ordinary prompt");
+		await bridge.promptWhenReady("verifier follow-up", undefined, { streamingBehavior: "followUp" });
+
+		assert.deepEqual(commands, [
+			{ type: "prompt", message: "ordinary prompt" },
+			{ type: "prompt", message: "verifier follow-up", streamingBehavior: "followUp" },
+		], `${MARKER}: followUp must be carried in the one prompt RPC command, not retried after a busy rejection`);
+	});
+
 	it("agent-qa retryable fetch failures auto-retry the same session instead of creating an empty-history replacement", async () => {
 		const goalId = "goal-agent-qa-fetch-retry";
 		const stateDir = makeStateDir("verifier-agent-qa-fetch-");

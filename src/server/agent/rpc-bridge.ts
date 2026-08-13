@@ -156,11 +156,13 @@ export type RpcEventListener = (event: any) => void;
  * interface (`IRpcBridge`). The production code is unchanged: it still
  * calls `new RpcBridge(opts)` and the factory intercepts transparently.
  */
+export type PromptStreamingBehavior = "steer" | "followUp";
+
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
-	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
-	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
+	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number, streamingBehavior?: PromptStreamingBehavior): Promise<any>;
+	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior }): Promise<any>;
 	steer(text: string): Promise<any>;
 	abort(): Promise<any>;
 	getState(): Promise<any>;
@@ -800,7 +802,12 @@ export class RpcBridge {
 
 	// --- Convenience methods matching the RPC protocol ---
 
-	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
+	prompt(
+		text: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		timeoutMs?: number,
+		streamingBehavior?: PromptStreamingBehavior,
+	) {
 		// Defensive backstop: if a prompt carries image(s) but blank text, the
 		// model API rejects the blank ContentBlock. The primary fix synthesizes
 		// text upstream in session-manager.enqueuePrompt (where non-image
@@ -810,7 +817,12 @@ export class RpcBridge {
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
+		return this.sendCommand({
+			type: "prompt",
+			message: effectiveText,
+			...(images?.length ? { images } : {}),
+			...(streamingBehavior ? { streamingBehavior } : {}),
+		}, timeoutMs);
 	}
 
 	/** Wait for a (possibly cold) agent to become responsive, then prompt with a
@@ -820,10 +832,15 @@ export class RpcBridge {
 	async promptWhenReady(
 		text: string,
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
-		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number },
+		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior },
 	): Promise<any> {
 		await this.waitForReady(opts?.readyTimeoutMs ?? COLD_REPROMPT_READY_TIMEOUT_MS);
-		return this.prompt(text, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
+		return this.prompt(
+			text,
+			images,
+			opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS,
+			opts?.streamingBehavior,
+		);
 	}
 
 	steer(text: string) {
