@@ -26,6 +26,7 @@ import { inspectAigwTargetRealm, type AigwTargetRealm } from "./aigw-models-json
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
+import { runtimeFromProvider, type SessionRuntime } from "./session-runtime.js";
 
 // These Pi providers require credential/runtime integration Bobbit does not yet
 // forward to host or sandbox agents. Keep the denylist provider-scoped so future
@@ -61,6 +62,8 @@ export interface ApiModel {
 	headers?: Record<string, string>;
 	compat?: unknown;
 	authenticated: boolean;
+	/** Derived from `provider`; emitted by the model registry, never selected by callers. */
+	readonly runtime?: SessionRuntime;
 	/**
 	 * When `false`, the model is authenticated but MUST NOT be bound to an agent
 	 * session because Bobbit has no runnable agent-side provider path for it. The
@@ -89,6 +92,11 @@ export function findSessionSelectableModel(
 		&& model.id === modelId
 		&& model.sessionSelectable !== false,
 	);
+}
+
+/** Attach the runtime projection at catalog API boundaries without mutating source metadata. */
+function withDerivedRuntime<T extends { provider: string }>(model: T): T & { readonly runtime: SessionRuntime } {
+	return { ...model, runtime: runtimeFromProvider(model.provider) };
 }
 
 export interface CustomProviderConfig {
@@ -465,8 +473,12 @@ async function assembleModels(
 	}
 
 	// Enforce the exact deferred-provider boundary across every catalog source.
+	// Dynamic source snapshots deliberately stay raw: they remain the authority for
+	// failure-only metadata retention, while runtime is an API-boundary projection.
 	return {
-		models: results.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER),
+		models: results
+			.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER)
+			.map(withDerivedRuntime),
 		dynamicModels,
 	};
 }
@@ -595,7 +607,7 @@ function hasOAuthCredentials(provider?: string): boolean {
 /** Discover models from a single custom provider config (without persisting anything). */
 export async function discoverModelsForConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
 	try {
-		return await discoverFromSingleConfig(config);
+		return (await discoverFromSingleConfig(config)).map(withDerivedRuntime);
 	} catch (err) {
 		// Preserve the standalone discovery API's established empty-on-failure
 		// contract. Registry assembly calls the throwing primitive below so it can
