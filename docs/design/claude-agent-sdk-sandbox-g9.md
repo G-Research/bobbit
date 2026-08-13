@@ -370,10 +370,9 @@ with the stable sanitized code.
 ### Manual real-subscription scenario
 
 Extend `tests/manual-integration/claude-agent-sdk-lifecycle.spec.ts` (or add a
-separate sandbox case) behind both:
+separate sandbox case) behind its sandbox-only flag:
 
 ```bash
-BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
 MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
 npm run test:manual -- --grep "Claude Agent SDK sandbox"

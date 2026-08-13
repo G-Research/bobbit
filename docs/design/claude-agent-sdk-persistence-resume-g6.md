@@ -133,9 +133,12 @@ work:
    archived Bobbit record remains archived; this is a new Bobbit wrapper that
    resumes the same SDK conversation, not a copied transcript.
 
-SDK sessions remain fail-closed in Docker because the existing bridge rejects
-that runtime there. Continue returns the existing unavailable/runtime failure
-and never falls back to a host-local transcript operation.
+When G6 was designed, SDK sessions remained fail-closed in Docker because the
+existing bridge rejected that runtime there. [G9 — Claude Agent SDK Docker
+sandbox runtime](claude-agent-sdk-sandbox-g9.md) supersedes that Docker
+limitation for supported sandbox SDK sessions: Continue follows normal sandbox
+wiring and container-scoped history access, never a host-local transcript
+fallback.
 
 ### Live Fork remains unsupported
 
