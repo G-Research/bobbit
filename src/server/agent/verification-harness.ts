@@ -2074,17 +2074,13 @@ export function sanitizeVerificationWsEvent<T>(event: T): T {
 // once streaming starts, the retry receives its full resolved allowance.
 const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
 const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
+/** Queue admission is outside active review time, but cannot block forever. */
+const VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS = 60_000;
 // Reminder-path fairness (see runLlmReviewViaSession). A reviewer that went
 // idle without calling verification_result is nudged up to MAX_REVIEWER_REMINDERS
-// times. Each nudge gets a fair turn: we wait REVIEWER_REMINDER_STREAM_SETTLE_MS
-// for the agent to actually start streaming before racing waitForIdle, and —
-// if it did stream this turn — a further REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS
-// for an in-flight verdict POST to land before giving up. This restores the
-// pre-regression behavior where a reviewer that completed its analysis but
-// missed the tool call is re-nudged on the SAME session (preserving its
-// context) instead of being torn down after a single under-graced reminder.
+// times. Each nudge waits for its exact durable dispatch receipt, then gives
+// an in-flight verdict POST a short grace before another reminder/teardown.
 const MAX_REVIEWER_REMINDERS = 2;
-const REVIEWER_REMINDER_STREAM_SETTLE_MS = 15_000;
 const REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS = 20_000;
 const MAX_VERIFIER_SAME_SESSION_RESURRECTIONS = 3;
 
@@ -3085,10 +3081,9 @@ export class VerificationHarness {
 					promptKind: useRestartContinuationPrompt ? "restart-resume" : "reminder",
 					whenReady: true,
 				});
-				// Reminder dispatch is fire-and-forget on the RPC channel; the session
-				// stays `idle` for a tick before transitioning to `streaming`. This fixed
-				// settle is outside the fresh active-turn allowance.
-				reminderStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
+				// dispatchVerifierPrompt waited for this exact durable row's provider
+				// acceptance; do not let an unrelated streaming turn prove readiness.
+				reminderStarted = true;
 			} catch (resumeErr) {
 				const msg = (resumeErr as Error)?.message || String(resumeErr);
 				console.warn(`[verification] Resume reminder for ${step.sessionId} could not reach the revived reviewer (treating as restart-interrupt): ${msg}`);
@@ -3153,7 +3148,7 @@ export class VerificationHarness {
 						promptKind: "fallback",
 						whenReady: true,
 					});
-					fallbackStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
+					fallbackStarted = true;
 				} catch (resumeErr) {
 					const msg = (resumeErr as Error)?.message || String(resumeErr);
 					console.warn(`[verification] Post-continuation fallback reminder for ${step.sessionId} could not reach the revived reviewer: ${msg}`);
@@ -5277,10 +5272,9 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Admit a verifier-owned turn through SessionManager's durable queue. Pi's
-	 * `followUp` mode is part of the same RPC command, so a ready-but-streaming
-	 * reviewer accepts this exact intent instead of rejecting it for a raw retry.
-	 * The direct fallback exists for narrow test/session-manager shims only.
+	 * Admit a verifier-owned turn through SessionManager's durable queue and
+	 * await the receipt for that exact row. Session-wide streaming state cannot
+	 * prove this intent started: it may describe the preceding reviewer turn.
 	 */
 	private async dispatchVerifierPrompt(
 		session: SessionInfo,
@@ -5295,25 +5289,65 @@ export class VerificationHarness {
 			whenReady?: boolean;
 			attempt?: number;
 		},
-	): Promise<unknown> {
+	): Promise<void> {
 		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1}`;
 		const manager = this.sessionManager;
-		if (manager && typeof manager.enqueuePrompt === "function") {
-			console.log(`[verification][verifier-dispatch] ${fields} mode=queued decision=followUp`);
-			return manager.enqueuePrompt(session.id, text, {
+		if (manager && typeof manager.enqueueVerifierPrompt === "function") {
+			const receipt = manager.enqueueVerifierPrompt(session.id, text, {
+				coldStart: args.whenReady,
+				streamingBehavior: "followUp",
+				suppressTitleGen: true,
+			});
+			let timer: TimerHandle | undefined;
+			try {
+				await Promise.race([
+					receipt.dispatched,
+					new Promise<never>((_, reject) => {
+						timer = this.clock.setTimeout(() => reject(new Error(`Verifier prompt ${receipt.rowId} did not dispatch within ${VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS}ms`)), VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS);
+					}),
+				]);
+				console.log(`[verification][verifier-dispatch] ${fields} mode=queued decision=dispatched row=${receipt.rowId}`);
+			} catch (error) {
+				receipt.cancel();
+				console.warn(`[verification][verifier-dispatch] ${fields} mode=queued decision=cancelled row=${receipt.rowId}`);
+				throw error;
+			} finally {
+				if (timer) this.clock.clearTimeout(timer);
+			}
+			return;
+		}
+		// Legacy test shims predate row receipts. Retain their queue API while
+		// keeping production on enqueueVerifierPrompt above.
+		const compatibilityStreamingSettleMs = args.promptKind === "reminder" || args.promptKind === "resurrection"
+			? 15_000
+			: args.promptKind === "restart-resume" || args.promptKind === "fallback"
+				? 10_000
+				: undefined;
+		if (manager && typeof (manager as any).enqueuePrompt === "function") {
+			console.log(`[verification][verifier-dispatch] ${fields} mode=compat-queued decision=followUp`);
+			await (manager as any).enqueuePrompt(session.id, text, {
 				source: "verification",
 				coldStart: args.whenReady,
 				streamingBehavior: "followUp",
 				suppressTitleGen: true,
 			});
+			// Compatibility-only: production must not use session-global streaming
+			// as row correlation, but old narrow mocks expose no receipt.
+			if (compatibilityStreamingSettleMs && typeof (manager as any).waitForStreaming === "function") {
+				await (manager as any).waitForStreaming(session.id, compatibilityStreamingSettleMs);
+			}
+			return;
 		}
 		console.log(`[verification][verifier-dispatch] ${fields} mode=direct decision=followUp`);
-		return dispatchTrackedSystemPrompt(session, text, {
+		await dispatchTrackedSystemPrompt(session, text, {
 			source: "verification",
 			whenReady: args.whenReady,
 			streamingBehavior: "followUp",
 			now: () => this.clock.now(),
 		});
+		if (compatibilityStreamingSettleMs && manager && typeof (manager as any).waitForStreaming === "function") {
+			await (manager as any).waitForStreaming(session.id, compatibilityStreamingSettleMs);
+		}
 	}
 
 	/** Distinguish a real idle turn from expiry of its active-thinking allowance. */
@@ -5477,14 +5511,9 @@ export class VerificationHarness {
 					attempt,
 				});
 
-				// Readiness, restart, prompt delivery, and this fixed settle window are
-				// outside the fresh active-turn allowance.
-				const started = await sessionManager.waitForStreaming(args.sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS)
-					.then(() => true)
-					.catch((err: any) => {
-						lastError = (err as Error)?.message || String(err);
-						return false;
-					});
+				// The exact resurrection row is provider-accepted above. Session-wide
+				// streaming may still describe the interrupted turn and is not evidence.
+				const started = true;
 
 				if (!started) {
 					lastError = `${lastError}; resurrected verifier did not start streaming`;
@@ -5763,12 +5792,9 @@ export class VerificationHarness {
 					promptKind: "reminder",
 					attempt: reminderNum,
 				});
-				// Wait for the agent to actually pick up the reminder before racing
-				// against waitForIdle — see _tryResumeFromSession for rationale. Give
-				// it a fair settle window; if it never starts streaming we still loop
-				// to the next reminder rather than tearing down after one nudge.
-				const started = await this.sessionManager!.waitForStreaming(sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
-				if (!started) continue;
+				// The receipt above identifies this reminder; do not use the preceding
+				// turn's session-level streaming state as its start acknowledgement.
+				const started = true;
 				const result2 = await this.waitForReviewTurn(sessionId, resultPromise, timeoutMs);
 				if (result2.type === "result") {
 					reminderOutcome = { type: "result", verdict: result2.verdict, summary: result2.summary };
@@ -6206,8 +6232,8 @@ export class VerificationHarness {
 					promptKind: "reminder",
 					attempt: reminderNum,
 				});
-				const started = await this.sessionManager!.waitForStreaming(qaSessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
-				if (!started) continue;
+				// dispatchVerifierPrompt awaited this exact QA reminder row.
+				const started = true;
 				const result2 = await this.waitForReviewTurn(qaSessionId, resultPromise, timeoutMs);
 
 				if (result2.type === "result") {
