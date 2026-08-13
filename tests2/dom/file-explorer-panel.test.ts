@@ -442,6 +442,7 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("Explorer refreshed.");
 
 		root.remove();
+		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
 	});
 
 	it("queues one first-idle refresh that arrives during initialization", async () => {
