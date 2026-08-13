@@ -2752,11 +2752,11 @@ Agent calls preview_open({html|file})
         tool_result = [
           {type:"text", text:"Preview panel is open ..."},
           {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON
-             {kind:"preview", url, path?, entry?, contentHash?, artifactId?}}
-        ]  // new path = relPath: "<sid>/<entry>", host-invariant, forward slashes on all OSes
+             {kind:"preview", url:"/preview/<sid>/", entry, contentHash, artifactId}}
+        ]  // canonical current marker: no duplicate path or identity aliases
    └─→ session.jsonl persists both blocks (snapshot block ≤ 250 UTF-8 bytes;
-       the builder compacts duplicated data and artifact-id keys but never
-       silently removes valid contentHash or artifact identity)
+       the builder preserves canonical contentHash and artifactId, using a
+       bounded reversible entry envelope or trusted same-call fallback when needed)
    └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
        {entry, mtime, url, path, contentHash, artifactId?}; iframe src bumps
        `?mtime=<n>` and reloads.
@@ -2782,7 +2782,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 ### Key design decisions
 
 - **Server-backed side-panel workspace** - regular and assistant sessions share the same durable tab model for previews, proposals, reviews, inbox, and pack panels. Chat stays outside the tab strip. The live preview tab tracks explicit preview open/update events; bootstrap/SSE metadata patches only already-open tabs so closed tabs do not resurrect.
-- **Lossless snapshots (≤ 250 UTF-8 bytes)** - v3 markers retain validated content and artifact identities while compacting duplicated route/path data and artifact-id keys. `path` is optional; when emitted it uses the host-invariant `<sessionId>/<entry>` form (forward slashes on all OSes), not a host-absolute path. A compact marker uses `/preview/<sid>/` plus a raw filename; the reader encodes that filename exactly once and validates the reconstructed route. It accepts raw percent, Unicode, and URL-significant filenames without changing them. If no lossless shape fits, `preview_open` returns `PREVIEW_SNAPSHOT_CAP` naming the filename rather than emitting a dead marker. The agent can refresh a 5000-line report 50 times without its bytes entering context.
+- **Lossless snapshots (≤ 250 UTF-8 bytes)** - current v3 writers use `/preview/<sid>/` with canonical `entry`, `contentHash`, and `artifactId`; they omit duplicate `path` and never write identity aliases. The entry remains reversible through a bounded envelope or the trusted same-call fallback, and is encoded exactly once when the reader rebuilds the strict route. Historical `path`, `e`, and artifact-id aliases are reader compatibility only. If no lossless shape fits, `preview_open` returns `PREVIEW_SNAPSHOT_CAP` naming the filename rather than emitting a dead marker. See [the current write contract](preview-architecture.md#current-write-contract).
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
 - **Cookie auth for the content origin** - the stateless HMAC-signed `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens. A stable 32-byte key is loaded once from `<serverSecretsDir>/cookie-signing-key`; request verification is bounded and entirely in memory. Cookie bootstrap and seven-day renewal happen only on centrally classified browser-signaled API requests, never on preview content or SSE.

@@ -2,20 +2,20 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1139,
+  "censusTotal": 1140,
   "buckets": {
-    "daily": 64,
+    "daily": 66,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 203
+    "v2-integration": 202
   },
   "methods": {
     "adapter": 275,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 50,
+    "relocate": 51,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -86,6 +86,24 @@
     {
       "path": "tests2/browser/journeys/sidebar-status.journey.spec.ts",
       "reason": "Deterministic production-renderer browser journey covering Project preservation, Status grouping/order, independent filters, shared search, pin/read movement, archives, actions, Menu icon, shimmer/time treatment, reload, collapse, keyboard focus, and mobile behavior.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/sidebar-reveal-current.test.ts",
+      "reason": "Focused DOM coverage for current-session reveal filter reset, explicit ancestor expansion, disabled state, repeat emphasis, archived loading, and reduced-motion behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
+      "reason": "Deterministic production-renderer desktop journey covering exact action-scoped inclusion of categorically hidden team/archive targets, manual filter-authority restoration, explicit reveal of a seven-level descendant chain beneath a canonically stamped team-lead spawned goal beyond the default depth cap, durable depth and exact path persistence across a full reload with canonical fixture rehydration and unrelated project state preserved, collapsed live and status=terminated archived-child delegates in Project and Status views, terminal cache normalization, filter/search reset, keyboard highlight restoration, nearest scrolling, repeated emphasis, distinct cold archived hydration, reduced motion, cleanup, and mobile absence.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2804,15 +2822,6 @@
       }
     },
     {
-      "path": "tests2/core/typecheck-memory-policy.test.ts",
-      "reason": "Pins the unchanged server and web type checks plus the scoped 4 GiB heap for only the tests2 compiler, without replacing caller NODE_OPTIONS.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
       "path": "tests2/core/project-registry-root-paths.test.ts",
       "reason": "Cross-platform project registry path identity coverage for dialect-aware canonicalization, containment, and case evidence.",
       "execution": {
@@ -2904,7 +2913,7 @@
     },
     {
       "path": "tests2/core/preview-snapshot-generality.test.ts",
-      "reason": "Focused writer/reader regression matrix for compact preview v3 markers: raw reserved, Unicode, percent, and long filenames retain the compact route plus validated hash/artifact identity under the 250-byte cap, with trusted preview_open fallback only for entry-omitted long markers and explicit no-silent-degradation cap failure.",
+      "reason": "Focused writer/reader regression matrix for all realistic preview v3 filenames: raw reserved, Unicode, percent, dotted, and long names retain a self-contained compact marker with canonical hash/artifact identity under the 250-byte cap; unsafe and incompressible entries fail loudly at write time.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3029,15 +3038,6 @@
       }
     },
     {
-      "path": "tests2/core/gateway-consumers.test.ts",
-      "reason": "Multi-gateway consumer regressions covering registry assembly, per-gateway session selection, retained discovery, and explicit title-provider routing.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
       "path": "tests2/browser/goal-setup-recovery.spec.ts",
       "reason": "Chromium journey through the real gateway retry route and live broadcasts: current setup failures disable team and session starts, retrying renders as in-flight without an agent, and a persisted ready recovery clears dashboard/sidebar warnings through reload.",
       "execution": {
@@ -3100,87 +3100,114 @@
         "project": "dom"
       }
     },
-  {
-    "path": "tests2/core/multi-gateway-auth.test.ts",
-    "reason": "Credential-free request-time gateway authentication coverage for absent, literal, environment, and command expressions plus sanitized failure/redaction behavior.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "core"
+    {
+      "path": "tests2/core/operator-pause-durability-repro.test.ts",
+      "reason": "Failing-first durability and auto-unblock regression coverage for operator-paused goals with unmet dependencies, while retaining migration of provenance-free legacy dependency pauses.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/crash-restart.journey.spec.ts",
+      "reason": "Real browser and gateway-restart journey proving an operator pause applied in the dashboard to a dependency-blocked child retains its persisted provenance and paused dashboard affordance after restart.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-auth.test.ts",
+      "reason": "Credential-free request-time gateway authentication coverage for absent, literal, environment, and command expressions plus sanitized failure/redaction behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-exclusivity.test.ts",
+      "reason": "Derived exclusivity regression coverage proving only an enabled AIGW gateway enables exclusive mode.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-migration.test.ts",
+      "reason": "Legacy singleton AIGW preference migration coverage for idempotence, cleanup, and preserved model preferences.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-retained-catalog.test.ts",
+      "reason": "Gateway discovery status coverage distinguishing authoritative empty results from unreachable matching retained catalogs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-validation.test.ts",
+      "reason": "Named gateway validation, persistence redaction, and provider routing regression coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-writer.test.ts",
+      "reason": "Type-specific models.json writer coverage, including raw OpenAI-compatible claude-local routing without Bedrock behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/multi-gateway-api.test.ts",
+      "reason": "In-process gateway API coverage for named gateway CRUD, authentication, status, refresh, and legacy shim behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/model-picker-hide-filter.journey.spec.ts",
+      "reason": "Chromium journey for visible empty versus unreachable gateway status and persisted display-only model-picker filtering.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/multi-gateway-settings.journey.spec.ts",
+      "reason": "Chromium Models settings journey for adding, saving, testing, retaining, and removing named gateways without exposing configured keys.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/gateway-consumers.test.ts",
+      "reason": "Multi-gateway consumer regressions covering registry assembly, per-gateway session selection, retained discovery, and explicit title-provider routing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
-  },
-  {
-    "path": "tests2/core/multi-gateway-exclusivity.test.ts",
-    "reason": "Derived exclusivity regression coverage proving only an enabled AIGW gateway enables exclusive mode.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "core"
-    }
-  },
-  {
-    "path": "tests2/core/multi-gateway-migration.test.ts",
-    "reason": "Legacy singleton AIGW preference migration coverage for idempotence, cleanup, and preserved model preferences.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "core"
-    }
-  },
-  {
-    "path": "tests2/core/multi-gateway-retained-catalog.test.ts",
-    "reason": "Gateway discovery status coverage distinguishing authoritative empty results from unreachable matching retained catalogs.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "core"
-    }
-  },
-  {
-    "path": "tests2/core/multi-gateway-validation.test.ts",
-    "reason": "Named gateway validation, persistence redaction, and provider routing regression coverage.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "core"
-    }
-  },
-  {
-    "path": "tests2/core/multi-gateway-writer.test.ts",
-    "reason": "Type-specific models.json writer coverage, including raw OpenAI-compatible claude-local routing without Bedrock behavior.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "core"
-    }
-  },
-  {
-    "path": "tests2/integration/multi-gateway-api.test.ts",
-    "reason": "In-process gateway API coverage for named gateway CRUD, authentication, status, refresh, and legacy shim behavior.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "integration"
-    }
-  },
-  {
-    "path": "tests2/browser/journeys/model-picker-hide-filter.journey.spec.ts",
-    "reason": "Chromium journey for visible empty versus unreachable gateway status and persisted display-only model-picker filtering.",
-    "execution": {
-      "runner": "playwright",
-      "tier": "browser",
-      "project": "browser"
-    }
-  },
-  {
-    "path": "tests2/browser/journeys/multi-gateway-settings.journey.spec.ts",
-    "reason": "Chromium Models settings journey for adding, saving, testing, retaining, and removing named gateways without exposing configured keys.",
-    "execution": {
-      "runner": "playwright",
-      "tier": "browser",
-      "project": "browser"
-    }
-  }
   ],
   "journeys": [
     {
@@ -3293,6 +3320,10 @@
     },
     {
       "path": "tests2/browser/journeys/sidebar-status.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

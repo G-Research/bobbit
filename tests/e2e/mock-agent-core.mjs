@@ -2377,12 +2377,10 @@ export class MockAgentCore {
 	}
 
 	/**
-	 * File-mode counterpart to the compact artifact fixture above. It writes the
-	 * entry below a source subdirectory with a nested declared asset, mounts it
-	 * through the real gateway, and uses the production writer to emit the only
-	 * lossless under-cap marker it can produce: one with the long entry omitted
-	 * but both artifact identity fields retained. Removing the source immediately
-	 * after mounting ensures reopening must use the immutable artifact.
+	 * File-mode counterpart to the compact artifact fixture above. It writes a
+	 * Unicode/dotted entry below a source subdirectory with a nested declared
+	 * asset, mounts it through the real gateway, and removes the source right
+	 * away so reopening must use the immutable artifact.
 	 */
 	async _handlePreviewArtifactFileCompactSnapshot() {
 		const sessionId = this.env.BOBBIT_SESSION_ID;
@@ -2399,7 +2397,7 @@ export class MockAgentCore {
 		}
 
 		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-		const entry = `compact-${"x".repeat(210)}.HTML`;
+		const entry = "résumé.v1.雪.html";
 		const sourceRoot = fs.mkdtempSync(path.join(this.cwd, ".preview-reopen-source-"));
 		const sourceDir = path.join(sourceRoot, "pages");
 		const sourceFile = path.join(sourceDir, entry);
@@ -2496,12 +2494,13 @@ export class MockAgentCore {
 			const payload = JSON.parse(marker.slice("__preview_snapshot_v3__\n".length));
 			if (
 				Buffer.byteLength(marker, "utf8") > 250 ||
-				payload.entry !== undefined || payload.e !== undefined ||
+				payload.entry !== entry ||
+				payload.path !== undefined ||
 				payload.contentHash !== mounted.body.contentHash ||
-				(payload.artifactId ?? payload.aid) !== mounted.body.artifactId ||
+				payload.artifactId !== mounted.body.artifactId ||
 				payload.url !== `/preview/${sessionId}/`
 			) {
-				fail(`file compact snapshot lost a required lossless variant: ${marker}`);
+				fail(`file compact snapshot must retain the canonical entry and identities: ${marker}`);
 				return;
 			}
 		} catch (error) {
