@@ -89,6 +89,11 @@ export function initialState(): ReducerState {
 	return { messages: [], nextTick: 1, highestSeq: 0 };
 }
 
+function deliveryIntentId(message: any): string | undefined {
+	const id = message?.deliveryIntentId ?? message?.intentId;
+	return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
 function extractText(message: any): string {
 	if (!message) return "";
 	if (typeof message === "string") return message;
@@ -348,9 +353,14 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const { frame, seq } = action;
 			const tick = state.nextTick;
 			const nextHighest = Math.max(state.highestSeq, seq);
-			// frame is an event payload — we only care about message_end here;
-			// other event types don't mutate the message list.
-			if (frame?.type !== "message_end" || !frame.message) {
+			// Correlated user message_start is the outbox acknowledgement boundary.
+			// It enters the transcript immediately; message_end later replaces it
+			// with the exact terminal payload. Other starts remain non-mutating.
+			const isTerminal = frame?.type === "message_end";
+			const isCorrelatedUserStart = frame?.type === "message_start"
+				&& !!deliveryIntentId(frame.message)
+				&& (frame.message?.role === "user" || frame.message?.role === "user-with-attachments");
+			if ((!isTerminal && !isCorrelatedUserStart) || !frame.message) {
 				return { ...state, highestSeq: nextHighest };
 			}
 			// Enrich on the LIVE path too (not just snapshots): a role:"user" echo
@@ -384,6 +394,12 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				}
 			}
 
+			// Terminal content is authoritative. Replace the provisional start by
+			// occurrence identity even when Pi changes/omits its own message id.
+			const incomingIntentId = deliveryIntentId(incoming);
+			if (incomingIntentId) {
+				messages = messages.filter((message) => deliveryIntentId(message) !== incomingIntentId);
+			}
 			// Drop any prior server entry with the same id (replace-by-id).
 			if (typeof incoming.id === "string" && incoming.id.length > 0) {
 				const idx = messages.findIndex((m) => m.id === incoming.id);
@@ -598,6 +614,7 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			}
 
 			const serverIds = new Set<string>();
+			const serverDeliveryIntentIds = new Set<string>();
 			// Equivalence sets keyed on toolCallId — the snapshot is authoritative
 			// for any toolCall it contains, even when the live row landed without
 			// a string id (e.g. mock-agent toolResult message_ends, real LLM
@@ -608,6 +625,8 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const serverAssistantToolCallIds = new Set<string>();
 			for (const m of snapshotRows) {
 				if (typeof m.id === "string" && m.id.length > 0) serverIds.add(m.id);
+				const intentId = deliveryIntentId(m);
+				if (intentId) serverDeliveryIntentIds.add(intentId);
 				if (m.role === "toolResult") {
 					const tcid = (m as any).toolCallId;
 					if (typeof tcid === "string" && tcid.length > 0) {
@@ -656,6 +675,8 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// Survivors: client-side rows that the snapshot doesn't already represent.
 			const survivors: OrderedMessage[] = [];
 			for (const m of state.messages) {
+				const intentId = deliveryIntentId(m);
+				if (intentId && serverDeliveryIntentIds.has(intentId)) continue;
 				if (m._origin === "server") {
 					// 1) Identity-based drops (structural, correct).
 					// Live-event server rows: drop if snapshot has matching id.
