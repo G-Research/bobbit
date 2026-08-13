@@ -232,6 +232,9 @@ export function startSourceVite(options: SourceViteOptions): RunningSourceProces
 	env.NODE_ENV = "development";
 	env.GATEWAY_URL = options.gatewayUrl;
 	env.VITE_HOST = "localhost";
+	// This smoke proves the canonical bridge is loaded from Vite's source module
+	// graph. The normal dev server remains bundled; only this owned fixture opts out.
+	env.BOBBIT_VITE_SOURCE_GRAPH = "1";
 	const child = spawn(process.execPath, [
 		viteCli,
 		"--host", "127.0.0.1",
