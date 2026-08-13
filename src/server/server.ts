@@ -132,6 +132,10 @@ import {
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
 } from "./agent/compaction-sidecar.js";
+import {
+	initClaudeSdkCompactionCheckpointDir,
+	readClaudeSdkPreCompactionMessages,
+} from "./agent/claude-sdk-compaction-checkpoint.js";
 import { projectOwnTranscriptJsonl, readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
@@ -2284,6 +2288,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	initPromptDirs(stateDir);
 	initSkillSidecarDir(stateDir);
 	initCompactionSidecarDir(stateDir);
+	initClaudeSdkCompactionCheckpointDir(stateDir);
 	initAuthorSidecarDir(stateDir, { secretsDir, hmacKey: cookieSigningKey });
 	initAssistantRegistry(configDir);
 
@@ -15861,17 +15866,10 @@ async function handleApiRoute(
 		const [, targetId] = beforeCompactionMatch;
 		const targetPs = sessionManager.getPersistedSession(targetId);
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
-		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
-
 
 		const compactionId = url.searchParams.get("compactionId");
 		if (!compactionId) {
 			json({ error: "invalid_params", detail: "compactionId required" }, 400);
-			return;
-		}
-		const entry = findCompactionSidecarEntry(targetId, compactionId);
-		if (!entry) {
-			json({ error: "compaction_not_found" }, 404);
 			return;
 		}
 		const qp2 = url.searchParams;
@@ -15901,6 +15899,20 @@ async function handleApiRoute(
 			}
 			return;
 		}
+		const isSdkSession = resolveSessionRuntime({
+			modelProvider: targetPs.modelProvider,
+			initialModel: targetPs.modelProvider && targetPs.modelId ? `${targetPs.modelProvider}/${targetPs.modelId}` : undefined,
+			persistedRuntime: targetPs.runtime,
+		}) === "claude-agent-sdk";
+		if (isSdkSession) {
+			const envelope = readClaudeSdkPreCompactionMessages(targetId, compactionId, { cursor, limit, verbose });
+			if (!envelope) { json({ error: "compaction_not_found" }, 404); return; }
+			json(envelope);
+			return;
+		}
+		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
+		const entry = findCompactionSidecarEntry(targetId, compactionId);
+		if (!entry) { json({ error: "compaction_not_found" }, 404); return; }
 		const ctx2 = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 		try {
 			const envelope = await readOrphanedBeforeCompaction(

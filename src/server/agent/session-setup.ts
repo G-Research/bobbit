@@ -356,6 +356,8 @@ export interface PipelineContext {
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
+	/** Server-owned SDK checkpoint capture; returns the actual lost-history span for providers. */
+	beginClaudeSdkCompaction?: (sessionId: string, input: { trigger?: string }) => Promise<{ span?: string }>;
 	claudeAgentSdkBridgeDepsFactory?: SessionBridgeOptions["claudeAgentSdkBridgeDepsFactory"];
 	/** Narrow existing SessionManager grant seam used by the SDK permission adapter. */
 	requestToolGrant?: (sessionId: string, toolName: string, toolGroup: string, options: { signal: AbortSignal; toolUseId?: string }) => Promise<import("./claude-agent-sdk-tool-surface.js").ClaudeSdkGrantResolution>;
@@ -654,12 +656,18 @@ function resolveSdkRuntimeOptions(plan: SessionSetupPlan, ctx: PipelineContext):
 	plan.bridgeOptions.claudeAgentSdkBridgeDepsFactory = ctx.claudeAgentSdkBridgeDepsFactory;
 
 	const lifecycleHub = ctx.lifecycleHub;
-	if (plan.bridgeOptions.runtime === "claude-agent-sdk" && lifecycleHub) {
-		plan.bridgeOptions.onBeforeCompact = async ({ span, summary }) => {
-			await lifecycleHub.dispatch("beforeCompact", {
-				sessionId: plan.id, cwd: plan.cwd, scope: "project", projectId: plan.projectId,
-				goalId: effectiveGoalId(plan), roleName: plan.role ?? plan.roleName, span, summary,
-			});
+	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
+		plan.bridgeOptions.onBeforeCompact = async ({ trigger, summary }) => {
+			// PreCompact only gives the provider trigger/instructions. Capture official
+			// SDK history first so providers receive the real about-to-be-lost span.
+			const checkpoint = await ctx.beginClaudeSdkCompaction?.(plan.id, { trigger });
+			if (lifecycleHub) {
+				await lifecycleHub.dispatch("beforeCompact", {
+					sessionId: plan.id, cwd: plan.cwd, scope: "project", projectId: plan.projectId,
+					goalId: effectiveGoalId(plan), roleName: plan.role ?? plan.roleName,
+					span: checkpoint?.span, summary,
+				});
+			}
 		};
 	}
 }

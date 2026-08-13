@@ -63,6 +63,11 @@ import {
 	parseCompactionStartMs,
 } from "./compaction-sidecar.js";
 import {
+	beginClaudeSdkCompactionCheckpoint,
+	claudeSdkCompactionSpan,
+	completeClaudeSdkCompactionCheckpoint,
+} from "./claude-sdk-compaction-checkpoint.js";
+import {
 	SessionStore,
 	normalizePersistedInFlightSteers,
 	type InFlightSteerRecord,
@@ -2825,6 +2830,7 @@ export class SessionManager {
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
+			beginClaudeSdkCompaction: (sessionId, input) => this.beginClaudeSdkCompaction(sessionId, input),
 			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 			requestToolGrant: (sessionId, toolName, toolGroup, options) => this.requestToolGrant(sessionId, toolName, toolGroup, options),
 			costTracker: resolvedCostTracker,
@@ -7091,6 +7097,9 @@ export class SessionManager {
 		if (session.runtime === "claude-agent-sdk") {
 			if (!this._sessionWriterIsCurrent(session)) return;
 			const record = event?.claudeSdkUsage as AuthoritativeUsageRecord | undefined;
+			// A root result is an authoritative post-compaction observation. Its
+			// completion still requires changed official history (never the frame alone).
+			if (record && session.rpcClient) void this.reconcileClaudeSdkCompaction(session);
 			if (!record || typeof record.sourceResultId !== "string" || !record.total || !record.modelUsage
 				|| (record.costBasis !== "subscription-notional" && record.costBasis !== "api-notional" && record.costBasis !== "unknown")) return;
 			const outcome = this.resolveCostTracker(session).recordAuthoritativeUsage(
@@ -8174,6 +8183,9 @@ export class SessionManager {
 		session.promptAuthorReplayBindings = undefined;
 		session.lastKeylessPromptAuthorEnd = undefined;
 		restoring = false;
+		// Reconcile an interrupted SDK compaction from official resumed history;
+		// Pi keeps its existing JSONL replay/sidecar path untouched.
+		if (session.runtime === "claude-agent-sdk") void this.reconcileClaudeSdkCompaction(session);
 		broadcastStatus(session, "idle");
 
 		// `switch_session` replays durable user message echoes and `_consumeSteerEcho`
@@ -9060,7 +9072,11 @@ export class SessionManager {
 		const promise = (async (): Promise<{ success: boolean; data?: unknown; error?: string }> => {
 			const response = await session.rpcClient.getMessages();
 			if (!response?.success) return response;
-			return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
+			const data = normalizeToolResultErrorSnapshot(response.data);
+			// A reload is an authoritative SDK-history observation. Reconcile a
+			// pending provider compaction before returning its visible snapshot.
+			await this.reconcileClaudeSdkCompaction(session, data, false);
+			return { ...response, data };
 		})();
 		session.messagesSnapshotCache = { seq, promise };
 		promise.then(
@@ -9076,6 +9092,46 @@ export class SessionManager {
 			},
 		);
 		return promise;
+	}
+
+	/** Capture an SDK-owned PreCompact boundary before the provider mutates history. */
+	private async beginClaudeSdkCompaction(sessionId: string, input: { trigger?: string }): Promise<{ span?: string }> {
+		const session = this.sessions.get(sessionId);
+		if (!session || session.runtime !== "claude-agent-sdk" || !this._sessionWriterIsCurrent(session)) return {};
+		const response = await session.rpcClient.getMessages();
+		if (!response?.success || !Array.isArray(response.data)) {
+			throw new ClaudeAgentSdkUnavailableError(response?.error ?? "SDK_SESSION_UNAVAILABLE: cannot capture compaction history");
+		}
+		const checkpoint = beginClaudeSdkCompactionCheckpoint(session.id, {
+			trigger: input.trigger,
+			messages: response.data,
+			startedAtMs: this.clock.now(),
+		});
+		if (!checkpoint) throw new Error("Unable to durably capture Claude SDK compaction checkpoint");
+		session.isCompacting = true;
+		this.emitAgentEvent(session, { type: "compaction_start", reason: checkpoint.trigger, compactionId: checkpoint.id });
+		return { span: claudeSdkCompactionSpan(checkpoint) };
+	}
+
+	/** Resolve a pending SDK checkpoint only from changed official history. */
+	private async reconcileClaudeSdkCompaction(session: SessionInfo, knownMessages?: unknown, refresh = true): Promise<boolean> {
+		if (session.runtime !== "claude-agent-sdk" || !this._sessionWriterIsCurrent(session)) return false;
+		let messages = knownMessages;
+		if (!Array.isArray(messages)) {
+			try {
+				const response = await session.rpcClient.getMessages();
+				if (!response?.success || !Array.isArray(response.data)) return false;
+				messages = response.data;
+			} catch {
+				return false;
+			}
+		}
+		const checkpoint = completeClaudeSdkCompactionCheckpoint(session.id, messages, this.clock.now());
+		if (!checkpoint || !this._sessionWriterIsCurrent(session)) return false;
+		session.isCompacting = false;
+		this.emitAgentEvent(session, { type: "compaction_end", reason: checkpoint.trigger, compactionId: checkpoint.id });
+		if (refresh) void this.refreshAfterCompaction(session);
+		return true;
 	}
 
 	/** Query the agent for its session file and save metadata to disk */
