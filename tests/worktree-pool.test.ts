@@ -69,6 +69,27 @@ async function yieldToEventLoop(): Promise<void> {
 	await new Promise<void>(resolve => setImmediate(resolve));
 }
 
+/**
+ * Wait for a controllable test barrier, not an arbitrary event-loop turn. The
+ * common-dir resolver uses real asynchronous filesystem work, so a single
+ * setImmediate is insufficient when earlier tests have the thread pool busy.
+ * The deadline merely converts a broken production path into a useful failure
+ * instead of leaving a deferred command runner holding this test process open.
+ */
+async function awaitBarrier<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error(`Timed out waiting for ${description}`)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 describe("WorktreePool — Phase 3 claim sequence", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
@@ -250,6 +271,7 @@ describe("WorktreePool — bounded multi-repo claim", () => {
 		});
 		const failedRepo = worktrees[3]!.repo;
 		const renameGate = deferred<void>();
+		const firstBatchStarted = deferred<void>();
 		let activeRenames = 0;
 		let maxActiveRenames = 0;
 		let forwardRenameCalls = 0;
@@ -259,6 +281,7 @@ describe("WorktreePool — bounded multi-repo claim", () => {
 					forwardRenameCalls++;
 					activeRenames++;
 					maxActiveRenames = Math.max(maxActiveRenames, activeRenames);
+					if (forwardRenameCalls === RECOVERY_IO_CONCURRENCY) firstBatchStarted.resolve(undefined);
 					await renameGate.promise;
 					activeRenames--;
 					if (String(options?.cwd).endsWith(failedRepo)) throw new Error("injected per-repo rename failure");
@@ -284,22 +307,29 @@ describe("WorktreePool — bounded multi-repo claim", () => {
 		});
 
 		const claiming = pool.claim(targetBranch);
-		await yieldToEventLoop();
-		assert.equal(activeRenames, RECOVERY_IO_CONCURRENCY, "claim must apply backpressure at the shared Git-mutation ceiling");
-		assert.equal(forwardRenameCalls, RECOVERY_IO_CONCURRENCY, "later components must not start while the first bounded batch is deferred");
+		try {
+			await awaitBarrier(firstBatchStarted.promise, "the first bounded multi-repo claim batch");
+			assert.equal(activeRenames, RECOVERY_IO_CONCURRENCY, "claim must apply backpressure at the shared Git-mutation ceiling");
+			assert.equal(forwardRenameCalls, RECOVERY_IO_CONCURRENCY, "later components must not start while the first bounded batch is deferred");
 
-		renameGate.resolve(undefined);
-		const result = await claiming;
-		assert.ok(result);
-		assert.equal(result.degraded, true, "one failed component should degrade rather than abort sibling results");
-		assert.equal(maxActiveRenames, RECOVERY_IO_CONCURRENCY);
-		assert.equal(forwardRenameCalls, componentCount, "failure isolation must allow every component mutation to run");
-		assert.deepEqual(
-			result.worktrees,
-			worktrees.map(w => ({ repo: w.repo, worktreePath: path.join(newContainer, w.repo) })),
-			"bounded completion must preserve declared component result order",
-		);
-		await pool.stop();
+			renameGate.resolve(undefined);
+			const result = await claiming;
+			assert.ok(result);
+			assert.equal(result.degraded, true, "one failed component should degrade rather than abort sibling results");
+			assert.equal(maxActiveRenames, RECOVERY_IO_CONCURRENCY);
+			assert.equal(forwardRenameCalls, componentCount, "failure isolation must allow every component mutation to run");
+			assert.deepEqual(
+				result.worktrees,
+				worktrees.map(w => ({ repo: w.repo, worktreePath: path.join(newContainer, w.repo) })),
+				"bounded completion must preserve declared component result order",
+			);
+		} finally {
+			// Always release a foreground claim before teardown; an assertion failure
+			// must not leave its controllable command runner pending forever.
+			renameGate.resolve(undefined);
+			await Promise.allSettled([claiming, pool.stop()]);
+		}
+
 	});
 });
 
@@ -876,11 +906,13 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 
 	it("claim before the first initialize attempt remains compatible and stop() waits for it", async () => {
 		const branchRename = deferred<ExecFileResult>();
+		const branchRenameEntered = deferred<void>();
 		let branchRenameStarted = false;
 		const commandRunner: CommandRunner = {
 			execFile: async (_file, args) => {
 				if (args[0] === "branch" && args[1] === "-m" && !branchRenameStarted) {
 					branchRenameStarted = true;
+					branchRenameEntered.resolve(undefined);
 					return await branchRename.promise;
 				}
 				return { stdout: "", stderr: "" };
@@ -892,21 +924,32 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		// No initialize() call: boot sweepers historically registered ready entries
 		// before pool initialization existed, and that explicit compatibility stays.
 		const claiming = pool.claim("session/deferred1");
-		assert.equal(branchRenameStarted, true, "claim should reach the deferred Git mutation");
-		let stopSettled = false;
-		const stopping = pool.stop().then(() => { stopSettled = true; });
-		await yieldToEventLoop();
-		assert.equal(stopSettled, false, "stop must remain pending while the foreground claim mutates Git");
+		let stopping: Promise<void> | undefined;
+		try {
+			// Repository-scoped coordination first resolves the canonical Git common
+			// directory. Wait for the observable command barrier rather than assuming
+			// one event-loop turn has completed asynchronous common-dir canonicalization.
+			await awaitBarrier(branchRenameEntered.promise, "the deferred foreground claim mutation");
+			assert.equal(branchRenameStarted, true, "claim should reach the deferred Git mutation");
+			let stopSettled = false;
+			stopping = pool.stop().then(() => { stopSettled = true; });
+			await yieldToEventLoop();
+			assert.equal(stopSettled, false, "stop must remain pending while the foreground claim mutates Git");
 
-		branchRename.resolve({ stdout: "", stderr: "" });
-		const claimed = await claiming;
-		assert.ok(claimed, "claim semantics should remain successful after the deferred rename resumes");
-		await stopping;
-		assert.equal(stopSettled, true);
+			branchRename.resolve({ stdout: "", stderr: "" });
+			const claimed = await claiming;
+			assert.ok(claimed, "claim semantics should remain successful after the deferred rename resumes");
+			await stopping;
+			assert.equal(stopSettled, true);
+		} finally {
+			branchRename.resolve({ stdout: "", stderr: "" });
+			await Promise.allSettled([claiming, stopping ?? pool.stop()]);
+		}
 	});
 
 	it("drain() waits for deferred failure cleanup scheduled by claim", async () => {
 		const cleanup = deferred<void>();
+		const cleanupEntered = deferred<void>();
 		let cleanupStarted = false;
 		const commandRunner: CommandRunner = {
 			execFile: async () => { throw new Error("deferred claim failure"); },
@@ -917,25 +960,32 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 			commandRunner,
 			cleanupWorktreeImpl: async () => {
 				cleanupStarted = true;
+				cleanupEntered.resolve(undefined);
 				await cleanup.promise;
 			},
 		});
 		pool.registerExternalEntry("pool/_pool-cleanup", path.resolve("virtual-pool-wt", "pool-_pool-cleanup"));
 
-		const claimed = await pool.claim("session/fallback1");
-		assert.equal(claimed, null, "claim failure should preserve the cold-create fallback");
-		await yieldToEventLoop();
-		assert.equal(cleanupStarted, true, "claim failure should start best-effort cleanup");
+		let draining: Promise<void> | undefined;
+		try {
+			const claimed = await pool.claim("session/fallback1");
+			assert.equal(claimed, null, "claim failure should preserve the cold-create fallback");
+			await awaitBarrier(cleanupEntered.promise, "the deferred failure cleanup");
+			assert.equal(cleanupStarted, true, "claim failure should start best-effort cleanup");
 
-		let drainSettled = false;
-		const draining = pool.drain().then(() => { drainSettled = true; });
-		await yieldToEventLoop();
-		assert.equal(drainSettled, false, "drain must remain pending while failure cleanup mutates the worktree");
+			let drainSettled = false;
+			draining = pool.drain().then(() => { drainSettled = true; });
+			await yieldToEventLoop();
+			assert.equal(drainSettled, false, "drain must remain pending while failure cleanup mutates the worktree");
 
-		cleanup.resolve(undefined);
-		await draining;
-		assert.equal(drainSettled, true);
-		assert.equal(pool.size, 0);
+			cleanup.resolve(undefined);
+			await draining;
+			assert.equal(drainSettled, true);
+			assert.equal(pool.size, 0);
+		} finally {
+			cleanup.resolve(undefined);
+			await Promise.allSettled([draining ?? pool.drain()]);
+		}
 	});
 
 	it("drain() is idempotent and safe on a pool that never started", async () => {

@@ -3028,15 +3028,78 @@
         "project": "browser"
       }
     },
-  {
-    "path": "tests2/core/gateway-consumers.test.ts",
-    "reason": "Multi-gateway consumer regressions covering registry assembly, per-gateway session selection, retained discovery, and explicit title-provider routing.",
-    "execution": {
-      "runner": "vitest",
-      "tier": "unit",
-      "project": "core"
-    }
-  },
+    {
+      "path": "tests2/core/gateway-consumers.test.ts",
+      "reason": "Multi-gateway consumer regressions covering registry assembly, per-gateway session selection, retained discovery, and explicit title-provider routing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/goal-setup-recovery.spec.ts",
+      "reason": "Chromium journey through the real gateway retry route and live broadcasts: current setup failures disable team and session starts, retrying renders as in-flight without an agent, and a persisted ready recovery clears dashboard/sidebar warnings through reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/integration/sandbox-git-config-coordination.test.ts",
+      "reason": "Integration coverage for repository-scoped coordination of sandbox Git configuration mutations during concurrent setup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/worktree-pool-config-coordination.test.ts",
+      "reason": "Integration coverage for repository-scoped coordination of worktree-pool Git configuration mutations during concurrent setup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/parallel-goal-setup-repro.test.ts",
+      "reason": "Deterministic failing-first coverage for same-goal setup single-flight: duplicate auto-start callers must await one authoritative setup promise, and recovery to ready must atomically remove the active setup error.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/setup-ready-team-start-guard.test.ts",
+      "reason": "Focused lifecycle coverage proving team leads and workers cannot start while canonical goal setup is preparing, retrying, or failed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/shared-git-config-coordination-repro.test.ts",
+      "reason": "Deterministic barrier-driven reproduction for repository-common-dir Git config mutation coordination across parallel root and child setup transactions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/dom/goal-setup-recovery-repro.test.ts",
+      "reason": "DOM reproduction for truthful setup recovery rendering: a current error is actionable, while a ready live update removes stale setup warnings and restores controls.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
   {
     "path": "tests2/core/multi-gateway-auth.test.ts",
     "reason": "Credential-free request-time gateway authentication coverage for absent, literal, environment, and command expressions plus sanitized failure/redaction behavior.",

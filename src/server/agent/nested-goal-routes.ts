@@ -76,6 +76,18 @@ export interface NestedGoalRouteDeps {
 const HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
 const GENERIC_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
 
+/** Parent-facing status for child creation tool responses. */
+function childSetupOutcome(goal: PersistedGoal): { setupStatus: string; setupMessage: string; retrySetup?: boolean } {
+	const status: string = goal.setupStatus ?? "ready"; // GoalStore migrates legacy rows on load.
+	if (status === "ready") {
+		return { setupStatus: status, setupMessage: "Child setup is verified ready; its team may start when scheduler capacity is available." };
+	}
+	if (status === "error") {
+		return { setupStatus: status, setupMessage: "Child setup failed; retry setup before its team can start.", retrySetup: true };
+	}
+	return { setupStatus: status, setupMessage: "Child setup is in progress; its team will start only after setup is verified ready." };
+}
+
 function goalMergeGitUnavailable(parent: PersistedGoal, child: PersistedGoal): Record<string, unknown> | null {
 	const parentRepos = parent.repoWorktrees;
 	const childRepos = child.repoWorktrees;
@@ -746,6 +758,7 @@ export async function tryHandleNestedGoalRoute(
 				id: child.id,
 				suggestedRole,
 				spawnedBySessionId,
+				...childSetupOutcome(ctx.goalStore.get(child.id) ?? child),
 				...(blocked ? { blocked: true, pendingDeps: unresolvedDeps } : {}),
 				...(capacityBlocked ? { capacityBlocked: true } : {}),
 			}, 201);
