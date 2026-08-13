@@ -520,6 +520,289 @@ describe("verifier lifecycle reproductions", () => {
 		assert.doesNotMatch(recoveryPrompt, /ALREADY FORMED|do not re-investigate|STOP — verification_result not called/i, `${MARKER}: resurrected QA prompt must not use alive-idle reminder wording. prompt=${recoveryPrompt}`);
 	});
 
+	it("VERIFIER_BUSY_RACE_REPRO queues a fresh llm-review kickoff when its reviewer is already processing", async () => {
+		const goalId = "goal-busy-llm-kickoff";
+		const stateDir = makeStateDir("verifier-busy-llm-kickoff-");
+		const sessionId = "busy-llm-kickoff-same-session";
+		const createdIds: string[] = [];
+		const providerAccepted: string[] = [];
+		let busyRejections = 0;
+		let verdicts = 0;
+		let harness: any;
+		const fakeSession = {
+			id: sessionId,
+			status: "idle",
+			transcriptMarker: "preserved llm kickoff history",
+			lastTurnErrored: false,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async () => {
+					busyRejections += 1;
+					throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+				},
+			},
+		};
+		const roleStore = { get: () => undefined, getAll: () => [] };
+		const { projectContextManager } = makeProjectContext(goalId, roleStore);
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => {
+				createdIds.push(opts.sessionId);
+				return fakeSession;
+			},
+			setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => fakeSession,
+			// Models SessionManager's durable admission: the first bridge attempt is
+			// busy, the same logical row is retained, then accepted exactly once.
+			enqueuePrompt: async (sid: string, text: string, opts: any) => {
+				assert.equal(sid, sessionId, `${MARKER}: VERIFIER_BUSY_RACE_REPRO must queue the original reviewer session`);
+				assert.equal(opts.source, "verification", `${MARKER}: queued verifier prompts retain verification attribution`);
+				busyRejections += 1;
+				providerAccepted.push(text);
+				verdicts += 1;
+				harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "Queued kickoff completed from preserved session." });
+				return { status: "dispatched" };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {},
+			terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, roleStore as any, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Busy kickoff", prompt: "Review", timeout: 1, role: "reviewer" }, stateDir, goalId,
+			{ name: "reviewer", promptTemplate: "You are a code reviewer." }, "combined", "kickoff", 1_000, sessionId,
+		);
+
+		assert.equal(result.passed, true, `${MARKER}: VERIFIER_BUSY_RACE_REPRO fresh kickoff must survive already-processing contention. result=${JSON.stringify(result)}`);
+		assert.deepEqual(createdIds, [sessionId], `${MARKER}: VERIFIER_BUSY_RACE_REPRO must not replace the busy reviewer or lose its history`);
+		assert.equal(fakeSession.transcriptMarker, "preserved llm kickoff history", `${MARKER}: VERIFIER_BUSY_RACE_REPRO preserves same-session context`);
+		assert.equal(busyRejections, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO recovers one busy kickoff intent without a duplicate dispatch`);
+		assert.equal(providerAccepted.length, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO accepts the queued kickoff exactly once`);
+		assert.equal(verdicts, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO publishes exactly one verdict`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO queues an llm-review reminder on the same busy reviewer", async () => {
+		const goalId = "goal-busy-llm-reminder";
+		const stateDir = makeStateDir("verifier-busy-llm-reminder-");
+		const sessionId = "busy-llm-reminder-same-session";
+		const createdIds: string[] = [];
+		const providerAccepted: string[] = [];
+		let busyRejections = 0;
+		let verdicts = 0;
+		let harness: any;
+		let rawPromptCalls = 0;
+		const fakeSession = {
+			id: sessionId, status: "idle", transcriptMarker: "preserved llm reminder history", lastTurnErrored: false,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async () => {
+					rawPromptCalls += 1;
+					if (rawPromptCalls === 1) return { success: true }; // kickoff becomes idle without a verdict
+					busyRejections += 1;
+					throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+				},
+			},
+		};
+		const roleStore = { get: () => undefined, getAll: () => [] };
+		const { projectContextManager } = makeProjectContext(goalId, roleStore);
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => { createdIds.push(opts.sessionId); return fakeSession; },
+			setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => fakeSession,
+			enqueuePrompt: async (sid: string, text: string) => {
+				assert.equal(sid, sessionId, `${MARKER}: VERIFIER_BUSY_RACE_REPRO reminder must retain its reviewer identity`);
+				providerAccepted.push(text);
+				if (providerAccepted.length === 2) {
+					busyRejections += 1;
+					verdicts += 1;
+					harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "Queued reminder completed from preserved session." });
+				}
+				return { status: "dispatched" };
+			},
+			// The kickoff ended idle with no result, which is precisely the reminder race window.
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, roleStore as any, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Busy reminder", prompt: "Review", timeout: 1, role: "reviewer" }, stateDir, goalId,
+			{ name: "reviewer", promptTemplate: "You are a code reviewer." }, "combined", "kickoff", 1_000, sessionId,
+		);
+
+		assert.equal(result.passed, true, `${MARKER}: VERIFIER_BUSY_RACE_REPRO same-session reminder must recover busy contention. result=${JSON.stringify(result)}`);
+		assert.deepEqual(createdIds, [sessionId], `${MARKER}: VERIFIER_BUSY_RACE_REPRO reminder must not spawn a replacement reviewer`);
+		assert.equal(fakeSession.transcriptMarker, "preserved llm reminder history", `${MARKER}: VERIFIER_BUSY_RACE_REPRO reminder preserves context`);
+		assert.equal(busyRejections, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO has one recovered busy reminder`);
+		assert.equal(providerAccepted.length, 2, `${MARKER}: VERIFIER_BUSY_RACE_REPRO accepts kickoff and reminder exactly once each`);
+		assert.equal(verdicts, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO reminder publishes one verdict`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO does not mistake promptWhenReady liveness for idle during same-session resurrection", async () => {
+		const goalId = "goal-busy-llm-resurrection";
+		const stateDir = makeStateDir("verifier-busy-llm-resurrection-");
+		const sessionId = "busy-llm-resurrection-same-session";
+		const createdIds: string[] = [];
+		const providerAccepted: string[] = [];
+		let readyButBusyCalls = 0;
+		let verdicts = 0;
+		let idleWaits = 0;
+		let harness: any;
+		const fakeSession = {
+			id: sessionId, status: "terminated", transcriptMarker: "preserved resurrection transcript", lastTurnErrored: false,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async () => ({ success: true }),
+				// This mock represents a successful get_state/readiness probe followed
+				// by the exact busy prompt rejection. Readiness is not prompt idleness.
+				promptWhenReady: async () => {
+					readyButBusyCalls += 1;
+					throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+				},
+			},
+		};
+		const roleStore = { get: () => undefined, getAll: () => [] };
+		const { projectContextManager } = makeProjectContext(goalId, roleStore);
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => { createdIds.push(opts.sessionId); return fakeSession; },
+			setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => fakeSession,
+			enqueuePrompt: async (sid: string, text: string) => {
+				assert.equal(sid, sessionId, `${MARKER}: VERIFIER_BUSY_RACE_REPRO resurrection must retain original reviewer id`);
+				providerAccepted.push(text);
+				if (providerAccepted.length === 2) {
+					readyButBusyCalls += 1;
+					verdicts += 1;
+					harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "Queued resurrection continuation completed." });
+				}
+				return { status: "dispatched" };
+			},
+			waitForIdle: async () => {
+				idleWaits += 1;
+				if (idleWaits === 1) throw new Error("Agent process not running");
+			},
+			waitForStreaming: async () => {},
+			ensureSessionAlive: async (sid: string) => {
+				assert.equal(sid, sessionId, `${MARKER}: VERIFIER_BUSY_RACE_REPRO resurrects the same session`);
+				assert.equal(fakeSession.transcriptMarker, "preserved resurrection transcript", `${MARKER}: VERIFIER_BUSY_RACE_REPRO keeps transcript history during resurrection`);
+				fakeSession.status = "idle";
+			},
+			terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, roleStore as any, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Busy resurrection", prompt: "Review", timeout: 1, role: "reviewer" }, stateDir, goalId,
+			{ name: "reviewer", promptTemplate: "You are a code reviewer." }, "combined", "kickoff", 1_000, sessionId,
+		);
+
+		assert.equal(result.passed, true, `${MARKER}: VERIFIER_BUSY_RACE_REPRO resurrection must queue after a ready-but-busy reviewer. result=${JSON.stringify(result)}`);
+		assert.deepEqual(createdIds, [sessionId], `${MARKER}: VERIFIER_BUSY_RACE_REPRO must not replace a healthy-but-busy resurrected reviewer`);
+		assert.equal(readyButBusyCalls, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO must recover one ready-but-busy continuation without a second raw prompt`);
+		assert.equal(providerAccepted.length, 2, `${MARKER}: VERIFIER_BUSY_RACE_REPRO accepts kickoff and resurrection continuation once each`);
+		assert.equal(verdicts, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO resurrection publishes one verdict`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO queues a fresh agent-qa kickoff and preserves its report artifact", async () => {
+		const goalId = "goal-busy-qa-kickoff";
+		const stateDir = makeStateDir("verifier-busy-qa-kickoff-");
+		const sessionId = "busy-qa-kickoff-same-session";
+		const createdIds: string[] = [];
+		const providerAccepted: string[] = [];
+		let busyRejections = 0;
+		let verdicts = 0;
+		let harness: any;
+		const fakeSession = {
+			id: sessionId, status: "idle", transcriptMarker: "preserved QA kickoff history", lastTurnErrored: false,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async () => { throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."); },
+			},
+		};
+		const { roleStore, projectContextManager } = makeProjectContext(goalId, qaRoleStore());
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => { createdIds.push(opts.sessionId); return fakeSession; },
+			setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => fakeSession,
+			enqueuePrompt: async (sid: string, text: string) => {
+				assert.equal(sid, sessionId, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA kickoff queues original session`);
+				busyRejections += 1;
+				providerAccepted.push(text);
+				verdicts += 1;
+				harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "Queued QA kickoff completed.", reportHtml: "<p>queued QA</p>" });
+				return { status: "dispatched" };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, roleStore, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runAgentQaStep(
+			{ name: "Busy QA kickoff", prompt: "Run checks", timeout: 1, role: "qa-tester" }, stateDir, goalId,
+			{ branch: "goal/busy", commit: "abc123" }, "signal", {}, "goal", new Map(), sessionId,
+		);
+
+		assert.equal(result.passed, true, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA kickoff must survive busy contention. result=${JSON.stringify(result)}`);
+		assert.deepEqual(createdIds, [sessionId], `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA must not replace its busy reviewer`);
+		assert.equal(fakeSession.transcriptMarker, "preserved QA kickoff history", `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA preserves context`);
+		assert.equal(busyRejections, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO recovers one busy QA kickoff`);
+		assert.equal(providerAccepted.length, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA kickoff is accepted once`);
+		assert.equal(verdicts, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA publishes one verdict`);
+		assert.deepEqual(result.artifact, { content: "<p>queued QA</p>", contentType: "text/html" }, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA preserves report artifact`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO queues an agent-qa reminder on the same busy reviewer", async () => {
+		const goalId = "goal-busy-qa-reminder";
+		const stateDir = makeStateDir("verifier-busy-qa-reminder-");
+		const sessionId = "busy-qa-reminder-same-session";
+		const createdIds: string[] = [];
+		const providerAccepted: string[] = [];
+		let busyRejections = 0;
+		let verdicts = 0;
+		let harness: any;
+		let rawPromptCalls = 0;
+		const fakeSession = {
+			id: sessionId, status: "idle", transcriptMarker: "preserved QA reminder history", lastTurnErrored: false,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async () => {
+					rawPromptCalls += 1;
+					if (rawPromptCalls === 1) return { success: true }; // kickoff becomes idle without a verdict
+					busyRejections += 1;
+					throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+				},
+			},
+		};
+		const { roleStore, projectContextManager } = makeProjectContext(goalId, qaRoleStore());
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async (_cwd: string, _args: unknown, _goalId: string, _assistantType: unknown, opts: any) => { createdIds.push(opts.sessionId); return fakeSession; },
+			setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => fakeSession,
+			enqueuePrompt: async (sid: string, text: string) => {
+				assert.equal(sid, sessionId, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder must retain session identity`);
+				providerAccepted.push(text);
+				if (providerAccepted.length === 2) {
+					busyRejections += 1;
+					verdicts += 1;
+					harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "Queued QA reminder completed.", reportHtml: "<p>queued reminder</p>" });
+				}
+				return { status: "dispatched" };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, roleStore, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runAgentQaStep(
+			{ name: "Busy QA reminder", prompt: "Run checks", timeout: 1, role: "qa-tester" }, stateDir, goalId,
+			{ branch: "goal/busy", commit: "abc123" }, "signal", {}, "goal", new Map(), sessionId,
+		);
+
+		assert.equal(result.passed, true, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder must survive busy contention. result=${JSON.stringify(result)}`);
+		assert.deepEqual(createdIds, [sessionId], `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder must not replace reviewer`);
+		assert.equal(fakeSession.transcriptMarker, "preserved QA reminder history", `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder preserves context`);
+		assert.equal(busyRejections, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO has one recovered busy QA reminder`);
+		assert.equal(providerAccepted.length, 2, `${MARKER}: VERIFIER_BUSY_RACE_REPRO accepts QA kickoff and reminder once each`);
+		assert.equal(verdicts, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder publishes one verdict`);
+		assert.deepEqual(result.artifact, { content: "<p>queued reminder</p>", contentType: "text/html" }, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder preserves report artifact`);
+	});
+
 	it("agent-qa honors a late verification_result posted during teardown", async () => {
 		const goalId = "goal-agent-qa-late-verdict";
 		const stateDir = makeStateDir("verifier-agent-qa-late-verdict-");
