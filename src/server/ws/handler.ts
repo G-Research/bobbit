@@ -114,14 +114,16 @@ function isExactResolvedMeta(meta: OptionalResolvedModelStateMeta | undefined): 
 
 /**
  * Build a `state.model` payload from exact registry metadata when available.
- * During a temporary registry miss, only a live frame whose provider/id exactly
- * matches the requested identity may supply capability fields. Missing fields
- * remain missing; Bobbit does not manufacture defaults from the model name.
+ * The active Claude SDK Query is authoritative for its live reasoning and
+ * effort capabilities. Stable metadata still comes from the exact registry.
+ * Other runtimes use live fields only during a temporary registry miss. Missing
+ * fields remain missing; Bobbit does not manufacture defaults from a model name.
  */
 export function buildResolvedModelStateModel(provider: string, id: string, base?: Record<string, unknown>): Record<string, unknown> {
 	const resolved = resolveModelStateMeta(provider, id) as OptionalResolvedModelStateMeta | undefined;
 	const matchingLive = base?.provider === provider && base?.id === id ? base : undefined;
 	const source = isExactResolvedMeta(resolved) ? resolved : matchingLive;
+	const capabilitySource = provider === "claude-agent-sdk" && matchingLive ? matchingLive : source;
 	const model: Record<string, unknown> = {
 		...(matchingLive ?? {}),
 		provider,
@@ -132,9 +134,9 @@ export function buildResolvedModelStateModel(provider: string, id: string, base?
 	else delete model.contextWindow;
 	if (isPositiveNumber(source?.maxTokens)) model.maxTokens = source.maxTokens;
 	else delete model.maxTokens;
-	if (typeof source?.reasoning === "boolean") model.reasoning = source.reasoning;
+	if (typeof capabilitySource?.reasoning === "boolean") model.reasoning = capabilitySource.reasoning;
 	else delete model.reasoning;
-	if (isThinkingLevelMap(source?.thinkingLevelMap)) model.thinkingLevelMap = source.thinkingLevelMap;
+	if (isThinkingLevelMap(capabilitySource?.thinkingLevelMap)) model.thinkingLevelMap = capabilitySource.thinkingLevelMap;
 	else delete model.thinkingLevelMap;
 	if (isInputModalityList(source?.input)) model.input = source.input;
 	else delete model.input;
