@@ -103,7 +103,7 @@
     },
     {
       "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
-      "reason": "Gateway-backed desktop journey covering explicit reveal of collapsed nested team delegates in Project and Status views, filter/search reset, keyboard highlight restoration, nearest scrolling, repeated emphasis, persisted expansion, cold archived reveal, reduced motion, cleanup, and mobile absence.",
+      "reason": "Deterministic production-renderer desktop journey covering explicit reveal of collapsed nested team delegates in Project and Status views, filter/search reset, keyboard highlight restoration, nearest scrolling, repeated emphasis, persisted expansion across reload, cold archived hydration, reduced motion, cleanup, and mobile absence.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
