@@ -72,8 +72,11 @@ export function createSessionBridge(options: SessionBridgeOptions): IRpcBridge {
 		const sdkOptions = { ...options, runtime } as import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkBridgeOptions;
 		const deps = options.claudeAgentSdkBridgeDepsFactory?.(sdkOptions) ?? sdkDeps;
 		const launch = sdkOptions.claudeSdkSandboxLaunch;
+		// The deps factory is a test-only seam. Preserve an explicitly injected
+		// sandbox transcript accessor so executable lifecycle tests never fall
+		// through to the real Docker CLI after their fake SDK query is ready.
 		const sandboxSessionAccess = launch
-			? createSandboxClaudeAgentSdkSessionAccess({
+			? deps.sessionAccess?.sandboxSdk ?? createSandboxClaudeAgentSdkSessionAccess({
 				containerId: launch.containerId,
 				cwd: launch.cwd,
 				bobbitSessionId: launch.sessionId,

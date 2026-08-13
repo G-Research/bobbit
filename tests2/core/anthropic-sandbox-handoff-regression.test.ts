@@ -365,6 +365,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		mkdirSync(path.join(configRoot, "tools"), { recursive: true });
 		const dockerExecs: Array<{ args: string[]; options: any }> = [];
 		const sdkLaunches: any[] = [];
+		const sdkQueryOptions: any[] = [];
 		const queries: Array<{ close: ReturnType<typeof vi.fn> }> = [];
 		const fakeChild = () => {
 			const child = new EventEmitter() as any;
@@ -393,11 +394,13 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 				const line = chunk.toString();
 				if (!line.startsWith("BOBBIT_SDK_DISPATCH:")) return;
 				const init = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
-				const schemas = (init.manifest ?? []).map((entry: any) => ({
-					name: entry.name,
-					inputSchema: { type: "object", properties: {} },
-				}));
-				child.stdout.write(`BOBBIT_SDK_DISPATCH:${JSON.stringify({ type: "ready", schemas })}\n`);
+				const schemas = (init.manifest ?? []).flatMap((entry: any) =>
+					(entry.selectedToolNames ?? []).map((name: string) => ({
+						name,
+						inputSchema: { type: "object", properties: {} },
+					})),
+				);
+				queueMicrotask(() => child.stdout.write(`BOBBIT_SDK_DISPATCH:${JSON.stringify({ type: "ready", schemas })}\n`));
 			});
 			return child;
 		});
@@ -412,13 +415,16 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			};
 			manager.toolManager = new ToolManager(configRoot, path.resolve("defaults/tools"));
 			manager.assemblePrompt = vi.fn(() => undefined);
-			manager.resolveSessionRole = vi.fn(() => undefined);
+			manager.resolveSessionRole = vi.fn((name: string | undefined) => name ? { name, promptTemplate: `${name} prompt`, accessory: "none", toolPolicies: {} } : undefined);
 			manager.resolveEffectiveAllowedTools = vi.fn(() => []);
 			manager.ensureMcpManagerForContext = vi.fn(async () => {});
+			const sdkRoleManager = {
+				getRole: (name: string) => ({ name, promptTemplate: `${name} prompt`, accessory: "none", toolPolicies: {} }),
+			};
 			manager.buildPipelineContext = vi.fn(() => ({
 				toolManager: manager.toolManager,
 				mcpManager: null,
-				roleManager: null,
+				roleManager: sdkRoleManager,
 				groupPolicyStore: null,
 				configCascade: null,
 				projectConfigStore: null,
@@ -427,15 +433,23 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			manager.applyDirectProviderEnv = vi.fn(async () => {});
 			manager.requireCurrentCatalogSpawnModel = vi.fn(async (model: string) => model);
 			manager.resolveCurrentCatalogThinkingLevel = vi.fn(async () => "off");
-			manager.tryAutoSelectModel = vi.fn(async () => undefined);
+			manager.tryAutoSelectModel = vi.fn(async () => ({ provider: "claude-agent-sdk", modelId: "sandbox-sonnet", thinkingLevel: "off" }));
 			manager.tryApplyDefaultThinkingLevel = vi.fn(async () => undefined);
 			manager.drainQueue = vi.fn();
+			manager._writeModelNameFile = vi.fn();
 			manager.handleAgentLifecycle = vi.fn();
 			manager._reconcileAfterAbort = vi.fn();
 			let failCandidate = false;
 			manager.claudeAgentSdkBridgeDepsFactory = () => {
 				const ownedChildren: any[] = [];
 				return {
+					sessionAccess: {
+						loadSdk: async () => { throw new Error("sandbox history must use its injected accessor"); },
+						sandboxSdk: {
+							getSessionInfo: vi.fn(async () => ({ sessionId: resumeId, summary: "replacement", lastModified: 1 })),
+							getSessionMessages: vi.fn(async () => []),
+						},
+					},
 					createDockerSpawn: (input: any) => (options: any) => {
 						const child = fakeChild();
 						sdkLaunches.push({ input, options, child });
@@ -443,9 +457,13 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 						return child;
 					},
 					query: (request: any) => {
+						sdkQueryOptions.push(request.options);
 						request.options.spawnClaudeCodeProcess({ args: ["--sdk-protocol"], env: {}, signal: new AbortController().signal });
+						let finishIterator!: () => void;
+						const iteratorFinished = new Promise<void>((resolve) => { finishIterator = resolve; });
 						const query = {
 							close: vi.fn(async () => {
+								finishIterator();
 								for (const child of ownedChildren.splice(0)) child.kill("SIGTERM");
 							}),
 							initializationResult: async () => {
@@ -454,6 +472,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 							},
 							async *[Symbol.asyncIterator]() {
 								yield { type: "system", subtype: "init", session_id: resumeId };
+								await iteratorFinished;
 							},
 						};
 						queries.push(query);
@@ -510,6 +529,14 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			const forceOld = oldBridge();
 			forceOld.abort = vi.fn(() => new Promise(() => {}));
 			manager.sessions.set(forceId, live(forceId, forceOld, "streaming"));
+			// Drive the grace expiry as an explicit lifecycle edge, not a wall-clock sleep.
+			manager.clock = {
+				now: () => Date.now(),
+				setTimeout: (callback: () => void) => { queueMicrotask(callback); return 1; },
+				clearTimeout: vi.fn(),
+				setInterval,
+				clearInterval,
+			};
 			await expect(manager.forceAbort(forceId, 1)).resolves.toBeUndefined();
 
 			assert.equal(wiring.mock.calls.length, 2);
@@ -525,6 +552,8 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 				assert.equal(sdk.input.cwd, `/workspace-wt/${id}`);
 				assert.equal(sdk.input.env.BOBBIT_TOKEN, `scoped-${id}`);
 				assert.equal(sdk.input.env.CLAUDE_CODE_OAUTH_TOKEN, "current-oauth");
+				const queryOptions = sdkQueryOptions.find(candidate => candidate.env.BOBBIT_SESSION_ID === id);
+				assert.equal(queryOptions?.resume, resumeId);
 				assert.equal(sdk.options.args.includes("switch_session"), false);
 			}
 			assert.equal(roleOld.stop.mock.calls.length, 1);
@@ -540,6 +569,10 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			const queryCount = queries.length;
 			await expect(manager.assignRole(failedId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).rejects.toThrow("candidate startup failed");
 			assert.ok(queries[queryCount]?.close.mock.calls.length, "failed SDK candidate must be disposed");
+			const failedSdk = sdkLaunches.find(candidate => candidate.input.containerId === `container-${failedId}`);
+			const failedDispatcher = dockerExecs.find(candidate => candidate.args.includes(`container-${failedId}`));
+			assert.equal(failedSdk?.child.killed, true, "failed SDK subprocess must be killed");
+			assert.ok(failedDispatcher, "failed candidate must have completed real dispatcher preflight");
 			assert.equal(failedOld.stop.mock.calls.length, 0);
 			assert.equal(manager.sessions.get(failedId)?.rpcClient, failedOld);
 		} finally {
