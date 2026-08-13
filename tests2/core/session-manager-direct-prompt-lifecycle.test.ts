@@ -1315,6 +1315,29 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 0);
 	});
 
+	it("tick-zero redrains an ordinary busy rejection without auto or manual retry", async () => {
+		const manager = makeManager();
+		let attempts = 0;
+		const prompt = vi.fn(async () => {
+			attempts += 1;
+			return attempts === 1
+				? { success: false, error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message." }
+				: { success: true };
+		});
+		const { session } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(manager.enqueuePrompt(session.id, "ordinary busy prompt"), /already processing/);
+		assert.equal(autoRetryPendingEvents(session).length, 0, "ordinary contention must not schedule provider auto-retry");
+		assert.equal(session.manualRetryRequired, undefined, "ordinary contention must not expose manual retry before the queue redrain");
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 2, "tick-zero redrain should deliver the original durable row once the transport settles");
+		assert.equal(session.promptQueue.length, 0);
+		assert.equal(autoRetryPendingEvents(session).length, 0);
+		assert.notEqual(session.manualRetryRequired, true);
+	});
+
 	it("recovers a queued prompt when local abort status changes before prompt rejection", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();

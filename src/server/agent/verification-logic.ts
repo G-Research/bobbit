@@ -359,20 +359,60 @@ export const QA_NON_TRANSIENT_PATTERNS = [
  * backoff loop.
  */
 export function isReviewerBusyError(output: string): boolean {
-	return !!output && /\bAgent is already processing\.\s*Specify streamingBehavior\b/i.test(output);
+	return !!output && /^Agent is already processing\.\s*Specify streamingBehavior \('steer' or 'followUp'\) to queue the message\.?$/i.test(output.trim());
 }
+
+const VERIFIER_FAILURE_PREFIX = "(?:LLM review|Agent QA) failed:";
+const VERIFIER_BUSY_TRANSPORT = "Agent is already processing\\.\\s*Specify streamingBehavior \\('steer' or 'followUp'\\) to queue the message\\.?";
+const VERIFIER_RECEIPT_TIMEOUT = "Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \\d+ms";
+const VERIFIER_RESTART_BEFORE_DISPATCH = "Verifier (?:session [a-z0-9][a-z0-9-]* (?:restarted|was terminated) before dispatch|prompt [a-z0-9][a-z0-9-]* was cancelled before dispatch)";
 
 /**
  * The verifier receipt's bounded dispatch wait elapsed while its durable row
  * remained queued. This is queue contention, not reviewer content or provider
- * configuration; keep it narrowly retryable under the ordinary bounded policy.
+ * configuration. It is intentionally verifier-scoped: ordinary session prompt
+ * delivery uses its tick-zero queue redrain rather than verification retries.
  */
 export function isVerifierPromptDispatchTimeoutError(output: string): boolean {
-	return !!output && /(?:^|(?:LLM review|Agent QA) failed:\s*)Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \d+ms$/i.test(output.trim());
+	return !!output && new RegExp(`^${VERIFIER_FAILURE_PREFIX}\\s*${VERIFIER_RECEIPT_TIMEOUT}$`, "i").test(output.trim());
+}
+
+/**
+ * Match only an error envelope emitted by the verifier transport. A reviewer
+ * finding that quotes the same SDK text is content, not infrastructure.
+ */
+export function isVerifierBusyTransportError(output: string): boolean {
+	return !!output && new RegExp(`^${VERIFIER_FAILURE_PREFIX}\\s*${VERIFIER_BUSY_TRANSPORT}$`, "i").test(output.trim());
+}
+
+/**
+ * A verifier receipt was fenced because restart/termination won before its
+ * provider dispatch. The explicit harness envelope prevents a review summary
+ * mentioning restart from being retried as infrastructure.
+ */
+export function isVerifierRestartBeforeDispatchError(output: string): boolean {
+	if (!output) return false;
+	const text = output.trim();
+	return new RegExp(`^(?:${VERIFIER_FAILURE_PREFIX}\\s*|Reviewer agent was not ready / timed out while (?:resuming|sending post-continuation reminder) after server restart:\\s*)${VERIFIER_RESTART_BEFORE_DISPATCH}$`, "i").test(text);
+}
+
+/** Verifier-only transient policy; generic SessionManager policy stays narrow. */
+export function isTransientVerifierReviewError(output: string): boolean {
+	return isTransientReviewError(output)
+		|| isVerifierBusyTransportError(output)
+		|| isVerifierPromptDispatchTimeoutError(output)
+		|| isVerifierRestartBeforeDispatchError(output);
+}
+
+/** Verifier-only QA variant, preserving QA's ordinary stricter policy. */
+export function isTransientVerifierQaError(output: string): boolean {
+	return isTransientQaError(output)
+		|| isVerifierBusyTransportError(output)
+		|| isVerifierPromptDispatchTimeoutError(output)
+		|| isVerifierRestartBeforeDispatchError(output);
 }
 
 function matchesAnyTransient(output: string): boolean {
-	if (isReviewerBusyError(output) || isVerifierPromptDispatchTimeoutError(output)) return true;
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
 	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
 	if (TRANSIENT_INFRA_ERROR_REGEXES.some(re => re.test(output))) return true;
@@ -382,7 +422,11 @@ function matchesAnyTransient(output: string): boolean {
 	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
-/** Check if an LLM review error output matches a transient failure pattern. */
+/**
+ * Check if an ordinary LLM review error output matches a transient failure pattern.
+ * Verifier transport contention is intentionally excluded; see
+ * `isTransientVerifierReviewError()` at the harness boundary.
+ */
 export function isTransientReviewError(output: string): boolean {
 	return matchesAnyTransient(output);
 }
@@ -508,7 +552,7 @@ export function describeProviderBackoff(session: BackoffSnapshot | undefined): s
 	return ` Last turn hit a provider ${kind} error${attemptPart}${pendingPart}. Check your provider quota / subscription rate limits. (Error: ${snippet})`;
 }
 
-/** Check if an agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
+/** Check if an ordinary agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
 export function isTransientQaError(output: string): boolean {
 	if (QA_NON_TRANSIENT_PATTERNS.some(pattern => output.includes(pattern))) return false;
 	return matchesAnyTransient(output);
