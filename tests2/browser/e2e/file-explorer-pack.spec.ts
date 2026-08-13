@@ -222,7 +222,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await pathInput.press("Enter");
 		await expect(treeItem(page, "deep/navigation"), "direct directory navigation reveals initially unloaded ancestors").toBeVisible({ timeout: 15_000 });
 		await expect(treeItem(page, "deep/navigation")).toBeFocused();
-		const breadcrumbs = panel.getByRole("navigation", { name: "Current path" });
+		const breadcrumbs = panel.getByRole("navigation", { name: "Current absolute path" });
 		await expect(breadcrumbs).toBeVisible();
 		await expect(breadcrumbs.getByRole("button", { name: /navigation/i })).toHaveAttribute("aria-current", "location");
 
@@ -284,7 +284,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		pathInput = panel.getByRole("textbox", { name: "Relative path" });
 		await pathInput.fill("deep/navigation/direct-target.txt");
 		await pathInput.press("Enter");
-		await expect(panel.getByRole("navigation", { name: "Current path" }), "the path bar remains available in the narrow preview pane").toBeVisible();
+		await expect(panel.getByRole("navigation", { name: "Current absolute path" }), "the path bar remains available in the narrow preview pane").toBeVisible();
 		await expect(panel.getByRole("button", { name: "Back to files" })).toBeVisible();
 		await panel.getByRole("button", { name: "Back to files" }).click();
 		await expect(search).toBeVisible();
@@ -317,7 +317,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		let restored = await waitForExplorer(page);
 		await expect(restored.getByRole("button", { name: "Changed files only" })).toHaveAttribute("aria-pressed", "true");
 		await expect(restored.getByRole("combobox", { name: "Search files and folders" }), "search queries are transient across reload").toHaveValue("");
-		await expect(restored.getByRole("navigation", { name: "Current path" })).toBeVisible();
+		await expect(restored.getByRole("navigation", { name: "Current absolute path" })).toBeVisible();
 
 		await restored.getByRole("button", { name: /Edit path/ }).click();
 		pathInput = restored.getByRole("textbox", { name: "Relative path" });
@@ -325,7 +325,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await page.reload();
 		restored = await waitForExplorer(page);
 		await expect(restored.getByRole("textbox", { name: "Relative path" }), "path editing state is transient across reload").toHaveCount(0);
-		await expect(restored.getByRole("navigation", { name: "Current path" })).toBeVisible();
+		await expect(restored.getByRole("navigation", { name: "Current absolute path" })).toBeVisible();
 		await expect(restored.getByRole("button", { name: "Changed files only" }), "the durable filter preference survives both reloads").toHaveAttribute("aria-pressed", "true");
 	});
 

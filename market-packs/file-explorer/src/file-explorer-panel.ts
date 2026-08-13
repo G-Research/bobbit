@@ -1052,6 +1052,14 @@ function filesystemParent(rootPath?: string): string | undefined {
 
 function resetForRootChange(state: ExplorerState, rootPath: string): void {
 	state.rootPath = rootPath;
+	// Fence every request issued under the previous root. The current absolute
+	// navigation owns navigationGeneration, so leave that counter untouched.
+	state.refreshGeneration += 1;
+	state.selectionGeneration += 1;
+	state.search.generation += 1;
+	if (state.search.timer !== undefined) window.clearTimeout(state.search.timer);
+	state.search = { query: "", phase: "idle", results: [], activeIndex: -1, count: 0, truncated: false, generation: state.search.generation };
+	state.searchInput.value = "";
 	state.directories.clear();
 	state.discovered.clear();
 	state.expanded.clear();

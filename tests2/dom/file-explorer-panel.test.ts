@@ -1593,6 +1593,56 @@ describe("built-in file explorer panel", () => {
 		expect(row(root, "changed.txt")).not.toBeNull();
 	});
 
+	it("fences old-root list, search, and preview responses after rebasing", async () => {
+		const oldList = deferred<unknown>();
+		const oldSearch = deferred<unknown>();
+		const oldRead = deferred<unknown>();
+		const nextRoot = "C:\\Users\\tester\\other";
+		const fakeHost = host({
+			list: ({ path, rootPath }) => rootPath === nextRoot
+				? { rootPath: nextRoot, entries: [{ path: "fresh.txt", name: "fresh.txt", kind: "file" }], truncated: false, git: { kind: "none" } }
+				: path === "folder" ? oldList.promise : list([
+					{ path: "folder", name: "folder", kind: "directory" },
+					{ path: "old.txt", name: "old.txt", kind: "file" },
+				]),
+			read: () => oldRead.promise,
+			search: () => oldSearch.promise,
+			resolve: ({ absolutePath }) => absolutePath === nextRoot
+				? { path: "", rootPath: nextRoot, kind: "root", chain: [] }
+				: { path: "", kind: "root", chain: [] },
+		});
+		const root = mount("root-response-fence", fakeHost);
+		await tick();
+
+		click(row(root, "folder"));
+		click(row(root, "old.txt"));
+		await tick();
+		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
+		search.value = "stale";
+		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+		await tick(220);
+		click(root.querySelector('[aria-label="Edit path (Ctrl+L)"]')!);
+		await tick();
+		const input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
+		input.value = "C:/Users/tester/other";
+		key(input, "Enter");
+		await tick();
+		await tick();
+
+		oldList.resolve(list([{ path: "folder/stale.ts", name: "stale.ts", kind: "file" }]));
+		oldSearch.resolve({ query: "stale", results: [{ path: "stale-search.ts", name: "stale-search.ts", kind: "file" }], count: 1, truncated: false });
+		oldRead.resolve({ kind: "text", text: "stale preview" });
+		await tick();
+		await tick();
+
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toBe("C:/Users/tester/other");
+		expect(row(root, "fresh.txt")).not.toBeNull();
+		expect(root.textContent).not.toContain("stale.ts");
+		expect(root.textContent).not.toContain("stale-search.ts");
+		expect(root.textContent).not.toContain("stale preview");
+		expect(root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')?.value).toBe("");
+	});
+
 	it("sets a real directory as the explorer root from its context menu", async () => {
 		const nextRoot = "C:\\Users\\tester\\worktrees\\bobbit\\folder";
 		const fakeHost = host({
