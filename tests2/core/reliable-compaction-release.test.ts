@@ -49,8 +49,14 @@ describe("reliable compaction admission fences", () => {
 		const steerAdmission = manager.deliverLiveSteer(session.id, "S1 during manual", { intentId: "S1" });
 		await Promise.all([promptAdmission, steerAdmission]);
 
-		expect(prompt).not.toHaveBeenCalled();
-		expect(steer).not.toHaveBeenCalled();
+		expect(
+			prompt,
+			"RELIABLE_COMPACTION_FENCE_BROKEN: prompt RPC ran before compaction_end",
+		).not.toHaveBeenCalled();
+		expect(
+			steer,
+			"RELIABLE_COMPACTION_FENCE_BROKEN: steer RPC ran before compaction_end",
+		).not.toHaveBeenCalled();
 		expect(session.promptQueue.toArray()).toMatchObject([
 			{ id: "P1", kind: "prompt", targetTurn: "next-turn", deliveryState: "queued" },
 			{ id: "S1", kind: "steer", targetTurn: "next-turn", deliveryState: "queued" },

@@ -3038,6 +3038,42 @@
       }
     },
     {
+      "path": "tests2/core/pi-installed-contract.test.ts",
+      "reason": "Installed-runtime contract coverage for the aligned Pi trio version, delta-only streaming with terminal authority, compaction event order and retry metadata, manual-compaction prompt rejection, recoverable-length overflow retry, queue release, and steer acknowledgement before user echo.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/reliable-intent-queue.test.ts",
+      "reason": "Core reliable-turn queue coverage for stable occurrence identity, replay idempotence, metadata-preserving restore, target-turn lane ordering, identical steers, and abort retargeting, using the shared deterministic reliable-intent fixture.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/reliable-intent-attempt.test.ts",
+      "reason": "Core reliable-turn attempt-ledger coverage for delayed acknowledgement and echo, exact-once identical steers, ambiguous failure, abort interleavings, stale attempts, and persisted restore, using the shared deterministic reliable-intent fixture.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/reliable-compaction-release.test.ts",
+      "reason": "Core reliable-turn compaction coverage for admission fencing, single release across manual, threshold, overflow, failure, and abort outcomes, continuation-versus-next-turn ordering, and Stop interleavings, using the shared deterministic reliable-intent fixture.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/browser/goal-setup-recovery.spec.ts",
       "reason": "Chromium journey through the real gateway retry route and live broadcasts: current setup failures disable team and session starts, retrying renders as in-flight without an agent, and a persisted ready recovery clears dashboard/sidebar warnings through reload.",
       "execution": {
