@@ -28,6 +28,7 @@ import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeA
 import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
+import { projectClaudeSdkEmbeddedWork } from "./claude-sdk-subagent-work.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -633,8 +634,21 @@ function redactDispatchFailureReason(reason: string, providerAuthFailure: boolea
  *
  * See goal `goal-fix-lastac-724b3421` for the bug this guards against.
  */
+/**
+ * Semantic SDK child-work frames are transport-only at the root-session
+ * boundary. They belong to an existing parent tool card, not to the root turn:
+ * never let their nested message/tool payloads advance root activity, lifecycle,
+ * queue, status, transcript, or accounting state.
+ */
+export function isClaudeSdkSubagentWorkEvent(event: unknown): event is { type: "claude_sdk_subagent_work" } {
+	return !!event
+		&& typeof event === "object"
+		&& !Array.isArray(event)
+		&& (event as { type?: unknown }).type === "claude_sdk_subagent_work";
+}
+
 export function isUserVisibleActivity(event: any): boolean {
-	if (!event || typeof event.type !== "string") return false;
+	if (!event || typeof event.type !== "string" || isClaudeSdkSubagentWorkEvent(event)) return false;
 	switch (event.type) {
 		case "message_update":
 		case "message_end":
@@ -5510,6 +5524,11 @@ export class SessionManager {
 		event: any,
 		opts?: { replacementOwnedTerminal?: boolean; deferQueueDrain?: boolean },
 	): void {
+		// Embedded SDK child work is sequenced and broadcast like any live frame,
+		// but it is deliberately not a root agent event. In particular, its nested
+		// `message`/tool payload must not settle prompt delivery or alter root state.
+		if (isClaudeSdkSubagentWorkEvent(event)) return;
+
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
 		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
@@ -7148,7 +7167,10 @@ export class SessionManager {
 
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
 		if (isRetryableAgentEnd(event)) return;
-		emitSessionEvent(session, truncateLargeToolContent(event));
+		// Child-work frames already contain the server-owned, bounded semantic
+		// projection. Preserve their opaque source metadata verbatim; generic tool
+		// truncation is for root transcript rows and must not rewrite this audit data.
+		emitSessionEvent(session, isClaudeSdkSubagentWorkEvent(event) ? event : truncateLargeToolContent(event));
 	}
 
 	/**
@@ -7156,6 +7178,9 @@ export class SessionManager {
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
+		// G10b preserves child usage/cost as opaque source metadata. G8 remains the
+		// sole accounting owner, so nested work must never enter this root tracker.
+		if (isClaudeSdkSubagentWorkEvent(event)) return;
 		// SDK accounting has exactly one authority: the root result annotation
 		// emitted by its translator. Never fall through to assistant message_end;
 		// those frames can be streamed, replayed, or belong to an SDK child.
@@ -10061,7 +10086,32 @@ export class SessionManager {
 		const persisted = this.resolveStoreForId(id)?.get(id);
 		const identity = live ?? persisted;
 		const correlatedSnapshot = applyArchivedSnapshotCorrelations(snapshot);
-		const visible = buildVisibleMessageSnapshotData(correlatedSnapshot, {
+		const source: any = correlatedSnapshot;
+		const isClaudeSdk = identity?.runtime === "claude-agent-sdk"
+			|| (!!persisted && runtimeForPersistedSession(persisted) === "claude-agent-sdk");
+		// SDK history is an authoritative mixed root/child source. Split it before
+		// authoring, truncation, and root ordering so a child row cannot ever enter
+		// the root transcript pipeline. The wire envelope retains child metadata for
+		// reload/archive consumers without inventing a second transcript store.
+		const alreadyProjected = !!source && typeof source === "object" && !Array.isArray(source)
+			&& Array.isArray(source.subagentWork);
+		const sourceMessages = Array.isArray(source)
+			? source
+			: source && typeof source === "object" && Array.isArray(source.messages)
+				? source.messages
+				: undefined;
+		const partitioned = isClaudeSdk && !alreadyProjected && sourceMessages
+			? projectClaudeSdkEmbeddedWork(sourceMessages as any)
+			: undefined;
+		const snapshotWithNestedWork = partitioned
+			? {
+				...(Array.isArray(source) ? {} : source),
+				messages: partitioned.rootMessages,
+				subagentWork: [...partitioned.workByParent.values()],
+				...(partitioned.diagnostics.length > 0 ? { subagentWorkDiagnostics: partitioned.diagnostics } : {}),
+			}
+			: source;
+		const visible = buildVisibleMessageSnapshotData(snapshotWithNestedWork, {
 			sessionId: id,
 			session: {
 				id,
