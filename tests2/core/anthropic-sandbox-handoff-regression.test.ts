@@ -2,7 +2,7 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
-import { afterEach, describe, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -359,7 +359,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	it("passes freshly wired SDK authority to role and force-abort dispatch, and disposes a failed role candidate", async () => {
 		vi.resetModules();
 		const bridgeFactory = vi.fn();
-		const activate = vi.fn(async () => {});
+		const activate = vi.fn(async (_plan: any, _context: any) => {});
 		try {
 			vi.doMock("../../src/server/agent/session-runtime.ts", async (importOriginal) => ({
 				...(await importOriginal()),
@@ -371,7 +371,6 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			}));
 			const { SessionManager: IsolatedSessionManager } = await import("../../src/server/agent/session-manager.ts");
 			const manager: any = new IsolatedSessionManager();
-			managers.push(manager);
 			const resumeId = "00000000-0000-4000-8000-000000000031";
 			const records = new Map<string, any>();
 			manager._testStore = {
@@ -414,6 +413,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			const candidate = (start = vi.fn(async () => {})) => ({
 				start,
 				stop: vi.fn(async () => {}),
+				abort: vi.fn(async () => ({ success: true })),
 				onEvent: vi.fn(() => vi.fn()),
 				getState: vi.fn(async () => ({ success: true, data: {} })),
 				getMessages: vi.fn(async () => ({ success: true, data: { messages: [] } })),
@@ -451,6 +451,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			expect(wiring).toHaveBeenCalledTimes(2);
 			for (const [index, id] of [roleId, forceId].entries()) {
 				const plan = activate.mock.calls[index]?.[0];
+				assert.ok(plan, `expected SDK dispatcher activation for ${id}`);
 				expect(plan).toMatchObject({ id, cwd: `/workspace-wt/${id}`, roleName: index === 0 ? "sandbox-role" : undefined });
 				expect(plan.bridgeOptions).toMatchObject({
 					sandboxed: true, containerId: `container-${id}`, gatewayToken: `scoped-${id}`,
