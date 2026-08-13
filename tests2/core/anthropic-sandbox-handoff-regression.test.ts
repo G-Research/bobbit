@@ -460,6 +460,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			manager.resolveCurrentCatalogThinkingLevel = vi.fn(async () => "off");
 			manager.tryAutoSelectModel = vi.fn(async () => ({ provider: "claude-agent-sdk", modelId: "sandbox-sonnet", thinkingLevel: "off" }));
 			manager.tryApplyDefaultThinkingLevel = vi.fn(async () => undefined);
+			manager.finalizeSpawnOptions = vi.fn(async () => {});
 			manager.drainQueue = vi.fn();
 			manager._writeModelNameFile = vi.fn();
 			manager.handleAgentLifecycle = vi.fn();
