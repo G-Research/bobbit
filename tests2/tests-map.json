@@ -103,7 +103,7 @@
     },
     {
       "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
-      "reason": "Deterministic production-renderer desktop journey covering exact action-scoped inclusion of categorically hidden team/archive targets, manual filter-authority restoration, explicit reveal of a seven-level descendant chain beneath a canonically stamped team-lead spawned goal beyond the default depth cap, exact path-only persistence with unrelated project state preserved, collapsed team delegates in Project and Status views, filter/search reset, keyboard highlight restoration, nearest scrolling, repeated emphasis, persisted expansion across reload, cold archived hydration, reduced motion, cleanup, and mobile absence.",
+      "reason": "Deterministic production-renderer desktop journey covering exact action-scoped inclusion of categorically hidden team/archive targets, manual filter-authority restoration, explicit reveal of a seven-level descendant chain beneath a canonically stamped team-lead spawned goal beyond the default depth cap, durable depth and exact path persistence across a full reload with canonical fixture rehydration and unrelated project state preserved, collapsed live and status=terminated archived-child delegates in Project and Status views, terminal cache normalization, filter/search reset, keyboard highlight restoration, nearest scrolling, repeated emphasis, distinct cold archived hydration, reduced motion, cleanup, and mobile absence.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

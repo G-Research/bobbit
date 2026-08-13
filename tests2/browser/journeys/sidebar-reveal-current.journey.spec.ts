@@ -24,6 +24,7 @@ const IDS = {
 	unrelatedTeamDelegate: "reveal-unrelated-team-delegate",
 	unrelatedStatusMember: "reveal-unrelated-status-team-member",
 	archived: "reveal-cold-archived",
+	terminatedChild: "reveal-cached-terminated-child",
 	unrelatedArchived: "reveal-unrelated-archived",
 	deepProject: "reveal-deep-project",
 	deepTeamGoal: "reveal-deep-team-goal",
@@ -99,8 +100,8 @@ function treeKey(kind: "project" | "project-archived" | "goal" | "team-lead", id
 	return `sidebar-tree/v1/${kind}/${encodeURIComponent(id)}`;
 }
 
-function sessionChildrenKey(sessionId: string): string {
-	return `sidebar-tree/v1/session-children/${encodeURIComponent(sessionId)}?childClass=delegate`;
+function sessionChildrenKey(sessionId: string, childClass: "delegate" | "archived-delegate" = "delegate"): string {
+	return `sidebar-tree/v1/session-children/${encodeURIComponent(sessionId)}?childClass=${childClass}`;
 }
 
 function navRow(page: Page, sessionId: string): Locator {
@@ -267,6 +268,56 @@ async function injectStatusMemberTarget(page: Page): Promise<void> {
 		state.keyboardNavActiveId = null;
 		state.sidebarRevealSessionId = null;
 		window.history.replaceState({}, "", `#/session/${ids.statusMember}`);
+		(window as any).__renderRevealFixture();
+	}, IDS);
+	await expect(revealButton(page)).toBeEnabled();
+}
+
+async function injectTerminatedChildTarget(page: Page): Promise<void> {
+	await injectNestedTarget(page);
+	await page.evaluate((ids) => {
+		const state = (window as any).__bobbitState;
+		const terminated = {
+			id: ids.terminatedChild,
+			title: "Recently terminated delegate",
+			cwd: "/tmp/sidebar-reveal-current",
+			projectId: ids.project,
+			delegateOf: ids.teamLead,
+			role: "coder",
+			status: "terminated",
+			archived: false,
+			createdAt: 1_009,
+			lastActivity: 1_009,
+			lastReadAt: 1_010,
+			clientCount: 0,
+			server_tags: [],
+			user_tags: [],
+		};
+		state.gatewaySessions = [
+			...state.gatewaySessions.filter((value: any) => value.id !== terminated.id),
+			terminated,
+		];
+		// Let production own the terminal record's cache migration during the
+		// action; the fixture renderer must not overwrite that canonical move.
+		(window as any).__revealCanonicalSessions = null;
+		(window as any).__revealCanonicalGoals = null;
+		(window as any).__revealCanonicalArchivedSessions = null;
+		(window as any).__revealTerminatedRequests = [];
+		const originalFetch = window.fetch.bind(window);
+		window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			const url = new URL(raw, window.location.href);
+			(window as any).__revealTerminatedRequests.push(`${init?.method || "GET"} ${url.pathname}${url.search}`);
+			if (url.pathname.endsWith(`/api/sessions/${ids.terminatedChild}`)) return Response.json(terminated);
+			return originalFetch(input, init);
+		}) as typeof window.fetch;
+		(window as any).__revealActiveSessionId = ids.terminatedChild;
+		state.selectedSessionId = ids.terminatedChild;
+		state.connectingSessionId = ids.terminatedChild;
+		state.remoteAgent = null;
+		state.keyboardNavActiveId = null;
+		state.sidebarRevealSessionId = null;
+		window.history.replaceState({}, "", `#/session/${ids.terminatedChild}`);
 		(window as any).__renderRevealFixture();
 	}, IDS);
 	await expect(revealButton(page)).toBeEnabled();
@@ -671,10 +722,67 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		expect(await storedExpansion(page, unrelatedProjectKey), `${MARK}: reveal preserves the unrelated project sentinel`).toBe("collapsed");
 		const deepScroll = await page.evaluate(() => (window as any).__revealScrollCalls.at(-1));
 		expect(deepScroll).toMatchObject({ options: { behavior: "smooth", block: "nearest" }, wasWithin: false, overflowing: true });
+
+		// Reload creates fresh module-local depth state. Reinject only the static
+		// canonical gateway fixture; the durable reveal depth and ancestor path
+		// must be sufficient to render the clipped target without another reveal.
+		await reloadFixture(page);
+		expect(await injectDeepTarget(page)).toEqual(deepGoalIds);
+		await expect(navRow(page, IDS.deepSession), `${MARK}: persisted depth renders the deepest target after reload`).toBeVisible({ timeout: 3_000 });
+		await expect(navRow(page, IDS.deepSession)).toHaveAttribute("data-nav-active", "true");
+		const rehydratedPath = await page.evaluate((sessionId) => (window as any).__revealTreeAncestors(sessionId), IDS.deepSession);
+		expect(rehydratedPath, `${MARK}: reload restores the exact deep ancestor path`).toEqual([...pathKeys].reverse());
+		for (const key of pathKeys) {
+			expect(await storedExpansion(page, key), `${MARK}: reload preserves target path ${key}`).toBe("expanded");
+		}
+		expect(await storedExpansion(page, unrelatedProjectKey), `${MARK}: reload preserves unrelated collapsed sentinel`).toBe("collapsed");
 	});
 
-	test("cold archived reveal loads the terminated row, honors reduced motion, omits mobile control, and cleans fixture state", async ({ page }) => {
+	test("terminated child and cold archived reveals use archived hierarchy, reduced motion, and mobile cleanup", async ({ page }) => {
 		await openFixture(page, { width: 1280, height: 430 });
+
+		await injectTerminatedChildTarget(page);
+		const unrelatedKey = treeKey("goal", IDS.unrelatedGoal);
+		await clickTreeToggle(page, unrelatedKey);
+		await clickTreeToggle(page, unrelatedKey);
+		expect(await storedExpansion(page, unrelatedKey)).toBe("collapsed");
+		await expect(navRow(page, IDS.terminatedChild), `${MARK}: cached terminated child is filtered before reveal`).toHaveCount(0);
+		const container = page.locator(".sidebar-edge [data-project-reorder-list]");
+		await container.evaluate(element => { (element as HTMLElement).scrollTop = 0; });
+		await installRevealProbes(page, IDS.terminatedChild);
+
+		await activateReveal(page);
+		const terminatedPath = [
+			treeKey("project", IDS.project),
+			treeKey("goal", IDS.parentGoal),
+			treeKey("goal", IDS.teamGoal),
+			treeKey("team-lead", IDS.teamLead),
+			sessionChildrenKey(IDS.teamLead, "archived-delegate"),
+		];
+		const terminatedRow = navRow(page, IDS.terminatedChild);
+		await expect(terminatedRow, `${MARK}: status=terminated archived=false child is revealed`).toBeVisible({ timeout: 3_000 });
+		await expect(terminatedRow).toHaveAttribute("data-nav-active", "true");
+		await expectRowWithinSidebar(page, IDS.terminatedChild);
+		const terminatedAncestors = await page.evaluate((sessionId) => (window as any).__revealTreeAncestors(sessionId), IDS.terminatedChild);
+		expect(terminatedAncestors, `${MARK}: terminated child uses archived-child hierarchy`).toEqual([...terminatedPath].reverse());
+		for (const key of terminatedPath) expect(await storedExpansion(page, key), key).toBe("expanded");
+		expect(await storedExpansion(page, unrelatedKey), `${MARK}: terminated reveal preserves unrelated collapse`).toBe("collapsed");
+		await expect.poll(() => page.evaluate(() => (window as any).__revealEmphasisCount)).toBeGreaterThanOrEqual(1);
+		const terminatedScroll = await page.evaluate(() => (window as any).__revealScrollCalls.at(-1));
+		expect(terminatedScroll).toMatchObject({ options: { behavior: "smooth", block: "nearest" }, wasWithin: false, overflowing: true });
+		const terminatedCache = await page.evaluate((id) => {
+			const state = (window as any).__bobbitState;
+			return {
+				live: state.gatewaySessions.some((session: any) => session.id === id),
+				archived: state.archivedSessions.some((session: any) => session.id === id),
+				requests: (window as any).__revealTerminatedRequests as string[],
+			};
+		}, IDS.terminatedChild);
+		expect(terminatedCache).toMatchObject({ live: false, archived: true });
+		expect(terminatedCache.requests.some(value => value.includes(`/api/sessions/${IDS.terminatedChild}`)), `${MARK}: terminal target exact hydration`).toBe(true);
+
+		// Keep the genuinely archived cold-load case separate from the cached
+		// status=terminated child path above while reusing the same fixture boot.
 		await injectArchivedTarget(page);
 		await clickTreeToggle(page, treeKey("project", IDS.project));
 		await expect(navRow(page, IDS.archived), `${MARK}: cold target is absent before reveal`).toHaveCount(0);
