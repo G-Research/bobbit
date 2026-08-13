@@ -12,8 +12,7 @@ import {
 	deleteSession,
 	createGoal,
 	deleteGoal,
-	startTeam,
-	teardownTeam,
+	seedTeamLeadHeader,
 } from "./_e2e/e2e-setup.js";
 import { attachLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 
@@ -96,14 +95,18 @@ test.describe("team abort — membership enforcement", () => {
 test.describe("team abort — stuck agent", () => {
 	let goalId: string;
 
-	test.beforeEach(async () => {
+	test.beforeEach(async ({ gateway }) => {
 		const goal = await createGoal({ title: "abort-stuck", team: true });
 		goalId = goal.id;
-		await startTeam(goalId);
+		// These endpoint tests need an active team to spawn a worker, not a live
+		// team-lead turn. Seed the established minimal team state so Windows does
+		// not boot and later tear down two unrelated leader agents per file.
+		seedTeamLeadHeader(gateway, goalId);
 	});
 
 	test.afterEach(async () => {
-		if (goalId) await teardownTeam(goalId).catch(() => {});
+		// Goal cascade owns worker and seeded-team cleanup. Calling team teardown
+		// first repeats the same dismissal work and needlessly extends Windows IO.
 		if (goalId) await deleteGoal(goalId).catch(() => {});
 		goalId = "";
 	});
@@ -151,11 +154,7 @@ test.describe("team abort — stuck agent", () => {
 		expect(promptData.status).toBe("dispatched");
 		await agentClock.settleCurrentPrompt();
 
-		// Cleanup
-		await apiFetch(`/api/goals/${goalId}/team/dismiss`, {
-			method: "POST",
-			body: JSON.stringify({ sessionId: agentId }),
-		});
+		// Goal cascade in afterEach owns this worker's teardown.
 	});
 
 	test("POST /team/abort on an already-idle agent is a no-op", async ({ gateway }) => {
@@ -184,11 +183,7 @@ test.describe("team abort — stuck agent", () => {
 		expect(data.ok).toBe(true);
 		expect(data.status).toBe("idle");
 
-		// Cleanup
-		await apiFetch(`/api/goals/${goalId}/team/dismiss`, {
-			method: "POST",
-			body: JSON.stringify({ sessionId: agentId }),
-		});
+		// Goal cascade in afterEach owns this worker's teardown.
 	});
 });
 
