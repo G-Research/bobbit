@@ -208,6 +208,10 @@ export default function createFileExplorerPanel() {
 			}
 			state.host = host;
 			queueMicrotask(() => {
+				// A caller can synchronously remove a newly rendered panel before its
+				// deferred lifecycle setup runs. Do not create subscriptions or observers
+				// for a root that has already left the document.
+				if (!state!.root.isConnected) return;
 				activate(state!);
 				subscribeToStatus(state!);
 				requestInitialize(state!);
@@ -401,8 +405,10 @@ function activate(state: ExplorerState): void {
 	subscribeToStatus(state);
 	if (typeof MutationObserver !== "undefined") {
 		state.detachObserver = new MutationObserver(() => {
-			if (state.root.isConnected) return;
-			window.setTimeout(() => { if (!state.root.isConnected) deactivate(state); }, 0);
+			// Mutation delivery is deferred until the current synchronous turn ends,
+			// so a remove-and-append remount remains connected. A genuinely detached
+			// panel must release its subscription before another test or host turn runs.
+			if (!state.root.isConnected) deactivate(state);
 		});
 		state.detachObserver.observe(document.documentElement, { childList: true, subtree: true });
 	}
@@ -410,6 +416,10 @@ function activate(state: ExplorerState): void {
 
 function deactivate(state: ExplorerState): void {
 	state.active = false;
+	// A cached root can be rendered again after a real detach. Its directory
+	// snapshot may no longer describe the session, so route initialization must
+	// run again while preserving the durable UI preference already restored.
+	state.initialized = false;
 	state.lifecycleGeneration += 1;
 	state.initializationQueued = false;
 	state.refreshGeneration += 1;
