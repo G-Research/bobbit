@@ -326,7 +326,7 @@ bell-toggle button {
 	min-width: 0;
 	white-space: nowrap;
 	color: var(--muted-foreground);
-	font-size: 0.75em;
+	font-size: 0.8333em;
 	font-weight: 500;
 	transition: color 120ms ease, background-color 120ms ease;
 }
@@ -455,49 +455,103 @@ bell-toggle button {
 	gap: 0.125em;
 }
 
-.sidebar-status-heading {
-	display: flex;
-	align-items: center;
-	gap: 0.4167em;
-	height: 2.0833em;
-	padding: 0 0.5833em;
-	color: var(--muted-foreground);
-	font-size: 0.6667em;
-	font-weight: 650;
-	letter-spacing: 0.09em;
-	text-transform: uppercase;
+.sidebar-status-section--first {
+	margin-top: 0.125rem;
 }
 
-.sidebar-status-heading::after {
-	content: "";
-	flex: 1 1 auto;
-	height: 1px;
-	background: color-mix(in oklch, var(--border) 70%, transparent);
+.sidebar-status-heading {
+	width: 100%;
+}
+
+.sidebar-status-heading--lower-padding {
+	padding-bottom: 0.25rem;
+}
+
+.sidebar-status-heading:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: -2px;
 }
 
 .sidebar-status-heading-icon {
 	display: inline-flex;
-	width: 1em;
-	height: 1em;
-}
-
-.sidebar-status-heading-icon svg {
-	width: 100%;
-	height: 100%;
+	align-items: center;
+	flex: 0 0 auto;
 }
 
 .sidebar-status-count {
 	padding: 0 0.5em;
 	border-radius: 999px;
 	background: var(--muted);
-	font-size: 0.6667rem;
+	font-size: 0.6667em;
 	letter-spacing: 0;
 }
 
 .sidebar-status-rows {
 	display: flex;
 	flex-direction: column;
-	gap: 0.125em;
+	gap: 0.25rem;
+}
+
+.sidebar-status-goal-row {
+	/* Keep the two-line label centred against the sprite's layout box. */
+	align-items: center;
+}
+
+.sidebar-status-goal-sprite {
+	/* Pixel art reads slightly low beside uppercase text; optically correct it. */
+	position: relative;
+	top: -0.0625rem;
+}
+
+.sidebar-status-goal-copy {
+	row-gap: 0.0625rem;
+}
+
+.sidebar-status-goal-title {
+	line-height: 1.25;
+}
+
+.sidebar-status-goal-title-icon,
+.sidebar-status-session-title-icon {
+	display: inline-flex;
+}
+
+.sidebar-status-goal-title-icon {
+	width: 1em;
+	height: 1em;
+}
+
+.sidebar-status-session-title-icon {
+	width: 0.8em;
+	height: 0.8em;
+	position: relative;
+	top: 0.0625rem;
+}
+
+.sidebar-status-goal-title-icon svg,
+.sidebar-status-session-title-icon svg {
+	width: 100%;
+	height: 100%;
+}
+
+.sidebar-status-agent-title {
+	line-height: 1.25;
+	opacity: 0.78;
+}
+
+[data-status-motion-row="true"][data-status-moving="true"] {
+	will-change: transform;
+}
+
+.sidebar-status-change-trace {
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	background: color-mix(in oklch, var(--sidebar-status-motion-accent) 5%, transparent);
+	box-shadow: inset 2px 0 0 color-mix(in oklch, var(--sidebar-status-motion-accent) 24%, transparent);
+	opacity: 0;
+	pointer-events: none;
+	z-index: 3;
 }
 
 .sidebar-status-empty {

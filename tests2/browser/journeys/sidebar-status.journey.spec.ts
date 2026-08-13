@@ -28,6 +28,7 @@ const DEPS = [
 	ENTRY,
 	path.resolve("src/app/sidebar.ts"),
 	path.resolve("src/app/sidebar-status.ts"),
+	path.resolve("src/app/sidebar-status-motion.ts"),
 	path.resolve("src/app/sidebar-view-preferences.ts"),
 	path.resolve("src/app/render.ts"),
 	path.resolve("src/app/render-helpers.ts"),
@@ -88,6 +89,23 @@ async function sessionIdsInSection(page: Page, key: "pinned" | "unread" | "read"
 	return section(page, key).locator("[data-session-id]").evaluateAll((elements) =>
 		elements.map((element) => (element as HTMLElement).dataset.sessionId || "").filter(Boolean),
 	);
+}
+
+async function headingMetrics(heading: Locator, labelSelector: string) {
+	return heading.evaluate((element, selector) => {
+		const label = element.querySelector<HTMLElement>(selector);
+		if (!label) throw new Error(`Missing heading label: ${selector}`);
+		const headingStyle = getComputedStyle(element);
+		const labelStyle = getComputedStyle(label);
+		return {
+			height: element.getBoundingClientRect().height,
+			contentHeight: label.getBoundingClientRect().height + Number.parseFloat(headingStyle.paddingTop) + Number.parseFloat(headingStyle.paddingBottom),
+			padding: [headingStyle.paddingTop, headingStyle.paddingRight, headingStyle.paddingBottom, headingStyle.paddingLeft],
+			fontSize: labelStyle.fontSize,
+			fontWeight: labelStyle.fontWeight,
+			letterSpacing: labelStyle.letterSpacing,
+		};
+	}, labelSelector);
 }
 
 function filtersButton(page: Page): Locator {
@@ -169,8 +187,11 @@ test.describe("Journey: Sidebar status views", () => {
 		// Clean profile: one search, By Project selected, and canonical tree intact.
 		await expect(page.locator("input[data-search]")).toHaveCount(1);
 		await expect(page.getByTestId("sidebar-view-project")).toHaveAttribute("aria-pressed", "true");
-		await expect(page.getByTestId("project-header").filter({ hasText: "Status Journey Project" })).toBeVisible();
-		await expect(page.getByTestId("sidebar-sessions-header")).toBeVisible();
+		const projectHeader = page.getByTestId("project-header").filter({ hasText: "Status Journey Project" });
+		await expect(projectHeader).toBeVisible();
+		const projectGroupingHeader = page.getByTestId("sidebar-sessions-header");
+		await expect(projectGroupingHeader).toBeVisible();
+		const projectHeadingMetrics = await headingMetrics(projectGroupingHeader, ":scope > .flex-1");
 		await expect(row(page, ids.readNew)).toBeVisible();
 
 		// Shared search and Full Search remain available in Project mode.
@@ -193,7 +214,79 @@ test.describe("Journey: Sidebar status views", () => {
 		)).toEqual(["pinned", "unread", "read"]);
 		await expect.poll(() => sessionIdsInSection(page, "pinned")).toEqual([ids.pinnedNew, ids.pinnedOld]);
 		await expect.poll(() => sessionIdsInSection(page, "unread")).toEqual([ids.unreadNew, ids.unreadOld]);
-		await expect.poll(() => sessionIdsInSection(page, "read")).toEqual([ids.readNew, ids.readOld, ids.busy, ids.teamLead, ids.staffSession]);
+		await expect.poll(() => sessionIdsInSection(page, "read")).toEqual([ids.busy, ids.readNew, ids.readOld, ids.teamLead, ids.staffSession]);
+		const goalOwnedRow = row(page, ids.unreadNew);
+		await expect(goalOwnedRow.getByTestId("sidebar-status-goal-title")).toHaveText("IMPROVE SESSION MANAGER SIDEBAR");
+		await expect(goalOwnedRow.getByTestId("sidebar-session-title-text"), `${MARK}: agent title moves to the quiet second line`).toHaveText("Unread Newest");
+		const goalIconColor = await goalOwnedRow.locator(".sidebar-status-goal-title-icon").evaluate(element => getComputedStyle(element).color);
+		expect(["rgb(37, 99, 235)", "rgb(96, 165, 250)"], `${MARK}: goal icon uses the owning project colour`).toContain(goalIconColor);
+		await expect(goalOwnedRow.getByTestId("sidebar-status-session-title-icon"), `${MARK}: goal rows do not duplicate the session identity icon`).toHaveCount(0);
+		const standaloneRow = row(page, ids.unreadOld);
+		await expect(standaloneRow.getByTestId("sidebar-status-goal-title"), `${MARK}: standalone sessions stay single-line`).toHaveCount(0);
+		await expect(standaloneRow.getByTestId("sidebar-status-session-title-icon"), `${MARK}: standalone Status rows show a session icon`).toHaveAttribute("data-status-identity", "session");
+		const staffRow = row(page, ids.staffSession);
+		await expect(staffRow.getByTestId("sidebar-status-session-title-icon"), `${MARK}: staff Status rows use the staff icon instead of the session icon`).toHaveAttribute("data-status-identity", "staff");
+		const sessionIconColor = await standaloneRow.getByTestId("sidebar-status-session-title-icon").evaluate(element => getComputedStyle(element).color);
+		expect(["rgb(37, 99, 235)", "rgb(96, 165, 250)"], `${MARK}: session icon uses the owning project colour`).toContain(sessionIconColor);
+
+		const motionResult = await page.evaluate((sessionId) => {
+			(window as any).__reorderSidebarStatusUnreadRows();
+			const movingRow = document.querySelector<HTMLElement>(`[data-session-id="${sessionId}"]`)!;
+			const clickTarget = movingRow.querySelector<HTMLElement>("[data-testid='sidebar-session-title-text']")!;
+			const clickDispatched = clickTarget.dispatchEvent(new MouseEvent("click", {
+				bubbles: true,
+				cancelable: true,
+				detail: 1,
+			}));
+			return {
+				moving: movingRow.dataset.statusMoving,
+				tracing: movingRow.dataset.statusChangeTracing,
+				clickDispatched,
+				selectedSessionId: (window as any).__bobbitState.selectedSessionId,
+			};
+		}, ids.unreadOld);
+		expect(motionResult, `${MARK}: FLIP rows trace changes and suppress pointer clicks while moving`).toEqual({
+			moving: "true",
+			tracing: "true",
+			clickDispatched: false,
+			selectedSessionId: null,
+		});
+		await expect.poll(() => sessionIdsInSection(page, "unread")).toEqual([ids.unreadOld, ids.unreadNew]);
+		await expect(row(page, ids.unreadOld)).not.toHaveAttribute("data-status-moving", "true", { timeout: 2_000 });
+
+		for (const key of ["pinned", "unread", "read"] as const) {
+			const heading = section(page, key).locator(".sidebar-status-heading");
+			await expect(heading.locator(".sidebar-status-heading-icon svg"), `${MARK}: ${key} heading needs an icon`).toHaveCount(1);
+			await expect(heading.locator(".sidebar-chevron-glyph"), `${MARK}: ${key} heading needs a disclosure chevron`).toHaveText("▾");
+			const metrics = await headingMetrics(heading, ".sidebar-status-heading-label");
+			expect(metrics.contentHeight, `${MARK}: ${key} heading content height should match By Project`).toBeCloseTo(projectHeadingMetrics.contentHeight, 2);
+			expect(metrics.padding, `${MARK}: ${key} heading padding should match By Project`).toEqual(projectHeadingMetrics.padding);
+			expect(
+				{ fontSize: metrics.fontSize, fontWeight: metrics.fontWeight, letterSpacing: metrics.letterSpacing },
+				`${MARK}: ${key} heading typography should match By Project`,
+			).toEqual({
+				fontSize: projectHeadingMetrics.fontSize,
+				fontWeight: projectHeadingMetrics.fontWeight,
+				letterSpacing: projectHeadingMetrics.letterSpacing,
+			});
+		}
+		await expect(page.locator(".sidebar-status-separator"), `${MARK}: rules belong only between Status sections`).toHaveCount(2);
+		expect(await section(page, "pinned").evaluate((element) => element.previousElementSibling?.classList.contains("sidebar-status-separator") ?? false)).toBe(false);
+		for (const key of ["unread", "read"] as const) {
+			expect(await section(page, key).evaluate((element) => element.previousElementSibling?.classList.contains("sidebar-status-separator") ?? false)).toBe(true);
+		}
+
+		// Status headings collapse like project groups and persist independently.
+		const unreadHeading = section(page, "unread").locator(".sidebar-status-heading");
+		await unreadHeading.click();
+		await expect(unreadHeading).toHaveAttribute("aria-expanded", "false");
+		await expect(section(page, "unread").locator("[data-session-id]")).toHaveCount(0);
+		await expect(section(page, "pinned").locator("[data-session-id]")).toHaveCount(2);
+		await page.evaluate(() => (window as any).__reloadSidebarStatusJourney());
+		await expect(section(page, "unread").locator(".sidebar-status-heading")).toHaveAttribute("aria-expanded", "false");
+		await section(page, "unread").locator(".sidebar-status-heading").press("Enter");
+		await expect.poll(() => sessionIdsInSection(page, "unread")).toEqual([ids.unreadNew, ids.unreadOld]);
+
 		const allIds = await page.locator("[data-status-section] [data-session-id]").evaluateAll((elements) =>
 			elements.map((element) => (element as HTMLElement).dataset.sessionId),
 		);
@@ -286,6 +379,7 @@ test.describe("Journey: Sidebar status views", () => {
 		await expect(filterCheckbox(page, "archived")).toBeChecked();
 		await closeFiltersWithEscape(page);
 		await expect(row(page, ids.archived)).toBeVisible();
+		await expect(row(page, ids.archived).getByTestId("sidebar-status-session-title-icon"), `${MARK}: archived standalone rows retain the session identity icon`).toHaveCount(1);
 		await expect(row(page, ids.archived)).toHaveCSS("filter", "grayscale(1)");
 		await openSessionMenu(page, ids.archived);
 		expect((await menuItemIds(page)).slice(0, 3)).toEqual(["continue-archived", "copy-link", "pin"]);
@@ -323,6 +417,9 @@ test.describe("Journey: Sidebar status views", () => {
 		await page.setViewportSize({ width: 390, height: 844 });
 		await page.evaluate(() => (window as any).__renderMobileSidebarStatusJourney());
 		await expect(page.getByTestId("sidebar-view-status")).toHaveAttribute("aria-pressed", "true", { timeout: 10_000 });
+		const mobileGoalFontSize = await row(page, ids.unreadNew).getByTestId("sidebar-status-goal-title").evaluate(element => parseFloat(getComputedStyle(element).fontSize));
+		const mobileSessionFontSize = await row(page, ids.unreadOld).getByTestId("sidebar-session-title-text").evaluate(element => parseFloat(getComputedStyle(element).fontSize));
+		expect(mobileGoalFontSize, `${MARK}: mobile goal title is deliberately smaller than a standard session title`).toBeLessThan(mobileSessionFontSize);
 
 		const targetRow = row(page, ids.readNew);
 		await expect(targetRow).toBeVisible();

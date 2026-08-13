@@ -3,13 +3,16 @@ import { afterAll, beforeEach, describe, it } from "vitest";
 import {
 	SIDEBAR_PROJECT_FILTER_STORAGE_KEYS,
 	SIDEBAR_SESSION_VIEW_STORAGE_KEY,
+	SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY,
 	SIDEBAR_STATUS_FILTER_STORAGE_KEYS,
 	getSidebarViewFilters,
 	isSidebarViewFilterActive,
 	loadSidebarSessionView,
+	loadSidebarStatusCollapsedSections,
 	loadSidebarStatusFilter,
 	parseSidebarSessionView,
 	setActiveSidebarViewFilter,
+	setSidebarStatusSectionExpanded,
 	setSidebarView,
 	setSidebarViewFilter,
 	sidebarNeedsArchivedSessions,
@@ -47,6 +50,7 @@ function preferenceState(): SidebarViewPreferenceState {
 		statusShowBusy: true,
 		statusShowRead: true,
 		statusShowTeams: false,
+		statusCollapsedSections: new Set(),
 		filtersPopoverOpen: false,
 	};
 }
@@ -73,6 +77,20 @@ describe("sidebar view preference validation", () => {
 		assert.equal(loadSidebarStatusFilter("showBusy"), false);
 		assert.equal(loadSidebarStatusFilter("showRead"), true);
 		assert.equal(loadSidebarStatusFilter("showTeams"), false);
+	});
+
+	it("persists only valid collapsed Status sections", () => {
+		const state = preferenceState();
+		setSidebarStatusSectionExpanded(state, "unread", false);
+		setSidebarStatusSectionExpanded(state, "pinned", false);
+		assert.deepEqual([...state.statusCollapsedSections!].sort(), ["pinned", "unread"]);
+		assert.equal(storage.getItem(SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY), '["pinned","unread"]');
+		assert.deepEqual([...loadSidebarStatusCollapsedSections()].sort(), ["pinned", "unread"]);
+
+		storage.setItem(SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY, '["read","invalid",3]');
+		assert.deepEqual([...loadSidebarStatusCollapsedSections()], ["read"]);
+		storage.setItem(SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY, "corrupt");
+		assert.deepEqual([...loadSidebarStatusCollapsedSections()], []);
 	});
 });
 

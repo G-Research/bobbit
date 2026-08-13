@@ -1,6 +1,7 @@
-import { isSessionReadFilterable } from "../shared/session-tags.js";
+import { isSessionReadFilterable, sessionShowsLastActivity } from "../shared/session-tags.js";
 import type { GatewaySession } from "./state.js";
 import type {
+	GoalContext,
 	SessionContext,
 	SidebarTreeModel,
 	SidebarTreeNode,
@@ -18,6 +19,8 @@ export interface StatusCandidate<TSession extends StatusSession = StatusSession>
 	/** Archived-safe presentation, including terminal records and archived child placement. */
 	archived: boolean;
 	staff: boolean;
+	/** Owning goal resolved from the canonical tree, including inherited child/delegate membership. */
+	goalId?: string;
 }
 
 export interface StatusStaffLike {
@@ -49,6 +52,20 @@ function isArchivedCandidate(session: StatusSession, node?: SidebarTreeNode): bo
 	return false;
 }
 
+function nodeGoalId(model: Pick<SidebarTreeModel, "flatByKey">, node: SidebarTreeNode): string | undefined {
+	let current: SidebarTreeNode | undefined = node;
+	const seen = new Set<string>();
+	while (current) {
+		const context = current.context as Partial<SessionContext & TeamLeadContext & GoalContext>;
+		if (current.kind === "goal") return (current.context as GoalContext).goal.id;
+		if (context.goalId || context.teamGoalId) return context.goalId || context.teamGoalId;
+		if (!current.parentKey || seen.has(current.parentKey)) return undefined;
+		seen.add(current.parentKey);
+		current = model.flatByKey.get(current.parentKey);
+	}
+	return undefined;
+}
+
 /**
  * Flatten the already-eligible tree population without consulting expansion.
  * The supplied staff synthesizer is the existing production adapter; injecting
@@ -64,7 +81,7 @@ export function collectEligibleStatusSessions<TSession extends StatusSession = S
 	const add = (candidate: StatusCandidate<TSession>) => {
 		const existing = byId.get(candidate.session.id);
 		if (!existing || (existing.archived && !candidate.archived) || (candidate.staff && !existing.staff && existing.archived === candidate.archived)) {
-			byId.set(candidate.session.id, candidate);
+			byId.set(candidate.session.id, { ...candidate, goalId: candidate.goalId ?? existing?.goalId });
 		}
 	};
 
@@ -73,13 +90,13 @@ export function collectEligibleStatusSessions<TSession extends StatusSession = S
 		const context = node.context as SessionContext | TeamLeadContext;
 		const session = context.session as TSession;
 		if (!session?.id) continue;
-		add({ session, archived: isArchivedCandidate(session, node), staff: false });
+		add({ session, archived: isArchivedCandidate(session, node), staff: false, goalId: nodeGoalId(model, node) });
 	}
 
 	for (const staffAgent of staff) {
 		const session = synthesizeStaffSession(staffAgent);
 		if (!session?.id) continue;
-		add({ session, archived: isArchivedCandidate(session), staff: true });
+		add({ session, archived: isArchivedCandidate(session), staff: true, goalId: session.goalId || session.teamGoalId });
 	}
 
 	return [...byId.values()];
@@ -93,6 +110,15 @@ export function compareStatusCandidatesNewestFirst<TSession extends StatusSessio
 	a: StatusCandidate<TSession>,
 	b: StatusCandidate<TSession>,
 ): number {
+	const aShowsActivity = sessionShowsLastActivity(a.session);
+	const bShowsActivity = sessionShowsLastActivity(b.session);
+	// Active rows render a shimmer instead of a timestamp. Keep them in one
+	// deterministic cluster so hidden lastActivity churn cannot reshuffle them.
+	if (aShowsActivity !== bShowsActivity) return aShowsActivity ? 1 : -1;
+	if (!aShowsActivity) {
+		return finiteTimestamp(b.session.createdAt) - finiteTimestamp(a.session.createdAt)
+			|| a.session.id.localeCompare(b.session.id);
+	}
 	return finiteTimestamp(b.session.lastActivity) - finiteTimestamp(a.session.lastActivity)
 		|| finiteTimestamp(b.session.createdAt) - finiteTimestamp(a.session.createdAt)
 		|| a.session.id.localeCompare(b.session.id);

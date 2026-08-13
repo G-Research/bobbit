@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, ChevronDown, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, Mail, MailOpen, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -52,8 +52,8 @@ import {
 } from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
 import { collectEligibleStatusSessions, selectSidebarStatusSections, type SidebarStatusSections, type StatusCandidate } from "./sidebar-status.js";
-import { getSidebarViewFilters, setSidebarView, sidebarNeedsArchivedSessions, type SidebarSessionView, type SidebarViewFilters } from "./sidebar-view-preferences.js";
-import { isPinned, isSessionBusy, sessionTeamKind } from "../shared/session-tags.js";
+import { getSidebarViewFilters, setSidebarStatusSectionExpanded, setSidebarView, sidebarNeedsArchivedSessions, type SidebarSessionView, type SidebarStatusSectionKey, type SidebarViewFilters } from "./sidebar-view-preferences.js";
+import { isPinned, isSessionBusy, sessionShowsLastActivity, sessionTeamKind } from "../shared/session-tags.js";
 
 export { isProjectExpanded, toggleProjectExpanded };
 
@@ -1836,22 +1836,80 @@ export function renderSidebarViewControls(variant: "desktop" | "mobile" = "deskt
 	`;
 }
 
-function renderStatusHeading(key: "pinned" | "unread" | "read", count: number): TemplateResult {
-	const label = key === "pinned" ? "Pinned" : key === "unread" ? "Unread" : "Read";
+function renderStatusHeading(key: SidebarStatusSectionKey, count: number, expanded: boolean): TemplateResult {
+	const { label, headingIcon } = key === "pinned"
+		? { label: "Pinned", headingIcon: Pin }
+		: key === "unread"
+			? { label: "Unread", headingIcon: Mail }
+			: { label: "Read", headingIcon: MailOpen };
 	const headingId = `sidebar-status-${key}-heading`;
+	const rowsId = `sidebar-status-${key}-rows`;
+	const desktop = isDesktop();
+	const headingLayout = desktop
+		? "gap-1 pr-1 py-0.5 hover:bg-secondary/30"
+		: "gap-1.5 pl-0.5 pr-2 py-0.5 active:bg-secondary/50";
+	const toggle = () => {
+		setSidebarStatusSectionExpanded(state, key, !expanded);
+		renderApp();
+	};
 	return html`
-		<div class="sidebar-status-heading" id=${headingId}>
-			${key === "pinned" ? html`<span class="sidebar-status-heading-icon">${icon(Pin, "xs")}</span>` : nothing}
-			<span>${label}</span>
+		<div
+			class="sidebar-status-heading ${key === "pinned" ? "" : "sidebar-status-heading--lower-padding"} relative flex items-center ${headingLayout} rounded-md cursor-pointer transition-colors"
+			style=${desktop ? "padding-left:var(--sidebar-header-chevron-w);" : ""}
+			id=${headingId}
+			role="button"
+			tabindex="0"
+			aria-controls=${rowsId}
+			aria-expanded=${expanded ? "true" : "false"}
+			@click=${toggle}
+			@keydown=${(event: KeyboardEvent) => {
+				if (event.key !== "Enter" && event.key !== " ") return;
+				event.preventDefault();
+				toggle();
+			}}
+		>
+			<span class="sidebar-chevron-slot ${desktop ? "sidebar-chevron-slot--header sidebar-chevron-slot--absolute" : "sidebar-chevron-slot--inline"} text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+			<span class="sidebar-status-heading-icon shrink-0 text-muted-foreground">${icon(headingIcon, desktop ? "xs" : "sm")}</span>
+			<span class="sidebar-status-heading-label flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style=${`font-size:${desktop ? "0.75em" : "1.1667em"};`}>${label}</span>
 			<span class="sidebar-status-count">${count}</span>
 		</div>
 	`;
 }
 
+function statusCandidateMotionSignature(candidate: StatusCandidate, goalTitle: string | undefined): string {
+	const session = candidate.session;
+	return JSON.stringify([
+		session.title,
+		session.status,
+		sessionShowsLastActivity(session) ? session.lastActivity : 0,
+		sessionShowsLastActivity(session) ? session.lastReadAt ?? 0 : 0,
+		session.isCompacting === true,
+		session.isAborting === true,
+		session.lastTurnErrored === true,
+		session.consecutiveErrorTurns ?? 0,
+		session.archived === true,
+		session.archivedAt ?? 0,
+		candidate.staff,
+		goalTitle || "",
+		session.server_tags || [],
+		session.user_tags || [],
+	]);
+}
+
 function renderStatusCandidate(candidate: StatusCandidate): TemplateResult {
+	const goal = candidate.goalId ? state.goals.find(item => item.id === candidate.goalId) : undefined;
+	const projectId = goal?.projectId || candidate.session.projectId;
+	const project = projectId ? state.projects.find(item => item.id === projectId) : undefined;
+	const rowOptions = {
+		flat: true,
+		goalTitle: goal?.title,
+		projectColor: project ? getProjectAccentColor(project) : undefined,
+		statusIdentity: candidate.staff ? "staff" : "session",
+		statusMotionSignature: statusCandidateMotionSignature(candidate, goal?.title),
+	} as const;
 	return candidate.archived
-		? renderArchivedSessionRow(candidate.session, false, { flat: true })
-		: renderSessionRow(candidate.session, { flat: true });
+		? renderArchivedSessionRow(candidate.session, false, rowOptions)
+		: renderSessionRow(candidate.session, rowOptions);
 }
 
 /** Canonical flat rows grouped into the three exact Status sections. */
@@ -1870,16 +1928,21 @@ export function renderSidebarStatusContent(
 	if (count === 0) {
 		return html`<div class="sidebar-status-empty">No sessions match this search and filter.</div>${archiveControls}`;
 	}
-	return html`${entries.map(([key, rows]) => rows.length === 0 ? nothing : html`
-		<section
-			class="sidebar-status-section"
-			aria-labelledby=${`sidebar-status-${key}-heading`}
-			data-status-section=${key}
-		>
-			${renderStatusHeading(key, rows.length)}
-			<div class="sidebar-status-rows">${rows.map(renderStatusCandidate)}</div>
-		</section>
-	`)}${archiveControls}`;
+	const visibleEntries = entries.filter((entry) => entry[1].length > 0);
+	return html`${visibleEntries.map(([key, rows], index) => {
+		const expanded = !state.statusCollapsedSections.has(key);
+		return html`
+			${index > 0 ? html`<div class="sidebar-status-separator border-t border-border/30 ${isDesktop() ? "my-1" : "my-0.5"} mx-2"></div>` : nothing}
+			<section
+				class="sidebar-status-section ${index === 0 ? "sidebar-status-section--first" : ""}"
+				aria-labelledby=${`sidebar-status-${key}-heading`}
+				data-status-section=${key}
+			>
+				${renderStatusHeading(key, rows.length, expanded)}
+				${expanded ? html`<div class="sidebar-status-rows" id=${`sidebar-status-${key}-rows`}>${rows.map(renderStatusCandidate)}</div>` : nothing}
+			</section>
+		`;
+	})}${archiveControls}`;
 }
 
 export function renderSidebar() {

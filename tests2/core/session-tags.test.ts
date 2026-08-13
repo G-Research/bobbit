@@ -9,6 +9,7 @@ import {
 	projectServerTags,
 	removeTag,
 	replaceTag,
+	sessionShowsLastActivity,
 	sessionTeamKind,
 } from "../../src/shared/session-tags.js";
 
@@ -95,6 +96,16 @@ describe("canonical session tag classifiers", () => {
 		["busy", false, false],
 	] as const)("classifies status=%s compacting=%s as busy=%s", (status, isCompacting, expected) => {
 		expect(isSessionBusy({ status, isCompacting })).toBe(expected);
+	});
+
+	it.each([
+		["streaming", false, false],
+		["busy", false, false],
+		["idle", true, false],
+		["idle", false, true],
+		["terminated", false, true],
+	] as const)("classifies status=%s compacting=%s as showing last activity=%s", (status, isCompacting, expected) => {
+		expect(sessionShowsLastActivity({ status, isCompacting })).toBe(expected);
 	});
 
 	it.each([

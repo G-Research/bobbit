@@ -72,6 +72,9 @@ describe("collectEligibleStatusSessions", () => {
 			() => staffSession,
 		);
 		assert.deepEqual(new Set(ids(collected)), new Set(["lead", "member", "child", "staff-live"]));
+		assert.equal(collected.find(value => value.session.id === "lead")?.goalId, "g");
+		assert.equal(collected.find(value => value.session.id === "member")?.goalId, "g");
+		assert.equal(collected.find(value => value.session.id === "child")?.goalId, "g", "child membership inherits from its tree ancestors");
 		assert.equal(collected.find(value => value.session.id === "staff-live")?.staff, true);
 	});
 
@@ -84,7 +87,7 @@ describe("collectEligibleStatusSessions", () => {
 		} as SidebarTreeNode;
 		const liveNode = {
 			kind: "session",
-			context: { session: live },
+			context: { session: live, goalId: "goal-live" },
 		} as SidebarTreeNode;
 		const model = { flatByKey: new Map([["archived", archivedNode], ["live", liveNode]]) } as Pick<SidebarTreeModel, "flatByKey">;
 		const collected = collectEligibleStatusSessions(model, [{ currentSessionId: "same" }], () => ({ ...live, title: "Staff name", staffId: "staff" }));
@@ -92,6 +95,7 @@ describe("collectEligibleStatusSessions", () => {
 		assert.equal(collected[0].archived, false);
 		assert.equal(collected[0].staff, true);
 		assert.equal(collected[0].session.title, "Staff name");
+		assert.equal(collected[0].goalId, "goal-live", "staff display replacement preserves canonical tree membership");
 	});
 });
 
@@ -108,14 +112,22 @@ describe("selectSidebarStatusSections", () => {
 		assert.equal([...sections.pinned, ...sections.unread, ...sections.read].length, 3);
 	});
 
-	it("sorts each section by activity, creation, then id", () => {
+	it("sorts timestamp rows by activity and keeps shimmer-only active rows stable", () => {
 		const sections = select([
 			candidate("z", { lastActivity: 20, createdAt: 5, server_tags: ["read-state=unread"] }),
 			candidate("b", { lastActivity: 20, createdAt: 10, server_tags: ["read-state=unread"] }),
 			candidate("a", { lastActivity: 20, createdAt: 10, server_tags: ["read-state=unread"] }),
 			candidate("newest", { lastActivity: 30, createdAt: 1, server_tags: ["read-state=unread"] }),
+			candidate("active-new", { status: "streaming", lastActivity: 100, createdAt: 40, server_tags: ["read-state=unread"] }),
+			candidate("active-old", { status: "busy", lastActivity: 200, createdAt: 35, server_tags: ["read-state=unread"] }),
 		]);
-		assert.deepEqual(ids(sections.unread), ["newest", "a", "b", "z"]);
+		assert.deepEqual(ids(sections.unread), ["active-new", "active-old", "newest", "a", "b", "z"]);
+
+		const afterHiddenActivityChurn = select([
+			candidate("active-new", { status: "streaming", lastActivity: 500, createdAt: 40, server_tags: ["read-state=unread"] }),
+			candidate("active-old", { status: "busy", lastActivity: 900, createdAt: 35, server_tags: ["read-state=unread"] }),
+		]);
+		assert.deepEqual(ids(afterHiddenActivityChurn.unread), ["active-new", "active-old"], "hidden timestamps must not reorder shimmer-only rows");
 	});
 
 	it("applies Archived, teams, Busy, and Read gates with only Busy/Read active exemptions", () => {

@@ -106,6 +106,13 @@ export function isSessionBusy(session: SessionTagSource): boolean {
 		|| session.status === "starting";
 }
 
+/** Whether the canonical sidebar row shows a timestamp rather than active shimmer. */
+export function sessionShowsLastActivity(session: SessionTagSource): boolean {
+	return session.isCompacting !== true
+		&& session.status !== "streaming"
+		&& session.status !== "busy";
+}
+
 /**
  * Whether a read session is eligible for suppression by production Show Read.
  * Other states, including serialized `archived` records and active work, remain
