@@ -7742,6 +7742,9 @@ async function handleApiRoute(
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {
 		const id = singleSessionMatch[1];
+		// Detail reads share the audit contract with the catalog without discovering
+		// providers: a cold cache means availability remains unknown.
+		const sessionAuditModels = auditModels();
 		const session = sessionManager.getSession(id);
 		if (!session) {
 			// Check if it's an archived session
@@ -7776,6 +7779,7 @@ async function handleApiRoute(
 					archived: true,
 					archivedAt: archived.archivedAt,
 					imageGenerationModel: sessionManager.getImageModelForSession(archived.id),
+					...sessionAuditIdentity(archived, sessionAuditModels),
 				});
 				return;
 			}
@@ -7832,6 +7836,7 @@ async function handleApiRoute(
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 			completedTurnCount: session.completedTurnCount ?? 0,
 			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
+			...sessionAuditIdentity(sessionPs ?? session, sessionAuditModels),
 		});
 		return;
 	}

@@ -126,7 +126,11 @@ test.describe("session runtime route boundary", () => {
 		const archivedSingle = await localApiFetch(gateway, `/api/sessions/${archivedSdkId}`);
 		expect(archivedSingle.status).toBe(200);
 		const archivedSingleBody = await archivedSingle.json();
-		expect(archivedSingleBody).toMatchObject({ runtime: "claude-agent-sdk" });
+		expect(archivedSingleBody).toMatchObject({
+			runtime: "claude-agent-sdk",
+			modelProvider: "claude-agent-sdk",
+			modelId: "saved-sdk-model",
+		});
 		expect(archivedSingleBody.modelAvailable).toBeUndefined();
 
 		const sourceId = sessions.add(await createSession());
@@ -141,6 +145,9 @@ test.describe("session runtime route boundary", () => {
 			modelId: "saved-sdk-model",
 		});
 		const countBefore = gateway.sessionManager.listSessions().length;
+		const liveSingle = await localApiFetch(gateway, `/api/sessions/${sourceId}`);
+		expect(liveSingle.status).toBe(200);
+		expect(await liveSingle.json()).toMatchObject({ runtime: "claude-agent-sdk" });
 
 		const fork = await localApiFetch(gateway, `/api/sessions/${sourceId}/fork`, {
 			method: "POST",
