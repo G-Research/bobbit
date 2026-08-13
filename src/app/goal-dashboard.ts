@@ -11,6 +11,7 @@ import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamSta
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
+import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -622,6 +623,7 @@ function applyDashboardRemoteStateSnapshot(message: Record<string, unknown>): bo
 			: typeof message.kind === "string" ? message.kind
 				: isGoalGitStatus(snapshot.data) ? "git" : "pr";
 	if (resource === "git" || resource === "repository") {
+		remoteStateRequestOrder.supersede(remoteStateRequestKey("dashboard", currentGoalId!, "git"));
 		if (!isGoalGitStatus(snapshot.data)) return false;
 		const next = withUntrackedStatusPreserved(gitStatus, { ...snapshot.data, ...snapshot }, false);
 		if (JSON.stringify(next) === JSON.stringify(gitStatus)) return false;
@@ -630,6 +632,8 @@ function applyDashboardRemoteStateSnapshot(message: Record<string, unknown>): bo
 		return true;
 	}
 	if (resource !== "pr" && resource !== "pr_status") return false;
+	remoteStateRequestOrder.supersede(remoteStateRequestKey("dashboard", currentGoalId!, "pr"));
+	remoteStateRequestOrder.supersede(remoteStateRequestKey("sidebar", currentGoalId!, "pr"));
 	return applyDashboardPrSnapshot(currentGoalId!, snapshot);
 }
 
@@ -790,6 +794,9 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	startTaskPolling(goalId);
 
 	try {
+		const gitTicket = remoteStateRequestOrder.begin(remoteStateRequestKey("dashboard", goalId, "git"));
+		const prTicket = remoteStateRequestOrder.begin(remoteStateRequestKey("dashboard", goalId, "pr"));
+		const sidebarPrTicket = remoteStateRequestOrder.begin(remoteStateRequestKey("sidebar", goalId, "pr"));
 		const [goalRes, tasksRes, commitsRes, fetchedGates, gitStatusRes, costRes, prStatusRes] = await Promise.all([
 			gatewayFetch(`/api/goals/${goalId}`),
 			gatewayFetch(`/api/goals/${goalId}/tasks`),
@@ -835,13 +842,15 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		if (gitStatusRes && gitStatusRes.ok) {
 			const snapshot = parseRemoteStateSnapshot<GoalGitStatus>(await gitStatusRes.json());
-			gitStatus = snapshot.data ? { ...snapshot.data, ...snapshot } : null;
-			gitRepoKnown = 'yes';
-			gitStatusLastRefreshAt = performance.now();
+			if (currentGoalId === goalId && remoteStateRequestOrder.isCurrent(gitTicket)) {
+				gitStatus = snapshot.data ? { ...snapshot.data, ...snapshot } : null;
+				gitRepoKnown = 'yes';
+				gitStatusLastRefreshAt = performance.now();
+			}
 		} else if (gitStatusRes && gitStatusRes.status === 400) {
 			try {
 				const body = await gitStatusRes.json();
-				if (body?.error === 'Not a git repository') gitRepoKnown = 'no';
+				if (currentGoalId === goalId && remoteStateRequestOrder.isCurrent(gitTicket) && body?.error === 'Not a git repository') gitRepoKnown = 'no';
 			} catch { /* ignore */ }
 		}
 
@@ -850,12 +859,16 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		}
 
 		if (prStatusRes && prStatusRes.status === 204) {
-			prStatus = null;
-			prSnapshotMetadata = undefined;
-			state.prStatusCache.delete(goalId);
+			if (currentGoalId === goalId && remoteStateRequestOrder.isCurrent(prTicket)) {
+				prStatus = null;
+				prSnapshotMetadata = undefined;
+			}
+			if (remoteStateRequestOrder.isCurrent(sidebarPrTicket)) state.prStatusCache.delete(goalId);
 		} else if (prStatusRes && prStatusRes.ok) {
 			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prStatusRes.json());
-			applyDashboardPrSnapshot(goalId, snapshot);
+			if (currentGoalId === goalId && remoteStateRequestOrder.isCurrent(prTicket)) {
+				applyDashboardPrSnapshot(goalId, snapshot, remoteStateRequestOrder.isCurrent(sidebarPrTicket));
+			}
 		}
 
 		const teamState = await getTeamState(goalId);
@@ -1068,6 +1081,63 @@ export interface TeamAgent {
 let agents: TeamAgent[] = [];
 let agentPollTimer: ReturnType<typeof setInterval> | null = null;
 let taskPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function reconciledDashboardAgents(): TeamAgent[] {
+	const agentsBySessionId = new Map<string, TeamAgent>();
+	const orderedSessionIds: string[] = [];
+	for (const agent of agents) {
+		const existing = agentsBySessionId.get(agent.sessionId);
+		if (!existing) {
+			agentsBySessionId.set(agent.sessionId, agent);
+			orderedSessionIds.push(agent.sessionId);
+		} else if (existing.status === "archived" && agent.status !== "archived") {
+			// Polling can briefly expose both lifecycle records. Keep the original
+			// position, but prefer the live record until archival is authoritative.
+			agentsBySessionId.set(agent.sessionId, agent);
+		}
+	}
+
+	const teamLeadSession = currentGoal?.team
+		? (state.gatewaySessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")
+			|| state.archivedSessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead"))
+		: null;
+	if (!teamLeadSession) {
+		return orderedSessionIds.map(sessionId => agentsBySessionId.get(sessionId)!);
+	}
+
+	const fallbackLead: TeamAgent = {
+		sessionId: teamLeadSession.id,
+		role: "team-lead",
+		status: teamLeadSession.status,
+		worktreePath: "",
+		branch: "",
+		task: "",
+		createdAt: teamLeadSession.createdAt,
+		archivedAt: teamLeadSession.archivedAt,
+	};
+	const responseLead = agentsBySessionId.get(teamLeadSession.id);
+	if (!responseLead) {
+		return [fallbackLead, ...orderedSessionIds.map(sessionId => agentsBySessionId.get(sessionId)!)];
+	}
+
+	// The response carries richer card metadata, so retain it when both paths
+	// contain the lead. A live session-state record wins only the lifecycle
+	// fields when teardown polling still reports the same lead as archived.
+	const reconciledLead = fallbackLead.status !== "archived" && responseLead.status === "archived"
+		? {
+			...responseLead,
+			status: fallbackLead.status,
+			createdAt: fallbackLead.createdAt,
+			archivedAt: fallbackLead.archivedAt,
+		}
+		: responseLead;
+	return [
+		reconciledLead,
+		...orderedSessionIds
+			.filter(sessionId => sessionId !== teamLeadSession.id)
+			.map(sessionId => agentsBySessionId.get(sessionId)!),
+	];
+}
 
 async function fetchAgents(goalId: string): Promise<TeamAgent[]> {
 	try {
@@ -1338,6 +1408,7 @@ async function refreshGoalGitStatus(
 	const ctl = new AbortController();
 	gitStatusAbort = ctl;
 	gitStatusLastRefreshAt = performance.now();
+	const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("dashboard", goalId, "git"));
 
 	let changed = false;
 	await runGitStatusRefresh(ctl.signal, {
@@ -1348,9 +1419,9 @@ async function refreshGoalGitStatus(
 			signal,
 		}),
 		sleep: abortableSleep,
-		isStale: () => currentGoalId !== goalId,
+		isStale: () => currentGoalId !== goalId || !remoteStateRequestOrder.isCurrent(ticket),
 		onOk: (data) => {
-			if (currentGoalId !== goalId) return;
+			if (currentGoalId !== goalId || !remoteStateRequestOrder.isCurrent(ticket)) return;
 			const next = withUntrackedStatusPreserved(gitStatus, data as GoalGitStatus, !!opts?.untracked);
 			if (JSON.stringify(next) !== JSON.stringify(gitStatus)) {
 				gitStatus = next;
@@ -1359,7 +1430,7 @@ async function refreshGoalGitStatus(
 			gitRepoKnown = 'yes';
 		},
 		onNotARepo: () => {
-			if (currentGoalId !== goalId) return;
+			if (currentGoalId !== goalId || !remoteStateRequestOrder.isCurrent(ticket)) return;
 			if (gitRepoKnown !== 'no' || gitStatus !== null) {
 				gitRepoKnown = 'no';
 				gitStatus = null;
@@ -1397,7 +1468,7 @@ function startGitStatusPolling(goalId: string): void {
 	}, ACTIVE_PR_POLL_INTERVAL_MS);
 }
 
-function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<unknown>): boolean {
+function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<unknown>, updateSidebar = true): boolean {
 	const metadata = copyRemoteStateMetadata(snapshot);
 	const metadataChanged = JSON.stringify(metadata) !== JSON.stringify(prSnapshotMetadata);
 	prSnapshotMetadata = metadata;
@@ -1405,11 +1476,11 @@ function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<
 		const next: PrStatus = { ...snapshot.data, url: sanitizePullRequestUrl(snapshot.data.url)!, ...metadata };
 		if (JSON.stringify(next) === JSON.stringify(prStatus)) return metadataChanged;
 		prStatus = next;
-		state.prStatusCache.set(goalId, next);
+		if (updateSidebar) state.prStatusCache.set(goalId, next);
 		return true;
 	}
 	if (snapshot.data === null && !snapshot.stale && !snapshot.lastError) {
-		const cacheDeleted = state.prStatusCache.delete(goalId);
+		const cacheDeleted = updateSidebar ? state.prStatusCache.delete(goalId) : false;
 		const changed = prStatus !== null || cacheDeleted || metadataChanged;
 		prStatus = null;
 		return changed;
@@ -1420,7 +1491,7 @@ function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<
 		const next = { ...prStatus, ...metadata };
 		if (JSON.stringify(next) !== JSON.stringify(prStatus)) {
 			prStatus = next;
-			state.prStatusCache.set(goalId, next);
+			if (updateSidebar) state.prStatusCache.set(goalId, next);
 			return true;
 		}
 	}
@@ -1428,11 +1499,14 @@ function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<
 }
 
 async function refreshGoalPrStatus(goalId: string, intent: "automatic" | "visible" | "explicit"): Promise<void> {
+	const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("dashboard", goalId, "pr"));
+	const sidebarTicket = remoteStateRequestOrder.begin(remoteStateRequestKey("sidebar", goalId, "pr"));
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=${intent}`).catch(() => null);
-		if (!res || currentGoalId !== goalId) return;
+		if (!res || currentGoalId !== goalId || !remoteStateRequestOrder.isCurrent(ticket)) return;
+		const updateSidebar = remoteStateRequestOrder.isCurrent(sidebarTicket);
 		if (res.status === 204) {
-			const cacheDeleted = state.prStatusCache.delete(goalId);
+			const cacheDeleted = updateSidebar ? state.prStatusCache.delete(goalId) : false;
 			const changed = prStatus !== null || prSnapshotMetadata !== undefined || cacheDeleted;
 			prStatus = null;
 			prSnapshotMetadata = undefined;
@@ -1441,7 +1515,8 @@ async function refreshGoalPrStatus(goalId: string, intent: "automatic" | "visibl
 		}
 		if (!res.ok) return;
 		const snapshot = parseRemoteStateSnapshot<PrStatus>(await res.json());
-		if (currentGoalId === goalId && applyDashboardPrSnapshot(goalId, snapshot)) renderApp();
+		if (currentGoalId === goalId && remoteStateRequestOrder.isCurrent(ticket)
+			&& applyDashboardPrSnapshot(goalId, snapshot, remoteStateRequestOrder.isCurrent(sidebarTicket))) renderApp();
 	} catch { /* retain last good PR state on transient errors */ }
 }
 
@@ -1834,25 +1909,11 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; b
 	} catch (err) {
 		widget.setMergeResult(err instanceof Error ? err.message : 'Network error');
 	}
-	// Re-fetch both git-status and pr-status
-	try {
-		const [gitRes, prRes] = await Promise.all([
-			gatewayFetch(`/api/goals/${goalId}/git-status?intent=explicit`).catch(() => null),
-			gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=explicit`).catch(() => null),
-		]);
-		if (gitRes && gitRes.ok) {
-			const snapshot = parseRemoteStateSnapshot<GoalGitStatus>(await gitRes.json());
-			gitStatus = snapshot.data ? { ...snapshot.data, ...snapshot } : gitStatus;
-		}
-		if (prRes && prRes.status === 204) {
-			prStatus = null;
-			prSnapshotMetadata = undefined;
-			state.prStatusCache.delete(goalId);
-		} else if (prRes && prRes.ok) {
-			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prRes.json());
-			applyDashboardPrSnapshot(goalId, snapshot);
-		}
-	} catch { /* ignore */ }
+	// Re-fetch both independent coordinator records through the ordered owners.
+	await Promise.all([
+		refreshGoalGitStatus(goalId, { intent: "explicit" }),
+		refreshGoalPrStatus(goalId, "explicit"),
+	]);
 	refreshPrStatusCache();
 	renderApp();
 }
@@ -2474,12 +2535,13 @@ function currentGateSummaryCounts(): { passed: number; total: number } {
 function renderTabBar(): TemplateResult {
 	const gateSummary = currentGateSummaryCounts();
 	const gateCountStr = gateSummary.total > 0 ? `${gateSummary.passed}/${gateSummary.total}` : String(gates.length);
+	const dashboardAgents = reconciledDashboardAgents();
 
 	const tabs: Array<{ id: DashboardTabId; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
 		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
-		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length + (currentGoal?.team && (state.gatewaySessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead") || state.archivedSessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")) ? 1 : 0)) },
+		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(dashboardAgents.length) },
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },
 	];
 
@@ -2627,24 +2689,7 @@ function renderTasksTab(): TemplateResult {
 // ============================================================================
 
 function renderAgentsTab(): TemplateResult {
-	// Build combined list: team lead (if any) + spawned agents
-	const allAgents: TeamAgent[] = [];
-	const teamLeadSession = currentGoal?.team
-		? (state.gatewaySessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")
-			|| state.archivedSessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead"))
-		: null;
-	if (teamLeadSession) {
-		allAgents.push({
-			sessionId: teamLeadSession.id,
-			role: "team-lead",
-			status: teamLeadSession.status,
-			worktreePath: "",
-			branch: "",
-			task: "",
-			createdAt: 0,
-		});
-	}
-	allAgents.push(...agents);
+	const allAgents = reconciledDashboardAgents();
 
 	if (allAgents.length === 0) {
 		return html`<div class="tab-empty">${svgAgents}<span>No active agents</span></div>`;
@@ -2665,8 +2710,17 @@ function renderAgentsTab(): TemplateResult {
 				|| state.archivedSessions.find(gs => gs.id === agent.sessionId);
 			return s && c.author === (s.title || s.id.slice(0, 8));
 		}).length;
-		const elapsed = (isArchived && agent.archivedAt ? agent.archivedAt : Date.now()) - agent.createdAt;
-		const mins = Math.floor(elapsed / 60_000);
+		const now = Date.now();
+		const startedAt = Number.isFinite(agent.createdAt) && agent.createdAt > 0 && agent.createdAt <= now
+			? agent.createdAt
+			: now;
+		const hasValidArchivedAt = isArchived && Number.isFinite(agent.archivedAt) && agent.archivedAt! > 0 && agent.archivedAt! <= now;
+		const endedAt = hasValidArchivedAt
+			? agent.archivedAt!
+			: isArchived && agent.role === "team-lead"
+				? startedAt
+				: now;
+		const mins = Math.floor(Math.max(0, endedAt - startedAt) / 60_000);
 		const timeStr = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
 		const displayName = isArchived ? (agent.title || formatAgentName(agent)) : formatAgentName(agent);
 

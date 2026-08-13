@@ -17,7 +17,8 @@ import {
 	proposalPanelTabId,
 	reviewDocumentIdFromPanelTab,
 	reviewDocumentIdForTitle,
-	reviewPanelTabId,
+	reviewIdFromPanelTab,
+	reviewPanelTabIdFromReviewId,
 	reviewTitleFromPanelTab,
 	type LegacyPanelTab,
 	type PanelWorkspaceTab,
@@ -46,6 +47,7 @@ type PanelWorkspaceOptions = {
 	rev?: number;
 	fields?: Record<string, unknown>;
 	documentId?: string;
+	reviewId?: string;
 };
 
 const PROPOSAL_LABELS: Record<string, string> = {
@@ -96,10 +98,25 @@ function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWork
 		return;
 	}
 	if (tab.kind === "review") {
-		const documentId = reviewDocumentIdFromPanelTab(tab);
-		const title = reviewTitleFromPanelTab(tab);
+		const reviewId = reviewIdFromPanelTab(tab);
+		const group = state.reviewGroups.get(reviewId);
+		if (group) {
+			s.reviewActiveReviewId = group.reviewId;
+			s.reviewDocuments = new Map(group.files.map((file) => [file.fileId, {
+				title: file.title,
+				markdown: file.markdown,
+				source: group.source,
+				documentId: file.fileId,
+				fileId: file.fileId,
+				reviewId: group.reviewId,
+			}]));
+			s.reviewActiveTab = group.activeFileId;
+		} else {
+			const documentId = reviewDocumentIdFromPanelTab(tab);
+			const title = reviewTitleFromPanelTab(tab);
+			s.reviewActiveTab = documentId && state.reviewDocuments.has(documentId) ? documentId : title || documentId;
+		}
 		s.reviewPanelOpen = true;
-		s.reviewActiveTab = documentId && state.reviewDocuments.has(documentId) ? documentId : title || documentId;
 		s.previewPanelActiveTab = "review";
 		s.previewPanelTab = "review";
 		if (s.assistantType && setAssistantTab) s.assistantTab = "preview";
@@ -174,18 +191,21 @@ function sidePanelTabFromLegacy(tab: PanelWorkspaceTab, sessionId: string): Side
 	}
 	if (tab.kind === "review") {
 		const title = reviewTitleFromPanelTab(tab) || tab.title.replace(/^Review:\s*/, "") || "Review";
-		const documentId = typeof (tab.source as any).documentId === "string" && (tab.source as any).documentId
-			? (tab.source as any).documentId
-			: reviewDocumentIdForTitle(title);
+		const source = tab.source as Record<string, unknown>;
+		const reviewId = typeof source.reviewId === "string" && source.reviewId
+			? source.reviewId
+			: typeof source.documentId === "string" && source.documentId
+				? source.documentId
+				: reviewDocumentIdForTitle(title);
 		return {
-			id: reviewPanelTabId(documentId),
+			id: reviewPanelTabIdFromReviewId(reviewId),
 			kind: "review",
 			title: `Review: ${title}`,
 			label: `Review: ${title}`,
-			source: { type: "review", sessionId, documentId, title },
+			source: { type: "review", sessionId, reviewId, documentId: reviewId, title },
 			state: tab.state,
 			updatedAt,
-		};
+		} as SidePanelWorkspaceTab;
 	}
 	if (tab.kind === "inbox") {
 		return { id: INBOX_PANEL_TAB_ID, kind: "inbox", title: tab.title || "Inbox", label: tab.label || "Inbox", source: { type: "inbox", sessionId }, state: tab.state, updatedAt };
@@ -413,14 +433,14 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 
 export function selectReviewWorkspaceTab(title: string, options: PanelWorkspaceOptions = {}): void {
 	const sessionId = panelSessionId(options.sessionId);
-	const documentId = options.documentId || reviewDocumentIdForTitle(title);
+	const reviewId = options.reviewId || options.documentId || reviewDocumentIdForTitle(title);
 	selectPanelWorkspaceTab({
-		id: reviewPanelTabId(documentId),
+		id: reviewPanelTabIdFromReviewId(reviewId),
 		kind: "review",
 		title: `Review: ${title}`,
 		label: `Review: ${title}`,
 		legacyTab: "review",
-		source: { type: "review", title, reviewTitle: title, documentId, sessionId },
+		source: { type: "review", title, reviewTitle: title, reviewId, documentId: reviewId, sessionId },
 	}, { ...options, sessionId });
 }
 

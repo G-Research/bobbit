@@ -42,9 +42,13 @@ import { stopPreviewSubscription } from "../../src/app/preview-panel.js";
 import { stopInboxSubscription } from "../../src/app/inbox-panel.js";
 import {
 	clearReviewSubmitted,
+	clearReviewTombstone,
+	getReviewTombstone,
 	isReviewSubmitted,
 	markReviewSubmitted,
+	setReviewTombstone,
 } from "../../src/ui/components/review/AnnotationStore.js";
+import * as reviewSources from "../../src/app/review-sources.js";
 
 const SESSION_A = "cold-session-a";
 const SESSION_B = "cold-session-b";
@@ -188,21 +192,6 @@ function authoritativeWorkspace(sessionId: string): SidePanelWorkspace {
 	return workspace;
 }
 
-function conflictWorkspace(sessionId: string, revision: number, marker: string): SidePanelWorkspace {
-	const workspace = workspaceFor(sessionId);
-	const reviewId = `review:${sessionId}-review`;
-	return {
-		...workspace,
-		revision,
-		tabs: workspace.tabs.map((tab) => tab.kind === "review"
-			? { ...tab, title: `${sessionId} review ${marker}`, label: `Review ${marker}`, updatedAt: revision }
-			: { ...tab, title: `${tab.title} ${marker}`, updatedAt: revision }),
-		activeTabId: reviewId,
-		sizeMode: "split",
-		updatedAt: revision,
-	};
-}
-
 function requestBaseRevision(input: RequestInfo | URL, init: RequestInit | undefined, url: URL): number | undefined {
 	const headers = new Headers(input instanceof Request ? input.headers : undefined);
 	new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
@@ -234,6 +223,25 @@ async function fetchFixture(input: RequestInfo | URL, init?: RequestInit): Promi
 	const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
 	const sessionId = sessionIdFromPath(url.pathname);
 	timeline.push({ kind: "rest", path: `${url.pathname}${url.search}`, method, ...(sessionId ? { sessionId } : {}) });
+
+	const openTabMatch = url.pathname.endsWith("/side-panel-workspace/open");
+	if (openTabMatch && sessionId && method === "POST") {
+		const current = authoritativeWorkspace(sessionId);
+		const body = typeof init?.body === "string" ? JSON.parse(init.body) as { tab?: any; focus?: boolean } : {};
+		const incoming = body.tab;
+		const tabs = incoming
+			? [...current.tabs.filter((tab) => tab.id !== incoming.id), incoming]
+			: current.tabs;
+		const next = {
+			...current,
+			revision: current.revision + 1,
+			tabs,
+			activeTabId: body.focus !== false && incoming ? incoming.id : current.activeTabId,
+			updatedAt: current.updatedAt + 1,
+		};
+		authoritativeWorkspaces.set(sessionId, next);
+		return Response.json(cloneWorkspace(next));
+	}
 
 	const deleteTabMatch = url.pathname.match(/\/side-panel-workspace\/tabs\/([^/]+)$/);
 	if (deleteTabMatch && sessionId && method === "DELETE") {
@@ -523,7 +531,7 @@ beforeEach(() => {
 	vi.spyOn(packEntrypoints, "reconcilePackEntrypointsForProject").mockResolvedValue();
 	vi.spyOn(reviewSourcesLazy, "loadReviewSources").mockResolvedValue({
 		restorePersistedReviewDocuments: (sessionId: string) => {
-			if (state.selectedSessionId !== sessionId || isReviewSubmitted(sessionId)) return;
+			if (state.selectedSessionId !== sessionId) return;
 			const documentId = `${sessionId}-review`;
 			const hasMatchingWorkspaceTab = state.sidePanelWorkspaceBySession[sessionId]?.tabs.some((tab) => {
 				if (tab.kind !== "review") return false;
@@ -892,7 +900,105 @@ describe("cold session transcript/workspace ordering", () => {
 		}
 	});
 
-	it("does not reopen a submitted review tab when delayed workspace hydration settles", async () => {
+	it.each(["submitted", "closed"] as const)(
+		"lets authoritative presence win over an exact %s tombstone and keeps explicit reopen write-free",
+		async (tombstoneState) => {
+			const reviewA = {
+				reviewId: "exact-review-a",
+				title: "Exact review A",
+				files: [{ fileId: "exact-a-file", title: "A.md", markdown: "# A" }],
+				activeFileId: "exact-a-file",
+				source: { kind: "markdown-review" as const, sessionId: SESSION_A },
+			};
+			const reviewB = {
+				reviewId: "exact-review-b",
+				title: "Exact review B",
+				files: [{ fileId: "exact-b-file", title: "B.md", markdown: "# B" }],
+				activeFileId: "exact-b-file",
+				source: { kind: "markdown-review" as const, sessionId: SESSION_A },
+			};
+			const reviewTab = (review: typeof reviewA) => ({
+				id: `review:${encodeURIComponent(review.reviewId)}`,
+				kind: "review" as const,
+				title: `Review: ${review.title}`,
+				label: `Review: ${review.title}`,
+				source: {
+					type: "review" as const,
+					sessionId: SESSION_A,
+					reviewId: review.reviewId,
+					documentId: review.reviewId,
+					title: review.title,
+				},
+				updatedAt: 10,
+			});
+
+			state.reviewGroupsBySession = {};
+			reviewSources.persistReviewGroup(SESSION_A, reviewA);
+			reviewSources.persistReviewGroup(SESSION_A, reviewB);
+			const seeded = workspaceFor(SESSION_A);
+			authoritativeWorkspaces.set(SESSION_A, {
+				...seeded,
+				tabs: [reviewTab(reviewA), reviewTab(reviewB)],
+				activeTabId: reviewTab(reviewA).id,
+			});
+			await setReviewTombstone(SESSION_A, reviewA.reviewId, tombstoneState);
+			vi.mocked(reviewSourcesLazy.loadReviewSources).mockResolvedValue(reviewSources);
+			gateFor(SESSION_A).release();
+
+			try {
+				await connectToSession(SESSION_A, true);
+				await waitFor(
+					() => state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.some((tab) => tab.id === reviewTab(reviewA).id) === true,
+					`EXACT_REVIEW_${tombstoneState.toUpperCase()}_AUTHORITY_REGRESSION: authoritative A tab was removed`,
+				);
+
+				expect(getReviewTombstone(SESSION_A, reviewA.reviewId)).toBe(tombstoneState);
+				expect(state.reviewGroups.has(reviewA.reviewId)).toBe(true);
+				expect(state.reviewGroups.has(reviewB.reviewId)).toBe(true);
+				expect(state.reviewGroupsBySession[SESSION_A]?.map((review) => review.reviewId)).toEqual([
+					reviewA.reviewId,
+					reviewB.reviewId,
+				]);
+				expect(state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.map((tab) => tab.id)).toEqual([
+					reviewTab(reviewA).id,
+					reviewTab(reviewB).id,
+				]);
+				expect(authoritativeWorkspace(SESSION_A).tabs.map((tab) => tab.id)).toEqual([
+					reviewTab(reviewA).id,
+					reviewTab(reviewB).id,
+				]);
+
+				reviewSources.openMarkdownReviewGroup({
+					sessionId: SESSION_A,
+					reviewId: reviewA.reviewId,
+					title: reviewA.title,
+					files: reviewA.files,
+					live: true,
+				});
+				await waitFor(
+					() => state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.some((tab) => tab.id === reviewTab(reviewA).id) === true,
+					`EXACT_REVIEW_${tombstoneState.toUpperCase()}_LIVE_REOPEN_REGRESSION: fresh A did not stay open`,
+				);
+
+				expect(getReviewTombstone(SESSION_A, reviewA.reviewId)).toBe(tombstoneState);
+				expect(state.reviewGroups.has(reviewA.reviewId)).toBe(true);
+				expect(state.reviewGroups.has(reviewB.reviewId)).toBe(true);
+				expect(state.reviewGroupsBySession[SESSION_A]?.map((review) => review.reviewId)).toEqual([
+					reviewA.reviewId,
+					reviewB.reviewId,
+				]);
+				expect(state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.map((tab) => tab.id).sort()).toEqual([
+					reviewTab(reviewA).id,
+					reviewTab(reviewB).id,
+				].sort());
+			} finally {
+				await clearReviewTombstone(SESSION_A, reviewA.reviewId);
+				reviewSources.clearPersistedReviewDocuments(SESSION_A);
+			}
+		},
+	);
+
+	it("restores a submitted review when delayed hydration confirms its authoritative primary", async () => {
 		await markReviewSubmitted(SESSION_A);
 		const pendingConnect = connectToSession(SESSION_A, true);
 
@@ -910,14 +1016,14 @@ describe("cold session transcript/workspace ordering", () => {
 
 			expect.soft(
 				state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.some((tab) => tab.kind === "review"),
-				"SUBMITTED_REVIEW_HYDRATION_REGRESSION: delayed workspace hydration resurrected a submitted review tab",
-			).toBe(false);
+				"SUBMITTED_REVIEW_AUTHORITY_REGRESSION: delayed hydration removed an authoritative review tab",
+			).toBe(true);
 			expect.soft(
 				state.panelTabs.some((tab) => tab.kind === "review"),
-				"SUBMITTED_REVIEW_HYDRATION_REGRESSION: submitted review leaked into foreground panel tabs",
-			).toBe(false);
-			expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
-			expect.soft(state.reviewPanelOpen).toBe(false);
+				"SUBMITTED_REVIEW_AUTHORITY_REGRESSION: authoritative review did not reach foreground tabs",
+			).toBe(true);
+			expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(true);
+			expect.soft(state.reviewPanelOpen).toBe(true);
 		} finally {
 			gateFor(SESSION_A).release();
 			await pendingConnect.catch(() => {});
@@ -925,93 +1031,22 @@ describe("cold session transcript/workspace ordering", () => {
 		}
 	});
 
-	it("reconciles a submitted review through one confirmed 204 delete with a coherent revision", async () => {
-		workspaceDeleteOutcomes.set(SESSION_A, [{ kind: "confirmed-204" }]);
-		await markReviewSubmitted(SESSION_A);
-		gateFor(SESSION_A).release();
-		await connectToSession(SESSION_A, true);
-
-		expect(
-			workspaceDeleteAttempts.get(SESSION_A),
-			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: cleanup must issue exactly one normal DELETE",
-		).toEqual([{ tabId: `review:${SESSION_A}-review`, baseRevision: undefined }]);
-		expect(
-			workspaceFetchCount.get(SESSION_A),
-			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: confirmed 204 must not trigger a stale workspace refetch",
-		).toBe(1);
-		expect(
-			authoritativeWorkspace(SESSION_A).revision,
-			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: fixture authority did not advance after confirmed delete",
-		).toBe(11);
-		expect(
-			authoritativeWorkspace(SESSION_A).tabs.some((tab) => tab.kind === "review"),
-			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: confirmed server delete retained the review",
-		).toBe(false);
-		expectServerConsistentWorkspaceMirrors(SESSION_A, "SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION");
-		expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
-		expect.soft(state.reviewPanelOpen).toBe(false);
-	});
-
-	it("bounds submitted-review conflict retry and preserves the newest 409 workspace", async () => {
-		const conflictAt11 = conflictWorkspace(SESSION_A, 11, "server-v11");
-		const conflictAt12 = conflictWorkspace(SESSION_A, 12, "server-v12");
+	it("never mutates authoritative workspace while reconciling retained submitted suppression", async () => {
 		workspaceDeleteOutcomes.set(SESSION_A, [
-			{ kind: "conflict-409", current: conflictAt11 },
-			{ kind: "conflict-409", current: conflictAt12 },
+			{ kind: "network-error", message: "must remain unused" },
 		]);
 		await markReviewSubmitted(SESSION_A);
 		gateFor(SESSION_A).release();
 		await connectToSession(SESSION_A, true);
 
-		expect(
-			workspaceDeleteAttempts.get(SESSION_A),
-			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: cleanup must retry once against the newer revision and then stop",
-		).toEqual([
-			{ tabId: `review:${SESSION_A}-review`, baseRevision: undefined },
-			{ tabId: `review:${SESSION_A}-review`, baseRevision: 11 },
-		]);
-		expect(
-			workspaceFetchCount.get(SESSION_A),
-			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: 409 bodies already carry current workspace and must not refetch",
-		).toBe(1);
-		expect(
-			authoritativeWorkspace(SESSION_A).revision,
-			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: second conflict did not become authoritative",
-		).toBe(12);
-		expect(
-			authoritativeWorkspace(SESSION_A).tabs.some((tab) => tab.kind === "review"),
-			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: conflict authority fixture unexpectedly removed the review",
-		).toBe(true);
-		expectServerConsistentWorkspaceMirrors(SESSION_A, "SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION");
+		expect(workspaceDeleteAttempts.get(SESSION_A)).toBeUndefined();
+		expect(workspaceFetchCount.get(SESSION_A)).toBe(1);
+		expect(authoritativeWorkspace(SESSION_A).revision).toBe(10);
+		expect(authoritativeWorkspace(SESSION_A).tabs.some((tab) => tab.kind === "review")).toBe(true);
+		expectServerConsistentWorkspaceMirrors(SESSION_A, "SUBMITTED_REVIEW_PASSIVE_SUPPRESSION_REGRESSION");
 		expect.soft(state.panelTabs.some((tab) => tab.kind === "review")).toBe(true);
-		expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
-		expect.soft(state.reviewPanelOpen).toBe(false);
-	});
-
-	it("keeps an authoritative review after submitted-review delete network failure and refetch", async () => {
-		workspaceDeleteOutcomes.set(SESSION_A, [
-			{ kind: "network-error", message: "fixture submitted-review DELETE network failure" },
-		]);
-		await markReviewSubmitted(SESSION_A);
-		gateFor(SESSION_A).release();
-		await connectToSession(SESSION_A, true);
-
-		expect(
-			workspaceDeleteAttempts.get(SESSION_A),
-			"SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION: network failure must not cause blind delete retries",
-		).toEqual([{ tabId: `review:${SESSION_A}-review`, baseRevision: undefined }]);
-		expect(
-			workspaceFetchCount.get(SESSION_A),
-			"SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION: network failure must perform one authoritative refetch",
-		).toBe(2);
-		expect(
-			authoritativeWorkspace(SESSION_A).tabs.some((tab) => tab.kind === "review"),
-			"SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION: refetch fixture unexpectedly removed the review",
-		).toBe(true);
-		expectServerConsistentWorkspaceMirrors(SESSION_A, "SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION");
-		expect.soft(state.panelTabs.some((tab) => tab.kind === "review")).toBe(true);
-		expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
-		expect.soft(state.reviewPanelOpen).toBe(false);
+		expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(true);
+		expect.soft(state.reviewPanelOpen).toBe(true);
 	});
 
 	it("keeps the exact cached A agent and panel connected after A to B to A before A hydration releases", async () => {

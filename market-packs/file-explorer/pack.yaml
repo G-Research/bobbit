@@ -1,0 +1,14 @@
+name: file-explorer
+schema: 2
+description: Read-only session file explorer with Git working-tree decorations and previews.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints:
+    - file-explorer-session-menu
+    - file-explorer-slash
+routes:
+  module: lib/explorer-routes.mjs
+  names: [list, resolve, search, read, diff]

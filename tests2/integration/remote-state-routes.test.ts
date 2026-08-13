@@ -4,6 +4,69 @@ import { basename, dirname, join } from "node:path";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "./_e2e/e2e-setup.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
+
+let serverModule: any;
+let forceRequestedAt = 1_000;
+type PersistenceMode = "sqlite" | "json" | undefined;
+interface MutableProjectPersistenceOptions {
+	goalPersistence?: PersistenceMode;
+	taskPersistence?: PersistenceMode;
+	gatePersistence?: PersistenceMode;
+}
+let projectPersistenceOptions: MutableProjectPersistenceOptions | undefined;
+let previousPersistence: MutableProjectPersistenceOptions | undefined;
+
+function deterministicGitStatus(opts?: { untracked?: boolean }) {
+	return {
+		branch: "main",
+		primaryBranch: "main",
+		primaryRef: "refs/heads/main",
+		isOnPrimary: true,
+		status: [],
+		hasUpstream: true,
+		ahead: 0,
+		behind: 0,
+		aheadOfPrimary: 0,
+		behindPrimary: 0,
+		mergedIntoPrimary: true,
+		insertionsVsPrimary: 0,
+		deletionsVsPrimary: 0,
+		clean: true,
+		summary: "clean",
+		unpushed: false,
+		partial: false,
+		untrackedIncluded: opts?.untracked === true,
+	};
+}
+
+function crossForceCoalescingWindow(): void {
+	forceRequestedAt += 251;
+}
+
+function unexpectedRunnerCommand(file: string, args: readonly string[], options?: any): never {
+	throw new Error(`unexpected route command: ${commandName(file)} ${args.join(" ")} (cwd=${String(options?.cwd ?? "")})`);
+}
+
+function standardSingleRepositoryProbe(
+	file: string,
+	args: readonly string[],
+	repositoryRoot: string,
+): { stdout: string; stderr: string } | undefined {
+	if (commandName(file) !== "git") return undefined;
+	const command = args.join(" ");
+	if (command === "rev-parse --show-toplevel") return { stdout: `${repositoryRoot}\n`, stderr: "" };
+	if (command === "rev-parse --path-format=absolute --git-common-dir" || command === "rev-parse --git-common-dir") {
+		return { stdout: `${join(repositoryRoot, ".git")}\n`, stderr: "" };
+	}
+	if (command === "rev-parse --git-dir") return { stdout: ".git\n", stderr: "" };
+	if (command === "symbolic-ref --quiet --short HEAD") return { stdout: "fixture/route-head\n", stderr: "" };
+	if (args[0] === "check-ref-format" && args[1] === "--branch" && typeof args[2] === "string") {
+		if (/^[\-]|[\u0000-\u001f\u007f]|:\/\//.test(args[2])) throw new Error("invalid fixture branch");
+		return { stdout: `${args[2]}\n`, stderr: "" };
+	}
+	return undefined;
+}
 
 function commandName(file: string): string {
 	return basename(file).toLowerCase().replace(/\.(?:cmd|exe)$/, "");
@@ -67,6 +130,46 @@ async function removeSiblingWorktree(runner: any, primary: string, sibling: stri
  * and the only observed fetch is the injected command below.
  */
 test.describe("remote-state coordinator routes", () => {
+	test.beforeAll(async ({ gateway }) => {
+		// This route suite creates four temporary real-filesystem projects but does
+		// not test store persistence. Keep those lazy contexts on the existing JSON
+		// fixture seam; native SQLite ownership is covered by the focused store/E2E
+		// suites and otherwise adds synchronous handles to the tier-1 route budget.
+		projectPersistenceOptions = (gateway.projectContextManager as { options: MutableProjectPersistenceOptions }).options;
+		previousPersistence = {
+			goalPersistence: projectPersistenceOptions.goalPersistence,
+			taskPersistence: projectPersistenceOptions.taskPersistence,
+			gatePersistence: projectPersistenceOptions.gatePersistence,
+		};
+		projectPersistenceOptions.goalPersistence = "json";
+		projectPersistenceOptions.taskPersistence = "json";
+		projectPersistenceOptions.gatePersistence = "json";
+
+		serverModule = (await loadServerTestRuntime()).server;
+		expect(typeof serverModule.__setGitStatusFake).toBe("function");
+		expect(typeof serverModule.__clearGitStatusFake).toBe("function");
+		expect(typeof serverModule.__setRemoteStateForceNowFake).toBe("function");
+		expect(typeof serverModule.__clearRemoteStateForceNowFake).toBe("function");
+	});
+
+	test.afterAll(() => {
+		if (!projectPersistenceOptions || !previousPersistence) return;
+		projectPersistenceOptions.goalPersistence = previousPersistence.goalPersistence;
+		projectPersistenceOptions.taskPersistence = previousPersistence.taskPersistence;
+		projectPersistenceOptions.gatePersistence = previousPersistence.gatePersistence;
+	});
+
+	test.beforeEach(() => {
+		forceRequestedAt = 1_000;
+		serverModule.__setRemoteStateForceNowFake(() => forceRequestedAt);
+		serverModule.__setGitStatusFake(async (_cwd: string, _containerId?: string, opts?: { untracked?: boolean }) => deterministicGitStatus(opts));
+	});
+
+	test.afterEach(() => {
+		serverModule.__clearGitStatusFake();
+		serverModule.__clearRemoteStateForceNowFake();
+	});
+
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());
@@ -132,7 +235,9 @@ test.describe("remote-state coordinator routes", () => {
 				if (endpoint.endsWith("/rulesets/73")) return { stdout: JSON.stringify({ current_user_can_bypass: "pull_requests_only" }), stderr: "" };
 				throw new Error(`unexpected permission API args: ${args.join(" ")}`);
 			}
-			return originalExecFile.call(runner, file, args, options);
+			const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -237,7 +342,7 @@ test.describe("remote-state coordinator routes", () => {
 
 			// Restricted sockets keep entity-addressed delivery for their authorized
 			// session; only the UI-only sidebar fanout is filtered.
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const targetedCursor = sandboxWs.messageCount();
 			const beforeTargetedRead = prReads;
 			const targetedResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
@@ -285,9 +390,9 @@ test.describe("remote-state coordinator routes", () => {
 			const beforeCustomPorts = prReads;
 			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
 			// This SSH remote intentionally aliases the earlier HTTPS PR identity.
-			// Let the 250ms explicit-refresh coalescing window expire so this assertion
+			// Cross the explicit-refresh coalescing window deterministically so this
 			// observes a new authority-pinned permission cycle on every runner speed.
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const sshPermissionStart = permissionApiCalls.length;
 			const sshResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
 			expect(sshResponse.status).toBe(200);
@@ -384,7 +489,9 @@ test.describe("remote-state coordinator routes", () => {
 				(error as any).stderr = "fixture transport unavailable";
 				throw error;
 			}
-			return originalExecFile.call(runner, file, args, options);
+			const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -431,7 +538,7 @@ test.describe("remote-state coordinator routes", () => {
 			// A failed forced refresh retains the last-good null, but lastError makes
 			// it diagnostics-bearing stale state. optional=1 must not erase it as 204.
 			mode = "failure";
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const failedResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
 			expect(failedResponse.status).toBe(200);
 			const failedBody = await failedResponse.json();
@@ -492,7 +599,10 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "gh" && args[0] === "api") {
 				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
-			return originalExecFile.call(runner, file, args, options);
+			if (commandName(file) === "git" && args[0] === "check-ref-format" && args[1] === "--branch") {
+				return { stdout: `${String(args[2])}\n`, stderr: "" };
+			}
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -600,7 +710,7 @@ test.describe("remote-state coordinator routes", () => {
 					stderr: "",
 				};
 			}
-			return originalExecFile.call(runner, file, args, options);
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -721,7 +831,9 @@ test.describe("remote-state coordinator routes", () => {
 				}, current] : [current];
 				return { stdout: JSON.stringify(results), stderr: "" };
 			}
-			return originalExecFile.call(runner, file, args, options);
+			const probe = standardSingleRepositoryProbe(file, args, ownedCwd);
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -752,26 +864,26 @@ test.describe("remote-state coordinator routes", () => {
 			expect(ghCalls.some(args => args[0] === "pr" && args[1] === "view")).toBe(false);
 
 			returnOutsideResult = true;
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const escaped = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
 			expect(escaped.status).toBe(200);
 			const escapedBody = await escaped.json();
 			expect(escapedBody).toMatchObject({ stale: true, lastError: "unavailable", data: { number: 117, title: "owned 17" } });
 			expect(JSON.stringify(escapedBody)).not.toContain(outsideSentinel);
 			returnOutsideResult = false;
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const recovered = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
 			expect(recovered.status).toBe(200);
 			expect(await recovered.json()).toMatchObject({ stale: false, data: { number: 117 } });
 
 			unsafeUrl = `https://${credentialSentinel}:secret@github.com/acme/owned-selector/pull/117`;
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const rejectedCredentialUrl = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
 			const rejectedCredentialBody = await rejectedCredentialUrl.json();
 			expect(rejectedCredentialBody).toMatchObject({ stale: true, lastError: "unavailable", data: { number: 117 } });
 			expect(JSON.stringify(rejectedCredentialBody)).not.toContain(credentialSentinel);
 			unsafeUrl = undefined;
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			expect(await (await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`)).json()).toMatchObject({ stale: false, data: { number: 117 } });
 
 			const callsBeforeInjectedMerge = ghCalls.length;
@@ -867,7 +979,7 @@ test.describe("remote-state coordinator routes", () => {
 					stderr: "",
 				};
 			}
-			return originalExecFile.call(runner, file, args, options);
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -1036,7 +1148,7 @@ test.describe("remote-state coordinator routes", () => {
 					stderr: "",
 				};
 			}
-			return originalExecFile.call(runner, file, args, options);
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -1180,7 +1292,7 @@ test.describe("remote-state coordinator routes", () => {
 					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 				}
 			}
-			return originalExecFile.call(runner, file, args, options);
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -1319,7 +1431,7 @@ test.describe("remote-state coordinator routes", () => {
 				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
 				if (args[0] === "api") return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
-			return originalExecFile.call(runner, file, args, options);
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		const exerciseOrientation = async (trusted: { goalId: string; cwd: string; repository: RepositoryFixture }, untrustedGoalId: string) => {
@@ -1434,7 +1546,9 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "gh" && args[0] === "api") {
 				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
-			return originalExecFile.call(runner, file, args, options);
+			const probe = standardSingleRepositoryProbe(file, args, hostCwd);
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -1467,7 +1581,7 @@ test.describe("remote-state coordinator routes", () => {
 				expect(await response.json()).toMatchObject({ stale: false, data: { state: "MERGED", title: "merge version 2" } });
 			}
 
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const sessionMerge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
 				method: "POST",
 				body: JSON.stringify({ method: "rebase", branch }),
@@ -1480,7 +1594,7 @@ test.describe("remote-state coordinator routes", () => {
 			expect(await sessionFresh.json()).toMatchObject({ stale: false, data: { title: "merge version 3" } });
 
 			rejectMerge = true;
-			await new Promise(resolve => setTimeout(resolve, 260));
+			crossForceCoalescingWindow();
 			const readsBeforeRejectedMerge = prReads;
 			const rejectedMerge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
 				method: "POST",
@@ -1541,7 +1655,9 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "gh" && args[0] === "api") {
 				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
-			return originalExecFile.call(runner, file, args, options);
+			const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -1589,10 +1705,9 @@ test.describe("remote-state coordinator routes", () => {
 				failure = undefined;
 				version += 1;
 				gateway.clock.advance(1);
-				// Route force requests use a short real-time burst marker. Keep this
-				// recovery distinct from the previous explicit cycle while the two
-				// requests below still land in the same burst and join one flight.
-				await new Promise(resolve => setTimeout(resolve, 260));
+				// Keep this recovery distinct from the previous explicit cycle while the
+				// two requests below retain one burst timestamp and join one flight.
+				crossForceCoalescingWindow();
 				let releaseRecovery!: () => void;
 				let markRecoveryStarted!: () => void;
 				const recoveryStartedPromise = new Promise<void>(resolve => { markRecoveryStarted = resolve; });
@@ -1629,10 +1744,11 @@ test.describe("remote-state coordinator routes", () => {
 		test.setTimeout(30_000);
 		const primary = gitCwd();
 		const sibling = join(primary, `.remote-pr-head-sibling-${Date.now()}`);
-		const siblingBranch = `remote-pr-head-sibling-${Date.now()}`;
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
-		await runner.execFile("git", ["worktree", "add", "-b", siblingBranch, sibling], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
+		// Head isolation is entirely runner-projected; only the final dirty-state
+		// scenario below needs a native sibling worktree.
+		mkdirSync(sibling, { recursive: true });
 		const primarySession = await createRemoteStateSession(gateway, primary);
 		const siblingSession = await createRemoteStateSession(gateway, sibling);
 		gateway.sessionManager.updateSessionMeta(primarySession, { branch: "" });
@@ -1696,7 +1812,9 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "gh" && args[0] === "api") {
 				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
-			return originalExecFile.call(runner, file, args, options);
+			const probe = standardSingleRepositoryProbe(file, args, primary);
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
 		};
 
 		try {
@@ -1737,7 +1855,8 @@ test.describe("remote-state coordinator routes", () => {
 			primaryWs?.close();
 			siblingWs?.close();
 			await Promise.all([deleteSession(primarySession), deleteSession(siblingSession)]);
-			await removeSiblingWorktree(runner, primary, sibling);
+			const cleanup = await awaitableRm(sibling, { maxAttempts: 5, backoffMs: 50 });
+			expect(cleanup.removed, `head-isolation fixture cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 		}
 	});
 
@@ -1745,6 +1864,11 @@ test.describe("remote-state coordinator routes", () => {
 		test.setTimeout(30_000);
 		const primary = gitCwd();
 		const sibling = join(primary, `.remote-state-sibling-${Date.now()}`);
+		// This is the sole route scenario that owns native status fidelity. Evict
+		// deterministic projections before creating either worktree consumer.
+		serverModule.__clearGitStatusFake();
+		serverModule.invalidateGitStatusCache(primary);
+		serverModule.invalidateGitStatusCache(sibling);
 		const branch = `remote-state-sibling-${Date.now()}`;
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;

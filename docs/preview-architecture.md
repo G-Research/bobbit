@@ -154,8 +154,8 @@ between multiple preview tabs without re-mounting on every click. The
 active tab's `artifactId` is read off the panel-tab itself, not mirrored
 into global state, so SSE / bootstrap updates of `state.previewPanelEntry`
 can never desync the iframe `src` from the visible tab. The live mount
-slot remains the source for tabs without an `artifactId` (assistant /
-live preview).
+slot remains only as the fallback for tabs without an `artifactId`; a current
+or assistant-owned tab with an artifact still uses the stable artifact route.
 
 ### Reopen-tab decision flow
 
@@ -214,8 +214,9 @@ small metadata to render after restart:
 On gateway restart, `sidePanelWorkspace` is loaded with the session. When the
 browser reloads or returns to the session, the side-panel shell renders the
 active preview tab and the iframe derives `entry`, `mtime`, and `artifactId` from
-that tab before transient preview mirrors are repopulated. Live tabs point at
-`/preview/<sid>/<entry>?mtime=<n>`; artifact-backed historical tabs point at
+that tab before transient preview mirrors are repopulated. Tabs without an
+artifact point at `/preview/<sid>/<entry>?mtime=<n>`; every artifact-backed tab,
+including the current/live identity, points at
 `/preview/<sid>/_artifact/<artifactId>/<entry>?mtime=<n>`.
 
 Bootstrap (`GET /api/preview/mount`) and `preview-changed` SSE metadata may later
@@ -702,13 +703,19 @@ contracts differ:
 
 ### Inline chat-card path
 
-`WriteRenderer` delegates `.html` and `.htm` writes to `HtmlRenderer`, including
-historical completed calls. During streaming, prepared HTML is applied through
-the existing debounced `document.open()` / `write()` / `close()` path; completion
-switches to the declarative `srcdoc` binding. A successful HTML edit fetches the
-resulting file snapshot and delegates to the same completed renderer. Thus write,
-edit, streaming, and completed cards share one preparation helper rather than
-separate theme implementations.
+`WriteRenderer` checks for the transport truncation descriptor before extension
+dispatch. Truncated `.html`, `.htm`, and `.svg` writes therefore stay on the
+generic code-preview path instead of passing an object to a source-string
+renderer; completed calls also retain the generic **Load full content** control.
+Ordinary source strings keep their normal extension dispatch: `.html` and `.htm`
+writes delegate to `HtmlRenderer`, including historical completed calls, while
+`.svg` writes delegate to `SvgRenderer`. During HTML streaming, prepared source
+is applied through the existing debounced `document.open()` / `write()` /
+`close()` path; completion switches to the declarative `srcdoc` binding. A
+successful `.html` or `.htm` edit fetches the resulting file snapshot and
+delegates to the same completed `HtmlRenderer`. Thus ordinary writes, successful
+edits, streaming, and completed HTML cards share one preparation helper rather
+than separate theme implementations.
 
 The helper parses authored input inertly with the browser HTML parser, inserts a
 parsed copy of the canonical bridge as the first node in `<head>`, and serializes the
@@ -873,7 +880,8 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `src/shared/preview-bridge-scripts.ts` | Canonical live theme bridge plus the side-panel-only swipe bridge |
 | `src/ui/tools/renderers/prepare-inline-html.ts` | Parser-backed, early theme-bridge preparation for inline `srcdoc` HTML |
 | `src/ui/tools/renderers/HtmlRenderer.ts` | Completed and streaming inline iframe lifecycle; original-source disclosure and themed chrome |
-| `src/ui/tools/renderers/WriteRenderer.ts`, `EditRenderer.ts` | `.html` / `.htm` write and successful-edit delegation into `HtmlRenderer` |
+| `src/ui/tools/renderers/WriteRenderer.ts` | Descriptor-first generic preview and full-content loading for truncated `.html` / `.htm` / `.svg` writes; source-string delegation to `HtmlRenderer` or `SvgRenderer` |
+| `src/ui/tools/renderers/EditRenderer.ts` | Successful `.html` / `.htm` edit snapshot loading and completed delegation into `HtmlRenderer` |
 | `defaults/tools/html/extension.ts` | `preview_open` tool — POSTs to `/api/preview/mount`, stamps a lossless v3 marker or reports `PREVIEW_SNAPSHOT_CAP` |
 | `defaults/tools/html/snapshot.ts` | Marker constants, `buildPreviewSnapshotV3Block`, `parseSnapshot`, 250-byte v3 cap |
 | `src/server/preview/artifacts.ts` | Immutable artifact store — capture, restore, hash-based dedupe, orphan sweep |
