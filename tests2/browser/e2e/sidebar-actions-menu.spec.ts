@@ -204,14 +204,14 @@ test.describe("Sidebar actions menu", () => {
 		sessionIds.push(sessionId);
 		await waitForSessionStatus(sessionId, "idle");
 		await openSession(page, sessionId);
-		const trigger = page.locator(`[data-testid="session-actions-trigger"][data-session-id="${sessionId}"]`).first();
+		const trigger = page.locator(`[data-testid="session-actions-trigger"][data-header-session-id="${sessionId}"]`).first();
 		await expect(trigger).toBeVisible({ timeout: 10_000 });
 
 		// The click reaches the old header trigger, then a render replaces it
 		// before the lazy popover import resolves. The menu must use the exact
 		// replacement for this session, including Escape focus restoration.
 		await page.evaluate((id) => {
-			const current = document.querySelector<HTMLElement>(`[data-testid="session-actions-trigger"][data-session-id="${id}"]`);
+			const current = document.querySelector<HTMLElement>(`[data-testid="session-actions-trigger"][data-header-session-id="${id}"]`);
 			if (!current) throw new Error("header trigger was not rendered");
 			document.addEventListener("click", (event) => {
 				if (!(event.target instanceof Node) || !current.contains(event.target)) return;
@@ -229,10 +229,10 @@ test.describe("Sidebar actions menu", () => {
 		expect(await page.evaluate(() => (window as any).__replacedHeaderTrigger)).toEqual({ oldConnected: false, newConnected: true });
 		expect(await page.locator("sidebar-actions-popover").evaluate((element) => {
 			const anchor = (element as any).anchorEl as HTMLElement | null;
-			return { connected: anchor?.isConnected, sessionId: anchor?.dataset.sessionId };
+			return { connected: anchor?.isConnected, sessionId: anchor?.dataset.headerSessionId };
 		})).toEqual({ connected: true, sessionId });
 		await page.keyboard.press("Escape");
-		await expect(page.locator(`[data-testid="session-actions-trigger"][data-session-id="${sessionId}"]`)).toBeFocused({ timeout: 5_000 });
+		await expect(page.locator(`[data-testid="session-actions-trigger"][data-header-session-id="${sessionId}"]`)).toBeFocused({ timeout: 5_000 });
 	});
 
 	test("header actions replace a closing menu and immediately toggle a new one closed", async ({ page }) => {
@@ -240,7 +240,7 @@ test.describe("Sidebar actions menu", () => {
 		sessionIds.push(sessionId);
 		await waitForSessionStatus(sessionId, "idle");
 		await openSession(page, sessionId);
-		const currentTrigger = () => page.locator(`[data-testid="session-actions-trigger"][data-session-id="${sessionId}"]`).first();
+		const currentTrigger = () => page.locator(`[data-testid="session-actions-trigger"][data-header-session-id="${sessionId}"]`).first();
 
 		await currentTrigger().click();
 		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });

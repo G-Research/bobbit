@@ -945,7 +945,7 @@ function refreshOpenHeaderSessionActionsPopover(): void {
  */
 function connectedHeaderSessionActionsTrigger(input: Pick<OpenHeaderSessionActionsPopover, "sessionId"> & { trigger: HTMLElement }): HTMLElement | null {
 	const matches = (element: HTMLElement): boolean => element.isConnected
-		&& element.dataset.sessionId === input.sessionId;
+		&& element.dataset.headerSessionId === input.sessionId;
 	if (matches(input.trigger)) return input.trigger;
 	return [...document.querySelectorAll<HTMLElement>('[data-testid="session-actions-trigger"]')]
 		.find(matches) ?? null;
@@ -1095,7 +1095,7 @@ function renderHeaderSessionActions(input: {
 						type="button"
 						class="${input.mobile ? "h-10 w-10 p-0" : "h-7 px-2"} rounded-md transition-colors inline-flex items-center justify-center text-muted-foreground hover:bg-secondary/80 hover:text-foreground"
 						data-testid="session-actions-trigger"
-						data-session-id=${input.session.id}
+						data-header-session-id=${input.session.id}
 						aria-label="Session actions"
 						aria-haspopup="menu"
 						aria-expanded=${isHeaderSessionActionsPopoverOpen(input.session.id) ? "true" : "false"}
