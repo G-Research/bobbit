@@ -156,6 +156,13 @@ describe("Claude Agent SDK sandbox spawn", () => {
 			containerId: "sandbox", cwd: "/workspace", env: {}, command: ["/usr/local/bin/bobbit-claude-agent-sdk"], spawn: spawn as any,
 		})({ args: [], env: {}, signal: controller.signal } as any);
 
+		expect(child.stdin.listenerCount("error")).toBeGreaterThan(0);
+		expect(() => child.stdin.emit("error", Object.assign(new Error("closed pipe"), { code: "EPIPE" }))).not.toThrow();
+		expect(() => child.stdin.emit("error", Object.assign(new Error("destroyed stream"), { code: "ERR_STREAM_DESTROYED" }))).not.toThrow();
+		expect(child.stderr.listenerCount("data")).toBeGreaterThan(0);
+		child.stderr.write(Buffer.alloc(65 * 1024, "x"));
+		expect(child.stderr.readableLength).toBe(0);
+
 		process.kill("SIGKILL");
 		expect(child.kill).toHaveBeenCalledWith("SIGKILL");
 		child.emit("exit", 0, null);

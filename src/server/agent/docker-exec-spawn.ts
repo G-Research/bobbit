@@ -12,6 +12,8 @@ export interface DockerExecCommand {
 	command: readonly string[];
 	spawn?: DockerSpawn;
 	logPrefix?: string;
+	/** Consume stderr for SDK-owned children which otherwise have no fd-2 owner. */
+	drainStderr?: boolean;
 }
 
 /** Docker accepts no host paths here: setup must have translated this first. */
@@ -60,10 +62,23 @@ export function spawnDockerExec(
 	}
 	execArgs.push("-w", input.cwd, input.containerId, ...input.command, ...args);
 	console.log(`[${input.logPrefix ?? "docker-exec"}] Docker exec args: ${redactDockerArgs(execArgs)}`);
-	return (input.spawn ?? spawn)("docker", execArgs, {
+	const child = (input.spawn ?? spawn)("docker", execArgs, {
 		stdio: ["pipe", "pipe", "pipe"],
 		env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 	});
+	// A container can exit between spawn and a queued protocol write. These two
+	// expected stream errors must not escape as uncaught gateway exceptions.
+	child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+		if (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED") return;
+		console.warn(`[${input.logPrefix ?? "docker-exec"}] stdin error: ${error.code ?? "unknown"}`);
+	});
+	// Pi owns and forwards stderr itself. SDK-owned children have no fd-2
+	// consumer, so explicitly opt in to discard it and prevent pipe backpressure.
+	if (input.drainStderr) {
+		child.stderr?.on("data", () => undefined);
+		child.stderr?.on("error", () => undefined);
+	}
+	return child;
 }
 
 export interface ClaudeSdkDockerSpawn extends DockerExecCommand {
@@ -85,7 +100,7 @@ export function createClaudeSdkDockerSpawn(input: ClaudeSdkDockerSpawn): (option
 				.map((name) => [name, options.env[name]] as const)
 				.filter((entry): entry is [string, string] => typeof entry[1] === "string"),
 		);
-		const child = spawnDockerExec({ ...input, env: { ...input.env, ...sdkMetadata } }, options.args);
+		const child = spawnDockerExec({ ...input, env: { ...input.env, ...sdkMetadata }, drainStderr: true }, options.args);
 		if (!child.stdin || !child.stdout) {
 			child.kill("SIGTERM");
 			throw new Error("Docker sandbox process did not provide pipe stdio");

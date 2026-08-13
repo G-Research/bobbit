@@ -58,7 +58,7 @@ function workerEnv(manifest: ReturnType<typeof buildClaudeSdkExtensionManifest>)
 	return { BOBBIT_BUILTIN_TOOLS: [...new Set(manifest.flatMap(entry => entry.builtinToolNames ?? []))].sort().join(",") };
 }
 
-function sandboxDispatcherFixture() {
+function sandboxDispatcherFixture({ ready = true }: { ready?: boolean } = {}) {
 	const child = new EventEmitter() as any;
 	child.stdin = new PassThrough();
 	child.stdout = new PassThrough();
@@ -81,7 +81,7 @@ function sandboxDispatcherFixture() {
 		for (const line of lines) {
 			const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
 			received.push(message);
-			if (message.type === "init") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "ready", schemas: [{ name: "read", inputSchema: { type: "object" } }], omittedConditional: [] }) + "\n");
+			if (ready && message.type === "init") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "ready", schemas: [{ name: "read", inputSchema: { type: "object" } }], omittedConditional: [] }) + "\n");
 		}
 	});
 	const dispatcher = new ClaudeSdkExtensionDispatcher({
@@ -226,6 +226,22 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 			child.stdout.write(utf8Frame.subarray(emojiOffset));
 			await expect(utf8.pending).resolves.toBe(utf8Result);
 			expect(dockerSpawn).toHaveBeenCalledOnce();
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
+	it("absorbs early sandbox dispatcher stdin closure and drains its stderr", async () => {
+		const { child, dispatcher } = sandboxDispatcherFixture({ ready: false });
+		const starting = dispatcher.start();
+		try {
+			expect(child.stdin.listenerCount("error")).toBeGreaterThan(0);
+			expect(() => child.stdin.emit("error", Object.assign(new Error("closed pipe"), { code: "EPIPE" }))).not.toThrow();
+			expect(child.stderr.listenerCount("data")).toBeGreaterThan(0);
+			child.stderr.write(Buffer.alloc(65 * 1024, "x"));
+			expect(child.stderr.readableLength).toBe(0);
+			child.emit("exit", 1, null);
+			await expect(starting).rejects.toThrow("Bobbit extension dispatcher failed to start");
 		} finally {
 			dispatcher.dispose();
 		}

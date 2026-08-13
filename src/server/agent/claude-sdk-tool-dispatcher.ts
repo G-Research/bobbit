@@ -263,6 +263,7 @@ export class ClaudeSdkExtensionDispatcher {
 			command: ["node", "--input-type=module", "--eval", source],
 			spawn: sandbox.spawn,
 			logPrefix: "claude-sdk-tools",
+			drainStderr: true,
 		});
 		if (!child.stdin || !child.stdout) {
 			child.kill("SIGTERM");
