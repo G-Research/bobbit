@@ -20,6 +20,13 @@ export interface SidebarActionsTrailingToggle {
 	onToggle: () => void;
 }
 
+export interface SidebarActionsHelp {
+	/** DOM id for the associated tooltip. */
+	id: string;
+	ariaLabel: string;
+	text: string;
+}
+
 export interface SidebarActionsPopoverItem {
 	id: string;
 	label: string;
@@ -27,6 +34,7 @@ export interface SidebarActionsPopoverItem {
 	icon: TemplateResult;
 	tone?: "default" | "danger";
 	quick: boolean;
+	help?: SidebarActionsHelp;
 	trailingToggle?: SidebarActionsTrailingToggle;
 }
 
@@ -41,12 +49,11 @@ export interface SidebarActionsPopoverPosition {
 }
 
 /**
- * A single roving-focus stop. Every menu row is a stop; a row that owns a
- * trailing checkbox contributes an extra `toggle` stop immediately after it so
- * the checkbox is reachable as its own ArrowDown/ArrowUp target.
+ * A single roving-focus stop. Every menu row is a stop; optional sibling help
+ * and trailing-checkbox controls follow it in visual order.
  */
 interface SidebarActionsFocusStop {
-	kind: "row" | "toggle";
+	kind: "row" | "help" | "toggle";
 	itemIndex: number;
 }
 
@@ -94,6 +101,9 @@ export class SidebarActionsPopover extends LitElement {
 	@state() private _closing = false;
 	@state() private _position: SidebarActionsPopoverPosition = { top: VIEWPORT_PADDING, left: VIEWPORT_PADDING, placement: "bottom" };
 	@state() private _maxHeight = 320;
+	@state() private _openHelpIndex = -1;
+	@state() private _pinnedHelpIndex = -1;
+	@state() private _helpTooltipPosition = { top: VIEWPORT_PADDING, left: VIEWPORT_PADDING };
 
 	private _previousFocus: HTMLElement | null = null;
 	private _rowStrip: HTMLElement | null = null;
@@ -130,6 +140,7 @@ export class SidebarActionsPopover extends LitElement {
 		this._unbindListeners();
 		this._cancelAnimations();
 		this._restoreRowStrip();
+		this._resetHelp();
 		this.removeAttribute("data-popover-open");
 	}
 
@@ -151,6 +162,7 @@ export class SidebarActionsPopover extends LitElement {
 		}
 		if (changed.has("items")) {
 			this._highlightIndex = this._clampIndex(this._highlightIndex);
+			if (!this.items[this._openHelpIndex]?.help) this._resetHelp();
 			if (this.open) queueMicrotask(() => this._measureAndPosition());
 		}
 		this._syncPopoverOpenAttr();
@@ -160,6 +172,7 @@ export class SidebarActionsPopover extends LitElement {
 		this._openedToken += 1;
 		this._closeRequested = false;
 		this._closing = false;
+		this._resetHelp();
 		this._cancelAnimations();
 		this._previousFocus = (document.activeElement as HTMLElement | null) ?? null;
 		this._rowStrip = this._resolveRowStrip();
@@ -172,6 +185,7 @@ export class SidebarActionsPopover extends LitElement {
 	private _onExternalClose(): void {
 		this._closeRequested = false;
 		this._closing = false;
+		this._resetHelp();
 		this._unbindListeners();
 		this._cancelAnimations();
 		this._restoreRowStrip();
@@ -180,6 +194,7 @@ export class SidebarActionsPopover extends LitElement {
 	}
 
 	private _onExternalCloseWithAnimation(): void {
+		this._resetHelp();
 		this._unbindListeners();
 		this._syncPopoverOpenAttr();
 		if (this._prefersReducedMotion()) {
@@ -294,6 +309,7 @@ export class SidebarActionsPopover extends LitElement {
 		if (!this.open || this._closeRequested) return;
 		this._closeRequested = true;
 		this._closing = true;
+		this._resetHelp();
 		this._syncPopoverOpenAttr();
 		this._unbindListeners();
 		if (this._prefersReducedMotion()) {
@@ -401,12 +417,13 @@ export class SidebarActionsPopover extends LitElement {
 
 	/**
 	 * The flat list of roving-focus stops in visual order. Each item yields a
-	 * `row` stop; items with a trailing checkbox add a `toggle` stop right after.
+	 * `row` stop, followed by its optional `help` and `toggle` stops.
 	 */
 	private _focusStops(): SidebarActionsFocusStop[] {
 		const stops: SidebarActionsFocusStop[] = [];
 		this.items.forEach((item, itemIndex) => {
 			stops.push({ kind: "row", itemIndex });
+			if (item.help) stops.push({ kind: "help", itemIndex });
 			if (item.trailingToggle) stops.push({ kind: "toggle", itemIndex });
 		});
 		return stops;
@@ -453,6 +470,9 @@ export class SidebarActionsPopover extends LitElement {
 		if (stop.kind === "row") {
 			return this.querySelector<HTMLElement>(`button[data-sidebar-actions-index="${stop.itemIndex}"]`);
 		}
+		if (stop.kind === "help") {
+			return this.querySelector<HTMLElement>(`[data-sidebar-actions-help-index="${stop.itemIndex}"]`);
+		}
 		const item = this.items[stop.itemIndex];
 		if (!item) return null;
 		return this.querySelector<HTMLElement>(`[data-sidebar-actions-toggle][data-sidebar-action-id="${item.id}"]`);
@@ -463,6 +483,10 @@ export class SidebarActionsPopover extends LitElement {
 		if (!stop) return;
 		const item = this.items[stop.itemIndex];
 		if (!item) return;
+		if (stop.kind === "help") {
+			this._handleHelpActivation(stop.itemIndex, event);
+			return;
+		}
 		// Enter on a focused checkbox toggles it without firing the row action.
 		if (stop.kind === "toggle") {
 			if (item.trailingToggle) item.trailingToggle.onToggle();
@@ -491,10 +515,48 @@ export class SidebarActionsPopover extends LitElement {
 	private _toggleFromKeyboard(): boolean {
 		if (this._closeRequested) return false;
 		const stop = this._activeStop();
-		if (!stop) return false;
+		if (!stop || stop.kind === "help") return false;
 		const item = this.items[stop.itemIndex];
 		if (item?.trailingToggle) { item.trailingToggle.onToggle(); return true; }
 		return false;
+	}
+
+	private _showHelp(itemIndex: number): void {
+		if (this._closeRequested || !this.items[itemIndex]?.help) return;
+		this._openHelpIndex = itemIndex;
+		void this.updateComplete.then(() => this._measureHelpTooltip(itemIndex));
+	}
+
+	private _hideHelpIfUnpinned(itemIndex: number, requireFocusOutside = false): void {
+		if (this._pinnedHelpIndex === itemIndex || this._openHelpIndex !== itemIndex) return;
+		if (requireFocusOutside) {
+			const control = this.querySelector<HTMLElement>(`[data-sidebar-actions-help-index="${itemIndex}"]`);
+			if (control && document.activeElement === control) return;
+		}
+		this._openHelpIndex = -1;
+	}
+
+	private _handleHelpActivation(itemIndex: number, event: Event): void {
+		event.preventDefault();
+		event.stopPropagation();
+		if (this._closeRequested || !this.items[itemIndex]?.help) return;
+		if (this._pinnedHelpIndex === itemIndex) {
+			this._pinnedHelpIndex = -1;
+			this._openHelpIndex = -1;
+			return;
+		}
+		this._pinnedHelpIndex = itemIndex;
+		this._showHelp(itemIndex);
+	}
+
+	private _handleHelpPointer(event: Event): void {
+		event.preventDefault();
+		event.stopPropagation();
+	}
+
+	private _resetHelp(): void {
+		this._openHelpIndex = -1;
+		this._pinnedHelpIndex = -1;
 	}
 
 	private _handleToggle(item: SidebarActionsPopoverItem, event: Event): void {
@@ -532,6 +594,38 @@ export class SidebarActionsPopover extends LitElement {
 			: Math.max(44, viewport.height - position.top - VIEWPORT_PADDING);
 		this._position = position;
 		this._maxHeight = Math.floor(available);
+		if (this._openHelpIndex >= 0) {
+			const itemIndex = this._openHelpIndex;
+			void this.updateComplete.then(() => this._measureHelpTooltip(itemIndex));
+		}
+	}
+
+	private _measureHelpTooltip(itemIndex: number): void {
+		if (this._openHelpIndex !== itemIndex || !this.items[itemIndex]?.help) return;
+		const control = this.querySelector<HTMLElement>(`[data-sidebar-actions-help-index="${itemIndex}"]`);
+		const tooltip = this.querySelector<HTMLElement>(`[data-sidebar-actions-help-tooltip-index="${itemIndex}"]`);
+		const menu = this.querySelector<HTMLElement>(".bobbit-sidebar-actions-menu");
+		if (!control || !tooltip || !menu) return;
+
+		const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1024;
+		const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 768;
+		const controlRect = control.getBoundingClientRect();
+		const menuRect = menu.getBoundingClientRect();
+		const tooltipWidth = Math.max(tooltip.offsetWidth, Math.min(292, viewportWidth - VIEWPORT_PADDING * 2));
+		const tooltipHeight = Math.max(tooltip.offsetHeight, 52);
+		const maxLeft = Math.max(VIEWPORT_PADDING, viewportWidth - VIEWPORT_PADDING - tooltipWidth);
+		const left = Math.min(
+			Math.max(controlRect.left + controlRect.width / 2 - tooltipWidth / 2, VIEWPORT_PADDING),
+			maxLeft,
+		);
+		const belowTop = menuRect.bottom + ANCHOR_GAP;
+		const fitsBelow = belowTop + tooltipHeight <= viewportHeight - VIEWPORT_PADDING;
+		const unclampedTop = fitsBelow ? belowTop : menuRect.top - ANCHOR_GAP - tooltipHeight;
+		const maxTop = Math.max(VIEWPORT_PADDING, viewportHeight - VIEWPORT_PADDING - tooltipHeight);
+		const top = Math.min(Math.max(unclampedTop, VIEWPORT_PADDING), maxTop);
+		if (top !== this._helpTooltipPosition.top || left !== this._helpTooltipPosition.left) {
+			this._helpTooltipPosition = { top, left };
+		}
 	}
 
 	private _prefersReducedMotion(): boolean {
@@ -730,6 +824,7 @@ export class SidebarActionsPopover extends LitElement {
 				>
 					${this.items.map((item, index) => this._renderItem(item, index))}
 				</div>
+				${this._renderHelpTooltip()}
 			</div>
 		`;
 	}
@@ -737,15 +832,18 @@ export class SidebarActionsPopover extends LitElement {
 	private _renderItem(item: SidebarActionsPopoverItem, index: number): TemplateResult {
 		const activeStop = this._activeStop();
 		const rowActive = activeStop?.kind === "row" && activeStop.itemIndex === index;
+		const helpActive = activeStop?.kind === "help" && activeStop.itemIndex === index;
 		const toggleActive = activeStop?.kind === "toggle" && activeStop.itemIndex === index;
 		const danger = item.tone === "danger";
 		const color = danger ? "var(--negative, var(--destructive, currentColor))" : "inherit";
 		const accent = "var(--accent, rgba(127,127,127,0.15))";
 		const rowBackground = rowActive ? accent : "transparent";
+		const hasHelp = !!item.help;
 		const hasToggle = !!item.trailingToggle;
-		// In a toggle row the wrapper paints the row highlight so it covers the full
-		// width (button + checkbox); the button itself stays transparent.
-		const buttonBackground = hasToggle ? "transparent" : rowBackground;
+		const hasSiblingControl = hasHelp || hasToggle;
+		// Accessory rows let the wrapper paint the primary row highlight across the
+		// full width while each sibling retains its own roving-focus highlight.
+		const buttonBackground = hasSiblingControl ? "transparent" : rowBackground;
 		const button = html`
 			<button
 				type="button"
@@ -758,7 +856,7 @@ export class SidebarActionsPopover extends LitElement {
 				tabindex=${rowActive ? "0" : "-1"}
 				title=${item.title || item.label}
 				class="bobbit-sidebar-actions-row"
-				style=${`display:flex;align-items:center;gap:8px;${hasToggle ? "flex:1;" : "width:100%;"}min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${buttonBackground};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
+				style=${`display:flex;align-items:center;gap:8px;${hasSiblingControl ? "flex:1;" : "width:100%;"}min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${buttonBackground};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
 				@mouseenter=${() => { this._highlightIndex = this._stopIndexFor(index, "row"); }}
 				@click=${(event: Event) => this._select(item.id, event)}
 			>
@@ -771,43 +869,90 @@ export class SidebarActionsPopover extends LitElement {
 				<span data-sidebar-actions-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.label}</span>
 			</button>
 		`;
-		if (!hasToggle) return button;
-		const toggle = item.trailingToggle!;
+		if (!hasSiblingControl) return button;
+
+		const help = item.help;
+		const helpOpen = this._openHelpIndex === index;
+		const helpBackground = helpActive || helpOpen ? accent : "transparent";
+		const toggle = item.trailingToggle;
 		const toggleBackground = toggleActive ? accent : "transparent";
 		return html`
 			<div
 				role="none"
-				class="bobbit-sidebar-actions-toggle-row"
+				class=${hasToggle ? "bobbit-sidebar-actions-toggle-row" : "bobbit-sidebar-actions-item-row"}
 				style=${`display:flex;align-items:stretch;gap:2px;width:100%;min-width:0;border-radius:4px;background:${rowBackground};`}
 				@mouseenter=${() => { this._highlightIndex = this._stopIndexFor(index, "row"); }}
 			>
 				${button}
-				<span
-					role="menuitemcheckbox"
-					data-sidebar-actions-toggle
-					data-sidebar-action-id=${item.id}
-					data-session-action-id=${item.id}
-					aria-checked=${toggle.checked ? "true" : "false"}
-					aria-label=${toggle.ariaLabel}
-					title=${toggle.ariaLabel}
-					tabindex=${toggleActive ? "0" : "-1"}
-					style=${`display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;padding:6px 10px 6px 8px;border-radius:4px;cursor:pointer;color:var(--muted-foreground, inherit);font:inherit;line-height:1.2;white-space:nowrap;background:${toggleBackground};`}
-					@mouseenter=${(e: Event) => { e.stopPropagation(); this._highlightIndex = this._stopIndexFor(index, "toggle"); }}
-					@click=${(event: Event) => this._handleToggle(item, event)}
-					@keydown=${(event: KeyboardEvent) => { if (event.key === " " || event.key === "Enter") this._handleToggle(item, event); }}
-				>
-					<input
-						type="checkbox"
-						class="toggle-switch toggle-switch--sm"
-						.checked=${toggle.checked}
-						aria-hidden="true"
-						tabindex="-1"
-						style="pointer-events:none;flex:0 0 auto;"
-					/>
-					${toggle.label ? html`<span style="overflow:hidden;text-overflow:ellipsis;">${toggle.label}</span>` : nothing}
-				</span>
+				${help ? html`
+					<button
+						type="button"
+						role="menuitem"
+						data-sidebar-actions-help
+						data-sidebar-actions-help-index=${index}
+						aria-label=${help.ariaLabel}
+						aria-describedby=${help.id}
+						aria-expanded=${helpOpen ? "true" : "false"}
+						tabindex=${helpActive ? "0" : "-1"}
+						style=${`align-self:center;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex:0 0 28px;padding:0;border:0;border-radius:4px;background:${helpBackground};color:var(--muted-foreground, inherit);font:inherit;font-size:11px;font-weight:650;line-height:1;cursor:help;`}
+						@pointerenter=${(event: PointerEvent) => { this._handleHelpPointer(event); this._highlightIndex = this._stopIndexFor(index, "help"); this._showHelp(index); }}
+						@pointerleave=${(event: PointerEvent) => { this._handleHelpPointer(event); this._hideHelpIfUnpinned(index, true); }}
+						@mouseenter=${(event: MouseEvent) => { this._handleHelpPointer(event); this._highlightIndex = this._stopIndexFor(index, "help"); this._showHelp(index); }}
+						@mouseleave=${(event: MouseEvent) => { this._handleHelpPointer(event); this._hideHelpIfUnpinned(index, true); }}
+						@pointerdown=${(event: PointerEvent) => this._handleHelpPointer(event)}
+						@focus=${() => { this._highlightIndex = this._stopIndexFor(index, "help"); this._showHelp(index); }}
+						@blur=${() => this._hideHelpIfUnpinned(index)}
+						@click=${(event: Event) => this._handleHelpActivation(index, event)}
+						@keydown=${(event: KeyboardEvent) => { if (event.key === " " || event.key === "Enter") this._handleHelpActivation(index, event); }}
+					>(?)</button>
+				` : nothing}
+				${toggle ? html`
+					<span
+						role="menuitemcheckbox"
+						data-sidebar-actions-toggle
+						data-sidebar-action-id=${item.id}
+						data-session-action-id=${item.id}
+						aria-checked=${toggle.checked ? "true" : "false"}
+						aria-label=${toggle.ariaLabel}
+						title=${toggle.ariaLabel}
+						tabindex=${toggleActive ? "0" : "-1"}
+						style=${`display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;padding:6px 10px 6px 8px;border-radius:4px;cursor:pointer;color:var(--muted-foreground, inherit);font:inherit;line-height:1.2;white-space:nowrap;background:${toggleBackground};`}
+						@mouseenter=${(e: Event) => { e.stopPropagation(); this._highlightIndex = this._stopIndexFor(index, "toggle"); }}
+						@click=${(event: Event) => this._handleToggle(item, event)}
+						@keydown=${(event: KeyboardEvent) => { if (event.key === " " || event.key === "Enter") this._handleToggle(item, event); }}
+					>
+						<input
+							type="checkbox"
+							class="toggle-switch toggle-switch--sm"
+							.checked=${toggle.checked}
+							aria-hidden="true"
+							tabindex="-1"
+							style="pointer-events:none;flex:0 0 auto;"
+						/>
+						${toggle.label ? html`<span style="overflow:hidden;text-overflow:ellipsis;">${toggle.label}</span>` : nothing}
+					</span>
+				` : nothing}
 			</div>
 		`;
+	}
+
+	private _renderHelpTooltip(): TemplateResult {
+		return html`${this.items.map((item, index) => {
+			if (!item.help) return nothing;
+			const open = this._openHelpIndex === index;
+			const position = this._helpTooltipPosition;
+			return html`
+				<div
+					id=${item.help.id}
+					role="tooltip"
+					data-sidebar-actions-help-tooltip
+					data-sidebar-actions-help-tooltip-index=${index}
+					aria-hidden=${open ? "false" : "true"}
+					?hidden=${!open}
+					style=${`position:fixed;z-index:80;top:${position.top}px;left:${position.left}px;width:min(292px, calc(100vw - 16px));box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--popover, var(--background));color:var(--popover-foreground, inherit);box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:12px;line-height:1.45;text-align:left;`}
+				>${item.help.text}</div>
+			`;
+		})}`;
 	}
 }
 

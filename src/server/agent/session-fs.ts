@@ -12,7 +12,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { FileHandle } from "node:fs/promises";
 import type { SandboxManager } from "./sandbox-manager.js";
+import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { sidecarPathFor } from "./session-sidecar.js";
 
 type SessionDeleteFs = Pick<typeof fs.promises, "unlink">;
@@ -20,6 +23,11 @@ type SessionDeleteFs = Pick<typeof fs.promises, "unlink">;
 async function containerPathToHostLazy(filePath: string): Promise<string> {
 	const { containerPathToHost } = await import("./rpc-bridge.js");
 	return containerPathToHost(filePath);
+}
+
+async function hostPathToContainerLazy(filePath: string): Promise<string | null> {
+	const { tryHostPathToContainer } = await import("./rpc-bridge.js");
+	return tryHostPathToContainer(filePath);
 }
 
 /**
@@ -53,6 +61,42 @@ function isContainerAgentSessionPath(filePath: string): boolean {
 		|| normalized === "/bobbit-state/sessions"
 		|| normalized.startsWith("/bobbit-state/sessions/");
 }
+
+export function canonicalContainerAgentSessionPath(filePath: string): string | null {
+	if (!filePath || filePath.includes("\0") || filePath.includes("\\")) return null;
+	const normalized = path.posix.normalize(filePath);
+	if (normalized !== filePath || !isContainerAgentSessionPath(normalized)) return null;
+	return normalized;
+}
+
+const SANDBOX_PUBLISH_SCRIPT = [
+	'const fs=require("node:fs"),path=require("node:path");',
+	'const [stage,temp,target]=process.argv.slice(1);',
+	'let fd;',
+	'try {',
+	'  fs.mkdirSync(path.dirname(target),{recursive:true});',
+	'  fs.copyFileSync(stage,temp,fs.constants.COPYFILE_EXCL);',
+	'  fs.chmodSync(temp,0o600);',
+	'  fd=fs.openSync(temp,"r+"); fs.fsyncSync(fd); fs.closeSync(fd); fd=undefined;',
+	'  fs.renameSync(temp,target);',
+	'} finally {',
+	'  if (fd!==undefined) { try { fs.closeSync(fd); } catch {} }',
+	'  try { fs.unlinkSync(temp); } catch {}',
+	'}',
+].join("\n");
+
+const SANDBOX_RENAME_SCRIPT = [
+	'const fs=require("node:fs"),path=require("node:path");',
+	'const [source,target]=process.argv.slice(1);',
+	'fs.mkdirSync(path.dirname(target),{recursive:true});',
+	'fs.renameSync(source,target);',
+].join("\n");
+
+const SANDBOX_DELETE_SCRIPT = [
+	'const fs=require("node:fs");',
+	'const target=process.argv[1];',
+	'try { fs.unlinkSync(target); } catch (error) { if (error?.code!=="ENOENT") throw error; }',
+].join("\n");
 
 function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
 	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
@@ -174,6 +218,133 @@ export async function sessionFileRead(
 		return fs.readFileSync(hostPath, "utf-8");
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * Atomically publish generated session-file content in the destination's own
+ * filesystem realm. Sandbox targets are published entirely inside the live
+ * container: the host owns only an exclusive flat staging file under the
+ * trusted sessions root, while fixed Node code copies and renames in-container.
+ */
+export async function sessionFileWriteAtomic(
+	ctx: SessionFsContext,
+	filePath: string,
+	content: string,
+	sandboxManager: SandboxManager | null,
+): Promise<void> {
+	if (ctx.sandboxed) {
+		const targetPath = canonicalContainerAgentSessionPath(filePath);
+		if (!ctx.projectId || !targetPath) {
+			throw new CrossRealmCopyError("cross-realm session write not supported");
+		}
+		const sandbox = sandboxManager?.get(ctx.projectId);
+		if (!sandbox) throw new Error(`sandbox unavailable for project ${ctx.projectId}`);
+
+		const stagePath = path.join(
+			activeAgentSessionsDir(),
+			`.bobbit-stage-${process.pid}-${randomUUID()}.tmp`,
+		);
+		const siblingTemp = path.posix.join(
+			path.posix.dirname(targetPath),
+			`.${path.posix.basename(targetPath)}.bobbit-stage-${randomUUID()}.tmp`,
+		);
+		let handle: FileHandle | undefined;
+		let stageCreated = false;
+		try {
+			await fs.promises.mkdir(activeAgentSessionsDir(), { recursive: true });
+			handle = await fs.promises.open(stagePath, "wx", 0o600);
+			stageCreated = true;
+			const stat = await handle.stat();
+			if (!stat.isFile()) throw new Error("Session transcript staging entry is not a regular file");
+			await handle.writeFile(content, { encoding: "utf-8" });
+			await handle.sync();
+			await handle.close();
+			handle = undefined;
+			const containerStage = await hostPathToContainerLazy(stagePath);
+			if (!containerStage || !canonicalContainerAgentSessionPath(containerStage)) {
+				throw new CrossRealmCopyError("sandbox session stage is not in the sessions bind mount");
+			}
+			await sandbox.exec([
+				"node", "-e", SANDBOX_PUBLISH_SCRIPT, "--",
+				containerStage, siblingTemp, targetPath,
+			]);
+		} finally {
+			if (handle) {
+				try { await handle.close(); } catch { /* retain the primary staging failure */ }
+			}
+			if (stageCreated) {
+				try { await fs.promises.unlink(stagePath); } catch { /* remove only this invocation's flat stage */ }
+			}
+		}
+		return;
+	}
+
+	const directory = path.dirname(filePath);
+	await fs.promises.mkdir(directory, { recursive: true });
+	const temporaryPath = path.join(
+		directory,
+		`.${path.basename(filePath)}.bobbit-stage-${process.pid}-${randomUUID()}.tmp`,
+	);
+	let handle: FileHandle | undefined;
+	let temporaryCreated = false;
+	try {
+		handle = await fs.promises.open(temporaryPath, "wx", 0o600);
+		temporaryCreated = true;
+		const stat = await handle.stat();
+		if (!stat.isFile()) throw new Error("Session transcript staging entry is not a regular file");
+		await handle.writeFile(content, { encoding: "utf-8" });
+		await handle.sync();
+		await handle.close();
+		handle = undefined;
+		await fs.promises.rename(temporaryPath, filePath);
+		temporaryCreated = false;
+	} finally {
+		if (handle) {
+			try { await handle.close(); } catch { /* retain the primary staging failure */ }
+		}
+		if (temporaryCreated) {
+			try { await fs.promises.unlink(temporaryPath); } catch { /* remove only this invocation's exclusive temp */ }
+		}
+	}
+}
+
+/** Atomically move a transcript between two paths in one live sandbox realm. */
+export async function sessionFileRenameAtomic(
+	ctx: SessionFsContext,
+	sourcePath: string,
+	targetPath: string,
+	sandboxManager: SandboxManager | null,
+): Promise<void> {
+	const source = canonicalContainerAgentSessionPath(sourcePath);
+	const target = canonicalContainerAgentSessionPath(targetPath);
+	if (!ctx.sandboxed || !ctx.projectId || !source || !target) {
+		throw new CrossRealmCopyError("cross-realm session rename not supported");
+	}
+	const sandbox = sandboxManager?.get(ctx.projectId);
+	if (!sandbox) throw new Error(`sandbox unavailable for project ${ctx.projectId}`);
+	await sandbox.exec(["node", "-e", SANDBOX_RENAME_SCRIPT, "--", source, target]);
+}
+
+/**
+ * Delete only through a live container. This intentionally has no host-path
+ * translation fallback: an unavailable sandbox leaves an orphan for trusted
+ * maintenance rather than turning an attacker-influenced path into host I/O.
+ */
+export async function sessionFileDeleteContainerOnly(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+): Promise<boolean> {
+	const target = canonicalContainerAgentSessionPath(filePath);
+	if (!ctx.sandboxed || !ctx.projectId || !target) return false;
+	const sandbox = sandboxManager?.get(ctx.projectId);
+	if (!sandbox) return false;
+	try {
+		await sandbox.exec(["node", "-e", SANDBOX_DELETE_SCRIPT, "--", target]);
+		return true;
+	} catch {
+		return false;
 	}
 }
 

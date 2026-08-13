@@ -82,7 +82,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		const memfs = createMemFs();
 		const stateDir = path.resolve("/memfs/gate-signal-reminder");
 		memfs.mkdirSync(stateDir, { recursive: true });
-		gateStore = new GateStore(stateDir, memfs);
+		gateStore = new GateStore(stateDir, memfs, { persistence: "json" });
 		gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 		clock = createManualClock(START_TIME);
 		notifications = [];

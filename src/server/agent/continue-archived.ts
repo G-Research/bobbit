@@ -20,6 +20,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { purgeAuthorSidecar } from "./author-sidecar.js";
+import { purgeCompactionSidecar } from "./compaction-sidecar.js";
+import { sidecarPathFor } from "./session-sidecar.js";
+import { purgeSkillSidecar } from "../skills/skill-sidecar.js";
 
 type ContinueArchivedFs = Pick<typeof fs, "existsSync" | "mkdirSync" | "cpSync" | "unlinkSync" | "rmSync">;
 
@@ -64,7 +68,10 @@ export function copyProposalDirIfPresent(
 	fsImpl.cpSync(src, dst, { recursive: true });
 }
 
-/** Best-effort cleanup after a failed continue-archived flow. */
+/**
+ * Best-effort cleanup after a failed continue or fork flow. Only destination
+ * artifacts are removed; source transcript/worktree state is never touched.
+ */
 export function cleanupFailedContinue(
 	destPath: string | undefined,
 	newSessionId: string,
@@ -73,13 +80,26 @@ export function cleanupFailedContinue(
 ): void {
 	if (destPath) {
 		try { fsImpl.unlinkSync(destPath); } catch { /* may be absent */ }
+		try { fsImpl.unlinkSync(sidecarPathFor(destPath)); } catch { /* may be absent */ }
 	}
-	try {
-		const dir = path.join(stateDir, "tool-content", newSessionId);
-		if (fsImpl.existsSync(dir)) fsImpl.rmSync(dir, { recursive: true, force: true });
-	} catch { /* best-effort */ }
-	try {
-		const dir = path.join(stateDir, "proposal-drafts", newSessionId);
-		if (fsImpl.existsSync(dir)) fsImpl.rmSync(dir, { recursive: true, force: true });
-	} catch { /* best-effort */ }
+	for (const artifactDir of ["tool-content", "proposal-drafts"]) {
+		try {
+			const dir = path.join(stateDir, artifactDir, newSessionId);
+			if (fsImpl.existsSync(dir)) fsImpl.rmSync(dir, { recursive: true, force: true });
+		} catch { /* best-effort */ }
+	}
+
+	// Skill and compaction sidecars live in stateDir. Remove them directly so
+	// injected cleanup filesystems and partially initialized servers are covered,
+	// then invoke their canonical purge helpers for configured-directory parity.
+	const safeId = newSessionId.replace(/[^A-Za-z0-9_-]/g, "_");
+	for (const artifactFile of [
+		path.join(stateDir, "skill-sidecar", `${safeId}.jsonl`),
+		path.join(stateDir, "compaction-sidecar", `${safeId}.jsonl`),
+	]) {
+		try { fsImpl.unlinkSync(artifactFile); } catch { /* may be absent */ }
+	}
+	purgeAuthorSidecar(newSessionId);
+	purgeSkillSidecar(newSessionId);
+	purgeCompactionSidecar(newSessionId);
 }

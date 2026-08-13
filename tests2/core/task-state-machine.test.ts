@@ -40,7 +40,7 @@ describe("TaskManager State Machine", () => {
 
 	beforeEach(() => {
 		ensureStateDir();
-		mgr = new TaskManager(new TaskStore(path.join(TEST_DIR, "state")));
+		mgr = new TaskManager(new TaskStore(path.join(TEST_DIR, "state"), undefined, { persistence: "json" }));
 	});
 
 	afterEach(() => {

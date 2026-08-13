@@ -20,7 +20,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const FIRST_PARTY_PACKS = ["hindsight", "pr-walkthrough", "terminal"]; // explicit allowlist
+// Hindsight's managed runtime/settings integration is available alongside the
+// file explorer, so ship both first-party packs.
+const FIRST_PARTY_PACKS = ["file-explorer", "hindsight", "pr-walkthrough", "terminal"]; // explicit allowlist
 const SRC = "market-packs";
 const DEST = "dist/server/builtin-packs/market-packs";
 

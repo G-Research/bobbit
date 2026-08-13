@@ -232,6 +232,12 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		consumers: frozen(["tests2/core/async-background-cleanup-static.test.ts"]),
 	},
 	{
+		id: "metadata-retirement-source-guard",
+		roots: frozen(["src"]),
+		matches: (path) => path.startsWith("src/") && /\.ts$/i.test(path),
+		consumers: frozen(["tests2/core/openai-model-additions-merge.test.ts"]),
+	},
+	{
 		id: "search-worker-main-thread-boundary",
 		roots: frozen(["src/server/search"]),
 		matches: (path) => path.startsWith("src/server/search/") && /\.ts$/i.test(path),
@@ -674,6 +680,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/openai-model-additions-merge.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "productionTypeScriptFiles", ["scan:metadata-retirement-source-guard"]),
+		]),
+	},
+	{
 		consumer: "tests2/core/no-general-workflow-default.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("recursive-directory-scan", "listSourceFiles", ["scan:workflow-default-source-guard"]),
@@ -777,7 +789,7 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/core/tool-result-error-bridge-extension.test.ts",
 		operations: frozen([
-			allowedExecutableOperation("dynamic-import", "`data:text/javascript,${encodeURIComponent(source)}`", "in-memory generated data URL module"),
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(filePath).href}?nonce=${Date.now()}-${Math.random()}`", "test-owned generated error bridge extension"),
 		]),
 	},
 	{
@@ -790,6 +802,19 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		consumer: "tests2/integration/hindsight-experience-api.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("repository-directory-copy", "PACK_SOURCE", "copies the reviewed installed Hindsight pack into an isolated marketplace fixture"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/agent-dir-settings.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "target", "test-owned snapshot of isolated agent-directory fixture state"),
+			allowedExecutableOperation("repository-directory-copy", "snapshot.backup", "test-owned agent-directory fixture restored from its temporary snapshot"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/history-fork-api.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("recursive-directory-scan", "transcriptFilesForSession", "test-owned isolated agent-session transcript tree"),
 		]),
 	},
 	{
@@ -844,6 +869,31 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "path.join(projectA.rootPath, \".bobbit\", \"config\", \"project.yaml\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
+		allowReason: "test-owned persisted sandbox transcript used to prove byte preservation across reload and termination",
+		reads: frozen([
+			{ expression: "fixture.restored.agentSessionFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/focused-tool-contract-refresh.test.ts",
+		allowReason: "test-owned generated system prompt and the tool detail document path it points to",
+		reads: frozen([
+			{ expression: "spawnedOptions.systemPromptPath", count: 1 },
+			{ expression: "agentDocsPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-fs-sandbox-publication.test.ts",
+		allowReason: "isolated test-owned sandbox filesystem transcript, canary, and staging artifacts",
+		reads: frozen([
+			{ expression: "hostDestination", count: 1 },
+			{ expression: "path.join(sentinel, \"sentinel.txt\")", count: 1 },
+			{ expression: "filesystem.hostPath(destination)", count: 2 },
+			{ expression: "hostCanary", count: 1 },
 		]),
 	},
 	{
@@ -949,6 +999,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/review-payload-api-hardening.test.ts",
+		allowReason: "isolated integration gateway review-annotation state",
+		reads: frozen([
+			{ expression: "annotationPath", count: 7 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/sandbox-security.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
@@ -1027,6 +1084,23 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "seeded.transcriptFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/history-fork-api.test.ts",
+		allowReason: "isolated integration gateway and test-owned transcript, proposal, and worktree artifacts",
+		reads: frozen([
+			{ expression: "seeded.file", count: 5 },
+			{ expression: "sandboxFixture.filesystem.hostPath(persisted.agentSessionFile)", count: 1 },
+			{ expression: "stagedFile", count: 1 },
+			{ expression: "forkPersisted.agentSessionFile", count: 4 },
+			{ expression: "path.join(proposalFork, \"goal.md\")", count: 1 },
+			{ expression: "path.join(proposalFork, \"goal.history\", \"0001.md\")", count: 1 },
+			{ expression: "sentinel", count: 1 },
+			{ expression: "sourceTranscript.file", count: 2 },
+			{ expression: "trusted", count: 2 },
+			{ expression: "attackerFile", count: 3 },
+			{ expression: "sourceHostPath", count: 2 },
 		]),
 	},
 	{
@@ -1122,7 +1196,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/agent-dir-settings.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
-			{ expression: "bypassPrefsPath", count: 1 },
+			{ expression: "preferencesPath", count: 2 },
 			{ expression: "path.join(bobbitDir(), \"state\", \"preferences.json\")", count: 1 },
 			{ expression: "path.join(active, \"auth.json\")", count: 1 },
 			{ expression: "path.join(pending, \"sessions\", \"session-a\", \"transcript.jsonl\")", count: 1 },
@@ -1459,8 +1533,8 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/release-skill-preflight-order.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
-			{ expression: "options.env.npm_config_userconfig", count: 1 },
-			{ expression: "options.env.npm_config_globalconfig", count: 1 },
+			{ expression: "options.env.npm_config_userconfig", count: 2 },
+			{ expression: "options.env.npm_config_globalconfig", count: 2 },
 		]),
 	},
 	{
@@ -1604,9 +1678,9 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/core/openai-model-additions-merge.test.ts",
-		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		declarations: frozen(["scan:metadata-retirement-source-guard"]),
 		reads: frozen([
-			{ expression: "f", count: 1 },
+			{ expression: "file", count: 1 },
 		]),
 	},
 	{
@@ -1838,6 +1912,69 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary project configuration output",
 		reads: frozen([
 			{ expression: "path.join(configDir, \"project.yaml\")", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/gate-store-sqlite.test.ts",
+		allowReason: "test-owned temporary GateStore state and retirement fixtures",
+		reads: frozen([
+			{ expression: "recoveryFile", count: 1 },
+			{ expression: "invalidFile", count: 1 },
+			{ expression: "duplicateFile", count: 1 },
+			{ expression: "sourceFile", count: 2 },
+			{ expression: "livePreferred", count: 1 },
+			{ expression: "recoveryPreferred", count: 1 },
+			{ expression: "`${livePreferred}.1`", count: 1 },
+			{ expression: "`${recoveryPreferred}.1`", count: 1 },
+			{ expression: "`${livePreferred}.2`", count: 1 },
+			{ expression: "`${recoveryPreferred}.2`", count: 1 },
+			{ expression: "preferred", count: 2 },
+			{ expression: "retryTarget", count: 1 },
+			{ expression: "`${preferred}.2`", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/goal-store-sqlite.test.ts",
+		allowReason: "test-owned temporary GoalStore state, migration, and retirement fixtures",
+		reads: frozen([
+			{ expression: "`${liveFile}.sqlite-retired`", count: 1 },
+			{ expression: "`${liveFile}.pre-migration-recovered`", count: 1 },
+			{ expression: "`${legacyFile}.sqlite-retired`", count: 1 },
+			{ expression: "tombstoneFile", count: 1 },
+			{ expression: "preferred", count: 1 },
+			{ expression: "`${preferred}.1`", count: 1 },
+			{ expression: "`${preferred}.2`", count: 1 },
+			{ expression: "malformedFile", count: 1 },
+			{ expression: "duplicateFile", count: 1 },
+			{ expression: "failedFile", count: 1 },
+			{ expression: "sourceFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/goal-task-store-lifecycle.test.ts",
+		allowReason: "test-owned temporary pre-migration recovery and native-handle release fixtures",
+		reads: frozen([
+			{ expression: "goalRecovery", count: 1 },
+			{ expression: "taskRecovery", count: 1 },
+			{ expression: "tombstoneFile", count: 1 },
+			{ expression: "path.join(stateDir, \"sessions.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/task-store-sqlite.test.ts",
+		allowReason: "test-owned temporary TaskStore state, migration, and retirement fixtures",
+		reads: frozen([
+			{ expression: "`${liveFile}.sqlite-retired`", count: 1 },
+			{ expression: "`${liveFile}.sqlite-retired.1`", count: 1 },
+			{ expression: "`${recoveryFile}-recovered`", count: 1 },
+			{ expression: "`${recoveryFile}-recovered.1`", count: 1 },
+			{ expression: "path.join(stateDir, \".deletion-tombstones.json\")", count: 1 },
+			{ expression: "preferredBackup", count: 1 },
+			{ expression: "`${preferredBackup}.1`", count: 1 },
+			{ expression: "malformedFile", count: 1 },
+			{ expression: "duplicateFile", count: 1 },
+			{ expression: "failedFile", count: 1 },
+			{ expression: "recoveryFile", count: 1 },
 		]),
 	},
 	{
@@ -2105,6 +2242,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "path.join(tmpAgentDir, \"models.json\")", count: 1 },
+			{ expression: "modelsPath", count: 5 },
 		]),
 	},
 	{
@@ -2112,7 +2250,15 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "f", count: 1 },
-			{ expression: "path.join(tmp, \"models.json\")", count: 6 },
+			{ expression: "path.join(tmp, \"models.json\")", count: 4 },
+			{ expression: "modelsPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
+		allowReason: "test-owned temporary agent models.json fixture used to verify byte preservation",
+		reads: frozen([
+			{ expression: "path.join(agentDir, \"models.json\")", count: 7 },
 		]),
 	},
 	{

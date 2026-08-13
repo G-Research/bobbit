@@ -1,4 +1,4 @@
-import { GitPullRequest, Terminal, Zap } from "lucide";
+import { FolderTree, GitPullRequest, Terminal, Zap } from "lucide";
 import {
 	DEFAULT_ENTRYPOINT_ICON_ID,
 	isSupportedEntrypointIconId,
@@ -9,6 +9,7 @@ const ENTRYPOINT_ICON_NODES = {
 	zap: Zap,
 	terminal: Terminal,
 	"git-pull-request": GitPullRequest,
+	"folder-tree": FolderTree,
 } satisfies Record<EntrypointIconId, typeof Zap>;
 
 export function entrypointIconNode(iconId?: string): typeof Zap {

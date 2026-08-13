@@ -1082,6 +1082,63 @@ let agents: TeamAgent[] = [];
 let agentPollTimer: ReturnType<typeof setInterval> | null = null;
 let taskPollTimer: ReturnType<typeof setInterval> | null = null;
 
+function reconciledDashboardAgents(): TeamAgent[] {
+	const agentsBySessionId = new Map<string, TeamAgent>();
+	const orderedSessionIds: string[] = [];
+	for (const agent of agents) {
+		const existing = agentsBySessionId.get(agent.sessionId);
+		if (!existing) {
+			agentsBySessionId.set(agent.sessionId, agent);
+			orderedSessionIds.push(agent.sessionId);
+		} else if (existing.status === "archived" && agent.status !== "archived") {
+			// Polling can briefly expose both lifecycle records. Keep the original
+			// position, but prefer the live record until archival is authoritative.
+			agentsBySessionId.set(agent.sessionId, agent);
+		}
+	}
+
+	const teamLeadSession = currentGoal?.team
+		? (state.gatewaySessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")
+			|| state.archivedSessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead"))
+		: null;
+	if (!teamLeadSession) {
+		return orderedSessionIds.map(sessionId => agentsBySessionId.get(sessionId)!);
+	}
+
+	const fallbackLead: TeamAgent = {
+		sessionId: teamLeadSession.id,
+		role: "team-lead",
+		status: teamLeadSession.status,
+		worktreePath: "",
+		branch: "",
+		task: "",
+		createdAt: teamLeadSession.createdAt,
+		archivedAt: teamLeadSession.archivedAt,
+	};
+	const responseLead = agentsBySessionId.get(teamLeadSession.id);
+	if (!responseLead) {
+		return [fallbackLead, ...orderedSessionIds.map(sessionId => agentsBySessionId.get(sessionId)!)];
+	}
+
+	// The response carries richer card metadata, so retain it when both paths
+	// contain the lead. A live session-state record wins only the lifecycle
+	// fields when teardown polling still reports the same lead as archived.
+	const reconciledLead = fallbackLead.status !== "archived" && responseLead.status === "archived"
+		? {
+			...responseLead,
+			status: fallbackLead.status,
+			createdAt: fallbackLead.createdAt,
+			archivedAt: fallbackLead.archivedAt,
+		}
+		: responseLead;
+	return [
+		reconciledLead,
+		...orderedSessionIds
+			.filter(sessionId => sessionId !== teamLeadSession.id)
+			.map(sessionId => agentsBySessionId.get(sessionId)!),
+	];
+}
+
 async function fetchAgents(goalId: string): Promise<TeamAgent[]> {
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/team/agents?include=archived`);
@@ -2478,12 +2535,13 @@ function currentGateSummaryCounts(): { passed: number; total: number } {
 function renderTabBar(): TemplateResult {
 	const gateSummary = currentGateSummaryCounts();
 	const gateCountStr = gateSummary.total > 0 ? `${gateSummary.passed}/${gateSummary.total}` : String(gates.length);
+	const dashboardAgents = reconciledDashboardAgents();
 
 	const tabs: Array<{ id: DashboardTabId; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
 		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
-		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(agents.length + (currentGoal?.team && (state.gatewaySessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead") || state.archivedSessions.some(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")) ? 1 : 0)) },
+		{ id: "agents", label: "Agents", icon: svgAgents, countStr: String(dashboardAgents.length) },
 		{ id: "commits", label: "Commits", icon: svgCommit, countStr: String(commits.length) },
 	];
 
@@ -2631,24 +2689,7 @@ function renderTasksTab(): TemplateResult {
 // ============================================================================
 
 function renderAgentsTab(): TemplateResult {
-	// Build combined list: team lead (if any) + spawned agents
-	const allAgents: TeamAgent[] = [];
-	const teamLeadSession = currentGoal?.team
-		? (state.gatewaySessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead")
-			|| state.archivedSessions.find(s => (s.goalId === currentGoal!.id || s.teamGoalId === currentGoal!.id) && s.role === "team-lead"))
-		: null;
-	if (teamLeadSession) {
-		allAgents.push({
-			sessionId: teamLeadSession.id,
-			role: "team-lead",
-			status: teamLeadSession.status,
-			worktreePath: "",
-			branch: "",
-			task: "",
-			createdAt: 0,
-		});
-	}
-	allAgents.push(...agents);
+	const allAgents = reconciledDashboardAgents();
 
 	if (allAgents.length === 0) {
 		return html`<div class="tab-empty">${svgAgents}<span>No active agents</span></div>`;
@@ -2669,8 +2710,17 @@ function renderAgentsTab(): TemplateResult {
 				|| state.archivedSessions.find(gs => gs.id === agent.sessionId);
 			return s && c.author === (s.title || s.id.slice(0, 8));
 		}).length;
-		const elapsed = (isArchived && agent.archivedAt ? agent.archivedAt : Date.now()) - agent.createdAt;
-		const mins = Math.floor(elapsed / 60_000);
+		const now = Date.now();
+		const startedAt = Number.isFinite(agent.createdAt) && agent.createdAt > 0 && agent.createdAt <= now
+			? agent.createdAt
+			: now;
+		const hasValidArchivedAt = isArchived && Number.isFinite(agent.archivedAt) && agent.archivedAt! > 0 && agent.archivedAt! <= now;
+		const endedAt = hasValidArchivedAt
+			? agent.archivedAt!
+			: isArchived && agent.role === "team-lead"
+				? startedAt
+				: now;
+		const mins = Math.floor(Math.max(0, endedAt - startedAt) / 60_000);
 		const timeStr = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
 		const displayName = isArchived ? (agent.title || formatAgentName(agent)) : formatAgentName(agent);
 

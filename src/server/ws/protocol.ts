@@ -143,12 +143,16 @@ export interface ChannelInfo {
 	closeReason?: string;
 }
 
+export interface SessionStreamCapabilities {
+	assistantStreamDelta?: 1;
+}
+
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
 	// `clientKind` is routing/product metadata for connection setup. It is not an
 	// unspoofable browser authority signal; endpoint auth still comes from the bearer
 	// token plus server-side session/surface/capability checks.
-	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel" }
+	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel"; capabilities?: SessionStreamCapabilities }
 	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
 	| { type: "steer"; text: string }
 	| { type: "steer_queued"; messageId: string }
@@ -255,7 +259,7 @@ export interface RemoteStateSnapshotMessage {
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok"; surfaceTokenKey?: string }
+	| { type: "auth_ok"; surfaceTokenKey?: string; capabilities?: SessionStreamCapabilities }
 	| { type: "ext_surface_token_result"; requestId: string; ok: boolean; token?: string; error?: string }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
 	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }
@@ -298,8 +302,9 @@ export type ServerMessage =
 	/** Sent to ALL authenticated clients when a visible session is created so
 	 * session navigation can refresh immediately instead of waiting for polling. */
 	| { type: "session_created"; sessionId: string; projectId?: string }
-	/** Broad invalidation fallback for session-list changes. */
-	| { type: "sessions_changed"; projectId?: string }
+	/** Broad invalidation fallback for session-list changes. Optional fields let
+	 * clients patch a known row immediately while retaining refresh authority. */
+	| { type: "sessions_changed"; projectId?: string; sessionId?: string; user_tags?: string[] }
 	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
 	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }

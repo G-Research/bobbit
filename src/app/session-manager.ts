@@ -1543,6 +1543,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -2421,6 +2423,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -2465,14 +2469,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Initial workspace hydration has one owner and starts only after the
 		// transcript-bearing agent is bound, so REST latency cannot delay paint.
 		await hydrateSidePanelWorkspace(sessionId);
-		// Transcript replay may have observed the submitted-review marker before
-		// any server tabs existed locally. Replay that cleanup after hydration,
-		// including for a now-cached session, before stale-invocation teardown.
+		// Reconcile artifact content only after authoritative tabs are available.
+		// An exact primary wins over passive-replay tombstones; absence plus a
+		// tombstone remains suppressed by the restore below.
 		await remote.reconcileSubmittedReviewWorkspace();
 		if (isStale()) { cleanupRemote(remote); return; }
 		// The earlier restore runs before hydration so it cannot see cold-loaded
-		// review tabs. Restore again only after submitted tabs have been removed;
-		// unsubmitted persisted documents now have authoritative tabs to bind to.
+		// review tabs. Restore again now that authoritative presence is known.
 		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 
 		// Listen for suggest-goal events from assistant messages
@@ -2953,15 +2956,22 @@ export type ForkSessionResponse = {
  * session and either spins up a fresh worktree (`newWorktree: true`, default)
  * or reuses the source session's existing worktree (`newWorktree: false`).
  */
-export async function forkSession(source: GatewaySession, opts: { newWorktree: boolean }): Promise<void> {
+export async function forkSession(
+	source: GatewaySession,
+	opts: { newWorktree: boolean; entryId?: string },
+): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = source.goalId || null;
 	renderApp();
 	try {
+		const body: { newWorktree: boolean; entryId?: string } = {
+			newWorktree: opts.newWorktree,
+		};
+		if (opts.entryId !== undefined) body.entryId = opts.entryId;
 		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/fork`, {
 			method: "POST",
-			body: JSON.stringify({ newWorktree: opts.newWorktree }),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({} as any));
@@ -3133,6 +3143,8 @@ export function backToSessions(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
@@ -3159,6 +3171,8 @@ export function disconnectGateway(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;

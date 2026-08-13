@@ -51,7 +51,7 @@ export class ProjectContextManager {
 
   constructor(
     registry: ProjectRegistry,
-    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {},
+    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; goalPersistence?: "sqlite" | "json"; taskPersistence?: "sqlite" | "json"; gatePersistence?: "sqlite" | "json"; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {},
   ) {
     this.registry = registry;
   }
@@ -393,26 +393,47 @@ export class ProjectContextManager {
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
-  /** Close all contexts on shutdown. Awaits every context's async close so
-   *  the caller (server shutdown / test teardown) can safely remove the temp
-   *  state dir only after all pending search flushes have settled. */
+  /** Close all contexts on shutdown. Every close is awaited before topology
+   *  cleanup, and failures are reported only after all sibling handles release. */
   async closeAll(): Promise<void> {
-    await Promise.allSettled([...this.contexts.values()].map((ctx) => ctx.close()));
-    if (this.contexts.size > 0) {
-      this.contexts.clear();
-      this.contextTopologyVersion++;
+    const entries = [...this.contexts.entries()];
+    const results = await Promise.allSettled(entries.map(([, ctx]) => ctx.close()));
+
+    let removed = false;
+    for (const [projectId, ctx] of entries) {
+      if (this.contexts.get(projectId) !== ctx) continue;
+      this.contexts.delete(projectId);
+      removed = true;
     }
+    if (removed) this.contextTopologyVersion++;
+
+    const errors = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, `Failed to close ${errors.length} project contexts`);
   }
 
-  /** Remove a context when a project is unregistered. The returned barrier
-   *  settles only after all context-owned background work has stopped. */
+  /** Remove a context when a project is unregistered. Topology cleanup occurs
+   *  after its close settles even when close reports a persistence failure. */
   async remove(projectId: string): Promise<void> {
     const ctx = this.contexts.get(projectId);
-    if (ctx) {
+    if (!ctx) return;
+
+    let closeFailed = false;
+    let closeError: unknown;
+    try {
       await ctx.close();
+    } catch (error) {
+      closeFailed = true;
+      closeError = error;
+    }
+
+    if (this.contexts.get(projectId) === ctx) {
       this.contexts.delete(projectId);
       this.contextTopologyVersion++;
     }
+    if (closeFailed) throw closeError;
   }
 
   /**

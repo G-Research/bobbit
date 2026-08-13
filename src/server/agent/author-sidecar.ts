@@ -10,7 +10,11 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
+import {
+	isMessageAuthor,
+	type BobbitMessage,
+	type MessageAuthor,
+} from "../../shared/message-author.js";
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import { serverSecretsDir } from "../bobbit-dir.js";
 import { loadOrCreateCookieSigningKey } from "../auth/cookie-signing-key.js";
@@ -107,6 +111,8 @@ export interface InitAuthorSidecarOptions {
 export interface CopyAuthorSidecarOptions {
 	/** Exact cloned Pi JSONL. When supplied, only transcript-confirmed bindings copy. */
 	transcript?: string | null;
+	/** Require settlement.messageId to match a retained Pi entry exactly. */
+	strictExactIdentity?: boolean;
 }
 
 interface LegacyPromptAuthorDispatchRecord {
@@ -1100,12 +1106,14 @@ export function createPromptAuthorStreamCorrelation(
 /**
  * Correlate sidecar bindings before inference. Matching is global by phase so
  * an early legacy duplicate cannot consume a later row's exact id binding.
+ * Transcript cursor provenance is intentionally outside this ledger: Pi agent
+ * events do not carry entry ids, so author settlements cannot prove them.
  */
 export function mergeAuthorSidecarIntoMessages<T extends object>(
 	entries: PromptAuthorBinding[],
 	messages: T[],
 	context: NormalizeVisibleMessageContext = {},
-): Array<T & { author?: MessageAuthor }> {
+): Array<BobbitMessage<T>> {
 	if (!Array.isArray(messages)) return messages;
 	const directPromptBindings = entries
 		.filter((entry) => isPromptAuthorBinding(entry) && entry.settlement?.outcome !== "cancelled")
@@ -1186,7 +1194,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		authored = messages.map((row, index) => {
 			const binding = assignments.get(index);
 			if (!binding) return row;
-			const projected = projectCorrelatedPromptMessage(
+			const projected: T & Record<string, unknown> = projectCorrelatedPromptMessage(
 				row as T & Record<string, unknown>,
 				binding,
 			);
@@ -1233,6 +1241,7 @@ function transcriptPromptCandidates(transcript: string): TranscriptPromptCandida
 function transcriptConfirmedBindings(
 	bindings: PromptAuthorBinding[],
 	transcript: string,
+	strictExactIdentity = false,
 ): PromptAuthorBinding[] {
 	const candidates = transcriptPromptCandidates(transcript);
 	const confirmed = new Set<PromptAuthorBinding>();
@@ -1247,6 +1256,9 @@ function transcriptConfirmedBindings(
 		if (!candidate) continue;
 		candidate.consumed = true;
 		confirmed.add(binding);
+	}
+	if (strictExactIdentity) {
+		return bindings.filter((binding) => confirmed.has(binding));
 	}
 	for (const binding of bindings) {
 		if (confirmed.has(binding) || binding.settlement?.messageId) continue;
@@ -1290,7 +1302,11 @@ export function copyAuthorSidecar(
 		let bindings = readAuthorSidecar(fromSessionId)
 			.filter((binding) => binding.settlement?.outcome === "echoed");
 		if (options.transcript !== undefined) {
-			bindings = transcriptConfirmedBindings(bindings, options.transcript ?? "");
+			bindings = transcriptConfirmedBindings(
+				bindings,
+				options.transcript ?? "",
+				options.strictExactIdentity === true,
+			);
 		}
 		const records: AuthorSidecarRecord[] = [];
 		for (const binding of bindings) {
