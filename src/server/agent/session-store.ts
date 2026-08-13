@@ -5,6 +5,7 @@ import { recordDeletionTombstone, recordDeletionTombstoneAsync } from "./deletio
 import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type {
+	DeliveryIntentKind,
 	DeliveryState,
 	DeliveryTargetTurn,
 	QueuedMessage,
@@ -42,6 +43,9 @@ export interface InFlightSteerRecord {
 	state?: InFlightAttemptState;
 	targetTurn?: DeliveryTargetTurn;
 	sequence?: number;
+	/** Original accepted occurrence metadata; required for identity-preserving restore. */
+	kind?: DeliveryIntentKind;
+	createdAt?: number;
 	/** Ambiguous attempts are not retryable until a terminal no-start proof retires them. */
 	retryable?: boolean;
 	source?: PromptSource;
@@ -113,6 +117,8 @@ export function normalizePersistedInFlightSteers(
 					? entry.targetTurn
 					: "continuation",
 				sequence: validLedgerInteger(entry.sequence) ? entry.sequence : index + 1,
+				kind: entry.kind === "prompt" || entry.kind === "steer" ? entry.kind : "steer",
+				createdAt: validLedgerInteger(entry.createdAt) ? entry.createdAt : entry.dispatchEpoch,
 				retryable: typeof entry.retryable === "boolean" ? entry.retryable : false,
 			}
 			: { text: entry.text, promptId };
