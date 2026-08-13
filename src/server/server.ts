@@ -17211,18 +17211,21 @@ async function handleApiRoute(
 						: undefined;
 					const auditStateDirs = [...new Set([context.stateDir, sessionAuditContext?.stateDir].filter((value): value is string => !!value))];
 					const targetAudit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
+					const sessionAudit = new PromptExtensionAuthoringAuditStore(sessionAuditContext?.stateDir ?? context.stateDir, fsImpl);
 					for (const change of changes) {
 						// Draft edits create a new proposal revision without changing the
-						// authoring request identity. Match the newest target record, then
-						// update its direct session-route mirror by the same opaque id.
-						const entry = targetAudit.list(200).filter(candidate =>
-							candidate.sessionId === sessionId
+						// authoring request identity. Resolve that identity from the direct
+						// authoring-session mirror, then require the target store to own the
+						// same opaque record. An unrelated newer target row must not settle.
+						const mirror = sessionAudit.listForSession(sessionId, 200).filter(candidate =>
+							candidate.projectId === context.project.id
 							&& candidate.packId === change.packId
 							&& candidate.sectionId === change.sectionId
 							&& (candidate.status === "requested" || candidate.status === "proposed")
 						).at(-1);
+						const entry = mirror && targetAudit.get(mirror.id);
 						const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
-						if (!entry || !baseline) continue;
+						if (!entry || entry.projectId !== context.project.id || !baseline) continue;
 						const update = {
 							status: "accepted" as const, terminal: false, proposalId,
 							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
