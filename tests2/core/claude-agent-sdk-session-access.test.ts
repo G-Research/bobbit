@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	readSdkSessionInfo,
 	readSdkSessionMessages,
+	readSdkSubagentMessages,
+	readSdkSubagents,
 	type ClaudeAgentSdkSessionApi,
 	type SdkSessionMessage,
 } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
@@ -17,6 +19,8 @@ function sdkFixture(overrides: Partial<ClaudeAgentSdkSessionApi> = {}) {
 	const sdk: ClaudeAgentSdkSessionApi = {
 		getSessionInfo: vi.fn(async () => ({ sessionId: SESSION_ID, summary: "test", lastModified: 1 })),
 		getSessionMessages: vi.fn(async () => []),
+		listSubagents: vi.fn(async () => []),
+		getSubagentMessages: vi.fn(async () => []),
 		...overrides,
 	};
 	return { sdk, deps: { loadSdk: vi.fn(async () => sdk) } };
@@ -33,6 +37,21 @@ describe("Claude Agent SDK session access", () => {
 		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(1, SESSION_ID, { dir: CWD });
 		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(2, SESSION_ID, { dir: CWD });
 		expect(fixture.sdk.getSessionMessages).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
+	});
+
+	it("reads pinned child APIs without inferring parent identity from agent ids", async () => {
+		const fixture = sdkFixture({ listSubagents: vi.fn(async () => ["child-1"]), getSubagentMessages: vi.fn(async () => []) });
+
+		await expect(readSdkSubagents({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toEqual(["child-1"]);
+		await expect(readSdkSubagentMessages({ sessionId: SESSION_ID, cwd: CWD, agentId: "child-1" }, fixture.deps)).resolves.toEqual([]);
+		expect(fixture.sdk.listSubagents).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
+		expect(fixture.sdk.getSubagentMessages).toHaveBeenCalledWith(SESSION_ID, "child-1", { dir: CWD });
+		await expect(readSdkSubagentMessages({ sessionId: SESSION_ID, cwd: CWD, agentId: "" }, fixture.deps)).rejects.toMatchObject({
+			message: expect.stringContaining("invalid SDK subagent identity"),
+		});
+		await expect(readSdkSubagents({ sessionId: SESSION_ID, cwd: CWD }, sdkFixture({ listSubagents: vi.fn(async () => ["", 3] as any) }).deps)).rejects.toMatchObject({
+			message: expect.stringContaining("SDK_SESSION_UNAVAILABLE"),
+		});
 	});
 
 	it("fails absent, invalid, loader, and provider sources as sanitized unavailable errors", async () => {
