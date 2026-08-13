@@ -21,6 +21,8 @@ export interface SidebarViewPreferenceState {
 	statusShowBusy: boolean;
 	statusShowRead: boolean;
 	statusShowTeams: boolean;
+	/** Transient exact-session inclusion owned by the explicit reveal action. */
+	sidebarRevealSessionId?: string | null;
 	statusCollapsedSections?: Set<SidebarStatusSectionKey>;
 	filtersPopoverOpen?: boolean;
 }
@@ -113,6 +115,7 @@ export function setSidebarView(
 	view: SidebarSessionView,
 ): void {
 	preferenceState.sidebarSessionView = parseSidebarSessionView(view);
+	preferenceState.sidebarRevealSessionId = null;
 	preferenceState.filtersPopoverOpen = false;
 	safeSetItem(SIDEBAR_SESSION_VIEW_STORAGE_KEY, preferenceState.sidebarSessionView);
 }
@@ -128,6 +131,10 @@ export function setSidebarViewFilter(
 	value: boolean,
 ): boolean {
 	if (typeof value !== "boolean") return false;
+	// A manual filter choice supersedes the prior one-shot reveal inclusion.
+	// resetSidebarViewFilters intentionally clears it too; the reveal transaction
+	// installs its exact target only after that reset completes.
+	preferenceState.sidebarRevealSessionId = null;
 	if (view === "project") {
 		if (key === "showTeams") return false;
 		preferenceState[key] = value;

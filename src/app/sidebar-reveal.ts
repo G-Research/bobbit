@@ -10,7 +10,12 @@
 
 import { renderApp, state, activeSessionId, type GatewaySession, type Goal } from "./state.js";
 import { getRouteFromHash, type AppRoute } from "./routing.js";
-import { buildSidebarStatusSections, buildSidebarTreeModel, handleSidebarSearchClear } from "./sidebar.js";
+import {
+	buildSidebarStatusSections,
+	buildSidebarTreeModel,
+	handleSidebarSearchClear,
+	materializeExplicitSidebarSessionDepth,
+} from "./sidebar.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 import { sidebarTreeKey, type SidebarTreeNodeKey } from "./sidebar-tree-builder.js";
 import {
@@ -236,12 +241,22 @@ export async function revealCurrentSidebarSession(): Promise<void> {
 	const token = ++revealToken;
 	pending = null;
 
-	handleSidebarSearchClear();
+	handleSidebarSearchClear(false);
 	resetSidebarViewFilters(state, view);
+	// Install the categorical exception only after the reset setters have
+	// cleared any prior action, and before this transaction's first render.
+	state.sidebarRevealSessionId = sessionId;
 	state.keyboardNavActiveId = `session:${sessionId}`;
 	renderApp();
 
-	if (!await hydrateExplicitTarget(token, sessionId, view)) return;
+	if (!await hydrateExplicitTarget(token, sessionId, view)) {
+		if (state.sidebarRevealSessionId === sessionId && explicitRevealIsCurrent(token, sessionId, view)) {
+			state.sidebarRevealSessionId = null;
+			renderApp();
+		}
+		return;
+	}
+	materializeExplicitSidebarSessionDepth(sessionId);
 	const target: PendingReveal = { ...targetForSession(sessionId), mode: "explicit", sessionId, view };
 	pending = target;
 

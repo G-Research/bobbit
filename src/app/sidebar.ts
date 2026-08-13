@@ -1127,11 +1127,11 @@ export function handleSidebarSearchInput(query: string): void {
 	renderApp();
 }
 
-export function handleSidebarSearchClear(): void {
+export function handleSidebarSearchClear(shouldRender = true): void {
 	state.searchQuery = "";
 	clearArchivedSearchState();
 	_clearArchivedSearchDemand();
-	renderApp();
+	if (shouldRender) renderApp();
 }
 
 export function renderArchivedSearchControls(): TemplateResult | string {
@@ -1488,7 +1488,7 @@ function nestedGoalChildren(node: GoalTreeNode, archived: boolean): GoalTreeNode
 /** Render the collapsible per-project Archived subsection (desktop variant). */
 function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 	// The canonical model only creates this section when archived content is
-	// eligible. That includes the narrowly exempted active archived session.
+	// eligible. That includes the exact target of an explicit reveal action.
 	if (!projectTree.archivedSectionNode) return "";
 	const project = projectTree.project as Project;
 	const expanded = projectTree.archivedSectionNode.expanded;
@@ -1545,6 +1545,88 @@ function _expandNestedDepth(projectId: string): void {
 	const cur = _getNestedDepthCap(projectId);
 	_expandedNestedDepthByProject.set(projectId, cur + NESTED_DEPTH_INCREMENT);
 	renderApp();
+}
+
+/**
+ * Materialize the hydrated goal ancestry for one explicit session reveal.
+ * This only raises the existing cap for the target's canonical project and
+ * leaves automatic route reveals and every unrelated project unchanged.
+ */
+export function materializeExplicitSidebarSessionDepth(sessionId: string): boolean {
+	const sessionsById = new Map(state.archivedSessions.map(session => [session.id, session]));
+	for (const session of state.gatewaySessions) sessionsById.set(session.id, session);
+	const target = sessionsById.get(sessionId);
+	if (!target) return false;
+
+	const goalsById = new Map(state.goals.map(goal => [goal.id, goal]));
+	const projectIds = new Set(state.projects.map(project => project.id));
+	const fallbackProjectId = state.projects[0]?.id;
+	const resolveGoalProjectId = (goalId: string): string | undefined => {
+		let goal = goalsById.get(goalId);
+		let resolved: string | undefined;
+		const seen = new Set<string>();
+		while (goal && !seen.has(goal.id)) {
+			seen.add(goal.id);
+			if (goal.projectId) {
+				if (!projectIds.has(goal.projectId)) return undefined;
+				resolved ??= goal.projectId;
+			}
+			goal = goal.parentGoalId ? goalsById.get(goal.parentGoalId) : undefined;
+		}
+		return resolved ?? fallbackProjectId;
+	};
+
+	// Placement can be inherited through a delegate/team/child parent, so walk
+	// those canonical references only. Hydration has already loaded this chain.
+	const relatedGoalIds: string[] = [];
+	const seenGoalIds = new Set<string>();
+	const sessionQueue = [sessionId];
+	const seenSessionIds = new Set<string>();
+	while (sessionQueue.length > 0) {
+		const relatedId = sessionQueue.shift()!;
+		if (seenSessionIds.has(relatedId)) continue;
+		seenSessionIds.add(relatedId);
+		const session = sessionsById.get(relatedId);
+		if (!session) continue;
+		for (const goalId of [session.goalId, session.teamGoalId]) {
+			if (goalId && !seenGoalIds.has(goalId)) {
+				seenGoalIds.add(goalId);
+				relatedGoalIds.push(goalId);
+			}
+		}
+		for (const parentId of [session.parentSessionId, session.delegateOf, session.teamLeadSessionId]) {
+			if (parentId && !seenSessionIds.has(parentId)) sessionQueue.push(parentId);
+		}
+	}
+	if (relatedGoalIds.length === 0) return false;
+
+	const preferredProjectId = projectIds.has(target.projectId ?? "")
+		? target.projectId
+		: relatedGoalIds.map(resolveGoalProjectId).find((id): id is string => Boolean(id));
+	if (!preferredProjectId) return false;
+
+	let requiredDepth = 0;
+	for (const goalId of relatedGoalIds) {
+		if (resolveGoalProjectId(goalId) !== preferredProjectId) continue;
+		let cursor = goalsById.get(goalId);
+		let depth = 0;
+		const seen = new Set<string>();
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			if (!cursor.parentGoalId) break;
+			const parent = goalsById.get(cursor.parentGoalId);
+			if (!parent || resolveGoalProjectId(parent.id) !== preferredProjectId) break;
+			depth++;
+			cursor = parent;
+		}
+		requiredDepth = Math.max(requiredDepth, depth);
+	}
+
+	let cap = _getNestedDepthCap(preferredProjectId);
+	if (requiredDepth <= cap) return false;
+	while (cap < requiredDepth) cap += NESTED_DEPTH_INCREMENT;
+	_expandedNestedDepthByProject.set(preferredProjectId, cap);
+	return true;
 }
 
 /** Render the "Show N more child goals…" affordance when the depth cap clipped. */
@@ -1607,12 +1689,12 @@ export function buildSidebarTreeModel(sidebarData = getSidebarData()): SidebarTr
 	return buildSidebarTreeModelWithSearch(sidebarData).model;
 }
 
-function activeArchivedTreePopulation(activeId: string): { sessions: GatewaySession[]; goalIds: Set<string> } {
+function revealedArchivedTreePopulation(sessionId: string): { sessions: GatewaySession[]; goalIds: Set<string> } {
 	const archivedById = new Map(state.archivedSessions.map(session => [session.id, session]));
 	const goalsById = new Map(state.goals.map(goal => [goal.id, goal]));
 	const sessionIds = new Set<string>();
 	const goalIds = new Set<string>();
-	const sessionQueue = [activeId];
+	const sessionQueue = [sessionId];
 	const goalQueue: string[] = [];
 
 	while (sessionQueue.length > 0 || goalQueue.length > 0) {
@@ -1668,14 +1750,20 @@ export function buildSidebarTreeModelWithSearch(
 		: staffList.filter(s => s.state !== "retired");
 	const liveSessionsNoStaff = state.gatewaySessions.filter(s => !sidebarData.staffSessionIds.has(s.id));
 	const activeId = activeSessionId();
-	const activeArchived = activeId ? state.archivedSessions.find(session => session.id === activeId) : undefined;
-	const narrowActiveArchive = Boolean(activeArchived && !filters.showArchived && !bypassFilters);
-	const activeArchivePopulation = narrowActiveArchive && activeId ? activeArchivedTreePopulation(activeId) : null;
-	const goalsForTree: Goal[] = activeArchivePopulation
-		? state.goals.filter(goal => !goal.archived || activeArchivePopulation.goalIds.has(goal.id))
+	if (state.sidebarRevealSessionId && state.sidebarRevealSessionId !== activeId) {
+		state.sidebarRevealSessionId = null;
+	}
+	const revealSessionId = state.sidebarRevealSessionId === activeId ? activeId : undefined;
+	const revealedArchived = revealSessionId
+		? state.archivedSessions.find(session => session.id === revealSessionId)
+		: undefined;
+	const narrowRevealArchive = Boolean(revealedArchived && !filters.showArchived && !bypassFilters);
+	const revealArchivePopulation = narrowRevealArchive && revealSessionId ? revealedArchivedTreePopulation(revealSessionId) : null;
+	const goalsForTree: Goal[] = revealArchivePopulation
+		? state.goals.filter(goal => !goal.archived || revealArchivePopulation.goalIds.has(goal.id))
 		: state.goals;
 	let sessionsForTree: GatewaySession[] = liveSessionsNoStaff;
-	let archivedSessionsForTree: GatewaySession[] = activeArchivePopulation?.sessions ?? state.archivedSessions;
+	let archivedSessionsForTree: GatewaySession[] = revealArchivePopulation?.sessions ?? state.archivedSessions;
 	let visibleSearchGoalIds: Set<string> | null = null;
 
 	let retainedSearchSessionIds: Set<string> | null = null;
@@ -1727,7 +1815,7 @@ export function buildSidebarTreeModelWithSearch(
 		sessions: sessionsForTree,
 		archivedSessions: archivedSessionsForTree,
 		staff: filteredStaff,
-		showArchived: filters.showArchived || bypassFilters || narrowActiveArchive,
+		showArchived: filters.showArchived || bypassFilters || narrowRevealArchive,
 		projectOrder: projects.map(p => p.id),
 		nestedDepthByProject: new Map(projects.map(p => [p.id, _getNestedDepthCap(p.id)])),
 		defaultNestedDepth: DEFAULT_NESTED_DEPTH_CAP,
@@ -1740,7 +1828,7 @@ export function buildSidebarTreeModelWithSearch(
 				|| view === "status"
 				|| passesSidebarFilters(session as GatewaySession, active, bypass),
 			bypassBusyReadFilters: bypassFilters || view === "status",
-			includeArchived: filters.showArchived || bypassFilters || narrowActiveArchive,
+			includeArchived: filters.showArchived || bypassFilters || narrowRevealArchive,
 		},
 		expansion: sidebarTreeExpansionInput(),
 	});
@@ -1838,6 +1926,7 @@ export function buildSidebarStatusSections(
 		filters,
 		searchQuery: state.searchQuery,
 		activeSessionId: activeSessionId(),
+		revealSessionId: state.sidebarRevealSessionId,
 		isPinned: session => isPinned(session.user_tags),
 		isUnread: session => hasUnseenActivity(session),
 		isBusy: session => isSessionBusy(session),
