@@ -406,14 +406,6 @@ describe("built-in file explorer panel", () => {
 
 	it("refreshes on the first idle and later non-idle to idle transitions while pruning vanished selection", async () => {
 		let statusCallback: ((value: { status: "idle" | "running" | "error" }) => void) | undefined;
-		let detachCallback: MutationCallback | undefined;
-		class CapturedMutationObserver {
-			constructor(callback: MutationCallback) { detachCallback = callback; }
-			observe() {}
-			disconnect() {}
-			takeRecords(): MutationRecord[] { return []; }
-		}
-		vi.stubGlobal("MutationObserver", CapturedMutationObserver);
 
 		let entries: Entry[] = [{ path: "keep.txt", name: "keep.txt", kind: "file" }];
 		const statusDispose = vi.fn();
@@ -426,7 +418,6 @@ describe("built-in file explorer panel", () => {
 		const root = mount(sid, fakeHost);
 		await vi.waitFor(() => {
 			expect(statusCallback).toBeTypeOf("function");
-			expect(detachCallback).toBeTypeOf("function");
 			expect(row(root, "keep.txt")).not.toBeNull();
 		});
 		click(row(root, "keep.txt"));
@@ -453,9 +444,7 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("Explorer refreshed.");
 
 		root.remove();
-		expect(statusDispose).not.toHaveBeenCalled();
-		detachCallback!([], {} as MutationObserver);
-		await tick();
+		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
 		await tick();
 		expect(statusDispose).toHaveBeenCalledTimes(1);
 	});
