@@ -6,13 +6,94 @@
  * and transcript ownership without a Docker daemon or subscription.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "./gateway-harness.js";
 import { apiFetch, connectWs, defaultProjectId, gitCwd, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
 
 const SDK_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OAUTH_POLICY = "ANTHROPIC_OAUTH_TOKEN";
+
+type DockerDispatcherLaunch = {
+	containerId: string;
+	cwd: string;
+	command: string[];
+	envNames: string[];
+	hasScopedAuthority: boolean;
+};
+
+/**
+ * The production dispatcher speaks newline-delimited `BOBBIT_SDK_DISPATCH:`
+ * messages over the Docker-exec child pipes. This executable is placed first
+ * in PATH only for this journey: it records the non-secret launch shape and
+ * implements that protocol, rather than replacing SessionManager wiring or
+ * the dispatcher itself.
+ */
+function installControlledDocker(root: string): { launches: () => DockerDispatcherLaunch[]; restore: () => void } {
+	const bin = join(root, "controlled-docker-bin");
+	const script = join(bin, "docker.mjs");
+	const executable = join(bin, process.platform === "win32" ? "docker.cmd" : "docker");
+	const log = join(root, "controlled-docker-launches.jsonl");
+	const previousPath = process.env.PATH;
+	const previousLog = process.env.BOBBIT_E2E_CONTROLLED_DOCKER_LOG;
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(script, `import { appendFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const envNames = [];
+let scopedToken = false;
+let gatewayUrl = false;
+for (let index = 0; index < args.length; index++) {
+  if (args[index] !== "-e") continue;
+  const entry = args[++index] || "";
+  const equals = entry.indexOf("=");
+  const name = equals < 0 ? entry : entry.slice(0, equals);
+  const value = equals < 0 ? "" : entry.slice(equals + 1);
+  envNames.push(name);
+  if (name === "BOBBIT_TOKEN" && value.length > 0) scopedToken = true;
+  if (name === "BOBBIT_GATEWAY_URL" && value.length > 0) gatewayUrl = true;
+}
+const worktree = args.indexOf("-w");
+const cwd = worktree >= 0 ? args[worktree + 1] || "" : "";
+const containerId = worktree >= 0 ? args[worktree + 2] || "" : "";
+const command = worktree >= 0 ? args.slice(worktree + 3) : [];
+if (command[0] === "node" && command[1] === "--input-type=module" && command[2] === "--eval") appendFileSync(process.env.BOBBIT_E2E_CONTROLLED_DOCKER_LOG, JSON.stringify({ containerId, cwd, command: command.slice(0, 3), envNames, hasScopedAuthority: scopedToken && gatewayUrl }) + "\\n");
+let pending = "";
+process.stdin.on("data", chunk => {
+  pending += chunk.toString();
+  const lines = pending.split("\\n");
+  pending = lines.pop() || "";
+  for (const line of lines) {
+    if (!line.startsWith("BOBBIT_SDK_DISPATCH:")) continue;
+    const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
+    if (message.type === "init") {
+      const names = [...new Set((message.manifest || []).flatMap(entry => entry.selectedToolNames || []))];
+      process.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "ready", schemas: names.map(name => ({ name, inputSchema: { type: "object", properties: {} } })), omittedConditional: [] }) + "\\n");
+    }
+    if (message.type === "invoke") process.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "result", id: message.id, result: { content: [{ type: "text", text: "controlled container dispatch" }] } }) + "\\n");
+  }
+});
+`);
+	writeFileSync(executable, process.platform === "win32"
+		? "@echo off\r\nnode \"%~dp0docker.mjs\" %*\r\n"
+		: "#!/usr/bin/env node\nimport \"./docker.mjs\";\n");
+	chmodSync(executable, 0o755);
+	process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${previousPath ?? ""}`;
+	process.env.BOBBIT_E2E_CONTROLLED_DOCKER_LOG = log;
+	return {
+		launches: () => {
+			try {
+				return readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as DockerDispatcherLaunch);
+			} catch { return []; }
+		},
+		restore: () => {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+			if (previousLog === undefined) delete process.env.BOBBIT_E2E_CONTROLLED_DOCKER_LOG;
+			else process.env.BOBBIT_E2E_CONTROLLED_DOCKER_LOG = previousLog;
+		},
+	};
+}
 
 type QueryArgs = { prompt: AsyncIterable<any>; options: Record<string, any> };
 type SdkMessage = { type: "user" | "assistant"; uuid: string; session_id: string; message: any; parent_tool_use_id: null; parent_agent_id: null };
@@ -106,8 +187,10 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		const sandboxPrototype = Object.getPrototypeOf(sandboxManager) as Record<string, any>;
 		const originalEnsure = sandboxPrototype.ensureForProject;
 		const originalGet = sandboxPrototype.get;
+		const originalGetStats = sandboxPrototype.getStats;
 		const authFile = join(gateway.bobbitDir, "agent", "auth.json");
 		const originalAuth = readFileSync(authFile, "utf8");
+		const docker = installControlledDocker(gateway.bobbitDir);
 		const access = randomUUID();
 		let containerId = "controlled-sdk-container-a";
 		let capable = true;
@@ -123,6 +206,14 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		};
 		sandboxPrototype.get = function(this: unknown, id: string) {
 			return id === projectId ? sandbox : originalGet.call(this, id);
+		};
+		// The session route checks manager stats before invoking `docker info`.
+		// Keep that check true to the controlled ready pooled container above,
+		// while the later production dispatcher still runs through our Docker-exec
+		// protocol executable.
+		sandboxPrototype.getStats = function(this: unknown) {
+			const stats = originalGetStats.call(this);
+			return { ...stats, containers: [...stats.containers, { projectId, containerId, status: "ready" }] };
 		};
 
 		const createSandboxSdkSession = async (): Promise<Response> => apiFetch("/api/sessions", {
@@ -182,6 +273,16 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			expect(bridgeLaunches[0].containerId).toBe("controlled-sdk-container-a");
 			expect(bridgeLaunches[0].cwd).toMatch(/^\/workspace-wt\/session\/s-/);
 			expect(bridgeLaunches[0].oauthAccessToken === access).toBe(true);
+			const initialDispatches = docker.launches();
+			expect(initialDispatches).toHaveLength(1);
+			expect(initialDispatches[0]).toMatchObject({
+				containerId: "controlled-sdk-container-a",
+				cwd: bridgeLaunches[0].cwd,
+				hasScopedAuthority: true,
+			});
+			expect(initialDispatches[0].command).toEqual(expect.arrayContaining(["node", "--input-type=module", "--eval"]));
+			expect(initialDispatches[0].envNames).toEqual(expect.arrayContaining(["BOBBIT_TOKEN", "BOBBIT_GATEWAY_URL"]));
+			expect(initialDispatches[0].envNames).not.toEqual(expect.arrayContaining(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]));
 
 			const connection = await connectWs(id);
 			try {
@@ -217,12 +318,22 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			expect(sdk.queries).toHaveLength(2);
 			expect(sdk.queries[1].args.options.resume).toBe(SDK_SESSION_ID);
 			expect(bridgeLaunches[1].containerId).toBe("controlled-sdk-container-b");
+			const recoveredDispatches = docker.launches();
+			expect(recoveredDispatches).toHaveLength(2);
+			expect(recoveredDispatches[1]).toMatchObject({
+				containerId: "controlled-sdk-container-b",
+				cwd: bridgeLaunches[1].cwd,
+				hasScopedAuthority: true,
+			});
+			expect(recoveredDispatches[1].envNames).not.toEqual(expect.arrayContaining(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]));
 			expect(sdk.history).toEqual(before);
 			expect(gateway.piCommandLog.slice(piBefore).filter((row: any) => row.sessionId === id)).toEqual([]);
 		} finally {
+			docker.restore();
 			writeFileSync(authFile, originalAuth);
 			sandboxPrototype.ensureForProject = originalEnsure;
 			sandboxPrototype.get = originalGet;
+			sandboxPrototype.getStats = originalGetStats;
 			await apiFetch("/api/custom-providers/claude-agent-sdk", { method: "DELETE" }).catch(() => undefined);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
