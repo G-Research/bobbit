@@ -371,7 +371,19 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			child.stdin = new PassThrough();
 			child.stdout = new PassThrough();
 			child.stderr = new PassThrough();
-			child.kill = vi.fn(() => true);
+			child.killed = false;
+			child.exitCode = null;
+			child.signalCode = null;
+			child.kill = vi.fn(() => {
+				if (child.killed) return false;
+				child.killed = true;
+				child.exitCode = 0;
+				child.stdin.end();
+				child.stdout.end();
+				child.stderr.end();
+				queueMicrotask(() => child.emit("exit", 0, null));
+				return true;
+			});
 			return child;
 		};
 		const dispatcherSpawn = vi.fn((_command: string, args: string[], options: any) => {
@@ -421,26 +433,35 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			manager.handleAgentLifecycle = vi.fn();
 			manager._reconcileAfterAbort = vi.fn();
 			let failCandidate = false;
-			manager.claudeAgentSdkBridgeDepsFactory = () => ({
-				createDockerSpawn: (input: any) => (options: any) => {
-					sdkLaunches.push({ input, options });
-					return fakeChild();
-				},
-				query: (request: any) => {
-					request.options.spawnClaudeCodeProcess({ args: ["--sdk-protocol"], env: {}, signal: new AbortController().signal });
-					const query = {
-						close: vi.fn(async () => {}),
-						initializationResult: async () => {
-							if (failCandidate) throw new Error("candidate startup failed");
-							return { session_id: resumeId, models: [{ value: "sandbox-sonnet" }] };
-						},
-						[Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
-					};
-					queries.push(query);
-					return query;
-				},
-				clock: { now: () => 0, setTimeout, setInterval, clearTimeout, clearInterval },
-			});
+			manager.claudeAgentSdkBridgeDepsFactory = () => {
+				const ownedChildren: any[] = [];
+				return {
+					createDockerSpawn: (input: any) => (options: any) => {
+						const child = fakeChild();
+						sdkLaunches.push({ input, options, child });
+						ownedChildren.push(child);
+						return child;
+					},
+					query: (request: any) => {
+						request.options.spawnClaudeCodeProcess({ args: ["--sdk-protocol"], env: {}, signal: new AbortController().signal });
+						const query = {
+							close: vi.fn(async () => {
+								for (const child of ownedChildren.splice(0)) child.kill("SIGTERM");
+							}),
+							initializationResult: async () => {
+								if (failCandidate) throw new Error("candidate startup failed");
+								return { session_id: resumeId, models: [{ value: "sandbox-sonnet" }] };
+							},
+							async *[Symbol.asyncIterator]() {
+								yield { type: "system", subtype: "init", session_id: resumeId };
+							},
+						};
+						queries.push(query);
+						return query;
+					},
+					clock: { now: () => 0, setTimeout, setInterval, clearTimeout, clearInterval },
+				};
+			};
 			const wiring = vi.fn(async (options: any, id: string) => {
 				assert.equal(options.runtime, "claude-agent-sdk");
 				assert.equal(options.claudeAgentSdkSessionId, resumeId);
@@ -508,6 +529,8 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			}
 			assert.equal(roleOld.stop.mock.calls.length, 1);
 			assert.equal(forceOld.stop.mock.calls.length, 1);
+			await manager.sessions.get(roleId).rpcClient.stop();
+			await manager.sessions.get(forceId).rpcClient.stop();
 
 			const failedId = "sdk-role-candidate-failure";
 			records.set(failedId, persisted(failedId));
