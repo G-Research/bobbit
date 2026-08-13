@@ -305,10 +305,9 @@ sidebar. The staff session continues to appear as a normal staff-section
 entry; the only inbox UI surface is the panel attached to the session view.
 This is deliberate — see [design/staff-inbox.md §8.6](design/staff-inbox.md#86-sidebar--explicit-non-change).
 
-The "Wake Now" button on the staff edit page (`src/app/staff-page.ts`) is
-preserved but rewired: it calls `enqueueInboxManual(staffId, { title: "Manual wake", prompt: … })`
-and now surfaces an "Enqueued. The agent will process when idle." feedback
-line instead of starting a session synchronously.
+The staff edit page no longer exposes a "Wake Now" action. Manual inbox work is
+added from the session's Inbox panel, keeping wake controls alongside the queue
+they affect.
 
 ## Idempotency contract
 
