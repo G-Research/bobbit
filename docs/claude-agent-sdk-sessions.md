@@ -10,7 +10,7 @@ persistence, and recovery rules.
 ## Selecting the runtime
 
 The Agent SDK runtime is opt-in. It is not added to Bobbit's model catalog and
-session creation does not accept a per-request `initialModel` selector. First,
+session creation does not use a per-request `initialModel` selector. First,
 register a **Custom Provider** whose exact id is `claude-agent-sdk` and add the
 SDK model id you intend to use. Then select it through existing configuration:
 set the default session model or a role's `model` to:
@@ -26,8 +26,12 @@ remain Pi-backed. This explicit split prevents an existing Anthropic session
 from changing runtime merely because an SDK is installed.
 
 `MANUAL_CLAUDE_AGENT_SDK_MODEL` is only the opt-in manual-smoke-test input. Its
-value is the unprefixed model id (for example, `claude-sonnet-4-5`); it neither
-registers the provider nor configures a gateway or default session model.
+value is the unprefixed model id (for example, `claude-sonnet-4-5`). The manual
+lifecycle spec uses it to register a Custom Provider and default session model
+inside its isolated temporary Bobbit state before creating a session; removing
+that state removes the test-local configuration. It does not register a provider
+or change the model selection of a developer's production gateway; use the
+configuration above for production selection.
 
 Bobbit derives and persists runtime from the selected provider; the runtime is
 not a separate preference. Replacement cannot change an existing session between
@@ -744,8 +748,11 @@ The following is an opt-in manual scenario, not automated evidence and not a
 claim that it has been executed. Run it only on a developer machine with Docker
 available, a rebuilt `bobbit-agent` image matching the current server SDK pin, a
 local active Anthropic OAuth subscription, and an unprefixed SDK model id. The
-scenario creates a Docker-sandbox project with the required enabled empty
-`ANTHROPIC_OAUTH_TOKEN` policy, then checks readiness, prompt, steer, soft
+scenario creates an isolated Custom Provider and default session model only for
+its temporary test gateway, then creates a Docker-sandbox project with the
+required enabled empty `ANTHROPIC_OAUTH_TOKEN` policy. It does not configure a
+production gateway; follow [Selecting the runtime](#selecting-the-runtime) for
+production selection. The scenario then checks readiness, prompt, steer, soft
 interrupt, stop, force-abort replacement, gateway-restart resume, and that the
 same SDK UUID survives. It does not use or log API-key credentials.
 

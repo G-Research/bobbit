@@ -15,6 +15,30 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { manualTmpRoot } from "./manual-test-paths.ts";
 
+const smokeEnvironmentKeys = [
+	"BOBBIT_DIR",
+	"BOBBIT_SECRETS_DIR",
+	"BOBBIT_AGENT_DIR",
+	"BOBBIT_SKIP_MCP",
+	"BOBBIT_SKIP_AIGW_DISCOVERY",
+	"BOBBIT_SKIP_TITLE_GEN",
+	"BOBBIT_SKIP_WORKTREE_POOL",
+	"BOBBIT_NO_OPEN",
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+] as const;
+
+function captureSmokeEnvironment(): Map<string, string | undefined> {
+	return new Map(smokeEnvironmentKeys.map(key => [key, process.env[key]]));
+}
+
+function restoreSmokeEnvironment(environment: Map<string, string | undefined>): void {
+	for (const [key, value] of environment) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+}
+
 test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 	test("discovers a local subscription and supports ready, prompt, steer, soft interrupt, and termination", async () => {
 		test.skip(
@@ -31,6 +55,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 		let gateway: { shutdown(): Promise<void>; sessionManager: any } | undefined;
 		let token = "";
 		let baseURL = "";
+		const originalEnvironment = captureSmokeEnvironment();
 
 		try {
 			mkdirSync(projectRoot, { recursive: true });
@@ -100,15 +125,26 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 					"without the provider prefix (for example, claude-sonnet-4-5).",
 				);
 			}
-			const initialModel = `claude-agent-sdk/${configuredModel}`;
-			const createResponse = await api("/api/sessions", {
+			const sessionModel = `claude-agent-sdk/${configuredModel}`;
+			const providerResponse = await api("/api/custom-providers", {
 				method: "POST",
 				body: JSON.stringify({
-					projectId: project.id,
-					cwd: projectRoot,
-					worktree: false,
-					initialModel,
+					id: "claude-agent-sdk",
+					name: "claude-agent-sdk",
+					type: "manual",
+					baseUrl: "http://127.0.0.1:9",
+					models: [{ id: configuredModel, name: "Manual Claude Agent SDK smoke" }],
 				}),
+			});
+			expect(providerResponse.status, await providerResponse.text()).toBe(200);
+			const preferencesResponse = await api("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
+			});
+			expect(preferencesResponse.status, await preferencesResponse.text()).toBe(200);
+			const createResponse = await api("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false }),
 			});
 			expect(createResponse.status, await createResponse.clone().text()).toBe(201);
 			const created = await createResponse.json() as { id: string };
@@ -116,7 +152,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				() => gateway!.sessionManager.getSession(created.id),
 				"SDK bridge installation",
 			);
-			expect(session.runtime, `initialModel ${initialModel} must select the Claude Agent SDK runtime`).toBe("claude-agent-sdk");
+			expect(session.runtime, `default session model ${sessionModel} must select the Claude Agent SDK runtime`).toBe("claude-agent-sdk");
 			await session.rpcClient.waitForReady(90_000);
 			expect(session.rpcClient.running, "SDK query must remain usable after readiness").toBe(true);
 
@@ -160,6 +196,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 		} finally {
 			if (gateway) await gateway.shutdown().catch(() => {});
 			if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+			restoreSmokeEnvironment(originalEnvironment);
 		}
 	});
 });
@@ -188,6 +225,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 		const projectRoot = join(root, "project");
 		let gateway: { shutdown(): Promise<void>; sessionManager: any } | undefined;
 		let token = "";
+		const originalEnvironment = captureSmokeEnvironment();
 		try {
 			mkdirSync(projectRoot, { recursive: true });
 			// A remote-less checkout exercises Bobbit's mounted clone without copying
@@ -243,7 +281,24 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }] }),
 			});
 			expect(config.status, await config.text()).toBe(200);
-			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false, initialModel: `claude-agent-sdk/${configuredModel}` }) });
+			const sessionModel = `claude-agent-sdk/${configuredModel}`;
+			const providerResponse = await api("/api/custom-providers", {
+				method: "POST",
+				body: JSON.stringify({
+					id: "claude-agent-sdk",
+					name: "claude-agent-sdk",
+					type: "manual",
+					baseUrl: "http://127.0.0.1:9",
+					models: [{ id: configuredModel, name: "Manual Claude Agent SDK sandbox smoke" }],
+				}),
+			});
+			expect(providerResponse.status, await providerResponse.text()).toBe(200);
+			const preferencesResponse = await api("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
+			});
+			expect(preferencesResponse.status, await preferencesResponse.text()).toBe(200);
+			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false }) });
 			expect(createdResponse.status, await createdResponse.clone().text()).toBe(201);
 			const created = await createdResponse.json() as { id: string };
 			let session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK bridge installation");
@@ -278,6 +333,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 		} finally {
 			if (gateway) await gateway.shutdown().catch(() => {});
 			if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+			restoreSmokeEnvironment(originalEnvironment);
 		}
 	});
 });

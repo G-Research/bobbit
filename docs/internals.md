@@ -1670,6 +1670,13 @@ Generated provider/model/thinking arguments precede caller-supplied `options.arg
 
 The resolved tuple flows through the existing session setup, restore, respawn, delegate/team, host, and sandbox mechanisms as `initialModel` and `initialThinkingLevel`. The live session retains the spawn values as `spawnPinnedModel` and `spawnPinnedThinkingLevel` for read-back verification and later inheritance.
 
+The Claude Agent SDK uses this existing provider/default or role cascade after an
+operator registers the exact `claude-agent-sdk` Custom Provider; a session-create
+request does not select that runtime with `initialModel`. Its manual lifecycle
+smokes bootstrap the provider and default only in isolated temporary state, not
+in a production gateway. See [Claude Agent SDK runtime selection](claude-agent-sdk-sessions.md#selecting-the-runtime)
+for the canonical operator guidance.
+
 ### Skip-setModel branch preserves hard-fail-on-mismatch
 
 `applyModelString` and `applyReviewModelOverrides` in `src/server/agent/review-model-override.ts` accept `skipSetModel?: boolean`. When `true`, the helper skips the `setModel` RPC but still calls `rpc.getState()` and throws on mismatch - the same contract as the unconditional `setModel` path. `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` and the three verification sub-session sites set `skipSetModel: true` exactly when `session.spawnPinnedModel` equals the model they would otherwise bind. Net effect: the read-back verification still runs, but the redundant `setModel` RPC (and its `model_change` event) is elided.
