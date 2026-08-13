@@ -1944,12 +1944,113 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(promptOwner.promptQueue.length, 0, "termination must purge verifier work from the replacement promptOwner too");
 	});
 
-	it("VERIFIER_BUSY_RACE_REPRO drops restored verifier rows while retaining ordinary durable rows", () => {
+	it("redrives the exact verifier-owned steer without batching a source:verification notification", async () => {
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = vi.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-mixed-steered-verifier-retry",
+			rpcClient: { prompt },
+		});
+		const verifier = session.promptQueue.enqueue("exact verifier steer", {
+			isSteered: true,
+			source: "verification",
+			verifierOwned: true,
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+			streamingBehavior: "followUp",
+		});
+		const notification = session.promptQueue.enqueue("team lead notification must not hitchhike", {
+			isSteered: true,
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
+
+		manager.drainQueue(session);
+		await flushAsyncWork();
+		assert.equal(session.lastPromptText, verifier.text, "the verifier retry anchor must be its exact row, not mixed batch text");
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.id),
+			[verifier.id, notification.id],
+			"the failed verifier row restores ahead of, but never absorbs, the ordinary notification",
+		);
+		const retry = autoRetryPendingEvents(session).at(-1);
+		assert.ok(retry, "the failed verifier delivery schedules its bounded retry");
+		manager._testClock.advance(retry.retryDelayMs);
+		await flushAsyncWork();
+
+		assert.deepEqual(
+			prompt.mock.calls.map((call: any[]) => call[0]),
+			["[System]: exact verifier steer", "[System]: exact verifier steer"],
+			"retryLastPrompt must select the flagged verifier row by durable ID, never replay its source:verification neighbour",
+		);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.id, row.text, row.verifierOwned]),
+			[[notification.id, notification.text, undefined]],
+			"only the accepted verifier row is consumed; the notification remains queued exactly once",
+		);
+	});
+
+	it("restartAgent carries source:verification notifications but purges verifier-owned rows", async () => {
+		const manager = makeManager();
+		const sessionId = "s-restart-verifier-ownership";
+		const { session } = putSession(manager, {
+			id: sessionId,
+			status: "streaming",
+			unsubscribe: vi.fn(),
+			rpcClient: { stop: vi.fn(async () => {}) },
+		});
+		const notification = session.promptQueue.enqueue("team lead notification survives restart", {
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
+		const receipt = manager.enqueueVerifierPrompt(sessionId, "verifier-owned row is purged at restart");
+		const receiptOutcome = receipt.dispatched.then(
+			() => assert.fail("restart must settle the discarded verifier receipt"),
+			(error: Error) => error,
+		);
+		const persisted = {
+			id: sessionId,
+			title: session.title,
+			cwd: session.cwd,
+			agentSessionFile: "/virtual/project/reviewer.jsonl",
+			createdAt: session.createdAt,
+			lastActivity: session.lastActivity,
+		};
+		manager._testStore.get.mockReturnValue(persisted);
+		manager.restoreSession = vi.fn(async () => {
+			manager.sessions.set(sessionId, {
+				...session,
+				promptQueue: new PromptQueue(session.promptQueue.toArray()),
+				status: "idle",
+			});
+		});
+
+		await manager.restartAgent(sessionId);
+		assert.match((await receiptOutcome).message, /restarted before dispatch/);
+		assert.deepEqual(
+			manager.sessions.get(sessionId)?.promptQueue.toArray().map((row: any) => [row.id, row.source, row.verifierOwned]),
+			[[notification.id, "verification", undefined]],
+			"restartAgent must retain durable team-lead work while fencing only harness-owned verifier rows",
+		);
+	});
+
+	it("separates verifier lifecycle ownership from verification attribution on restore", () => {
 		const manager = makeManager();
 		const persisted = new PromptQueue();
 		persisted.enqueue("ordinary restored work");
+		// Team-lead gate notifications share the verification source for UI and
+		// authorship, but were never admitted by enqueueVerifierPrompt.
+		persisted.enqueue("team lead gate notification", {
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
 		persisted.enqueue("stale verifier reminder", {
 			source: "verification",
+			verifierOwned: true,
 			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
 			streamingBehavior: "followUp",
 		});
@@ -1965,9 +2066,47 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		});
 
 		assert.deepEqual(
-			manager.sessions.get("s-restored-verifier-rows")?.promptQueue.toArray().map((row: any) => [row.text, row.source]),
-			[["ordinary restored work", undefined]],
-			"VERIFIER_BUSY_RACE_REPRO: a restored signal cannot redrive a stale verifier turn, but ordinary queue rows remain durable",
+			manager.sessions.get("s-restored-verifier-rows")?.promptQueue.toArray().map((row: any) => [row.text, row.source, row.verifierOwned]),
+			[
+				["ordinary restored work", undefined, undefined],
+				["team lead gate notification", "verification", undefined],
+			],
+			"VERIFIER_BUSY_RACE_REPRO: restore prunes only explicitly verifier-owned rows; legacy source:verification work remains durable",
+		);
+	});
+
+	it("keeps source:verification work through auth and manual-retry recovery while settling verifier-owned receipts", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session } = putSession(manager, {
+			id: "s-verifier-ownership-auth",
+			status: "streaming",
+			rpcClient: { prompt },
+		});
+		const notification = session.promptQueue.enqueue("team lead notification survives recovery", {
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
+		const receipt = manager.enqueueVerifierPrompt(session.id, "owned verifier row is abandoned");
+		const receiptOutcome = receipt.dispatched.then(
+			() => assert.fail("verifier-owned auth failure must reject its receipt"),
+			(error: Error) => error,
+		);
+
+		// A real provider-auth recovery sees both dequeued/recovered kinds. The
+		// ordinary source:verification row remains, while the exact verifier row
+		// is abandoned so the harness cannot time out waiting for manual Retry.
+		(manager as any).recoverPromptDispatch(session, [
+			{ id: notification.id, text: notification.text, source: notification.source },
+			{ id: receipt.rowId, text: "owned verifier row is abandoned", source: "verification", verifierOwned: true },
+		], AUTH_ERROR, "ownership test", [notification.id, receipt.rowId], true);
+
+		const error = await receiptOutcome;
+		assert.match(error.message, /OpenRouter provider authentication failure \(missing-api-key\)/);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.id, row.source, row.verifierOwned]),
+			[[notification.id, "verification", undefined]],
+			"manual/provider-auth recovery must not abandon durable team-lead notifications",
 		);
 	});
 });
