@@ -281,6 +281,10 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }] }),
 			});
 			expect(config.status, await config.text()).toBe(200);
+			const savedConfigResponse = await api(`/api/projects/${project.id}/config`);
+			expect(savedConfigResponse.status, await savedConfigResponse.clone().text()).toBe(200);
+			const savedConfig = await savedConfigResponse.json() as { sandbox_tokens?: Array<{ key: string; enabled: boolean; value: string }> };
+			expect(savedConfig.sandbox_tokens).toEqual([{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true, value: "" }]);
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
 			const providerResponse = await api("/api/custom-providers", {
 				method: "POST",
