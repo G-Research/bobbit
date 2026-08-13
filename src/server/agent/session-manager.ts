@@ -1305,10 +1305,10 @@ function removePromptAuthorAmbiguityFence(
 	owner.residentBytes = Math.max(0, owner.residentBytes - promptAuthorAmbiguityFenceBytes(removed));
 }
 
-/** Cancel one exact prepared attempt, or a restored attempt by its unique sidecar id. */
+/** Cancel one exact prepared attempt, or a restored attempt by durable occurrence evidence. */
 function cancelPromptAuthorBinding(
 	session: SessionInfo,
-	target: PreparedPromptAuthorDispatch | string,
+	target: PreparedPromptAuthorDispatch | string | Pick<PendingPromptAuthorRecord, "promptId" | "intentId" | "attemptId">,
 	now: number,
 ): boolean {
 	const pendingAuthors = session.pendingPromptAuthors;
@@ -1319,7 +1319,12 @@ function cancelPromptAuthorBinding(
 			}
 			return -1;
 		})()
-		: (pendingAuthors?.findIndex((candidate) => candidate === target.pending) ?? -1);
+		: "pending" in target
+			? (pendingAuthors?.findIndex((candidate) => candidate === target.pending) ?? -1)
+			: (pendingAuthors?.findIndex((candidate) =>
+				candidate.promptId === target.promptId
+				&& (target.intentId === undefined || candidate.intentId === target.intentId)
+				&& (target.attemptId === undefined || candidate.attemptId === target.attemptId)) ?? -1);
 	if (idx === -1) return false;
 
 	const [pending] = pendingAuthors!.splice(idx, 1);
@@ -1552,6 +1557,56 @@ type ReliableInFlightRecord = InFlightSteerRecord & {
 	deliveryReason?: string;
 };
 
+export interface PersistedIntentRestoreState {
+	messageQueue?: QueuedMessage[];
+	inFlightSteerTexts?: InFlightSteerRecord[];
+	changed: boolean;
+}
+
+/**
+ * Fold durable terminal sidecar evidence before a restored queue becomes live.
+ * Only modern exact occurrence/attempt identities are removed; legacy rows with
+ * no verifiable intent tuple retain their compatibility recovery behavior.
+ */
+export function reconcilePersistedIntentRestore(
+	messageQueue: readonly QueuedMessage[] | undefined,
+	inFlightSteerTexts: readonly InFlightSteerRecord[] | undefined,
+	bindings: readonly PromptAuthorBinding[],
+): PersistedIntentRestoreState {
+	const latestByIntent = new Map<string, PromptAuthorBinding>();
+	const terminalAttempts = new Set<string>();
+	for (const binding of bindings) {
+		if (binding.intentId) latestByIntent.set(binding.intentId, binding);
+		if (binding.intentId && binding.attemptId && binding.settlement) {
+			terminalAttempts.add(`${binding.intentId}\0${binding.attemptId}`);
+		}
+	}
+
+	const queue = messageQueue?.filter((row) => {
+		const latest = latestByIntent.get(row.id);
+		if (latest?.settlement === undefined) return true;
+		// A proven-no-start recovery explicitly carries the retired attempt on its
+		// queued row. A stale pre-dispatch queue copy has no such evidence and must
+		// yield to the terminal sidecar disposition.
+		const recovered = row as ReliableQueuedMessage;
+		return latest.settlement.outcome === "cancelled"
+			&& (recovered.deliveryState === "queued" || recovered.deliveryState === "failed")
+			&& recovered.attemptId !== undefined
+			&& recovered.attemptId === latest.attemptId;
+	});
+	const ledger = inFlightSteerTexts?.filter((record) => {
+		if (!record.intentId || !record.attemptId) return true;
+		return !terminalAttempts.has(`${record.intentId}\0${record.attemptId}`);
+	});
+	const queueChanged = (queue?.length ?? 0) !== (messageQueue?.length ?? 0);
+	const ledgerChanged = (ledger?.length ?? 0) !== (inFlightSteerTexts?.length ?? 0);
+	return {
+		messageQueue: queue && queue.length > 0 ? [...queue] : undefined,
+		inFlightSteerTexts: ledger && ledger.length > 0 ? [...ledger] : undefined,
+		changed: queueChanged || ledgerChanged,
+	};
+}
+
 /**
  * Merge the persisted queue and dispatch ledger into one occurrence projection.
  * Queue rows win duplicate IDs, while accepted occurrence time and lane sequence
@@ -1579,6 +1634,9 @@ function projectReliableDeliveryOutbox(
 			dispatchEpoch: record.dispatchEpoch,
 			source: record.source,
 			author: record.author,
+			images: record.images,
+			attachments: record.attachments,
+			suppressTitleGen: record.suppressTitleGen,
 		}));
 
 	return [...queued, ...inFlight].sort((left, right) => {
@@ -1828,18 +1886,23 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 	session.lastKeylessPromptAuthorEnd = undefined;
 
 	// Settlement may have reached the durable sidecar just before a gateway
-	// crash, while the in-flight steer ledger update did not. The echoed
-	// settlement wins: retaining that ledger row would redispatch the steer.
-	const echoedPromptIds = new Set(
-		entries
-			.filter((entry) => entry.settlement?.outcome === "echoed")
-			.map((entry) => entry.promptId),
-	);
+	// crash, while the queue/ledger transaction did not. Exact modern attempt
+	// evidence wins for either terminal outcome. Legacy prompt-id rows retain the
+	// established echoed pruning, but an unverifiable cancellation never drops one.
+	const terminalAttempts = new Set(entries
+		.filter((entry) => entry.intentId && entry.attemptId && entry.settlement)
+		.map((entry) => `${entry.intentId}\0${entry.attemptId}`));
+	const echoedLegacyPromptIds = new Set(entries
+		.filter((entry) => entry.intentId === undefined && entry.settlement?.outcome === "echoed")
+		.map((entry) => entry.promptId));
 	const before = session.inFlightSteerTexts?.length ?? 0;
 	if (before > 0) {
-		session.inFlightSteerTexts = session.inFlightSteerTexts!.filter(
-			(record) => !echoedPromptIds.has(record.promptId),
-		);
+		session.inFlightSteerTexts = session.inFlightSteerTexts!.filter((record) => {
+			if (record.intentId && record.attemptId) {
+				return !terminalAttempts.has(`${record.intentId}\0${record.attemptId}`);
+			}
+			return !echoedLegacyPromptIds.has(record.promptId);
+		});
 	}
 	return before - (session.inFlightSteerTexts?.length ?? 0);
 }
@@ -3149,7 +3212,13 @@ export class SessionManager {
 
 			this._sessionReplacementCoordinators.delete(sessionId);
 			owned.active = undefined;
-			if (!canonical || owned.terminalRequest) return;
+			// Termination destroys the session. Stop destroys only the current turn:
+			// its proven-no-start reconciliation deliberately leaves accepted rows for
+			// this sole post-abort drain boundary.
+			if (!canonical || owned.terminalRequest === "terminate") return;
+			if (process.env.BOBBIT_DEBUG && canonical) {
+				console.log(`[reliable-turn] replacement-release session=${sessionId} terminal=${owned.terminalRequest ?? "none"} status=${canonical.status} queued=${canonical.promptQueue.length} drain=${owned.drainOnRelease}`);
+			}
 			if (
 				owned.drainOnRelease
 				&& canonical.status === "idle"
@@ -5300,18 +5369,24 @@ export class SessionManager {
 	private persistIntentCancellation(session: SessionInfo, row: ReliableQueuedMessage): boolean {
 		const existing = [...readAuthorSidecar(session.id)].reverse().find((binding) =>
 			binding.intentId === row.id || binding.promptId === row.id);
-		if (existing?.settlement?.outcome === "cancelled") return true;
 		if (existing?.settlement?.outcome === "echoed") return false;
 		const settledAt = this.clock.now();
+		const recoveredAttempt = row.attemptId !== undefined && row.attemptId === existing?.attemptId;
+		if (existing?.settlement?.outcome === "cancelled" && !recoveredAttempt) return true;
 		let attemptId = existing?.attemptId;
-		if (!existing) {
+		let promptId = existing?.promptId ?? row.id;
+		if (!existing || recoveredAttempt) {
+			// A recovered queue row legitimately follows a cancelled delivery attempt.
+			// Give explicit dismissal a fresh exact attempt so restore can distinguish
+			// terminal intent cancellation from the retired attempt marker on the row.
 			attemptId = promptAttemptId("dismiss");
+			promptId = row.id;
 			const source = row.source ?? "user";
 			const author = resolveAcceptedPromptAuthor(source, row.author);
 			if (!appendPromptAuthorDispatch(session.id, {
 				schemaVersion: 2,
 				type: "prompt-author",
-				promptId: row.id,
+				promptId,
 				intentId: row.id,
 				attemptId,
 				dispatchEpoch: settledAt,
@@ -5324,7 +5399,7 @@ export class SessionManager {
 		return appendPromptAuthorSettlement(session.id, {
 			schemaVersion: 2,
 			type: "prompt-author-settlement",
-			promptId: existing?.promptId ?? row.id,
+			promptId,
 			intentId: row.id,
 			...(attemptId === undefined ? {} : { attemptId }),
 			settledAt,
@@ -5419,6 +5494,21 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, {
 			inFlightSteerTexts: this.persistedInFlightSteerTexts(session),
 		});
+	}
+
+	/** Apply a synchronously persisted exact echo/cancellation that preceded RPC acknowledgement. */
+	private pruneTerminalInFlightAttempt(session: SessionInfo, intentId: string, attemptId: string): boolean {
+		const terminal = readAuthorSidecar(session.id).some((binding) =>
+			binding.intentId === intentId
+			&& binding.attemptId === attemptId
+			&& binding.settlement !== undefined);
+		if (!terminal) return false;
+		const ledger = (session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[];
+		const next = ledger.filter((record) => record.intentId !== intentId || record.attemptId !== attemptId);
+		if (next.length === ledger.length) return false;
+		session.inFlightSteerTexts = next;
+		this.broadcastQueue(session);
+		return true;
 	}
 
 	private broadcastQueue(session: SessionInfo, _opts?: { includeInFlightSteers?: boolean }): void {
@@ -6134,15 +6224,21 @@ export class SessionManager {
 		return cancelPromptAuthorBinding(session, prepared, this.clock.now());
 	}
 
-	private cancelRestoredPromptAuthorDispatch(session: SessionInfo, promptId: string): boolean {
-		if (cancelPromptAuthorBinding(session, promptId, this.clock.now())) return true;
+	private cancelRestoredPromptAuthorDispatch(
+		session: SessionInfo,
+		target: string | Pick<InFlightSteerRecord, "promptId" | "intentId" | "attemptId">,
+	): boolean {
+		if (cancelPromptAuthorBinding(session, target, this.clock.now())) return true;
 		// A hard-abort synthetic agent_end can reconcile the durable steer ledger
-		// before replacement hydration has rebuilt pendingPromptAuthors. Settle the
-		// exact unresolved sidecar occurrence now so restore cannot later expose it
-		// as a live attempt or let replay consume a newer same-text retry.
-		const restored = readAuthorSidecar(session.id).find(
-			(binding) => binding.promptId === promptId && binding.settlement === undefined,
-		);
+		// before replacement hydration has rebuilt pendingPromptAuthors. Settle only
+		// the exact modern attempt; legacy prompt ids keep their established fallback.
+		const restored = [...readAuthorSidecar(session.id)].reverse().find((binding) => {
+			if (binding.settlement !== undefined) return false;
+			if (typeof target === "string") return binding.promptId === target;
+			return binding.promptId === target.promptId
+				&& (target.intentId === undefined || binding.intentId === target.intentId)
+				&& (target.attemptId === undefined || binding.attemptId === target.attemptId);
+		});
 		if (!restored) return false;
 		retainPromptAuthorAmbiguityFence(session, {
 			promptId: restored.promptId,
@@ -6263,6 +6359,9 @@ export class SessionManager {
 					retryable: false,
 					source,
 					author,
+					images: row.images,
+					attachments: row.attachments,
+					suppressTitleGen: row.suppressTitleGen,
 				};
 				(session.inFlightSteerTexts ??= []).push(ledgerRecord);
 				session.promptQueue.remove(row.id);
@@ -6278,8 +6377,11 @@ export class SessionManager {
 						throw new Error((response as any)?.error || "steer rejected");
 					}
 					acceptPreparedPromptDispatch(session, prepared, activityBoundary);
-					// RPC acknowledgement is deliberately not a settlement boundary.
-					this.broadcastQueue(session);
+					// RPC acknowledgement is deliberately not a settlement boundary. An
+					// exact terminal sidecar written by an earlier correlated echo is.
+					if (!this.pruneTerminalInFlightAttempt(session, row.id, prepared.attemptId)) {
+						this.broadcastQueue(session);
+					}
 				} catch (error) {
 					if (activityBoundary?.state === "committed") return;
 					const index = (session.inFlightSteerTexts as ReliableInFlightRecord[]).indexOf(ledgerRecord);
@@ -6291,6 +6393,8 @@ export class SessionManager {
 							deliveryState: "failed",
 							retryable: true,
 							deliveryError: "bridge-rejected",
+							attemptId: prepared.attemptId,
+							dispatchEpoch: prepared.dispatchEpoch,
 						}, { front: true });
 					} else if (index !== -1) {
 						ledgerRecord.state = "uncertain";
@@ -6349,7 +6453,7 @@ export class SessionManager {
 	 */
 	private _reconcileInFlightSteers(
 		session: SessionInfo,
-		opts?: { outcome?: "ambiguous" | "proven-no-start" },
+		opts?: { outcome?: "ambiguous" | "proven-no-start"; retargetContinuation?: boolean },
 	): void {
 		const ledger = (session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[];
 		if (opts?.outcome !== "proven-no-start") {
@@ -6377,23 +6481,35 @@ export class SessionManager {
 		}
 
 		const recoverable = [...ledger];
-		for (const record of recoverable) this.cancelRestoredPromptAuthorDispatch(session, record.promptId);
+		if (process.env.BOBBIT_DEBUG && recoverable.length > 0) {
+			console.log(`[reliable-turn] reconcile session=${session.id} outcome=proven-no-start attempts=${recoverable.map((record) => record.intentId ?? record.promptId).join(",")}`);
+		}
+		for (const record of recoverable) this.cancelRestoredPromptAuthorDispatch(session, record);
 		session.inFlightSteerTexts = ledger.filter((record) => !recoverable.includes(record));
 		for (const record of [...recoverable].reverse()) {
 			const intentId = record.intentId ?? record.promptId;
 			const kind = record.kind ?? "steer";
+			const originalTarget = record.targetTurn
+				?? (record.intentId ? (kind === "steer" ? "continuation" : "next-turn") : "next-turn");
+			const retargeted = opts?.retargetContinuation === true
+				&& (record.targetTurn ?? "continuation") === "continuation";
 			this.enqueueReliableIntent(session, {
 				id: intentId,
 				text: record.text,
 				isSteered: kind === "steer",
 				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
 				kind,
-				targetTurn: "next-turn",
+				targetTurn: retargeted ? "next-turn" : originalTarget,
 				sequence: record.sequence,
 				deliveryState: "queued",
-				deliveryReason: "continuation-aborted",
+				deliveryReason: retargeted ? "continuation-aborted" : (record.deliveryReason ?? "delivery-recovered"),
+				attemptId: record.attemptId,
+				dispatchEpoch: record.dispatchEpoch,
 				source: record.source,
 				author: record.author,
+				images: record.images,
+				attachments: record.attachments,
+				suppressTitleGen: record.suppressTitleGen,
 			}, { front: true });
 		}
 		this.broadcastQueue(session);
@@ -6405,8 +6521,8 @@ export class SessionManager {
 	): void {
 		const queue = session.promptQueue as any;
 		if (opts?.outcome === "proven-no-start") {
-			if (typeof queue.retargetContinuationAfterAbort === "function") {
-				queue.retargetContinuationAfterAbort("continuation-aborted");
+			if (typeof queue.retargetContinuationToNextTurn === "function") {
+				queue.retargetContinuationToNextTurn("continuation-aborted");
 			} else {
 				const rows = session.promptQueue.toArray() as ReliableQueuedMessage[];
 				const retargeted = rows.filter((row) => row.targetTurn === "continuation" && row.deliveryState !== "received");
@@ -6420,9 +6536,39 @@ export class SessionManager {
 				}
 			}
 		}
-		this._reconcileInFlightSteers(session, opts);
+		this._reconcileInFlightSteers(session, {
+			...opts,
+			retargetContinuation: opts?.outcome === "proven-no-start",
+		});
 		if (session._reliableCompactionReleaseDeferred && opts?.outcome === "proven-no-start") {
 			session._reliableCompactionReleaseDeferred = false;
+		}
+	}
+
+	/** Terminally cancel modern ambiguous attempts when abort recovery cannot prove history. */
+	private _cancelAmbiguousInFlightAfterAbort(session: SessionInfo): void {
+		const ledger = (session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[];
+		const cancelled: ReliableInFlightRecord[] = [];
+		for (const record of ledger) {
+			if (!record.intentId || !record.attemptId) continue;
+			if (this.cancelRestoredPromptAuthorDispatch(session, record)) cancelled.push(record);
+		}
+		if (cancelled.length === 0) return;
+		const cancelledSet = new Set(cancelled);
+		session.inFlightSteerTexts = ledger.filter((record) => !cancelledSet.has(record));
+		this.broadcastQueue(session);
+		for (const record of cancelled) {
+			broadcast(session.clients, {
+				type: "intent_update",
+				sessionId: session.id,
+				intent: {
+					id: record.intentId!,
+					deliveryState: "cancelled",
+					deliveryReason: "abort-recovery-failed",
+					retryable: false,
+				} as unknown as ReliableQueuedMessage,
+				settlement: "cancelled",
+			});
 		}
 	}
 
@@ -6719,6 +6865,9 @@ export class SessionManager {
 				retryable: false,
 				source,
 				author,
+				images: reliableRow.images,
+				attachments: reliableRow.attachments,
+				suppressTitleGen: reliableRow.suppressTitleGen,
 			};
 			(session.inFlightSteerTexts ??= []).push(attempt);
 			session.promptQueue.remove(reliableRow.id);
@@ -6734,7 +6883,9 @@ export class SessionManager {
 					throw new Error((response as any).error || "prompt rejected");
 				}
 				acceptPreparedPromptDispatch(session, prepared, activityBoundary);
-				this.broadcastQueue(session);
+				if (!this.pruneTerminalInFlightAttempt(session, reliableRow.id, prepared.attemptId)) {
+					this.broadcastQueue(session);
+				}
 				return;
 			} catch (error) {
 				if (activityBoundary?.state === "committed") return;
@@ -6742,7 +6893,14 @@ export class SessionManager {
 				if (definiteRejection) {
 					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
 					this.cancelPromptAuthorDispatch(session, prepared);
-					this.enqueueReliableIntent(session, { ...reliableRow, deliveryState: "failed", retryable: true, deliveryError: "bridge-rejected" }, { front: true });
+					this.enqueueReliableIntent(session, {
+						...reliableRow,
+						deliveryState: "failed",
+						retryable: true,
+						deliveryError: "bridge-rejected",
+						attemptId: prepared.attemptId,
+						dispatchEpoch: prepared.dispatchEpoch,
+					}, { front: true });
 				} else if (index !== -1) {
 					attempt.state = "uncertain";
 					attempt.retryable = false;
@@ -7009,7 +7167,12 @@ export class SessionManager {
 	private handleAgentLifecycle(
 		session: SessionInfo,
 		event: any,
-		opts?: { replacementOwnedTerminal?: boolean; deferQueueDrain?: boolean },
+		opts?: {
+			replacementOwnedTerminal?: boolean;
+			deferQueueDrain?: boolean;
+			/** A synthetic hard-kill terminal cannot prove whether Pi appended the user start. */
+			abortAttemptOutcome?: "ambiguous" | "proven-no-start";
+		},
 	): void {
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
@@ -7219,9 +7382,12 @@ export class SessionManager {
 			// duplicate agent_end cannot reinterpret the next turn as cancelled.
 			session.abortShapedTerminal = undefined;
 			if (wasAborting || abortShapedTerminal) {
-				// Requeue only durable entries that did not reach the user-role echo
-				// settlement boundary before the cancelled turn ended.
-				this._reconcileAfterAbort(session);
+				// A real final agent_end orders after every user start for the cancelled
+				// run, so anything unresolved has proven no start. Synthetic hard-kill
+				// bookkeeping opts into ambiguity until replacement replay proves history.
+				this._reconcileAfterAbort(session, {
+					outcome: opts?.abortAttemptOutcome ?? "proven-no-start",
+				});
 				this.broadcastQueue(session);
 
 				// Cancellation is not a model malfunction. Clear only its error state
@@ -9173,11 +9339,43 @@ export class SessionManager {
 		}
 	}
 
+	private preparePersistedIntentRestore(ps: PersistedSession): {
+		ps: PersistedSession;
+		bindings: PromptAuthorBinding[];
+		store: SessionStore;
+		changed: boolean;
+	} {
+		const store = this.getSessionStore(ps.projectId);
+		const bindings = readAuthorSidecar(ps.id);
+		const normalizedLedger = normalizePersistedInFlightSteers(ps.inFlightSteerTexts);
+		const reconciled = reconcilePersistedIntentRestore(ps.messageQueue, normalizedLedger, bindings);
+		if (reconciled.changed) {
+			// Publish terminal sidecar evidence before a queue can be installed or
+			// drained. A crash between settlement and the prior queue transaction must
+			// not resurrect the accepted occurrence on another restore.
+			store.update(ps.id, {
+				messageQueue: reconciled.messageQueue,
+				inFlightSteerTexts: reconciled.inFlightSteerTexts,
+			});
+		}
+		return {
+			store,
+			bindings,
+			changed: reconciled.changed,
+			ps: {
+				...ps,
+				messageQueue: reconciled.messageQueue,
+				inFlightSteerTexts: reconciled.inFlightSteerTexts,
+			},
+		};
+	}
+
 	private addDormantSession(
 		ps: PersistedSession,
 		restoreError?: string,
 		condition?: ModelSelectionRequiredCondition,
 	): void {
+		ps = this.preparePersistedIntentRestore(ps).ps;
 		this.sessions.set(ps.id, {
 			id: ps.id,
 			title: ps.title,
@@ -9295,6 +9493,11 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
+		const preparedRestore = this.preparePersistedIntentRestore(ps);
+		ps = preparedRestore.ps;
+		const restoreStore = preparedRestore.store;
+		const restoredAuthorBindings = preparedRestore.bindings;
+		if (preparedRestore.changed) await restoreStore.flushAsync();
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -9711,7 +9914,7 @@ export class SessionManager {
 		// The sidecar is the durable source for dispatches that crossed a gateway
 		// restart before Pi echoed them. Hydrate before subscribing/switch_session
 		// so replayed update/end frames retain and settle the original identity.
-		const settledSteersPruned = restorePromptAuthorBindings(session, readAuthorSidecar(ps.id));
+		const settledSteersPruned = restorePromptAuthorBindings(session, restoredAuthorBindings);
 
 		// Skip cost tracking and lifecycle effects during switch_session replay.
 		// Activity attribution has a stronger origin fence: it stays suppressed
@@ -9719,7 +9922,6 @@ export class SessionManager {
 		// after the switch response cannot corrupt the persisted timestamp.
 		let restoring = true;
 
-		const restoreStore = this.getSessionStore(ps.projectId);
 		installSessionActivityAttribution(session, restoreStore, {
 			now: () => this.clock.now(),
 			suppressUntilPrompt: true,
@@ -14942,6 +15144,7 @@ export class SessionManager {
 		this.handleAgentLifecycle(session, { type: "agent_end", messages: [] }, {
 			replacementOwnedTerminal: true,
 			deferQueueDrain: true,
+			abortAttemptOutcome: "ambiguous",
 		});
 
 		// Emit agent_end so clients know streaming stopped.
@@ -15185,9 +15388,10 @@ export class SessionManager {
 			// lifecycle replacement has settled, never against an intermediate bridge.
 			session.recoverDrainAttempts = 0;
 		} catch (err) {
-			// If replacement setup failed before replay reconciliation, preserve the
-			// accepted steer as queued intent for a later recovery attempt.
-			this._reconcileAfterAbort(session);
+			// Without a verified replay, redispatch would be unsafe. Settle exact modern
+			// attempts as visibly cancelled instead of stranding them uncertain forever;
+			// unverifiable legacy rows remain available to their compatibility restore.
+			this._cancelAmbiguousInFlightAfterAbort(session);
 			session.promptAuthorReplayBindings = undefined;
 			session.lastKeylessPromptAuthorEnd = undefined;
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
