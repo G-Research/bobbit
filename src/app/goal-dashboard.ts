@@ -379,6 +379,14 @@ let treeCostLastFetchAt = 0;
 let dashboardDescendants: Goal[] = [];
 let dashboardDescendantsInFlight = false;
 let dashboardDescendantsLastFetchAt = 0;
+/**
+ * Local scheduler-recovery consumes fence older descendants snapshots. A
+ * response started before a successful retry cannot resurrect the recovery it
+ * predates; a request started afterwards remains authoritative, so a genuinely
+ * new scheduler stop is still shown.
+ */
+let dashboardRecoveryGeneration = 0;
+const consumedSchedulerRecoveryGeneration = new Map<string, number>();
 
 /**
  * Pending plan-mutation approval requests for the current goal — the
@@ -463,12 +471,22 @@ async function fetchDashboardDescendants(goalId: string): Promise<void> {
 	if (dashboardDescendantsInFlight) return;
 	dashboardDescendantsInFlight = true;
 	dashboardDescendantsLastFetchAt = Date.now();
+	// Capture before awaiting: a retry that succeeds while this request is in
+	// flight consumes the older snapshot's recovery record only.
+	const recoveryGeneration = dashboardRecoveryGeneration;
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/descendants`);
 		if (!res.ok) return;
 		const data = await res.json() as { goals?: Goal[] };
 		if (currentGoalId === goalId) {
-			dashboardDescendants = Array.isArray(data?.goals) ? data.goals : [];
+			const staleConsumedIds = [...consumedSchedulerRecoveryGeneration]
+				.filter(([, consumedAt]) => consumedAt > recoveryGeneration)
+				.map(([childGoalId]) => childGoalId);
+			let descendants = Array.isArray(data?.goals) ? data.goals : [];
+			for (const childGoalId of staleConsumedIds) {
+				descendants = clearSchedulerRecoveryForGoal(descendants, childGoalId);
+			}
+			dashboardDescendants = descendants;
 			renderApp();
 		}
 	} catch {
@@ -597,6 +615,8 @@ function dashboardGoalPool(): Goal[] {
  * the already-cleared recovery pill before the next fetch.
  */
 function reconcilePlanSchedulerRecoveryRetry(goalId: string): void {
+	// The root badge and Plan-node actions share this success callback.
+	consumedSchedulerRecoveryGeneration.set(goalId, ++dashboardRecoveryGeneration);
 	state.goals = clearSchedulerRecoveryForGoal(state.goals, goalId);
 	dashboardDescendants = clearSchedulerRecoveryForGoal(dashboardDescendants, goalId);
 	if (currentGoal?.id === goalId) {
@@ -1050,6 +1070,8 @@ export function clearDashboardState(): void {
 	dashboardDescendants = [];
 	dashboardDescendantsInFlight = false;
 	dashboardDescendantsLastFetchAt = 0;
+	dashboardRecoveryGeneration = 0;
+	consumedSchedulerRecoveryGeneration.clear();
 	dashboardPendingMutations = [];
 	dashboardMutationsInFlight = false;
 	dashboardMutationDecisionInFlight.clear();

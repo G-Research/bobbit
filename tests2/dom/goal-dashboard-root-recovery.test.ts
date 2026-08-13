@@ -14,11 +14,15 @@ let state!: StateModule["state"];
 let setRenderApp!: StateModule["setRenderApp"];
 let clearDashboardState!: DashboardModule["clearDashboardState"];
 let loadDashboardData!: DashboardModule["loadDashboardData"];
+let notifyGoalEventForDashboard!: DashboardModule["notifyGoalEventForDashboard"];
 let renderGoalDashboard!: DashboardModule["renderGoalDashboard"];
 let host!: HTMLElement;
 let activeGoal!: Goal;
 let retryResult: "success" | "failed" | "network";
 let webSocketSendCount: number;
+let descendantsRequestCount: number;
+let holdDescendantsResponse = false;
+let resolveDescendantsResponse: ((response: Response) => void) | undefined;
 
 const now = 1_783_682_557_000;
 
@@ -66,7 +70,13 @@ function installFetchStub(): void {
 		if (path === `/api/goals/${activeGoal.id}/team`) return Promise.resolve(new Response(null, { status: 404 }));
 		// Deliberately contain the root too: this represents the duplicate cache
 		// which used to restore recovery after the root action's stale render.
-		if (path === `/api/goals/${activeGoal.id}/descendants`) return Promise.resolve(jsonResponse({ goals: [activeGoal] }));
+		if (path === `/api/goals/${activeGoal.id}/descendants`) {
+			descendantsRequestCount++;
+			if (holdDescendantsResponse) {
+				return new Promise<Response>(resolve => { resolveDescendantsResponse = resolve; });
+			}
+			return Promise.resolve(jsonResponse({ goals: [activeGoal] }));
+		}
 		if (path === `/api/goals/${activeGoal.id}/mutations/pending`) return Promise.resolve(jsonResponse({ pending: [] }));
 		if (path === `/api/goals/${activeGoal.id}/verifications/active`) return Promise.resolve(jsonResponse({ verifications: [] }));
 		if (path === "/api/sessions") return Promise.resolve(jsonResponse({ sessions: [], generation: 1 }));
@@ -102,6 +112,9 @@ beforeEach(async () => {
 	activeGoal = makeGoal();
 	retryResult = "success";
 	webSocketSendCount = 0;
+	descendantsRequestCount = 0;
+	holdDescendantsResponse = false;
+	resolveDescendantsResponse = undefined;
 	installFetchStub();
 	vi.stubGlobal("WebSocket", class extends EventTarget {
 		static OPEN = 1;
@@ -116,6 +129,7 @@ beforeEach(async () => {
 	setRenderApp = stateMod.setRenderApp;
 	clearDashboardState = dashboardMod.clearDashboardState;
 	loadDashboardData = dashboardMod.loadDashboardData;
+	notifyGoalEventForDashboard = dashboardMod.notifyGoalEventForDashboard;
 	renderGoalDashboard = dashboardMod.renderGoalDashboard;
 	clearDashboardState();
 	state.goals = [activeGoal];
@@ -142,16 +156,27 @@ afterEach(() => {
 });
 
 describe("root scheduler recovery retry", () => {
-	it("clears all root recovery caches immediately after a successful POST without a broadcast", async () => {
+	it("does not let an older descendants response restore consumed root recovery", async () => {
+		// Start a descendants refresh, but hold its pre-retry snapshot until the
+		// successful retry has cleared every local recovery cache.
+		holdDescendantsResponse = true;
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6_000);
+		notifyGoalEventForDashboard();
+		expect(descendantsRequestCount).toBe(2);
+
 		const button = host.querySelector<HTMLButtonElement>("[data-testid='goal-scheduler-recovery-retry']")!;
 		button.click();
-
 		await waitFor(() => state.goals[0]?.schedulerRecovery === undefined);
 		expect(state.goals[0]?.schedulerRecovery).toBeUndefined();
+
+		resolveDescendantsResponse!(jsonResponse({ goals: [activeGoal] }));
+		await nextFrame();
+		await nextFrame();
+
 		// Lit commits the render queued by reconciliation asynchronously; do not
 		// mistake the previous DOM frame for a stale cache or broadcast dependency.
-		await waitFor(() => host.querySelector("[data-testid='goal-scheduler-recovery-retry']") ? null : true);
 		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeNull();
+		expect(state.goals[0]?.schedulerRecovery).toBeUndefined();
 		expect(webSocketSendCount).toBe(0);
 	});
 
