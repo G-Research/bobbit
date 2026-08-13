@@ -28,7 +28,12 @@ import {
 export interface PromptAuthorDispatchRecord {
 	schemaVersion: 2;
 	type: "prompt-author";
+	/** Legacy-compatible sidecar key. Modern dispatches keep it attempt-unique. */
 	promptId: string;
+	/** Durable accepted occurrence and one-attempt evidence. Optional on v2 legacy rows. */
+	intentId?: string;
+	attemptId?: string;
+	dispatchEpoch?: number;
 	dispatchedAt: number;
 	/** Keyed digest of the exact text sent to Pi, including any author prefix. */
 	modelTextDigest: string;
@@ -42,6 +47,8 @@ export interface PromptAuthorSettlementRecord {
 	schemaVersion: 2;
 	type: "prompt-author-settlement";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
 	settledAt: number;
 	outcome: "echoed" | "cancelled";
 	messageId?: string;
@@ -55,6 +62,9 @@ export interface PromptAuthorDispatchInput {
 	schemaVersion?: 1 | 2;
 	type?: "prompt-author";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
+	dispatchEpoch?: number;
 	dispatchedAt: number;
 	/** Exact text that will be sent to Pi; append immediately hashes it. */
 	modelText: string;
@@ -68,6 +78,8 @@ export interface PromptAuthorSettlementInput {
 	schemaVersion?: 1 | 2;
 	type?: "prompt-author-settlement";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
 	settledAt: number;
 	outcome: "echoed" | "cancelled";
 	messageId?: string;
@@ -82,6 +94,9 @@ export interface PromptAuthorBinding {
 	schemaVersion: 1 | 2;
 	type: "prompt-author";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
+	dispatchEpoch?: number;
 	dispatchedAt: number;
 	modelText?: string;
 	modelTextDigest?: string;
@@ -92,6 +107,8 @@ export interface PromptAuthorBinding {
 		schemaVersion: 1 | 2;
 		type: "prompt-author-settlement";
 		promptId: string;
+		intentId?: string;
+		attemptId?: string;
 		settledAt: number;
 		outcome: "echoed" | "cancelled";
 		messageId?: string;
@@ -153,6 +170,15 @@ function validTimestamp(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+function validOptionalKey(value: unknown): boolean {
+	return value === undefined || validKey(value);
+}
+
+function validOptionalEpoch(value: unknown): boolean {
+	return value === undefined
+		|| (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+}
+
 function validDigest(value: unknown): value is string {
 	return typeof value === "string" && DIGEST_PATTERN.test(value);
 }
@@ -176,6 +202,9 @@ function isDispatchRecord(value: unknown): value is PromptAuthorDispatchRecord {
 	return record.schemaVersion === 2
 		&& record.type === "prompt-author"
 		&& validKey(record.promptId)
+		&& validOptionalKey(record.intentId)
+		&& validOptionalKey(record.attemptId)
+		&& validOptionalEpoch(record.dispatchEpoch)
 		&& validTimestamp(record.dispatchedAt)
 		&& validDigest(record.modelTextDigest)
 		&& isPromptSource(record.source)
@@ -189,6 +218,8 @@ function isSettlementRecord(value: unknown): value is PromptAuthorSettlementReco
 	return record.schemaVersion === 2
 		&& record.type === "prompt-author-settlement"
 		&& validKey(record.promptId)
+		&& validOptionalKey(record.intentId)
+		&& validOptionalKey(record.attemptId)
 		&& validTimestamp(record.settledAt)
 		&& (record.outcome === "echoed" || record.outcome === "cancelled")
 		&& (record.messageId === undefined || validKey(record.messageId))
@@ -229,6 +260,9 @@ function canonicalDispatchRecord(record: PromptAuthorDispatchRecord): PromptAuth
 		schemaVersion: 2,
 		type: "prompt-author",
 		promptId: record.promptId,
+		...(record.intentId === undefined ? {} : { intentId: record.intentId }),
+		...(record.attemptId === undefined ? {} : { attemptId: record.attemptId }),
+		...(record.dispatchEpoch === undefined ? {} : { dispatchEpoch: record.dispatchEpoch }),
 		dispatchedAt: record.dispatchedAt,
 		modelTextDigest: record.modelTextDigest,
 		source: record.source,
@@ -242,6 +276,8 @@ function canonicalSettlementRecord(record: PromptAuthorSettlementRecord): Prompt
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
 		promptId: record.promptId,
+		...(record.intentId === undefined ? {} : { intentId: record.intentId }),
+		...(record.attemptId === undefined ? {} : { attemptId: record.attemptId }),
 		settledAt: record.settledAt,
 		outcome: record.outcome,
 		...(record.messageId === undefined ? {} : { messageId: record.messageId }),
@@ -261,6 +297,9 @@ function isPromptAuthorBinding(value: unknown): value is PromptAuthorBinding {
 	if ((record.schemaVersion !== 1 && record.schemaVersion !== 2)
 		|| record.type !== "prompt-author"
 		|| !validKey(record.promptId)
+		|| !validOptionalKey(record.intentId)
+		|| !validOptionalKey(record.attemptId)
+		|| !validOptionalEpoch(record.dispatchEpoch)
 		|| !validTimestamp(record.dispatchedAt)
 		|| !isPromptSource(record.source)
 		|| !isMessageAuthor(record.author)
@@ -684,6 +723,9 @@ export function appendPromptAuthorDispatch(
 		schemaVersion: 2,
 		type: "prompt-author",
 		promptId: input.promptId,
+		...(input.intentId === undefined ? {} : { intentId: input.intentId }),
+		...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
+		...(input.dispatchEpoch === undefined ? {} : { dispatchEpoch: input.dispatchEpoch }),
 		dispatchedAt: input.dispatchedAt,
 		modelTextDigest: modelTextDigest ?? "",
 		source: input.source,
@@ -702,6 +744,8 @@ export function appendPromptAuthorSettlement(
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
 		promptId: input.promptId,
+		...(input.intentId === undefined ? {} : { intentId: input.intentId }),
+		...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
 		settledAt: input.settledAt,
 		outcome: input.outcome,
 		...(input.messageId === undefined ? {} : { messageId: input.messageId }),
@@ -711,17 +755,30 @@ export function appendPromptAuthorSettlement(
 	return appendRecord(sessionId, record);
 }
 
-/** Fold redispatches by prompt id. The latest dispatch resets prior settlement. */
+/**
+ * Fold sidecar evidence by attempt when present. Legacy prompt-id redispatches
+ * retain their historical latest-wins behavior, while modern stale settlements
+ * can no longer settle a replacement attempt for the same accepted intent.
+ */
 export function foldAuthorSidecarRecords(records: AuthorSidecarRecord[]): PromptAuthorBinding[] {
 	const bindings = new Map<string, PromptAuthorBinding>();
+	const latestKeyByPromptId = new Map<string, string>();
 	for (const record of records) {
 		if (isDispatchRecord(record)) {
-			bindings.set(record.promptId, { ...record });
+			const key = record.attemptId ? `attempt:${record.attemptId}` : `prompt:${record.promptId}`;
+			bindings.set(key, { ...record });
+			latestKeyByPromptId.set(record.promptId, key);
 			continue;
 		}
 		if (!isSettlementRecord(record)) continue;
-		const binding = bindings.get(record.promptId);
+		const key = record.attemptId
+			? `attempt:${record.attemptId}`
+			: latestKeyByPromptId.get(record.promptId);
+		if (!key) continue;
+		const binding = bindings.get(key);
 		if (!binding) continue;
+		// When both sides carry occurrence identity, contradictory evidence fails closed.
+		if (record.intentId && binding.intentId && record.intentId !== binding.intentId) continue;
 		binding.settlement = record;
 	}
 	return [...bindings.values()].sort((left, right) => left.dispatchedAt - right.dispatchedAt);
@@ -765,8 +822,8 @@ export function extractPromptModelText(message: Record<string, unknown>): string
  */
 export function projectCorrelatedPromptMessage<T extends Record<string, unknown>>(
 	message: T,
-	binding: Pick<PromptAuthorBinding, "author" | "modelPrefix" | "modelTextDigest">,
-): T & { author: MessageAuthor } {
+	binding: Pick<PromptAuthorBinding, "author" | "modelPrefix" | "modelTextDigest" | "intentId" | "attemptId">,
+): T & { author: MessageAuthor; deliveryIntentId?: string; deliveryAttemptId?: string } {
 	const candidateModelText = extractPromptModelText(message);
 	const rawTextProven = candidateModelText !== undefined
 		&& promptAuthorBindingDigestMatchesText(binding, candidateModelText);
@@ -801,11 +858,17 @@ export function projectCorrelatedPromptMessage<T extends Record<string, unknown>
 	}
 
 	const authorChanged = !sameAuthor(message.author, binding.author);
-	if (!contentChanged && !authorChanged) return message as T & { author: MessageAuthor };
+	const intentChanged = binding.intentId !== undefined && message.deliveryIntentId !== binding.intentId;
+	const attemptChanged = binding.attemptId !== undefined && message.deliveryAttemptId !== binding.attemptId;
+	if (!contentChanged && !authorChanged && !intentChanged && !attemptChanged) {
+		return message as T & { author: MessageAuthor; deliveryIntentId?: string; deliveryAttemptId?: string };
+	}
 	return {
 		...message,
 		...(contentChanged ? { content: projectedContent } : {}),
 		author: binding.author,
+		...(binding.intentId === undefined ? {} : { deliveryIntentId: binding.intentId }),
+		...(binding.attemptId === undefined ? {} : { deliveryAttemptId: binding.attemptId }),
 	};
 }
 
@@ -896,6 +959,8 @@ function utf8Length(value: unknown): number {
 function streamBindingBytes(binding: PromptAuthorBinding): number {
 	return 128
 		+ utf8Length(binding.promptId)
+		+ utf8Length(binding.intentId)
+		+ utf8Length(binding.attemptId)
 		+ utf8Length(binding.modelTextDigest)
 		+ utf8Length(binding.modelText)
 		+ utf8Length(binding.modelPrefix)
@@ -998,6 +1063,8 @@ export function createPromptAuthorStreamCorrelation(
 
 	const exactMessageIds = new Map<string, StreamBindingRef[]>();
 	const exactPromptIds = new Map<string, StreamBindingRef[]>();
+	const exactIntentIds = new Map<string, StreamBindingRef[]>();
+	const exactAttemptIds = new Map<string, StreamBindingRef[]>();
 	const timestampBindings = createBuckets();
 	const fifoBindings = createBuckets();
 	const refs: StreamBindingRef[] = [];
@@ -1007,6 +1074,8 @@ export function createPromptAuthorStreamCorrelation(
 		const ref: StreamBindingRef = { binding, order: refs.length, consumed: false };
 		refs.push(ref);
 		appendBucket(exactPromptIds, binding.promptId, ref);
+		if (binding.intentId) appendBucket(exactIntentIds, binding.intentId, ref);
+		if (binding.attemptId) appendBucket(exactAttemptIds, binding.attemptId, ref);
 		if (binding.settlement?.outcome !== "echoed") continue;
 		const settledMessageId = binding.settlement.messageId;
 		if (settledMessageId) {
@@ -1075,9 +1144,16 @@ export function createPromptAuthorStreamCorrelation(
 		// Unresolved dispatches are never allowed into digest/FIFO matching. The
 		// sole supported occurrence is Bobbit's exact synthetic in-flight steer id.
 		const id = messageId(message);
-		if (message._inFlightSteer === true && id?.startsWith("inflight-steer:")) {
-			const promptId = id.slice("inflight-steer:".length);
-			const direct = firstUnconsumed(exactPromptIds.get(promptId));
+		if (message._inFlightSteer === true) {
+			const deliveryAttemptId = validKey(message.deliveryAttemptId) ? message.deliveryAttemptId : undefined;
+			const deliveryIntentId = validKey(message.deliveryIntentId) ? message.deliveryIntentId : undefined;
+			const encodedId = id?.startsWith("inflight-steer:")
+				? id.slice("inflight-steer:".length)
+				: undefined;
+			const direct = firstUnconsumed(deliveryAttemptId ? exactAttemptIds.get(deliveryAttemptId) : undefined)
+				?? firstUnconsumed(deliveryIntentId ? exactIntentIds.get(deliveryIntentId) : undefined)
+				?? firstUnconsumed(encodedId ? exactPromptIds.get(encodedId) : undefined)
+				?? firstUnconsumed(encodedId ? exactIntentIds.get(encodedId) : undefined);
 			if (direct) {
 				direct.consumed = true;
 				return direct.binding;
@@ -1132,9 +1208,16 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		const row = rows[index];
 		if (!eligiblePromptMessage(row) || row._inFlightSteer !== true) continue;
 		const id = messageId(row);
-		if (!id?.startsWith("inflight-steer:")) continue;
-		const promptId = id.slice("inflight-steer:".length);
-		const binding = directPromptBindings.find((candidate) => !consumed.has(candidate) && candidate.promptId === promptId);
+		const encodedId = id?.startsWith("inflight-steer:")
+			? id.slice("inflight-steer:".length)
+			: undefined;
+		const deliveryIntentId = validKey(row.deliveryIntentId) ? row.deliveryIntentId : undefined;
+		const deliveryAttemptId = validKey(row.deliveryAttemptId) ? row.deliveryAttemptId : undefined;
+		const binding = directPromptBindings.find((candidate) => !consumed.has(candidate) && (
+			(deliveryAttemptId !== undefined && candidate.attemptId === deliveryAttemptId)
+			|| (deliveryIntentId !== undefined && candidate.intentId === deliveryIntentId)
+			|| (encodedId !== undefined && (candidate.promptId === encodedId || candidate.intentId === encodedId))
+		));
 		if (!binding) continue;
 		assignments.set(index, binding);
 		consumed.add(binding);
@@ -1315,6 +1398,9 @@ export function copyAuthorSidecar(
 				schemaVersion: 2,
 				type: "prompt-author",
 				promptId: binding.promptId,
+				...(binding.intentId === undefined ? {} : { intentId: binding.intentId }),
+				...(binding.attemptId === undefined ? {} : { attemptId: binding.attemptId }),
+				...(binding.dispatchEpoch === undefined ? {} : { dispatchEpoch: binding.dispatchEpoch }),
 				dispatchedAt: binding.dispatchedAt,
 				modelTextDigest: binding.modelTextDigest,
 				source: binding.source,
@@ -1325,6 +1411,8 @@ export function copyAuthorSidecar(
 				schemaVersion: 2,
 				type: "prompt-author-settlement",
 				promptId: binding.promptId,
+				...(binding.intentId === undefined ? {} : { intentId: binding.intentId }),
+				...(binding.attemptId === undefined ? {} : { attemptId: binding.attemptId }),
 				settledAt: binding.settlement.settledAt,
 				outcome: "echoed",
 				...(binding.settlement.messageId === undefined ? {} : { messageId: binding.settlement.messageId }),
