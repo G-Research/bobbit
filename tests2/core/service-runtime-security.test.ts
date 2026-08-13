@@ -42,6 +42,17 @@ function input(root: string, mode: ServiceRunnerStartInput["mode"]): ServiceRunn
 	return { manifest, mode, packRoot: root, descriptorDir: root, serverIdentity: "server", serviceIdentity: "pack\0fixture", packId: "pack", environment: { PORT: "8080" }, envFile: path.join(root, "runtime.env") };
 }
 
+async function withPlatform<T>(platform: NodeJS.Platform, action: () => Promise<T>): Promise<T> {
+	const original = Object.getOwnPropertyDescriptor(process, "platform");
+	if (!original) throw new Error("process.platform descriptor is unavailable");
+	Object.defineProperty(process, "platform", { ...original, value: platform });
+	try {
+		return await action();
+	} finally {
+		Object.defineProperty(process, "platform", original);
+	}
+}
+
 describe("service runtime security boundaries", () => {
 	it("requires gateway identity in a safe Compose project template", () => {
 		const root = rootWithCompose("services: {}\n");
@@ -136,12 +147,35 @@ describe("service runtime security boundaries", () => {
 		}
 	});
 
-	it("refuses a non-owner-only Compose env artifact before invoking Docker", async () => {
+	it("refuses a non-owner-only Compose env artifact before invoking Docker on POSIX", async () => {
+		if (process.platform === "win32") return;
 		const root = rootWithCompose("services:\n  api:\n    image: fixture\n    restart: 'no'\n    ports: [\"127.0.0.1::8080\"]\n");
 		fs.chmodSync(path.join(root, "runtime.env"), 0o644);
 		const execute = vi.fn();
 		await assert.rejects(new ComposeServiceRunner({ execute }).start(input(root, "compose")), { code: "SERVICE_LAUNCH_FAILED" });
 		assert.equal(execute.mock.calls.length, 0);
+	});
+
+	it("accepts regular Compose env files but rejects symlinks on Windows", async () => {
+		const root = rootWithCompose("services:\n  api:\n    image: fixture\n    restart: 'no'\n    ports: [\"127.0.0.1::8080\"]\n");
+		const envFile = path.join(root, "runtime.env");
+		fs.chmodSync(envFile, 0o644);
+
+		await withPlatform("win32", async () => {
+			const execute = vi.fn()
+				.mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 })
+				.mockResolvedValueOnce({ stdout: "127.0.0.1:43123", stderr: "", exitCode: 0 });
+			await expect(new ComposeServiceRunner({ execute }).start(input(root, "compose"))).resolves.toMatchObject({ endpoint: "http://127.0.0.1:43123" });
+			assert.equal(execute.mock.calls.length, 2, "a regular Windows artifact reaches Compose");
+
+			const target = path.join(root, "untrusted.env");
+			fs.writeFileSync(target, "PORT=untrusted\n");
+			fs.rmSync(envFile);
+			fs.symlinkSync(target, envFile);
+			const unsafeExecute = vi.fn();
+			await assert.rejects(new ComposeServiceRunner({ execute: unsafeExecute }).start(input(root, "compose")), { code: "SERVICE_LAUNCH_FAILED" });
+			assert.equal(unsafeExecute.mock.calls.length, 0, "symlink artifacts are rejected before Compose");
+		});
 	});
 
 	it("tears down the scoped Compose project without deleting volumes when publication discovery fails after up", async () => {

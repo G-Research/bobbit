@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
@@ -47,8 +47,10 @@ describe("ServiceRuntimeStore", () => {
 		const afterRestart = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" });
 		assert.deepEqual(await afterRestart.load(identity), record({ desired: "stopped", selectedMode: "docker", settingsRevision: "rev-2", storageIdentity }));
 		const runtimeDir = path.join(root, "service-runtimes", Buffer.from("@bobbit/hindsight").toString("base64url"), "hindsight");
-		assert.equal((await stat(path.join(runtimeDir, "state.json"))).mode & 0o777, 0o600);
-		assert.equal((await stat(runtimeDir)).mode & 0o777, 0o700);
+		if (process.platform !== "win32") {
+			assert.equal((await stat(path.join(runtimeDir, "state.json"))).mode & 0o777, 0o600);
+			assert.equal((await stat(runtimeDir)).mode & 0o777, 0o700);
+		}
 		assert.deepEqual((await store.list()).map((entry) => entry.identity), [identity]);
 	});
 
@@ -104,7 +106,7 @@ describe("ServiceRuntimeStore", () => {
 		await store.writeEnvironment(identity, { TOKEN: "generated-value", API_KEY: "user-value" });
 		const envFile = await store.environmentFile(identity);
 		assert.equal(envFile, path.join(root, "service-runtimes", Buffer.from("pack").toString("base64url"), "runtime", "runtime.env"));
-		assert.equal((await stat(envFile)).mode & 0o777, 0o600);
+		if (process.platform !== "win32") assert.equal((await stat(envFile)).mode & 0o777, 0o600);
 		await store.writeLog(identity, Array.from({ length: 240 }, (_, i) => `TOKEN=generated-value user-value ${i}`).join("\n"), ["generated-value", "user-value"]);
 		const log = await store.readLog(identity);
 		assert.ok(log?.includes("TOKEN=[REDACTED]"));
@@ -115,7 +117,8 @@ describe("ServiceRuntimeStore", () => {
 		assert.ok(!stateText.includes("generated-value") && !stateText.includes("user-value"));
 	});
 
-	it("refuses a missing or non-owner-only environment artifact", async () => {
+	it("refuses a missing or non-owner-only environment artifact on POSIX", async () => {
+		if (process.platform === "win32") return;
 		const root = await temporaryRoot();
 		const store = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" });
 		const identity = store.identity("pack", "runtime");
@@ -124,6 +127,22 @@ describe("ServiceRuntimeStore", () => {
 		const envFile = await store.environmentFile(identity);
 		await writeFile(envFile, "VALUE=bad\n");
 		await chmod(envFile, 0o644);
+		await assert.rejects(store.environmentFile(identity), { code: "SERVICE_RUNTIME_STORE_CORRUPT" });
+	});
+
+	it("accepts regular environment artifacts but rejects symlinks on Windows", async () => {
+		const root = await temporaryRoot();
+		const store = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1", platform: "win32" });
+		const identity = store.identity("pack", "runtime");
+		await store.writeEnvironment(identity, { VALUE: "value" });
+		const envFile = await store.environmentFile(identity);
+		await chmod(envFile, 0o644);
+		assert.equal(await store.environmentFile(identity), envFile);
+
+		const target = path.join(root, "untrusted.env");
+		await writeFile(target, "VALUE=untrusted\n");
+		await rm(envFile);
+		await symlink(target, envFile);
 		await assert.rejects(store.environmentFile(identity), { code: "SERVICE_RUNTIME_STORE_CORRUPT" });
 	});
 
