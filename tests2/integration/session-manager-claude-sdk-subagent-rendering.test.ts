@@ -84,4 +84,23 @@ describe("SessionManager Claude SDK embedded work transport", () => {
 		expect(snapshot.subagentWork).toBe(nested);
 		expect(snapshot.messages).not.toContainEqual(expect.objectContaining({ id: "child-error" }));
 	});
+
+	it("projects SDK reload/archive rows into nested work before the root snapshot pipeline", () => {
+		const manager: any = Object.create(SessionManager.prototype);
+		manager.sessions = new Map();
+		manager.projectContextManager = null;
+		manager._testStore = { get: () => ({ id: "sdk-root", runtime: "claude-agent-sdk", title: "SDK", cwd: "/workspace" }) };
+		manager.messageAuthorDependencies = () => ({});
+		const snapshot = manager.buildVisibleMessageSnapshot("sdk-root", [
+			{ id: "root-agent", role: "assistant", content: [{ type: "toolCall", id: "agent-parent-1", name: "Agent", arguments: {} }] },
+			{ id: "child-text", role: "assistant", parentToolUseId: "agent-parent-1", parentAgentId: "child-1", content: "nested prose", usage: { cost: { total: 0.25 } } },
+		]);
+
+		expect(snapshot.messages).toEqual([expect.objectContaining({ id: "root-agent" })]);
+		expect(snapshot.messages).not.toContainEqual(expect.objectContaining({ id: "child-text" }));
+		expect(snapshot.subagentWork).toEqual([expect.objectContaining({
+			parentToolUseId: "agent-parent-1",
+			messages: [expect.objectContaining({ id: "child-text", usage: { cost: { total: 0.25 } } })],
+		})]);
+	});
 });
