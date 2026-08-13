@@ -457,12 +457,16 @@ test.describe("Journey: built-in file explorer pack", () => {
 
 		await showTreeIfNarrow(panel);
 		await treeItem(page, "binary.dat").click();
+		await expect(panel.getByRole("tab", { name: "Diff" }), "file navigation remembers Diff mode").toHaveAttribute("aria-selected", "true");
+		await expect(panel.locator(PREVIEW)).toContainText("Binary file changed. A text diff is not available.");
+		await panel.getByRole("tab", { name: "File" }).click();
 		await expect(panel.locator(PREVIEW)).toContainText("Binary files cannot be previewed.");
 		await showTreeIfNarrow(panel);
 		await treeItem(page, "empty.txt").click();
 		await expect(panel.locator(PREVIEW)).toContainText("This file is empty.");
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		await expect(panel.locator(PREVIEW)).toContainText("Empty file added.");
+		await panel.getByRole("tab", { name: "File" }).click();
 		await showTreeIfNarrow(panel);
 		await treeItem(page, "oversized.txt").click();
 		await expect(panel.locator(PREVIEW)).toContainText(/File is too large|File exceeds the preview limit/);
