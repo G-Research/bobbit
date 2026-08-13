@@ -1722,20 +1722,16 @@ export class RemoteAgent {
 		this.send({ type: "steer_queued", messageId });
 	}
 
-	/** Remove an unaccepted local occurrence, or ask the server to remove the
-	 * accepted occurrence. Local cleanup is durable and id-keyed. */
+	/** Remove a never-sent local occurrence immediately. Once a frame may have
+	 * reached the server, retain its carrier until durable cancellation receipt. */
 	removeQueued(messageId: string): void {
 		const idx = this._pendingOutbox.findIndex((e) => e.row?.id === messageId);
-		if (idx !== -1) {
+		if (idx !== -1 && this._pendingOutbox[idx].lastSentEpoch === undefined) {
 			this._pendingOutbox.splice(idx, 1);
 			void storage.deliveryIntents.delete(this._sessionId, messageId);
 			this.onQueueUpdate?.(this.getQueue());
 			return;
 		}
-		const projected = this._deliveryProjection.delete(messageId);
-		const before = this._serverQueue.length;
-		this._serverQueue = this._serverQueue.filter((row) => row.id !== messageId);
-		if (projected || before !== this._serverQueue.length) this.onQueueUpdate?.(this.getQueue());
 		this.send({ type: "remove_queued", messageId });
 	}
 
@@ -2388,9 +2384,16 @@ export class RemoteAgent {
 				);
 				break;
 
-			case "intent_update":
-				this._updateDeliveryProjection(msg.intent ?? msg.row ?? msg.data ?? msg);
+			case "intent_update": {
+				const intent = msg.intent ?? msg.row ?? msg.data ?? msg;
+				const intentId = typeof intent?.id === "string" ? intent.id : deliveryIntentId(intent);
+				if (intentId && (msg.settlement === "surfaced" || msg.settlement === "cancelled")) {
+					this._settleSurfacedIntent(intentId);
+					break;
+				}
+				this._updateDeliveryProjection(intent);
 				break;
+			}
 
 			case "intent_accepted": {
 				// Receipt alone is not ownership transfer. It intentionally does not

@@ -56,9 +56,9 @@ function boundedDiagnostic(value: unknown): string | undefined {
 }
 
 /**
- * Normalize queue rows at the persistence boundary. Missing delivery metadata is
- * legacy state, not a separate runtime shape: it receives a stable occurrence
- * id and conservative lane defaults once when restored.
+ * Normalize queue rows at the persistence boundary. Legacy rows retain absent
+ * delivery metadata so their historical steer-priority behavior stays isolated;
+ * identified reliable rows receive conservative defaults for partial metadata.
  */
 function normalizeQueuedMessage(
 	message: QueuedMessage,
@@ -77,20 +77,26 @@ function normalizeQueuedMessage(
 		normalized.source = normalized.author.kind;
 	}
 
-	const kind = validKind(normalized.kind)
-		? normalized.kind
-		: normalized.isSteered ? "steer" : "prompt";
-	const targetTurn = validTargetTurn(normalized.targetTurn)
-		? normalized.targetTurn
-		: kind === "steer" ? "continuation" : "next-turn";
-	normalized.kind = kind;
-	normalized.targetTurn = targetTurn;
-	normalized.sequence = validSequence(normalized.sequence)
-		? normalized.sequence
-		: fallbackSequence(targetTurn);
-	normalized.deliveryState = validDeliveryState(normalized.deliveryState)
-		? normalized.deliveryState
-		: "queued";
+	const carriesReliableMetadata = normalized.kind !== undefined
+		|| normalized.targetTurn !== undefined
+		|| normalized.sequence !== undefined
+		|| normalized.deliveryState !== undefined;
+	if (carriesReliableMetadata) {
+		const kind = validKind(normalized.kind)
+			? normalized.kind
+			: normalized.isSteered ? "steer" : "prompt";
+		const targetTurn = validTargetTurn(normalized.targetTurn)
+			? normalized.targetTurn
+			: kind === "steer" ? "continuation" : "next-turn";
+		normalized.kind = kind;
+		normalized.targetTurn = targetTurn;
+		normalized.sequence = validSequence(normalized.sequence)
+			? normalized.sequence
+			: fallbackSequence(targetTurn);
+		normalized.deliveryState = validDeliveryState(normalized.deliveryState)
+			? normalized.deliveryState
+			: "queued";
+	}
 	const deliveryReason = boundedDiagnostic(normalized.deliveryReason);
 	const deliveryError = boundedDiagnostic(normalized.deliveryError);
 	if (deliveryReason === undefined) delete normalized.deliveryReason;
@@ -143,18 +149,25 @@ export class PromptQueue {
 
 	private createMessage(text: string, opts?: PromptQueueEnqueueOptions): QueuedMessage {
 		const isSteered = opts?.isSteered ?? opts?.kind === "steer";
-		const kind = opts?.kind ?? (isSteered ? "steer" : "prompt");
-		const targetTurn = opts?.targetTurn ?? (kind === "steer" ? "continuation" : "next-turn");
+		const reliable = validKey(opts?.intentId)
+			|| opts?.kind !== undefined
+			|| opts?.targetTurn !== undefined
+			|| opts?.sequence !== undefined
+			|| opts?.deliveryState !== undefined;
 		const msg: QueuedMessage = {
 			id: validKey(opts?.intentId) ? opts.intentId : randomUUID(),
 			text,
 			isSteered,
 			createdAt: Date.now(),
-			kind,
-			targetTurn,
-			sequence: validSequence(opts?.sequence) ? opts.sequence : this.allocateSequence(targetTurn),
-			deliveryState: validDeliveryState(opts?.deliveryState) ? opts.deliveryState : "queued",
 		};
+		if (reliable) {
+			const kind = opts?.kind ?? (isSteered ? "steer" : "prompt");
+			const targetTurn = opts?.targetTurn ?? (kind === "steer" ? "continuation" : "next-turn");
+			msg.kind = kind;
+			msg.targetTurn = targetTurn;
+			msg.sequence = validSequence(opts?.sequence) ? opts.sequence : this.allocateSequence(targetTurn);
+			msg.deliveryState = validDeliveryState(opts?.deliveryState) ? opts.deliveryState : "queued";
+		}
 		if (opts?.images?.length) msg.images = opts.images;
 		if (opts?.attachments?.length) msg.attachments = opts.attachments;
 		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
@@ -215,10 +228,16 @@ export class PromptQueue {
 		const msg = this.queue.find(m => m.id === messageId);
 		if (!msg) return false;
 		if (msg.isSteered) return true;
+		const reliable = msg.kind !== undefined
+			|| msg.targetTurn !== undefined
+			|| msg.sequence !== undefined
+			|| msg.deliveryState !== undefined;
 		msg.isSteered = true;
-		msg.kind = "steer";
-		msg.targetTurn = "continuation";
-		msg.sequence = this.allocateSequence("continuation");
+		if (reliable) {
+			msg.kind = "steer";
+			msg.targetTurn = "continuation";
+			msg.sequence = this.allocateSequence("continuation");
+		}
 		this.reorder();
 		return true;
 	}
