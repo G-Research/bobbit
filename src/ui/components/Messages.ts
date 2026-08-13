@@ -369,6 +369,8 @@ export class AssistantMessage extends LitElement {
 	@property({ type: Boolean }) hideToolCalls = false;
 	@property({ type: Object }) toolResultsById?: Map<string, BobbitMessage<ToolResultMessageType>>;
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
+	/** Renderer-only Claude SDK activity, already partitioned by exact parent tool-use id. */
+	@property({ attribute: false }) embeddedSubagentWork?: unknown;
 	@property({ type: Boolean }) isStreaming: boolean = false;
 	@property({ type: Boolean }) hidePendingToolCalls = false;
 	@property({ attribute: false }) onCostClick?: () => void;
@@ -520,6 +522,7 @@ export class AssistantMessage extends LitElement {
 							.callStartTime=${this.message.timestamp}
 							.result=${result}
 							.partialResult=${this.toolPartialResults?.[tc.id]}
+							.embeddedSubagentWork=${this.embeddedSubagentWork}
 							.pending=${pending}
 							.permissionBlocked=${permissionBlocked}
 							.aborted=${aborted}
@@ -665,6 +668,10 @@ export class ToolMessage extends LitElement {
 	/** Server-stamped timestamp of the assistant message that issued this call.
 	 *  Threaded to renderers as a reload-stable timer anchor (e.g. bash_bg wait). */
 	@property({ type: Number }) callStartTime?: number;
+	/** Child activity is consumed only by the native Agent/Task renderer. */
+	@property({ attribute: false }) embeddedSubagentWork?: unknown;
+	/** Nested SDK child tools reuse their normal renderer content without adding a second card shell. */
+	@property({ type: Boolean }) embedded = false;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -803,6 +810,7 @@ export class ToolMessage extends LitElement {
 				goalId: goalIdCtx,
 				getAskResponseAnswers,
 				packTool: toolName,
+				embeddedSubagentWork: this.embeddedSubagentWork,
 				host: getHostApi(sessionIdCtx, this.toolCall.id, { kind: "tool", tool: toolName, packId: packIdForTool(toolName) }),
 			},
 		);
@@ -812,7 +820,9 @@ export class ToolMessage extends LitElement {
 			return renderResult.content;
 		}
 
-		// Default: wrap in card
+		// Nested SDK child tools retain their canonical renderer content without a
+		// second card-colored surface; root tools keep the historical outer card.
+		if (this.embedded) return html`<div data-tool-name="${toolName}" class="text-card-foreground">${renderResult.content}</div>`;
 		return html`
 			<div data-tool-name="${toolName}" class="p-2.5 border border-border rounded-md bg-card text-card-foreground shadow-xs">
 				${this.permissionBlocked ? html`

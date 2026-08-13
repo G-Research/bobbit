@@ -139,6 +139,8 @@ export class MessageList extends LitElement {
 	@property({ type: Boolean }) hasStreamMessage: boolean = false;
 	/** Partial results from long-running tools (delegate progress, etc.) */
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
+	/** Renderer-facing SDK child activity; partitions attach only by root call id. */
+	@property({ attribute: false }) embeddedSubagentWork?: unknown;
 	@property({ attribute: false }) onCostClick?: () => void;
 	@property({ attribute: false }) onDismissError?: (id: string) => void;
 	@property({ attribute: false }) onRestartAgent?: () => void;
@@ -360,6 +362,7 @@ export class MessageList extends LitElement {
 						.permissionBlockedTools=${permissionBlockedTools}
 						.toolResultsById=${resultByCallId}
 						.toolPartialResults=${this.toolPartialResults}
+						.embeddedSubagentWork=${this.embeddedSubagentWork}
 						.hideToolCalls=${false}
 						.hidePendingToolCalls=${this.isStreaming && this.hasStreamMessage}
 						.onCostClick=${this.onCostClick}
