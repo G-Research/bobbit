@@ -32,7 +32,7 @@ describe("review timeout payload propagation", () => {
 		const gateId = "implementation";
 		const signalId = "signal-review-timeout-payload";
 		const stateDir = makeStateDir();
-		const gateStore = new GateStore(stateDir);
+		const gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 		gateStore.initGatesForGoal(goalId, [gateId]);
 
 		const signal = {
@@ -127,7 +127,7 @@ describe("review timeout payload propagation", () => {
 		assert.deepEqual(completed.timeout, { configuredSeconds: 7, elapsedMs: 7_004 });
 
 		await gateStore.flush();
-		const reloaded = new GateStore(stateDir);
+		const reloaded = new GateStore(stateDir, undefined, { persistence: "json" });
 		const persistedGate = reloaded.getGate(goalId, gateId);
 		const persistedSignal = persistedGate?.signals.find(candidate => candidate.id === signalId);
 		assert.equal(persistedGate?.status, "failed", `${MARKER}: overall gate outcome must remain failed`);

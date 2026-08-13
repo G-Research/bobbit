@@ -10,7 +10,7 @@ import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../b
 import { caCertPath } from "../auth/tls.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
-import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
+import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -95,6 +95,10 @@ export interface RpcBridgeOptions {
 	 * Valid: off|minimal|low|medium|high|xhigh|max. Silently ignored otherwise.
 	 */
 	initialThinkingLevel?: string;
+	/** Original model request retained separately when final argv canonicalization changes it. */
+	requestedModel?: string;
+	/** Original thinking request retained separately from the exact clamped spawn level. */
+	requestedThinkingLevel?: string;
 	/** Timer/clock implementation. Defaults to real timers. */
 	clock?: Clock;
 }
@@ -127,6 +131,10 @@ export interface IRpcBridge {
 	abort(): Promise<any>;
 	getState(): Promise<any>;
 	getMessages(): Promise<any>;
+	/** Narrow read-only Pi session-tree plane used for authoritative sidecar binding. */
+	getTranscriptEntries?(): Promise<any>;
+	/** Read-only Pi transcript cursor/tree plane used to authorize history actions. */
+	getTranscriptCursorSnapshot?(): Promise<any>;
 	setModel(provider: string, modelId: string): Promise<any>;
 	setThinkingLevel(level: string): Promise<any>;
 	compact(timeoutMs?: number): Promise<any>;
@@ -278,6 +286,116 @@ export function resolveDirectGatewayEnv(
 	}
 	if (gwUrl) env.BOBBIT_GATEWAY_URL = gwUrl;
 	return env;
+}
+
+export interface EffectivePiSelection {
+	requestedModel?: string;
+	effectiveModel?: string;
+	requestedThinking?: ThinkingLevel;
+	effectiveThinking?: ThinkingLevel;
+	sanitizedArgs: string[];
+}
+
+function splitQualifiedModel(value: string | undefined): { provider: string; modelId: string } | undefined {
+	if (!value) return undefined;
+	const slash = value.indexOf("/");
+	if (slash <= 0 || slash === value.length - 1) return undefined;
+	return { provider: value.slice(0, slash), modelId: value.slice(slash + 1) };
+}
+
+/**
+ * Resolve Pi's effective provider/model/thinking tuple before process creation.
+ *
+ * Pi treats the last provider/model/thinking option as authoritative. A
+ * qualified model infers its provider only when no explicit raw provider is
+ * present; a bare raw model retains the initially pinned provider. Selection
+ * flags are removed from `sanitizedArgs` so callers can emit one canonical
+ * tuple after validating it against Bobbit's exact target-realm catalog.
+ */
+export function resolveEffectivePiSelection(options: RpcBridgeOptions): EffectivePiSelection {
+	const requestedModel = options.requestedModel ?? options.initialModel;
+	const requestedThinking = (THINKING_LEVELS as readonly string[]).includes(
+		options.requestedThinkingLevel ?? options.initialThinkingLevel ?? "",
+	)
+		? (options.requestedThinkingLevel ?? options.initialThinkingLevel) as ThinkingLevel
+		: undefined;
+	const initial = splitQualifiedModel(options.initialModel);
+	let rawProvider: string | undefined;
+	let rawModel: string | undefined;
+	let rawThinking: ThinkingLevel | undefined;
+	let sawRawProvider = false;
+	const sanitizedArgs: string[] = [];
+	const args = options.args ?? [];
+
+	const readSelectionValue = (flag: string, index: number): { value: string; nextIndex: number } => {
+		const value = args[index + 1];
+		if (!value || value.startsWith("-")) {
+			throw new Error(`Invalid Pi ${flag} argument: expected a non-empty value`);
+		}
+		return { value, nextIndex: index + 1 };
+	};
+
+	for (let i = 0; i < args.length; i++) {
+		const flag = args[i];
+		if (flag !== "--provider" && flag !== "--model" && flag !== "--thinking") {
+			sanitizedArgs.push(flag);
+			continue;
+		}
+		const parsed = readSelectionValue(flag, i);
+		i = parsed.nextIndex;
+		if (flag === "--provider") {
+			sawRawProvider = true;
+			rawProvider = parsed.value;
+		} else if (flag === "--model") {
+			rawModel = parsed.value;
+		} else {
+			if (!(THINKING_LEVELS as readonly string[]).includes(parsed.value)) {
+				throw new Error(`Invalid Pi --thinking argument: unknown level "${parsed.value}"`);
+			}
+			rawThinking = parsed.value as ThinkingLevel;
+		}
+	}
+
+	// Pi supports `--model <pattern>:<thinking>` when no explicit --thinking
+	// was supplied. Preserve strict exact model matching while honoring that
+	// documented shorthand.
+	if (rawModel && !rawThinking) {
+		const colon = rawModel.lastIndexOf(":");
+		const suffix = colon > 0 ? rawModel.slice(colon + 1) : "";
+		if ((THINKING_LEVELS as readonly string[]).includes(suffix)) {
+			rawModel = rawModel.slice(0, colon);
+			rawThinking = suffix as ThinkingLevel;
+		}
+	}
+
+	let provider = rawProvider ?? initial?.provider;
+	let modelId = rawModel ?? initial?.modelId;
+	if (rawModel && !sawRawProvider) {
+		const qualified = splitQualifiedModel(rawModel);
+		if (qualified) {
+			provider = qualified.provider;
+			modelId = qualified.modelId;
+		}
+	} else if (rawModel && rawProvider) {
+		// Pi tolerates `--provider p --model p/id` by stripping the matching
+		// provider prefix before exact model resolution.
+		const prefix = `${rawProvider}/`;
+		if (rawModel.toLowerCase().startsWith(prefix.toLowerCase())) {
+			modelId = rawModel.slice(prefix.length);
+		}
+	}
+	const effectiveModel = provider && modelId ? `${provider}/${modelId}` : undefined;
+	const initialThinking = (THINKING_LEVELS as readonly string[]).includes(options.initialThinkingLevel ?? "")
+		? options.initialThinkingLevel as ThinkingLevel
+		: undefined;
+
+	return {
+		...(requestedModel ? { requestedModel } : {}),
+		...(effectiveModel ? { effectiveModel } : {}),
+		...(requestedThinking ? { requestedThinking } : {}),
+		...(rawThinking ?? initialThinking ? { effectiveThinking: rawThinking ?? initialThinking } : {}),
+		sanitizedArgs,
+	};
 }
 
 export function buildAgentArgs(options: RpcBridgeOptions): string[] {
@@ -724,6 +842,45 @@ export class RpcBridge {
 		const response = await this.sendCommand({ type: "get_messages" });
 		if (response?.success) return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
 		return response;
+	}
+
+	/** Read Pi's session tree without invoking any mutating fork operation. */
+	async getTranscriptEntries() {
+		const response = await this.sendCommand({ type: "get_entries" });
+		if (!response?.success) return response;
+		return {
+			success: true,
+			data: {
+				entries: response.data?.entries,
+				leafId: response.data?.leafId,
+			},
+		};
+	}
+
+	/**
+	 * Read Pi's immutable fork selector and session tree without invoking its
+	 * mutating fork RPC. The caller correlates these two views with get_messages;
+	 * malformed or unsuccessful responses remain failures rather than cursors.
+	 */
+	async getTranscriptCursorSnapshot() {
+		const [forkMessages, entries] = await Promise.all([
+			this.sendCommand({ type: "get_fork_messages" }),
+			this.sendCommand({ type: "get_entries" }),
+		]);
+		if (!forkMessages?.success || !entries?.success) {
+			return {
+				success: false,
+				error: forkMessages?.error ?? entries?.error ?? "Pi transcript cursor data is unavailable",
+			};
+		}
+		return {
+			success: true,
+			data: {
+				forkMessages: forkMessages.data?.messages,
+				entries: entries.data?.entries,
+				leafId: entries.data?.leafId,
+			},
+		};
 	}
 
 	async stop(): Promise<void> {

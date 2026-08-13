@@ -1,0 +1,189 @@
+/* Only new session-manager layout styles live here. Existing Bobbit chrome,
+   typography, row, animation, popover, and utility styles come from app.css. */
+html, body, #app { width: 100%; height: 100%; overflow: hidden; }
+body { margin: 0; }
+
+.mock-view-controls {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-height: 27px;
+	padding: 0 8px 3px;
+	margin: 0 5px 3px;
+	border-bottom: 1px solid color-mix(in oklch, var(--border) 65%, transparent);
+}
+.mock-session-mode-switch { display: contents; }
+.mock-session-mode-switch button {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 0;
+	color: var(--muted-foreground);
+	font-size: .75em;
+	font-weight: 500;
+	transition: color 120ms ease;
+}
+.mock-session-mode-switch button:hover { color: var(--foreground); }
+.mock-session-mode-switch button[data-active="true"] { color: var(--foreground); }
+.mock-session-mode-switch button[data-active="true"]::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: -4px;
+	height: 1px;
+	background: var(--primary);
+}
+.mock-session-mode-switch svg,
+.mock-mode-filter svg { width: 12px; height: 12px; }
+.mock-mode-filter {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	margin-left: auto;
+	padding: 3px 5px;
+	border-radius: 5px;
+	color: var(--muted-foreground);
+	font-size: .75em;
+}
+.mock-mode-filter:hover,
+.mock-mode-filter[data-active="true"] { background: var(--secondary); color: var(--foreground); }
+
+.mock-group-heading {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: 25px;
+	padding: 0 7px;
+	color: var(--muted-foreground);
+	font-size: .6667em;
+	font-weight: 650;
+	letter-spacing: .09em;
+	text-transform: uppercase;
+}
+.mock-group-heading::after { content: ""; flex: 1; height: 1px; background: color-mix(in oklch, var(--border) 70%, transparent); }
+.mock-group-heading .group-count {
+	padding: 0 4px;
+	border-radius: 999px;
+	background: var(--muted);
+	font-size: 8px;
+	letter-spacing: 0;
+}
+.mock-filter-popover {
+	position: absolute;
+	top: calc(100% + 3px);
+	right: 0;
+	z-index: 40;
+	width: 236px;
+	padding: 5px;
+	border: 1px solid var(--border);
+	border-radius: 7px;
+	background: var(--popover);
+	box-shadow: 0 10px 30px color-mix(in oklch, var(--foreground) 12%, transparent);
+}
+.mock-filter-title {
+	padding: 4px 6px 5px;
+	color: var(--muted-foreground);
+	font-size: .6667em;
+	font-weight: 650;
+	letter-spacing: .08em;
+	text-transform: uppercase;
+}
+.mock-filter-label { padding: 5px 6px 3px; color: var(--muted-foreground); font-size: .6667em; }
+.mock-filter-chip-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 5px 5px; }
+.mock-filter-chip {
+	padding: 3px 6px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	color: var(--muted-foreground);
+	font-size: .6667em;
+}
+.mock-filter-chip:hover { color: var(--foreground); }
+.mock-filter-chip[data-active="true"] {
+	border-color: color-mix(in oklch, var(--primary) 42%, var(--border));
+	background: color-mix(in oklch, var(--primary) 10%, transparent);
+	color: var(--foreground);
+}
+
+.mock-empty {
+	margin: 12px 7px;
+	padding: 14px 10px;
+	border: 1px dashed var(--border);
+	border-radius: 7px;
+	color: var(--muted-foreground);
+	font-size: .75em;
+	line-height: 1.45;
+	text-align: center;
+}
+
+.mock-chat-area { background: var(--background); }
+.mock-chat-scroll { scrollbar-gutter: stable; }
+.mock-message { display: flex; gap: 9px; max-width: 760px; width: 100%; }
+.mock-message-role {
+	width: 25px;
+	height: 25px;
+	border: 1px solid var(--border);
+	border-radius: 7px;
+	display: grid;
+	place-items: center;
+	color: var(--muted-foreground);
+	background: var(--card);
+	flex: 0 0 25px;
+}
+.mock-message-body { min-width: 0; padding-top: 2px; color: var(--foreground); font-size: 13px; line-height: 1.55; }
+.mock-message-body .author { display: block; margin-bottom: 3px; font-size: 11px; font-weight: 650; color: var(--muted-foreground); }
+.mock-message-user { margin-left: auto; flex-direction: row-reverse; }
+.mock-message-user .mock-message-body { padding: 8px 10px; border-radius: 8px; background: var(--muted); }
+.mock-composer {
+	min-height: 76px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--card);
+	box-shadow: 0 2px 12px color-mix(in oklch, var(--foreground) 5%, transparent);
+}
+.mock-composer textarea { resize: none; outline: none; }
+
+.mock-toast {
+	position: fixed;
+	top: 52px;
+	left: 50%;
+	z-index: 100;
+	transform: translateX(-50%);
+	padding: 7px 11px;
+	border: 1px solid var(--border);
+	border-radius: 7px;
+	background: var(--popover);
+	color: var(--foreground);
+	box-shadow: 0 8px 24px color-mix(in oklch, var(--foreground) 12%, transparent);
+	font-size: 12px;
+	animation: mock-toast-in 160ms ease-out;
+}
+@keyframes mock-toast-in { from { opacity: 0; transform: translate(-50%, -5px); } }
+
+.mock-dialog-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 90;
+	display: grid;
+	place-items: center;
+	background: color-mix(in oklch, var(--background) 62%, transparent);
+	backdrop-filter: blur(2px);
+}
+.mock-dialog {
+	width: min(420px, calc(100vw - 32px));
+	padding: 16px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--popover);
+	box-shadow: 0 18px 54px color-mix(in oklch, var(--foreground) 18%, transparent);
+}
+.mock-dialog h2 { margin: 0 0 5px; font-size: 16px; }
+.mock-dialog p { margin: 0 0 13px; color: var(--muted-foreground); font-size: 12px; }
+.mock-dialog input { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--input); border-radius: 6px; background: var(--background); outline: none; }
+.mock-dialog input:focus { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 20%, transparent); }
+
+@media (max-width: 760px) {
+	.mock-view-controls { margin-inline: 8px; }
+}

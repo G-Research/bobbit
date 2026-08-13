@@ -17,7 +17,6 @@ import {
 	resolveComposerSlashDispatch,
 	type ComposerRuntime,
 	type ComposerSlashMenuItem,
-	type ComposerSlashSkill,
 } from "../../app/composer-slash-dispatch.js";
 import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -30,13 +29,24 @@ async function loadAttachmentLazy(source: string | File | Blob | ArrayBuffer, fi
 	return mod.loadAttachment(source, fileName);
 }
 
-type SlashSkillInfo = ComposerSlashMenuItem;
+interface SlashSkillInfo {
+	name: string;
+	description: string;
+	argumentHint?: string;
+	source: "project" | "personal" | "legacy" | "built-in" | "pack";
+	/** Slice C1 — set when this slash entry is a pack `composer-slash` ENTRYPOINT.
+	 *  Selecting it only inserts the completed command; send-time dispatch runs the
+	 *  launcher once the user has supplied any required arguments. */
+	entrypointId?: string;
+}
 
-const BUILT_IN_SLASH_COMMANDS: ComposerSlashSkill[] = [];
+// The PR-walkthrough launcher is now provided by the first-party pack's
+// composer-slash entrypoint (not a built-in slash command).
+const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [];
 
-function mergeBuiltInSlashCommands(skills: ComposerSlashSkill[]): ComposerSlashSkill[] {
-	const names = new Set(skills.map((skill) => skill.name));
-	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name)), ...skills];
+function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
+	const names = new Set(skills.map((skill) => skill.name.toLowerCase()));
+	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name.toLowerCase())), ...skills];
 }
 
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
@@ -110,6 +120,9 @@ export class MessageEditor extends LitElement {
 	@property() showThinkingSelector = true;
 	@property() onInput?: (value: string) => void;
 	@property() onSend?: (input: string, attachments: Attachment[]) => void | Promise<void>;
+	/** Synchronous prompt fence. When set, normal send retains the complete draft
+	 *  and returns before message-send, slash dispatch, history, or onSend. */
+	@property() blockedSendReason?: string;
 	@property() onAbort?: () => void;
 	@property() onModelSelect?: () => void;
 	@property() onThinkingChange?: (level: ThinkingLevel) => void;
@@ -132,8 +145,7 @@ export class MessageEditor extends LitElement {
 	@property() cwd?: string;
 	/** Project ID — used to scope slash skill discovery */
 	@property() projectId?: string;
-	/** Explicit server-provided session runtime; never inferred from model/provider.
-	 * Undefined is a real loading state and must not assume Pi controls. */
+	/** Explicit server-provided session runtime; undefined is a real loading state. */
 	@property() runtime: ComposerRuntime | undefined;
 	@property({ attribute: false }) onCompact?: () => void | Promise<void>;
 
@@ -146,6 +158,7 @@ export class MessageEditor extends LitElement {
 	 *  present. Shown as an inline error; cleared on the next edit or when the
 	 *  attachments change. */
 	@state() private _steerError = "";
+	@state() private _blockedSendError = "";
 	/** Content-aware submit-lock guarding BOTH the steer ({@link handleSteerShortcut})
 	 *  and normal-send ({@link handleSend}) lifecycles against concurrent DUPLICATE
 	 *  submission. Holds the exact text of every submit currently mid-flight (via any
@@ -163,10 +176,10 @@ export class MessageEditor extends LitElement {
 	private _savedDraft = ""; // draft saved when entering history mode
 
 	// Slash skill autocomplete state
-	@state() private _slashSkills: ComposerSlashSkill[] = mergeBuiltInSlashCommands([]);
+	@state() private _slashSkills: SlashSkillInfo[] = mergeBuiltInSlashCommands([]);
 	/** Server-only token reservations for non-menu skill winners. */
 	private _slashCollisionClaims: Array<{ name: string }> = [];
-	@state() private _slashFilteredSkills: SlashSkillInfo[] = [];
+	@state() private _slashFilteredSkills: ComposerSlashMenuItem[] = [];
 	@state() private _slashMenuOpen = false;
 	@state() private _slashSelectedIndex = 0;
 	@state() private _slashTokenStart = 0;
@@ -282,9 +295,9 @@ export class MessageEditor extends LitElement {
 		const cursorPos = textarea.selectionStart;
 		const textBeforeCursor = this.value.substring(0, cursorPos);
 		// Find the last "/" before cursor that's at a word boundary (after whitespace, newline, or at position 0)
-		const match = textBeforeCursor.match(/(^|[\s])\/([\w.-]*)$/);
+		const match = textBeforeCursor.match(/(^|[\s])\/([\w-]*)$/);
 		if (match) {
-			// Eagerly load skills if not yet loaded (handles race with cwd arrival).
+			// Eagerly load skills if not yet loaded (handles race with cwd arrival)
 			if (!this._slashSkillsLoaded && this.cwd) {
 				this._loadSlashSkills().then(() => this._updateSlashAutocomplete());
 			}
@@ -301,6 +314,12 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
+	/** Slice C1 — append the registered pack `composer-slash` ENTRYPOINTS (from the
+	 *  reconciled client pack-entrypoints registry) to the slash list as synthetic
+	 *  entries. The trigger name is the entrypoint id; selecting one completes the
+	 *  token and send-time dispatch runs the launcher. Best-effort + synchronous —
+	 *  the registry is already populated by the project reconcile; a load failure is
+	 *  non-fatal. */
 	private _showLauncherFeedback(message: string, kind: "pending" | "error" | "resolved"): void {
 		// Dispatch-only: the persistent launcher-feedback element in render.ts owns
 		// the UI. Do NOT also call showHeaderToast here (the transient 2500ms toast
@@ -320,7 +339,7 @@ export class MessageEditor extends LitElement {
 		this._showLauncherFeedback("", "resolved");
 	}
 
-	private _selectSlashSkill(skill: SlashSkillInfo) {
+	private _selectSlashSkill(skill: ComposerSlashMenuItem) {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return;
 		const before = this.value.substring(0, this._slashTokenStart);
@@ -337,9 +356,6 @@ export class MessageEditor extends LitElement {
 		textarea.setSelectionRange(newPos, newPos);
 	}
 
-	/** Fetch the file list for the current `@` query from the server (debounced).
-	 *  Mirrors `_loadSlashSkills` but is query-scoped because the file tree can be
-	 *  large/remote, so the server does the filtering + ranking. */
 	private async _loadFileMentions(query: string) {
 		if (!this.cwd) {
 			this._atFiles = [];
@@ -851,6 +867,7 @@ export class MessageEditor extends LitElement {
 		this.value = textarea.value;
 		if (this._sendSizeError) this._sendSizeError = ""; // clear the S31 error once the user edits
 		if (this._steerError) this._steerError = ""; // clear the steer-attachment error once the user edits
+		if (this._blockedSendError) this._blockedSendError = "";
 		this.onInput?.(this.value);
 		this._updateSlashAutocomplete();
 		this._updateAtAutocomplete();
@@ -911,12 +928,16 @@ export class MessageEditor extends LitElement {
 			}
 		}
 
-		// An open autocomplete menu owns Enter, including Ctrl/Cmd+Enter. Once no
-		// completion applies, the steer resolver still blocks exact Bobbit commands.
+		// Ctrl/Cmd+Enter steer shortcut. Placed AFTER the slash/@-menu blocks (so an
+		// open autocomplete keeps Enter ownership) and BEFORE the plain Enter branch
+		// (Ctrl/Cmd+Enter also satisfies `!e.shiftKey`). IME is already guarded above.
 		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
 			e.preventDefault();
 			void this.handleSteerShortcut();
-		} else if (e.key === "Enter" && !e.shiftKey) {
+			return;
+		}
+
+		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
 			if (!this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {
 				this.handleSend();
@@ -1020,8 +1041,16 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
+	public showBlockedSendError(reason: string): void {
+		this._blockedSendError = reason;
+	}
+
 	private handleSend = async () => {
 		const text = this.value;
+		if (this.blockedSendReason) {
+			this.showBlockedSendError(this.blockedSendReason);
+			return;
+		}
 		// Content-aware lock: block only an identical concurrent submission (same text
 		// mid-flight via any path); a distinct edited submission is still allowed.
 		if (this._inFlightSubmits.has(text)) return;
@@ -1042,8 +1071,6 @@ export class MessageEditor extends LitElement {
 		this._steerError = ""; // a normal send dismisses any stale steer-attachment alert (D2)
 		const dispatch = resolveComposerSlashDispatch(text, { runtime: this.runtime, registry: this._composerSlashRegistry() });
 		if (dispatch?.kind === "unsupported-compact" || dispatch?.kind === "unavailable-compact") {
-			// Hidden reservations prevent a runtime-native command from receiving the
-			// raw token. Do not mutate the draft, attachments, history, or focus.
 			this._steerError = this._composerDispatchAlert(dispatch.kind);
 			return;
 		}
@@ -1078,7 +1105,6 @@ export class MessageEditor extends LitElement {
 			this._historyIndex = -1;
 			this._savedDraft = "";
 			void this.addToHistory(text);
-
 			this._showLauncherPending(`Starting ${dispatch.label}…`);
 			runLauncherEntrypoint(dispatch.entrypointKey, (r) => {
 				if (r.ok) this._showLauncherResolved();
@@ -1113,6 +1139,10 @@ export class MessageEditor extends LitElement {
 	 *  ONLY if the composer still holds exactly what we sent — a mid-flight edit or a
 	 *  newly added attachment during the await is preserved, never discarded. */
 	private handleSteerShortcut = async () => {
+		if (this.blockedSendReason) {
+			this.showBlockedSendError(this.blockedSendReason);
+			return;
+		}
 		if (this.processingFiles) return; // same readiness guard as send
 		const text = this.value;
 		if (!text.trim()) return; // non-empty text required
@@ -1450,6 +1480,9 @@ export class MessageEditor extends LitElement {
 				this._loadHistory();
 			}
 		}
+		if (changed.has("blockedSendReason") && !this.blockedSendReason) {
+			this._blockedSendError = "";
+		}
 
 		if (changed.has("sessionId") || changed.has("cwd") || changed.has("projectId") || changed.has("runtime")) {
 			// Session/project/runtime changes must not momentarily offer a stale scoped
@@ -1644,12 +1677,14 @@ export class MessageEditor extends LitElement {
 				     NOTE: transform: translateZ(0) is load-bearing on iOS Safari. Without its
 				     own GPU compositing layer the textarea caret is invisible in this position
 				     (bottom of viewport, nested flex). Do not remove without re-testing on iOS. -->
-				${(this._sendSizeError || this._steerError)
+				${(this._blockedSendError || this._sendSizeError || this._steerError)
 					? html`<div
-							data-testid=${this._steerError ? "composer-steer-error" : "composer-size-error"}
+							data-testid=${this._blockedSendError
+								? "composer-model-selection-error"
+								: this._steerError ? "composer-steer-error" : "composer-size-error"}
 							class="mx-2 mb-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive"
 							role="alert"
-						>${this._steerError || this._sendSizeError}</div>`
+						>${this._blockedSendError || this._steerError || this._sendSizeError}</div>`
 					: nothing}
 				<div class="flex items-center gap-1 px-2 py-2" style="transform: translateZ(0);">
 					${attachButton}

@@ -39,6 +39,7 @@ import {
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 import { resumeOperatorPausedGoal } from "./goal-resume.js";
+import { GoalPausedError, requireAncestorsNotPaused } from "./goal-paused-guard.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
@@ -75,6 +76,18 @@ export interface NestedGoalRouteDeps {
 
 const HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
 const GENERIC_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
+
+/** Parent-facing status for child creation tool responses. */
+function childSetupOutcome(goal: PersistedGoal): { setupStatus: string; setupMessage: string; retrySetup?: boolean } {
+	const status: string = goal.setupStatus ?? "ready"; // GoalStore migrates legacy rows on load.
+	if (status === "ready") {
+		return { setupStatus: status, setupMessage: "Child setup is verified ready; its team may start when scheduler capacity is available." };
+	}
+	if (status === "error") {
+		return { setupStatus: status, setupMessage: "Child setup failed; retry setup before its team can start.", retrySetup: true };
+	}
+	return { setupStatus: status, setupMessage: "Child setup is in progress; its team will start only after setup is verified ready." };
+}
 
 function goalMergeGitUnavailable(parent: PersistedGoal, child: PersistedGoal): Record<string, unknown> | null {
 	const parentRepos = parent.repoWorktrees;
@@ -206,6 +219,17 @@ export function listDescendants(
 	});
 }
 
+/** True when a child is still waiting for one of its declared sibling plans. */
+function hasUnresolvedPlanDependencies(child: PersistedGoal, goals: PersistedGoal[]): boolean {
+	const dependencies = child.dependsOnPlanIds;
+	if (!child.parentGoalId || !dependencies?.length) return false;
+	return dependencies.some(planId => !goals.some(candidate =>
+		candidate.parentGoalId === child.parentGoalId
+		&& candidate.spawnedFromPlanId === planId
+		&& candidate.state === "complete",
+	));
+}
+
 /**
  * Try to dispatch a nested-goal Phase-4 route. Returns `true` when the
  * route was matched and a response written; `false` when caller should
@@ -322,7 +346,9 @@ export async function tryHandleNestedGoalRoute(
 	 * MUST go through `executePauseForGoals`, not call this directly.
 	 */
 	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
-		await pauseGoalManager.updateGoal(goalId, { paused: true });
+		// Provenance distinguishes an operator pause from pre-provenance legacy
+		// dependency pauses when GoalManager restores persisted goals on boot.
+		await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
 		await cancelAllVerifications(goalId);
 		broadcastToAll({ type: "goal_state_changed", goalId });
 	}
@@ -746,6 +772,7 @@ export async function tryHandleNestedGoalRoute(
 				id: child.id,
 				suggestedRole,
 				spawnedBySessionId,
+				...childSetupOutcome(ctx.goalStore.get(child.id) ?? child),
 				...(blocked ? { blocked: true, pendingDeps: unresolvedDeps } : {}),
 				...(capacityBlocked ? { capacityBlocked: true } : {}),
 			}, 201);
@@ -1288,6 +1315,28 @@ export async function tryHandleNestedGoalRoute(
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
+		// The capacity queue is intentionally process-local. If the gateway
+		// restarted after an eligible child was paused, resume rebuilds that lost
+		// intent from durable scheduler state. This is deliberately narrow: only
+		// successfully resumed non-root auto-start children that are still blocked
+		// qualify; declared dependencies must all be complete. It therefore never
+		// invents starts for roots, manual work, or unresolved dependency children.
+		for (const { goalId, result } of resumeResult.processed) {
+			if (!result) continue;
+			const resumed = getGoalAcrossProjects(goalId);
+			if (!resumed?.parentGoalId || resumed.archived || resumed.autoStartTeam === false || resumed.state !== "blocked") continue;
+			const currentGoals = projectContextManager.getContextForGoal(goalId)?.goalStore.getAll() ?? [];
+			if (hasUnresolvedPlanDependencies(resumed, currentGoals)) continue;
+			try {
+				requireAncestorsNotPaused(goalId, getGoalAcrossProjects);
+			} catch (err) {
+				if (err instanceof GoalPausedError) continue;
+				throw err;
+			}
+			// `requestChildStart` is idempotent for existing pending/holding entries
+			// and remains the sole owner of cap, state, and pause enforcement.
+			verificationHarness.requestChildStart(goalId);
+		}
 		json({
 			resumed: count,
 			...(resumeResult.errors.length > 0

@@ -34,6 +34,31 @@ const PREVIEW_SNAPSHOT_MARKERS = [
 
 const VERIFICATION_RESULT_LARGE_FIELDS = ["summary", "report_html"] as const;
 
+// Mirrors the executable review_open contract without importing defaults/
+// across the server rootDir boundary. The projection is transport-only;
+// extension and payload-store validation remain authoritative.
+const MAX_PROJECTED_REVIEW_FILES = 64;
+const MAX_PROJECTED_REVIEW_METADATA_BYTES = 24 * 1024;
+const MAX_PROJECTED_REVIEW_TITLE_BYTES = 320;
+const REVIEW_OPEN_FIELDS = new Set(["title", "replace", "markdown", "file", "files"]);
+const REVIEW_FILE_FIELDS = new Set(["title", "markdown", "file"]);
+const INVALID_REVIEW_TITLE_CHARACTERS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
+interface ProjectedReviewMarkdown {
+	_truncated: true;
+	_originalLength: number;
+	_originalBytes: number;
+}
+
+interface ProjectedReviewInvalid {
+	_invalid: true;
+	_reason: "invalid_review_input" | "review_metadata_too_large" | "too_many_review_files";
+	_originalLength?: number;
+	_originalBytes?: number;
+	_originalCount?: number;
+	_maximumCount?: number;
+}
+
 /** Return the matched marker prefix, or undefined if none matches. */
 function matchMarker(text: string): string | undefined {
 	for (const m of PREVIEW_SNAPSHOT_MARKERS) {
@@ -110,12 +135,217 @@ function isVerificationResultTool(block: any): boolean {
 	return block?.name === "verification_result";
 }
 
+function isReviewOpenTool(block: any): boolean {
+	return block?.name === "review_open";
+}
+
+function projectedReviewMarkdown(markdown: string): ProjectedReviewMarkdown {
+	return {
+		_truncated: true,
+		_originalLength: markdown.length,
+		_originalBytes: Buffer.byteLength(markdown, "utf8"),
+	};
+}
+
+function projectedReviewInvalid(
+	reason: ProjectedReviewInvalid["_reason"],
+	details: Omit<ProjectedReviewInvalid, "_invalid" | "_reason"> = {},
+): ProjectedReviewInvalid {
+	return { _invalid: true, _reason: reason, ...details };
+}
+
+function projectedReviewString(value: unknown, budget: { bytes: number }, title: boolean): string | ProjectedReviewInvalid {
+	if (typeof value !== "string") return projectedReviewInvalid("invalid_review_input");
+	const bytes = Buffer.byteLength(value, "utf8");
+	if ((title && (bytes > MAX_PROJECTED_REVIEW_TITLE_BYTES || INVALID_REVIEW_TITLE_CHARACTERS.test(value)))
+		|| budget.bytes + bytes > MAX_PROJECTED_REVIEW_METADATA_BYTES) {
+		return projectedReviewInvalid("review_metadata_too_large", {
+			_originalLength: value.length,
+			_originalBytes: bytes,
+		});
+	}
+	budget.bytes += bytes;
+	return value;
+}
+
+function hasOwn(value: object, key: string): boolean {
+	return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isReviewProjectionRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isProjectedReviewInvalid(value: unknown): value is ProjectedReviewInvalid {
+	return isReviewProjectionRecord(value)
+		&& value._invalid === true
+		&& (value._reason === "invalid_review_input"
+			|| value._reason === "review_metadata_too_large"
+			|| value._reason === "too_many_review_files");
+}
+
+function isProjectedReviewMarkdown(value: unknown): value is ProjectedReviewMarkdown {
+	return isReviewProjectionRecord(value)
+		&& value._truncated === true
+		&& typeof value._originalLength === "number"
+		&& typeof value._originalBytes === "number";
+}
+
+function stripUnexpectedReviewFields(source: Record<string, unknown>, allowed: Set<string>): Record<string, unknown> {
+	let hasUnexpected = false;
+	for (const key in source) {
+		if (hasOwn(source, key) && !allowed.has(key)) {
+			hasUnexpected = true;
+			break;
+		}
+	}
+	if (!hasUnexpected) return source;
+
+	const projected: Record<string, unknown> = {};
+	for (const key of allowed) {
+		if (hasOwn(source, key)) projected[key] = source[key];
+	}
+	projected._invalid = true;
+	projected._reason = "invalid_review_input";
+	return projected;
+}
+
+function projectReviewMarkdown(next: Record<string, unknown>): Record<string, unknown> {
+	let projected = next;
+	if (typeof next.markdown === "string") {
+		projected = { ...projected, markdown: projectedReviewMarkdown(next.markdown) };
+	}
+	if (Array.isArray(next.files)) {
+		let filesChanged = false;
+		const files = next.files.map((file) => {
+			if (!isReviewProjectionRecord(file) || typeof file.markdown !== "string") return file;
+			filesChanged = true;
+			return { ...file, markdown: projectedReviewMarkdown(file.markdown) };
+		});
+		if (filesChanged) projected = { ...projected, files };
+	}
+	return projected;
+}
+
+function reviewMetadataBytes(payload: Record<string, unknown>): number {
+	return Buffer.byteLength(JSON.stringify(payload, (key, value) => key === "markdown" ? undefined : value), "utf8");
+}
+
+/**
+ * Review arguments are visible before executable validation. Project both
+ * cumulative Markdown and the closed, UTF-8-bounded metadata schema so a
+ * malformed call cannot put multi-megabyte titles, paths, or arrays onto live
+ * or history transport. Valid metadata retains exact values and file order.
+ */
+function projectLargeReviewMarkdown(payload: any, threshold: number): any {
+	if (!isReviewProjectionRecord(payload)) return payload;
+	const budget = { bytes: 0 };
+	let next = stripUnexpectedReviewFields(payload, REVIEW_OPEN_FIELDS);
+
+	for (const field of ["title", "file"] as const) {
+		if (!hasOwn(next, field) || isProjectedReviewInvalid(next[field])) continue;
+		const value = projectedReviewString(next[field], budget, field === "title");
+		if (value !== next[field]) next = { ...next, [field]: value };
+	}
+	if (hasOwn(next, "replace") && typeof next.replace !== "boolean" && !isProjectedReviewInvalid(next.replace)) {
+		next = { ...next, replace: projectedReviewInvalid("invalid_review_input") };
+	}
+	if (hasOwn(next, "markdown") && typeof next.markdown !== "string"
+		&& !isProjectedReviewInvalid(next.markdown) && !isProjectedReviewMarkdown(next.markdown)) {
+		next = { ...next, markdown: projectedReviewInvalid("invalid_review_input") };
+	}
+
+	const originalFiles = Array.isArray(payload.files) ? payload.files : undefined;
+	if (hasOwn(next, "files")) {
+		if (!Array.isArray(next.files)) {
+			if (!isProjectedReviewInvalid(next.files)) {
+				next = { ...next, files: projectedReviewInvalid("invalid_review_input") };
+			}
+		} else if (next.files.length > MAX_PROJECTED_REVIEW_FILES) {
+			next = {
+				...next,
+				files: projectedReviewInvalid("too_many_review_files", {
+					_originalCount: next.files.length,
+					_maximumCount: MAX_PROJECTED_REVIEW_FILES,
+				}),
+			};
+		} else {
+			let filesChanged = false;
+			const files = next.files.map((rawFile) => {
+				if (isProjectedReviewInvalid(rawFile)) return rawFile;
+				if (!isReviewProjectionRecord(rawFile)) {
+					filesChanged = true;
+					return projectedReviewInvalid("invalid_review_input");
+				}
+				let file = stripUnexpectedReviewFields(rawFile, REVIEW_FILE_FIELDS);
+				for (const field of ["title", "file"] as const) {
+					if (!hasOwn(file, field) || isProjectedReviewInvalid(file[field])) continue;
+					const value = projectedReviewString(file[field], budget, field === "title");
+					if (value !== file[field]) file = { ...file, [field]: value };
+				}
+				if (hasOwn(file, "markdown") && typeof file.markdown !== "string"
+					&& !isProjectedReviewInvalid(file.markdown) && !isProjectedReviewMarkdown(file.markdown)) {
+					file = { ...file, markdown: projectedReviewInvalid("invalid_review_input") };
+				}
+				if (file !== rawFile) filesChanged = true;
+				return file;
+			});
+			if (filesChanged) next = { ...next, files };
+		}
+	}
+
+	// Include JSON structure and escaping in the canonical metadata envelope.
+	// When it is exceeded, collapse the source list rather than forwarding a
+	// partial sequence that could be mistaken for executable input.
+	if (reviewMetadataBytes(next) > MAX_PROJECTED_REVIEW_METADATA_BYTES) {
+		if (hasOwn(next, "files")) {
+			next = {
+				...next,
+				files: projectedReviewInvalid("review_metadata_too_large", {
+					...(originalFiles ? { _originalCount: originalFiles.length } : {}),
+					_maximumCount: MAX_PROJECTED_REVIEW_FILES,
+				}),
+			};
+		} else if (hasOwn(next, "file")) {
+			next = { ...next, file: projectedReviewInvalid("review_metadata_too_large") };
+		}
+	}
+
+	let totalMarkdownBytes = typeof payload.markdown === "string" ? Buffer.byteLength(payload.markdown, "utf8") : 0;
+	if (originalFiles && originalFiles.length <= MAX_PROJECTED_REVIEW_FILES) {
+		for (const file of originalFiles) {
+			if (isReviewProjectionRecord(file) && typeof file.markdown === "string") {
+				totalMarkdownBytes += Buffer.byteLength(file.markdown, "utf8");
+			}
+		}
+	}
+	if (totalMarkdownBytes > threshold) next = projectReviewMarkdown(next);
+
+	// Metadata plus an individually-short Markdown body can still exceed the
+	// default generic boundary. Keep this review-specific envelope bounded
+	// without changing the generic threshold or its custom-test semantics.
+	if (Buffer.byteLength(JSON.stringify(next), "utf8") > LARGE_CONTENT_THRESHOLD) {
+		next = projectReviewMarkdown(next);
+	}
+	if (Buffer.byteLength(JSON.stringify(next), "utf8") > LARGE_CONTENT_THRESHOLD && Array.isArray(next.files)) {
+		next = {
+			...next,
+			files: projectedReviewInvalid("review_metadata_too_large", {
+				_originalCount: next.files.length,
+				_maximumCount: MAX_PROJECTED_REVIEW_FILES,
+			}),
+		};
+	}
+	return next;
+}
+
 function truncateToolPayload(payload: any, block: any, threshold: number): any {
 	if (!payload || typeof payload !== "object") return payload;
-	let next = payload;
+	let next = isReviewOpenTool(block) ? projectLargeReviewMarkdown(payload, threshold) : payload;
 
 	if (isLargeString(payload.content, threshold)) {
-		next = { ...next, content: truncatedStringDescriptor(payload.content) };
+		if (next === payload) next = { ...payload };
+		next.content = truncatedStringDescriptor(payload.content);
 	}
 
 	if (isVerificationResultTool(block)) {
@@ -147,6 +377,19 @@ function truncateMessageContentBlock(block: any, threshold: number): any {
 	const textBlock = truncateTextBlock(block, threshold);
 	if (textBlock !== block) return textBlock;
 	return truncateToolBlock(block, threshold);
+}
+
+function truncateMessageContent(message: any, threshold: number): any {
+	const content = message?.content;
+	if (!Array.isArray(content)) return message;
+
+	let changed = false;
+	const projectedContent = content.map((block: any) => {
+		const projected = truncateMessageContentBlock(block, threshold);
+		if (projected !== block) changed = true;
+		return projected;
+	});
+	return changed ? { ...message, content: projectedContent } : message;
 }
 
 /**
@@ -282,31 +525,31 @@ export function truncateLargeToolContentInMessages(messages: any, threshold: num
  * Returns the original event unchanged when no truncation is needed.
  */
 export function truncateLargeToolContent(event: any, threshold: number = LARGE_CONTENT_THRESHOLD): any {
-	// Fast-path: only process message events with content arrays
 	const eventType = event?.type;
 	if (eventType !== "message_update" && eventType !== "message_end") return event;
 
-	const content = event.message?.content;
-	if (!Array.isArray(content)) return event;
-
-	let needsTruncation = false;
-	for (const block of content) {
-		if (truncateMessageContentBlock(block, threshold) !== block) {
-			needsTruncation = true;
-			break;
-		}
-	}
-
-	if (!needsTruncation) return event;
-
-	// Build a shallow clone of the event with truncated content blocks
-	const newContent = content.map((block: any) => truncateMessageContentBlock(block, threshold));
+	// Project every cumulative assistant snapshot and completed tool-call checkpoint
+	// at this single live transport boundary. Pi owns the original event, so clone
+	// only changed ancestors before EventBuffer retention and stream compaction.
+	const message = truncateMessageContent(event.message, threshold);
+	const assistantMessageEvent = event.assistantMessageEvent;
+	const partial = truncateMessageContent(assistantMessageEvent?.partial, threshold);
+	const toolCall = truncateToolBlock(assistantMessageEvent?.toolCall, threshold);
+	const assistantMessageEventChanged = partial !== assistantMessageEvent?.partial
+		|| toolCall !== assistantMessageEvent?.toolCall;
+	if (message === event.message && !assistantMessageEventChanged) return event;
 
 	return {
 		...event,
-		message: {
-			...event.message,
-			content: newContent,
-		},
+		...(message === event.message ? {} : { message }),
+		...(assistantMessageEventChanged
+			? {
+				assistantMessageEvent: {
+					...assistantMessageEvent,
+					...(partial === assistantMessageEvent?.partial ? {} : { partial }),
+					...(toolCall === assistantMessageEvent?.toolCall ? {} : { toolCall }),
+				},
+			}
+			: {}),
 	};
 }

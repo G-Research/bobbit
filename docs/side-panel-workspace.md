@@ -1,6 +1,6 @@
 # Side-panel workspace
 
-Bobbit's side-panel workspace is the durable, per-session model for everything that opens to the right of chat. It replaces the old preview-specific/localStorage side-pane state with a server-authoritative tab set shared by previews, pack panels, proposals, review documents, and the staff inbox.
+Bobbit's side-panel workspace is the durable, per-session model for everything that opens to the right of chat. It replaces the old preview-specific/localStorage side-pane state with a server-authoritative tab set shared by previews, pack panels, proposals, review groups, and the staff inbox.
 
 The workspace owns only side panels. Chat is not a side-panel tab.
 
@@ -14,9 +14,9 @@ For each session, the server is the source of truth for:
 - tab source metadata needed to rehydrate content;
 - the absence of closed tabs.
 
-A closed tab is authoritative absence. Reload, reconnect, restart, WebSocket replay, render, localStorage, and content caches must not recreate it. A closed proposal tab stays closed even if the proposal draft still exists; a closed review tab stays closed even if its document/annotations are cached; a closed preview tab stays closed even if a mount or artifact still exists.
+A closed tab is authoritative absence. Reload, reconnect, restart, WebSocket replay, render, localStorage, and content caches must not recreate it. A closed proposal tab stays closed even if the proposal draft still exists; a closed review tab stays closed even if its group, files, or annotations are cached; a closed preview tab stays closed even if a mount or artifact still exists.
 
-Tabs can be created or focused only through explicit workspace open/reopen events. The real app render path renders the server workspace it has hydrated; it does not derive tabs from `activeProposals`, review document caches, inbox booleans, preview mount state, or localStorage. File-based browser fixtures keep a local fallback so unit fixtures can run without a gateway, but that fallback is not the product authority.
+Tabs can be created or focused only through explicit workspace open/reopen events. The real app render path renders the server workspace it has hydrated; it does not derive tabs from `activeProposals`, review-group caches, inbox booleans, preview mount state, or localStorage. File-based browser fixtures keep a local fallback so unit fixtures can run without a gateway, but that fallback is not the product authority.
 
 ## Data model and persistence
 
@@ -47,7 +47,7 @@ Every committed mutation increments `revision`, persists the whole workspace thr
 | Preview | `preview:entry:<encoded-entry>` or `preview:entry:<encoded-entry>:v:<N>` | `entry`, `artifactId?`, `contentHash?`, `path?`, `url?`, `version?`, `live?`, `historical?`; state may include `mtime` | Live preview tabs update in place and restore from persisted tab metadata after restart. Historical preview tabs represent immutable artifacts or restored older cards. |
 | Pack | `pack:<encoded-packId>:<encoded-panelId>:<encoded-instanceKey>` | `packId`, `panelId`, `instanceKey`, `params?` | Covers PR walkthrough and artifact viewer pack panels. `instanceKey` is part of identity. |
 | Proposal | `proposal:<type>` or `proposal:<type>:rev:<N>` | `proposalType`, `rev?`, `historical?` | Types are `goal`, `project`, `role`, `tool`, and `staff`. Current revisions update the current tab; historical revs open only by explicit reopen. |
-| Review | `review:<encoded-documentId>` | stable `documentId`, display `title` | Title is metadata. Renames do not change identity. Closing the tab preserves content/annotations for explicit reopen. |
+| Review | `review:<encoded-reviewId>` | stable `reviewId`, display `title`; artifact-backed reviews also carry exact `toolCallId`, `payloadId`, and `contentHash`; state carries `activeFileId` | One closable primary tab represents the whole review. Its ordered files are review-pane navigation, never workspace tabs. |
 | Inbox | `inbox` | session id and optional `staffId` | Staff inbox opens/focuses through the same workspace APIs as other panels. |
 
 ### Legacy chat artifacts exclusion
@@ -61,6 +61,7 @@ Because those legacy files are superseded by pack artifact panels, they are excl
 `preview_open` still writes the per-session preview mount and streams updates via preview SSE. Workspace tab creation is separate:
 
 - explicit preview open/tool actions open or focus the current preview tab and persist render metadata such as `entry`, `mtime`, `contentHash`, `path`, `url`, and `artifactId` when available;
+- `live` describes the current tab's in-place update identity, not its transport: whenever that tab has an `artifactId`, iframe and popout navigation use the immutable artifact route so a later mount replacement cannot make an older filename transiently return `File not found`;
 - gateway restart restores the active preview iframe from that persisted workspace tab; the client does not need a fresh tool call or a mount bootstrap to recreate the tab;
 - historical card Open buttons explicitly open a versioned preview tab or focus an equivalent current tab when hashes match;
 - `GET /api/preview/mount` bootstrap, `preview-changed` SSE events, and mount metadata refreshes patch metadata only for already-open tabs;
@@ -85,9 +86,11 @@ Proposal close paths are durable workspace deletes. The tab close button, Dismis
 
 ### Review lifecycle
 
-Review tabs are keyed by stable document id, not title. `openMarkdownReviewDocument()` creates or preserves the document id, caches the content, and explicitly opens `review:<documentId>`.
+A review group is keyed by stable `reviewId`, not by its display title or any file identity. It owns exactly one closable primary workspace tab, `review:<encoded-reviewId>`. The group's ordered files and file-specific annotation identities live beneath that review identity. They appear only as secondary navigation inside the review pane: selecting a file does not change the active workspace tab, files have no close controls, and a one-file review hides the secondary row.
 
-Restoring cached or persisted review documents restores content only for review tabs that already exist in the server workspace. If a review tab was closed, the cached document and annotations may remain available for an explicit review reopen, but hydration must not recreate the tab from cache alone.
+Review state belongs to the session that opened it. Every review workspace open, including a non-live human sign-off launch, is serialized with close and decision cleanup by exact `(sessionId, reviewId)` key. A background-session open persists the complete group and opens or focuses that session's primary tab without changing the selected session or the foreground review model. A background `review_close` likewise affects only its owner session. Switching to the owner later hydrates the group and its selected file only if that exact primary tab is still authoritative. Duplicate display titles remain separate because workspace identity is `reviewId`, not title.
+
+Closing a primary tab closes that whole review after the aggregate unsent-comment confirmation. Close and decision cleanup first uses the authoritative one-shot conflict retry to remove every exact or legacy-matching primary; only confirmed workspace absence allows the tombstone, persisted group, annotations, and final draft to be cleared. A terminal or partial close failure preserves that state for retry, even when decision feedback was already delivered. A newer exact-key open supersedes cleanup before its destructive commit and reasserts the primary last; a still-newer cleanup can supersede that queued open normally. Other review groups and their primary tabs remain intact. Historical tool-result replay may restore neither a closed nor a submitted review because an absent primary plus its tombstone suppresses passive replay. Any explicit open reasserts authority through the exact primary itself and never edits tombstone storage; authoritative presence therefore survives reload, while a workspace-open failure leaves exact and sibling suppression unchanged. See [Durable review opening](review-open-architecture.md) for payload artifacts, authenticated recovery, renderer outcomes, and limits. See [Review Pane Sign-Off — Review hierarchy and identity](review-pane-signoff.md#review-hierarchy-and-identity) for file navigation, decision, and cleanup details.
 
 ### Pack panel lifecycle
 
@@ -146,6 +149,9 @@ The side-panel shell renders every tab kind with the same workspace chrome:
 
 - tab strip and close buttons;
 - active tab selection;
+- title-sized readable overflow: desktop and mobile tabs use their title-and-controls width up to the maximum instead of equal fixed slots; when the strip cannot keep longer titles readable, it moves excess tabs into a top-layer **More tabs** menu; mobile keeps Chat pinned while panel tabs overflow, and selecting an overflowed tab brings it into the visible window without changing canonical workspace order;
+- three tab-strip surface shades in every layout: muted strip background, an intermediate inactive-tab surface, and the content-background surface for the selected tab and its outward bottom curves;
+- active-tab actions share the tab-strip row: desktop retains its full panel/window controls, while mobile uses the trailing space for applicable controls such as preview refresh and pop-out instead of leaving it empty;
 - drag reorder;
 - fullscreen;
 - collapse and restore;
@@ -175,8 +181,8 @@ Keyboard shortcuts target the active side panel, regardless of kind, and use the
 
 Preview popout keeps the content-origin route:
 
-- live preview: `/preview/<sessionId>/<entry>`;
-- artifact preview: `/preview/<sessionId>/_artifact/<artifactId>/<entry>`.
+- preview without a persisted artifact: `/preview/<sessionId>/<entry>`;
+- any artifact-backed preview, including the current/live tab identity: `/preview/<sessionId>/_artifact/<artifactId>/<entry>`.
 
 All other panel kinds use the app deep link:
 
@@ -199,7 +205,7 @@ On first hydrate, if the server workspace is empty and has no migration stamp, t
 Migration behavior:
 
 - legacy pack ids without `instanceKey` become `:default` only when valid for the panel;
-- legacy review title tabs become deterministic `legacy-title-<hash>` document ids;
+- legacy review sources carrying `documentId` reuse that value as the canonical `reviewId`, while title-shaped tabs become deterministic `legacy-title-<hash>` review ids; both are migration input only and persist as `review:<encoded-reviewId>` with `source.reviewId`;
 - the old preview collapsed key maps to `sizeMode: "collapsed"`;
 - closed tabs are not inferred from proposal/review/preview/inbox caches;
 - after migration, the real app does not write workspace state to localStorage.
@@ -224,10 +230,10 @@ Useful checks:
 - `sizeMode` should reflect the last shared control or shortcut action;
 - `revision` should increase after every committed mutation;
 - duplicate artifact pack panels should differ by `source.instanceKey`;
-- review tab ids should include document ids, not mutable titles;
+- review tab ids should decode to the owning review's stable `reviewId`, not a file/document id or mutable title; `source.documentId` and title-shaped ids indicate legacy migration input and should canonicalize to `source.reviewId`;
 - stale localStorage should not change the workspace after `migratedFromLocalStorageAt` is set;
 - preview restart restore should show the active preview tab in the workspace after gateway restart, and a user-closed preview tab should stay absent even while `GET /api/preview/mount` still succeeds.
 
 Regression coverage: `tests/e2e/ui/preview-durable-restart.spec.ts` for restart restore and `tests/ui-fixtures/preview-panel.spec.ts` for one-step visible sizing controls.
 
-Related docs: [architecture.md](architecture.md#side-panel-workspace), [preview-architecture.md](preview-architecture.md#restart-restore), [extension-host-authoring.md](extension-host-authoring.md#panels--persistent-side-panels-hostuiopenpanel), [rest-api.md](rest-api.md#side-panel-workspace), and [websocket-protocol.md](websocket-protocol.md#server--client).
+Related docs: [architecture.md](architecture.md#side-panel-workspace), [review-pane-signoff.md](review-pane-signoff.md#review-hierarchy-and-identity), [preview-architecture.md](preview-architecture.md#restart-restore), [extension-host-authoring.md](extension-host-authoring.md#panels--persistent-side-panels-hostuiopenpanel), [rest-api.md](rest-api.md#side-panel-workspace), and [websocket-protocol.md](websocket-protocol.md#server--client).

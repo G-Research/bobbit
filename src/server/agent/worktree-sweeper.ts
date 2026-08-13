@@ -1,30 +1,22 @@
 /**
  * Boot-time worktree sweeper.
  *
- * Reconciles on-disk git worktrees against persisted goal/session/team/staff
- * records before the worktree pool fills. This catches:
+ * Reconciles on-disk Git worktrees against persisted goal/session/team/staff
+ * records before the worktree pool fills. Discovery is diagnostic only:
  *
- *   - Pool worktrees that were left behind after a crash and aren't yet
- *     in the in-memory pool (logged for the pool to reclaim itself —
- *     `WorktreePool.reclaimOrphaned` already handles directory-based
- *     reclaim). The sweeper just counts these so they're visible in logs.
- *   - Active session/goal/team/staff branches with intact worktrees → keep.
- *   - Worktrees on a branch that no live record claims → cleanup.
- *   - A live record whose worktree path differs from git's tracking
- *     (rename-mid-shutdown) → repair via `git worktree repair`.
+ *   - Pool-shaped worktrees are counted so they remain visible in boot logs.
+ *   - Active session/goal/team/staff worktrees retain their existing guards.
+ *   - Discovered worktrees without an exact durable identity are reported and
+ *     preserved; branch or path shape never authorizes repair or cleanup.
  *
- * The sweeper runs once after the listener starts and may overlap pool fill:
- * pool branches are counted but never mutated here, so the branch sets remain
- * disjoint. See docs/design/multi-repo-components.md §5.5 (historical) and
- * docs/design/remove-session-worktree-rename.md §13 (current post-upgrade
- * sweeper patterns: live `session-<id8>`, pool `pool-_pool-<id>`, legacy
- * `session-<slug>-<id8>` / `session-new-session-<id8>` orphan handling).
+ * The sweeper runs once after the listener starts and may overlap pool fill.
+ * It never mutates discovered Git worktrees or branches.
  */
 
 import { performance } from "node:perf_hooks";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { cleanupWorktree, type RemoteGitPolicy } from "../skills/git.js";
+import type { cleanupWorktree, RemoteGitPolicy } from "../skills/git.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY, realRecoveryFs, type RecoveryFs } from "./bounded-async-work.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
@@ -269,17 +261,13 @@ export async function sweepOrphanedWorktrees(opts: {
 	commandRunner?: CommandRunner;
 	remotePolicy?: RemoteGitPolicy;
 	fs?: SweepFs;
-	/** Focused test seam; production always uses the shared cleanup helper. */
+	/** Retained compatibility seam; boot discovery never invokes cleanup. */
 	cleanupWorktreeImpl?: WorktreeCleanup;
-	/**
-	 * Return a fresh view of every durable owner. Called synchronously in the
-	 * uninterrupted turn immediately before each repair or cleanup mutation.
-	 */
+	/** Retained compatibility seam; boot discovery never authorizes a mutation. */
 	getCurrentOwnership?: () => SweepOwnership;
 }): Promise<SweepResult> {
 	const commandRunner = opts.commandRunner ?? realCommandRunner;
 	const sweepFs: SweepFs = opts.fs ?? { ...realRecoveryFs, realpath: value => fs.realpath(value) };
-	const cleanup = opts.cleanupWorktreeImpl ?? cleanupWorktree;
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
 	const diagCounters = diagEnabled ? {
@@ -293,8 +281,7 @@ export async function sweepOrphanedWorktrees(opts: {
 	} : undefined;
 
 	try {
-		// Keep the initial snapshot for deterministic candidate classification and
-		// counts. Mutable ownership is rebuilt again at each mutation boundary.
+		// Keep the initial snapshot for deterministic diagnostic classification.
 		const initialOwnership: SweepOwnership = {
 			goals: opts.goals,
 			sessions: opts.sessions,
@@ -354,34 +341,11 @@ export async function sweepOrphanedWorktrees(opts: {
 			...scans.flatMap(worktrees => worktrees.flatMap(worktree => [worktree.path, worktree.repoPath, worktree.resolvedWorktreeRoot])),
 		], sweepFs.realpath);
 		const initialGuards = buildOwnershipGuards(initialOwnership, aliases);
-		const refreshCurrentOwnershipAliases = async (): Promise<void> => {
-			// This snapshot only tells us which aliases need I/O. A session can claim
-			// a worktree while that I/O yields, so it must never authorize a mutation.
-			const ownershipForAliases = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
-			await canonicalizePaths(ownershipPaths(ownershipForAliases), sweepFs.realpath, aliases);
-		};
-		const finalOwnershipGuards = (): { guards: OwnershipGuards; hasUnresolvedPaths: boolean } => {
-			// Call this directly after refreshCurrentOwnershipAliases(). It performs
-			// the final synchronous ownership read and has no await before repair or
-			// cleanup begins, leaving no event-loop turn for a new claim to race in.
-			const finalOwnership = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
-			// A path that first appears in this final snapshot could be a lexical
-			// alias (for example /var while Git reported /private/var). Resolving it
-			// would yield and reopen the ownership race, so do not mutate until a
-			// later sweep can canonicalize it from a stable snapshot.
-			const hasUnresolvedPaths = ownershipPaths(finalOwnership).some(value => {
-				const normalized = normalize(value);
-				return !!normalized && !aliases.has(normalized);
-			});
-			return { guards: buildOwnershipGuards(finalOwnership, aliases), hasUnresolvedPaths };
-		};
 
 		type SweepOutcome =
 			| { kind: "none" }
 			| { kind: "reclaimed" }
-			| { kind: "repaired" }
-			| { kind: "cleaned"; worktree: SweptWorktree; branch: string }
-			| { kind: "cleanup-error"; worktree: SweptWorktree; error: unknown };
+			| { kind: "needs-attention"; worktree: SweptWorktree; branch: string };
 
 		// Reconcile different repos in parallel, but keep worktrees within one repo
 		// sequential. This avoids concurrent Git metadata mutations in the same repo
@@ -415,41 +379,10 @@ export async function sweepOrphanedWorktrees(opts: {
 					continue;
 				}
 
-				const initialOwnershipState = ownershipForWorktree(wt.path, branch, initialGuards);
-				if (initialOwnershipState.ownedByBranch || initialOwnershipState.ownedByPath) {
-					// Explicit path ownership wins over flat-container drift detection for
-					// multi-repo worktrees and shared/live-session references.
-					if (initialOwnershipState.ownedByPath) {
-						outcomes.push({ kind: "none" });
-						continue;
-					}
-					if (initialOwnershipState.ownedByBranch && branch) {
-						const expected = initialOwnershipState.expectedPath;
-						if (expected && normalize(expected) !== wtPathNorm) {
-							try {
-								// A new path/repo/team owner, archive, or changed branch owner
-								// can appear while the async repo scan is pending. Resolve unseen
-								// aliases, then synchronously re-read ownership before repair.
-								await refreshCurrentOwnershipAliases();
-								const { guards: currentGuards, hasUnresolvedPaths } = finalOwnershipGuards();
-								const current = ownershipForWorktree(wt.path, branch, currentGuards);
-								if (hasUnresolvedPaths || current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
-									outcomes.push({ kind: "none" });
-									continue;
-								}
-								await execGit(
-									["worktree", "repair", wt.path],
-									gitOptions(wt.repoPath, 15_000),
-									commandRunner,
-								);
-								outcomes.push({ kind: "repaired" });
-							} catch {
-								// A live owner keeps the worktree even when revalidation or repair fails.
-								outcomes.push({ kind: "none" });
-							}
-							continue;
-						}
-					}
+				const ownership = ownershipForWorktree(wt.path, branch, initialGuards);
+				// Exact path ownership (including shared cwd, delegate, team-container,
+				// and multi-repo component guards) remains an ordinary protected row.
+				if (ownership.ownedByPath) {
 					outcomes.push({ kind: "none" });
 					continue;
 				}
@@ -459,36 +392,15 @@ export async function sweepOrphanedWorktrees(opts: {
 					continue;
 				}
 
-				try {
-					// The scan intentionally starts from a stable snapshot, but cleanup
-					// authorization must be live: session creation remains available while
-					// this post-listen sweep yields on filesystem and Git work.
-					await refreshCurrentOwnershipAliases();
-					const { guards: currentGuards, hasUnresolvedPaths } = finalOwnershipGuards();
-					const current = ownershipForWorktree(wt.path, branch, currentGuards);
-					if (hasUnresolvedPaths || current.ownedByBranch || current.ownedByPath) {
-						outcomes.push({ kind: "none" });
-						continue;
-					}
-					await cleanup(
-						wt.repoPath,
-						wt.path,
-						branch,
-						!initialGuards.archivedBranches.has(branch) && !currentGuards.archivedBranches.has(branch),
-						commandRunner,
-						opts.remotePolicy,
-					);
-					outcomes.push({ kind: "cleaned", worktree: wt, branch });
-				} catch (error) {
-					outcomes.push({ kind: "cleanup-error", worktree: wt, error });
-				}
+				// A branch-only durable match and an entirely unreferenced Git worktree
+				// are both unverified discoveries. Preserve and report them; neither
+				// branch naming nor worktree-root placement proves Bobbit ownership.
+				outcomes.push({ kind: "needs-attention", worktree: wt, branch });
 			}
 			return outcomes;
 		});
 
 		let reclaimed = 0;
-		let cleaned = 0;
-		let repaired = 0;
 		for (const outcomes of outcomesByRepo) {
 			for (const outcome of outcomes) {
 				switch (outcome.kind) {
@@ -496,25 +408,15 @@ export async function sweepOrphanedWorktrees(opts: {
 						reclaimed++;
 						if (diagCounters) diagCounters.reclaimed++;
 						break;
-					case "repaired":
-						repaired++;
-						if (diagCounters) diagCounters.repaired++;
-						break;
-					case "cleaned":
-						cleaned++;
-						if (diagCounters) diagCounters.cleaned++;
-						console.log(`[sweeper] Cleaned orphan worktree: ${outcome.worktree.path} (branch: ${outcome.branch}, repo: ${outcome.worktree.repoPath})`);
-						break;
-					case "cleanup-error":
-						if (diagCounters) diagCounters.errors++;
-						console.warn(`[sweeper] Failed to clean orphan worktree ${outcome.worktree.path}:`, outcome.error);
+					case "needs-attention":
+						console.log(`[sweeper] Preserved unverified worktree: ${outcome.worktree.path} (branch: ${outcome.branch}, repo: ${outcome.worktree.repoPath})`);
 						break;
 					case "none":
 						break;
 				}
 			}
 		}
-		return { reclaimed, cleaned, repaired };
+		return { reclaimed, cleaned: 0, repaired: 0 };
 	} finally {
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-sweeper:sweep", performance.now() - diagStart, diagCounters);
 	}

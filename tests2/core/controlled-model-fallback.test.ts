@@ -133,7 +133,6 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const getAigwUrl = (prefs: { get: (key: string) => unknown }) => prefs.get("aigw.baseUrl") as string | undefined;
 	const discoverAigwModels = async () => ([{ id: "us.anthropic.claude-opus-4-5" }]);
 	const modelRecencyRank = () => 1;
-	const inferMeta = () => ({ reasoning: false });
 	const isKnownThinkingLevel = (value: unknown) => (
 		typeof value === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value)
 			? value
@@ -163,7 +162,6 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"getAigwUrl",
 		"discoverAigwModels",
 		"modelRecencyRank",
-		"inferMeta",
 		"isKnownThinkingLevel",
 		"clampThinkingLevelForModel",
 		"sanitizeModelErrorText",
@@ -178,7 +176,6 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		getAigwUrl,
 		discoverAigwModels,
 		modelRecencyRank,
-		inferMeta,
 		isKnownThinkingLevel,
 		clampThinkingLevelForModel,
 		sanitizeModelErrorText,
@@ -354,7 +351,7 @@ function makeReviewRpc(failModels: string[] = []): ReviewModelRpc & {
 	} as any;
 }
 
-const DURABLE_MODEL = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
+const DURABLE_MODEL = { provider: "anthropic", id: "claude-sonnet-5" };
 const REQUESTED_MODEL = { provider: "anthropic", id: "claude-opus-5" };
 const FALLBACK_MODEL = { provider: "anthropic", id: "claude-haiku-4-5" };
 const SDK_MODEL = { provider: "claude-agent-sdk", id: "sdk-live-model" };
@@ -924,7 +921,7 @@ describe("controlled model fallback policy — real SessionManager preflight", (
 
 describe("controlled model fallback policy — session auto-selection", () => {
 	it("model success followed by thinking rejection leaves the previous durable tuple intact", async () => {
-		const previous = { provider: "anthropic", id: "claude-sonnet-4-20250514", thinkingLevel: "high" };
+		const previous = { provider: "anthropic", id: "claude-sonnet-5", thinkingLevel: "high" };
 		const result = await exerciseAutoSelect({
 			prefs: { "default.sessionThinkingLevel": "xhigh" },
 			roleModel: "anthropic/claude-opus-5",

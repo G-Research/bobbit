@@ -37,7 +37,20 @@ class FakeChild extends EventEmitter {
 	kill(): boolean { return true; }
 }
 
+export interface FakeCommandSpawnBarrier {
+	/** Resolves only after the armed command has actually been spawned. */
+	readonly spawned: Promise<VerificationCommandSpawnSpec>;
+	/** Resolves when that exact fake child emits its terminal close. */
+	readonly closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+}
+
+interface ArmedFakeCommandSpawn extends FakeCommandSpawnBarrier {
+	resolveSpawned(spec: VerificationCommandSpawnSpec): void;
+	resolveClosed(result: { code: number | null; signal: NodeJS.Signals | null }): void;
+}
+
 interface ResettableVerificationRunner extends VerificationCommandRunner {
+	armNextSpawn(): FakeCommandSpawnBarrier;
 	reset(): void;
 }
 
@@ -68,12 +81,15 @@ let fakePid = 950_000;
 
 function createManualVerificationRunner(clock: ManualClock): ResettableVerificationRunner {
 	const live = new Set<TrackedChild>();
+	let armedNextSpawn: ArmedFakeCommandSpawn | undefined;
 
 	const runner: ResettableVerificationRunner = {
 		nonDurable: true,
 		spawn(spec: VerificationCommandSpawnSpec): TrackedChild {
 			const child = new FakeChild(++fakePid);
 			const scripted = interpretFakeCommand(spec.command);
+			const spawnBarrier = armedNextSpawn;
+			armedNextSpawn = undefined;
 			let closed = false;
 			let killed = false;
 			let timedOut = false;
@@ -99,6 +115,7 @@ function createManualVerificationRunner(clock: ManualClock): ResettableVerificat
 				live.delete(tracked);
 				child.emit("exit", code, signal);
 				child.emit("close", code, signal);
+				spawnBarrier?.resolveClosed({ code, signal });
 			};
 
 			const tracked: TrackedChild & { _timedOut?: boolean } = {
@@ -130,11 +147,24 @@ function createManualVerificationRunner(clock: ManualClock): ResettableVerificat
 					emitClose(scripted.exitCode, null);
 				}, scripted.delayMs);
 			}
+			spawnBarrier?.resolveSpawned(spec);
 			return tracked;
+		},
+		armNextSpawn(): FakeCommandSpawnBarrier {
+			if (armedNextSpawn) {
+				throw new Error("[fake-command-step] the next spawn already has an armed lifecycle barrier");
+			}
+			let resolveSpawned!: ArmedFakeCommandSpawn["resolveSpawned"];
+			let resolveClosed!: ArmedFakeCommandSpawn["resolveClosed"];
+			const spawned = new Promise<VerificationCommandSpawnSpec>(resolve => { resolveSpawned = resolve; });
+			const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => { resolveClosed = resolve; });
+			armedNextSpawn = { spawned, closed, resolveSpawned, resolveClosed };
+			return { spawned, closed };
 		},
 		reset(): void {
 			for (const child of [...live]) child.killTree("SIGTERM", 0);
 			live.clear();
+			armedNextSpawn = undefined;
 		},
 	};
 	return runner;
@@ -153,6 +183,19 @@ function runnerFor(clock: ManualClock): ResettableVerificationRunner {
 export function trackFakeCommandStepConnection(connection: WsConnection): WsConnection {
 	state.connections.add(connection);
 	return connection;
+}
+
+/**
+ * Arm a one-shot lifecycle barrier on the installed manual runner. The spawn
+ * and close promises retain their observations, so neither edge can be missed
+ * when verification performs asynchronous setup before spawning.
+ */
+export function armNextFakeCommandStepSpawn(gateway: FakeCommandStepGateway): FakeCommandSpawnBarrier {
+	const runner = runnerFor(gateway.clock);
+	if (gateway.teamManager.verificationHarness?.commandStepRunner !== runner) {
+		throw new Error("[fake-command-step] cannot arm spawn barrier before installing the manual runner");
+	}
+	return runner.armNextSpawn();
 }
 
 /**

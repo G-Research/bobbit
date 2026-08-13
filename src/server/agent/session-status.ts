@@ -18,6 +18,7 @@
  */
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
+import { isSocketSendable } from "../ws/socket-sendability.js";
 import { resolveSessionRuntime, type SessionRuntime } from "./session-runtime.js";
 
 /** Subset of `SessionInfo` the helper actually touches. */
@@ -65,7 +66,7 @@ export function buildSessionStatusFrame(
 function broadcastFrame(clients: Set<WebSocket>, msg: ServerMessage): void {
 	const data = JSON.stringify(msg);
 	for (const client of clients) {
-		if (client.readyState !== 1) continue;
+		if (!isSocketSendable(client)) continue;
 		try { client.send(data); } catch { /* per-client send failure is non-fatal */ }
 	}
 }

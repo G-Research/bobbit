@@ -31,13 +31,15 @@
  * runs. The campaign is therefore heavy (a UI mutant ≈ one `vite build` + two
  * Playwright specs). It gates the switchover only — it is NOT part of test:v2.
  *
- * ─── Junction-safe teardown ─────────────────────────────────────────────────────
- * The ephemeral worktree's node_modules is a Windows junction into the primary
- * repo's node_modules. `unlinkNodeModulesJunction` UNLINKS the reparse point
- * (non-recursively) BEFORE any recursive delete, so neither `git worktree remove`
- * nor `fs.rmSync` can descend THROUGH the junction and wipe the shared tree.
- * This is the same fix chaos.mjs carries (see docs/testing-v2/node-modules-
- * corruption-rca.md) — do NOT reintroduce delete-through-junction.
+ * ─── Junction-safe teardown (campaign-scoped chaos root — PR #956) ───────────────
+ * The campaign worktree is created as a SIBLING of a single shared node_modules
+ * reparse point inside a campaign-scoped "chaos root" under os.tmpdir(). NO
+ * node_modules link ever lives INSIDE the worktree, so neither `git worktree
+ * remove` nor a recursive `fs.rmSync` of the worktree can descend THROUGH a
+ * junction into the shared/primary tree. Teardown unlinks the shared reparse
+ * point FIRST, then removes the root. This is the same primary fix chaos.mjs
+ * carries (see docs/testing-v2/node-modules-corruption-rca.md) — do NOT
+ * reintroduce an in-worktree node_modules junction (`ensureNodeModulesJunction`).
  *
  * ─── Honest attribution ─────────────────────────────────────────────────────────
  * caught    = a Playwright JSON report names a FAILING test in the targeted spec
@@ -51,7 +53,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ── Paths / repo resolution (mirrors chaos.mjs) ────────────────────────────────
 
@@ -148,6 +150,16 @@ const PLAYWRIGHT_CLI = path.join(PRIMARY_NODE_MODULES, "playwright", "cli.js");
 // uses for vitest.
 const TSC_ENTRY = path.join(PRIMARY_NODE_MODULES, "typescript", "bin", "tsc");
 const VITE_ENTRY = path.join(PRIMARY_NODE_MODULES, "vite", "bin", "vite.js");
+
+// Campaign-scoped container ("chaos root"): holds ONE shared node_modules
+// junction plus the campaign worktree as a SIBLING. Node / Vite / Playwright
+// resolve modules by walking UP from <BROWSER_CHAOS_ROOT>/wt-*/… to
+// <BROWSER_CHAOS_ROOT>/node_modules, so nothing resolvable ever lives inside the
+// throwaway worktree (= a deletion root). Primary fix for the node_modules-wipe
+// bug (PR #956): a recursive worktree delete can no longer descend through an
+// in-worktree junction into the shared/primary tree. See
+// docs/testing-v2/node-modules-corruption-rca.md.
+const BROWSER_CHAOS_ROOT = path.join(os.tmpdir(), `bobbit-browser-chaos-root-${process.pid}-${Date.now()}`);
 
 // --corpus <name> selects tests2/chaos/browser-mutants-<name>.json and suffixes
 // the report paths with -<name>, so two coders can run DISJOINT corpus files +
@@ -390,38 +402,94 @@ function classifyRun(r, durationMs) {
 	return { result: "error", detail: `exit ${r.exitCode} but NO attributed failing spec — harness error (${durationMs}ms)`, tests: [] };
 }
 
-// ── Worktree management (junction-safe teardown reused from chaos.mjs) ──────────
+// ── Worktree management (campaign-scoped chaos root — mirrors chaos.mjs PR #956) ─
 
-function createEphemeralWorktree(label) {
-	const tmpDir = path.join(os.tmpdir(), `bobbit-browser-chaos-${label}-${Date.now()}`);
+// Provision the campaign-scoped chaos root ONCE per run: the container dir plus a
+// SINGLE shared `node_modules` reparse point pointing at the complete toolchain
+// tree. The campaign worktree is created as a SIBLING (see createEphemeralWorktree)
+// and resolves modules by walking up to this link — so NO node_modules link lives
+// inside a worktree that a force-delete could descend through.
+export function ensureBrowserChaosRoot(root = BROWSER_CHAOS_ROOT, nmTarget = PRIMARY_NODE_MODULES) {
+	fs.mkdirSync(root, { recursive: true });
+	const link = path.join(root, "node_modules");
+	if (!fs.existsSync(link)) {
+		if (!fs.existsSync(nmTarget)) {
+			console.warn(`[browser-chaos] Warning: toolchain node_modules not found at ${nmTarget}`);
+			return root;
+		}
+		// On Windows use 'junction' for directories; on POSIX use 'dir' symlink.
+		const type = process.platform === "win32" ? "junction" : "dir";
+		fs.symlinkSync(nmTarget, link, type);
+	}
+	return root;
+}
+
+export function createEphemeralWorktree(label) {
+	// Sibling of the shared node_modules inside the chaos root. NO per-worktree
+	// node_modules link is created — the worktree resolves modules by walking up
+	// to <BROWSER_CHAOS_ROOT>/node_modules, so nothing resolvable lives in this
+	// deletion root and a force-delete can never descend through a junction into
+	// the shared/primary tree (the node_modules-wipe bug).
+	ensureBrowserChaosRoot();
+	const dir = path.join(BROWSER_CHAOS_ROOT, `wt-${label}`);
 	try {
-		execFileSync("git", ["worktree", "add", "--detach", tmpDir, "HEAD"], { cwd: REPO_ROOT, stdio: "pipe" });
-		return tmpDir;
+		execFileSync("git", ["worktree", "add", "--detach", dir, "HEAD"], { cwd: REPO_ROOT, stdio: "pipe" });
+		return dir;
 	} catch (err) {
+		// Provisioning (root + shared node_modules reparse point) already ran above,
+		// but this failure happens BEFORE the campaign's cleanup-protected lifecycle.
+		// Without this, a failed `git worktree add` would leak a live junction in
+		// os.tmpdir(). Unlink-first cleanup here so no reparse point survives the
+		// error path (junction-safe: cleanupBrowserChaosRoot removes the link first).
+		cleanupBrowserChaosRoot();
 		throw new Error(`git worktree add failed: ${err.stderr || err.message}`);
 	}
 }
 
-function ensureNodeModulesJunction(worktreePath) {
-	const link = path.join(worktreePath, "node_modules");
-	if (fs.existsSync(link)) return;
-	if (!fs.existsSync(PRIMARY_NODE_MODULES)) {
-		console.warn(`[browser-chaos] Warning: primary node_modules not found at ${PRIMARY_NODE_MODULES}`);
-		return;
-	}
-	try {
-		const type = process.platform === "win32" ? "junction" : "dir";
-		fs.symlinkSync(PRIMARY_NODE_MODULES, link, type);
-	} catch (err) {
-		console.warn(`[browser-chaos] Warning: failed to create node_modules junction: ${err.message}`);
+// Remove ONLY a reparse point (junction/symlink), NEVER following it into its
+// target. On Windows a directory junction is a directory that is NOT a symlink
+// per lstat, so it must be removed with rmdir (non-recursive); a POSIX/Windows
+// symlink is removed with unlink. Refuse a real (non-link) entry — recursively
+// deleting that would be the exact footgun this helper exists to prevent.
+export function unlinkReparsePoint(p) {
+	const st = fs.lstatSync(p); // let it throw if absent — callers guard with existsSync
+	if (process.platform === "win32" && st.isDirectory() && !st.isSymbolicLink()) {
+		fs.rmdirSync(p); // Windows directory junction
+	} else if (st.isSymbolicLink()) {
+		fs.unlinkSync(p); // POSIX/Windows symlink
+	} else {
+		throw new Error("refusing to reparse-unlink a real entry: " + p);
 	}
 }
 
-// Remove the node_modules reparse point (junction/symlink) WITHOUT following it.
-// On Windows both `git worktree remove --force` and Node's recursive fs.rmSync
-// can descend THROUGH a directory junction and delete the target's contents (the
-// shared node_modules tree) instead of just unlinking the link. We therefore
-// unlink the link itself, non-recursively, first. (Same fix as chaos.mjs.)
+// Campaign teardown: remove the single shared node_modules reparse point FIRST
+// (so it can never be traversed), then recursively delete the chaos root. By the
+// time rm -rf runs, the junction is already gone — nothing external to descend
+// into. If the reparse point survives the unlink attempt, REFUSE the recursive
+// delete and leave the root in place rather than risk traversing the junction.
+export function cleanupBrowserChaosRoot(root = BROWSER_CHAOS_ROOT) {
+	const link = path.join(root, "node_modules");
+	try {
+		if (fs.existsSync(link)) unlinkReparsePoint(link);
+	} catch (e) {
+		console.warn(`[browser-chaos] junction unlink: ${e.message}`);
+	}
+	if (fs.existsSync(link)) {
+		console.warn(`[browser-chaos] node_modules reparse point still present after unlink; skipping recursive delete of ${root} to avoid traversing the junction`);
+		return;
+	}
+	try {
+		fs.rmSync(root, { recursive: true, force: true });
+	} catch { /* best-effort */ }
+}
+
+// Defensive belt-and-braces (retained from #956): even though no junction now
+// lives inside a worktree under the campaign-scoped-root design,
+// removeEphemeralWorktree still unlinks any node_modules reparse point BEFORE any
+// recursive delete. On Windows both `git worktree remove --force` and Node's
+// recursive fs.rmSync can descend THROUGH a directory junction and delete the
+// target's contents (the shared node_modules tree) instead of just unlinking the
+// link. We therefore unlink the link itself, non-recursively, first.
 function unlinkNodeModulesJunction(worktreePath) {
 	const link = path.join(worktreePath, "node_modules");
 	let st;
@@ -463,7 +531,7 @@ function unlinkNodeModulesJunction(worktreePath) {
 	}
 }
 
-function removeEphemeralWorktree(worktreePath) {
+export function removeEphemeralWorktree(worktreePath) {
 	if (!worktreePath) return;
 	try {
 		unlinkNodeModulesJunction(worktreePath);
@@ -800,8 +868,6 @@ async function main() {
 	}
 
 	try {
-		ensureNodeModulesJunction(worktreePath);
-
 		// Initial full build so dist/server + dist/ui exist and are CLEAN. Each
 		// step invokes its JS entry directly (no npm/.bin) for determinism.
 		console.log(`\n[browser-chaos] initial full build (packs + server + ui)…`);
@@ -813,7 +879,7 @@ async function main() {
 			if (!r.ok) {
 				console.error(`[browser-chaos] initial build:${label} FAILED — cannot run browser mutation campaign.`);
 				console.error(((r.stdout || "") + "\n" + (r.stderr || "")).slice(-1500));
-				if (!keepWorktree) removeEphemeralWorktree(worktreePath);
+				if (!keepWorktree) { removeEphemeralWorktree(worktreePath); cleanupBrowserChaosRoot(); }
 				process.exit(1);
 			}
 		}
@@ -842,8 +908,12 @@ async function main() {
 			writeReports(results, { date: new Date().toISOString(), totalDurationMs: Date.now() - totalStart, partial: true, runner: "browser-chaos.mjs" });
 		}
 	} finally {
-		if (!keepWorktree) removeEphemeralWorktree(worktreePath);
-		else console.log(`[browser-chaos] --keep-worktree: leaving ${worktreePath} in place (remember to \`git worktree remove\`).`);
+		if (!keepWorktree) {
+			removeEphemeralWorktree(worktreePath);
+			cleanupBrowserChaosRoot();
+		} else {
+			console.log(`[browser-chaos] --keep-worktree: leaving ${worktreePath} in place (remember to \`git worktree remove\` + delete ${BROWSER_CHAOS_ROOT}).`);
+		}
 	}
 
 	const meta = { date: new Date().toISOString(), totalDurationMs: Date.now() - totalStart, mutantCount: mutants.length, runner: "browser-chaos.mjs", partial: false };
@@ -876,7 +946,11 @@ async function main() {
 	console.log("\n✓ browser-chaos.mjs complete");
 }
 
-main().catch(err => {
-	console.error("[browser-chaos] Fatal error:", err);
-	process.exit(1);
-});
+// CLI-only guard: importing this module (e.g. from a test) must NOT run a
+// campaign. Only run main() when executed directly as a script.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+	main().catch(err => {
+		console.error("[browser-chaos] Fatal error:", err);
+		process.exit(1);
+	});
+}

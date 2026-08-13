@@ -61,8 +61,8 @@ function assertPublishBoundary(workflow: Workflow): void {
 	const publish = step(workflow, "publish", "Publish verified artifact (OIDC trusted publishing)");
 	assert.match(
 		publish.run ?? "",
-		/npm publish release-artifact\/bobbit\.tgz --ignore-scripts --provenance/,
-		"publish must name the verified artifact and disable lifecycle scripts",
+		/npm publish \.\/release-artifact\/bobbit\.tgz --ignore-scripts --provenance/,
+		"publish must use an explicit local path for the verified artifact and disable lifecycle scripts",
 	);
 }
 
@@ -96,7 +96,8 @@ describe("release publish privilege boundary mutations", () => {
 	it("rejects publishing the workspace or enabling lifecycle scripts", () => {
 		for (const replacement of [
 			"npm publish --provenance",
-			"npm publish release-artifact/bobbit.tgz --provenance",
+			"npm publish release-artifact/bobbit.tgz --ignore-scripts --provenance",
+			"npm publish ./release-artifact/bobbit.tgz --provenance",
 		]) {
 			const mutation = mutated(workflow => {
 				step(workflow, "publish", "Publish verified artifact (OIDC trusted publishing)").run = replacement;

@@ -269,7 +269,7 @@ describe("GoalTriggerDispatcher.onGoalArchived", () => {
 describe("GoalStore — onGoalCreated / onGoalArchived", () => {
 	function freshStore(): GoalStore {
 		const dir = fs.mkdtempSync(path.join(tmpRoot, "gs-"));
-		return new GoalStore(dir);
+		return new GoalStore(dir, undefined, { persistence: "json" });
 	}
 
 	it("put with a new id fires onGoalCreated exactly once", () => {

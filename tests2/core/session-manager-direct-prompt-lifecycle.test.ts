@@ -369,7 +369,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		{ ordering: "agent-start-before-echo", source: "agent", author: { kind: "agent", id: "session:caller", label: "Caller" } },
 		{ ordering: "echo-before-rejection", source: "agent", author: { kind: "agent", id: "session:caller", label: "Caller" } },
 	] as const)(
-		"keeps an accepted queued $author.kind author when the late RPC rejection arrives $ordering",
+		"requires the queued $author.kind prompt's exact echo when RPC rejection arrives $ordering",
 		async ({ ordering, source, author }) => {
 			const manager = makeManager();
 			const pending = deferred<any>();
@@ -406,24 +406,14 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			pending.resolve({ success: false, error: "late negative acknowledgement" });
 			await flushAsyncWork();
 
-			assert.equal(session.promptQueue.length, 0, "an observed turn must not be recovered");
 			const afterAck = readAuthorSidecar(session.id).find((row) => row.promptId === queued.id);
-			assert.notEqual(afterAck?.settlement?.outcome, "cancelled");
-
 			if (ordering === "agent-start-before-echo") {
-				const echo: any = manager.prepareVisibleAgentEvent(session, {
-					type: "message_end",
-					message: { id: `m-${ordering}`, role: "user", content: piText },
-				});
-				assert.deepEqual(echo.message.author, author);
-				assert.equal(echo.message.content, text, "the provider echo projects back to the durable base text");
-				manager.handleAgentLifecycle(session, echo);
+				assert.equal(session.promptQueue.length, 1, "unrelated lifecycle must not accept the rejected dispatch");
+				assert.equal(afterAck?.settlement?.outcome, "cancelled");
+			} else {
+				assert.equal(session.promptQueue.length, 0, "the exact user echo must prevent recovery");
+				assert.equal(afterAck?.settlement?.outcome, "echoed", "late rejection must not overwrite the echoed settlement");
 			}
-			assert.equal(
-				readAuthorSidecar(session.id).find((row) => row.promptId === queued.id)?.settlement?.outcome,
-				"echoed",
-				"late rejection must not overwrite the durable echoed settlement",
-			);
 		},
 	);
 
@@ -1300,10 +1290,15 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal((prompt.mock.calls[0] as any[])[0], taskNotice);
 		assert.equal(session.promptQueue.length, 0);
 
-		// The agent has accepted the prompt and begun processing it. A late bridge
+		// The exact user echo proves Pi accepted this dispatch. A late bridge
 		// failure from that same dispatch must not recover the row back into the
 		// queue, otherwise agent_end will inject the same task notification again.
 		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		const echo = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { id: "accepted-task-notice", role: "user", content: taskNotice },
+		});
+		manager.handleAgentLifecycle(session, echo);
 		pending.resolve({ success: false, error: "Agent is already processing." });
 		await Promise.resolve();
 		await Promise.resolve();

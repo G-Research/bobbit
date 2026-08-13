@@ -1,6 +1,15 @@
-import type { MessageAuthor } from "../../shared/message-author.js";
+import {
+	PI_TRANSCRIPT_ENTRY_ID_SOURCE,
+	isAccountablePromptMessage,
+	isPiTranscriptEntryId,
+	type MessageAuthor,
+} from "../../shared/message-author.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
-import { mergeAuthorSidecarIntoMessages, readAuthorSidecar } from "./author-sidecar.js";
+import {
+	extractPromptModelText,
+	mergeAuthorSidecarIntoMessages,
+	readAuthorSidecar,
+} from "./author-sidecar.js";
 import { mergeCompactionSidecarIntoMessages } from "./compaction-sidecar.js";
 import { mergeClaudeSdkCompactionCheckpoints } from "./claude-sdk-compaction-checkpoint.js";
 import { EventBuffer } from "./event-buffer.js";
@@ -18,29 +27,183 @@ export interface VisibleMessageSnapshotContext {
 	agentDeps?: NormalizeVisibleMessageContext["agentDeps"];
 	latestMessageUpdate?: { id?: string; message: any };
 	inFlightSteerTexts?: readonly PersistedInFlightSteer[];
+	/** Server-confirmed Pi entry ids aligned to the unmodified get_messages rows. */
+	transcriptPromptEntryIds?: readonly (string | undefined)[];
 }
 
-function stripUntrustedSnapshotAuthors(messages: any[]): any[] {
+export interface TranscriptCursorSnapshot {
+	forkMessages: unknown;
+	entries: unknown;
+	leafId: unknown;
+}
+
+interface CursorEntry {
+	id: string;
+	parentId: string | null;
+	type: string;
+	message?: Record<string, unknown>;
+	firstKeptEntryId?: string;
+}
+
+function parseCursorEntries(snapshot: TranscriptCursorSnapshot): {
+	branch: CursorEntry[];
+	forkTextById: Map<string, string>;
+} | undefined {
+	if (!Array.isArray(snapshot.entries) || !Array.isArray(snapshot.forkMessages)) return undefined;
+	const byId = new Map<string, CursorEntry>();
+	for (const value of snapshot.entries) {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+		const raw = value as Record<string, unknown>;
+		if (!isPiTranscriptEntryId(raw.id)
+			|| (raw.parentId !== null && !isPiTranscriptEntryId(raw.parentId))
+			|| typeof raw.type !== "string"
+			|| byId.has(raw.id)) return undefined;
+		byId.set(raw.id, {
+			id: raw.id,
+			parentId: raw.parentId as string | null,
+			type: raw.type,
+			...(raw.message && typeof raw.message === "object" && !Array.isArray(raw.message)
+				? { message: raw.message as Record<string, unknown> }
+				: {}),
+			...(typeof raw.firstKeptEntryId === "string" ? { firstKeptEntryId: raw.firstKeptEntryId } : {}),
+		});
+	}
+
+	if (snapshot.leafId === null && byId.size === 0) return { branch: [], forkTextById: new Map() };
+	if (!isPiTranscriptEntryId(snapshot.leafId) || !byId.has(snapshot.leafId)) return undefined;
+	const branch: CursorEntry[] = [];
+	const seen = new Set<string>();
+	let cursor: string | null = snapshot.leafId;
+	while (cursor !== null) {
+		if (seen.has(cursor)) return undefined;
+		seen.add(cursor);
+		const entry = byId.get(cursor);
+		if (!entry) return undefined;
+		branch.push(entry);
+		cursor = entry.parentId;
+	}
+	branch.reverse();
+
+	const forkTextById = new Map<string, string>();
+	for (const value of snapshot.forkMessages) {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+		const raw = value as Record<string, unknown>;
+		if (!isPiTranscriptEntryId(raw.entryId)
+			|| typeof raw.text !== "string"
+			|| forkTextById.has(raw.entryId)) return undefined;
+		const entry = byId.get(raw.entryId);
+		if (!entry || entry.type !== "message" || !isAccountablePromptMessage(entry.message)) return undefined;
+		const modelText = extractPromptModelText(entry.message!);
+		if (modelText === undefined || modelText !== raw.text) return undefined;
+		forkTextById.set(raw.entryId, raw.text);
+	}
+	return { branch, forkTextById };
+}
+
+/**
+ * Correlate Pi's id-less get_messages view with its read-only session tree.
+ * Matching is positional within Pi's active, compaction-aware context, so
+ * duplicate prompt text cannot move a cursor to an older or newer occurrence.
+ * An in-memory prompt may exist only as a trailing get_messages row while Pi is
+ * streaming; callers can permit that tail, but it never receives a cursor.
+ */
+export function correlateTranscriptPromptEntryIds(
+	messages: readonly unknown[],
+	snapshot: TranscriptCursorSnapshot,
+	options: { allowUnpersistedTail?: boolean } = {},
+): Array<string | undefined> | undefined {
+	if (!Array.isArray(messages)) return undefined;
+	const parsed = parseCursorEntries(snapshot);
+	if (!parsed) return undefined;
+
+	let contextEntries = parsed.branch;
+	let latestCompactionIndex = -1;
+	for (let index = 0; index < parsed.branch.length; index++) {
+		if (parsed.branch[index].type === "compaction") latestCompactionIndex = index;
+	}
+	if (latestCompactionIndex !== -1) {
+		const compaction = parsed.branch[latestCompactionIndex];
+		const retainedBefore: CursorEntry[] = [];
+		let retaining = false;
+		for (let index = 0; index < latestCompactionIndex; index++) {
+			const entry = parsed.branch[index];
+			if (entry.id === compaction.firstKeptEntryId) retaining = true;
+			if (retaining) retainedBefore.push(entry);
+		}
+		contextEntries = [compaction, ...retainedBefore, ...parsed.branch.slice(latestCompactionIndex + 1)];
+	}
+
+	const expected = contextEntries.filter((entry) =>
+		entry.type === "message" && isAccountablePromptMessage(entry.message),
+	);
+	const visibleUserIndexes: number[] = [];
+	for (let index = 0; index < messages.length; index++) {
+		if (isAccountablePromptMessage(messages[index])) visibleUserIndexes.push(index);
+	}
+	if (visibleUserIndexes.length < expected.length) return undefined;
+	const unpersistedTail = visibleUserIndexes.length - expected.length;
+	if (unpersistedTail > 0 && !options.allowUnpersistedTail) return undefined;
+
+	const entryIds = new Array<string | undefined>(messages.length);
+	for (let index = 0; index < expected.length; index++) {
+		const messageIndex = visibleUserIndexes[index];
+		const message = messages[messageIndex] as Record<string, unknown>;
+		const expectedEntry = expected[index];
+		const visibleText = extractPromptModelText(message);
+		const authoritativeText = parsed.forkTextById.get(expectedEntry.id);
+		if (visibleText === undefined || authoritativeText === undefined || visibleText !== authoritativeText) {
+			return undefined;
+		}
+		entryIds[messageIndex] = expectedEntry.id;
+	}
+	return entryIds;
+}
+
+function stripUntrustedSnapshotMetadata(messages: any[]): any[] {
 	let changed = false;
 	const stripped = messages.map((message) => {
-		if (!message || typeof message !== "object" || Array.isArray(message) || !("author" in message)) {
+		if (!message || typeof message !== "object" || Array.isArray(message)
+			|| (!("author" in message) && !("_entryIdSource" in message))) {
 			return message;
 		}
-		const { author: _untrustedAuthor, ...withoutAuthor } = message;
+		const {
+			author: _untrustedAuthor,
+			_entryIdSource: _untrustedEntryIdSource,
+			...withoutUntrustedMetadata
+		} = message;
 		changed = true;
-		return withoutAuthor;
+		return withoutUntrustedMetadata;
 	});
 	return changed ? stripped : messages;
 }
 
+function projectTranscriptPromptEntryIds(
+	messages: any[],
+	entryIds: readonly (string | undefined)[] | undefined,
+): any[] {
+	if (!entryIds || entryIds.length !== messages.length) return messages;
+	let changed = false;
+	const projected = messages.map((message, index) => {
+		const entryId = entryIds[index];
+		if (!isPiTranscriptEntryId(entryId) || !isAccountablePromptMessage(message)) return message;
+		changed = true;
+		return { ...message, entryId, _entryIdSource: PI_TRANSCRIPT_ENTRY_ID_SOURCE };
+	});
+	return changed ? projected : messages;
+}
+
 function transformMessages(messages: any[], context: VisibleMessageSnapshotContext): any[] {
 	// Pi transcript rows are untrusted at this boundary. Remove even
-	// valid-looking author metadata before Bobbit adds its trusted live,
-	// compaction, and sidecar identities below.
-	const trustedBase = stripUntrustedSnapshotAuthors(messages);
+	// valid-looking Bobbit metadata before trusted cursor, compaction, and sidecar
+	// projection below. Raw entryId values are never granted provenance.
+	const trustedBase = stripUntrustedSnapshotMetadata(messages);
+	const withTranscriptCursors = projectTranscriptPromptEntryIds(
+		trustedBase,
+		context.transcriptPromptEntryIds,
+	);
 	const authorBindings = readAuthorSidecar(context.sessionId);
 	const withInFlight = spliceInFlightSteers(
-		spliceInFlightMessage(trustedBase, context.latestMessageUpdate),
+		spliceInFlightMessage(withTranscriptCursors, context.latestMessageUpdate),
 		context.inFlightSteerTexts,
 		authorBindings,
 	);

@@ -26,6 +26,7 @@ import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 import { showHeaderToast } from "./header-toast.js";
 import { ensureProjectPlayFinishSoundOverride } from "./play-finish-sound.js";
+import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -43,6 +44,8 @@ import { countDescendants } from "./goal-descendants-count.js";
 import { isInitialSessionsLoad } from "./session-load-state.js";
 import { expandSidebarTreeNode } from "./sidebar-tree-state.js";
 import { HEADQUARTERS_PROJECT_ID, isHeadquartersProject } from "./headquarters.js";
+import { normalizeTags, removeTag, replaceTag } from "../shared/session-tags.js";
+import { sidebarNeedsArchivedSessions } from "./sidebar-view-preferences.js";
 
 function configApiProjectId(projectId?: string | null): string {
 	const selected = projectId || state.activeProjectId || HEADQUARTERS_PROJECT_ID;
@@ -340,6 +343,196 @@ export function updateLocalSessionStatus(
 	}
 }
 
+type SessionWithUserTags = Omit<GatewaySession, "user_tags"> & { user_tags?: unknown };
+type SessionTagsSnapshot = {
+	hadOwnProperty: boolean;
+	value: unknown;
+};
+type LoadedSessionTagsSnapshot = {
+	live: SessionTagsSnapshot[];
+	archived: SessionTagsSnapshot[];
+};
+
+type SessionPinMutation = {
+	pinned: boolean;
+	resolve: () => void;
+};
+type SessionPinMutationState = {
+	committed: LoadedSessionTagsSnapshot;
+	queue: SessionPinMutation[];
+	processing: boolean;
+	refreshAfterIdle: boolean;
+};
+
+/** One serialized queue per session; unrelated sessions remain concurrent. */
+const sessionPinMutations = new Map<string, SessionPinMutationState>();
+
+function userTagsEqual(left: readonly string[] | undefined, right: readonly string[]): boolean {
+	return !!left && left.length === right.length && left.every((tag, index) => tag === right[index]);
+}
+
+function patchSessionTagsInList(
+	list: GatewaySession[],
+	sessionId: string,
+	getTags: (session: SessionWithUserTags) => string[],
+): { list: GatewaySession[]; changed: boolean } {
+	let changed = false;
+	const next = list.map((session) => {
+		if (session.id !== sessionId) return session;
+		const current = session as SessionWithUserTags;
+		const userTags = getTags(current);
+		if (userTagsEqual(Array.isArray(current.user_tags) ? current.user_tags : undefined, userTags)) return session;
+		changed = true;
+		return { ...session, user_tags: [...userTags] } as GatewaySession;
+	});
+	return { list: changed ? next : list, changed };
+}
+
+function patchLoadedSessionUserTags(sessionId: string, userTags: readonly string[]): boolean {
+	const authoritativeTags = normalizeTags(userTags);
+	const live = patchSessionTagsInList(state.gatewaySessions, sessionId, () => authoritativeTags);
+	const archived = patchSessionTagsInList(state.archivedSessions, sessionId, () => authoritativeTags);
+	if (live.changed) state.gatewaySessions = live.list;
+	if (archived.changed) state.archivedSessions = archived.list;
+	return live.changed || archived.changed;
+}
+
+function captureLoadedSessionUserTags(sessionId: string): LoadedSessionTagsSnapshot {
+	const capture = (list: GatewaySession[]): SessionTagsSnapshot[] => list
+		.filter((session) => session.id === sessionId)
+		.map((session) => {
+			const row = session as SessionWithUserTags;
+			return {
+				hadOwnProperty: Object.prototype.hasOwnProperty.call(row, "user_tags"),
+				value: Array.isArray(row.user_tags) ? [...row.user_tags] : row.user_tags,
+			};
+		});
+	return { live: capture(state.gatewaySessions), archived: capture(state.archivedSessions) };
+}
+
+function patchLoadedSessionPin(sessionId: string, pinned: boolean): boolean {
+	const update = (session: SessionWithUserTags) => pinned
+		? replaceTag(session.user_tags, "pinned", "true")
+		: removeTag(session.user_tags, "pinned");
+	const live = patchSessionTagsInList(state.gatewaySessions, sessionId, update);
+	const archived = patchSessionTagsInList(state.archivedSessions, sessionId, update);
+	if (live.changed) state.gatewaySessions = live.list;
+	if (archived.changed) state.archivedSessions = archived.list;
+	return live.changed || archived.changed;
+}
+
+function restoreLoadedSessionUserTags(sessionId: string, snapshot: LoadedSessionTagsSnapshot): void {
+	const restore = (list: GatewaySession[], snapshots: SessionTagsSnapshot[]): GatewaySession[] => {
+		let matchIndex = 0;
+		return list.map((session) => {
+			if (session.id !== sessionId) return session;
+			const previous = snapshots[matchIndex++];
+			if (!previous) return session;
+			const restored = { ...session } as SessionWithUserTags;
+			if (previous.hadOwnProperty) {
+				restored.user_tags = Array.isArray(previous.value) ? [...previous.value] : previous.value;
+			} else {
+				delete restored.user_tags;
+			}
+			return restored as GatewaySession;
+		});
+	};
+	state.gatewaySessions = restore(state.gatewaySessions, snapshot.live);
+	state.archivedSessions = restore(state.archivedSessions, snapshot.archived);
+}
+
+function latestPendingPinIntent(mutationState: SessionPinMutationState): boolean | undefined {
+	return mutationState.queue.at(-1)?.pinned;
+}
+
+/** Overlay pending local intent on list snapshots without suppressing their other fields. */
+function overlayPendingSessionPins(sessions: GatewaySession[]): GatewaySession[] {
+	let changed = false;
+	const next = sessions.map((session) => {
+		const mutationState = sessionPinMutations.get(session.id);
+		const pinned = mutationState ? latestPendingPinIntent(mutationState) : undefined;
+		if (pinned === undefined) return session;
+		mutationState!.refreshAfterIdle = true;
+		const tags = pinned ? replaceTag(session.user_tags, "pinned", "true") : removeTag(session.user_tags, "pinned");
+		if (userTagsEqual(Array.isArray(session.user_tags) ? session.user_tags : undefined, tags)) return session;
+		changed = true;
+		return { ...session, user_tags: tags };
+	});
+	return changed ? next : sessions;
+}
+
+async function drainSessionPinMutations(sessionId: string, mutationState: SessionPinMutationState): Promise<void> {
+	if (mutationState.processing) return;
+	mutationState.processing = true;
+	while (mutationState.queue.length > 0) {
+		const mutation = mutationState.queue[0]!;
+		let failure: unknown;
+		try {
+			const response = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ pinned: mutation.pinned }),
+			});
+			if (!response.ok) {
+				throw await errorFromResponse(response, `Failed to ${mutation.pinned ? "pin" : "unpin"} session: ${response.status}`);
+			}
+			const body = await response.json().catch(() => null) as { user_tags?: unknown } | null;
+			if (!body || !Array.isArray(body.user_tags)) throw new Error("Pin response did not include user_tags");
+			patchLoadedSessionUserTags(sessionId, body.user_tags);
+			mutationState.committed = captureLoadedSessionUserTags(sessionId);
+		} catch (error) {
+			failure = error;
+			restoreLoadedSessionUserTags(sessionId, mutationState.committed);
+		}
+
+		mutationState.queue.shift();
+		const pendingIntent = latestPendingPinIntent(mutationState);
+		if (pendingIntent !== undefined) {
+			// A settlement may expose an older server state. Re-apply the newest
+			// admitted click until its own serialized request settles.
+			patchLoadedSessionPin(sessionId, pendingIntent);
+		}
+		renderApp();
+
+		// Preserve the existing newest-failure toast policy: an older failure with
+		// a newer admitted intent is silent, while the final failed intent reports.
+		if (failure && pendingIntent === undefined) {
+			console.error(`[sidebar] Failed to ${mutation.pinned ? "pin" : "unpin"} session:`, failure);
+			await flashSidebarToast(`Couldn't ${mutation.pinned ? "pin" : "unpin"} session`);
+		}
+		mutation.resolve();
+	}
+	mutationState.processing = false;
+	if (mutationState.queue.length === 0) {
+		sessionPinMutations.delete(sessionId);
+		if (mutationState.refreshAfterIdle) scheduleSessionListRefreshFromPush();
+	} else {
+		void drainSessionPinMutations(sessionId, mutationState);
+	}
+}
+
+/**
+ * Optimistically apply the latest click, while serializing durable writes per
+ * session against one committed rollback baseline.
+ */
+export function setSessionPinned(sessionId: string, pinned: boolean): Promise<void> {
+	let mutationState = sessionPinMutations.get(sessionId);
+	if (!mutationState) {
+		mutationState = {
+			committed: captureLoadedSessionUserTags(sessionId),
+			queue: [],
+			processing: false,
+			refreshAfterIdle: false,
+		};
+		sessionPinMutations.set(sessionId, mutationState);
+	}
+	const completion = new Promise<void>((resolve) => mutationState!.queue.push({ pinned, resolve }));
+	patchLoadedSessionPin(sessionId, pinned);
+	renderApp();
+	void drainSessionPinMutations(sessionId, mutationState);
+	return completion;
+}
+
 const SESSION_LIST_PUSH_REFRESH_DEBOUNCE_MS = 100;
 const SESSION_LIST_PUSH_RECONNECT_MS = 3_000;
 let sessionListPushRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -447,6 +640,13 @@ export function startSessionListPushSync(): void {
 			if (msg?.type === "remote_state_snapshot") {
 				if (applyRemoteStateSnapshotMessage(msg)) renderApp();
 			} else if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
+				if (msg.type === "sessions_changed" && typeof msg.sessionId === "string" && Array.isArray(msg.user_tags)) {
+					// The payload may describe an earlier serialized write. Keep the
+					// newest admitted local intent visible until its queue is idle.
+					const pendingMutation = sessionPinMutations.get(msg.sessionId);
+					if (pendingMutation) pendingMutation.refreshAfterIdle = true;
+					else if (patchLoadedSessionUserTags(msg.sessionId, msg.user_tags)) renderApp();
+				}
 				scheduleSessionListRefreshFromPush();
 			} else if (msg?.type === "staff_changed") {
 				scheduleStaffListRefreshFromPush();
@@ -568,7 +768,7 @@ export async function refreshSessions(): Promise<void> {
 			// Generation matches — nothing to do
 		} else {
 			sessionsChanged = true;
-			const newSessions: GatewaySession[] = sessionsData.sessions || [];
+			const newSessions: GatewaySession[] = overlayPendingSessionPins(sessionsData.sessions || []);
 
 			// Warm each source-project override without delaying session state,
 			// transitions, badges, or completion of this refresh.
@@ -597,7 +797,7 @@ export async function refreshSessions(): Promise<void> {
 			state.gatewaySessions = newSessions;
 
 			// Merge archived delegates of live sessions into state.archivedSessions
-			const archivedDelegates: GatewaySession[] = sessionsData.archivedDelegates || [];
+			const archivedDelegates: GatewaySession[] = overlayPendingSessionPins(sessionsData.archivedDelegates || []);
 			if (archivedDelegates.length > 0) {
 				const existingIds = new Set(state.archivedSessions.map(s => s.id));
 				for (const d of archivedDelegates) {
@@ -720,8 +920,10 @@ export async function refreshSessions(): Promise<void> {
 			.catch(() => {});
 	}
 
-	// Lazy-load archived sessions + goals on initial load only if user had "Show archived" persisted
-	if (isInitial && state.showArchived && !_archivedSessionsLoaded) {
+	// Lazy-load archived sessions + goals on initial load when either independent
+	// view persisted Show Archived. A restored By Status view must not wait for a
+	// view switch before its archived rows become available.
+	if (isInitial && sidebarNeedsArchivedSessions(state) && !_archivedSessionsLoaded) {
 		fetchArchivedSessions();
 		fetchArchivedGoalsPaginated();
 	}
@@ -755,7 +957,7 @@ export function clearArchivedSessionsState(): void {
 
 /** Fetch archived sessions from the API (paginated). */
 export async function fetchArchivedSessions(): Promise<void> {
-	if (state.showArchived && state.searchQuery.trim()) {
+	if (state.archivedSearchDemand && state.searchQuery.trim()) {
 		scheduleArchivedRemoteSearch(state.searchQuery);
 		return;
 	}
@@ -814,7 +1016,8 @@ function isArchivedSessionRecord(session: GatewaySession): boolean {
 
 function mergeArchivedSessionsIntoState(sessions: GatewaySession[]): void {
 	if (sessions.length === 0) return;
-	const incoming = new Map(sessions.map((s) => [s.id, s]));
+	const incomingSessions = overlayPendingSessionPins(sessions);
+	const incoming = new Map(incomingSessions.map((s) => [s.id, s]));
 	const seen = new Set<string>();
 	state.archivedSessions = state.archivedSessions.map((s) => {
 		const next = incoming.get(s.id);
@@ -822,14 +1025,14 @@ function mergeArchivedSessionsIntoState(sessions: GatewaySession[]): void {
 		seen.add(s.id);
 		return next;
 	});
-	for (const session of sessions) {
+	for (const session of incomingSessions) {
 		if (!seen.has(session.id)) state.archivedSessions.push(session);
 	}
 }
 
 function archivedSearchStillCurrent(query: string, runId: number): boolean {
 	return runId === _archivedSearchRunId
-		&& state.showArchived
+		&& state.archivedSearchDemand
 		&& state.searchQuery.trim() === query;
 }
 
@@ -839,7 +1042,7 @@ export function scheduleArchivedRemoteSearch(query: string, delay = ARCHIVED_SEA
 		clearTimeout(_archivedSearchTimer);
 		_archivedSearchTimer = null;
 	}
-	if (!trimmed || !state.showArchived) {
+	if (!trimmed || !state.archivedSearchDemand) {
 		clearArchivedSearchState();
 		return;
 	}
@@ -861,14 +1064,14 @@ export function scheduleArchivedRemoteSearch(query: string, delay = ARCHIVED_SEA
 
 export async function fetchArchivedSearchGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
 	const query = state.searchQuery.trim();
-	if (!query || !state.showArchived) return;
+	if (!query || !state.archivedSearchDemand) return;
 	state.archivedSearchQuery = query;
 	await fetchArchivedSearchGoalsPage(limit, afterCursor, query, _archivedSearchRunId);
 }
 
 export async function fetchArchivedSearchSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
 	const query = state.searchQuery.trim();
-	if (!query || !state.showArchived) return;
+	if (!query || !state.archivedSearchDemand) return;
 	state.archivedSearchQuery = query;
 	await fetchArchivedSearchSessionsPage(limit, afterCursor, query, _archivedSearchRunId);
 }
@@ -1313,7 +1516,7 @@ export async function promoteProject(id: string, name?: string): Promise<Project
 // ============================================================================
 
 export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: number): Promise<void> {
-	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+	if (afterCursor === undefined && state.archivedSearchDemand && state.searchQuery.trim()) {
 		scheduleArchivedRemoteSearch(state.searchQuery);
 		return;
 	}
@@ -1359,7 +1562,7 @@ export async function fetchArchivedGoalsPaginated(limit = 50, afterCursor?: numb
 }
 
 export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: number): Promise<void> {
-	if (afterCursor === undefined && state.showArchived && state.searchQuery.trim()) {
+	if (afterCursor === undefined && state.archivedSearchDemand && state.searchQuery.trim()) {
 		scheduleArchivedRemoteSearch(state.searchQuery);
 		return;
 	}
@@ -1369,7 +1572,7 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 		const res = await gatewayFetch(`/api/sessions?${params}`);
 		if (!res.ok) return;
 		const data = await res.json();
-		const sessions: GatewaySession[] = (data.sessions || []).filter((s: any) => s.archived === true);
+		const sessions: GatewaySession[] = overlayPendingSessionPins((data.sessions || []).filter((s: any) => s.archived === true));
 		if (afterCursor !== undefined) {
 			// Append
 			const existingIds = new Set(state.archivedSessions.map(s => s.id));
@@ -1385,7 +1588,7 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 		}
 
 		// Merge archived delegates from the response (BFS-enriched by server)
-		const archivedDelegates: GatewaySession[] = data.archivedDelegates || [];
+		const archivedDelegates: GatewaySession[] = overlayPendingSessionPins(data.archivedDelegates || []);
 		if (archivedDelegates.length > 0) {
 			const existingIds = new Set(state.archivedSessions.map(s => s.id));
 			for (const d of archivedDelegates) {
@@ -1578,24 +1781,26 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 
 	const results = await Promise.all(
 		goalsWithBranch.map(async (g) => {
+			const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("sidebar", g.id, "pr"));
 			try {
 				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1&intent=sidebar`);
-				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
-				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
+				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true, ticket };
+				if (!res.ok) return { goalId: g.id, pr: null, noPr: false, ticket };
 				const snapshot = parseRemoteStateSnapshot<RemotePrStatus>(await res.json());
 				const data = snapshot.data;
 				const pr = data && typeof data === "object" && typeof data.state === "string"
 					? { ...data, ...snapshot, state: data.state, url: sanitizePullRequestUrl(data.url) }
 					: null;
-				return { goalId: g.id, pr, noPr: data === null && !snapshot.stale && !snapshot.lastError };
+				return { goalId: g.id, pr, noPr: data === null && !snapshot.stale && !snapshot.lastError, ticket };
 			} catch {
-				return { goalId: g.id, pr: null, noPr: false };
+				return { goalId: g.id, pr: null, noPr: false, ticket };
 			}
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, pr, noPr } of results) {
+	for (const { goalId, pr, noPr, ticket } of results) {
+		if (!remoteStateRequestOrder.isCurrent(ticket)) continue;
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
 			if (!prev
@@ -1640,6 +1845,7 @@ export function applyRemoteStateSnapshotMessage(message: unknown): boolean {
 				: snapshot.data && typeof snapshot.data.branch === "string" ? "git" : "pr";
 	if (resource !== "pr" && resource !== "pr_status") return false;
 
+	remoteStateRequestOrder.supersede(remoteStateRequestKey("sidebar", msg.goalId, "pr"));
 	const previous = state.prStatusCache.get(msg.goalId);
 	if (snapshot.data && typeof snapshot.data.state === "string") {
 		const next: RemotePrStatus = {

@@ -1,5 +1,7 @@
 # Design: `bobbit_read` pagination
 
+> **Superseded contract notice:** This document records the original pagination rollout and is not the current agent-tool contract. See the authoritative [`bobbit` gateway tool reference](../bobbit-gateway-tool.md) and built-in [`bobbit_read` detail docs](../../defaults/tools/bobbit/bobbit_read.yaml).
+
 Status: **implemented** · Goal: Page Bobbit Tools · Author: coder-861a
 
 ## 1. Problem

@@ -503,8 +503,9 @@ export class TeamManager {
 		} else {
 			const dir = stateDir ?? bobbitStateDir();
 			this.localStore = new TeamStore(dir);
-			// Non-PCM test path: create a local GoalManager from the same stateDir
-			this._localGoalManager = new GoalManager(new GoalStore(dir), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock });
+			// Non-PCM test path: create a local GoalManager from the same stateDir.
+			// Keep fixtures on JSON even though their stateDir uses the real filesystem.
+			this._localGoalManager = new GoalManager(new GoalStore(dir, undefined, { persistence: "json" }), undefined, undefined, { commandRunner: this.commandRunner, clock: this.clock });
 		}
 		this.restorePromise = this.restoreTeams().then(() => {
 			this.restoreCompleted = true;
@@ -1926,10 +1927,27 @@ export class TeamManager {
 		}
 	}
 
+	/**
+	 * Setup is a hard lifecycle boundary: no lead or worker may start until the
+	 * authoritative setup transition has reached `ready`. GoalStore migrates
+	 * pre-status records to `ready` when loading; accepting an absent value here
+	 * keeps narrow in-process migration/test doubles compatible without making it
+	 * a valid state for newly persisted goals.
+	 */
+	private assertGoalSetupReady(goal: PersistedGoal): void {
+		if (goal.setupStatus !== undefined && goal.setupStatus !== "ready") {
+			const message = goal.setupStatus === "error"
+				? "Goal setup failed. Retry setup before starting the team"
+				: "Goal setup is still in progress. Wait for verified readiness before starting the team";
+			throw new TeamStartError("GOAL_SETUP_INCOMPLETE", message);
+		}
+	}
+
 	private assertGoalCanStart(goal: PersistedGoal): void {
 		if (!goal.team) {
 			throw new TeamStartError("TEAM_DISABLED", `Goal "${goal.title}" does not have team mode enabled`);
 		}
+		this.assertGoalSetupReady(goal);
 		// 'blocked' belongs exclusively to the dependency scheduler. An explicit
 		// operator resume must never clear it or use it to bypass dependencies.
 		if (goal.state === "blocked") {
@@ -1948,9 +1966,7 @@ export class TeamManager {
 		if (goal.state === "shelved") {
 			throw new TeamStartError("GOAL_SHELVED", "Goal is shelved and cannot start a team");
 		}
-		if (goal.setupStatus && goal.setupStatus !== "ready") {
-			throw new TeamStartError("GOAL_SETUP_INCOMPLETE", "Goal setup is not complete. Finish setup before starting the team");
-		}
+		this.assertGoalSetupReady(goal);
 	}
 
 	private async _startTeamImpl(goalId: string, options: NormalizedStartTeamOptions): Promise<SessionInfo> {
@@ -2278,6 +2294,9 @@ export class TeamManager {
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
 		}
+		// A stale/preparing goal must not be able to create a worker through an
+		// in-process caller that bypasses the REST spawn route.
+		this.assertGoalSetupReady(goal);
 		// Pause-cascade guard — in-process callers (team-lead extension
 		// invoking the team_spawn MCP tool) bypass REST. Defense-in-depth.
 		if (goal.paused) throw new GoalPausedError(goalId);

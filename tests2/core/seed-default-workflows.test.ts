@@ -20,6 +20,8 @@ type VerifyStep = {
 	expect?: string;
 	optional?: boolean;
 	prompt?: string;
+	timeout?: number;
+	failureGuidance?: string;
 };
 
 type Workflow = {
@@ -42,6 +44,21 @@ const EXPECTED_REVIEWS = [
 	{ name: "Integrated implementation review", role: "code-reviewer" },
 	{ name: "Security review", role: "security-reviewer" },
 ];
+type ImplementationPhasePolicy = {
+	commands: Record<"check" | "unit" | "browser" | "e2e", number>;
+	reviews: number;
+	qa: number;
+};
+const DEFAULT_IMPLEMENTATION_PHASES: ImplementationPhasePolicy = {
+	commands: { check: 1, unit: 1, browser: 1, e2e: 1 },
+	reviews: 2,
+	qa: 3,
+};
+const PROJECT_IMPLEMENTATION_PHASES: ImplementationPhasePolicy = {
+	commands: { check: 1, unit: 1, browser: 2, e2e: 3 },
+	reviews: 3,
+	qa: 4,
+};
 const SUPERSEDED_REVIEW_NAMES = [
 	/code quality/i,
 	/bug hunt/i,
@@ -140,14 +157,19 @@ function assertDeferredToLaterStage(prompt: string, artifact: RegExp, source: st
 	assert.match(policy, new RegExp(`${genericOrContrast}.{0,${policyWindow}}${artifactPattern}|${artifactPattern}.{0,${policyWindow}}${genericOrContrast}|${explicitHandoff}`, "i"), message);
 }
 
-function assertCompleteGateStageOwnership(workflows: Record<string, Workflow>, source: string): void {
+function assertCompleteGateStageOwnership(
+	workflows: Record<string, Workflow>,
+	source: string,
+	optionalQaPhase = DEFAULT_IMPLEMENTATION_PHASES.qa,
+): void {
 	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
 		const implementation = findGate(workflows[workflowId], "implementation");
 		const specPrompt = implementation.verify?.find((step) => step.role === "spec-auditor")?.prompt ?? "";
 		const securityPrompt = implementation.verify?.find((step) => step.role === "security-reviewer")?.prompt ?? "";
 
-		// Phase-2 reviews must not block on work owned by optional QA or publication.
-		assertDeferredToLaterStage(specPrompt, /(?:optional.{0,100}(?:phase[- ]?3|later).{0,100}(?:QA|agent QA)|(?:QA|agent QA).{0,100}optional.{0,100}(?:phase[- ]?3|later))/i, `${source}.${workflowId}.implementation Spec review optional QA`);
+		// Implementation reviews must not block on work owned by optional QA or publication.
+		const optionalQa = new RegExp(`(?:optional.{0,100}(?:phase[- ]?${optionalQaPhase}|later).{0,100}(?:QA|agent QA)|(?:QA|agent QA).{0,100}optional.{0,100}(?:phase[- ]?${optionalQaPhase}|later))`, "i");
+		assertDeferredToLaterStage(specPrompt, optionalQa, `${source}.${workflowId}.implementation Spec review optional QA`);
 		assertDeferredToLaterStage(specPrompt, /(?:ready[- ]to[- ]merge|publication).{0,160}(?:push|base(?:[- ]sync)?|pull request|PR)|(?:push|base(?:[- ]sync)?|pull request|PR).{0,160}(?:ready[- ]to[- ]merge|publication)/i, `${source}.${workflowId}.implementation Spec review publication`);
 
 		const hasDocumentationGate = workflowId !== "quick-fix";
@@ -191,7 +213,33 @@ function assertUnconditionalSpecDocumentationScope(workflows: Record<string, Wor
 	}
 }
 
-function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, source: string) {
+function assertProjectReadyToMergeChecks(workflows: Record<string, Workflow>, source: string): void {
+	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
+		const verify = findGate(workflows[workflowId], "ready-to-merge").verify ?? [];
+		const prRaisedIndex = verify.findIndex((step) => step.name === "PR raised");
+		const checksIndex = verify.findIndex((step) => step.name === "PR checks pass");
+		assert.ok(prRaisedIndex >= 0, `${source}.${workflowId}.ready-to-merge must verify that the PR was raised`);
+		assert.ok(checksIndex > prRaisedIndex, `${source}.${workflowId}.ready-to-merge must wait for PR checks after verifying that the PR was raised`);
+
+		const checks = verify[checksIndex];
+		assert.equal(checks.type, "command");
+		assert.equal(checks.phase, 1);
+		assert.equal(checks.timeout, 3600);
+		assert.equal(checks.run, 'gh pr checks "{{branch}}" --watch --interval 10');
+		const guidance = checks.failureGuidance?.replace(/\s+/g, " ") ?? "";
+		assert.match(guidance, /transient.{0,120}retry and re-signal/i);
+		assert.match(guidance, /re-signal.{0,120}earliest passed gate/i);
+		assert.match(guidance, /Implementation.{0,100}source code.{0,100}tests/i);
+		assert.match(guidance, /Documentation.{0,100}documentation-only/i);
+		assert.match(guidance, /Design\/Issue Analysis.{0,100}assumptions change/i);
+	}
+}
+
+function assertImplementationReviewPolicy(
+	workflows: Record<string, Workflow>,
+	source: string,
+	phases = DEFAULT_IMPLEMENTATION_PHASES,
+) {
 	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
 		const implementation = findGate(workflows[workflowId], "implementation");
 		const verify = implementation.verify ?? [];
@@ -199,8 +247,8 @@ function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, s
 
 		assert.deepEqual(
 			reviews.map(({ name, role, phase }) => ({ name, role, phase })),
-			EXPECTED_REVIEWS.map(({ name, role }) => ({ name, role, phase: 2 })),
-			`${source}.${workflowId}.implementation must contain exactly the three consolidated phase-2 reviews in policy order`,
+			EXPECTED_REVIEWS.map(({ name, role }) => ({ name, role, phase: phases.reviews })),
+			`${source}.${workflowId}.implementation must contain exactly the three consolidated reviews in policy order and phase`,
 		);
 
 		for (const step of verify) {
@@ -215,15 +263,15 @@ function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, s
 		assert.equal(build.type, "command");
 		assert.ok(build.phase === undefined || build.phase === 0, `${source}.${workflowId}.implementation Build must run in phase 0`);
 
-		for (const command of ["check", "unit", "browser", "e2e"]) {
+		for (const [command, phase] of Object.entries(phases.commands)) {
 			const step = verify.find((candidate) => candidate.type === "command" && candidate.command === command);
 			assert.ok(step, `${source}.${workflowId}.implementation must run ${command}`);
-			assert.equal(step.phase, 1, `${source}.${workflowId}.implementation ${command} must run in phase 1`);
+			assert.equal(step.phase, phase, `${source}.${workflowId}.implementation ${command} must run in phase ${phase}`);
 		}
 
 		for (const qaStep of verify.filter((step) => step.type === "agent-qa")) {
 			assert.equal(qaStep.optional, true, `${source}.${workflowId}.implementation QA must be optional`);
-			assert.equal(qaStep.phase, 3, `${source}.${workflowId}.implementation QA must run in phase 3`);
+			assert.equal(qaStep.phase, phases.qa, `${source}.${workflowId}.implementation QA must run in phase ${phases.qa}`);
 		}
 	}
 
@@ -285,13 +333,14 @@ describe("consolidated implementation review defaults", () => {
 		}
 	});
 
-	it("keeps the active project workflow config parseable and on the same review policy", () => {
+	it("keeps the active project workflow config parseable with serialized expensive verification phases", () => {
 		const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 		const project = YAML.parse(fs.readFileSync(path.join(repoRoot, ".bobbit", "config", "project.yaml"), "utf8")) as {
 			workflows?: Record<string, Workflow>;
 		};
 		assert.ok(project.workflows, "project.yaml must define workflows");
-		assertImplementationReviewPolicy(project.workflows, ".bobbit/config/project.yaml");
+		assertImplementationReviewPolicy(project.workflows, ".bobbit/config/project.yaml", PROJECT_IMPLEMENTATION_PHASES);
+		assertProjectReadyToMergeChecks(project.workflows, ".bobbit/config/project.yaml");
 
 		const prReview = project.workflows["pr-review"];
 		assert.ok(prReview, "PR Review must remain a purpose-built workflow");
@@ -318,7 +367,7 @@ describe("consolidated implementation review defaults", () => {
 			workflows?: Record<string, Workflow>;
 		};
 		assert.ok(project.workflows, "project.yaml must define workflows");
-		assertCompleteGateStageOwnership(project.workflows, ".bobbit/config/project.yaml");
+		assertCompleteGateStageOwnership(project.workflows, ".bobbit/config/project.yaml", PROJECT_IMPLEMENTATION_PHASES.qa);
 	});
 
 	it("keeps the phase-2 prompts implementation-ready", () => {

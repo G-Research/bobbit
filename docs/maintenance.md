@@ -74,16 +74,24 @@ Additional guards:
 
 - primary repository worktrees are never cleanup targets;
 - sandbox/container-internal paths are not host cleanup targets;
-- filesystem-only directories under a worktree root default to **Needs attention** unless they also satisfy strict Bobbit-owned git worktree rules;
+- every Git-metadata worktree without an exact archived-session repository, path, and non-empty branch match is ownership-unverified **Needs attention** work;
 - branch-only leftovers for archived sessions are treated as already cleaned for worktree cleanup;
 - non-object canonical cleanup bodies are rejected instead of being treated as a legacy orphan cleanup request.
 
-The in-memory worktree pool uses the same resolved worktree-root and pool-branch classification helpers when reclaiming previous pool entries. Pool reclaim is conservative: it only reclaims Bobbit pool branches with git metadata, skips active paths, and does not delete arbitrary directories.
+Pool-shaped leftovers discovered at startup are reported diagnostically rather than adopted or automatically cleaned; only entries created and held by the current in-memory pool are claimable.
+
+### Startup and graceful shutdown
+
+Boot scanning is non-destructive for discovered worktrees. Branch prefixes, worktree-root placement, and Git metadata can explain a diagnostic row, but cannot authorize repair, cleanup, or pool adoption.
+
+During orderly gateway shutdown, Bobbit fences new work, waits for boot initialization, snapshots the live pools, and starts `stop()` on all of them before any drain. Each stop and drain is bounded to 15 seconds. A successfully stopped pool locally drains only ready entries still held by that instance; a successful claim has already left the pool and survives as its session or goal worktree. Tracked cleanup after a failed claim and all single-/multi-repo drain cleanup skip remote Git operations.
+
+A stop failure or timeout skips that pool's drain. A drain failure or timeout may also leave an entry, but neither blocks later pools or the remaining shutdown phases. Crashes and forced termination can likewise leave pool-shaped worktrees. On the next boot those leftovers remain ownership-unverified **Needs attention** diagnostics; Bobbit does not adopt or automatically remove them.
 
 ### Legacy compatibility
 
 <a id="orphaned-worktrees"></a>
-`GET /api/maintenance/orphaned-worktrees` still returns the legacy `{ worktrees }` shape for unowned Bobbit `session/*` git worktrees. It is now a filtered view of the unified inventory.
+Legacy orphan discovery and cleanup retain their compatibility shapes but neither advertise nor remove ownership-unverified worktrees.
 
 Legacy `POST /api/maintenance/cleanup-worktrees` requests without a `mode` are still accepted for orphan cleanup compatibility:
 
@@ -95,7 +103,7 @@ Legacy `POST /api/maintenance/cleanup-worktrees` requests without a `mode` are s
 { "worktrees": [{ "path": "/path/to/worktree", "branch": "session/abc123", "repoPath": "/path/to/repo" }] }
 ```
 
-These compatibility calls also re-scan through the unified inventory and clean only safe orphan candidates. Canonical callers should send `mode: "all-safe"` or `mode: "selected"`. If `itemIds` is present, `mode` is required.
+These compatibility calls re-scan through the unified inventory, exclude ownership-unverified Git worktrees, and skip them without mutation if explicitly selected. Canonical callers should send `mode: "all-safe"` or `mode: "selected"`. If `itemIds` is present, `mode` is required.
 
 <a id="archived-session-worktrees"></a>
 `GET /api/maintenance/archived-session-worktrees` still returns the archived-session grouped response with `sessions`, flattened `items`, `groups`, `selectionPresets`, and additive `counts`. It is backed by the same unified inventory and preserves the older archived-session UI/test contract during migration.
@@ -122,7 +130,7 @@ Key routes:
 | `POST` | `/api/agent-dir/migrate` | Copy allowlisted data to the pending directory. |
 | `GET` | `/api/maintenance/worktrees` | Preview the canonical unified worktree inventory. |
 | `POST` | `/api/maintenance/cleanup-worktrees` | Clean all safe or selected canonical worktree inventory items; also accepts legacy orphan cleanup bodies. |
-| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy compatibility view of safe unowned Bobbit `session/*` git worktrees. |
+| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy `{ worktrees }` compatibility shape; excludes ownership-unverified Git worktrees. Inspect those through the canonical troubleshooting inventory. |
 | `GET` | `/api/maintenance/archived-session-worktrees` | Legacy compatibility view of archived-session worktree candidates and UX grouping data. |
 | `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Legacy compatibility cleanup for archived-session worktree candidates. |
 | `GET` | `/api/maintenance/orphaned-sessions` | Preview non-interactive session records that can be terminated. |

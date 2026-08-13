@@ -55,6 +55,7 @@ bobbit [options]
 --no-ui             Gateway-only mode (no UI)
 --new-token         Force-generate a new auth token
 --show-token        Print the current token and exit
+--version           Print the installed Bobbit version and exit
 ```
 
 See the **[Networking guide](docs/networking.md#production-subpath-mounting)** for base-path normalization and reverse-proxy configuration.

@@ -40,6 +40,36 @@ function canonical(p: string): string {
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+interface WorktreeAddCommand {
+	branch: string;
+	worktreePath: string;
+	startPoint?: string;
+	noTrack: boolean;
+}
+
+/** Parse `git worktree add` flags before identifying its positional arguments. */
+function parseWorktreeAdd(args: readonly string[]): WorktreeAddCommand | undefined {
+	if (args[0] !== "worktree" || args[1] !== "add") return undefined;
+
+	let index = 2;
+	let branch: string | undefined;
+	let noTrack = false;
+	while (index < args.length && args[index].startsWith("-")) {
+		const option = args[index++];
+		if (option === "--no-track") {
+			noTrack = true;
+		} else if (option === "-b" || option === "--branch") {
+			branch = args[index++];
+		}
+	}
+
+	const worktreePath = args[index++];
+	if (!worktreePath) return undefined;
+	if (!branch) branch = args[index++];
+	if (!branch) return undefined;
+	return { branch, worktreePath, startPoint: args[index], noTrack };
+}
+
 function fakeGitRunner(
 	repoPaths: string[],
 	initialBranches: Record<string, string[]> = {},
@@ -92,16 +122,21 @@ function fakeGitRunner(
 				if (!sha) throw new Error(`missing ref: ${args[2]}`);
 				return { stdout: `${sha}\n`, stderr: "" };
 			}
+			if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "--symbolic-full-name") {
+				const branch = String(args[3]).replace(/@\{upstream\}$/, "");
+				return { stdout: repo.upstreams.get(branch) ? `${repo.upstreams.get(branch)}\n` : "", stderr: "" };
+			}
 			if (args[0] === "symbolic-ref") {
 				return { stdout: "refs/remotes/origin/master\n", stderr: "" };
 			}
-			if (args[0] === "worktree" && args[1] === "add") {
-				const creating = args[2] === "-b";
-				const branch = String(args[3]);
-				const worktreePath = String(args[creating ? 4 : 2]);
+			const worktreeAdd = parseWorktreeAdd(args);
+			if (worktreeAdd) {
 				const sourceRepoKey = canonical(cwd);
-				worktreeRepos.set(canonical(worktreePath), sourceRepoKey);
-				if (creating) repo.localBranches.set(branch, `sha:${branch}`);
+				worktreeRepos.set(canonical(worktreeAdd.worktreePath), sourceRepoKey);
+				repo.localBranches.set(worktreeAdd.branch, `sha:${worktreeAdd.branch}`);
+				if (!worktreeAdd.noTrack && worktreeAdd.startPoint?.startsWith("origin/")) {
+					repo.upstreams.set(worktreeAdd.branch, worktreeAdd.startPoint);
+				}
 			}
 			if (args[0] === "branch" && String(args[1]).startsWith("--set-upstream-to=")) {
 				repo.upstreams.set(String(args[2]), String(args[1]).slice("--set-upstream-to=".length));
@@ -155,9 +190,10 @@ function countCommand(state: FakeGitState, expected: string): number {
 }
 
 function countNewBranchesFrom(state: FakeGitState, branch: string, startPoint: string): number {
-	return commandStrings(state).filter((command) =>
-		command.startsWith(`worktree add -b ${branch} `) && command.endsWith(` ${startPoint}`),
-	).length;
+	return state.commands.filter(({ args }) => {
+		const worktreeAdd = parseWorktreeAdd(args);
+		return worktreeAdd?.branch === branch && worktreeAdd.startPoint === startPoint;
+	}).length;
 }
 
 describe("local-only host worktree primitives", () => {
@@ -170,7 +206,7 @@ describe("local-only host worktree primitives", () => {
 
 			assertBranchStayedLocal(state, branch);
 			assert.ok(commandStrings(state).includes("fetch origin master"), "the base ref may still be fetched for a remote read");
-			assert.equal(state.repos.get(canonical(repo))?.upstreams.has(branch), false);
+			assert.equal(state.repos.get(canonical(repo))?.upstreams.get(branch), "origin/master");
 		});
 	});
 
@@ -197,7 +233,7 @@ describe("local-only host worktree primitives", () => {
 			const stateDir = path.join(root, "state");
 			memoryFs.mkdirSync(stateDir, { recursive: true });
 			const { state, runner } = fakeGitRunner([repo]);
-			const store = new GoalStore(stateDir);
+			const store = new GoalStore(stateDir, undefined, { persistence: "json" });
 			const manager = new GoalManager(store, undefined, stateDir, {
 				commandRunner: runner,
 				remotePolicy: { skipNonLocalRemoteGit: true },
@@ -211,7 +247,13 @@ describe("local-only host worktree primitives", () => {
 			const commands = commandStrings(state);
 			assert.ok(commands.includes("remote get-url origin"), "remote policy should classify origin before fetching");
 			assert.ok(!commands.some(command => command.startsWith("fetch ")), `non-local configured-base fetch must be suppressed; commands:\n${commands.join("\n")}`);
-			assert.ok(commands.some(command => command.startsWith(`worktree add -b ${goal.branch} `) && command.endsWith(" origin/master")));
+			assert.ok(state.commands.some(({ args }) => {
+				const worktreeAdd = parseWorktreeAdd(args);
+				return worktreeAdd !== undefined
+					&& worktreeAdd.branch === goal.branch
+					&& worktreeAdd.startPoint === "origin/master"
+					&& worktreeAdd.noTrack;
+			}), "configured base creation must use --no-track before the explicit upstream write");
 			assert.equal(store.get(goal.id)?.setupStatus, "ready");
 			assert.equal(state.repos.get(canonical(repo))?.localBranches.has(goal.branch!), true);
 			assertBranchStayedLocal(state, goal.branch!);
@@ -223,7 +265,7 @@ describe("local-only host worktree primitives", () => {
 			const stateDir = path.join(root, "state");
 			memoryFs.mkdirSync(stateDir, { recursive: true });
 			const { state, runner } = fakeGitRunner([repo]);
-			const store = new GoalStore(stateDir);
+			const store = new GoalStore(stateDir, undefined, { persistence: "json" });
 			const manager = new GoalManager(store, undefined, stateDir, {
 				commandRunner: runner,
 				remotePolicy: { skipNonLocalRemoteGit: true },
@@ -270,7 +312,7 @@ describe("local-only host worktree primitives", () => {
 			const commands = commandStrings(state);
 			assert.ok(commands.includes("remote get-url origin"), "team upgrade should classify origin before fetching");
 			assert.ok(!commands.some(command => command.startsWith("fetch ")), `team upgrade must suppress non-local configured-base fetch; commands:\n${commands.join("\n")}`);
-			assert.ok(commands.some(command => command.startsWith(`worktree add -b ${upgraded.branch} `) && command.endsWith(" origin/master")));
+			assert.equal(countNewBranchesFrom(state, upgraded.branch!, "origin/master"), 1);
 			assert.equal(state.repos.get(canonical(repo))?.localBranches.has(upgraded.branch), true);
 			assertBranchStayedLocal(state, upgraded.branch);
 		});
@@ -346,7 +388,7 @@ describe("local-only host worktree primitives", () => {
 			assert.equal(result.worktrees.length, 2);
 			assertBranchStayedLocal(state, branch);
 			assert.equal(countNewBranchesFrom(state, branch, "origin/master"), 2);
-			for (const repo of state.repos.values()) assert.equal(repo.upstreams.has(branch), false);
+			for (const repo of state.repos.values()) assert.equal(repo.upstreams.get(branch), "origin/master");
 		});
 	});
 });

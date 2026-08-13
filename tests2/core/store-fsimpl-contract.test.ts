@@ -31,4 +31,38 @@ describe("store fsImpl contract", () => {
 		expect(new PrStatusStore(stateDir, memfs).get("goal-1")?.url).toBe("https://example.invalid/pr/1");
 		expect(new ReviewAnnotationStore(stateDir, memfs).getAll("session-1").annotations.Doc).toHaveLength(1);
 	});
+
+	it("migrates a legacy submitted flag to exactly one review tombstone", () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/review-migration-state");
+		const file = path.join(stateDir, "review-annotations-session-1.json");
+		memfs.writeFileSync(file, JSON.stringify({ annotations: {}, submitted: true }), "utf-8");
+
+		const store = new ReviewAnnotationStore(stateDir, memfs);
+		expect(store.getReviewTombstone("session-1", "review-a")).toBe("submitted");
+		expect(store.getReviewTombstone("session-1", "review-b")).toBeUndefined();
+		expect(store.getReviewTombstones("session-1")).toEqual({
+			submittedReviewIds: ["review-a"],
+			closedReviewIds: [],
+			legacySubmitted: false,
+		});
+	});
+
+	it("keeps exact tombstones across bulk annotation writes", () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/review-bulk-state");
+		const store = new ReviewAnnotationStore(stateDir, memfs);
+		store.setReviewTombstone("session-1", "submitted-review", "submitted");
+		store.setReviewTombstone("session-1", "closed-review", "closed");
+
+		store.writeAll("session-1", {
+			Doc: [{ id: "a1", quote: "q", comment: "c" }],
+		}, false);
+
+		expect(store.getReviewTombstones("session-1")).toEqual({
+			submittedReviewIds: ["submitted-review"],
+			closedReviewIds: ["closed-review"],
+			legacySubmitted: false,
+		});
+	});
 });

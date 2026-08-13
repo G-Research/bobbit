@@ -342,12 +342,26 @@ test.describe("AI Gateway Configure Flow", () => {
 						openai: {
 							npm: "@ai-sdk/openai",
 							options: { baseURL: `http://127.0.0.1:${wellKnownPort}/openai/v1` },
-							models: { "gpt-5.5": { name: "gpt-5.5", reasoning: true, limit: { context: 272000, output: 128000 } } },
+							models: {
+								"gpt-5.5": {
+									name: "gpt-5.5",
+									reasoning: true,
+									limit: { context: 272000, output: 128000 },
+									modalities: { input: ["text", "image"] },
+								},
+							},
 						},
 						"aws-mantle": {
 							npm: "@ai-sdk/openai",
 							options: { baseURL: `http://127.0.0.1:${wellKnownPort}/aws/openai/v1` },
-							models: { "openai.gpt-5.5": { name: "openai.gpt-5.5", reasoning: true, limit: { context: 272000, output: 128000 } } },
+							models: {
+								"openai.gpt-5.5": {
+									name: "openai.gpt-5.5",
+									reasoning: true,
+									limit: { context: 272000, output: 128000 },
+									modalities: { input: ["text", "image"] },
+								},
+							},
 						},
 					},
 				}));
@@ -380,7 +394,15 @@ test.describe("AI Gateway Configure Flow", () => {
 			expect(configureRes.status).toBe(200);
 			const configureData = await configureRes.json();
 			const configuredOpenAi = configureData.models.find((m: any) => m.id === "openai.gpt-5.5");
-			expect(configuredOpenAi?.upstreamProvider).toBe("aws-mantle");
+			expect(configuredOpenAi).toMatchObject({
+				upstreamProvider: "aws-mantle",
+				api: "openai-responses",
+				baseUrl: `http://127.0.0.1:${wellKnownPort}/aws/openai/v1`,
+				contextWindow: 272000,
+				maxTokens: 128000,
+				reasoning: true,
+				input: ["text", "image"],
+			});
 
 			const testRes = await apiFetch("/api/models/test", {
 				method: "POST",
