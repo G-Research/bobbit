@@ -152,8 +152,6 @@ describe("Claude Agent SDK event translator", () => {
 				"claude-sonnet-4": {
 					inputTokens: 121, outputTokens: 43, cacheReadInputTokens: 10, cacheCreationInputTokens: 2,
 					costUSD: 0.004, contextWindow: 200_000, maxOutputTokens: 16_384,
-					// Explicit bridge extension; not declared in SDK 0.3.222.
-					contextTokens: 65_536,
 				},
 				"claude-haiku-4": {
 					inputTokens: 3, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
@@ -172,10 +170,20 @@ describe("Claude Agent SDK event translator", () => {
 				costBasis: "subscription-notional",
 				total: { inputTokens: 123, outputTokens: 45, cacheReadTokens: 10, cacheWriteTokens: 2, notionalCostUsd: 0.0042 },
 				modelUsage: expect.objectContaining({
-					"claude-sonnet-4": expect.objectContaining({ inputTokens: 121, contextWindow: 200_000, maxOutputTokens: 16_384, contextTokens: 65_536, notionalCostUsd: 0.004 }),
+					"claude-sonnet-4": expect.objectContaining({ inputTokens: 121, contextWindow: 200_000, maxOutputTokens: 16_384, contextTokens: 133, notionalCostUsd: 0.004 }),
 				}),
 			},
 		})]);
+
+		const clamped = normalizeClaudeSdkRootResultUsage({
+			...rootResult,
+			uuid: "result-usage-clamped",
+			modelUsage: {
+				...rootResult.modelUsage,
+				"claude-sonnet-4": { ...rootResult.modelUsage["claude-sonnet-4"], contextWindow: 125 },
+			},
+		});
+		expect(clamped?.modelUsage["claude-sonnet-4"].contextTokens).toBe(125);
 
 		expect(normalizeClaudeSdkRootResultUsage({ ...rootResult, parent_tool_use_id: "parent-tool" })).toBeUndefined();
 		expect(normalizeClaudeSdkRootResultUsage({ ...rootResult, uuid: "" })).toBeUndefined();
