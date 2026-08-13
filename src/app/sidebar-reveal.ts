@@ -1,11 +1,11 @@
 // ============================================================================
 // SIDEBAR REVEAL
 //
-// Route-driven reveals expand the target path ephemerally and preserve the
-// user's explicit collapse preferences. The desktop target control reuses the
-// same resolver/rAF pipeline in explicit mode: it resets only the active view,
-// persists expansion of the target path, restores the active keyboard row,
-// scrolls smoothly, and replays a one-shot emphasis.
+// Route-driven reveals persistently force-expand only the resolved target path,
+// overriding explicit collapses without disturbing unrelated tree state. The
+// desktop target control reuses the same resolver/rAF pipeline in explicit mode:
+// it also resets only the active view, restores the active keyboard row, scrolls
+// smoothly, and replays a one-shot emphasis.
 // ============================================================================
 
 import { renderApp, state, activeSessionId, type GatewaySession, type Goal } from "./state.js";
@@ -103,7 +103,7 @@ function resolveStaffAncestors(sessionId: string): SidebarTreeNodeKey[] | null {
 	];
 }
 
-/** Automatic route reveal. Its expansion, keyboard, filter and scroll contract is unchanged. */
+/** Automatic route reveal persistently force-expands only the resolved target path. */
 export function revealSidebarTargetForRoute(route: AppRoute = getRouteFromHash()): void {
 	const target = targetForRoute(route);
 	const token = ++revealToken;
@@ -291,8 +291,11 @@ function attemptReveal(token: number, attempt: number): void {
 		if (attempt < MAX_ATTEMPTS) nextFrame(() => attemptReveal(token, attempt + 1));
 		return;
 	}
+	// Both route navigation and the desktop control are explicit reveal intent:
+	// force-expand and persist only the resolved path, including nodes the user
+	// previously collapsed. The ancestor resolver keeps unrelated state intact.
 	for (const key of ancestors) {
-		expandSidebarTreeNode(key, { explicit: current.mode === "explicit" });
+		expandSidebarTreeNode(key, { explicit: true });
 	}
 	renderApp();
 	attemptScroll(current.navId, token, 0);
