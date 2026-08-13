@@ -49,6 +49,7 @@ interface PendingReveal {
 
 let pending: PendingReveal | null = null;
 let revealToken = 0;
+const activeEmphasisCleanups = new WeakMap<HTMLElement, () => void>();
 
 function nextFrame(cb: () => void): void {
 	if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => cb());
@@ -313,7 +314,8 @@ function reducedMotionPreferred(): boolean {
 		&& window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-function replayEmphasis(row: HTMLElement, token: number, reducedMotion: boolean): void {
+function replayEmphasis(row: HTMLElement, reducedMotion: boolean): void {
+	activeEmphasisCleanups.get(row)?.();
 	row.classList.remove("sidebar-reveal-emphasis", "sidebar-reveal-emphasis--reduced");
 	void row.offsetWidth;
 	row.classList.add("sidebar-reveal-emphasis");
@@ -321,12 +323,14 @@ function replayEmphasis(row: HTMLElement, token: number, reducedMotion: boolean)
 
 	const cleanup = () => {
 		row.removeEventListener("animationend", onAnimationEnd);
-		if (token !== revealToken) return;
+		if (activeEmphasisCleanups.get(row) !== cleanup) return;
+		activeEmphasisCleanups.delete(row);
 		row.classList.remove("sidebar-reveal-emphasis", "sidebar-reveal-emphasis--reduced");
 	};
 	const onAnimationEnd = (event: AnimationEvent) => {
 		if (event.target === row) cleanup();
 	};
+	activeEmphasisCleanups.set(row, cleanup);
 	row.addEventListener("animationend", onAnimationEnd);
 	setTimeout(cleanup, reducedMotion ? REDUCED_EMPHASIS_DURATION_MS : EMPHASIS_DURATION_MS + 80);
 }
@@ -340,7 +344,7 @@ function attemptScroll(navId: string, token: number, attempt: number): void {
 		if (current?.mode === "explicit") {
 			const reducedMotion = reducedMotionPreferred();
 			row.scrollIntoView({ block: "nearest", behavior: reducedMotion ? "auto" : "smooth" });
-			replayEmphasis(row, token, reducedMotion);
+			replayEmphasis(row, reducedMotion);
 		} else {
 			row.scrollIntoView({ block: "nearest" });
 		}
