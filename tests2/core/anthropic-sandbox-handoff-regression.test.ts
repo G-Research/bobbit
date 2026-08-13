@@ -2,6 +2,8 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -9,6 +11,7 @@ import { tmpdir } from "node:os";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { SessionManager } from "../../src/server/agent/session-manager.js";
+import { ToolManager } from "../../src/server/agent/tool-manager.js";
 import {
 	buildSandboxAgentAuthJson,
 	detectHostTokens,
@@ -356,21 +359,38 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.match(roleBody, /catch \(err\) \{\n\t\t\tunsub\(\);\n\t\t\tawait rpcClient\.stop\(\)\.catch/, "failed staged role candidates must be disposed without replacing the original bridge");
 	});
 
-	it("passes freshly wired SDK authority to role and force-abort dispatch, and disposes a failed role candidate", async () => {
-		vi.resetModules();
-		const bridgeFactory = vi.fn();
-		const activate = vi.fn(async (_plan: any, _context: any) => {});
+	it("runs real SDK sandbox dispatch for role and force-abort replacements", async () => {
+		const dispatcherRoot = mkdtempSync(path.join(tmpdir(), "bobbit-sdk-replacement-dispatch-"));
+		const configRoot = path.join(dispatcherRoot, "config");
+		mkdirSync(path.join(configRoot, "tools"), { recursive: true });
+		const dockerExecs: Array<{ args: string[]; options: any }> = [];
+		const sdkLaunches: any[] = [];
+		const queries: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+		const fakeChild = () => {
+			const child = new EventEmitter() as any;
+			child.stdin = new PassThrough();
+			child.stdout = new PassThrough();
+			child.stderr = new PassThrough();
+			child.kill = vi.fn(() => true);
+			return child;
+		};
+		const dispatcherSpawn = vi.fn((_command: string, args: string[], options: any) => {
+			const child = fakeChild();
+			dockerExecs.push({ args: [...args], options });
+			child.stdin.on("data", (chunk: Buffer) => {
+				const line = chunk.toString();
+				if (!line.startsWith("BOBBIT_SDK_DISPATCH:")) return;
+				const init = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
+				const schemas = (init.manifest ?? []).map((entry: any) => ({
+					name: entry.name,
+					inputSchema: { type: "object", properties: {} },
+				}));
+				child.stdout.write(`BOBBIT_SDK_DISPATCH:${JSON.stringify({ type: "ready", schemas })}\n`);
+			});
+			return child;
+		});
 		try {
-			vi.doMock("../../src/server/agent/session-runtime.ts", async (importOriginal) => ({
-				...(await importOriginal()),
-				createSessionBridge: bridgeFactory,
-			}));
-			vi.doMock("../../src/server/agent/session-setup.ts", async (importOriginal) => ({
-				...(await importOriginal()),
-				resolveToolActivation: activate,
-			}));
-			const { SessionManager: IsolatedSessionManager } = await import("../../src/server/agent/session-manager.ts");
-			const manager: any = new IsolatedSessionManager();
+			const manager: any = new SessionManager();
 			const resumeId = "00000000-0000-4000-8000-000000000031";
 			const records = new Map<string, any>();
 			manager._testStore = {
@@ -378,11 +398,20 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 				update: vi.fn((id: string, patch: any) => Object.assign(records.get(id), patch)),
 				put: vi.fn(), archive: vi.fn(),
 			};
+			manager.toolManager = new ToolManager(configRoot, path.resolve("defaults/tools"));
 			manager.assemblePrompt = vi.fn(() => undefined);
 			manager.resolveSessionRole = vi.fn(() => undefined);
 			manager.resolveEffectiveAllowedTools = vi.fn(() => []);
 			manager.ensureMcpManagerForContext = vi.fn(async () => {});
-			manager.buildPipelineContext = vi.fn(() => ({}));
+			manager.buildPipelineContext = vi.fn(() => ({
+				toolManager: manager.toolManager,
+				mcpManager: null,
+				roleManager: null,
+				groupPolicyStore: null,
+				configCascade: null,
+				projectConfigStore: null,
+				requestToolGrant: async () => ({ granted: false }),
+			}));
 			manager.applyDirectProviderEnv = vi.fn(async () => {});
 			manager.requireCurrentCatalogSpawnModel = vi.fn(async (model: string) => model);
 			manager.resolveCurrentCatalogThinkingLevel = vi.fn(async () => "off");
@@ -391,9 +420,30 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			manager.drainQueue = vi.fn();
 			manager.handleAgentLifecycle = vi.fn();
 			manager._reconcileAfterAbort = vi.fn();
+			let failCandidate = false;
+			manager.claudeAgentSdkBridgeDepsFactory = () => ({
+				createDockerSpawn: (input: any) => (options: any) => {
+					sdkLaunches.push({ input, options });
+					return fakeChild();
+				},
+				query: (request: any) => {
+					request.options.spawnClaudeCodeProcess({ args: ["--sdk-protocol"], env: {}, signal: new AbortController().signal });
+					const query = {
+						close: vi.fn(async () => {}),
+						initializationResult: async () => {
+							if (failCandidate) throw new Error("candidate startup failed");
+							return { session_id: resumeId, models: [{ value: "sandbox-sonnet" }] };
+						},
+						[Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
+					};
+					queries.push(query);
+					return query;
+				},
+				clock: { now: () => 0, setTimeout, setInterval, clearTimeout, clearInterval },
+			});
 			const wiring = vi.fn(async (options: any, id: string) => {
-				expect(options.runtime).toBe("claude-agent-sdk");
-				expect(options.claudeAgentSdkSessionId).toBe(resumeId);
+				assert.equal(options.runtime, "claude-agent-sdk");
+				assert.equal(options.claudeAgentSdkSessionId, resumeId);
 				options.sandboxed = true;
 				options.cwd = `/workspace-wt/${id}`;
 				options.containerId = `container-${id}`;
@@ -407,93 +457,70 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 					gatewayUrl: "http://sandbox.gateway.test",
 					oauthAccessToken: "current-oauth",
 				};
+				options.claudeSdkDispatcherTestDeps = { spawn: dispatcherSpawn, workerSource: "void 0" };
 				return true;
 			});
 			manager.applySandboxWiring = wiring;
-			const candidate = (start = vi.fn(async () => {})) => ({
-				start,
-				stop: vi.fn(async () => {}),
-				abort: vi.fn(async () => ({ success: true })),
-				onEvent: vi.fn(() => vi.fn()),
-				getState: vi.fn(async () => ({ success: true, data: {} })),
+			const oldBridge = () => ({
+				start: vi.fn(async () => {}), stop: vi.fn(async () => {}), abort: vi.fn(async () => ({ success: true })),
+				onEvent: vi.fn(() => vi.fn()), getState: vi.fn(async () => ({ success: true, data: {} })),
 				getMessages: vi.fn(async () => ({ success: true, data: { messages: [] } })),
 			});
-			const live = (id: string, old: any, status: "idle" | "streaming" = "idle") => ({
+			const live = (id: string, rpcClient: any, status: "idle" | "streaming" = "idle") => ({
 				id, title: id, cwd: "/workspace", projectId: "project-sdk", sandboxed: true,
 				runtime: "claude-agent-sdk", status, statusVersion: 0, clients: new Set(),
 				promptQueue: { toArray: () => [], enqueue: vi.fn() }, eventBuffer: { size: 0, push: vi.fn(() => ({ seq: 1, ts: 1 })) },
-				inFlightSteerTexts: [], unsubscribe: vi.fn(), rpcClient: old, lastActivity: Date.now(),
+				inFlightSteerTexts: [], unsubscribe: vi.fn(), rpcClient, lastActivity: Date.now(),
 			});
 			const persisted = (id: string) => ({
 				id, title: id, cwd: "/workspace", projectId: "project-sdk", sandboxed: true,
 				runtime: "claude-agent-sdk", modelProvider: "claude-agent-sdk", modelId: "sandbox-sonnet",
-				effectiveThinkingLevel: "off", claudeAgentSdkSessionId: resumeId,
-				createdAt: Date.now(), lastActivity: Date.now(),
+				effectiveThinkingLevel: "off", claudeAgentSdkSessionId: resumeId, createdAt: Date.now(), lastActivity: Date.now(),
 			});
 
 			const roleId = "sdk-role-replacement";
 			records.set(roleId, persisted(roleId));
-			const roleOld = candidate();
-			const roleReplacement = candidate();
-			bridgeFactory.mockReturnValueOnce(roleReplacement);
+			const roleOld = oldBridge();
 			manager.sessions.set(roleId, live(roleId, roleOld));
 			await expect(manager.assignRole(roleId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).resolves.toBe(true);
 
 			const forceId = "sdk-force-replacement";
 			records.set(forceId, persisted(forceId));
-			const forceOld = candidate(vi.fn(() => new Promise(() => {})));
+			const forceOld = oldBridge();
 			forceOld.abort = vi.fn(() => new Promise(() => {}));
-			const forceReplacement = candidate();
-			bridgeFactory.mockReturnValueOnce(forceReplacement);
 			manager.sessions.set(forceId, live(forceId, forceOld, "streaming"));
 			await expect(manager.forceAbort(forceId, 1)).resolves.toBeUndefined();
 
-			expect(wiring).toHaveBeenCalledTimes(2);
-			for (const [index, id] of [roleId, forceId].entries()) {
-				const plan = activate.mock.calls[index]?.[0];
-				assert.ok(plan, `expected SDK dispatcher activation for ${id}`);
-				expect(plan).toMatchObject({ id, cwd: `/workspace-wt/${id}`, roleName: index === 0 ? "sandbox-role" : undefined });
-				expect(plan.bridgeOptions).toMatchObject({
-					sandboxed: true, containerId: `container-${id}`, gatewayToken: `scoped-${id}`,
-					claudeAgentSdkSessionId: resumeId,
-					claudeSdkSandboxLaunch: expect.objectContaining({ containerId: `container-${id}`, cwd: `/workspace-wt/${id}`, gatewayToken: `scoped-${id}` }),
-				});
-				expect(JSON.stringify(plan.bridgeOptions)).not.toContain("admin");
+			assert.equal(wiring.mock.calls.length, 2);
+			for (const id of [roleId, forceId]) {
+				const exec = dockerExecs.find(candidate => candidate.args.includes(`container-${id}`));
+				const sdk = sdkLaunches.find(candidate => candidate.input.containerId === `container-${id}`);
+				assert.ok(exec, `${id} must start its dispatcher with docker exec`);
+				assert.ok(sdk, `${id} must start its SDK query through the Docker spawn seam`);
+				assert.ok(exec.args.includes("-w"));
+				assert.ok(exec.args.includes(`/workspace-wt/${id}`));
+				assert.ok(exec.args.includes(`BOBBIT_TOKEN=scoped-${id}`));
+				assert.ok(!exec.args.some(arg => /admin/i.test(arg)));
+				assert.equal(sdk.input.cwd, `/workspace-wt/${id}`);
+				assert.equal(sdk.input.env.BOBBIT_TOKEN, `scoped-${id}`);
+				assert.equal(sdk.input.env.CLAUDE_CODE_OAUTH_TOKEN, "current-oauth");
+				assert.equal(sdk.options.args.includes("switch_session"), false);
 			}
-			expect(roleOld.stop).toHaveBeenCalledTimes(1);
-			expect(forceOld.stop).toHaveBeenCalledTimes(1);
+			assert.equal(roleOld.stop.mock.calls.length, 1);
+			assert.equal(forceOld.stop.mock.calls.length, 1);
 
 			const failedId = "sdk-role-candidate-failure";
 			records.set(failedId, persisted(failedId));
-			const failedOld = candidate();
-			const failedCandidate = candidate(vi.fn(async () => { throw new Error("candidate startup failed"); }));
-			bridgeFactory.mockReturnValueOnce(failedCandidate);
+			const failedOld = oldBridge();
 			manager.sessions.set(failedId, live(failedId, failedOld));
+			failCandidate = true;
+			const queryCount = queries.length;
 			await expect(manager.assignRole(failedId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).rejects.toThrow("candidate startup failed");
-			expect(failedCandidate.stop).toHaveBeenCalledTimes(1);
-			expect(failedOld.stop).not.toHaveBeenCalled();
-			expect(manager.sessions.get(failedId)?.rpcClient).toBe(failedOld);
-
-			const invalidId = "sdk-invalid-replacement-cwd";
-			records.set(invalidId, persisted(invalidId));
-			const invalidOld = candidate();
-			manager.sessions.set(invalidId, live(invalidId, invalidOld));
-			manager.applySandboxWiring = vi.fn(async (options: any) => {
-				options.sandboxed = true;
-				options.cwd = "/host/must-not-dispatch";
-				return true;
-			});
-			const activationCount = activate.mock.calls.length;
-			await expect(manager.assignRole(invalidId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).rejects.toMatchObject({
-				code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-				message: expect.stringContaining("invalid sandbox working directory"),
-			});
-			expect(activate).toHaveBeenCalledTimes(activationCount);
-			expect(invalidOld.stop).not.toHaveBeenCalled();
+			assert.ok(queries[queryCount]?.close.mock.calls.length, "failed SDK candidate must be disposed");
+			assert.equal(failedOld.stop.mock.calls.length, 0);
+			assert.equal(manager.sessions.get(failedId)?.rpcClient, failedOld);
 		} finally {
-			vi.doUnmock("../../src/server/agent/session-runtime.ts");
-			vi.doUnmock("../../src/server/agent/session-setup.ts");
-			vi.resetModules();
+			rmSync(dispatcherRoot, { recursive: true, force: true });
 		}
 	});
 

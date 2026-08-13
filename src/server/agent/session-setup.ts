@@ -1196,6 +1196,7 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 					cwd: plan.bridgeOptions.cwd ?? "",
 					builtinToolsDir: ctx.toolManager.getBuiltinToolsDir(),
 					projectMarketPacksRoot: plan.bridgeOptions.projectMarketPacksRoot,
+					...plan.bridgeOptions.claudeSdkDispatcherTestDeps,
 				},
 			} : {}),
 		});

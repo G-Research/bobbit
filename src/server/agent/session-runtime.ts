@@ -16,6 +16,8 @@ export interface SessionBridgeOptions extends RpcBridgeOptions {
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
 	claudeSdkToolSurface?: import("./claude-agent-sdk-tool-surface.js").ClaudeSdkToolSurface;
+	/** Narrow deterministic dispatcher seam; production leaves this absent. */
+	claudeSdkDispatcherTestDeps?: Pick<import("./claude-sdk-tool-dispatcher.js").ClaudeSdkSandboxDispatcherOptions, "spawn" | "workerSource">;
 	claudeAgentSdkBridgeDepsFactory?: (options: import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkBridgeOptions) => ClaudeAgentSdkBridgeDeps;
 }
 
