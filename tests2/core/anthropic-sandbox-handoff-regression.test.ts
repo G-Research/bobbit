@@ -12,7 +12,11 @@ import { tmpdir } from "node:os";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { SessionManager } from "../../src/server/agent/session-manager.js";
 import { ToolManager } from "../../src/server/agent/tool-manager.js";
-import { claudeAgentSdkUnavailableDiagnostic } from "../../src/server/agent/claude-agent-sdk-error.js";
+import {
+	ClaudeAgentSdkUnavailableError,
+	claudeAgentSdkUnavailableDiagnostic,
+	SDK_SESSION_UNAVAILABLE,
+} from "../../src/server/agent/claude-agent-sdk-error.js";
 import {
 	buildSandboxAgentAuthJson,
 	detectHostTokens,
@@ -75,6 +79,24 @@ afterEach(() => {
 });
 
 describe("Anthropic sandbox OAuth handoff regressions", () => {
+	it.each([
+		"CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE",
+		"CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+	] as const)("preserves the safe %s reason code while redacting embedded credentials and config paths", (category) => {
+		const secret = "sk-sandbox-diagnostic-secret";
+		const configPath = `/Users/operator/${category}/credentials.json`;
+		const error = new ClaudeAgentSdkUnavailableError(new Error(
+			`${category}: Authorization: Bearer ${secret}; credential source ${configPath}`,
+		));
+		const diagnostic = claudeAgentSdkUnavailableDiagnostic(error);
+
+		assert.equal(error.code, SDK_SESSION_UNAVAILABLE);
+		assert.equal(error.message, SDK_SESSION_UNAVAILABLE);
+		assert.match(diagnostic, new RegExp(`\\b${category}\\b`));
+		assert.doesNotMatch(diagnostic, new RegExp(secret));
+		assert.doesNotMatch(diagnostic, new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	});
+
 	it("exports only a sanctioned, current non-renewable Anthropic OAuth credential", () => {
 		const expires = Date.now() + 60_000;
 		useHostAuth({
