@@ -2047,7 +2047,7 @@ function gitDecorationForEntry(state: ExplorerState, entry: TreeEntry): GitDecor
 }
 function folderOutlineSvg(tones: GitTone[], key: string): string {
 	const colors: Record<GitTone, string> = { added: "var(--positive)", modified: "var(--warning)", deleted: "var(--negative)" };
-	if (tones.length === 1) return iconSvg("folder").replace('stroke="currentColor"', `stroke="${colors[tones[0]]}"`);
+	if (tones.length === 1) return iconSvg("folder", colors[tones[0]]);
 	const id = `folder-gradient-${hash(key)}`;
 	const count = tones.length;
 	const stops = tones.map((tone, index) => {
@@ -2055,10 +2055,8 @@ function folderOutlineSvg(tones: GitTone[], key: string): string {
 		const end = Math.round((index + 1) * 100 / count);
 		return `<stop offset="${start}%" stop-color="${colors[tone]}"/><stop offset="${end}%" stop-color="${colors[tone]}"/>`;
 	}).join("");
-	return iconSvg("folder")
-		.replace("<svg ", `<svg `)
-		.replace(">", `><defs><linearGradient id="${id}" x1="0" y1="1" x2="1" y2="0">${stops}</linearGradient></defs>`)
-		.replace('stroke="currentColor"', `stroke="url(#${id})"`);
+	const defs = `<defs><linearGradient id="${id}" x1="0" y1="1" x2="1" y2="0">${stops}</linearGradient></defs>`;
+	return iconSvg("folder", `url(#${id})`, defs);
 }
 function idlePreview(path?: string): PreviewState { return { state: "idle", ...(path ? { path } : {}) }; }
 function nearestFocus(previous: string, paths: string[]): string { let value = previous; while (value) { if (paths.includes(value)) return value; value = parentOf(value); } return paths[0] ?? ""; }
@@ -2151,13 +2149,13 @@ const icons: Record<string, IconNode> = {
 	"lock": Lock,
 };
 
-function iconSvg(name: string): string {
+function iconSvg(name: string, stroke = "currentColor", prefix = ""): string {
 	const nodes = icons[name] ?? File;
 	const body = nodes.map(([tag, attrs]) => {
 		const attributes = Object.entries(attrs).map(([key, value]) => `${key}="${String(value)}"`).join(" ");
 		return `<${tag} ${attributes}/>`;
 	}).join("");
-	return `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="${stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${prefix}${body}</svg>`;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
