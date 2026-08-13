@@ -1673,4 +1673,123 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(binding?.source, "verification");
 		assert.deepEqual(binding?.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	});
+
+	it("VERIFIER_BUSY_RACE_REPRO keeps a verifier receipt queued behind a real streaming turn until agent_end drains its exact row", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			id: "s-verifier-receipt-behind-stream",
+			status: "streaming",
+			rpcClient: { prompt },
+		});
+		const receipt = manager.enqueueVerifierPrompt(session.id, "deliver the queued verifier verdict");
+		session.promptQueue.enqueue("ordinary durable work");
+		let settlement = "pending";
+		void receipt.dispatched.then(() => { settlement = "dispatched"; }, () => { settlement = "rejected"; });
+
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 0, "VERIFIER_BUSY_RACE_REPRO: a streaming session must not dispatch a second verifier turn");
+		assert.equal(settlement, "pending", "the receipt must not borrow the preceding turn's streaming state");
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.text, row.source]),
+			[["deliver the queued verifier verdict", "verification"], ["ordinary durable work", undefined]],
+		);
+
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		await receipt.dispatched;
+
+		assert.equal(settlement, "dispatched", "only the dequeued verifier row may settle this receipt");
+		assert.equal(prompt.mock.calls.length, 1, "VERIFIER_BUSY_RACE_REPRO: agent_end drains exactly one queued provider command");
+		assert.deepEqual(prompt.mock.calls[0], ["[System]: deliver the queued verifier verdict", undefined, undefined, "followUp"]);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.text),
+			["ordinary durable work"],
+			"the unrelated row stays durable and cannot settle the verifier receipt",
+		);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO cancels the exact queued verifier row without removing ordinary work", async () => {
+		const manager = makeManager();
+		const { session } = putSession(manager, {
+			id: "s-verifier-receipt-cancel",
+			status: "streaming",
+		});
+		const receipt = manager.enqueueVerifierPrompt(session.id, "expire before a reviewer becomes idle");
+		session.promptQueue.enqueue("ordinary work survives verifier timeout");
+
+		assert.equal(receipt.cancel(), true, "the verifier timeout owner must be able to cancel its exact durable row");
+		await assert.rejects(receipt.dispatched, /cancelled before dispatch/);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.text, row.source]),
+			[["ordinary work survives verifier timeout", undefined]],
+			"VERIFIER_BUSY_RACE_REPRO: cancellation must not delete neighbouring ordinary work",
+		);
+		assert.equal(receipt.cancel(), false, "cancellation is idempotent after the receipt has settled");
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO cancels and terminates verifier rows owned by an in-flight replacement", async () => {
+		const manager = makeManager();
+		const sessionId = "s-replacement-owned-verifier";
+		const { session: promptOwner } = putSession(manager, {
+			id: sessionId,
+			status: "streaming",
+		});
+		const replacement = {
+			...promptOwner,
+			promptQueue: new PromptQueue(),
+			rpcClient: {
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({})),
+				stop: vi.fn(async () => {}),
+			},
+			unsubscribe: vi.fn(),
+		};
+		manager.sessions.set(sessionId, replacement);
+		manager._sessionReplacementCoordinators.set(sessionId, {
+			tail: Promise.resolve(), pending: 0, coalesced: new Map(), promptOwner, drainOnRelease: false,
+		});
+
+		const cancelled = manager.enqueueVerifierPrompt(sessionId, "cancel on the replacement-owned queue");
+		// Keep the expected rejection observed even when this failing-first
+		// assertion exposes an ownership regression before await assert.rejects.
+		void cancelled.dispatched.catch(() => {});
+		assert.equal(promptOwner.promptQueue.peek()?.id, cancelled.rowId);
+		assert.equal(cancelled.cancel(), true, "VERIFIER_BUSY_RACE_REPRO: cancellation must target the replacement promptOwner, not an empty successor queue");
+		await assert.rejects(cancelled.dispatched, /cancelled before dispatch/);
+		assert.equal(promptOwner.promptQueue.length, 0, "the cancelled verifier row cannot survive on the replaced owner");
+
+		const terminated = manager.enqueueVerifierPrompt(sessionId, "remove on reviewer termination");
+		const terminatedOutcome = terminated.dispatched.then(() => "resolved", error => error.message);
+		assert.equal(promptOwner.promptQueue.peek()?.id, terminated.rowId);
+		await manager.terminateSession(sessionId);
+		assert.match(await terminatedOutcome, /terminated before dispatch/);
+		assert.equal(promptOwner.promptQueue.length, 0, "termination must purge verifier work from the replacement promptOwner too");
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO drops restored verifier rows while retaining ordinary durable rows", () => {
+		const manager = makeManager();
+		const persisted = new PromptQueue();
+		persisted.enqueue("ordinary restored work");
+		persisted.enqueue("stale verifier reminder", {
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+			streamingBehavior: "followUp",
+		});
+
+		manager.addDormantSession({
+			id: "s-restored-verifier-rows",
+			title: "Restored reviewer",
+			cwd: "/virtual/project",
+			agentSessionFile: "/virtual/project/reviewer.jsonl",
+			createdAt: 1,
+			lastActivity: 1,
+			messageQueue: persisted.toArray(),
+		});
+
+		assert.deepEqual(
+			manager.sessions.get("s-restored-verifier-rows")?.promptQueue.toArray().map((row: any) => [row.text, row.source]),
+			[["ordinary restored work", undefined]],
+			"VERIFIER_BUSY_RACE_REPRO: a restored signal cannot redrive a stale verifier turn, but ordinary queue rows remain durable",
+		);
+	});
 });

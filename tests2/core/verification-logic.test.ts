@@ -309,6 +309,23 @@ describe("isReviewerBusyError", () => {
 		assert.equal(isProviderBackoffError(BUSY_REJECTION), false);
 	});
 
+	it("treats a verifier receipt dispatch timeout as transient infrastructure contention", () => {
+		const output = "Verifier prompt verifier-row-123 did not dispatch within 60000ms";
+		for (const isTransient of [isTransientReviewError, isTransientQaError]) {
+			assert.equal(isTransient(output), true, "VERIFIER_BUSY_RACE_REPRO: a bounded queue-admission timeout must not become a terminal content failure");
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					isTransient,
+				}),
+				"retry",
+			);
+		}
+	});
+
 	it("does not override terminal error categories", () => {
 		const terminalBusyEnvelopes = [
 			"authentication failed",
