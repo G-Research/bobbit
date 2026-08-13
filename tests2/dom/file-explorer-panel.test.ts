@@ -414,7 +414,10 @@ describe("built-in file explorer panel", () => {
 			diff: () => ({ kind: "empty" }),
 		}, { onStatus: (cb) => { statusCallback = cb; }, statusDispose });
 		const root = mount("refresh-lifecycle", fakeHost);
-		await tick();
+		await vi.waitFor(() => {
+			expect(statusCallback).toBeTypeOf("function");
+			expect(row(root, "keep.txt")).not.toBeNull();
+		});
 		click(row(root, "keep.txt"));
 		await tick();
 		const rootStatusCount = () => fakeHost.callRoute.mock.calls.filter(([name, init]) => name === "list" && (init?.body as Record<string, unknown> | undefined)?.includeStatus === true).length;
@@ -439,9 +442,7 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("Explorer refreshed.");
 
 		root.remove();
-		await tick();
-		await tick();
-		expect(statusDispose).toHaveBeenCalledTimes(1);
+		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
 	});
 
 	it("queues one first-idle refresh that arrives during initialization", async () => {
