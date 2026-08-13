@@ -2822,6 +2822,28 @@ export class SessionManager {
 		this.settleVerifierPromptReceipt(sessionId, rowId, error);
 	}
 
+	/**
+	 * Settle only the verifier receipts belonging to an exact rejected dispatch.
+	 * Ordinary durable rows remain available for the interactive manual-retry
+	 * lifecycle, but verification must never wait for a row this path no longer
+	 * owns (notably after auth, terminal retry, or process-exit failures).
+	 */
+	private abandonVerifierPromptDispatchRows(session: SessionInfo, rows: Array<{
+		id?: string;
+		source?: PromptSource;
+	}>, durableQueueRowIds: Array<string | undefined> | undefined, error: Error): boolean {
+		let abandoned = false;
+		for (let index = 0; index < rows.length; index += 1) {
+			const row = rows[index];
+			if (row.source !== "verification") continue;
+			const rowId = durableQueueRowIds?.[index] ?? row.id;
+			if (!rowId) continue;
+			this.abandonVerifierPrompt(session.id, rowId, error);
+			abandoned = true;
+		}
+		return abandoned;
+	}
+
 	/** Purge verifier rows from the same canonical queue used for enqueue/cancel. */
 	private purgeVerifierPromptRows(sessionId: string, reason: string): void {
 		// Teardown can observe a replacement owner after only part of SessionInfo
@@ -6193,6 +6215,7 @@ export class SessionManager {
 		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
 		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
 			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
+			this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
 			return;
 		}
 
@@ -6259,6 +6282,10 @@ export class SessionManager {
 			session.promptQueue.reorderByIds([...recoveredIds].reverse());
 		}
 		if (manualRecoveryRequired) {
+			// This direct-dispatch recovery has handed ordinary work to the manual
+			// retry path. A verifier receipt cannot share that ownership: reject its
+			// exact row now rather than making the harness wait for its timeout.
+			this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
 			session.lastTurnErrored = true;
 			session.lastTurnErrorMessage = safeReason;
 			session.turnHadToolCalls = false;
@@ -6270,6 +6297,9 @@ export class SessionManager {
 			return;
 		}
 		if (providerAuthFailure) {
+			// Provider credentials are deterministic, terminal delivery failures.
+			// Do not leave verifier work parked behind a 60-second receipt timeout.
+			this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
 			this.surfaceProviderAuthFailure(session, reason, source);
 			this.broadcastQueue(session);
 			return;
@@ -6277,6 +6307,18 @@ export class SessionManager {
 		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
 		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
+			// Bounded retry exhaustion switches regular prompts to manual recovery.
+			// It must instead settle the verifier's exact receipt and remove its row.
+			if (session.manualRetryRequired) {
+				this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
+			}
+			return;
+		}
+		// Configuration/schema/auth-like failures have no useful tick-0 retry.
+		// Let ordinary rows retain their existing queue behavior, but settle a
+		// verifier receipt immediately rather than turning it into a timeout.
+		if (isNonRetryableAgentError(reason)
+			&& this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason))) {
 			return;
 		}
 		// Schedule a follow-up drain on the next tick so the rows we just
@@ -6295,11 +6337,11 @@ export class SessionManager {
 			session.recoverDrainAttempts = 0;
 			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${safeReason}); deferring ${rows.length} row(s) to the next agent_end drain`);
 			if (isReviewerBusyError(reason)) {
-				for (const row of rows) {
-					if (row.id && row.source === "verification") {
-						this.abandonVerifierPrompt(session.id, row.id, new Error(`Verifier prompt parked after reviewer contention: ${reason}`));
-					}
-				}
+				// Keep the contention envelope narrow so verifier-scoped retry policy
+				// can distinguish SDK busy from every other terminal dispatch failure.
+				this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, new Error(`Verifier prompt parked after reviewer contention: ${safeReason}`));
+			} else {
+				this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
 			}
 			return;
 		}
@@ -6323,6 +6365,7 @@ export class SessionManager {
 		durableQueueRowId?: string,
 		promptId = promptAttemptId("prompt"),
 		streamingBehavior?: PromptStreamingBehavior,
+		manualRecoveryRequired = durableQueueRowId !== undefined,
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
@@ -6336,6 +6379,7 @@ export class SessionManager {
 			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
 			this.clearRecoveredPromptDispatchOwnership(session, [durableQueueRowId]);
 			this.broadcastQueue(session);
+			this.settleVerifierPromptReceipt(session.id, durableQueueRowId);
 		};
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
 			if (activityBoundary?.state !== "committed") return false;
@@ -6364,7 +6408,7 @@ export class SessionManager {
 				if (acceptedBeforeAckFailure(reason)) return;
 				if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 				cancelled = true;
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], manualRecoveryRequired);
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
@@ -6377,7 +6421,7 @@ export class SessionManager {
 			if (!recovered && acceptedBeforeAckFailure(reason)) return;
 			if (!cancelled && !this.cancelPromptAuthorDispatch(session, prepared)) return;
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], manualRecoveryRequired);
 			}
 			if (isProviderAuthFailure(reason)) {
 				throw this.safeDispatchError(session, reason);
@@ -7262,11 +7306,11 @@ export class SessionManager {
 		}
 	}
 
-	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
+	private consumeRecoveredPromptDispatchRows(session: SessionInfo, preserveIds?: ReadonlySet<string>): boolean {
 		const ids = session.recoveredPromptDispatchQueueIds;
 		if (!ids?.length) return false;
 		const poisonOwned = new Set(session.poisonRecoveryPromptDispatchQueueIds ?? []);
-		const supersededIds = ids.filter(id => !poisonOwned.has(id));
+		const supersededIds = ids.filter(id => !poisonOwned.has(id) && !preserveIds?.has(id));
 		let removedAny = false;
 		for (const id of supersededIds) {
 			removedAny = session.promptQueue.remove(id) || removedAny;
@@ -7527,11 +7571,36 @@ export class SessionManager {
 			// Dispatch failures before agent_start re-enqueue the failed row for
 			// recovery. Auto retry may use the legacy text fallback; explicit Retry
 			// consumes only the ID ledger and allocates its own unique durable row.
-			if (!this.consumeRecoveredPromptDispatchRows(session) && isAuto) {
+			// An auto-retried verifier row remains the same durable acceptance until
+			// the provider accepts it or terminal recovery settles its receipt. Other
+			// recovered work retains the historical consume-and-redrive behaviour.
+			const recoveredVerifierRow = isAuto
+				? session.recoveredPromptDispatchQueueIds
+					?.map((id) => session.promptQueue.toArray().find((row) => row.id === id))
+					.find((row): row is QueuedMessage => row?.source === "verification")
+				: undefined;
+			const consumedRecovered = this.consumeRecoveredPromptDispatchRows(
+				session,
+				recoveredVerifierRow ? new Set([recoveredVerifierRow.id]) : undefined,
+			);
+			if (!recoveredVerifierRow && !consumedRecovered && isAuto) {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
 			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
-			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, acceptedRetry?.id);
+			await this.dispatchDirectPrompt(
+				session,
+				retryText,
+				session.lastPromptImages,
+				undefined,
+				false,
+				false,
+				recoveredVerifierRow?.source ?? "system",
+				recoveredVerifierRow?.author ?? BOBBIT_SYSTEM_AUTHOR,
+				acceptedRetry?.id ?? recoveredVerifierRow?.id,
+				undefined,
+				recoveredVerifierRow?.streamingBehavior,
+				!recoveredVerifierRow,
+			);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			this.consumeRecoveredPromptDispatchRows(session);
