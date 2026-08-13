@@ -2613,6 +2613,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/browser/claude-sdk-subagent-card.spec.ts",
+      "reason": "G10b browser journey covering exact-parent embedded Claude SDK child work in the native Agent card, terminal visibility, reload-safe nested state, and no standalone child surface.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

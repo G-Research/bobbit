@@ -111,6 +111,8 @@ type WorkState = {
 	parentToolUseId: string;
 	messages: Map<string, ClaudeAgentSdkHistoryMessage>;
 	pendingToolCallIds: Set<string>;
+	/** A replayed historical tool call must not re-open after its result. */
+	completedToolCallIds: Set<string>;
 	identities: Map<string, IdentityState>;
 	phase: ClaudeSdkSubagentPhase;
 	startedAt?: number;
@@ -123,7 +125,7 @@ function identityKey(identity: ClaudeSdkSubagentIdentity): string {
 }
 
 function initialState(parentToolUseId: string): WorkState {
-	return { parentToolUseId, messages: new Map(), pendingToolCallIds: new Set(), identities: new Map(), phase: "unknown" };
+	return { parentToolUseId, messages: new Map(), pendingToolCallIds: new Set(), completedToolCallIds: new Set(), identities: new Map(), phase: "unknown" };
 }
 
 function aggregatePhase(state: WorkState): ClaudeSdkSubagentPhase {
@@ -215,9 +217,14 @@ export class ClaudeSdkSubagentWorkAssembler {
 		if (!parentToolUseId || !id) return [];
 		const state = this.state(parentToolUseId);
 		state.messages.set(id, message);
-		for (const toolCallId of toolCalls(message)) state.pendingToolCallIds.add(toolCallId);
+		for (const toolCallId of toolCalls(message)) {
+			if (!state.completedToolCallIds.has(toolCallId)) state.pendingToolCallIds.add(toolCallId);
+		}
 		const resultId = toolResultId(message);
-		if (resultId) state.pendingToolCallIds.delete(resultId);
+		if (resultId) {
+			state.completedToolCallIds.add(resultId);
+			state.pendingToolCallIds.delete(resultId);
+		}
 		this.addIdentity(parentToolUseId, message.parentAgentId && boundedId(message.parentAgentId)
 			? { parentToolUseId, agentId: message.parentAgentId } : undefined, "unknown");
 		return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind, message }];
@@ -255,11 +262,14 @@ export class ClaudeSdkSubagentWorkAssembler {
 		const identity = eventIdentity(event, parentToolUseId);
 		const type = event.type;
 		if (type === "tool_execution_start" && boundedId(event.toolCallId)) {
-			this.state(parentToolUseId).pendingToolCallIds.add(event.toolCallId);
+			const state = this.state(parentToolUseId);
+			if (!state.completedToolCallIds.has(event.toolCallId)) state.pendingToolCallIds.add(event.toolCallId);
 			return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind: "tool_start", identity, toolEvent: event }];
 		}
 		if (type === "tool_execution_end" && boundedId(event.toolCallId)) {
-			this.state(parentToolUseId).pendingToolCallIds.delete(event.toolCallId);
+			const state = this.state(parentToolUseId);
+			state.completedToolCallIds.add(event.toolCallId);
+			state.pendingToolCallIds.delete(event.toolCallId);
 			return [{ type: "claude_sdk_subagent_work", parentToolUseId, kind: "tool_end", identity, toolEvent: event }];
 		}
 		if (type === "agent_end") {
@@ -321,17 +331,51 @@ export class ClaudeSdkSubagentWorkAssembler {
  * ordering. A non-empty parent id is the only partition key, even before its
  * root Agent card has appeared.
  */
+function rootAgentParentToolUseIds(messages: readonly ClaudeAgentSdkHistoryMessage[]): Set<string> {
+	const parents = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (isRecord(block) && block.type === "toolCall" && (block.name === "Agent" || block.name === "Task") && boundedId(block.id)) parents.add(block.id);
+		}
+	}
+	return parents;
+}
+
+/** Bounded official-SDK recovery for a snapshot with real root Agent/Task
+ * parents. It never infers a parent from an agent id and returns only rows
+ * annotated with one exact parent. */
+export async function recoverClaudeSdkEmbeddedWork(
+	messages: readonly ClaudeAgentSdkHistoryMessage[],
+	recovery: ClaudeSdkSubagentRecoveryOptions,
+): Promise<ClaudeAgentSdkHistoryMessage[]> {
+	const parents = rootAgentParentToolUseIds(messages);
+	if (parents.size === 0) return [...messages];
+	const assembler = new ClaudeSdkSubagentWorkAssembler({ recovery });
+	assembler.setKnownParentToolUseIds([...parents]);
+	const existing = new Set(messages.flatMap((message) => {
+		const parent = boundedId(message.parentToolUseId) ? message.parentToolUseId : undefined;
+		const id = sourceId(message);
+		return parent && id ? [`${parent}:${id}`] : [];
+	}));
+	for (const message of messages) if (boundedId(message.parentToolUseId)) assembler.ingestMessage(message);
+	const recovered = (await Promise.all([...parents].map((parent) => assembler.recover(parent))))
+		.flatMap((events) => events.flatMap((event) => event.message ? [event.message] : []));
+	const combined = [...messages];
+	for (const message of recovered) {
+		const parent = boundedId(message.parentToolUseId) ? message.parentToolUseId : undefined;
+		const id = sourceId(message);
+		if (!parent || !id || existing.has(`${parent}:${id}`)) continue;
+		existing.add(`${parent}:${id}`);
+		combined.push(message);
+	}
+	return combined;
+}
+
 export function projectClaudeSdkEmbeddedWork(messages: readonly ClaudeAgentSdkHistoryMessage[]): ClaudeSdkEmbeddedWorkProjection {
 	const assembler = new ClaudeSdkSubagentWorkAssembler();
 	const rootMessages: ClaudeAgentSdkHistoryMessage[] = [];
-	const parents = new Set<string>();
-	for (const message of messages) {
-		if (message.role === "assistant" && Array.isArray(message.content)) {
-			for (const block of message.content) {
-				if (isRecord(block) && block.type === "toolCall" && block.name === "Agent" && boundedId(block.id)) parents.add(block.id);
-			}
-		}
-	}
+	const parents = rootAgentParentToolUseIds(messages);
 	assembler.setKnownParentToolUseIds([...parents]);
 	for (const message of messages) {
 		if (boundedId(message.parentToolUseId)) assembler.ingestMessage(message);
