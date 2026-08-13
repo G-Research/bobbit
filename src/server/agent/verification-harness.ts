@@ -997,6 +997,8 @@ import {
 	isPreImplementationGate,
 	isProviderBackoffError,
 	isRetryableGenericAgentError,
+	isReviewerBusyError,
+	isVerifierPromptDispatchTimeoutError,
 	TRANSIENT_INFRA_ERROR_REGEXES,
 	shouldRetryVerificationStep,
 	isRestartInterruptError,
@@ -3264,7 +3266,7 @@ export class VerificationHarness {
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
-				undefined, ctx.gate,
+				undefined, ctx.gate, { gateId, signalId },
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
@@ -3337,6 +3339,7 @@ export class VerificationHarness {
 				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role, component: stepDef.component },
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
+				undefined, { gateId, signalId },
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
@@ -4923,6 +4926,7 @@ export class VerificationHarness {
 										cwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, attemptSessionId,
+										{ gateId: signal.gateId, signalId: signal.id },
 									);
 									result = qaResult;
 									if (qaResult.artifact) {
@@ -5053,7 +5057,7 @@ export class VerificationHarness {
 										cwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
-										gate,
+										gate, { gateId: signal.gateId, signalId: signal.id },
 									);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
@@ -5210,6 +5214,7 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
+		verificationContext?: { gateId?: string; signalId?: string },
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -5251,7 +5256,7 @@ export class VerificationHarness {
 		if (!this.sessionManager || !goalId) {
 			throw new Error("LLM review requires an active SessionManager and goalId");
 		}
-		return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId);
+		return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId, verificationContext);
 	}
 
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
@@ -5306,10 +5311,17 @@ export class VerificationHarness {
 						timer = this.clock.setTimeout(() => reject(new Error(`Verifier prompt ${receipt.rowId} did not dispatch within ${VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS}ms`)), VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS);
 					}),
 				]);
-				console.log(`[verification][verifier-dispatch] ${fields} mode=queued decision=dispatched row=${receipt.rowId}`);
+				console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=dispatched row=${receipt.rowId}`);
 			} catch (error) {
 				receipt.cancel();
-				console.warn(`[verification][verifier-dispatch] ${fields} mode=queued decision=cancelled row=${receipt.rowId}`);
+				const message = error instanceof Error ? error.message : String(error);
+				const decision = isReviewerBusyError(message)
+					? "busy-contention"
+					: isVerifierPromptDispatchTimeoutError(message)
+						? "dispatch-timeout"
+						: "cancelled";
+				// Lifecycle fields only: error strings can include provider payloads.
+				console.warn(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=${decision} row=${receipt.rowId}`);
 				throw error;
 			} finally {
 				if (timer) this.clock.clearTimeout(timer);
@@ -5469,6 +5481,8 @@ export class VerificationHarness {
 
 	private async recoverVerifierAfterProcessDeath(args: {
 		goalId?: string;
+		gateId?: string;
+		signalId?: string;
 		sessionId: string;
 		stepName: string;
 		label: string;
@@ -5486,7 +5500,7 @@ export class VerificationHarness {
 
 		for (let attempt = 1; attempt <= MAX_VERIFIER_SAME_SESSION_RESURRECTIONS; attempt++) {
 			attempts = attempt;
-			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; freshAllowanceMs=${args.timeoutMs}.`);
+			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; freshAllowanceMs=${args.timeoutMs}.`);
 			try {
 				const existing = sessionManager.getSession(args.sessionId);
 				if (existing && existing.status !== "terminated" && typeof sessionManager.restartAgent === "function") {
@@ -5504,6 +5518,8 @@ export class VerificationHarness {
 
 				await this.dispatchVerifierPrompt(session, args.prompt, {
 					goalId: args.goalId,
+					gateId: args.gateId,
+					signalId: args.signalId,
 					stepName: args.stepName,
 					verifierKind: args.label === "Agent QA" ? "agent-qa" : "llm-review",
 					promptKind: "resurrection",
@@ -5560,6 +5576,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
+		verificationContext?: { gateId?: string; signalId?: string },
 	): Promise<ReviewStepExecutionResult> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
@@ -5739,6 +5756,8 @@ export class VerificationHarness {
 			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
 			await this.dispatchVerifierPrompt(session, kickoff, {
 				goalId,
+				gateId: verificationContext?.gateId,
+				signalId: verificationContext?.signalId,
 				stepName: step.name,
 				verifierKind: "llm-review",
 				promptKind: "kickoff",
@@ -5787,6 +5806,8 @@ export class VerificationHarness {
 				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
 				await this.dispatchVerifierPrompt(session, reminderPrompt, {
 					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
 					stepName: step.name,
 					verifierKind: "llm-review",
 					promptKind: "reminder",
@@ -5858,6 +5879,8 @@ export class VerificationHarness {
 				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${msg}`);
 				const recovered = await this.recoverVerifierAfterProcessDeath({
 					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
 					sessionId,
 					stepName: step.name,
 					label: "LLM review",
@@ -5966,6 +5989,7 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
+		verificationContext?: { gateId?: string; signalId?: string },
 	): Promise<ReviewStepExecutionResult & { artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		// Inline-roles-aware lookup. Same fallback chain as before: explicit
@@ -6177,6 +6201,8 @@ export class VerificationHarness {
 			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
 			await this.dispatchVerifierPrompt(session, kickoff, {
 				goalId,
+				gateId: verificationContext?.gateId,
+				signalId: verificationContext?.signalId,
 				stepName: step.name,
 				verifierKind: "agent-qa",
 				promptKind: "kickoff",
@@ -6227,6 +6253,8 @@ export class VerificationHarness {
 				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
 				await this.dispatchVerifierPrompt(session, qaReminderPrompt, {
 					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
 					stepName: step.name,
 					verifierKind: "agent-qa",
 					promptKind: "reminder",
@@ -6296,6 +6324,8 @@ export class VerificationHarness {
 				console.error(`[verification] QA agent process died during "${step.name}" (session ${qaSessionId}): ${msg}`);
 				const recovered = await this.recoverVerifierAfterProcessDeath({
 					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
 					sessionId: qaSessionId,
 					stepName: step.name,
 					label: "Agent QA",

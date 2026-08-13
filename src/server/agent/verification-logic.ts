@@ -362,8 +362,17 @@ export function isReviewerBusyError(output: string): boolean {
 	return !!output && /\bAgent is already processing\.\s*Specify streamingBehavior\b/i.test(output);
 }
 
+/**
+ * The verifier receipt's bounded dispatch wait elapsed while its durable row
+ * remained queued. This is queue contention, not reviewer content or provider
+ * configuration; keep it narrowly retryable under the ordinary bounded policy.
+ */
+export function isVerifierPromptDispatchTimeoutError(output: string): boolean {
+	return !!output && /(?:^|(?:LLM review|Agent QA) failed:\s*)Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \d+ms$/i.test(output.trim());
+}
+
 function matchesAnyTransient(output: string): boolean {
-	if (isReviewerBusyError(output)) return true;
+	if (isReviewerBusyError(output) || isVerifierPromptDispatchTimeoutError(output)) return true;
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
 	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
 	if (TRANSIENT_INFRA_ERROR_REGEXES.some(re => re.test(output))) return true;
