@@ -1,7 +1,9 @@
 // v2-native — integration coverage for the three independent Claude SDK permission ceilings.
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildClaudeSdkToolSurface, sdkZodShape } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
@@ -156,6 +158,47 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		}
 	});
 
+	it("runs a sandbox dispatcher through the current container instead of a host Worker", async () => {
+		const child = new EventEmitter() as any;
+		child.stdin = new PassThrough();
+		child.stdout = new PassThrough();
+		child.stderr = new PassThrough();
+		child.killed = false;
+		child.exitCode = null;
+		child.signalCode = null;
+		child.kill = vi.fn(() => true);
+		const dockerSpawn = vi.fn((_command: string, args: string[]) => {
+			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/current", "container-current", "node"]));
+			expect(args.join(" ")).toContain("BOBBIT_TOKEN=scoped-token");
+			return child;
+		});
+		let input = "";
+		child.stdin.on("data", (chunk: Buffer) => {
+			input += chunk.toString();
+			const lines = input.split("\n");
+			input = lines.pop() ?? "";
+			for (const line of lines) {
+				const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
+				if (message.type === "init") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "ready", schemas: [{ name: "read", inputSchema: { type: "object" } }], omittedConditional: [] }) + "\n");
+				if (message.type === "invoke") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "result", id: message.id, result: "container-result" }) + "\n");
+			}
+		});
+		const dispatcher = new ClaudeSdkExtensionDispatcher({
+			cwd: "/host/must-not-run-tools",
+			env: {},
+			gatewayCredentials: { token: "scoped-token", url: "http://gateway.test" },
+			manifest: [{ extensionPath: path.resolve("defaults/tools/_builtins/extension.ts"), selectedToolNames: ["read"], allowedToolNames: ["read"] }],
+			sandbox: { containerId: "container-current", cwd: "/workspace-wt/current", builtinToolsDir: path.resolve("defaults/tools"), spawn: dockerSpawn as any, workerSource: "void 0" },
+		});
+		try {
+			await expect(dispatcher.start()).resolves.toEqual([{ name: "read", inputSchema: { type: "object" } }]);
+			await expect(dispatcher.invoke("read", {}, {})).resolves.toBe("container-result");
+			expect(dockerSpawn).toHaveBeenCalledOnce();
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
 	it("dispatches mixed-case MCP owners exactly and rejects forged never operations", async () => {
 		const callTool = vi.fn(async () => ({ content: [{ type: "text", text: "ok" }] }));
 		const handler = createMcpMetaToolHandler("PlayWright", undefined, { callTool } as any, [
@@ -207,6 +250,20 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		] as any));
 		expect(mcpShape.operation.safeParse("list").success).toBe(true);
 		expect(mcpShape.operation.safeParse("delete").success).toBe(false);
+	});
+
+	it("requires wired scoped authority for sandbox dispatch without changing direct-worker fallback", () => {
+		const adminToken = "admin-token-must-not-be-used";
+		expect(() => resolveClaudeSdkWorkerGatewayCredentials({
+			sandboxed: true,
+			env: { BOBBIT_TOKEN: adminToken, BOBBIT_GATEWAY_URL: "http://host-env.test" },
+		})).toThrow(/current scoped gateway authority/i);
+		expect(resolveClaudeSdkWorkerGatewayCredentials({
+			sandboxed: true,
+			gatewayToken: "scoped-session-token",
+			gatewayUrl: "http://scoped-gateway.test",
+			env: { BOBBIT_TOKEN: adminToken, BOBBIT_GATEWAY_URL: "http://host-env.test" },
+		})).toEqual({ token: "scoped-session-token", url: "http://scoped-gateway.test" });
 	});
 
 	it("reads fallback worker credentials from serverSecretsDir, never state/token, and omits them from the SDK child", async () => {
