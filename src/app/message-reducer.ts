@@ -89,9 +89,32 @@ export function initialState(): ReducerState {
 	return { messages: [], nextTick: 1, highestSeq: 0 };
 }
 
+const DELIVERY_INTENT_ID_MAX_LENGTH = 256;
+
 function deliveryIntentId(message: any): string | undefined {
 	const id = message?.deliveryIntentId ?? message?.intentId;
-	return typeof id === "string" && id.length > 0 ? id : undefined;
+	return typeof id === "string" && id.length > 0 && id.length <= DELIVERY_INTENT_ID_MAX_LENGTH
+		? id
+		: undefined;
+}
+
+/**
+ * A durable delivery identity names one user-message occurrence. Defensive
+ * recovery snapshots can briefly contain both the authoritative transcript row
+ * and a splice/fallback copy, so retain only the first occurrence at its
+ * original position. Legacy rows and invalid IDs deliberately remain distinct;
+ * message text is never part of this correlation boundary.
+ */
+function deduplicateSnapshotUserDeliveryIntents(messages: any[]): any[] {
+	const seen = new Set<string>();
+	return messages.filter((message) => {
+		if (message?.role !== "user" && message?.role !== "user-with-attachments") return true;
+		const intentId = deliveryIntentId(message);
+		if (!intentId) return true;
+		if (seen.has(intentId)) return false;
+		seen.add(intentId);
+		return true;
+	});
 }
 
 function extractText(message: any): string {
@@ -470,7 +493,9 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 
 		case "snapshot": {
 			const tick = state.nextTick;
-			const enriched = action.messages.map(enrichUserMessage);
+			const enriched = deduplicateSnapshotUserDeliveryIntents(
+				action.messages.map(enrichUserMessage),
+			);
 			// Two-way compaction dedup:
 			//   (a) State has a rich synthetic (`__compaction_summary` toolCall) —
 			//       drop the server's plain-text marker from this snapshot. Rich
