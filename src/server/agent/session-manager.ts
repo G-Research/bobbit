@@ -690,7 +690,13 @@ interface LivePromptAuthorMessageBinding {
 
 type ReplayPromptAuthorBinding = LivePromptAuthorMessageBinding;
 
-interface PendingPromptExtensionAudit { id: string; projectId: string; stateDir: string; }
+interface PendingPromptExtensionAudit {
+	id: string;
+	projectId: string;
+	stateDir: string;
+	/** Session-owner mirror; this makes a cross-project audit directly queryable by its authoring session. */
+	sessionStateDir?: string;
+}
 
 export interface PromptAuthorTombstoneBudget {
 	maxCount: number;
@@ -3335,11 +3341,19 @@ export class SessionManager {
 		catch { console.warn("[session-manager] static prompt extensions rejected; retaining core prompt"); return []; }
 	}
 
-	registerPromptExtensionAuthoringAudits(sessionId: string, auditIds: readonly string[], target: { projectId: string; stateDir: string }): void {
+	registerPromptExtensionAuthoringAudits(
+		sessionId: string,
+		auditIds: readonly string[],
+		target: { projectId: string; stateDir: string; sessionStateDir?: string },
+	): void {
 		const session = this.sessions.get(sessionId);
 		if (!session || auditIds.length === 0) return;
 		const pending = session.pendingPromptExtensionAudits ??= [];
-		for (const id of auditIds) if (!pending.some(entry => entry.id === id)) pending.push({ id, projectId: target.projectId, stateDir: target.stateDir });
+		for (const id of auditIds) {
+			if (!pending.some(entry => entry.id === id)) {
+				pending.push({ id, projectId: target.projectId, stateDir: target.stateDir, ...(target.sessionStateDir ? { sessionStateDir: target.sessionStateDir } : {}) });
+			}
+		}
 	}
 
 	private applyPendingStaticPromptRefresh(session: SessionInfo): void {
@@ -8292,10 +8306,14 @@ export class SessionManager {
 			const model = persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
 			const trace = new ContextTraceStore(this.stateDir);
 			for (const target of pending) {
-				const store = new PromptExtensionAuthoringAuditStore(target.stateDir);
-				const prior = store.get(target.id); if (!prior) continue;
-				const completed = store.complete(target.id, { status: prior.status === "accepted" ? "accepted" : "proposed", ...(model ? { model } : {}), ...(persisted?.modelProvider ? { provider: persisted.modelProvider } : {}), ...(persisted?.effectiveThinkingLevel ? { thinkingLevel: persisted.effectiveThinkingLevel } : {}), ...(session.latestTerminalPromptExtensionUsage && Object.keys(session.latestTerminalPromptExtensionUsage).length ? { usage: session.latestTerminalPromptExtensionUsage } : {}) });
-				trace.appendTrace(session.id, { ts: Date.now(), hook: "afterTurn", sessionId: session.id, providers: [], outcomes: [{ kind: "audit", hookId: completed.id, event: "afterTurn", outcome: "applied", value: completed.id }] });
+				let completed: ReturnType<PromptExtensionAuthoringAuditStore["complete"]> | undefined;
+				for (const stateDir of new Set([target.stateDir, target.sessionStateDir].filter((value): value is string => !!value))) {
+					const store = new PromptExtensionAuthoringAuditStore(stateDir);
+					const prior = store.get(target.id); if (!prior) continue;
+					const result = store.complete(target.id, { status: prior.status === "accepted" ? "accepted" : "proposed", ...(model ? { model } : {}), ...(persisted?.modelProvider ? { provider: persisted.modelProvider } : {}), ...(persisted?.effectiveThinkingLevel ? { thinkingLevel: persisted.effectiveThinkingLevel } : {}), ...(session.latestTerminalPromptExtensionUsage && Object.keys(session.latestTerminalPromptExtensionUsage).length ? { usage: session.latestTerminalPromptExtensionUsage } : {}) });
+					completed ??= result;
+				}
+				if (completed) trace.appendTrace(session.id, { ts: Date.now(), hook: "afterTurn", sessionId: session.id, providers: [], outcomes: [{ kind: "audit", hookId: completed.id, event: "afterTurn", outcome: "applied", value: completed.id }] });
 			}
 		} catch { console.warn("[session-manager] prompt extension authoring audit finalization unavailable"); }
 	}

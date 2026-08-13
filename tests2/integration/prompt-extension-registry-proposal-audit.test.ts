@@ -582,6 +582,32 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			expect((await apiFetch(`/api/sessions/${sessionA}/proposal/project/edit`, {
 				method: "POST", headers: agentA, body: JSON.stringify(changeTarget),
 			})).status).toBe(200);
+			const retargetedAudit = await readJson(await apiFetch(`/api/sessions/${sessionA}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			const crossProjectEntry = retargetedAudit.entries.find((entry: any) => entry.projectId === projectB.id);
+			expect(crossProjectEntry, `${REPRO}: session audit route must read its direct cross-project mirror`).toMatchObject({
+				actor: "agent", sessionId: sessionA, projectId: projectB.id, status: "requested",
+			});
+			const targetAuditStore = new PromptExtensionAuthoringAuditStore(path.join(rootB, ".bobbit", "state"));
+			expect(targetAuditStore.listForSession(sessionA)).toEqual(expect.arrayContaining([
+				expect.objectContaining({ id: crossProjectEntry?.id, projectId: projectB.id }),
+			]));
+			// The route opens only session A's owning project. A record injected into
+			// B must not be discovered by a cross-project audit-file scan.
+			targetAuditStore.create({
+				id: "unrelated-project-record", packId: packName, hookId: "author.prompt", event: "proposal", sectionId: "policy",
+				actor: "agent", sessionId: sessionA, projectId: projectB.id, trigger: "unrelated", baselineDigest: "a".repeat(64), baselineBytes: 1,
+			});
+			const afterUnrelatedInjection = await readJson(await apiFetch(`/api/sessions/${sessionA}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			expect(afterUnrelatedInjection.entries).not.toEqual(expect.arrayContaining([
+				expect.objectContaining({ id: "unrelated-project-record" }),
+			]));
+			expect((await apiFetch(`/api/sessions/${sessionA}/proposal/project/accept-extension-sections`, {
+				method: "POST", headers: operatorHeaders(humanCookie), body: JSON.stringify({ projectId: projectB.id }),
+			})).status).toBe(200);
+			const acceptedCrossProjectAudit = await readJson(await apiFetch(`/api/sessions/${sessionA}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			expect(acceptedCrossProjectAudit.entries).toEqual(expect.arrayContaining([
+				expect.objectContaining({ id: crossProjectEntry?.id, projectId: projectB.id, status: "accepted" }),
+			]));
 
 			sessionB = await createSession({ projectId: projectB.id });
 			const agentB = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionB) };
