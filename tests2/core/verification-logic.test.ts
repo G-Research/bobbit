@@ -327,10 +327,21 @@ describe("isReviewerBusyError", () => {
 		}), "break");
 	});
 
-	it("classifies only explicit restart-before-dispatch envelopes as verifier interruptions", () => {
+	it("classifies wrapped cold receipt and restart interruptions without matching findings", () => {
+		const backoff = " Last turn hit a provider rate-limit error after 1 auto-retry attempt — auto-retry still pending. Check your provider quota.";
+		const coldTimeout = "Reviewer agent was not ready / timed out while resuming after server restart: Verifier prompt reviewer-123 did not dispatch within 215000ms";
 		const interruption = "Reviewer agent was not ready / timed out while resuming after server restart: Verifier session reviewer-123 restarted before dispatch";
-		assert.equal(isVerifierRestartBeforeDispatchError(interruption), true);
-		assert.equal(isTransientVerifierReviewError(interruption), true);
+		for (const output of [coldTimeout, `${coldTimeout}${backoff}`]) {
+			assert.equal(isVerifierPromptDispatchTimeoutError(output), true);
+			assert.equal(isTransientVerifierReviewError(output), true);
+			assert.equal(isTransientVerifierQaError(output), true);
+		}
+		for (const output of [interruption, `${interruption}${backoff}`]) {
+			assert.equal(isVerifierRestartBeforeDispatchError(output), true);
+			assert.equal(isTransientVerifierReviewError(output), true);
+			assert.equal(isTransientVerifierQaError(output), true);
+		}
+		assert.equal(isVerifierPromptDispatchTimeoutError("Reviewer summary: Verifier prompt reviewer-123 did not dispatch within 215000ms"), false);
 		assert.equal(isVerifierRestartBeforeDispatchError("Reviewer summary: Verifier session reviewer-123 restarted before dispatch"), false);
 	});
 
@@ -349,6 +360,7 @@ describe("isReviewerBusyError", () => {
 
 		for (const terminal of terminalBusyEnvelopes) {
 			const output = `${BUSY_REJECTION} ${terminal}`;
+			const wrappedTimeout = `LLM review failed: Verifier prompt reviewer-123 did not dispatch within 215000ms ${terminal}`;
 			assert.equal(
 				shouldRetryVerificationStep({
 					passed: false,
@@ -360,6 +372,8 @@ describe("isReviewerBusyError", () => {
 				"break",
 				`Expected terminal category to win: ${terminal}`,
 			);
+			assert.equal(isTransientVerifierReviewError(wrappedTimeout), false, `Verifier timeout must not absorb terminal category: ${terminal}`);
+			assert.equal(isTransientVerifierQaError(wrappedTimeout), false, `Verifier QA timeout must not absorb terminal category: ${terminal}`);
 		}
 	});
 });

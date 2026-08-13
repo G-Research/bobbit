@@ -13,8 +13,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
-const { RpcBridge } = await import("../../src/server/agent/rpc-bridge.js");
+const {
+	VerificationHarness,
+	VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS,
+	VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS,
+} = await import("../../src/server/agent/verification-harness.js");
+const {
+	isTransientVerifierReviewError,
+	isTransientVerifierQaError,
+} = await import("../../src/server/agent/verification-logic.js");
+const {
+	COLD_REPROMPT_PROMPT_TIMEOUT_MS,
+	COLD_REPROMPT_READY_TIMEOUT_MS,
+	RpcBridge,
+} = await import("../../src/server/agent/rpc-bridge.js");
 
 const MARKER = "VERIFIER_LIFECYCLE_REPRO";
 
@@ -42,6 +54,30 @@ function makeFakeClock() {
 		},
 		setInterval: (handler: () => void, ms: number) => globalThis.setInterval(handler, ms),
 		clearTimeout: (handle: any) => globalThis.clearTimeout(handle),
+	};
+}
+
+function makeManualClock() {
+	let now = 0;
+	let sequence = 0;
+	const timers = new Map<number, { at: number; handler: () => void }>();
+	return {
+		now: () => now,
+		setTimeout: (handler: () => void, ms: number) => {
+			const id = ++sequence;
+			timers.set(id, { at: now + Math.max(0, ms), handler });
+			return id as any;
+		},
+		setInterval: (_handler: () => void, _ms: number) => 0 as any,
+		clearTimeout: (id: number) => timers.delete(id),
+		clearInterval: (_id: number) => {},
+		advance: (ms: number) => {
+			now += ms;
+			for (const [id, timer] of [...timers].filter(([, timer]) => timer.at <= now).sort((a, b) => a[1].at - b[1].at)) {
+				timers.delete(id);
+				timer.handler();
+			}
+		},
 	};
 }
 
@@ -1031,6 +1067,115 @@ describe("verifier lifecycle reproductions", () => {
 		assert.deepEqual(outcome, { type: "result", result: { verdict: false, summary: "PRE_RESOLVED_VERDICT_WINS" } }, `${MARKER}: verdict settled before receipt subscription must still win`);
 		assert.equal(deliveries, 1, `${MARKER}: pre-resolved verdict does not re-deliver the prompt`);
 		assert.equal(cancelCount, 1, `${MARKER}: rejected receipt is cancelled exactly once after accepting pre-resolved verdict`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO gives cold verifier receipts the bridge-ready budget before timing out", async () => {
+		const stateDir = makeStateDir("cold-verifier-receipt-budget-");
+		const clock = makeManualClock();
+		const sessionId = "cold-budget-reviewer";
+		const receiptAck = deferred<void>();
+		let admissions = 0;
+		let cancelCount = 0;
+		const sessionManager = {
+			enqueueVerifierPrompt: () => {
+				admissions += 1;
+				return {
+					rowId: "cold-budget-row",
+					mode: "queued",
+					dispatched: receiptAck.promise,
+					cancel: () => { cancelCount += 1; return true; },
+				};
+			},
+		} as any;
+		const harness = new VerificationHarness(stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager, verifierTeamManager() as any, undefined, undefined, undefined, { clock: clock as any }) as any;
+		const outcome = harness.dispatchVerifierPrompt({ id: sessionId, status: "idle", rpcClient: {} }, "Review", {
+			goalId: "goal-cold-budget", gateId: "gate-cold-budget", signalId: "signal-cold-budget",
+			stepName: "Cold receipt", verifierKind: "llm-review", promptKind: "restart-resume", whenReady: true,
+		});
+
+		await Promise.resolve();
+		assert.equal(VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS, COLD_REPROMPT_READY_TIMEOUT_MS + COLD_REPROMPT_PROMPT_TIMEOUT_MS + 5_000, `${MARKER}: cold receipt budget derives from both bridge allowances plus scheduling margin`);
+		clock.advance(VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS + 1);
+		await Promise.resolve();
+		assert.equal(cancelCount, 0, `${MARKER}: a cold receipt remains live after the ordinary warm 60s budget`);
+		receiptAck.resolve();
+		assert.deepEqual(await outcome, { type: "dispatched" }, `${MARKER}: a >60s cold acknowledgement dispatches once without a replacement`);
+		assert.equal(admissions, 1, `${MARKER}: cold receipt is admitted exactly once`);
+		assert.equal(cancelCount, 0, `${MARKER}: successful cold acknowledgement is not purged`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO purges exhausted cold receipts and fences stale delivery", async () => {
+		const stateDir = makeStateDir("cold-verifier-receipt-exhaustion-");
+		const clock = makeManualClock();
+		const sessionId = "cold-budget-expired-reviewer";
+		const receiptAck = deferred<void>();
+		const staleVerdict = deferred<any>();
+		let admissions = 0;
+		let cancelCount = 0;
+		const sessionManager = {
+			enqueueVerifierPrompt: () => {
+				admissions += 1;
+				return {
+					rowId: "cold-expired-row",
+					mode: "queued",
+					dispatched: receiptAck.promise,
+					cancel: () => { cancelCount += 1; return true; },
+				};
+			},
+		} as any;
+		const harness = new VerificationHarness(stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager, verifierTeamManager() as any, undefined, undefined, undefined, { clock: clock as any }) as any;
+		const outcome = harness.dispatchVerifierPrompt({ id: sessionId, status: "idle", rpcClient: {} }, "Review", {
+			goalId: "goal-cold-expired", gateId: "gate-cold-expired", signalId: "signal-cold-expired",
+			stepName: "Cold exhaustion", verifierKind: "agent-qa", promptKind: "restart-resume", whenReady: true,
+			resultPromise: staleVerdict.promise,
+		});
+
+		await Promise.resolve();
+		clock.advance(VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS);
+		const error = await outcome.then(() => assert.fail("expected cold receipt timeout"), err => err as Error);
+		assert.match(error.message, new RegExp(`did not dispatch within ${VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS}ms`));
+		assert.equal(cancelCount, 1, `${MARKER}: exhausted receipt is cancelled so its durable row is purged`);
+		assert.equal(admissions, 1, `${MARKER}: timeout does not redeliver the same verifier intent`);
+		const wrapped = `Reviewer agent was not ready / timed out while resuming after server restart: ${error.message} Last turn hit a provider backoff error — auto-retry still pending`;
+		assert.equal(isTransientVerifierReviewError(wrapped), true, `${MARKER}: cold recovery timeout remains verifier-transient after its backoff diagnostic`);
+		assert.equal(isTransientVerifierQaError(wrapped), true, `${MARKER}: cold QA recovery timeout remains verifier-transient after its backoff diagnostic`);
+
+		receiptAck.resolve();
+		staleVerdict.resolve({ verdict: false, summary: "STALE_COLD_RECEIPT_VERDICT" });
+		await Promise.resolve();
+		assert.equal(cancelCount, 1, `${MARKER}: stale acknowledgement/verdict cannot resurrect or double-purge the superseded receipt`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO fences cancellation and stale verdicts while a cold receipt is parked", async () => {
+		const stateDir = makeStateDir("cold-verifier-receipt-cancel-");
+		const clock = makeManualClock();
+		const sessionId = "cold-budget-cancelled-reviewer";
+		const receiptAck = deferred<void>();
+		const staleVerdict = deferred<any>();
+		let cancelCount = 0;
+		const sessionManager = {
+			enqueueVerifierPrompt: () => ({
+				rowId: "cold-cancelled-row", mode: "queued", dispatched: receiptAck.promise,
+				cancel: () => { cancelCount += 1; return true; },
+			}),
+		} as any;
+		const harness = new VerificationHarness(stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager, verifierTeamManager() as any, undefined, undefined, undefined, { clock: clock as any }) as any;
+		const signalId = "signal-cold-cancelled";
+		const outcome = harness.dispatchVerifierPrompt({ id: sessionId, status: "idle", rpcClient: {} }, "Review", {
+			goalId: "goal-cold-cancelled", gateId: "gate-cold-cancelled", signalId,
+			stepName: "Cold cancellation", verifierKind: "llm-review", promptKind: "restart-resume", whenReady: true,
+			resultPromise: staleVerdict.promise,
+		});
+
+		await Promise.resolve();
+		(harness.cancelledVerificationSignals as Set<string>).add(signalId);
+		for (const notify of harness.verifierDispatchCancellationWaiters.get(signalId) ?? []) notify("test superseded signal");
+		assert.deepEqual(await outcome, { type: "cancelled", reason: "test superseded signal" }, `${MARKER}: cancellation wins while a cold receipt waits for bridge readiness`);
+		assert.equal(cancelCount, 1, `${MARKER}: cancellation purges the exact parked verifier row`);
+		receiptAck.resolve();
+		staleVerdict.resolve({ verdict: true, summary: "STALE_CANCELLED_COLD_VERDICT" });
+		await Promise.resolve();
+		assert.equal(cancelCount, 1, `${MARKER}: stale receipt delivery or verdict cannot publish/revive a cancelled signal`);
 	});
 
 	it("agent-qa honors a late verification_result posted during teardown", async () => {
