@@ -130,28 +130,41 @@ describe("selectSidebarStatusSections", () => {
 		assert.deepEqual(ids(afterHiddenActivityChurn.unread), ["active-new", "active-old"], "hidden timestamps must not reorder shimmer-only rows");
 	});
 
-	it("applies Archived, teams, Busy, and Read gates with only Busy/Read active exemptions", () => {
+	it("keeps only the canonical active archived team target exempt from every visibility gate", () => {
 		const candidates = [
-			candidate("archived-active", { server_tags: ["read-state=unread"] }, true),
-			candidate("member-active", { server_tags: ["team-kind=member", "read-state=unread"] }),
-			candidate("busy", { server_tags: ["activity-state=busy", "read-state=unread"] }),
-			candidate("read", { server_tags: ["read-state=read"] }),
-			candidate("busy-read", { status: "streaming", server_tags: ["activity-state=busy", "read-state=read"] }),
-			candidate("unread", { server_tags: ["read-state=unread"] }),
+			candidate("active-target", {
+				server_tags: ["team-kind=member", "activity-state=busy", "read-state=read"],
+			}, true),
+			candidate("archived-other", { server_tags: ["read-state=unread"] }, true),
+			candidate("member-other", { server_tags: ["team-kind=member", "read-state=unread"] }),
+			candidate("busy-other", { server_tags: ["activity-state=busy", "read-state=unread"] }),
+			candidate("read-other", { server_tags: ["read-state=read"] }),
+			candidate("unread-visible", { server_tags: ["read-state=unread"] }),
 		];
 		const sections = select(candidates, {
-			activeSessionId: "member-active",
+			activeSessionId: "active-target",
 			filters: { showArchived: false, showTeams: false, showBusy: false, showRead: false },
 		});
-		assert.deepEqual(ids(sections.unread), ["unread"]);
-		assert.deepEqual(ids(sections.read), []);
-		assert.deepEqual(ids(sections.pinned), []);
 
-		const busyReadVisible = select(candidates, {
+		assert.deepEqual(ids(sections.unread), ["unread-visible"]);
+		assert.deepEqual(ids(sections.read), ["active-target"]);
+		assert.deepEqual(ids(sections.pinned), []);
+		assert.equal(
+			[...sections.pinned, ...sections.unread, ...sections.read].some(value => value.session.id.endsWith("-other")),
+			false,
+			"the exemption must be scoped to the exact active session id",
+		);
+	});
+
+	it("does not apply the read filter to active-work states", () => {
+		const sections = select([
+			candidate("busy-read", { status: "streaming", server_tags: ["activity-state=busy", "read-state=read"] }),
+			candidate("read", { server_tags: ["read-state=read"] }),
+		], {
 			filters: { showArchived: false, showTeams: true, showBusy: true, showRead: false },
 		});
-		assert.equal(ids(busyReadVisible.read).includes("busy-read"), true, "active-work states are not read-filterable");
-		assert.equal(ids(busyReadVisible.read).includes("read"), false);
+		assert.equal(ids(sections.read).includes("busy-read"), true, "active-work states are not read-filterable");
+		assert.equal(ids(sections.read).includes("read"), false);
 	});
 
 	it("uses production read-filterability for archived and terminal records", () => {
