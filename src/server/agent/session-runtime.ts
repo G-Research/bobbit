@@ -5,14 +5,19 @@ import {
 	defaultClaudeAgentSdkBridgeDeps,
 	type ClaudeAgentSdkBridgeDeps,
 } from "./claude-agent-sdk-bridge.js";
+import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
 
 export type SessionRuntime = "pi" | "claude-agent-sdk";
 
 export interface SessionBridgeOptions extends RpcBridgeOptions {
 	runtime?: SessionRuntime;
+	/** Ephemeral SDK-only sandbox launch descriptor; never persists with SessionInfo. */
+	claudeSdkSandboxLaunch?: import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkSandboxLaunch;
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
 	claudeSdkToolSurface?: import("./claude-agent-sdk-tool-surface.js").ClaudeSdkToolSurface;
+	/** Narrow deterministic dispatcher seam; production leaves this absent. */
+	claudeSdkDispatcherTestDeps?: Pick<import("./claude-sdk-tool-dispatcher.js").ClaudeSdkSandboxDispatcherOptions, "spawn" | "workerSource">;
 	claudeAgentSdkBridgeDepsFactory?: (options: import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkBridgeOptions) => ClaudeAgentSdkBridgeDeps;
 }
 
@@ -65,7 +70,22 @@ export function createSessionBridge(options: SessionBridgeOptions): IRpcBridge {
 	const runtime = resolveSessionRuntime(options);
 	if (runtime === "claude-agent-sdk") {
 		const sdkOptions = { ...options, runtime } as import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkBridgeOptions;
-		return new ClaudeAgentSdkBridge(sdkOptions, options.claudeAgentSdkBridgeDepsFactory?.(sdkOptions) ?? sdkDeps);
+		const deps = options.claudeAgentSdkBridgeDepsFactory?.(sdkOptions) ?? sdkDeps;
+		const launch = sdkOptions.claudeSdkSandboxLaunch;
+		// The deps factory is a test-only seam. Preserve an explicitly injected
+		// sandbox transcript accessor so executable lifecycle tests never fall
+		// through to the real Docker CLI after their fake SDK query is ready.
+		const sandboxSessionAccess = launch
+			? deps.sessionAccess?.sandboxSdk ?? createSandboxClaudeAgentSdkSessionAccess({
+				containerId: launch.containerId,
+				cwd: launch.cwd,
+				bobbitSessionId: launch.sessionId,
+			})
+			: undefined;
+		return new ClaudeAgentSdkBridge(sdkOptions, sandboxSessionAccess ? {
+			...deps,
+			sessionAccess: { ...(deps.sessionAccess ?? defaultClaudeAgentSdkSessionAccessDeps), sandboxSdk: sandboxSessionAccess },
+		} : deps);
 	}
 	return new RpcBridge(options);
 }

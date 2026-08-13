@@ -1,7 +1,9 @@
 // v2-native — integration coverage for the three independent Claude SDK permission ceilings.
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildClaudeSdkToolSurface, sdkZodShape } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
@@ -54,6 +56,43 @@ function workerFixture(): { root: string; cwd: string; manager: ToolManager; sco
 
 function workerEnv(manifest: ReturnType<typeof buildClaudeSdkExtensionManifest>): Record<string, string> {
 	return { BOBBIT_BUILTIN_TOOLS: [...new Set(manifest.flatMap(entry => entry.builtinToolNames ?? []))].sort().join(",") };
+}
+
+function sandboxDispatcherFixture({ ready = true }: { ready?: boolean } = {}) {
+	const child = new EventEmitter() as any;
+	child.stdin = new PassThrough();
+	child.stdout = new PassThrough();
+	child.stderr = new PassThrough();
+	child.killed = false;
+	child.exitCode = null;
+	child.signalCode = null;
+	child.kill = vi.fn(() => true);
+	const dockerSpawn = vi.fn((_command: string, args: string[]) => {
+		expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/current", "container-current", "node"]));
+		expect(args.join(" ")).toContain("BOBBIT_TOKEN=scoped-token");
+		return child;
+	});
+	const received: any[] = [];
+	let input = "";
+	child.stdin.on("data", (chunk: Buffer) => {
+		input += chunk.toString();
+		const lines = input.split("\n");
+		input = lines.pop() ?? "";
+		for (const line of lines) {
+			const message = JSON.parse(line.slice("BOBBIT_SDK_DISPATCH:".length));
+			received.push(message);
+			if (ready && message.type === "init") child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "ready", schemas: [{ name: "read", inputSchema: { type: "object" } }], omittedConditional: [] }) + "\n");
+		}
+	});
+	const dispatcher = new ClaudeSdkExtensionDispatcher({
+		cwd: "/host/must-not-run-tools",
+		env: {},
+		gatewayCredentials: { token: "scoped-token", url: "http://gateway.test" },
+		manifest: [{ extensionPath: path.resolve("defaults/tools/_builtins/extension.ts"), selectedToolNames: ["read"], allowedToolNames: ["read"] }],
+		sandbox: { containerId: "container-current", cwd: "/workspace-wt/current", builtinToolsDir: path.resolve("defaults/tools"), spawn: dockerSpawn as any, workerSource: "void 0" },
+	});
+	const emit = (message: unknown) => child.stdout.write("BOBBIT_SDK_DISPATCH:" + JSON.stringify(message) + "\n");
+	return { child, dispatcher, dockerSpawn, emit, received };
 }
 
 describe("Claude SDK Bobbit tool permission integration", () => {
@@ -156,6 +195,92 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		}
 	});
 
+	it("frames sandbox dispatcher stdout once across split, large, and UTF-8 result chunks", async () => {
+		const { child, dispatcher, dockerSpawn, emit, received } = sandboxDispatcherFixture();
+		const nextInvocation = async () => {
+			const pending = dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(received.at(-1)?.type).toBe("invoke"));
+			return { pending, id: received.at(-1)!.id as number };
+		};
+		try {
+			await expect(dispatcher.start()).resolves.toEqual([{ name: "read", inputSchema: { type: "object" } }]);
+			expect(child.stdout.listenerCount("data")).toBe(1);
+
+			const split = await nextInvocation();
+			const splitFrame = "BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "result", id: split.id, result: "split-result" }) + "\n";
+			const splitAt = splitFrame.indexOf("result") + 3;
+			child.stdout.write(splitFrame.slice(0, splitAt));
+			child.stdout.write(splitFrame.slice(splitAt));
+			await expect(split.pending).resolves.toBe("split-result");
+
+			const large = await nextInvocation();
+			const largeResult = "x".repeat(65 * 1024);
+			emit({ type: "result", id: large.id, result: largeResult });
+			await expect(large.pending).resolves.toBe(largeResult);
+
+			const utf8 = await nextInvocation();
+			const utf8Result = "split emoji: 🙂";
+			const utf8Frame = Buffer.from("BOBBIT_SDK_DISPATCH:" + JSON.stringify({ type: "result", id: utf8.id, result: utf8Result }) + "\n");
+			const emojiOffset = utf8Frame.indexOf(Buffer.from("🙂")) + 2;
+			child.stdout.write(utf8Frame.subarray(0, emojiOffset));
+			child.stdout.write(utf8Frame.subarray(emojiOffset));
+			await expect(utf8.pending).resolves.toBe(utf8Result);
+			expect(dockerSpawn).toHaveBeenCalledOnce();
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
+	it("absorbs early sandbox dispatcher stdin closure and drains its stderr", async () => {
+		const { child, dispatcher } = sandboxDispatcherFixture({ ready: false });
+		const starting = dispatcher.start();
+		try {
+			expect(child.stdin.listenerCount("error")).toBeGreaterThan(0);
+			child.stdin.destroy();
+			expect(() => child.stdin.emit("error", Object.assign(new Error("closed pipe"), { code: "EPIPE" }))).not.toThrow();
+			expect(child.stderr.listenerCount("data")).toBeGreaterThan(0);
+			child.stderr.write(Buffer.alloc(65 * 1024, "x"));
+			expect(child.stderr.readableLength).toBe(0);
+			expect(child.stdout.listenerCount("data")).toBe(1);
+			child.emit("exit", 1, null);
+			await expect(starting).rejects.toThrow("Bobbit extension dispatcher failed to start");
+			expect(child.stdout.listenerCount("data")).toBe(0);
+			expect(child.listenerCount("error")).toBe(0);
+			expect(child.listenerCount("exit")).toBe(0);
+			expect(child.kill).toHaveBeenCalledTimes(1);
+			child.emit("exit", 1, null);
+			expect(child.kill).toHaveBeenCalledTimes(1);
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
+	it("fails closed and settles pending sandbox calls for malformed and oversized frames", async () => {
+		const malformed = sandboxDispatcherFixture();
+		try {
+			await malformed.dispatcher.start();
+			const pending = malformed.dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(malformed.received.at(-1)?.type).toBe("invoke"));
+			malformed.child.stdout.write("BOBBIT_SDK_DISPATCH:{not-json}\n");
+			await expect(pending).rejects.toThrow("protocol error");
+			expect(malformed.child.kill).toHaveBeenCalledWith("SIGTERM");
+		} finally {
+			malformed.dispatcher.dispose();
+		}
+
+		const oversized = sandboxDispatcherFixture();
+		try {
+			await oversized.dispatcher.start();
+			const pending = oversized.dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(oversized.received.at(-1)?.type).toBe("invoke"));
+			oversized.child.stdout.write("BOBBIT_SDK_DISPATCH:" + "x".repeat(5 * 1024 * 1024));
+			await expect(pending).rejects.toThrow("protocol error");
+			expect(oversized.child.kill).toHaveBeenCalledWith("SIGTERM");
+		} finally {
+			oversized.dispatcher.dispose();
+		}
+	});
+
 	it("dispatches mixed-case MCP owners exactly and rejects forged never operations", async () => {
 		const callTool = vi.fn(async () => ({ content: [{ type: "text", text: "ok" }] }));
 		const handler = createMcpMetaToolHandler("PlayWright", undefined, { callTool } as any, [
@@ -207,6 +332,20 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		] as any));
 		expect(mcpShape.operation.safeParse("list").success).toBe(true);
 		expect(mcpShape.operation.safeParse("delete").success).toBe(false);
+	});
+
+	it("requires wired scoped authority for sandbox dispatch without changing direct-worker fallback", () => {
+		const adminToken = "admin-token-must-not-be-used";
+		expect(() => resolveClaudeSdkWorkerGatewayCredentials({
+			sandboxed: true,
+			env: { BOBBIT_TOKEN: adminToken, BOBBIT_GATEWAY_URL: "http://host-env.test" },
+		})).toThrow(/current scoped gateway authority/i);
+		expect(resolveClaudeSdkWorkerGatewayCredentials({
+			sandboxed: true,
+			gatewayToken: "scoped-session-token",
+			gatewayUrl: "http://scoped-gateway.test",
+			env: { BOBBIT_TOKEN: adminToken, BOBBIT_GATEWAY_URL: "http://host-env.test" },
+		})).toEqual({ token: "scoped-session-token", url: "http://scoped-gateway.test" });
 	});
 
 	it("reads fallback worker credentials from serverSecretsDir, never state/token, and omits them from the SDK child", async () => {

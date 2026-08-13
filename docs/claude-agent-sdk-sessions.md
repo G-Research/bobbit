@@ -10,7 +10,7 @@ persistence, and recovery rules.
 ## Selecting the runtime
 
 The Agent SDK runtime is opt-in. It is not added to Bobbit's model catalog and
-session creation does not accept a per-request `initialModel` selector. First,
+session creation does not use a per-request `initialModel` selector. First,
 register a **Custom Provider** whose exact id is `claude-agent-sdk` and add the
 SDK model id you intend to use. Then select it through existing configuration:
 set the default session model or a role's `model` to:
@@ -26,8 +26,12 @@ remain Pi-backed. This explicit split prevents an existing Anthropic session
 from changing runtime merely because an SDK is installed.
 
 `MANUAL_CLAUDE_AGENT_SDK_MODEL` is only the opt-in manual-smoke-test input. Its
-value is the unprefixed model id (for example, `claude-sonnet-4-5`); it neither
-registers the provider nor configures a gateway or default session model.
+value is the unprefixed model id (for example, `claude-sonnet-4-5`). The manual
+lifecycle spec uses it to register a Custom Provider and default session model
+inside its isolated temporary Bobbit state before creating a session; removing
+that state removes the test-local configuration. It does not register a provider
+or change the model selection of a developer's production gateway; use the
+configuration above for production selection.
 
 Bobbit derives and persists runtime from the selected provider; the runtime is
 not a separate preference. Replacement cannot change an existing session between
@@ -98,6 +102,35 @@ The bridge deliberately does not implement the old CLI `stream-json` protocol or
 manage a `claude` executable. The official SDK owns transport, streaming,
 interruption, initialization, and resume; retaining one bridge boundary avoids a
 second lifecycle protocol to maintain.
+
+## Docker sandbox sessions
+
+When a project's sandbox is set to Docker, an SDK session runs its SDK-owned
+Claude Code subprocess in that project's existing pooled `ProjectSandbox`
+container. `SandboxManager` remains the only owner of container creation,
+reuse, health, and recovery; the SDK does not create a second container runtime.
+Its custom spawn hook executes the image-pinned launcher with `docker exec -i
+-w <container-cwd>`.
+
+Session setup translates the ordinary project cwd to `/workspace`, or to the
+matching `/workspace-wt/...` path for a sandbox worktree, before the bridge is
+built. The process still sees the normal scoped Bobbit tool surface through the
+Bobbit MCP server, so tools, permissions, queues, model/thinking controls,
+steers, interrupts, and stop retain their established owners. SDK arguments are
+opaque to Bobbit and do not use Pi command remapping.
+
+The sandbox image must contain the exact Agent SDK version expected by the
+server (currently `0.3.222`), its architecture-appropriate bundled binary, and
+the fixed `/usr/local/bin/bobbit-claude-agent-sdk` launcher. Bobbit checks both
+the image capability label and launcher before the SDK query starts. Rebuild the
+`bobbit-agent` image after an SDK/server upgrade; a host or globally installed
+`claude` binary is never a substitute.
+
+Each Bobbit session uses a deterministic SDK config/state directory under the
+existing `/bobbit-state` mount. SDK history remains SDK-owned: Bobbit reads it
+with bounded, read-only SDK calls in the same pooled container. Those history
+calls have no OAuth or Bobbit gateway authority, and Bobbit does not create a Pi
+JSONL fallback or a second transcript store.
 
 ## Persistence, history, and recovery
 
@@ -538,13 +571,46 @@ three permission layers. No project/user/local Claude settings, `.mcp.json`,
 plugin configuration, unmanaged MCP server, or auto-memory state is merged into
 the Bobbit surface.
 
-Each bridge creates a fresh restrictive `CLAUDE_CONFIG_DIR` under Bobbit state
-and removes it during terminal cleanup. The SDK subprocess receives a closed
-environment: platform home/path/temp/locale values plus the required session
-identity variables. It does not receive gateway bearer tokens, provider keys,
-arbitrary project environment values, or copied subscription credentials. The
-normal home-directory subscription discovery remains available without placing
-its credential in Bobbit state or logs.
+Each bridge uses a restrictive `CLAUDE_CONFIG_DIR` under Bobbit state. A direct
+bridge creates a temporary directory and removes it at terminal cleanup. A
+sandbox bridge uses its deterministic per-session directory in `/bobbit-state`.
+Both receive a closed environment rather than inherited host or project
+settings.
+
+### Sandbox subscription handoff
+
+A sandboxed SDK session has one supported subscription path. The project must
+explicitly enable an empty `ANTHROPIC_OAUTH_TOKEN` sandbox-token policy entry,
+and the host must have a usable local Anthropic OAuth subscription. Under the
+project auth lock, Bobbit refreshes that host credential if needed and passes
+only its current short-lived access token to the SDK child as
+`CLAUDE_CODE_OAUTH_TOKEN`. The token is in memory only for that `docker exec`;
+it is not persisted, included in diagnostics, or passed to history reads.
+
+This path fails closed. Bobbit never forwards the host refresh token, host
+`.claude`/auth directory, provider settings, credential object, account
+metadata, container PID 1 environment, generic sandbox credentials,
+`ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN`. It does not run a host SDK query
+or fall back to a global `claude` binary. An explicit project API-key or OAuth
+credential is also rejected for this SDK sandbox path rather than treated as a
+substitute. Existing Pi sessions retain their separate credential behavior.
+
+Two sanitized startup errors are actionable:
+
+- `CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE` means the explicit OAuth policy is
+  absent or conflicts with a project credential, or the local OAuth subscription
+  is absent, expired, or cannot refresh. Enable the policy and sign in again;
+  do not add an API key as a workaround.
+- `CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE` means the Docker launch prerequisites
+  are incomplete, such as a stale/missing SDK image capability or launcher, an
+  invalid container cwd, or unavailable scoped gateway authority. Rebuild the
+  sandbox image and retry; restart the gateway if the error identifies scoped
+  authority.
+
+On restore, force-abort replacement, or pooled-container recovery, normal
+sandbox wiring obtains the current container, translated cwd, scoped authority,
+and fresh OAuth access token before rebuilding the bridge. The persisted SDK
+UUID is passed as `resume`; secrets and launch descriptors are not persisted.
 
 This isolation does not imply that the bundled Claude runtime reports no built-in
 skills, agents, or slash commands. The real initialization inventory pins the
@@ -553,14 +619,11 @@ the three programmatic projections described above. Hostile user, project,
 plugin, MCP, and memory fixtures must still be absent from the inventory.
 
 The trusted extension worker is intentionally a different boundary. It may
-receive the gateway URL and credential needed to run already trusted,
+receive the scoped gateway URL and credential needed to run already trusted,
 manifest-selected Bobbit handlers. It is launched by the gateway with a replaced,
-minimal environment; the Agent SDK subprocess never receives that credential.
-Do not add an SDK environment pass-through or a config-loaded MCP integration to
-make a handler work.
-
-The SDK launcher is host-local. SDK sessions therefore fail closed in Docker
-sandboxes instead of escaping the project container boundary.
+minimal environment; the Agent SDK subprocess receives only its allowlisted
+per-process authority. Do not add an SDK environment pass-through or a
+config-loaded MCP integration to make a handler work.
 
 ## Restore, replacement, and cleanup
 
@@ -663,9 +726,43 @@ npx playwright test --config playwright-e2e.config.ts \
   tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts
 ```
 
-A real-subscription lifecycle smoke remains opt-in. Supply an SDK model ID
-**without** the provider prefix; this environment variable is test-only and does
-not configure the gateway:
+### Docker sandbox deterministic checks
+
+The sandbox composition is covered without Docker credentials or a live
+subscription. These checks pin the fixed image launcher, opaque SDK arguments,
+closed/allowlisted environment, cwd validation, abort cleanup, full credential
+redaction, OAuth-policy/API-key rejection, capability probing, container history
+bounds, and replacement with the same SDK UUID in a new container:
+
+```bash
+npx vitest run --config vitest.config.ts --silent=passed-only \
+  tests2/core/claude-agent-sdk-sandbox-spawn.test.ts \
+  tests2/core/anthropic-sandbox-handoff-regression.test.ts \
+  tests2/integration/claude-agent-sdk-sandbox-runtime.test.ts
+npm run check
+```
+
+### Pending credentialed Docker dogfood
+
+The following is an opt-in manual scenario, not automated evidence and not a
+claim that it has been executed. Run it only on a developer machine with Docker
+available, a rebuilt `bobbit-agent` image matching the current server SDK pin, a
+local active Anthropic OAuth subscription, and an unprefixed SDK model id. The
+scenario creates an isolated Custom Provider and default session model only for
+its temporary test gateway, then creates a Docker-sandbox project with the
+required enabled empty `ANTHROPIC_OAUTH_TOKEN` policy. It does not configure a
+production gateway; follow [Selecting the runtime](#selecting-the-runtime) for
+production selection. The scenario then checks readiness, prompt, steer, soft
+interrupt, stop, force-abort replacement, gateway-restart resume, and that the
+same SDK UUID survives. It does not use or log API-key credentials.
+
+```bash
+BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
+MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
+npm run test:manual -- --grep "Docker sandbox lifecycle"
+```
+
+The direct, non-Docker subscription smoke remains separately opt-in:
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \

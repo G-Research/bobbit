@@ -133,9 +133,17 @@ work:
    archived Bobbit record remains archived; this is a new Bobbit wrapper that
    resumes the same SDK conversation, not a copied transcript.
 
-SDK sessions remain fail-closed in Docker because the existing bridge rejects
-that runtime there. Continue returns the existing unavailable/runtime failure
-and never falls back to a host-local transcript operation.
+When G6 was designed, SDK sessions remained fail-closed in Docker because the
+existing bridge rejected that runtime there. [G9 — Claude Agent SDK Docker
+sandbox runtime](claude-agent-sdk-sandbox-g9.md) supersedes that limitation for
+supported sandbox SDK sessions: normal wiring resumes the same persisted UUID
+in a matching rebuilt image, requires an enabled empty `ANTHROPIC_OAUTH_TOKEN`
+policy, and reads history through a bounded in-container accessor.
+`CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE` identifies unavailable policy or
+OAuth; `CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE` identifies image or sandbox
+wiring prerequisites. There is no host-local, Pi JSONL, or API-key fallback.
+See [Docker sandbox sessions](../claude-agent-sdk-sessions.md#docker-sandbox-sessions)
+for the current operator contract.
 
 ### Live Fork remains unsupported
 

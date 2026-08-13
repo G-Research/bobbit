@@ -23,8 +23,11 @@ chosen model id, and selects `claude-agent-sdk/<model-id>` through the existing
 `default.sessionModel` or role `model` configuration. The custom-provider name
 must preserve that provider prefix in the selectable model string.
 `MANUAL_CLAUDE_AGENT_SDK_MODEL` accepts only the matching unprefixed model id
-for the opt-in manual smoke; it does not register the provider or set gateway
-or default-model configuration.
+for the opt-in manual smoke. That smoke configures its isolated temporary
+Bobbit state with the Custom Provider and default session model; it does not
+change a developer's production gateway configuration. See [Selecting the
+runtime](../claude-agent-sdk-sessions.md#selecting-the-runtime) for production
+selection.
 
 ## Current boundaries to preserve
 

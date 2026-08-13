@@ -20,6 +20,7 @@ import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import type { ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
 import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
+import { createClaudeSdkDockerSpawn, isSandboxContainerCwd, type ClaudeSdkDockerSpawn } from "./docker-exec-spawn.js";
 
 import type { Options, Query, SDKUserMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
@@ -27,8 +28,22 @@ type QueryFactory = (input: Parameters<typeof sdkQuery>[0]) => ReturnType<typeof
 
 export type ClaudeAgentSdkState = "new" | "starting" | "ready" | "running" | "interrupting" | "failed" | "stopped";
 
+/** Ephemeral, SDK-only sandbox launch authority. Never persist or reuse for Pi. */
+export interface ClaudeAgentSdkSandboxLaunch {
+	containerId: string;
+	cwd: string;
+	sessionId: string;
+	sessionSecret?: string;
+	goalId?: string;
+	gatewayToken: string;
+	gatewayUrl: string;
+	oauthAccessToken: string;
+}
+
 export interface ClaudeAgentSdkBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-agent-sdk";
+	/** Created after sandbox setup; contains only the current per-process OAuth access token. */
+	claudeSdkSandboxLaunch?: ClaudeAgentSdkSandboxLaunch;
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
 	/** Session-local Bobbit MCP surface. Direct bridge tests receive an equally strict empty surface. */
@@ -41,6 +56,8 @@ export interface ClaudeAgentSdkBridgeDeps {
 	clock: Clock;
 	/** Optional deterministic seam for SDK-owned transcript access. */
 	sessionAccess?: ClaudeAgentSdkSessionAccessDeps;
+	/** Narrow test seam; production uses the shared Docker-exec adapter. */
+	createDockerSpawn?: (input: ClaudeSdkDockerSpawn) => ReturnType<typeof createClaudeSdkDockerSpawn>;
 }
 
 export class ClaudeAgentSdkUnavailableError extends Error {
@@ -139,7 +156,23 @@ export function isClaudeAgentSdkSessionId(value: unknown): value is string {
  * The SDK replaces its child environment, so never inherit the gateway's
  * credentials wholesale. Subscription discovery uses the user's HOME store.
  */
-export function buildClaudeAgentSdkEnv(options: Pick<RpcBridgeOptions, "env">): Record<string, string> {
+export function buildClaudeAgentSdkEnv(options: Pick<ClaudeAgentSdkBridgeOptions, "env" | "claudeSdkSandboxLaunch">): Record<string, string> {
+	const launch = options.claudeSdkSandboxLaunch;
+	if (launch) {
+		// A closed container environment: do not inherit host config or credentials.
+		return {
+			HOME: "/home/node",
+			PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			TMPDIR: "/tmp",
+			LANG: "C.UTF-8",
+			BOBBIT_SESSION_ID: launch.sessionId,
+			...(launch.sessionSecret ? { BOBBIT_SESSION_SECRET: launch.sessionSecret } : {}),
+			CLAUDE_CONFIG_DIR: `/bobbit-state/claude-agent-sdk/${launch.sessionId}`,
+			CLAUDE_AGENT_SDK_CLIENT_APP: "bobbit",
+			// Keep foreground helpers bounded to one level in the container too.
+			CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
+		};
+	}
 	const env: Record<string, string> = {};
 	for (const name of ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE"]) {
 		const value = process.env[name];
@@ -295,9 +328,12 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			if (this.options.args?.some(arg => arg === "--extension" || arg.startsWith("--extension="))) {
 				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK does not accept extension arguments");
 			}
-			// The SDK's default process launcher is host-local. Do not silently escape Bobbit's project container boundary.
-			if (this.options.sandboxed || this.options.containerId) {
-				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK sessions are not supported in Docker sandboxes");
+			const sandboxLaunch = this.options.claudeSdkSandboxLaunch;
+			if ((this.options.sandboxed || this.options.containerId) && !sandboxLaunch) {
+				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: Docker sandbox launch is unavailable; rebuild the Docker sandbox image and retry");
+			}
+			if (sandboxLaunch && (!sandboxLaunch.containerId || !sandboxLaunch.oauthAccessToken || !sandboxLaunch.gatewayToken || !sandboxLaunch.gatewayUrl || !isSandboxContainerCwd(sandboxLaunch.cwd))) {
+				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: Docker sandbox launch is invalid; rebuild the Docker sandbox image and retry");
 			}
 			const systemPrompt = this.options.systemPromptPath ? fs.readFileSync(this.options.systemPromptPath, "utf8") : undefined;
 			const initialModel = this.options.initialModel?.startsWith("claude-agent-sdk/")
@@ -308,19 +344,36 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				return {};
 			}] }] : undefined;
 			const env = buildClaudeAgentSdkEnv(this.options);
-			const sdkStateDir = bobbitStateDir();
-			fs.mkdirSync(sdkStateDir, { recursive: true, mode: 0o700 });
-			this.isolatedConfigDir = fs.mkdtempSync(path.join(sdkStateDir, "claude-sdk-"));
-			fs.chmodSync(this.isolatedConfigDir, 0o700);
+			if (!sandboxLaunch) {
+				const sdkStateDir = bobbitStateDir();
+				fs.mkdirSync(sdkStateDir, { recursive: true, mode: 0o700 });
+				this.isolatedConfigDir = fs.mkdtempSync(path.join(sdkStateDir, "claude-sdk-"));
+				fs.chmodSync(this.isolatedConfigDir, 0o700);
+				env.CLAUDE_CONFIG_DIR = this.isolatedConfigDir;
+			}
 			if (this.abortController.signal.aborted || this.closed) throw new Error("Claude Agent SDK startup cancelled");
-			env.CLAUDE_CONFIG_DIR = this.isolatedConfigDir;
 			// Bounded SDK definitions plus this process-local depth ceiling prevent
 			// approved foreground helpers from creating grandchildren.
 			env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = "1";
 			const sdkBase = {
-				cwd: this.options.cwd,
+				cwd: sandboxLaunch?.cwd ?? this.options.cwd,
 				env,
 				abortController: this.abortController,
+				...(sandboxLaunch ? { spawnClaudeCodeProcess: (this.deps.createDockerSpawn ?? createClaudeSdkDockerSpawn)({
+					containerId: sandboxLaunch.containerId,
+					cwd: sandboxLaunch.cwd,
+					// Docker does not inherit the SDK replacement environment. Forward the
+					// complete closed allowlist, then add only this exec's authority.
+					env: {
+						...env,
+						BOBBIT_GOAL_ID: sandboxLaunch.goalId,
+						BOBBIT_TOKEN: sandboxLaunch.gatewayToken,
+						BOBBIT_GATEWAY_URL: sandboxLaunch.gatewayUrl,
+						CLAUDE_CODE_OAUTH_TOKEN: sandboxLaunch.oauthAccessToken,
+					},
+					command: ["/usr/local/bin/bobbit-claude-agent-sdk"],
+					logPrefix: "claude-agent-sdk",
+				}) } : {}),
 				...(systemPrompt ? { systemPrompt } : {}),
 				...(initialModel ? { model: initialModel } : {}),
 				...(this.options.claudeAgentSdkSessionId ? { resume: this.options.claudeAgentSdkSessionId } : {}),

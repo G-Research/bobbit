@@ -25,6 +25,7 @@ function makeSandbox(): ProjectSandbox {
 
 function requiredStateMounts(stateDir: string) {
 	return [
+		mount(path.join(stateDir, "claude-agent-sdk"), "/bobbit-state/claude-agent-sdk"),
 		mount(path.join(stateDir, "sessions"), "/bobbit-state/sessions"),
 		mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard"),
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
@@ -230,6 +231,16 @@ describe("ProjectSandbox state mount staleness", () => {
 		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
 
 		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("marks pre-upgrade containers stale when the Claude Agent SDK state mount is missing", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/claude-agent-sdk");
+
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /claude-agent-sdk/);
 	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {

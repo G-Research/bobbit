@@ -2009,6 +2009,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "sandboxAgentAuthPath(\"project-test\")", count: 5 },
+			{ expression: "piAuthPath", count: 2 },
 			{ expression: "path.join(agentDir!, \"auth.json\")", count: 2 },
 		]),
 	},

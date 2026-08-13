@@ -600,7 +600,7 @@ export function buildEmptyClaudeSdkToolSurface(sessionId = "direct-bridge"): Cla
 /** The only supported Agent SDK query posture. It never merges caller settings. */
 export function buildClaudeAgentSdkQueryOptions(
 	surface: ClaudeSdkToolSurface,
-	base: Pick<Options, "cwd" | "env" | "abortController" | "systemPrompt" | "model" | "resume">,
+	base: Pick<Options, "cwd" | "env" | "abortController" | "systemPrompt" | "model" | "resume" | "spawnClaudeCodeProcess">,
 	preCompact?: NonNullable<Options["hooks"]>["PreCompact"],
 ): Options {
 	return {
