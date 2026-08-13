@@ -276,6 +276,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function compareCodeUnits(left: string, right: string): number {
+	return left === right ? 0 : left < right ? -1 : 1;
+}
+
 function compareOverrides(left: PromptExtensionOverride, right: PromptExtensionOverride): number {
-	return left.packId.localeCompare(right.packId) || left.sectionId.localeCompare(right.sectionId);
+	return compareCodeUnits(left.packId, right.packId) || compareCodeUnits(left.sectionId, right.sectionId);
 }
