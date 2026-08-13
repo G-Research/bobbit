@@ -840,6 +840,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	{
+		consumer: "tests2/integration/extension-settings-api.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "path.join(projectA.rootPath, \".bobbit\", \"config\", \"project.yaml\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/extension-host-surface-token.test.ts",
 		declarations: frozen(["scan:server-typescript-source-guards"]),
 		reads: frozen([
