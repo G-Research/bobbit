@@ -82,6 +82,15 @@ afterEach(async () => {
 	await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
+async function createDirectoryLink(target: string, linkPath: string): Promise<boolean> {
+	try {
+		await symlink(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function fixture(options: { symlink?: boolean } = {}): Promise<Fixture> {
 	const base = createRunChild("pinned-checkout");
 	roots.push(base);
@@ -228,6 +237,48 @@ describe("VerificationPinnedCheckoutManager", () => {
 			{ repoKey: "services/api", inventory: apiInventory },
 			{ repoKey: "services/api", inventory: apiInventory },
 		]), "a malformed aggregate cannot alias two manifest entries to one frozen path");
+	});
+
+	it.skipIf(process.platform !== "win32")("accepts a namespaced Windows repository root under its lexical container", async () => {
+		const source = await fixture();
+		const container = path.join(source.base, "branch-container");
+		const repository = path.join(container, "services", "api");
+		await mkdir(path.dirname(repository), { recursive: true });
+		await rename(source.root, repository);
+		source.root = repository;
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		const checkout = await manager.acquire({
+			signal: signal(source.head), sourceRoot: container, projectId: "test-project-id",
+			layout: {
+				version: 2, kind: "multi", containerRoot: container,
+				repositories: [{ repoKey: "services/api", sourceRoot: path.toNamespacedPath(repository), commitSha: source.head }],
+			},
+		});
+		assert.equal(checkout.layout, "multi");
+		await manager.release(checkout.id, checkout.projectId);
+	});
+
+	it("rejects a linked expected multi-repository path before it can escape the container", async () => {
+		const source = await fixture();
+		const container = path.join(source.base, "branch-container");
+		const outsideParent = path.join(source.base, "outside");
+		const outsideRoot = path.join(outsideParent, "api");
+		await mkdir(container);
+		await mkdir(outsideParent);
+		await rename(source.root, outsideRoot);
+		source.root = outsideRoot;
+		if (!await createDirectoryLink(outsideParent, path.join(container, "services"))) return;
+
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		await assert.rejects(manager.acquire({
+			signal: signal(source.head), sourceRoot: container, projectId: "test-project-id",
+			layout: {
+				version: 2, kind: "multi", containerRoot: container,
+				repositories: [{ repoKey: "services/api", sourceRoot: outsideRoot, commitSha: source.head }],
+			},
+		}), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+		assert.equal(git.calls.some(call => call.args.includes("worktree")), false, "linked repository paths fail before Git can create a checkout");
 	});
 
 	it("pins, resumes, audits, and cleans each repository in a multi-repository layout independently", async () => {

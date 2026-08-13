@@ -38,6 +38,15 @@ import {
 } from "../../src/server/agent/verification-harness.ts";
 import type { Component } from "../../src/server/agent/project-config-store.ts";
 
+function tryCreateDirectoryLink(target: string, linkPath: string): boolean {
+	try {
+		fs.symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 describe("verify step resolution — goalBranchContainer composed with resolveStep", () => {
 	it("single-repo with relativePath — goalBranchContainer must not double the offset", () => {
 		// Mirrors a real goal where the project's rootPath sits in a subdirectory
@@ -224,6 +233,53 @@ describe("pinned source layout validation", () => {
 			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform !== "win32")("accepts a namespaced Windows repository root under its lexical container", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-namespaced-root-"));
+		try {
+			const repository = path.join(root, "services", "api");
+			fs.mkdirSync(repository, { recursive: true });
+			const runner = {
+				execFile: async (_file: string, args: string[]) => ({
+					stdout: args.includes("--show-toplevel") ? args[args.indexOf("-C") + 1] : "0123456789abcdef0123456789abcdef01234567",
+					stderr: "",
+				}),
+			};
+			const layout = await resolvePinnedSourceLayout({
+				worktreePath: root,
+				cwd: root,
+				repoWorktrees: { "services/api": path.toNamespacedPath(repository) },
+			}, runner as any);
+			assert.equal(layout.repositories[0]?.repoKey, "services/api");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a linked repository path that resolves outside the canonical container", async () => {
+		const base = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-linked-root-"));
+		const root = path.join(base, "container");
+		try {
+			const outside = path.join(base, "outside");
+			const outsideRepository = path.join(outside, "api");
+			fs.mkdirSync(root);
+			fs.mkdirSync(outsideRepository, { recursive: true });
+			if (!tryCreateDirectoryLink(outside, path.join(root, "services"))) return;
+			const runner = {
+				execFile: async () => { throw new Error("linked repository paths must fail before Git runs"); },
+			};
+			await assert.rejects(
+				resolvePinnedSourceLayout({
+					worktreePath: root,
+					cwd: root,
+					repoWorktrees: { "services/api": outsideRepository },
+				}, runner as any),
+				(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
+			);
+		} finally {
+			fs.rmSync(base, { recursive: true, force: true });
 		}
 	});
 

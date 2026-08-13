@@ -1283,6 +1283,28 @@ function hasAuthoritativePinnedSourceLayout(goal: unknown): goal is { worktreePa
 
 const SANDBOX_REPOSITORY_KEY = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u;
 
+function sameCanonicalPath(left: string, right: string): boolean {
+	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/**
+ * Resolve a repository location under the canonical container without following
+ * a symlink or junction in its lexical path. Comparing canonical roots alone
+ * would otherwise accept a linked `<container>/<repoKey>` that points outside.
+ */
+async function resolveContainedRepositoryRoot(containerRoot: string, repoKey: string): Promise<string> {
+	const expected = path.resolve(containerRoot, repoKey);
+	const relative = path.relative(containerRoot, expected);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("repository escapes container");
+	let cursor = containerRoot;
+	for (const segment of relative ? relative.split(path.sep) : []) {
+		cursor = path.join(cursor, segment);
+		const info = await lstat(cursor);
+		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("linked repository path");
+	}
+	return realpath(expected);
+}
+
 /** A D-4 repository key must survive the sandbox's path grammar unchanged. */
 function sandboxRepositoryKey(value: unknown): string | undefined {
 	const key = verificationRepositoryKey(value);
@@ -1319,13 +1341,12 @@ export async function resolvePinnedSourceLayout(
 			seen.add(repoKey); seenFolded.add(foldedKey);
 			const rawInfo = await lstat(rawRoot);
 			if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("invalid source");
-			const sourceRoot = await realpath(rawRoot);
-			const expected = path.resolve(containerRoot, repoKey);
+			const [sourceRoot, expectedRoot] = await Promise.all([realpath(rawRoot), resolveContainedRepositoryRoot(containerRoot, repoKey)]);
 			const info = await lstat(sourceRoot);
 			// A genuine container-root repository may coexist with nested component
 			// repositories. Named repositories remain mutually disjoint; only `.`
 			// may enclose them.
-			if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected
+			if (!info.isDirectory() || info.isSymbolicLink() || !sameCanonicalPath(sourceRoot, expectedRoot)
 				|| roots.some(root => root.repoKey !== "." && repoKey !== "." && (sourceRoot.startsWith(`${root.sourceRoot}${path.sep}`) || root.sourceRoot.startsWith(`${sourceRoot}${path.sep}`)))) throw new Error("invalid source");
 			const topLevel = await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--show-toplevel"], { timeout: 15_000 });
 			if (await realpath(execOutputToString(topLevel.stdout).trim()) !== sourceRoot) throw new Error("invalid git root");
