@@ -503,17 +503,15 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		if (this.state === "failed" || this.state === "stopped") throw this.terminalError ?? new Error("Claude Agent SDK bridge stopped");
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
+			// This deadline belongs only to this caller. `startInternal()` owns the
+			// terminal startup deadline, so a short-lived steer must not poison a
+			// still-viable cold query for other callers.
 			await Promise.race([this.ready, new Promise<void>((_, reject) => {
 				timer = this.deps.clock.setTimeout(
 					() => reject(new ClaudeAgentSdkUnavailableError("Claude Agent SDK unavailable: readiness timed out")),
 					overallTimeoutMs,
 				);
 			})]);
-		} catch (error) {
-			// A readiness deadline means a loader/query cannot safely accept queued
-			// input. Fail it once so every waiter and prompt settles consistently.
-			if (!this.terminalError && error instanceof ClaudeAgentSdkUnavailableError) this.fail(error);
-			throw this.terminalError ?? error;
 		} finally { if (timer) this.deps.clock.clearTimeout(timer); }
 	}
 
