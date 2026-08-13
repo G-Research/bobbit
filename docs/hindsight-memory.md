@@ -23,8 +23,9 @@ singleton panel belongs to the current session. It is a workbench, not a setting
 Marketplace for configuration and grants.
 
 Opening the panel, saving settings, reading status, reading logs, automatic recall, and every
-memory read do **not** start a service. A managed service starts only after an operator with the
-`service.manage` grant confirms **Start** or **Restart** in the panel.
+memory read do **not** start a service. A managed service starts only after an operator with a live
+`service.manage` grant and a verified signed `bobbit_session` prompt-operator cookie confirms
+**Start** or **Restart** in the panel. The confirmation is required but is not authentication.
 
 ### Settings and secrets
 
@@ -154,9 +155,13 @@ that project and goal; all-scope is never an implicit fallback. `memory.read.all
 when the caller explicitly requests all scope, and it does not replace the ordinary read grant
 needed by reflection.
 
-A denied or missing grant fails closed with a structured capability error. The Hindsight panel's
-**Access** tab shows these six capabilities and links back to Marketplace; it cannot create its
-own grants.
+A denied or missing grant fails closed with a structured capability error. `runtime-control` and
+`migration-execute` additionally require a verified signed `bobbit_session` prompt-operator cookie:
+bearer-only, sandbox, and agent-session callers receive
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Their body `consent` or `confirmation` is required but
+is not authentication. `migration-plan` is non-destructive and remains `service.manage` grant-only.
+The Hindsight panel's **Access** tab shows these six capabilities and links back to Marketplace; it
+cannot create its own grants.
 
 ## Use the Hindsight Memory panel
 
@@ -169,8 +174,10 @@ state and prevents a late route result from painting into another session.
 
 The **Service** tab shows the generic runtime state, configured mode, desired state, ready
 endpoint, and bounded diagnostic logs. Refreshing status and reading logs are read-only. Start,
-stop, and restart open a confirmation dialog; the resulting control route also requires
-`consent: true` and the `service.manage` grant. External mode has no managed service to control.
+stop, and restart open a confirmation dialog; the resulting control route requires a live
+`service.manage` grant, a verified signed `bobbit_session` prompt-operator cookie, and
+`consent: true`. Consent is not authentication; bearer-only, sandbox, and agent-session callers
+receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. External mode has no managed service to control.
 
 The tab also exposes migration planning. It explains that migration is logical rather than a live
 PostgreSQL-directory mount and shows the exact confirmation text on a successful plan. See
@@ -238,9 +245,10 @@ The H-2, H-5, and H-6 mechanics are detailed in [Hindsight memory completion](de
 
 ## Agent tools
 
-Hindsight contributes exactly these tools. Each is a thin adapter over the same authenticated
-typed route used by the panel; it has no direct Hindsight client, settings, secret, Docker, or
-runtime-control implementation.
+Hindsight contributes exactly these data-plane tools. Each is a thin adapter over the same
+authenticated typed route used by the panel; it has no direct Hindsight client, settings, secret,
+Docker, runtime-control, or migration implementation. None of the five tools invokes
+`runtime-control`, `migration-plan`, or `migration-execute`.
 
 | Tool | Parameters | Behavior |
 |---|---|---|
@@ -263,9 +271,10 @@ scope, EP-7 settings projection, runtime context, and live capability decision f
 | Route | Purpose |
 |---|---|
 | `runtime-status` | Returns the project runtime projection and settings revision without secrets. |
-| `runtime-control` | Takes `{ action: "start" | "stop" | "restart", consent: true }`; requires `service.manage`. |
+| `runtime-control` | Takes `{ action: "start" | "stop" | "restart", consent: true }`; requires a live `service.manage` grant and a verified signed `bobbit_session` prompt-operator cookie. Consent is not authentication. |
 | `runtime-logs` | Returns a bounded trailing log list; `tail` is clamped to 1–200 lines. |
-| `migration-plan` / `migration-execute` | Plans a logical storage move, then attempts a confirmed execution as described above. |
+| `migration-plan` | Creates a redacted logical migration plan; requires `service.manage` only. |
+| `migration-execute` | Attempts a confirmed plan; requires a live `service.manage` grant, a verified signed `bobbit_session` prompt-operator cookie, and the exact plan confirmation. Confirmation is not authentication. |
 | `browse` / `search` | Lists current-scope memories with optional query, cursor, and limit. `scope: "all"` requires `memory.read.all`. |
 | `detail` / `history` | Reads one memory or its history only after scope validation. The current panel uses `detail`; `history` is available to typed route consumers. |
 | `recall` | Requires a non-empty query and returns recalled memories under the resolved scope. |

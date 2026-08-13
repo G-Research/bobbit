@@ -6,7 +6,7 @@
 
 A pack may declare a **runtime**: an operator-consented, gateway-supervised service that its provider/routes/tools consume only through a resolved endpoint. Runtime selection is host-owned. Pack code receives the same `ctx.runtime.endpoint` in all modes and never invokes Docker, Compose, a child process, port allocation, or restart logic.
 
-This is deliberately a service contract, not a Hindsight-specific Docker integration. A second author can implement LangFlow by authoring one descriptor, its container/Compose assets, provider configuration, and endpoint consumer; no new supervisor, lifecycle API, or deployment-mode code is required.
+This is deliberately a service contract, not a Hindsight-specific Docker integration. A second author can implement LangFlow by authoring one descriptor with valid local, Docker, and Compose launch blocks, its assets, provider configuration, and endpoint consumer; no new supervisor, lifecycle API, or deployment-mode code is required.
 
 > **Current Hindsight boundary.** This document retains the generic runtime contract. H-2, H-5, and H-6 mechanics are defined by [Hindsight memory completion](hindsight-memory-completion.md); H-3 is recorded in the [foundation provenance audit](hindsight-foundation-provenance.md); and H-4 ships the managed runtime, settings integration, memory panel, typed routes, and five agent tools described by the operational [Hindsight memory pack](../hindsight-memory.md). Hindsight uses central EP-6/EP-7 contracts and creates no private authorization or settings substitute.
 
@@ -14,7 +14,7 @@ This is deliberately a service contract, not a Hindsight-specific Docker integra
 
 | Must ship | Allowed to change | Deferred / prohibited |
 |---|---|---|
-| Schema-2 runtime descriptor and loader; local-process, Docker-container, and Docker-Compose runners; one lifecycle state machine; config/secrets/storage/diagnostics contracts; H-3 generic-foundation hardening; Hindsight descriptor and mode-independent endpoint wiring; mode-independent unavailable/unhealthy behavior. | Add direct runtime dependencies; new server runtime modules and REST routes; the H-3 host/extension seams named in §7; pack manifest/provider runtime fields; generated pack artifacts; extensions to EP-6/EP-7 consumption points after their work lands. | A LangFlow pack; a private settings or permission UI; arbitrary remote-service management; Kubernetes; automatic install/enable start; host-port choice in user settings; H-2 memory algorithms in H-3; H-4 runtime/screens/tools in H-3; EP-6/EP-7 implementation; Hindsight settings UI, panels, final agent tools, and private broad-recall grants; copying #820 semantics/tests without individual reconciliation. |
+| Schema-2 runtime descriptor and loader; local-process, Docker-container, and Docker-Compose runners; one lifecycle state machine; config/secrets/storage/diagnostics contracts; H-3 generic-foundation hardening; Hindsight descriptor and mode-independent endpoint wiring; mode-independent unavailable/unhealthy behavior. | Add direct runtime dependencies; new server runtime modules and authenticated pack-scoped typed-route integration; the H-3 host/extension seams named in §7; pack manifest/provider runtime fields; generated pack artifacts; extensions to EP-6/EP-7 consumption points after their work lands. | A LangFlow pack; a private settings or permission UI; arbitrary remote-service management; Kubernetes; automatic install/enable start; host-port choice in user settings; H-2 memory algorithms in H-3; H-4 runtime/screens/tools in H-3; EP-6/EP-7 implementation; Hindsight settings UI, panels, final agent tools, private broad-recall grants, and a global runtime REST API; copying #820 semantics/tests without individual reconciliation. |
 
 Acceptance means all of the following are true.
 
@@ -259,7 +259,7 @@ All listeners bind loopback from Bobbit's perspective. Fixed host-port settings 
 
 - restart, stop/disable, and pack update preserve data and generated service credentials;
 - uninstall stops/removes runner resources but preserves the bind directory and service state needed to reinstall;
-- **purge** requires an explicit destructive REST/UI confirmation, stops first, removes runner resources and runtime state, then recursively removes only the resolved declared storage root after containment/revalidation. It never accepts a path supplied by the request;
+- **purge** requires an explicit destructive typed-route/UI confirmation, stops first, removes runner resources and runtime state, then recursively removes only the resolved declared storage root after containment/revalidation. It never accepts a path supplied by the request;
 - local working files, Docker containers/networks, Compose project resources, rendered env, and logs are Bobbit-owned and may be removed by uninstall/purge. User-selected data is only removed by purge.
 
 ### Configuration/secrets provenance and redaction
@@ -272,21 +272,9 @@ All listeners bind loopback from Bobbit's perspective. Fixed host-port settings 
 | Host endpoint/port | runner discovery | Ephemeral observed state; status may show loopback endpoint/port after ready, never before. |
 | data directory | EP-7 non-secret setting | Shown before start and in diagnostics; not copied into pack files. |
 
-Runner stdout/stderr is held in a bounded 64 KiB ring and redacted before persistence/return using the exact resolved secret values plus `KEY=value` forms. The UI/API expose at most a 200-line sanitized tail. Command/adapter errors are mapped to stable codes; raw error text is retained only in the server log after the same redaction pass. Diagnostics include `state`, selected mode, changed time, sanitized reason, restart count/next retry, runner identity, endpoint when ready, health probe summary, and sanitized log tail.
+Runner stdout/stderr is held in a bounded 64 KiB ring and redacted before persistence/return using the exact resolved secret values plus `KEY=value` forms. The UI and typed routes expose at most a 200-line sanitized tail. Command/adapter errors are mapped to stable codes; raw error text is retained only in the server log after the same redaction pass. Diagnostics include `state`, selected mode, changed time, sanitized reason, restart count/next retry, runner identity, endpoint when ready, health probe summary, and sanitized log tail.
 
-The runtime REST surface is admin-authenticated and small:
-
-```text
-GET  /api/service-runtimes?projectId=             -> { runtimes: ServiceRuntimeStatus[] }
-GET  /api/service-runtimes/:id                    -> ServiceRuntimeStatus
-POST /api/service-runtimes/:id/start              -> ServiceRuntimeStatus
-POST /api/service-runtimes/:id/stop               -> ServiceRuntimeStatus
-POST /api/service-runtimes/:id/restart            -> ServiceRuntimeStatus
-GET  /api/service-runtimes/:id/logs?tail=         -> { lines: SanitizedLogLine[] }
-POST /api/service-runtimes/:id/purge              -> ServiceRuntimeStatus
-```
-
-`start` has no arbitrary environment/body overlay. It uses the saved EP-7 revision and selected `runtimeMode`; a stale settings revision returns `409 SERVICE_SETTINGS_STALE`. `purge` requires `{ confirm: "<packId>:<runtimeId>" }`. Missing grants are `403`, invalid descriptor/settings are `400`, missing runtime `404`, unavailable dependency `503`, and bounded runner/start failure `502`. All responses use diagnostic codes rather than secret-bearing text.
+The generic runtime nucleus exposes **no global REST API**. A host integration exposes authenticated, pack-scoped typed routes and derives pack, project, and session scope from the host binding; callers do not address a generic runtime path or select a runtime by request. Hindsight is the concrete composition; its route contract is documented in [Hindsight typed pack routes](../rest-api.md#hindsight-typed-pack-routes). Control uses the saved EP-7 revision and selected `runtimeMode`, accepts no arbitrary environment/body overlay, and returns stable diagnostic codes rather than secret-bearing text.
 
 ## 6. Hindsight mapping
 
@@ -396,13 +384,13 @@ Current regression coverage is registered in `tests2/core/hindsight-memory-compl
 A LangFlow author does exactly this:
 
 1. Add `runtimes/langflow.yaml` and list `langflow` in `contents.runtimes`.
-2. Declare LangFlow's HTTP service port and a real readiness endpoint, bounded probe timings, `local` argv plus its normal `portEnv` and listener `hostEnv`, digest-pinned Docker image, and a contained Compose file/service. The local runner supplies that normal port variable and forces the declared host variable to loopback; Docker/Compose use loopback dynamic publication. No LangFlow code emits or understands Bobbit-specific readiness messages.
+2. Declare LangFlow's HTTP service port and a real readiness endpoint, bounded probe timings, and all three required [launch-mode blocks](../managed-runtimes.md#launch-modes): `local` argv with its normal `portEnv` and listener `hostEnv`, a digest-pinned Docker image, and a contained Compose file/service. The local runner supplies that normal port variable and forces the declared host variable to loopback; Docker/Compose use loopback dynamic publication. No LangFlow code emits or understands Bobbit-specific readiness messages.
 3. Declare every setting/secret through the provider or pack EP-7 schema, and map each process environment variable via `environment`. Add `storage` only if LangFlow must persist data. Never read raw environment/config or construct a Docker command in the pack module.
 4. Set a provider's `runtime: langflow`; provider/routes/tools read only `ctx.runtime.endpoint`. If absent/not ready, return their documented graceful no-service behavior.
 5. Request `service.manage` in the manifest capability metadata. EP-6 displays/audits the grant; the generic supervisor only checks the resolved grant before control actions.
 6. Add the same runner-contract fixtures and mode matrix described below. No new server integration, settings screen, permission system, endpoint injection, port logic, or lifecycle code is authored.
 
-If a service cannot bind its ordinary declared `local.portEnv` and `local.hostEnv`, or expose the declared HTTP readiness endpoint, it is not compatible with local mode and must declare no local mode; it does not receive a bespoke exception. Docker and Compose support alone is insufficient for this goal's mode-independence promise.
+If a service cannot bind its ordinary declared `local.portEnv` and `local.hostEnv`, or expose the declared HTTP readiness endpoint, it is not eligible to declare this runtime until upstream supports it. The current contract has no one- or two-mode exception: Docker and Compose support alone is insufficient for the mode-independence promise.
 
 ## 9. File-level implementation plan and control flow
 
@@ -418,7 +406,7 @@ If a service cannot bind its ordinary declared `local.portEnv` and `local.hostEn
 | `src/server/service-runtime/index.ts` | Narrow public exports for server wiring/tests. |
 | `src/server/extension-host/pack-store.ts`, `server-host-api.ts`, `module-host-{bootstrap,worker}.ts`, `action-dispatcher.ts`, `route-dispatcher.ts`, `src/server/agent/{lifecycle-hub,provider-bridge-extension,pack-contributions}.ts`, and `pack-contribution-registry.ts` | H-3 only: reconcile typed PackStore result/error fidelity, reusable mutation fences, host-owned deadline/abort propagation, and durable retry/idempotency/lifecycle result seams. Preserve #1091/#1106; do not change H-2 algorithms, H-4 runtime/screens/tools, or EP-6/EP-7 ownership. |
 | `src/server/agent/lifecycle-hub.ts`, `src/server/agent/pack-contributions.ts`, and current goal-completion dispatch wiring | Inject the read-only `ServiceRuntimeContext` resolver before module invocation and carry the validated `goalCompleted` event to providers. Resolver only reads status; goal completion remains host-originated. |
-| `src/server/server.ts` | Construct supervisor after state/settings/grant dependencies; implement authenticated control/status/log/purge routes and lifecycle resolver. Avoid a Hindsight-specific plan switch. |
+| `src/server/server.ts` | Construct the supervisor after state/settings/grant dependencies; compose it with Hindsight's authenticated pack-scoped typed routes and lifecycle resolver. Do not add a global runtime REST route or a Hindsight-specific plan switch. |
 | `market-packs/hindsight/{pack.yaml,providers/memory.yaml,runtimes/hindsight.yaml,runtime/compose.yaml,src/shared.ts,src/provider.ts,src/routes.ts}` | Declare/consume the mode-independent runtime endpoint and config redaction. The delivered H-2/H-5/H-6 mechanics are maintained as specified in [Hindsight memory completion](hindsight-memory-completion.md); this runtime plan does not prescribe additional memory routes. |
 | Hindsight panels, final agent tools, and their entrypoints | Delivered separately by H-4 through the central EP-6/EP-7 contracts. See [Hindsight memory](../hindsight-memory.md); they are not part of the generic runtime implementation plan. |
 | `package.json`, lockfile | Add direct `execa`, `dockerode`, `get-port`, `p-retry`, and types needed by Dockerode. |

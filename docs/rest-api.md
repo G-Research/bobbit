@@ -1534,13 +1534,19 @@ when present. `scope: "all"` is an explicit all-project read only; it is never i
 an id, or a missing scope. Settings revisions and secrets remain owned by the EP-7 settings route:
 settings saves validate and persist but do not probe, pull, or start a runtime.
 
+`runtime-control` and `migration-execute` are prompt-operator actions. Each requires a live
+`service.manage` grant, a verified signed `bobbit_session` prompt-operator cookie, and its required
+body value (`consent: true` or the exact plan `confirmation`). That body value is not authentication.
+Bearer-only, sandbox, and agent-session callers receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`.
+`migration-plan` remains `service.manage` grant-only because it is non-destructive.
+
 | Route name | Request body inside `init.body` | Capability | Response summary |
 |---|---|---|---|
 | `runtime-status` | None | — | `{ settingsRevision, runtime }`, where `runtime` is the generic `ServiceRuntimeStatus`: identity, desired state, optional mode/endpoint, observed state, and safe diagnostic. External mode is reported as ready only with a valid configured endpoint. |
 | `runtime-logs` | `{ tail? }` | — | `{ settingsRevision, lines }`; `tail` is an integer clamped to 1–200 and defaults to 100. |
-| `runtime-control` | `{ action: "start" \| "stop" \| "restart", consent: true }` | `service.manage` | `{ settingsRevision, runtime }` from the exact settings snapshot used for control. |
+| `runtime-control` | `{ action: "start" \| "stop" \| "restart", consent: true }` | Live `service.manage` grant and verified prompt-operator cookie | `{ settingsRevision, runtime }` from the exact settings snapshot used for control. `consent: true` is required but is not authentication. |
 | `migration-plan` | `{ target: "managed-volume" \| "external" }` | `service.manage` | `{ settingsRevision, ok: true, plan }` or `{ settingsRevision, ok: false, code }`. Planning is redacted and does not run a command, start a service, pull an image, or mutate storage. |
-| `migration-execute` | `{ plan, confirmation }` | `service.manage` | `{ settingsRevision, ok: true, planId, fingerprint }` or `{ settingsRevision, ok: false, code, rolledBack? }`. The confirmation must equal the plan confirmation. The current built-in bridge returns `HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE` rather than executing a migration. |
+| `migration-execute` | `{ plan, confirmation }` | Live `service.manage` grant and verified prompt-operator cookie | `{ settingsRevision, ok: true, planId, fingerprint }` or `{ settingsRevision, ok: false, code, rolledBack? }`. The confirmation must equal the plan confirmation; it is required but is not authentication. The current built-in bridge returns `HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE` rather than executing a migration. |
 | `browse`, `search` | `{ query?, cursor?, limit?, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memories, cursor? }`. `limit` defaults to 25 and is capped at 100. |
 | `detail` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memory }` or a typed result without `memory`. The returned record is checked against the authoritative scope. |
 | `history` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, history }`; the route verifies the scoped record before reading its history. |
