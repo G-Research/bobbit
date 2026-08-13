@@ -5330,10 +5330,15 @@ export class VerificationHarness {
 		}
 		// Legacy test shims predate row receipts. Retain their queue API while
 		// keeping production on enqueueVerifierPrompt above.
-		const compatibilityStreamingSettleMs = args.promptKind === "reminder" || args.promptKind === "resurrection"
-			? 15_000
-			: args.promptKind === "restart-resume" || args.promptKind === "fallback"
-				? 10_000
+		// Legacy restart shims label the old generic resume continuation as a
+		// reminder, but still need the historical 10s cold-start settle. Normal
+		// same-session reminders and resurrections retain their 15s allowance.
+		const compatibilityStreamingSettleMs = args.promptKind === "restart-resume"
+			|| args.promptKind === "fallback"
+			|| (args.promptKind === "reminder" && args.whenReady)
+			? 10_000
+			: args.promptKind === "reminder" || args.promptKind === "resurrection"
+				? 15_000
 				: undefined;
 		if (manager && typeof (manager as any).enqueuePrompt === "function") {
 			console.log(`[verification][verifier-dispatch] ${fields} mode=compat-queued decision=followUp`);

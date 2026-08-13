@@ -172,6 +172,8 @@ function makeManager(): any {
 	manager._testStore = {
 		update: vi.fn(() => {}),
 		get: vi.fn(() => undefined),
+		getLive: vi.fn(() => []),
+		archiveAsync: vi.fn(async () => true),
 	};
 	managers.push(manager);
 	return manager;
@@ -1759,7 +1761,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(promptOwner.promptQueue.length, 0, "the cancelled verifier row cannot survive on the replaced owner");
 
 		const terminated = manager.enqueueVerifierPrompt(sessionId, "remove on reviewer termination");
-		const terminatedOutcome = terminated.dispatched.then(() => "resolved", error => error.message);
+		const terminatedOutcome = terminated.dispatched.then(() => "resolved", (error: Error) => error.message);
 		assert.equal(promptOwner.promptQueue.peek()?.id, terminated.rowId);
 		await manager.terminateSession(sessionId);
 		assert.match(await terminatedOutcome, /terminated before dispatch/);

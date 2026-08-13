@@ -2614,7 +2614,7 @@ type PendingVerifierPromptReceipt = {
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
 	/** Exact verifier rows waiting for provider acceptance, keyed by session/row. */
-	private _verifierPromptReceipts = new Map<string, Map<string, PendingVerifierPromptReceipt>>();
+	private _verifierPromptReceipts?: Map<string, Map<string, PendingVerifierPromptReceipt>>;
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
 	private sessionsWithConnectedClients = new Set<SessionInfo>();
 	private agentCliPath?: string;
@@ -2768,6 +2768,19 @@ export class SessionManager {
 		return this._sessionReplacementCoordinators.get(sessionId)?.promptOwner ?? this.sessions.get(sessionId);
 	}
 
+	/**
+	 * Lightweight unit seams may instantiate the prototype without field
+	 * initializers. Receipt bookkeeping is auxiliary to regular prompt delivery,
+	 * so lazily restore it instead of letting settlement throw from a queue drain.
+	 */
+	private _getVerifierPromptReceipts(): Map<string, Map<string, PendingVerifierPromptReceipt>> | undefined {
+		return this._verifierPromptReceipts;
+	}
+
+	private _ensureVerifierPromptReceipts(): Map<string, Map<string, PendingVerifierPromptReceipt>> {
+		return this._verifierPromptReceipts ??= new Map<string, Map<string, PendingVerifierPromptReceipt>>();
+	}
+
 	private createVerifierPromptReceipt(
 		sessionId: string,
 		rowId: string,
@@ -2777,9 +2790,10 @@ export class SessionManager {
 		let reject!: (error: Error) => void;
 		const dispatched = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
 		const pending: PendingVerifierPromptReceipt = { resolve, reject, cancelled: false, mode };
-		const receipts = this._verifierPromptReceipts.get(sessionId) ?? new Map<string, PendingVerifierPromptReceipt>();
+		const receiptStore = this._ensureVerifierPromptReceipts();
+		const receipts = receiptStore.get(sessionId) ?? new Map<string, PendingVerifierPromptReceipt>();
 		receipts.set(rowId, pending);
-		this._verifierPromptReceipts.set(sessionId, receipts);
+		receiptStore.set(sessionId, receipts);
 		return {
 			rowId,
 			dispatched,
@@ -2789,7 +2803,7 @@ export class SessionManager {
 	}
 
 	private markVerifierPromptBusyRecovered(sessionId: string, rowId: string): void {
-		const pending = this._verifierPromptReceipts.get(sessionId)?.get(rowId);
+		const pending = this._getVerifierPromptReceipts()?.get(sessionId)?.get(rowId);
 		if (pending) pending.mode = "busy-recovered";
 	}
 
@@ -2820,11 +2834,13 @@ export class SessionManager {
 	}
 
 	private settleVerifierPromptReceipt(sessionId: string, rowId: string, error?: Error): void {
-		const receipts = this._verifierPromptReceipts.get(sessionId);
+		const receiptStore = this._getVerifierPromptReceipts();
+		if (!receiptStore) return;
+		const receipts = receiptStore.get(sessionId);
 		const pending = receipts?.get(rowId);
-		if (!pending) return;
-		receipts!.delete(rowId);
-		if (receipts!.size === 0) this._verifierPromptReceipts.delete(sessionId);
+		if (!pending || !receipts) return;
+		receipts.delete(rowId);
+		if (receipts.size === 0) receiptStore.delete(sessionId);
 		if (pending.cancelled) {
 			pending.reject(new Error(`Verifier prompt ${rowId} was cancelled before dispatch`));
 		} else if (error) {
@@ -2835,9 +2851,11 @@ export class SessionManager {
 	}
 
 	private cancelAllVerifierPromptReceipts(sessionId: string, reason: string): void {
-		const receipts = this._verifierPromptReceipts.get(sessionId);
+		const receiptStore = this._getVerifierPromptReceipts();
+		if (!receiptStore) return;
+		const receipts = receiptStore.get(sessionId);
 		if (!receipts) return;
-		this._verifierPromptReceipts.delete(sessionId);
+		receiptStore.delete(sessionId);
 		for (const pending of receipts.values()) {
 			pending.cancelled = true;
 			pending.reject(new Error(reason));
@@ -5315,7 +5333,7 @@ export class SessionManager {
 
 	/** Cancel one verifier receipt and remove its still-durable row, if any. */
 	cancelVerifierPrompt(sessionId: string, rowId: string): boolean {
-		const receipts = this._verifierPromptReceipts.get(sessionId);
+		const receipts = this._getVerifierPromptReceipts()?.get(sessionId);
 		const pending = receipts?.get(rowId);
 		if (!pending) return false;
 		pending.cancelled = true;
@@ -8659,11 +8677,27 @@ export class SessionManager {
 		}
 	}
 
+	/** Remove stale harness-owned rows before either live or dormant restoration. */
+	private pruneRestoredVerifierPromptRows(ps: PersistedSession): QueuedMessage[] {
+		const persistedQueue = ps.messageQueue ?? [];
+		const restoredQueue = persistedQueue.filter(row => row.source !== "verification");
+		if (restoredQueue.length === persistedQueue.length) return restoredQueue;
+		for (const row of persistedQueue) {
+			if (row.source === "verification") {
+				this.settleVerifierPromptReceipt(ps.id, row.id, new Error(`Verifier prompt ${row.id} was discarded during session restore`));
+			}
+		}
+		ps.messageQueue = restoredQueue;
+		this.resolveStoreForSession(ps.id).update(ps.id, { messageQueue: restoredQueue });
+		return restoredQueue;
+	}
+
 	private addDormantSession(
 		ps: PersistedSession,
 		restoreError?: string,
 		condition?: ModelSelectionRequiredCondition,
 	): void {
+		const restoredQueue = this.pruneRestoredVerifierPromptRows(ps);
 		this.sessions.set(ps.id, {
 			id: ps.id,
 			title: ps.title,
@@ -8704,7 +8738,7 @@ export class SessionManager {
 				? `${ps.modelProvider}/${ps.modelId}`
 				: undefined,
 			spawnPinnedThinkingLevel: ps.effectiveThinkingLevel,
-			promptQueue: new PromptQueue(ps.messageQueue),
+			promptQueue: new PromptQueue(restoredQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
 		});
@@ -8785,16 +8819,7 @@ export class SessionManager {
 		// A verifier's active signal is restored and re-driven by VerificationHarness.
 		// Replaying a persisted verifier row here can issue a stale kickoff/reminder
 		// before that owner reattaches. Keep all ordinary durable prompt rows intact.
-		const restoredQueue = (ps.messageQueue ?? []).filter(row => row.source !== "verification");
-		if (restoredQueue.length !== (ps.messageQueue ?? []).length) {
-			for (const row of ps.messageQueue ?? []) {
-				if (row.source === "verification") {
-					this.settleVerifierPromptReceipt(ps.id, row.id, new Error(`Verifier prompt ${row.id} was discarded during session restore`));
-				}
-			}
-			ps.messageQueue = restoredQueue;
-			this.resolveStoreForSession(ps.id).update(ps.id, { messageQueue: restoredQueue });
-		}
+		const restoredQueue = this.pruneRestoredVerifierPromptRows(ps);
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
