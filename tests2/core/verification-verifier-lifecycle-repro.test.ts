@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+const { RpcBridge } = await import("../../src/server/agent/rpc-bridge.js");
 
 const MARKER = "VERIFIER_LIFECYCLE_REPRO";
 
@@ -518,6 +519,103 @@ describe("verifier lifecycle reproductions", () => {
 		assert.match(recoveryPrompt, /\[QA-TEST CONTEXT\]\ncomponent: web/, `${MARKER}: resurrected QA prompt must preserve full QA kickoff context. prompt=${recoveryPrompt}`);
 		assert.match(recoveryPrompt, /Run the browser smoke plan/, `${MARKER}: resurrected QA prompt must include the original QA test plan. prompt=${recoveryPrompt}`);
 		assert.doesNotMatch(recoveryPrompt, /ALREADY FORMED|do not re-investigate|STOP — verification_result not called/i, `${MARKER}: resurrected QA prompt must not use alive-idle reminder wording. prompt=${recoveryPrompt}`);
+	});
+
+	it("forwards followUp through the bridge and atomically accepts a busy reviewer kickoff exactly once", async () => {
+		const sent: Array<{ command: Record<string, unknown>; timeoutMs: number | undefined }> = [];
+		const bridge = new RpcBridge({}) as any;
+		bridge.sendCommand = async (command: Record<string, unknown>, timeoutMs?: number) => {
+			sent.push({ command, timeoutMs });
+			return { success: true };
+		};
+		bridge.waitForReady = async () => {};
+
+		await bridge.prompt("ordinary prompt");
+		await bridge.promptWhenReady("queued verifier prompt", undefined, { streamingBehavior: "followUp" });
+		assert.deepEqual(sent.map(({ command }) => command), [
+			{ type: "prompt", message: "ordinary prompt" },
+			{ type: "prompt", message: "queued verifier prompt", streamingBehavior: "followUp" },
+		], `${MARKER}: normal prompts must retain their wire shape while explicit followUp reaches Pi's prompt RPC command`);
+
+		const goalId = "goal-busy-reviewer-kickoff";
+		const stateDir = makeStateDir("verifier-busy-kickoff-");
+		const sessionId = "llm-review-busy-kickoff";
+		const calls: Array<{ behavior: unknown; text: string }> = [];
+		let acceptedSubmissions = 0;
+		let verdictSubmissions = 0;
+		let retries = 0;
+		let harness: any;
+		const busyPiPrompt = async (text: string, behavior?: unknown) => {
+			if (behavior !== "followUp") {
+				throw new Error("Cannot prompt while agent is streaming without streamingBehavior");
+			}
+			calls.push({ behavior, text });
+			acceptedSubmissions++;
+			const resolver = harness.pendingResults.get(sessionId);
+			if (resolver) {
+				verdictSubmissions++;
+				resolver({ verdict: true, summary: "Follow-up kickoff completed." });
+			}
+			return { success: true };
+		};
+		await assert.rejects(
+			busyPiPrompt("unmodeled kickoff"),
+			/Cannot prompt while agent is streaming without streamingBehavior/,
+			`${MARKER}: the reproduction must fail atomically when a busy Pi receives a prompt without a streaming mode`,
+		);
+
+		const fakeSession = {
+			id: sessionId,
+			status: "streaming",
+			lastTurnErrored: false,
+			rpcClient: {
+				onEvent: (_fn: (event: any) => void) => () => {},
+				prompt: async (text: string, _images?: unknown, _timeoutMs?: number, streamingBehavior?: unknown) =>
+					busyPiPrompt(text, streamingBehavior),
+			},
+		};
+		const roleStore = { get: () => undefined, getAll: () => [] };
+		const { projectContextManager } = makeProjectContext(goalId, roleStore);
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async () => fakeSession,
+			setTitle: () => {},
+			updateSessionMeta: () => {},
+			getSession: () => fakeSession,
+			retryLastPrompt: async () => { retries++; },
+			waitForIdle: async () => {},
+			terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(
+			stateDir,
+			undefined,
+			() => {},
+			roleStore as any,
+			undefined,
+			sessionManager,
+			verifierTeamManager() as any,
+			undefined,
+			projectContextManager as any,
+			undefined,
+			{ clock: makeFakeClock() as any },
+		) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Busy kickoff", prompt: "Review the diff", timeout: 1, role: "reviewer" },
+			stateDir,
+			goalId,
+			{ name: "reviewer", promptTemplate: "You are a code reviewer." },
+			"combined prompt",
+			"kickoff prompt",
+			1_000,
+			sessionId,
+		);
+
+		assert.equal(result.passed, true, `${MARKER}: followUp must let a verification-owned kickoff complete while Pi is busy. result=${JSON.stringify(result)}`);
+		assert.equal(acceptedSubmissions, 1, `${MARKER}: accepted busy kickoff must submit exactly once and must not enter a duplicate retry path`);
+		assert.equal(verdictSubmissions, 1, `${MARKER}: accepted busy kickoff must settle exactly one verification verdict`);
+		assert.equal(retries, 0, `${MARKER}: an accepted followUp kickoff must not trigger a duplicate retry`);
+		assert.deepEqual(calls.map(call => call.behavior), ["followUp"], `${MARKER}: verification kickoff must request Pi followUp behavior`);
 	});
 
 	it("agent-qa honors a late verification_result posted during teardown", async () => {
