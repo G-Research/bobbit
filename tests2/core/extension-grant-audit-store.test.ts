@@ -94,6 +94,27 @@ describe("ExtensionGrantAuditStore", () => {
 		expect(store.list(Number.NaN).length).toBe(100);
 	});
 
+	it("rotates over-cap history to newest valid rows without disturbing the recovery outbox", () => {
+		const fs = createMemFs();
+		fs.mkdirSync(stateDir, { recursive: true });
+		const prior = Array.from({ length: 16_000 }, (_, index) => JSON.stringify(entry((index % 9) + 1, {
+			hookId: `rotated-${String(index).padStart(5, "0")}`,
+		}))).join("\n") + "\n";
+		fs.writeFileSync(auditFile, prior, "utf-8");
+		const pending = entry(9, { hookId: "pending-recovery" });
+		fs.writeFileSync(outboxFile, JSON.stringify([pending]), "utf-8");
+
+		const store = new ExtensionGrantAuditStore(stateDir, fs);
+		store.append(entry(9, { hookId: "newest" }));
+
+		const persisted = String(fs.readFileSync(auditFile, "utf-8"));
+		expect(Buffer.byteLength(persisted, "utf-8")).toBeLessThanOrEqual(2 * 1024 * 1024);
+		expect(persisted).not.toContain("rotated-00000");
+		expect(persisted).toContain("rotated-15999");
+		expect(hookRows(store.list(200)).at(-1)?.hookId).toBe("newest");
+		expect(String(fs.readFileSync(outboxFile, "utf-8"))).toBe(JSON.stringify([pending]));
+	});
+
 	it("skips corrupt and secret-bearing historical rows while retaining valid entries", () => {
 		const fs = createMemFs();
 		fs.mkdirSync(stateDir, { recursive: true });

@@ -10,6 +10,8 @@ import {
 
 export type ExtensionGrantAuditAction = "granted" | "revoked";
 
+const MAX_AUDIT_BYTES = 2 * 1024 * 1024;
+
 interface ExtensionGrantAuditBase {
 	at: string;
 	actor: string;
@@ -121,6 +123,7 @@ export class ExtensionGrantAuditStore {
 		try {
 			if (!this.fs.existsSync(this.stateDir)) this.fs.mkdirSync(this.stateDir, { recursive: true });
 			this.fs.appendFileSync(this.auditFile, `${JSON.stringify(normalized)}\n`, "utf-8");
+			this.enforceCap();
 		} catch {
 			// Never log request or audit-entry values here: safe callers may retry,
 			// and error strings from mocked/OS filesystems can contain paths/data.
@@ -158,6 +161,30 @@ export class ExtensionGrantAuditStore {
 	list(limit = 100): ExtensionGrantAuditEntry[] {
 		const boundedLimit = Number.isInteger(limit) ? Math.min(200, Math.max(1, limit)) : 100;
 		return this.readAudit().slice(-boundedLimit);
+	}
+
+	/** Retain newest complete normalized rows without disturbing the recovery outbox. */
+	private enforceCap(): void {
+		if (this.fs.statSync(this.auditFile).size <= MAX_AUDIT_BYTES) return;
+		const kept: string[] = [];
+		let bytes = 0;
+		for (const sourceLine of this.fs.readFileSync(this.auditFile, "utf-8").split(/\r?\n/).reverse()) {
+			if (!sourceLine) continue;
+			// Re-normalize while rotating so corrupt rows cannot be retained as a
+			// fresh durable audit record.
+			let entry: ExtensionGrantAuditEntry | undefined;
+			try { entry = normalizeEntry(JSON.parse(sourceLine)); } catch { continue; }
+			if (!entry) continue;
+			const line = `${JSON.stringify(entry)}\n`;
+			const lineBytes = Buffer.byteLength(line, "utf-8");
+			if (bytes + lineBytes > MAX_AUDIT_BYTES) break;
+			kept.push(line);
+			bytes += lineBytes;
+		}
+		kept.reverse();
+		const temp = `${this.auditFile}.tmp-${process.pid}-${Date.now()}`;
+		this.fs.writeFileSync(temp, kept.join(""), "utf-8");
+		this.fs.renameSync(temp, this.auditFile);
 	}
 
 	private readAudit(): ExtensionGrantAuditEntry[] {

@@ -187,6 +187,37 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		}
 	});
 
+	test("reads prompt authoring audit only from the requested session's owning project", async ({ gateway }) => {
+		const rootA = path.join(gateway.bobbitDir, "prompt-extension-projects", `audit-owner-a-${FIXTURE_SUFFIX}`);
+		const rootB = path.join(gateway.bobbitDir, "prompt-extension-projects", `audit-owner-b-${FIXTURE_SUFFIX}`);
+		fs.mkdirSync(rootA, { recursive: true });
+		fs.mkdirSync(rootB, { recursive: true });
+		const projectA = await registerProject({ name: `audit-owner-a-${FIXTURE_SUFFIX}`, rootPath: rootA, seedWorkflows: false });
+		const projectB = await registerProject({ name: `audit-owner-b-${FIXTURE_SUFFIX}`, rootPath: rootB, seedWorkflows: false });
+		const humanCookie = await mintOperatorCookie();
+		let sessionA = "";
+		let sessionB = "";
+		try {
+			sessionA = await createSession({ projectId: projectA.id });
+			sessionB = await createSession({ projectId: projectB.id });
+			// Model a stale/malicious cross-project record. The operator route must
+			// never scan unrelated project-owned audit files to discover it.
+			new PromptExtensionAuthoringAuditStore(path.join(rootB, ".bobbit", "state")).create({
+				id: "wrong-owner", packId: "fixture", hookId: "author", event: "proposal", sectionId: "policy",
+				actor: "agent", sessionId: sessionA, trigger: "proposal-seed", baselineDigest: "a".repeat(64), baselineBytes: 1,
+			});
+
+			const scoped = await apiFetch(`/api/sessions/${sessionA}/prompt-extension-audit?limit=1`, { headers: operatorHeaders(humanCookie) });
+			expect(scoped.status).toBe(200);
+			expect(await readJson(scoped)).toEqual({ entries: [] });
+			const missing = await apiFetch("/api/sessions/missing-session/prompt-extension-audit", { headers: operatorHeaders(humanCookie) });
+			expect(missing.status).toBe(404);
+		} finally {
+			for (const id of [sessionA, sessionB]) if (id) await deleteSession(id);
+			for (const project of [projectA, projectB]) await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("requires a separate author grant and accepts only the stored proposal while retaining direct-seed audit detail", async ({ gateway }) => {
 		const packName = `prompt-proposal-${FIXTURE_SUFFIX}`;
 		const packDir = writeApiPack(gateway.bobbitDir, packName);

@@ -7,6 +7,8 @@ import { redactAuditDiffSecrets } from "../auth/redact.js";
 
 export type PromptExtensionAuthoringStatus = "requested" | "proposed" | "accepted" | "rejected" | "failed" | "cancelled" | "superseded";
 
+const MAX_AUDIT_BYTES = 2 * 1024 * 1024;
+
 /** One terminal provider usage delta, never a session-cumulative CostTracker total. */
 export interface PromptExtensionAuthoringUsage {
 	inputTokens?: number;
@@ -160,10 +162,19 @@ export class PromptExtensionAuthoringAuditStore {
 
 	/** Newest valid effective records, chronological. Diffs remain in this durable authorized store only. */
 	list(limit = 100): PromptExtensionAuthoringAuditEntry[] {
-		const bounded = Number.isInteger(limit) ? Math.max(1, Math.min(200, limit)) : 100;
+		return this.effectiveRows().slice(-boundedLimit(limit));
+	}
+
+	/** Session-filtered operator view; fold snapshots before applying its limit. */
+	listForSession(sessionId: string, limit = 100): PromptExtensionAuthoringAuditEntry[] {
+		if (!isId(sessionId)) return [];
+		return this.effectiveRows().filter(entry => entry.sessionId === sessionId).slice(-boundedLimit(limit));
+	}
+
+	private effectiveRows(): PromptExtensionAuthoringAuditEntry[] {
 		const effective = new Map<string, PromptExtensionAuthoringAuditEntry>();
 		for (const entry of this.readRows()) effective.set(entry.id, entry);
-		return [...effective.values()].slice(-bounded);
+		return [...effective.values()];
 	}
 
 	private append(entry: PromptExtensionAuthoringAuditEntry): void {
@@ -172,9 +183,32 @@ export class PromptExtensionAuthoringAuditStore {
 		try {
 			if (!this.fs.existsSync(this.stateDir)) this.fs.mkdirSync(this.stateDir, { recursive: true });
 			this.fs.appendFileSync(this.auditFile, `${JSON.stringify(normalized)}\n`, "utf-8");
+			this.enforceCap();
 		} catch {
 			throw new PromptExtensionAuthoringAuditStoreError();
 		}
+	}
+
+	/** Keep recent complete normalized snapshots without retaining untrusted old rows. */
+	private enforceCap(): void {
+		if (this.fs.statSync(this.auditFile).size <= MAX_AUDIT_BYTES) return;
+		const kept: string[] = [];
+		let bytes = 0;
+		for (const sourceLine of this.fs.readFileSync(this.auditFile, "utf-8").split(/\r?\n/).reverse()) {
+			if (!sourceLine) continue;
+			let entry: PromptExtensionAuthoringAuditEntry | undefined;
+			try { entry = normalize(JSON.parse(sourceLine)); } catch { continue; }
+			if (!entry) continue;
+			const line = `${JSON.stringify(entry)}\n`;
+			const lineBytes = Buffer.byteLength(line, "utf-8");
+			if (bytes + lineBytes > MAX_AUDIT_BYTES) break;
+			kept.push(line);
+			bytes += lineBytes;
+		}
+		kept.reverse();
+		const temp = `${this.auditFile}.tmp-${process.pid}-${Date.now()}`;
+		this.fs.writeFileSync(temp, kept.join(""), "utf-8");
+		this.fs.renameSync(temp, this.auditFile);
 	}
 
 	private readRows(): PromptExtensionAuthoringAuditEntry[] {
@@ -271,6 +305,7 @@ function readSafeLabels<const T extends readonly string[]>(value: Record<string,
 	return labels as { [K in T[number]]: string };
 }
 
+function boundedLimit(limit: number): number { return Number.isInteger(limit) ? Math.max(1, Math.min(200, limit)) : 100; }
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function isSafeLabel(value: unknown): value is string { return typeof value === "string" && PROMPT_EXTENSION_IDENTIFIER.test(value); }
 /** Model ids can include provider separators but never control characters or bulk output. */
