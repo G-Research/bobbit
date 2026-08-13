@@ -235,6 +235,39 @@ test.describe("Sidebar actions menu", () => {
 		await expect(page.locator(`[data-testid="session-actions-trigger"][data-session-id="${sessionId}"]`)).toBeFocused({ timeout: 5_000 });
 	});
 
+	test("header actions replace a closing menu and immediately toggle a new one closed", async ({ page }) => {
+		const sessionId = await createSession();
+		sessionIds.push(sessionId);
+		await waitForSessionStatus(sessionId, "idle");
+		await openSession(page, sessionId);
+		const currentTrigger = () => page.locator(`[data-testid="session-actions-trigger"][data-session-id="${sessionId}"]`).first();
+
+		await currentTrigger().click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		const closingMenu = page.locator("sidebar-actions-popover").first();
+		const oldClose = closingMenu.evaluate((element) => new Promise<void>((resolve) => {
+			element.addEventListener("close", () => resolve(), { once: true });
+		}));
+		await page.keyboard.press("Escape");
+		expect(await closingMenu.evaluate((element: any) => element.closing)).toBe(true);
+
+		// Escape begins a FLIP close; the immediately clicked current trigger must
+		// replace that owner rather than wait for its delayed close event.
+		await currentTrigger().click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		await oldClose;
+		await expect(page.locator("sidebar-actions-popover")).toHaveCount(1);
+		expect(await page.locator("sidebar-actions-popover").evaluate((element: any) => ({
+			open: element.open,
+			closing: element.closing,
+			anchorConnected: element.anchorEl?.isConnected,
+		}))).toEqual({ open: true, closing: false, anchorConnected: true });
+
+		// Do not swallow an intentional second click just because the menu is new.
+		await currentTrigger().click();
+		await expectNoPopover(page);
+	});
+
 	test("desktop session and goal action-menu smokes keep real-app quick actions wired", async ({ page }) => {
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);

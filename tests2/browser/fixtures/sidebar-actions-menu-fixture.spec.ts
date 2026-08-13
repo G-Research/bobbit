@@ -102,6 +102,35 @@ test("dismissal closes on outside click, Escape, route change, item selection, r
 	await expect(item(page, "dashboard")).toBeVisible({ timeout: 5_000 });
 });
 
+test("Escape followed by an immediate trigger click replaces a closing sidebar menu", async ({ page }) => {
+	const ids = await loadFixture(page);
+	await openMenu(page, "session", ids.session);
+	const closingMenu = page.locator("sidebar-actions-popover").first();
+	const oldClose = closingMenu.evaluate((element) => new Promise<void>((resolve) => {
+		element.addEventListener("close", () => resolve(), { once: true });
+	}));
+
+	await page.keyboard.press("Escape");
+	expect(await closingMenu.evaluate((element: any) => element.closing)).toBe(true);
+
+	// The old menu is still unwinding its FLIP close. This current-trigger click
+	// must retire it and create exactly one replacement in the same turn.
+	await trigger(page, "session", ids.session).click();
+	await expect(menu(page)).toBeVisible({ timeout: 5_000 });
+	await oldClose;
+	await expect(page.locator("sidebar-actions-popover")).toHaveCount(1);
+	expect(await page.locator("sidebar-actions-popover").evaluate((element: any) => ({
+		open: element.open,
+		closing: element.closing,
+		anchorConnected: element.anchorEl?.isConnected,
+	}))).toEqual({ open: true, closing: false, anchorConnected: true });
+
+	// A second deliberate activation must close, even inside the former 200 ms
+	// suppression window.
+	await trigger(page, "session", ids.session).click();
+	await expectNoPopover(page);
+});
+
 test("copy link fallback uses legacy execCommand without surfacing a modal", async ({ page }) => {
 	const ids = await loadFixture(page);
 

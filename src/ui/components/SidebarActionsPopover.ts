@@ -97,6 +97,11 @@ export class SidebarActionsPopover extends LitElement {
 	@property({ attribute: false }) sourceRects: SidebarActionsFlipRect[] = [];
 	@property({ type: Boolean, reflect: true }) open = false;
 
+	/** True while an initiated close is still unwinding its animation. */
+	get closing(): boolean {
+		return this._closing;
+	}
+
 	@state() private _highlightIndex = 0;
 	@state() private _closing = false;
 	@state() private _position: SidebarActionsPopoverPosition = { top: VIEWPORT_PADDING, left: VIEWPORT_PADDING, placement: "bottom" };

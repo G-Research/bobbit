@@ -524,10 +524,18 @@ interface OpenSidebarActionsPopover {
 let _openSidebarActionsPopover: OpenSidebarActionsPopover | null = null;
 let _sidebarActionsPopoverRequestId = 0;
 
+function isActiveSidebarActionsPopover(owner = _openSidebarActionsPopover): owner is OpenSidebarActionsPopover {
+	return !!owner
+		&& owner.element.isConnected
+		&& owner.element.open
+		&& !owner.element.closing;
+}
+
 function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: string): boolean {
-	return _openSidebarActionsPopover?.kind === kind
-		&& _openSidebarActionsPopover.entityId === entityId
-		&& _openSidebarActionsPopover.element.open;
+	const owner = _openSidebarActionsPopover;
+	return owner?.kind === kind
+		&& owner.entityId === entityId
+		&& isActiveSidebarActionsPopover(owner);
 }
 
 function toSidebarActionsPopoverItem({ id, label, title, icon, tone, quick, trailingToggle }: SidebarActionItem): SidebarActionsPopoverItem {
@@ -541,25 +549,32 @@ function sidebarActionPopoverItems(kind: SidebarActionEntityKind, actions: Sideb
 	return [...quickActions, ...menuOnlyActions].map(toSidebarActionsPopoverItem);
 }
 
+/** Retire an owner immediately so a replacement can be created in this turn. */
+function retireSidebarActionsPopover(owner = _openSidebarActionsPopover): void {
+	if (!owner) return;
+	if (_openSidebarActionsPopover === owner) _openSidebarActionsPopover = null;
+	owner.element.open = false;
+	try { owner.element.remove(); } catch { /* ignore */ }
+}
+
 function closeSidebarActionsPopover(render = true): void {
 	_sidebarActionsPopoverRequestId++;
-	const current = _openSidebarActionsPopover;
-	if (!current) return;
-	_openSidebarActionsPopover = null;
-	current.element.open = false;
-	try { current.element.remove(); } catch { /* ignore */ }
+	retireSidebarActionsPopover();
 	if (render) renderApp();
 }
 
 function removeSidebarActionsPopoverElement(element: SidebarActionsPopover): void {
-	if (_openSidebarActionsPopover?.element === element) _openSidebarActionsPopover = null;
+	const ownsPopover = _openSidebarActionsPopover?.element === element;
+	if (ownsPopover) _openSidebarActionsPopover = null;
 	try { element.remove(); } catch { /* ignore */ }
-	renderApp();
+	// An old owner can finish after its replacement is mounted. Re-rendering
+	// here would detach the replacement's exact entity anchor.
+	if (ownsPopover) renderApp();
 }
 
 function refreshOpenSidebarActionsPopover(): void {
 	const current = _openSidebarActionsPopover;
-	if (!current) return;
+	if (!isActiveSidebarActionsPopover(current)) return;
 	current.actions = current.refresh();
 	current.element.items = sidebarActionPopoverItems(current.kind, current.actions);
 }
@@ -587,9 +602,12 @@ async function openSidebarActionsPopover(input: {
 	sourceRects: SidebarActionsFlipRect[];
 }): Promise<void> {
 	if (isSidebarActionsPopoverOpen(input.kind, input.entityId)) {
+		// This is a new deliberate activation of the current, live trigger.
 		closeSidebarActionsPopover();
 		return;
 	}
+	// A closing, detached, or otherwise stale owner cannot own the next menu.
+	// Retire it synchronously so this invocation can create its replacement.
 	closeSidebarActionsPopover(false);
 	const requestId = ++_sidebarActionsPopoverRequestId;
 	await import("../ui/components/SidebarActionsPopover.js");
@@ -618,6 +636,16 @@ async function openSidebarActionsPopover(input: {
 		refresh: input.refresh,
 	};
 	renderApp();
+
+	// Rendering the expanded state can replace the sidebar trigger. Reanchor to
+	// the same entity only; never let a stale click attach this menu elsewhere.
+	if (requestId !== _sidebarActionsPopoverRequestId || _openSidebarActionsPopover?.element !== element) return;
+	const renderedTrigger = connectedSidebarActionsTrigger(input);
+	if (!renderedTrigger) {
+		closeSidebarActionsPopover(false);
+		return;
+	}
+	element.anchorEl = renderedTrigger;
 }
 
 function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { kind: SidebarActionEntityKind; entityId: string; mobile: boolean; btnPad: string }): TemplateResult {
@@ -837,7 +865,7 @@ function prefetchGoalGithubLink(goalId: string): void {
 	if (cached?.available) return;
 	void fetchGoalGithubLink(goalId, { skipRender: true, force: cached?.available === false })
 		.then(() => {
-			if (_openSidebarActionsPopover?.kind === "goal" && _openSidebarActionsPopover.entityId === goalId) {
+			if (isSidebarActionsPopoverOpen("goal", goalId)) {
 				refreshOpenSidebarActionsPopover();
 				renderApp();
 			}

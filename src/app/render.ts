@@ -847,7 +847,6 @@ interface OpenHeaderSessionActionsPopover {
 	element: SidebarActionsPopover;
 	actions: SessionActionDescriptor[];
 	refresh: () => SessionActionDescriptor[];
-	openedAt: number;
 	cleanup?: () => void;
 }
 
@@ -901,30 +900,42 @@ function toHeaderPopoverItems(actions: SessionActionDescriptor[]): SidebarAction
 	}));
 }
 
+function isActiveHeaderSessionActionsPopover(owner = _openHeaderSessionActionsPopover): owner is OpenHeaderSessionActionsPopover {
+	return !!owner
+		&& owner.element.isConnected
+		&& owner.element.open
+		&& !owner.element.closing;
+}
+
 function isHeaderSessionActionsPopoverOpen(sessionId: string): boolean {
-	return _openHeaderSessionActionsPopover?.sessionId === sessionId
-		&& _openHeaderSessionActionsPopover.element.open;
+	const owner = _openHeaderSessionActionsPopover;
+	return owner?.sessionId === sessionId && isActiveHeaderSessionActionsPopover(owner);
+}
+
+/** Retire an owner immediately so a replacement can be created in this turn. */
+function retireHeaderSessionActionsPopover(owner = _openHeaderSessionActionsPopover): void {
+	if (!owner) return;
+	if (_openHeaderSessionActionsPopover === owner) _openHeaderSessionActionsPopover = null;
+	owner.cleanup?.();
+	owner.element.open = false;
+	try { owner.element.remove(); } catch { /* ignore */ }
 }
 
 function closeHeaderSessionActionsPopover(renderAfterClose = true): void {
 	_headerSessionActionsPopoverRequestId++;
-	const current = _openHeaderSessionActionsPopover;
-	if (!current) return;
-	_openHeaderSessionActionsPopover = null;
-	current.cleanup?.();
-	current.element.open = false;
-	try { current.element.remove(); } catch { /* ignore */ }
+	retireHeaderSessionActionsPopover();
 	if (renderAfterClose) renderApp();
 }
 
 function refreshOpenHeaderSessionActionsPopover(): void {
 	const current = _openHeaderSessionActionsPopover;
-	if (current) {
+	if (isActiveHeaderSessionActionsPopover(current)) {
 		current.actions = current.refresh();
 		current.element.items = toHeaderPopoverItems(current.actions);
 		return;
 	}
-	renderApp();
+	// A closing owner keeps its current anchor until FLIP/focus cleanup settles.
+	if (!current) renderApp();
 }
 
 /**
@@ -948,12 +959,12 @@ async function openHeaderSessionActionsPopover(input: {
 	sourceRects: SidebarActionsFlipRect[];
 }): Promise<void> {
 	if (isHeaderSessionActionsPopoverOpen(input.sessionId)) {
-		// A render can replay the originating header click while its trigger is
-		// replaced. Do not let that same interaction immediately toggle closed.
-		if (performance.now() - (_openHeaderSessionActionsPopover?.openedAt ?? 0) < 200) return;
+		// This is a new deliberate activation of the current, live trigger.
 		closeHeaderSessionActionsPopover();
 		return;
 	}
+	// A closing, detached, or otherwise stale owner cannot own the next menu.
+	// Retire it synchronously so this invocation can create its replacement.
 	closeHeaderSessionActionsPopover(false);
 	const requestId = ++_headerSessionActionsPopoverRequestId;
 	await import("../ui/components/SidebarActionsPopover.js");
@@ -976,14 +987,18 @@ async function openHeaderSessionActionsPopover(input: {
 		void action?.run(event);
 	}) as EventListener);
 	element.addEventListener("close", () => {
-		if (_openHeaderSessionActionsPopover?.element === element) {
-			_openHeaderSessionActionsPopover.cleanup?.();
+		const owner = _openHeaderSessionActionsPopover;
+		const ownsPopover = owner?.element === element;
+		if (ownsPopover) {
+			owner.cleanup?.();
 			_openHeaderSessionActionsPopover = null;
 		} else {
 			cleanup();
 		}
 		try { element.remove(); } catch { /* ignore */ }
-		renderApp();
+		// An old owner can finish after its replacement is mounted. Re-rendering
+		// here would detach the replacement's exact anchor.
+		if (ownsPopover) renderApp();
 	});
 	document.body.appendChild(element);
 	_openHeaderSessionActionsPopover = {
@@ -991,7 +1006,6 @@ async function openHeaderSessionActionsPopover(input: {
 		element,
 		actions: input.actions,
 		refresh: input.refresh,
-		openedAt: performance.now(),
 		cleanup,
 	};
 	renderApp();
