@@ -54,31 +54,18 @@ function signal(commitSha: string): GateSignal {
 const SYNC_BRANCH = "goal/local-behind-sync";
 
 function fakeRetryClock() {
-	let callback: (() => void) | undefined;
+	let callback: (() => void | Promise<void>) | undefined;
 	let delay: number | undefined;
 	return {
-		setTimeout: (next: () => void, milliseconds: number) => {
+		setTimeout: (next: () => void | Promise<void>, milliseconds: number) => {
 			callback = next;
 			delay = milliseconds;
 			return 1 as unknown as ReturnType<typeof setTimeout>;
 		},
 		clearTimeout: () => { callback = undefined; },
 		delay: () => delay,
-		run: () => callback?.(),
+		run: async () => { await callback?.(); },
 	};
-}
-
-async function eventually(assertion: () => void): Promise<void> {
-	let last: unknown;
-	for (let attempt = 0; attempt < 20; attempt++) {
-		try {
-			assertion();
-			await new Promise<void>(resolve => setTimeout(resolve, 10));
-			assertion();
-			return;
-		} catch (error) { last = error; await new Promise<void>(resolve => setTimeout(resolve, 5)); }
-	}
-	throw last;
 }
 
 async function localBehindFixture(): Promise<{ root: string; state: string; source: string; oldHead: string; newHead: string }> {
@@ -154,8 +141,8 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 				&& error.message === "Pinned checkout cleanup is pending",
 		);
 		assert.equal(clock.delay(), 1_000);
-		clock.run();
-		await eventually(() => assert.equal(manager.getLease(checkout.id), undefined));
+		await clock.run();
+		assert.equal(manager.getLease(checkout.id), undefined);
 		await assert.rejects(lstat(checkout.path), /ENOENT/);
 	});
 

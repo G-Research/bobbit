@@ -155,8 +155,8 @@ export interface VerificationPinnedCheckoutManagerOptions {
 	commandRunner?: CommandRunner;
 	readInventory?: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	now?: () => number;
-	/** Injectable only for deterministic retry-clock tests. */
-	setTimeout?: (callback: () => void, delayMs: number) => CleanupRetryTimer;
+	/** Injectable only for deterministic retry-clock tests. The callback resolves when its serialized retry settles. */
+	setTimeout?: (callback: () => void | Promise<void>, delayMs: number) => CleanupRetryTimer;
 	clearTimeout?: (timer: CleanupRetryTimer) => void;
 }
 
@@ -337,7 +337,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	private readonly commandRunner: CommandRunner;
 	private readonly inventory: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	private readonly now: () => number;
-	private readonly scheduleTimeout: (callback: () => void, delayMs: number) => CleanupRetryTimer;
+	private readonly scheduleTimeout: (callback: () => void | Promise<void>, delayMs: number) => CleanupRetryTimer;
 	private readonly cancelTimeout: (timer: CleanupRetryTimer) => void;
 	private readonly cleanupRetryTimers = new Map<string, CleanupRetryTimer>();
 	private readonly leases = new Map<string, PinnedCheckoutLease>();
@@ -901,11 +901,15 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (this.cleanupRetryTimers.has(lease.signalId) || this.leases.get(lease.signalId) !== lease || lease.state !== "releasing") return;
 		const timer = this.scheduleTimeout(() => {
 			this.cleanupRetryTimers.delete(lease.signalId);
-			void this.serialized(async () => {
+			const retry = this.serialized(async () => {
 				const current = this.leases.get(lease.signalId);
 				if (!current || current !== lease || current.state !== "releasing") return;
 				await this.releaseInternal(current);
 			});
+			// Production timers discard returned promises, but the injected clock must
+			// await the exact serialized retry rather than guess at event-loop turns.
+			void retry.catch(() => undefined);
+			return retry;
 		}, this.cleanupRetryDelay(lease.cleanupAttempts));
 		this.cleanupRetryTimers.set(lease.signalId, timer);
 		// Background cleanup must not keep a production gateway process alive.

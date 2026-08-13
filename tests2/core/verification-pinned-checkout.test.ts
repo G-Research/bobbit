@@ -46,10 +46,10 @@ interface FakeGit {
 function fakeClock() {
 	let now = 0;
 	let sequence = 0;
-	const timers = new Map<number, { due: number; callback: () => void }>();
+	const timers = new Map<number, { due: number; callback: () => void | Promise<void> }>();
 	return {
 		now: () => now,
-		setTimeout: (callback: () => void, delayMs: number) => {
+		setTimeout: (callback: () => void | Promise<void>, delayMs: number) => {
 			const id = ++sequence;
 			timers.set(id, { due: now + delayMs, callback });
 			return id as unknown as ReturnType<typeof setTimeout>;
@@ -60,17 +60,16 @@ function fakeClock() {
 			while (true) {
 				const due = [...timers.entries()]
 					.filter(([, timer]) => timer.due <= deadline)
-					.sort(([, left], [, right]) => left.due - right.due || 0)[0];
+					.sort(([leftId, left], [rightId, right]) => left.due - right.due || leftId - rightId)[0];
 				if (!due) break;
 				const [id, timer] = due;
 				timers.delete(id);
 				now = timer.due;
-				timer.callback();
-				// Let the manager's serialized promise and filesystem operations settle.
-				await new Promise<void>(resolve => setImmediate(resolve));
+				// The retry callback resolves only after its serialized cleanup attempt
+				// has persisted and scheduled the next backoff (if any).
+				await timer.callback();
 			}
 			now = deadline;
-			await new Promise<void>(resolve => setImmediate(resolve));
 		},
 		pending: () => timers.size,
 	};
@@ -182,21 +181,6 @@ function signal(head: string): GateSignal {
 
 const isPinnedError = (code: PinnedCheckoutError["code"]) =>
 	(error: unknown) => error instanceof PinnedCheckoutError && error.code === code;
-
-async function eventually(assertion: () => void): Promise<void> {
-	let last: unknown;
-	for (let attempt = 0; attempt < 20; attempt++) {
-		try {
-			assertion();
-			// Lease deletion precedes the final durable state-file publication.
-			// Do not let fixture teardown race that final manager operation.
-			await new Promise<void>(resolve => setTimeout(resolve, 10));
-			assertion();
-			return;
-		} catch (error) { last = error; await new Promise<void>(resolve => setTimeout(resolve, 5)); }
-	}
-	throw last;
-}
 
 describe("VerificationPinnedCheckoutManager", () => {
 	it("prefixes independent repository inventories into a deterministic aggregate witness", async () => {
@@ -784,7 +768,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await clock.advance(999);
 		assert.equal(manager.getLease(checkout.id)?.cleanupAttempts, 1);
 		await clock.advance(1);
-		await eventually(() => assert.equal(manager.getLease(checkout.id), undefined));
+		assert.equal(manager.getLease(checkout.id), undefined);
 		assert.equal(clock.pending(), 0, "successful deletion cancels the retry timer");
 	});
 
@@ -801,7 +785,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await assert.rejects(manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
 		assert.equal(manager.getLease(SIGNAL_ID)?.state, "releasing");
 		await clock.advance(1_000);
-		await eventually(() => assert.equal(manager.getLease(SIGNAL_ID), undefined));
+		assert.equal(manager.getLease(SIGNAL_ID), undefined);
 	});
 
 	it("backs off cleanup retries through 30 seconds without leaking Git failures", async () => {
@@ -818,14 +802,12 @@ describe("VerificationPinnedCheckoutManager", () => {
 			await clock.advance(delay - 1);
 			assert.equal(manager.getLease(checkout.id)?.cleanupAttempts, index + 1);
 			await clock.advance(1);
-			await eventually(() => {
-				assert.equal(manager.getLease(checkout.id)?.cleanupAttempts, index + 2);
-				assert.equal(clock.pending(), 1, "the next backoff is scheduled only after this attempt persists");
-			});
+			assert.equal(manager.getLease(checkout.id)?.cleanupAttempts, index + 2);
+			assert.equal(clock.pending(), 1, "the next backoff is scheduled only after this attempt persists");
 		}
 		assert.equal(manager.getLease(checkout.id)?.lastCleanupErrorCode, "PATH_BUSY", "diagnostics retain only a stable error code");
 		await clock.advance(30_000);
-		await eventually(() => assert.equal(manager.getLease(checkout.id), undefined));
+		assert.equal(manager.getLease(checkout.id), undefined);
 	});
 
 	it("keeps retry timers isolated across retained orphan leases", async () => {
@@ -843,10 +825,8 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await assert.rejects(manager.release(second.id, second.projectId), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
 		assert.equal(clock.pending(), 2, "each retained lease owns one independent retry");
 		await clock.advance(1_000);
-		await eventually(() => {
-			assert.equal(manager.getLease(first.id), undefined);
-			assert.equal(manager.getLease(second.id), undefined);
-		});
+		assert.equal(manager.getLease(first.id), undefined);
+		assert.equal(manager.getLease(second.id), undefined);
 	});
 
 	it("re-establishes retry ownership on restart and leaves active recovery leases alone", async () => {
@@ -867,7 +847,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await restarted.recover(new Map());
 		assert.equal(restartClock.pending(), 1, "recovery restores a manager-owned retry for retained orphan state");
 		await restartClock.advance(2_000);
-		await eventually(() => assert.equal(restarted.getLease(checkout.id), undefined));
+		assert.equal(restarted.getLease(checkout.id), undefined);
 
 		const active = await first.acquire({ signal: { ...signal(source.head), id: "b0f0f0f0-0000-4000-8000-000000000002" }, sourceRoot: source.root, projectId: "test-project-id" });
 		git.failNextRemove("EBUSY");
