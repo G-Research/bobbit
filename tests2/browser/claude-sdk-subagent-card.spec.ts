@@ -13,6 +13,7 @@ const CHILD_AGENT_ID = "sdk-child-card";
 const CHILD_TEXT = "CHILD_CARD_ONLY_TEXT";
 const LATE_CHILD_TEXT = "CHILD_CARD_RESUMED_TEXT";
 const CHILD_FAILURE = "CHILD_CARD_TERMINAL_FAILURE";
+const SAFE_CHILD_FAILURE = "Subagent failed";
 
 type SdkQueryArgs = { prompt: AsyncIterable<unknown>; options: Record<string, any> };
 
@@ -211,7 +212,8 @@ test.describe("Claude SDK embedded subagent card", () => {
 			await expect(reloadedParent).toContainText(LATE_CHILD_TEXT, { timeout: 20_000 });
 			queries[0].emitChildFailure();
 			await expect(reloadedParent.locator(`[data-subagent-agent-id="${CHILD_AGENT_ID}"]`)).toContainText("Failed");
-			await expect(reloadedParent.locator('[role="alert"]')).toContainText(CHILD_FAILURE);
+			await expect(reloadedParent.locator('[role="alert"]')).toContainText(SAFE_CHILD_FAILURE);
+			await expect(reloadedParent).not.toContainText(CHILD_FAILURE);
 			await expectNoRootChildProse(page);
 
 			// Child lifecycle never creates a Bobbit child session, sidebar row, task,
