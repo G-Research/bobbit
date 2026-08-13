@@ -365,6 +365,9 @@ test.describe("extension settings API", () => {
 
 		const legacyUrl = "https://legacy-hindsight.example.test";
 		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, autoRecall: false, apiKey: SECRET_A });
+		// PackStore writes are deliberately out-of-band. Exercise the same cache
+		// invalidation and lazy resolver rebuild that a Marketplace mutation uses.
+		await notifyPackFilesystemMutation(initialServerPackOrder);
 		const beforeRecord = target(await settings(projectA.id));
 		expect(beforeRecord.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "legacy" });
 		expect(runtimeProviderIds(gateway, projectA.id)).toContain(PROVIDER_ID);
@@ -411,7 +414,7 @@ test.describe("extension settings API", () => {
 		});
 		expect(disableB.status).toBe(200);
 		expect(target(await settings(projectB.id))).toMatchObject({ enabled: { effective: false, projectOverride: false }, configuration: { state: "disabled" } });
-		expect(runtimeProviderIds(gateway, projectA.id)).toContain(PROVIDER_ID);
+		expect(runtimeProviderIds(gateway, projectA.id)).not.toContain(PROVIDER_ID);
 		expect(runtimeProviderIds(gateway, projectB.id)).not.toContain(PROVIDER_ID);
 
 		await gateway.projectContextManager.remove(projectB.id);
