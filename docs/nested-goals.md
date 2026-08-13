@@ -312,14 +312,23 @@ flow described under [Governance](#governance).
 ### dependsOn DAG between siblings
 
 Sibling sub-goals can declare `dependsOn` edges, forming a DAG. A child with
-unmet dependencies is created in the scheduler's **`blocked`** state and
-**auto-resumes** (`blocked → todo`) when its **last dependency merges**.
+unmet dependencies is created in the scheduler's **`blocked`** state and is
+submitted to the scheduler when its **last dependency merges**. An eligible,
+unpaused child may then move from `blocked` to `todo` and start when capacity
+allows.
 
 > **`blocked` (dependency wait) is distinct from operator `paused`.** `blocked`
-> is a scheduler-managed state cleared automatically when dependencies resolve;
-> an operator **resume must not** clear dependency-blocking. Pause is a
-> human/operator action (see [Pause/resume cascade](#pauseresume-cascade)).
-> Spawn/plan responses surface `blocked: true` plus the `pendingDeps` list.
+> is scheduler-managed; an operator **resume must not** clear dependency
+> blocking or restart an existing session. If a dependency resolves while the
+> child is operator-paused, the scheduler leaves it `blocked` and queued without
+> starting it. That queue is in memory and is lost on restart. Resume can
+> reconstruct only a durable `blocked` child whose dependencies are now resolved
+> (or wake existing in-memory scheduler intent), then passes it back to the
+> scheduler. The scheduler alone retains lifecycle and capacity decisions;
+> unresolved dependencies remain blocked for normal dependency integration.
+> Pause is a human/operator action (see [Pause/resume
+> cascade](#pauseresume-cascade)). Spawn/plan responses surface `blocked: true`
+> plus the `pendingDeps` list.
 
 Dependency declarations are validated at spawn and on plan mutation:
 self-dependency → `400 SELF_DEPENDENCY`, unknown plan id → `400 UNKNOWN_PLAN_ID`,
@@ -478,8 +487,14 @@ be bypassed.
 The per-root semaphore **is** the scheduler — there is no poll loop. Cap default
 3, floor 1, hard max 8. At cap, a child is parked `blocked` (capacity) and
 enqueued FIFO; a terminal child event (merge / archive / completion) releases a
-permit and **synchronously starts the next eligible queued child**. The cap is
-set with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validated
+permit and **synchronously starts the next eligible queued child**. A paused
+queued child is not eligible: it remains queued without consuming a permit or
+starting a team. This FIFO queue is process-local, so neither membership nor
+order survives a gateway restart. Resume therefore wakes existing in-memory
+scheduler intent when present, or reconstructs only a durable `blocked` child
+whose dependencies are resolved; it never scans for arbitrary work or starts a
+team directly. The scheduler applies the normal lifecycle and capacity decision.
+The cap is set with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validated
 `[1,8]`); it is stored per-goal but **resolved at the root** for the semaphore,
 so operators effectively set concurrency on the root. Live cap resizes apply in
 place.
@@ -501,9 +516,17 @@ Boot-resume/nudge skip predicates apply only to those restored leads, so a
 paused restored lead is not nudged. Restart does not create a new Team Lead for
 an existing goal that is teamless.
 
-Resume re-enables spawns and prompt delivery but does not auto-restart sessions.
-Pause/resume is an **operator** action and is distinct from the scheduler's
-dependency `blocked` state.
+Resume re-enables spawns and prompt delivery but does not restart existing
+sessions or directly clear dependency `blocked` state. The scheduler's pending
+queue is volatile, so restart loses its membership and ordering. For every goal
+whose pause was actually cleared, resume may re-request only eligible auto-start
+child work with unpaused ancestors and resolved dependencies. Existing
+in-memory scheduler intent is reused; after restart, durable `state: "blocked"`
+with resolved dependencies reconstructs the narrow capacity-parked request.
+The route never starts a team itself. The scheduler retains lifecycle and
+capacity ownership, while unresolved dependencies remain blocked for normal
+dependency integration. Pause/resume is an **operator** action and is distinct
+from the scheduler's dependency `blocked` state.
 
 **Prompt rejection.** While a goal is paused, `POST /api/goals/:id/team/prompt`
 and `POST /api/sessions/:id/prompt` return `409 GOAL_PAUSED` before any team
