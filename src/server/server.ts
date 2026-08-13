@@ -7343,10 +7343,10 @@ async function handleApiRoute(
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
 		const registeredProjectIds = new Set(projectRegistry.list().map(p => p.id));
 		const sessionAuditModels = auditModels();
-		let sessions = sessionManager.listSessions().map((s) => ({
+		let sessions = sessionManager.listSessions().map((s) => auditSessionRow({
 			...s,
 			colorIndex: colorStore.get(s.id),
-		})).filter(s => !s.projectId || registeredProjectIds.has(s.projectId));
+		}, sessionAuditModels)).filter(s => !s.projectId || registeredProjectIds.has(s.projectId));
 		if (filterProjectId) {
 			sessions = sessions.filter(s => s.projectId === filterProjectId);
 		}
