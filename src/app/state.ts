@@ -519,6 +519,8 @@ export const state = {
 	statusShowBusy: loadSidebarStatusFilter("showBusy"),
 	statusShowRead: loadSidebarStatusFilter("showRead"),
 	statusShowTeams: loadSidebarStatusFilter("showTeams"),
+	/** Exact, client-local categorical inclusion created only by the explicit reveal action. */
+	sidebarRevealSessionId: null as string | null,
 	/** Independently persisted expansion state for the three By Status groups. */
 	statusCollapsedSections: loadSidebarStatusCollapsedSections(),
 	/** Whether the sidebar filters popover is open */
