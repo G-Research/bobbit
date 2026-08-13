@@ -1552,6 +1552,47 @@ type ReliableInFlightRecord = InFlightSteerRecord & {
 	deliveryReason?: string;
 };
 
+/**
+ * Merge the persisted queue and dispatch ledger into one occurrence projection.
+ * Queue rows win duplicate IDs, while accepted occurrence time and lane sequence
+ * keep rows stable as an occurrence moves from the queue into the ledger.
+ */
+function projectReliableDeliveryOutbox(
+	queued: ReliableQueuedMessage[],
+	ledger: ReliableInFlightRecord[],
+): ReliableQueuedMessage[] {
+	const ids = new Set(queued.map((row) => row.id));
+	const inFlight = ledger
+		.filter((record) => record.intentId && !ids.has(record.intentId))
+		.map((record): ReliableQueuedMessage => ({
+			id: record.intentId!,
+			text: record.text,
+			isSteered: (record.kind ?? "steer") === "steer",
+			createdAt: record.createdAt ?? record.dispatchEpoch ?? 0,
+			kind: record.kind ?? "steer",
+			targetTurn: record.targetTurn ?? "continuation",
+			sequence: record.sequence,
+			deliveryState: record.state === "uncertain" ? "uncertain" : "dispatching",
+			deliveryReason: record.deliveryReason,
+			retryable: record.retryable ?? false,
+			attemptId: record.attemptId,
+			dispatchEpoch: record.dispatchEpoch,
+			source: record.source,
+			author: record.author,
+		}));
+
+	return [...queued, ...inFlight].sort((left, right) => {
+		const created = (left.createdAt ?? 0) - (right.createdAt ?? 0);
+		if (created !== 0) return created;
+		if (left.targetTurn === right.targetTurn) {
+			const sequence = (left.sequence ?? Number.MAX_SAFE_INTEGER)
+				- (right.sequence ?? Number.MAX_SAFE_INTEGER);
+			if (sequence !== 0) return sequence;
+		}
+		return left.id.localeCompare(right.id);
+	});
+}
+
 function batchPromptId(prefix: string, rows: QueuedMessage[]): string {
 	const digest = createHash("sha256").update(rows.map((row) => row.id).join("\0")).digest("hex");
 	return `${prefix}:${digest}`;
@@ -5359,37 +5400,14 @@ export class SessionManager {
 		};
 	}
 
-	private projectedDeliveryOutbox(session: SessionInfo): ReliableQueuedMessage[] {
-		const queued = session.promptQueue.toArray() as ReliableQueuedMessage[];
-		const ids = new Set(queued.map((row) => row.id));
-		const inFlight = ((session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[])
-			.filter((record) => record.intentId)
-			.filter((record) => !ids.has(record.intentId!))
-			.map((record): ReliableQueuedMessage => ({
-				id: record.intentId!,
-				text: record.text,
-				isSteered: (record.kind ?? "steer") === "steer",
-				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
-				kind: record.kind ?? "steer",
-				targetTurn: record.targetTurn ?? "continuation",
-				sequence: record.sequence,
-				deliveryState: record.state === "uncertain" ? "uncertain" : "dispatching",
-				retryable: record.retryable ?? false,
-				source: record.source,
-				author: record.author,
-			}));
-		const orderedInFlight = inFlight.sort((left, right) => {
-			const leftCreated = left.createdAt ?? 0;
-			const rightCreated = right.createdAt ?? 0;
-			if (leftCreated !== rightCreated) return leftCreated - rightCreated;
-			const leftSequence = left.sequence ?? Number.MAX_SAFE_INTEGER;
-			const rightSequence = right.sequence ?? Number.MAX_SAFE_INTEGER;
-			if (leftSequence !== rightSequence) return leftSequence - rightSequence;
-			return left.id.localeCompare(right.id);
-		});
-		// PromptQueue order is already authoritative (including explicit user
-		// reorder); only ledger-only rows need deterministic sorting.
-		return [...queued, ...orderedInFlight];
+	/** Server-authoritative outbox used by live broadcasts and initial WS attach. */
+	projectDeliveryOutbox(sessionId: string): QueuedMessage[] {
+		const session = this.sessions.get(sessionId);
+		if (!session) return [];
+		return projectReliableDeliveryOutbox(
+			session.promptQueue.toArray() as ReliableQueuedMessage[],
+			(session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[],
+		);
 	}
 
 	private persistedInFlightSteerTexts(session: SessionInfo): InFlightSteerRecord[] | undefined {
@@ -5405,7 +5423,7 @@ export class SessionManager {
 
 	private broadcastQueue(session: SessionInfo, _opts?: { includeInFlightSteers?: boolean }): void {
 		const queue = session.promptQueue.toArray();
-		const projection = this.projectedDeliveryOutbox(session);
+		const projection = this.projectDeliveryOutbox(session.id);
 		broadcast(session.clients, {
 			type: "queue_update",
 			sessionId: session.id,

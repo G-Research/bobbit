@@ -168,46 +168,13 @@ function acceptedIntentId(msg: unknown): string {
 		: randomUUID();
 }
 
-function deliveryOutboxProjection(
-	session: NonNullable<ReturnType<SessionManager["getSession"]>>,
-): Record<string, unknown>[] {
-	const queued = session.promptQueue.toArray() as unknown as Record<string, unknown>[];
-	const ids = new Set(queued.map((row) => row.id).filter((id): id is string => typeof id === "string"));
-	const inFlight = (session.inFlightSteerTexts as unknown as Array<Record<string, unknown>> | undefined ?? [])
-		.filter((row) => typeof row.intentId === "string" && !ids.has(row.intentId))
-		.filter((row) => row.state !== "received" && row.state !== "retired")
-		.map((row) => ({
-			id: row.intentId,
-			text: row.text,
-			isSteered: (row.kind ?? "steer") === "steer",
-			createdAt: row.createdAt ?? row.dispatchEpoch ?? Date.now(),
-			kind: row.kind ?? "steer",
-			targetTurn: row.targetTurn ?? "continuation",
-			sequence: row.sequence,
-			deliveryState: row.state === "uncertain" ? "uncertain" : "dispatching",
-			retryable: row.retryable ?? false,
-			source: row.source,
-			author: row.author,
-		}));
-	const orderedInFlight = inFlight.sort((left, right) => {
-		const leftCreated = typeof left.createdAt === "number" ? left.createdAt : 0;
-		const rightCreated = typeof right.createdAt === "number" ? right.createdAt : 0;
-		if (leftCreated !== rightCreated) return leftCreated - rightCreated;
-		const leftSequence = typeof left.sequence === "number" ? left.sequence : Number.MAX_SAFE_INTEGER;
-		const rightSequence = typeof right.sequence === "number" ? right.sequence : Number.MAX_SAFE_INTEGER;
-		if (leftSequence !== rightSequence) return leftSequence - rightSequence;
-		const leftId = typeof left.id === "string" ? left.id : "";
-		const rightId = typeof right.id === "string" ? right.id : "";
-		return leftId.localeCompare(rightId);
-	});
-	return [...queued, ...orderedInFlight];
-}
-
 function intentProjection(
-	session: NonNullable<ReturnType<SessionManager["getSession"]>>,
+	sessionManager: SessionManager,
+	sessionId: string,
 	intentId: string,
 ): Record<string, unknown> | undefined {
-	return deliveryOutboxProjection(session).find((row) => row.id === intentId);
+	return sessionManager.projectDeliveryOutbox(sessionId)
+		.find((row) => row.id === intentId) as unknown as Record<string, unknown> | undefined;
 }
 
 function sessionModelSelectionRequired(
@@ -812,13 +779,12 @@ export function handleWebSocketConnection(
 
 	const launchAcceptedDelivery = (
 		intentId: string,
-		session: NonNullable<ReturnType<SessionManager["getSession"]>>,
 		delivery: Promise<unknown> | unknown,
 	): void => {
 		// SessionManager admission is synchronous up to its first await: by this
 		// point the exact occurrence is persisted and projected, while Pi delivery
 		// continues independently. A duplicate frame resolves to the same row.
-		const accepted = intentProjection(session, intentId);
+		const accepted = intentProjection(sessionManager, sessionId, intentId);
 		let receiptSent = false;
 		if (accepted) {
 			sendIntentUpdate(accepted);
@@ -828,8 +794,7 @@ export function handleWebSocketConnection(
 			// Cold restore/replacement admission may cross an await before persistence.
 			// Emit its receipt when the authoritative manager finally exposes the row.
 			if (receiptSent) return;
-			const current = sessionManager.getSession(sessionId);
-			const admitted = current ? intentProjection(current, intentId) : undefined;
+			const admitted = intentProjection(sessionManager, sessionId, intentId);
 			if (admitted) {
 				sendIntentUpdate(admitted);
 				return;
@@ -846,8 +811,7 @@ export function handleWebSocketConnection(
 				}, settlement);
 			}
 		}, (error) => {
-			const current = sessionManager.getSession(sessionId);
-			const failed = current ? intentProjection(current, intentId) : undefined;
+			const failed = intentProjection(sessionManager, sessionId, intentId);
 			if (failed) sendIntentUpdate(failed, failed.deliveryState === "failed" ? "failed" : undefined);
 			console.warn(`[ws-handler] intent delivery did not settle session=${sessionId} intent=${intentId} outcome=${failed?.deliveryState ?? "retained"}`);
 			void error;
@@ -1063,7 +1027,7 @@ export function handleWebSocketConnection(
 
 			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
-			const deliveryOutbox = deliveryOutboxProjection(session);
+			const deliveryOutbox = sessionManager.projectDeliveryOutbox(sessionId);
 			send(ws, { type: "queue_update", sessionId, queue: deliveryOutbox } as unknown as ServerMessage);
 			send(ws, { type: "delivery_outbox", sessionId, outbox: deliveryOutbox } as unknown as ServerMessage);
 			for (const intentId of sessionManager.cancelledIntentIds(sessionId)) {
@@ -1256,7 +1220,7 @@ export function handleWebSocketConnection(
 				}
 				case "prompt": {
 					const intentId = acceptedIntentId(msg);
-					const existingIntent = intentProjection(session, intentId);
+					const existingIntent = intentProjection(sessionManager, sessionId, intentId);
 					if (existingIntent) {
 						sendIntentUpdate(existingIntent);
 						break;
@@ -1427,12 +1391,12 @@ export function handleWebSocketConnection(
 						suppressTitleGen: msg.suppressTitleGen === true,
 						intentId,
 					});
-					launchAcceptedDelivery(intentId, session, delivery);
+					launchAcceptedDelivery(intentId, delivery);
 					break;
 				}
 				case "steer": {
 					const intentId = acceptedIntentId(msg);
-					const existingIntent = intentProjection(session, intentId);
+					const existingIntent = intentProjection(sessionManager, sessionId, intentId);
 					if (existingIntent) {
 						sendIntentUpdate(existingIntent);
 						break;
@@ -1461,7 +1425,7 @@ export function handleWebSocketConnection(
 							author: LOCAL_USER_AUTHOR,
 							intentId,
 						});
-					launchAcceptedDelivery(intentId, session, delivery);
+					launchAcceptedDelivery(intentId, delivery);
 					break;
 				}
 				case "retry_intent": {
@@ -1471,11 +1435,11 @@ export function handleWebSocketConnection(
 						break;
 					}
 					const retry = manager.retryIntent(sessionId, msg.intentId);
-					if (retry === false && !intentProjection(session, msg.intentId)) {
+					if (retry === false && !intentProjection(sessionManager, sessionId, msg.intentId)) {
 						send(ws, { type: "error", message: "Intent is unknown or not retryable", code: "INTENT_NOT_RETRYABLE" });
 						break;
 					}
-					launchAcceptedDelivery(msg.intentId, session, retry);
+					launchAcceptedDelivery(msg.intentId, retry);
 					break;
 				}
 				case "steer_queued":
