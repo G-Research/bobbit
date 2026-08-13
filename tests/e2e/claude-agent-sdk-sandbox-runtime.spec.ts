@@ -5,11 +5,13 @@
  * proves SessionManager's production sandbox wiring, recovery, persistence,
  * and transcript ownership without a Docker daemon or subscription.
  */
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "./gateway-harness.js";
 import { apiFetch, connectWs, defaultProjectId, gitCwd, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
+import { isDockerSandboxAvailable, SANDBOX_IMAGE } from "./test-utils/docker.js";
 
 const SDK_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OAUTH_POLICY = "ANTHROPIC_OAUTH_TOKEN";
@@ -197,6 +199,7 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		const sandbox = {
 			getContainerId: async () => containerId,
 			hasClaudeAgentSdkCapability: async () => capable,
+			prepareClaudeAgentSdkSession: async () => undefined,
 			createWorktree: async (branch: string) => `/workspace-wt/${branch}`,
 			getStatus: () => ({ containerId, status: "ready", projectId }),
 		};
@@ -343,6 +346,36 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 				}),
 			}).catch(() => undefined);
 			await apiFetch(`/api/projects/${projectId}/config`, { method: "PUT", body: JSON.stringify({ sandbox: "none", sandbox_tokens: null }) }).catch(() => undefined);
+		}
+	});
+
+	test("keeps an OAuth-bearing SDK process outside the tool UID while workspace and SDK state survive restart", () => {
+		const imageHasSdkUser = isDockerSandboxAvailable() && (() => {
+			try {
+				execFileSync("docker", ["run", "--rm", SANDBOX_IMAGE, "id", "-u", "bobbit-sdk"], { stdio: "ignore", timeout: 10_000 });
+				return true;
+			} catch { return false; }
+		})();
+		test.skip(!imageHasSdkUser, "requires a locally rebuilt bobbit-agent image with the SDK user");
+		const name = `bobbit-sdk-uid-${randomUUID().slice(0, 8)}`;
+		const sentinel = `sdk-proc-${randomUUID()}`;
+		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf8", timeout: 20_000 });
+		try {
+			docker(["run", "-d", "--name", name, SANDBOX_IMAGE, "sleep", "infinity"]);
+			docker(["exec", "-u", "root", name, "install", "-d", "-o", "bobbit-sdk", "-g", "bobbit-sdk", "-m", "700", "/bobbit-state/claude-agent-sdk/sentinel"]);
+			docker(["exec", "-d", "-u", "bobbit-sdk", "-e", `CLAUDE_CODE_OAUTH_TOKEN=${sentinel}`, name, "sh", "-c", "printf sdk-history > /bobbit-state/claude-agent-sdk/sentinel/history; exec sleep 30"]);
+
+			// An allowed tool shell scans all peer process environments. It must not
+			// observe even the secret variable name from the separate SDK UID.
+			const scan = docker(["exec", "-u", "node", name, "sh", "-c", "for p in /proc/[0-9]*/environ; do grep -azl '^CLAUDE_CODE_OAUTH_TOKEN=' \"$p\" 2>/dev/null || true; done"]);
+			expect(scan).toBe("");
+			expect(scan).not.toContain(sentinel);
+			docker(["exec", "-u", "node", name, "sh", "-c", "printf workspace-ok > /workspace/sdk-uid-workspace; test \"$(cat /workspace/sdk-uid-workspace)\" = workspace-ok"]);
+			docker(["restart", name]);
+			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/sentinel/history"])).toBe("sdk-history");
+			expect(docker(["exec", "-u", "node", name, "cat", "/workspace/sdk-uid-workspace"])).toBe("workspace-ok");
+		} finally {
+			try { docker(["rm", "-f", name]); } catch { /* test cleanup */ }
 		}
 	});
 });

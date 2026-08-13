@@ -158,7 +158,7 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		expect(second.input).toMatchObject({ containerId: "container-worktree", cwd: "/workspace-wt/goal-branch" });
 		expect(first.options.args).toEqual(["--sdk-protocol", "opaque-sdk-argument"]);
 		expect(first.input.env).toMatchObject({
-			HOME: "/home/node",
+			HOME: "/home/bobbit-sdk",
 			PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			TMPDIR: "/tmp",
 			LANG: "C.UTF-8",
@@ -175,7 +175,7 @@ describe("Claude Agent SDK sandbox runtime", () => {
 			expect(serializedInput).not.toContain("EVIL_HOST_ENV");
 			expect(launch.options.args).not.toContain("switch_session");
 		}
-		expect(fresh.query.options.env).toMatchObject({ HOME: "/home/node", BOBBIT_SESSION_ID: "fresh-session" });
+		expect(fresh.query.options.env).toMatchObject({ HOME: "/home/bobbit-sdk", BOBBIT_SESSION_ID: "fresh-session" });
 		expect(fresh.query.options.env).not.toHaveProperty("ANTHROPIC_API_KEY");
 		await Promise.all([fresh.bridge.stop(), worktree.bridge.stop()]);
 	});
@@ -238,7 +238,7 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		await expect(access.getSessionMessages(SDK_ID)).resolves.toHaveLength(1);
 		expect(executions).toHaveLength(2);
 		for (const args of executions) {
-			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-w", "/workspace-wt/history", "container-history", "node", "--input-type=module"]));
+			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-u", "bobbit-sdk", "-w", "/workspace-wt/history", "container-history", "node", "--input-type=module"]));
 			expect(args.join(" ")).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/history-session");
 			expect(args.join(" ")).not.toMatch(/OAUTH|BOBBIT_TOKEN|ANTHROPIC_API_KEY/);
 		}

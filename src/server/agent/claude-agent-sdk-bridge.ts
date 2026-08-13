@@ -22,7 +22,7 @@ import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { defaultClaudeAgentSdkSessionAccessDeps, type ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
 import { ClaudeAgentSdkUnavailableError, normalizeClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
-import { createClaudeSdkDockerSpawn, isSandboxContainerCwd, type ClaudeSdkDockerSpawn } from "./docker-exec-spawn.js";
+import { CLAUDE_AGENT_SDK_DOCKER_HOME, createClaudeSdkDockerSpawn, isSandboxContainerCwd, type ClaudeSdkDockerSpawn } from "./docker-exec-spawn.js";
 
 import type { Options, Query, SDKUserMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
@@ -165,7 +165,7 @@ export function buildClaudeAgentSdkEnv(options: Pick<ClaudeAgentSdkBridgeOptions
 	if (launch) {
 		// A closed container environment: do not inherit host config or credentials.
 		return {
-			HOME: "/home/node",
+			HOME: CLAUDE_AGENT_SDK_DOCKER_HOME,
 			PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			TMPDIR: "/tmp",
 			LANG: "C.UTF-8",

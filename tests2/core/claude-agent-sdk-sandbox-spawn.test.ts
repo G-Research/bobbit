@@ -63,7 +63,7 @@ describe("Claude Agent SDK sandbox spawn", () => {
 			containerId: "sandbox-current",
 			cwd: "/workspace-wt/team/session",
 			env: {
-			HOME: "/home/node",
+			HOME: "/home/bobbit-sdk",
 			PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			TMPDIR: "/tmp",
 			LANG: "C.UTF-8",
@@ -100,8 +100,8 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		expect(bin).toBe("docker");
 		expect(options).toMatchObject({ stdio: ["pipe", "pipe", "pipe"] });
 		expect(args).toEqual([
-			"exec", "-i",
-			"-e", "HOME=/home/node",
+			"exec", "-i", "-u", "bobbit-sdk",
+			"-e", "HOME=/home/bobbit-sdk",
 			"-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"-e", "TMPDIR=/tmp",
 			"-e", "LANG=C.UTF-8",
@@ -133,7 +133,7 @@ describe("Claude Agent SDK sandbox spawn", () => {
 			},
 		});
 		expect(env).toEqual({
-			HOME: "/home/node",
+			HOME: "/home/bobbit-sdk",
 			PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			TMPDIR: "/tmp",
 			LANG: "C.UTF-8",
@@ -185,6 +185,9 @@ describe("Claude Agent SDK sandbox spawn", () => {
 	it("fails before spawn for invalid container paths and terminates children with missing pipe stdio", () => {
 		const spawn = vi.fn(() => dockerChild());
 		expect(() => spawnDockerExec({
+			containerId: "sandbox", cwd: "/workspace", env: {}, command: ["command"], user: "root" as any, spawn: spawn as any,
+		})).toThrow("Docker sandbox execution user is invalid");
+		expect(() => spawnDockerExec({
 			containerId: "sandbox", cwd: "/host/project", env: {}, command: ["command"], spawn: spawn as any,
 		})).toThrow("Docker sandbox working directory is invalid");
 		expect(() => spawnDockerExec({
@@ -211,9 +214,12 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		expect(rendered).not.toMatch(/oauth-secret|api-secret|gateway-secret|cloud-secret/);
 
 		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		let toolArgs: string[] = [];
 		spawnDockerExec({
-			containerId: "sandbox", cwd: "/workspace", env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth-secret" }, command: ["command"], spawn: (() => dockerChild()) as any,
+			containerId: "sandbox", cwd: "/workspace", env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth-secret" }, command: ["command"],
+			spawn: ((_command: string, args: string[]) => { toolArgs = args; return dockerChild(); }) as any,
 		});
+		expect(toolArgs).not.toContain("-u");
 		expect(log.mock.calls.join(" ")).not.toContain("oauth-secret");
 	});
 
@@ -241,17 +247,20 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		const sandbox = new ProjectSandbox({ projectId: "sdk-capability", projectDir: "/host/project", repoUrl: "https://example.test/repo.git", image: "bobbit:test" });
 		(sandbox as any).containerId = "container-current";
 		const inspect = vi.fn(async () => ({ stdout: `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`, stderr: "" }));
-		const wrapper = vi.fn(async () => "");
+		const wrapper = vi.fn(async (_containerId: string, args: string[]) => args[0] === "id" ? "1001\n" : "");
 		(sandbox as any).execDocker = inspect;
 		(sandbox as any)._dockerExec = wrapper;
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(true);
 		expect(inspect).toHaveBeenCalledWith(expect.arrayContaining(["image", "inspect", "--format"]), expect.any(Object));
-		expect(wrapper).toHaveBeenCalledWith("container-current", ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
+		expect(wrapper).toHaveBeenNthCalledWith(1, "container-current", ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
+		expect(wrapper).toHaveBeenNthCalledWith(2, "container-current", ["id", "-u", "bobbit-sdk"], { timeout: 5_000 });
 
 		(sandbox as any).execDocker = async () => ({ stdout: "0.3.221\n", stderr: "" });
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
 		(sandbox as any).execDocker = async () => ({ stdout: `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`, stderr: "" });
 		(sandbox as any)._dockerExec = async () => { throw new Error("missing wrapper"); };
+		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
+		(sandbox as any)._dockerExec = async (_containerId: string, args: string[]) => args[0] === "id" ? "1000\n" : "";
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
 	});
 });

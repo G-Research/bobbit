@@ -22,6 +22,7 @@ import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNam
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
+import { CLAUDE_AGENT_SDK_DOCKER_UID, CLAUDE_AGENT_SDK_DOCKER_USER, isSandboxContainerCwd } from "./docker-exec-spawn.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
@@ -614,6 +615,31 @@ export class ProjectSandbox {
 		return this._dockerExec(containerId, args, opts);
 	}
 
+	/**
+	 * Prepare exactly one SDK session's private config directory and its active
+	 * workspace. The fixed SDK user never shares a UID with model-invocable
+	 * `node` processes; a collaboration group grants both users workspace write
+	 * access without making the SDK config group-readable.
+	 */
+	async prepareClaudeAgentSdkSession(cwd: string, sessionId: string): Promise<void> {
+		if (!isSandboxContainerCwd(cwd) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(sessionId)) {
+			throw new Error("Claude Agent SDK sandbox session path is invalid");
+		}
+		const containerId = await this.getContainerId();
+		const configDir = `/bobbit-state/claude-agent-sdk/${sessionId}`;
+		await this.execDocker([
+			"exec", "-i", "-u", "root", containerId,
+			"install", "-d", "-o", CLAUDE_AGENT_SDK_DOCKER_USER, "-g", CLAUDE_AGENT_SDK_DOCKER_USER, "-m", "700", configDir,
+		], { timeout: 10_000, env: DOCKER_ENV });
+		// Both commands are fixed and run from a validated container CWD. GNU
+		// recursive ownership operations do not follow symlinks by default.
+		for (const command of [["chgrp", "-R", CLAUDE_AGENT_SDK_DOCKER_USER, "."], ["chmod", "-R", "g+rwX", "."]]) {
+			await this.execDocker([
+				"exec", "-i", "-u", "root", "-w", cwd, containerId, ...command,
+			], { timeout: 30_000, env: DOCKER_ENV });
+		}
+	}
+
 	/** Exact image and wrapper probe for the SDK-only sandbox launch path. */
 	async hasClaudeAgentSdkCapability(): Promise<boolean> {
 		try {
@@ -623,7 +649,8 @@ export class ProjectSandbox {
 			if (stdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION) return false;
 			const containerId = await this.getContainerId();
 			await this._dockerExec(containerId, ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
-			return true;
+			const sdkUid = (await this._dockerExec(containerId, ["id", "-u", CLAUDE_AGENT_SDK_DOCKER_USER], { timeout: 5_000 })).trim();
+			return sdkUid === CLAUDE_AGENT_SDK_DOCKER_UID;
 		} catch {
 			return false;
 		}

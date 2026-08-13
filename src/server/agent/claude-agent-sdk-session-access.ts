@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
 import { ClaudeAgentSdkUnavailableError, normalizeClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
-import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
+import { CLAUDE_AGENT_SDK_DOCKER_HOME, CLAUDE_AGENT_SDK_DOCKER_USER, isSandboxContainerCwd } from "./docker-exec-spawn.js";
 
 export interface SdkSessionInfo {
 	readonly sessionId: string;
@@ -193,8 +193,8 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 		includeSystemMessages?: boolean;
 	}): Promise<T> => {
 		const output = await execute([
-			"exec", "-i", "-w", input.cwd,
-			"-e", "HOME=/home/node", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, "-w", input.cwd,
+			"-e", `HOME=${CLAUDE_AGENT_SDK_DOCKER_HOME}`, "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"-e", `CLAUDE_CONFIG_DIR=${dir}`,
 			input.containerId, "node", "--input-type=module", "-e", SANDBOX_SDK_READER,
 			request.agentId ?? "", request.operation, request.sessionId, input.cwd,

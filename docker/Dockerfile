@@ -76,9 +76,18 @@ LABEL bobbit.claude-agent-sdk-version=${CLAUDE_AGENT_SDK_VERSION}
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
 RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
 
-# Run as non-root user. node:22-slim includes a 'node' user (uid=1000).
-# This ensures files created in /workspace via bind mount are owned by uid=1000
-# on the host, matching typical developer user IDs.
+# Keep subscription-bearing Claude SDK processes on a distinct, fixed
+# unprivileged UID. Model-invocable Pi/tool processes remain `node`; Linux
+# same-UID /proc access must not expose the SDK process environment to them.
+# The shared group is only for session workspace collaboration. The SDK config
+# directory stays SDK-user-only (0700), so group membership grants no credential
+# or transcript access.
+RUN groupadd --gid 1001 bobbit-sdk \
+    && useradd --uid 1001 --gid bobbit-sdk --create-home --shell /usr/sbin/nologin bobbit-sdk \
+    && usermod --append --groups bobbit-sdk node
+
+# Run ordinary sandbox processes as non-root `node` (uid=1000). This ensures
+# files created in /workspace via bind mount retain the existing ownership.
 USER node
 
 # Configure git for Windows host compatibility (CRLF line endings).

@@ -273,6 +273,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		const piAuth = JSON.stringify({ anthropic: { type: "oauth", access: "pi-access", refresh: "pi-refresh", expires: 2 }, "openai-codex": { type: "oauth", access: "pi-codex" } });
 		writeFileSync(piAuthPath, piAuth, "utf8");
 		const hasClaudeAgentSdkCapability = vi.fn(async () => true);
+		const prepareClaudeAgentSdkSession = vi.fn(async () => undefined);
 		const manager: any = new SessionManager();
 		manager.projectContextManager = null;
 		manager.projectConfigStore = {
@@ -288,7 +289,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		manager.sandboxTokenStore = scopedStore;
 		manager.sandboxManager = {
 			ensureForProject: async () => {},
-			get: () => ({ getContainerId: async () => "container-sdk", hasClaudeAgentSdkCapability }),
+			get: () => ({ getContainerId: async () => "container-sdk", hasClaudeAgentSdkCapability, prepareClaudeAgentSdkSession }),
 		};
 		const bridgeOptions: any = {
 			runtime: "claude-agent-sdk",
@@ -299,6 +300,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-sdk", { projectId: "project-sdk" }), true);
 		assert.equal(hasClaudeAgentSdkCapability.mock.calls.length, 1);
+		assert.deepEqual(prepareClaudeAgentSdkSession.mock.calls, [["/workspace-wt/sdk", "session-sdk"]]);
 		assert.deepEqual(scopedStore.register.mock.calls, [["project-sdk"]]);
 		assert.deepEqual(scopedStore.addSession.mock.calls, [["project-sdk", "session-sdk"]]);
 		assert.deepEqual(scopedStore.addGoal.mock.calls, [["project-sdk", "goal-sdk"]]);

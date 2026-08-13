@@ -4107,6 +4107,11 @@ export class SessionManager {
 			if (!sdkOAuthAccessToken || !bridgeOptions.gatewayToken || !bridgeOptions.gatewayUrl || !bridgeOptions.cwd) {
 				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE: enable the Anthropic OAuth sandbox token policy and sign in again");
 			}
+			try {
+				await sandbox.prepareClaudeAgentSdkSession(bridgeOptions.cwd, sessionId);
+			} catch {
+				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: SDK sandbox permissions are unavailable; rebuild the Docker sandbox image and retry");
+			}
 			bridgeOptions.claudeSdkSandboxLaunch = {
 				containerId,
 				cwd: bridgeOptions.cwd,

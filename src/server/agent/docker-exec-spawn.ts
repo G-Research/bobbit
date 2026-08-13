@@ -3,10 +3,26 @@ import type { SpawnOptions, SpawnedProcess } from "@anthropic-ai/claude-agent-sd
 
 export type DockerSpawn = typeof spawn;
 
+/** Fixed image identity for OAuth-bearing Claude SDK processes only. */
+export const CLAUDE_AGENT_SDK_DOCKER_USER = "bobbit-sdk";
+export const CLAUDE_AGENT_SDK_DOCKER_UID = "1001";
+export const CLAUDE_AGENT_SDK_DOCKER_HOME = "/home/bobbit-sdk";
+
+/** Server-owned execution identities; arbitrary Docker `-u` values are never accepted. */
+export type DockerExecUser = "claude-agent-sdk";
+
+function dockerUserArg(user: DockerExecUser | undefined): string | undefined {
+	if (user === undefined) return undefined;
+	if (user === "claude-agent-sdk") return CLAUDE_AGENT_SDK_DOCKER_USER;
+	throw new Error("Docker sandbox execution user is invalid");
+}
+
 export interface DockerExecCommand {
 	containerId: string;
 	cwd: string;
 	env: Record<string, string | undefined>;
+	/** Selects only a fixed server-owned image user, never a caller-supplied Docker identity. */
+	user?: DockerExecUser;
 	/** Appended after the fixed environment; preserves legacy duplicate override order. */
 	envEntries?: Iterable<readonly [string, string | undefined]>;
 	command: readonly string[];
@@ -56,6 +72,8 @@ export function spawnDockerExec(
 	if (input.command.length === 0) throw new Error("Docker sandbox command is required");
 
 	const execArgs = ["exec", "-i"];
+	const dockerUser = dockerUserArg(input.user);
+	if (dockerUser) execArgs.push("-u", dockerUser);
 	for (const [name, value] of [...Object.entries(input.env), ...(input.envEntries ? [...input.envEntries] : [])]) {
 		if (!validEnvName(name) || value === undefined) continue;
 		execArgs.push("-e", `${name}=${value}`);
@@ -100,7 +118,13 @@ export function createClaudeSdkDockerSpawn(input: ClaudeSdkDockerSpawn): (option
 				.map((name) => [name, options.env[name]] as const)
 				.filter((entry): entry is [string, string] => typeof entry[1] === "string"),
 		);
-		const child = spawnDockerExec({ ...input, env: { ...input.env, ...sdkMetadata }, drainStderr: true }, options.args);
+		const child = spawnDockerExec({
+			...input,
+			// Only the OAuth-bearing SDK process uses the image's separate UID.
+			user: "claude-agent-sdk",
+			env: { ...input.env, ...sdkMetadata },
+			drainStderr: true,
+		}, options.args);
 		if (!child.stdin || !child.stdout) {
 			child.kill("SIGTERM");
 			throw new Error("Docker sandbox process did not provide pipe stdio");

@@ -25,6 +25,7 @@ import { readAuthorSidecar } from "./author-sidecar.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions } from "./session-runtime.js";
+import { claudeAgentSdkUnavailableDiagnostic, isClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 import {
 	rebaseAgentTranscriptCwdMetadataFile as rebaseAgentTranscriptCwdMetadataFileLegacy,
 	rebaseTranscriptCwdMetadataContent,
@@ -546,7 +547,7 @@ export function nextBackoffDelay(
 
 export async function withRetry<T>(
 	fn: () => Promise<T>,
-	opts: { retries: number; delays: number[]; label: string; sessionId: string; nonRetryable?: (err: Error) => boolean },
+	opts: { retries: number; delays: number[]; label: string; sessionId: string; nonRetryable?: (err: Error) => boolean; errorMessage?: (err: Error) => string },
 ): Promise<T> {
 	let lastError: Error | undefined;
 	for (let attempt = 0; attempt <= opts.retries; attempt++) {
@@ -559,7 +560,7 @@ export async function withRetry<T>(
 				const delay = opts.delays[attempt] ?? opts.delays[opts.delays.length - 1];
 				console.warn(
 					`[session-setup] ${opts.label} failed for ${opts.sessionId} (attempt ${attempt + 1}/${opts.retries + 1}), ` +
-					`retrying in ${delay}ms: ${lastError.message}`,
+					`retrying in ${delay}ms: ${opts.errorMessage?.(lastError) ?? lastError.message}`,
 				);
 				await new Promise(resolve => setTimeout(resolve, delay));
 			}
@@ -1703,7 +1704,11 @@ export async function executeWorktreeAsync(
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	// SDK extension preflight is a real `docker exec`; defer it until the
+	// sandbox has supplied its current container ID and container-native CWD.
+	// Pi's existing activation timing remains unchanged.
+	const deferSandboxSdkToolActivation = plan.sandboxed && plan.bridgeOptions.runtime === "claude-agent-sdk";
+	if (!deferSandboxSdkToolActivation) await resolveToolActivation(plan, ctx);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
@@ -1723,7 +1728,14 @@ export async function executeWorktreeAsync(
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
 			}),
-			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
+			{
+				retries: 1,
+				delays: [1000],
+				label: "wireSandbox",
+				sessionId: plan.id,
+				nonRetryable: isUnresolvedHeadWorktreeError,
+				errorMessage: error => isClaudeAgentSdkUnavailableError(error) ? claudeAgentSdkUnavailableDiagnostic(error) : error.message,
+			},
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
 		});
@@ -1739,6 +1751,7 @@ export async function executeWorktreeAsync(
 			resolvePrompt(plan, ctx);
 		}
 	}
+	if (deferSandboxSdkToolActivation) await resolveToolActivation(plan, ctx);
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.
 	// For team-spawned sandboxed sessions, plan.sandboxBranch differs from plan.branch
