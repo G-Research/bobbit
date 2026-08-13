@@ -306,10 +306,50 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.equal(commands[0][5], "sh");
 		assert.match(commands[0][7], /chown -h root:root/);
 		assert.match(commands[0][7], /find -P/);
+		assert.match(commands[0][7], /-links \+1/);
+		assert.match(commands[0][7], /chmod 0700/);
+		assert.match(commands[0][7], /chmod 0600/);
 		assert.match(commands[0][7], /chown -h bobbit-sdk:bobbit-sdk/);
 		assert.match(commands[1].at(-1) ?? "", /test -O/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/host/project", "sdk-session"), /session path is invalid/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session path is invalid/);
+	});
+
+	it("locks SDK state before reconnecting an existing container", async () => {
+		const sandbox = makeSandbox();
+		const calls: string[] = [];
+		(sandbox as any)._findContainerByLabel = async () => "existing-sdk-container";
+		(sandbox as any)._hasStaleAgentDirMounts = async () => false;
+		(sandbox as any)._hasStaleStateDirMounts = async () => false;
+		(sandbox as any)._isContainerImageStale = async () => false;
+		(sandbox as any)._isContainerRunning = async () => true;
+		(sandbox as any)._hasSecureClaudeAgentSdkStateParent = async (id: string) => { calls.push(`verify:${id}`); return true; };
+		(sandbox as any)._dockerExec = async (_id: string, args: string[]) => { calls.push(`exec:${args[0]}`); return ""; };
+
+		await (sandbox as any)._initContainer();
+
+		assert.equal(calls[0], "verify:existing-sdk-container");
+		assert.equal(calls[1], "exec:echo");
+		assert.equal((sandbox as any).containerId, "existing-sdk-container");
+	});
+
+	it("replaces a running container whose SDK state predates the lifecycle lock", async () => {
+		const sandbox = makeSandbox();
+		const calls: Call[] = [];
+		(sandbox as any)._findContainerByLabel = async () => "legacy-sdk-container";
+		(sandbox as any)._hasStaleAgentDirMounts = async () => false;
+		(sandbox as any)._hasStaleStateDirMounts = async () => false;
+		(sandbox as any)._isContainerImageStale = async () => false;
+		(sandbox as any)._isContainerRunning = async () => true;
+		(sandbox as any)._hasSecureClaudeAgentSdkStateParent = async () => false;
+		(sandbox as any)._removeContainer = async (id: string) => { calls.push(["remove", id]); };
+		(sandbox as any)._createContainer = async () => { calls.push("create"); (sandbox as any).containerId = "replacement-sdk-container"; };
+		(sandbox as any)._runInitSequence = async () => { calls.push("init"); };
+
+		await (sandbox as any)._initContainer();
+
+		assert.deepEqual(calls, [["remove", "legacy-sdk-container"], "create", "init"]);
+		assert.equal((sandbox as any).containerId, "replacement-sdk-container");
 	});
 
 	it("fails closed before chmod when the unprivileged workspace preparation is incompatible", async () => {

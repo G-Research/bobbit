@@ -41,21 +41,49 @@ const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
 export const CLAUDE_AGENT_SDK_SANDBOX_VERSION = "0.3.222";
 const SDK_STATE_ENTRY_LIMIT = 10_000;
 
-// Runs as root with a validated session id passed as $1. Lock the mounted
-// parent before examining children: node can no longer replace a session dir
-// between its lstat and migration. The bounded find is physical (-P), rejects
-// every symlink, and chowns each entry without dereferencing it.
-const PREPARE_CLAUDE_SDK_STATE = `
+// Lock the mounted parent before any node/Pi/tool process is exposed. It stays
+// root-owned and traversal-only, so a model cannot replace a legacy child while
+// root migrates it later.
+const PREPARE_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
-session="$1"
-case "$session" in
-  *[!A-Za-z0-9_-]*|"") exit 64 ;;
-esac
+marker="$parent/.bobbit-sdk-state-parent-lock-v1"
 [ -d "$parent" ] && [ ! -L "$parent" ]
 chown -h root:root "$parent"
 chmod 0711 "$parent"
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+if [ -e "$marker" ] || [ -L "$marker" ]; then
+  [ -f "$marker" ] && [ ! -L "$marker" ] || exit 65
+else
+  : > "$marker"
+fi
+chown -h root:root "$marker"
+chmod 0600 "$marker"
+[ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
+`;
+
+// A running container without this marker may have exposed node to legacy
+// state before this lifecycle gate existed. Replace it rather than merely
+// locking paths after an untrusted process may already hold an open descriptor.
+const VERIFY_CLAUDE_SDK_STATE_PARENT = `
+set -eu
+parent=/bobbit-state/claude-agent-sdk
+marker="$parent/.bobbit-sdk-state-parent-lock-v1"
+[ -d "$parent" ] && [ ! -L "$parent" ]
+[ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+[ -f "$marker" ] && [ ! -L "$marker" ]
+[ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
+`;
+
+// Runs as root with a validated session id passed as $1. The bounded physical
+// walk rejects links, non-file entries, and hard links before changing legacy
+// ownership. Directories and files receive exact private modes before OAuth is
+// ever passed to the SDK process.
+const PREPARE_CLAUDE_SDK_STATE = `${PREPARE_CLAUDE_SDK_STATE_PARENT}
+session="$1"
+case "$session" in
+  *[!A-Za-z0-9_-]*|"") exit 64 ;;
+esac
 dir="$parent/$session"
 if [ -L "$dir" ]; then exit 65; fi
 if [ -e "$dir" ]; then
@@ -63,14 +91,20 @@ if [ -e "$dir" ]; then
 else
   install -d -o ${CLAUDE_AGENT_SDK_DOCKER_USER} -g ${CLAUDE_AGENT_SDK_DOCKER_USER} -m 0700 "$dir"
 fi
-# Lock the session root before walking old node-owned descendants.
+# Lock the root before walking old node-owned descendants.
 chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} "$dir"
 chmod 0700 "$dir"
 [ "$(stat -c '%u:%a' "$dir")" = "${CLAUDE_AGENT_SDK_DOCKER_UID}:700" ]
 [ -z "$(find -P "$dir" -xdev -type l -print -quit)" ]
+[ -z "$(find -P "$dir" -xdev ! \( -type d -o -type f \) -print -quit)" ]
+[ -z "$(find -P "$dir" -xdev -type f -links +1 -print -quit)" ]
 entries="$(find -P "$dir" -xdev -printf . | dd bs=1 count=${SDK_STATE_ENTRY_LIMIT + 1} status=none | wc -c)"
 [ "$entries" -le ${SDK_STATE_ENTRY_LIMIT} ]
-find -P "$dir" -xdev -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} +
+find -P "$dir" -xdev -type d -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} + -exec chmod 0700 {} +
+find -P "$dir" -xdev -type f -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} + -exec chmod 0600 {} +
+[ -z "$(find -P "$dir" -xdev -type d \( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0700 \) -print -quit)" ]
+[ -z "$(find -P "$dir" -xdev -type f \( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0600 -o -links +1 \) -print -quit)" ]
+[ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
 [ "$(stat -c '%u:%a' "$dir")" = "${CLAUDE_AGENT_SDK_DOCKER_UID}:700" ]
 `;
 
@@ -1079,6 +1113,30 @@ export class ProjectSandbox {
 
 	// ── Private: Container lifecycle ───────────────────────────────────
 
+	/**
+	 * Root-only lifecycle gate for the SDK state mount. Call before setting a
+	 * reusable container ready, so no restored model-invocable process can read
+	 * node-owned legacy config before its parent becomes inaccessible to node.
+	 */
+	private async _prepareClaudeAgentSdkStateParent(containerId: string): Promise<void> {
+		await this.execDocker([
+			"exec", "-i", "-u", "root", containerId, "sh", "-ceu",
+			PREPARE_CLAUDE_SDK_STATE_PARENT,
+		], { timeout: 10_000, env: DOCKER_ENV });
+	}
+
+	private async _hasSecureClaudeAgentSdkStateParent(containerId: string): Promise<boolean> {
+		try {
+			await this.execDocker([
+				"exec", "-i", "-u", "root", containerId, "sh", "-ceu",
+				VERIFY_CLAUDE_SDK_STATE_PARENT,
+			], { timeout: 10_000, env: DOCKER_ENV });
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	private async _initContainer(): Promise<void> {
 		const { projectId, image } = this.options;
 		const label = `bobbit-project=${projectId}`;
@@ -1137,8 +1195,13 @@ export class ProjectSandbox {
 			// Check if running
 			const running = await this._isContainerRunning(existingId);
 			if (running) {
-				// Validate with a simple exec
-				try {
+				// Never retrofit a live container's lock: an old node process could
+				// already hold a legacy file descriptor. Only reconnect when the
+				// root-owned lifecycle marker attests it was locked before exposure.
+				if (!await this._hasSecureClaudeAgentSdkStateParent(existingId)) {
+					console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has unlocked SDK state; recreating`);
+					await this._removeContainer(existingId);
+				} else try {
 					await this._dockerExec(existingId, ["echo", "ok"]);
 					this.containerId = existingId;
 					// Audit worktree state on reconnect — helps debug disappearing worktrees
@@ -1161,7 +1224,8 @@ export class ProjectSandbox {
 						timeout: 30_000,
 						env: DOCKER_ENV,
 					});
-					// Validate after start
+					// Lock SDK state before a restarted container becomes available.
+					await this._prepareClaudeAgentSdkStateParent(existingId);
 					await this._dockerExec(existingId, ["echo", "ok"]);
 					this.containerId = existingId;
 					// Audit worktree state after restart — overlay FS data may have been lost
@@ -1274,6 +1338,16 @@ export class ProjectSandbox {
 		}
 
 		this.containerId = containerId;
+
+		// This must be the first action after creation: init/setup commands run as
+		// node, and may become model-invocable after the container is published.
+		try {
+			await this._prepareClaudeAgentSdkStateParent(containerId);
+		} catch (error) {
+			this.containerId = null;
+			await this._removeContainer(containerId).catch(() => undefined);
+			throw error;
+		}
 
 		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
 		try {
