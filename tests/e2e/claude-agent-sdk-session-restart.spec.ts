@@ -24,7 +24,7 @@ type OfficialSessionMessage = {
 	type: "user" | "assistant";
 	uuid: string;
 	session_id: string;
-	message: { role?: string; content: unknown; timestamp: number };
+	message: { role?: string; model?: string; usage?: Record<string, number>; content: unknown; timestamp: number };
 	parent_tool_use_id: null;
 	parent_agent_id: null;
 };
@@ -143,7 +143,12 @@ class FakeOfficialSdk {
 			type: "assistant",
 			uuid: `sdk-assistant-${turn}`,
 			session_id: SDK_SESSION_ID,
-			message: { role: "assistant", content: [{ type: "text", text: `SDK_TRANSLATED:${text}` }], timestamp },
+			// Unlike result.modelUsage, this is the completed request's raw occupancy.
+			message: {
+				role: "assistant", model: "sonnet-test",
+				usage: { input_tokens: turn * 100, output_tokens: turn * 4, cache_read_input_tokens: turn * 20, cache_creation_input_tokens: turn * 3 },
+				content: [{ type: "text", text: `SDK_TRANSLATED:${text}` }], timestamp,
+			},
 			parent_tool_use_id: null,
 			parent_agent_id: null,
 		};
@@ -403,7 +408,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				notionalCostUsd: 0.003,
 				costBasis: "subscription-notional",
 				byModel: { "sonnet-test": expect.objectContaining({ inputTokens: 30, outputTokens: 12, contextWindow: 200_000, maxOutputTokens: 8_192 }) },
-				context: expect.objectContaining({ currentTokens: 26, highWaterTokens: 26, highWaterModel: "sonnet-test" }),
+				context: expect.objectContaining({ currentTokens: 246, highWaterTokens: 246, highWaterModel: "sonnet-test" }),
 			});
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "info", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "messages", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
@@ -478,7 +483,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				outputTokens: 12,
 				notionalCostUsd: 0.003,
 				byModel: { "sonnet-test": expect.objectContaining({ inputTokens: 30 }) },
-				context: expect.objectContaining({ highWaterTokens: 26 }),
+				context: expect.objectContaining({ highWaterTokens: 246 }),
 			});
 
 			const reloadConnection = await connectWs(sdkId);

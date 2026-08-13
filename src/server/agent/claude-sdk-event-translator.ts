@@ -106,7 +106,20 @@ interface PartitionState {
  */
 export interface ClaudeSdkTranslatorState {
 	readonly partitions: ReadonlyMap<PartitionKey, PartitionState>;
+	/**
+	 * The latest completed root assistant request's actual prompt occupancy.
+	 * Result `modelUsage` is cumulative attribution, so it must never supply
+	 * this per-request value. Child partitions cannot update this root field.
+	 */
+	readonly lastRootAssistantPromptUsage?: ClaudeSdkRootAssistantPromptUsage;
 	readonly terminated: boolean;
+}
+
+interface ClaudeSdkRootAssistantPromptUsage {
+	readonly model: string;
+	readonly inputTokens: number;
+	readonly cacheReadTokens: number;
+	readonly cacheWriteTokens: number;
 }
 
 const ROOT = Symbol("claude-sdk-root");
@@ -218,7 +231,10 @@ function nonNegativeNumber(value: unknown): number | undefined {
  * result must have both opaque identities and complete aggregate usage before
  * it can enter accounting; malformed and child results remain lifecycle-only.
  */
-export function normalizeClaudeSdkRootResultUsage(input: unknown): ClaudeSdkUsageRecord | undefined {
+export function normalizeClaudeSdkRootResultUsage(
+	input: unknown,
+	rootAssistantPromptUsage?: ClaudeSdkRootAssistantPromptUsage,
+): ClaudeSdkUsageRecord | undefined {
 	if (!isRecord(input) || input.type !== "result") return undefined;
 	if (input.parent_tool_use_id !== undefined && input.parent_tool_use_id !== null) return undefined;
 	const sdkSessionId = nonEmptyString(input.session_id);
@@ -246,22 +262,20 @@ export function normalizeClaudeSdkRootResultUsage(input: unknown): ClaudeSdkUsag
 			if (value !== undefined) normalized[target] = value;
 			return value;
 		};
-		const modelInputTokens = copy("inputTokens", "inputTokens");
+		copy("inputTokens", "inputTokens");
 		copy("outputTokens", "outputTokens");
-		const modelCacheReadTokens = copy("cacheReadInputTokens", "cacheReadTokens");
-		const modelCacheWriteTokens = copy("cacheCreationInputTokens", "cacheWriteTokens");
+		copy("cacheReadInputTokens", "cacheReadTokens");
+		copy("cacheCreationInputTokens", "cacheWriteTokens");
 		copy("costUSD", "notionalCostUsd");
-		const contextWindow = copy("contextWindow", "contextWindow");
+		copy("contextWindow", "contextWindow");
 		copy("maxOutputTokens", "maxOutputTokens");
-		if (modelInputTokens !== undefined && modelCacheReadTokens !== undefined && modelCacheWriteTokens !== undefined) {
-			// Anthropic defines input_tokens as content after the last cache
-			// breakpoint; total request input is input + cache read + cache write:
-			// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
-			// A malformed provider value cannot occupy more than its declared window.
-			const contextTokens = modelInputTokens + modelCacheReadTokens + modelCacheWriteTokens;
-			normalized.contextTokens = contextWindow !== undefined && contextTokens > contextWindow
-				? contextWindow
-				: contextTokens;
+		if (model === rootAssistantPromptUsage?.model) {
+			// `modelUsage` is cumulative across the SDK session. Context occupancy
+			// comes only from the final root assistant request's raw usage, and is
+			// intentionally not clamped to a declared context window.
+			normalized.contextTokens = rootAssistantPromptUsage.inputTokens
+				+ rootAssistantPromptUsage.cacheReadTokens
+				+ rootAssistantPromptUsage.cacheWriteTokens;
 		}
 		normalizedModels[model] = normalized;
 	}
@@ -282,6 +296,17 @@ export function normalizeClaudeSdkRootResultUsage(input: unknown): ClaudeSdkUsag
 		// is an estimate hint, not a statement that an API invoice was incurred.
 		costBasis: "subscription-notional",
 	};
+}
+
+function rootAssistantPromptUsageFor(message: Record<string, unknown>): ClaudeSdkRootAssistantPromptUsage | undefined {
+	const model = nonEmptyString(message.model);
+	const usage = isRecord(message.usage) ? message.usage : undefined;
+	if (!model || !usage) return undefined;
+	const inputTokens = nonNegativeNumber(usage.input_tokens);
+	const cacheReadTokens = nonNegativeNumber(usage.cache_read_input_tokens);
+	const cacheWriteTokens = nonNegativeNumber(usage.cache_creation_input_tokens);
+	if (inputTokens === undefined || cacheReadTokens === undefined || cacheWriteTokens === undefined) return undefined;
+	return { model, inputTokens, cacheReadTokens, cacheWriteTokens };
 }
 
 function usageFor(value: unknown): Usage {
@@ -527,7 +552,7 @@ function drain(state: ClaudeSdkTranslatorState, events: ClaudeSdkTranslatedEvent
 	const error = terminalIsError(source);
 	const terminalReason = nonEmptyString(source.terminal_reason);
 	const errorText = error ? terminalError(source) : undefined;
-	const claudeSdkUsage = normalizeClaudeSdkRootResultUsage(source);
+	const claudeSdkUsage = normalizeClaudeSdkRootResultUsage(source, state.lastRootAssistantPromptUsage);
 	events.push({
 		...annotate(
 			{ type: "agent_end", messages: [] },
@@ -601,7 +626,15 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 			return { state: next, events, diagnostics: [diagnostic("late_event", partitionKey, "assistant message is already final")] };
 		}
 		partition = emitAssistantEnd(partition, partitionKey, identities, contentBlocks(message.content), message, timestampFor(input), events);
-		return { state: updatePartition(next, partitionKey, partition), events, diagnostics };
+		const rootAssistantPromptUsage = partitionKey === ROOT ? rootAssistantPromptUsageFor(message) : undefined;
+		return {
+			state: {
+				...updatePartition(next, partitionKey, partition),
+				...(partitionKey === ROOT ? { lastRootAssistantPromptUsage: rootAssistantPromptUsage } : {}),
+			},
+			events,
+			diagnostics,
+		};
 	}
 
 	if (type === "stream_event") {
