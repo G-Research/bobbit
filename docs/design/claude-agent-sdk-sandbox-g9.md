@@ -375,7 +375,7 @@ separate sandbox case) behind its sandbox-only flag:
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
 MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
-npm run test:manual -- --grep "Claude Agent SDK sandbox"
+npm run test:manual -- --grep "Docker sandbox lifecycle"
 ```
 
 The scenario builds/verifies the matching Docker image, configures a temporary
