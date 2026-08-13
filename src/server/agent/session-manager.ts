@@ -5635,6 +5635,9 @@ export class SessionManager {
 				accepted.id,
 				undefined,
 				opts?.streamingBehavior,
+				undefined,
+				false,
+				opts?.suppressTitleGen,
 			);
 			return { status: "dispatched" };
 		}
@@ -5686,7 +5689,7 @@ export class SessionManager {
 						target.lastPromptSource = opts?.source ?? "user";
 						if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
 						try {
-							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, undefined, opts?.streamingBehavior);
+							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 						} catch (err) {
 							target.lastTurnErrored = true;
 							target.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
@@ -5773,7 +5776,7 @@ export class SessionManager {
 					// where attachments aren't tracked on SessionInfo), fall back to
 					// the synthetic phrase so we never re-send blank/invalid content.
 					const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
-					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior);
+					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 					return { status: "dispatched" };
 				}
 			}
@@ -5784,7 +5787,7 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior);
+			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 			return { status: "dispatched" };
 		}
 
@@ -5793,7 +5796,7 @@ export class SessionManager {
 		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior);
+			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 			return { status: "dispatched" };
 		}
 
@@ -6209,6 +6212,7 @@ export class SessionManager {
 		author?: MessageAuthor;
 		streamingBehavior?: PromptStreamingBehavior;
 		coldStart?: boolean;
+		suppressTitleGen?: boolean;
 	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>, manualRecoveryRequired = false): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		const providerAuthFailure = isProviderAuthFailure(reason);
@@ -6254,6 +6258,7 @@ export class SessionManager {
 					author: r.author,
 					streamingBehavior: r.streamingBehavior,
 					coldStart: r.coldStart,
+					suppressTitleGen: r.suppressTitleGen,
 				})
 				: session.promptQueue.enqueueAtFront(r.text, {
 					images: r.images,
@@ -6264,6 +6269,7 @@ export class SessionManager {
 					author: r.author,
 					streamingBehavior: r.streamingBehavior,
 					coldStart: r.coldStart,
+					suppressTitleGen: r.suppressTitleGen,
 				});
 			recoveredIds.push(recovered.id);
 			if (durableId && poisonOwnedIds.has(durableId)) {
@@ -6371,13 +6377,14 @@ export class SessionManager {
 		streamingBehavior?: PromptStreamingBehavior,
 		manualRecoveryRequired = durableQueueRowId !== undefined,
 		verifierOwned = false,
+		suppressTitleGen = false,
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
 
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, verifierOwned, author, streamingBehavior, coldStart }];
+		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, verifierOwned, author, streamingBehavior, coldStart, suppressTitleGen }];
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const consumeDurableAcceptanceRow = () => {
@@ -6504,8 +6511,8 @@ export class SessionManager {
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
 		// when drainQueue races the SDK's finishRun() during a graceful abort).
 		const dispatchedRowsForRecovery = steered.length > 0
-			? steered.map(r => ({ id: r.id, text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart }))
-			: [{ id: next.id, text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart }];
+			? steered.map(r => ({ id: r.id, text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart, suppressTitleGen: r.suppressTitleGen }))
+			: [{ id: next.id, text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart, suppressTitleGen: next.suppressTitleGen }];
 		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
@@ -7623,6 +7630,7 @@ export class SessionManager {
 				recoveredVerifierRow?.streamingBehavior,
 				manualRecoveryRequired,
 				recoveredVerifierRow?.verifierOwned === true,
+				recoveredVerifierRow?.suppressTitleGen === true,
 			);
 		} else {
 			// Fallback (e.g. session predates error tracking)
