@@ -575,7 +575,13 @@ import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, peekCachedAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel, type ApiModel } from "./agent/model-registry.js";
-import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId } from "./agent/claude-agent-sdk-bridge.js";
+import { isClaudeAgentSdkSessionId } from "./agent/claude-agent-sdk-bridge.js";
+import {
+	ClaudeAgentSdkUnavailableError,
+	claudeAgentSdkUnavailableDiagnostic,
+	claudeAgentSdkUnavailablePayload,
+	isClaudeAgentSdkUnavailableError,
+} from "./agent/claude-agent-sdk-error.js";
 import { resolveSessionRuntime } from "./agent/session-runtime.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
@@ -7987,6 +7993,14 @@ async function handleApiRoute(
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
 		} catch (err) {
+			if (isClaudeAgentSdkUnavailableError(err)) {
+				console.error(
+					`[POST /api/sessions] SDK unavailable cwd=${cwd ?? "(none)"} project=${resolvedProjectId ?? "(none)"}: ` +
+					claudeAgentSdkUnavailableDiagnostic(err),
+				);
+				json(claudeAgentSdkUnavailablePayload(), 503);
+				return;
+			}
 			// Log full error context server-side so that flaky 500s in tests
 			// (e.g. resilience suite under FS contention) leave a usable trail.
 			// `String(err)` alone drops the stack and any error.cause chain.
@@ -14533,11 +14547,9 @@ async function handleApiRoute(
 			}
 			try {
 				await sessionManager.readSdkSessionInfo(ps);
-			} catch {
-				json({
-					error: "Claude Agent SDK session is unavailable",
-					code: "SDK_SESSION_UNAVAILABLE",
-				}, 404);
+			} catch (err) {
+				console.error(`[POST /api/sessions/${archivedId}/continue] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+				json(claudeAgentSdkUnavailablePayload(), 503);
 				return;
 			}
 
@@ -15845,7 +15857,8 @@ async function handleApiRoute(
 			}
 		} catch (err) {
 			if (err instanceof ClaudeAgentSdkUnavailableError) {
-				json({ error: "sdk_session_unavailable", code: "SDK_SESSION_UNAVAILABLE" }, 503);
+				console.error(`[GET /api/sessions/${targetId}/transcript] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+				json(claudeAgentSdkUnavailablePayload(), 503);
 			} else if (err instanceof TranscriptReaderError) {
 				const status = err.code === "transcript_unavailable" ? 404 : 400;
 				json({ error: err.code, detail: err.message }, status);

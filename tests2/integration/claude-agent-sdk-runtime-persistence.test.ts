@@ -211,8 +211,8 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		manager.sessions.set(session.id, session);
 
 		await expect(manager.persistSessionMetadata(session)).rejects.toMatchObject({
-			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-			message: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK did not provide a valid resumable session id",
+			code: "SDK_SESSION_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE",
 		});
 		expect(update).not.toHaveBeenCalled();
 		expect(session.rpcClient.getState).toHaveBeenCalledTimes(1);
