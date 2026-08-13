@@ -3083,9 +3083,14 @@ export class SessionManager {
 		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
 		if (scopedToken) {
 			bridgeOptions.gatewayToken = scopedToken;
+		} else if (sdkRuntime) {
+			// An SDK sandbox's dispatcher is a separate container process. It must
+			// receive only a current SandboxTokenStore capability, never the host
+			// admin token used by legacy Pi sandbox harnesses.
+			throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: scoped sandbox gateway authority is unavailable; restart the gateway and retry");
 		} else {
-			// Legacy/test harnesses may omit SandboxTokenStore; keep sandbox behavior
-			// unchanged there. Direct agents never use this admin fallback.
+			// Legacy/test harnesses may omit SandboxTokenStore; preserve Pi sandbox
+			// behavior while the SDK path above remains fail-closed.
 			const adminToken = readToken();
 			if (adminToken === null) {
 				throw new Error("Cannot read gateway credentials for sandbox");

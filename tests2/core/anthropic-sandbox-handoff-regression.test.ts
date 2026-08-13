@@ -253,7 +253,13 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => entries,
 		};
-		manager.sandboxTokenStore = null;
+		const scopedToken = "minted-sdk-sandbox-authority";
+		const scopedStore = {
+			register: vi.fn(() => scopedToken),
+			addSession: vi.fn(),
+			addGoal: vi.fn(),
+		};
+		manager.sandboxTokenStore = scopedStore;
 		manager.sandboxManager = {
 			ensureForProject: async () => {},
 			get: () => ({ getContainerId: async () => "container-sdk", hasClaudeAgentSdkCapability }),
@@ -267,6 +273,9 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-sdk", { projectId: "project-sdk" }), true);
 		assert.equal(hasClaudeAgentSdkCapability.mock.calls.length, 1);
+		assert.deepEqual(scopedStore.register.mock.calls, [["project-sdk"]]);
+		assert.deepEqual(scopedStore.addSession.mock.calls, [["project-sdk", "session-sdk"]]);
+		assert.deepEqual(scopedStore.addGoal.mock.calls, [["project-sdk", "goal-sdk"]]);
 		assert.equal("sandboxCredentials" in bridgeOptions, false);
 		assert.deepEqual(bridgeOptions.claudeSdkSandboxLaunch, {
 			containerId: "container-sdk",
@@ -274,7 +283,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			sessionId: "session-sdk",
 			sessionSecret: "session-secret",
 			goalId: "goal-sdk",
-			gatewayToken: "a".repeat(64),
+			gatewayToken: scopedToken,
 			gatewayUrl: "http://127.0.0.1:3001",
 			oauthAccessToken: hostAccess,
 		});
@@ -286,6 +295,43 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			(error: any) => error?.code === "CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
 		);
 		assert.equal(readFileSync(piAuthPath, "utf8"), piAuth, "rejected SDK wiring must not mutate Pi auth state");
+	});
+
+	it("fails closed before SDK launch or goal dispatch when scoped gateway authority is absent", async () => {
+		useHostAuth(completePiOAuthCredential("sdk-current-access", Date.now() + 60_000));
+		const createWorktree = vi.fn(async () => "/workspace-wt/should-not-exist");
+		const dispatchGoalProvisioned = vi.fn();
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
+		};
+		// The valid admin token created by useHostAuth must never become SDK authority.
+		manager.sandboxTokenStore = null;
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({
+				getContainerId: async () => "container-sdk",
+				hasClaudeAgentSdkCapability: async () => true,
+				createWorktree,
+			}),
+		};
+		manager.dispatchGoalProvisionedForWorktree = dispatchGoalProvisioned;
+		const bridgeOptions: any = { runtime: "claude-agent-sdk", cwd: "/host/worktree", env: {} };
+
+		await assert.rejects(
+			() => manager.applySandboxWiring(bridgeOptions, "session-sdk", {
+				projectId: "project-sdk",
+				goalId: "goal-sdk",
+				sandboxBranch: "goal/sdk",
+			}),
+			(error: any) => error?.code === "CLAUDE_AGENT_SDK_UNAVAILABLE" && /scoped sandbox gateway authority/.test(error.message),
+		);
+		assert.equal(bridgeOptions.gatewayToken, undefined, "the admin token must not be assigned to an SDK sandbox");
+		assert.equal(bridgeOptions.claudeSdkSandboxLaunch, undefined, "missing scoped authority must prevent SDK launch descriptor creation");
+		assert.equal(createWorktree.mock.calls.length, 0, "missing scoped authority must stop before launch preparation");
+		assert.equal(dispatchGoalProvisioned.mock.calls.length, 0, "missing scoped authority must stop before goal dispatcher execution");
 	});
 
 	it("maps malformed persisted SDK sandbox CWD history to the unavailable stub", async () => {
