@@ -169,18 +169,56 @@ describe("ClaudeAgentSdkBridge", () => {
 		["malformed", { session_id: "not-an-sdk-uuid" }],
 	];
 
-	it("waits for initialization, times out deterministically, and fails pending prompts without hanging", async () => {
+	it("keeps a viable cold bridge running after a steer-specific readiness deadline", async () => {
 		const fixture = bridgeFixture();
 		const started = fixture.bridge.start();
-		await Promise.resolve();
-		const wait = fixture.bridge.waitForReady(25);
-		fixture.clock.advance(25);
-		await expect(wait).rejects.toThrow(/readiness timed out/i);
+		await flushMicrotasks();
+
+		const steer = fixture.bridge.steer("redirect while cold");
+		fixture.clock.advance(29_999);
+		await flushMicrotasks();
+		expect((fixture.bridge as any).state).toBe("starting");
+		expect(fixture.query.closeCalls).toBe(0);
+		expect(fixture.clock.pending()).toBe(2);
+
+		fixture.clock.advance(1);
+		await expect(steer).rejects.toThrow(/readiness timed out/i);
+		expect((fixture.bridge as any).state).toBe("starting");
+		expect(fixture.query.closeCalls).toBe(0);
+		expect(fixture.clock.pending()).toBe(1);
+
+		fixture.query.initialization.resolve({ session_id: "00000000-0000-4000-8000-000000000001" });
+		await started;
+		await expect(fixture.bridge.waitForReady(1)).resolves.toBeUndefined();
+		expect((fixture.bridge as any).state).toBe("ready");
+		expect(fixture.clock.pending()).toBe(0);
+	});
+
+	it("terminally settles every readiness waiter when provider initialization fails", async () => {
+		const fixture = bridgeFixture();
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const started = fixture.bridge.start();
+		await flushMicrotasks();
+		const directWaiter = fixture.bridge.waitForReady(60_000);
+		const pendingPrompt = fixture.bridge.promptWhenReady("must not be accepted", undefined, { readyTimeoutMs: 70_000 });
 
 		fixture.query.initialization.reject(new Error("subscription unavailable: TOKEN=secret"));
-		await expect(started).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
-		await expect(fixture.bridge.prompt("must settle", undefined, 10)).rejects.toThrow(/unavailable|subscription/i);
-		await expect(fixture.bridge.waitForReady(1)).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		await expect(started).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: "subscription unavailable: TOKEN=<redacted>",
+		});
+		await expect(directWaiter).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: "subscription unavailable: TOKEN=<redacted>",
+		});
+		await expect(pendingPrompt).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: "subscription unavailable: TOKEN=<redacted>",
+		});
+		expect(fixture.query.closeCalls).toBe(1);
+		expect(fixture.clock.pending()).toBe(0);
+		expect(observed.filter(event => event.type === "process_exit")).toHaveLength(1);
 	});
 
 	it.each(invalidInitializationIdentities)("fails %s initialization identity once before becoming ready", async (_kind, initialization) => {
