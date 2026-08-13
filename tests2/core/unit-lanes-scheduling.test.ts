@@ -112,6 +112,7 @@ let withNonExactE2eFlag: LoadedConfig;
 let withE2e: LoadedConfig;
 let withNonExactRetryFreeFlag: LoadedConfig;
 let withRetryFree: LoadedConfig;
+let withOneWorker: LoadedConfig;
 
 function restoreEnvironment(): void {
 	if (originalE2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
@@ -122,15 +123,17 @@ function restoreEnvironment(): void {
 	else process.env.VITEST_MAX_WORKERS = originalWorkerFlag;
 }
 
-async function loadConfig({ e2eFlag, retryFreeFlag }: {
+async function loadConfig({ e2eFlag, retryFreeFlag, workerFlag }: {
 	e2eFlag?: string;
 	retryFreeFlag?: string;
+	workerFlag?: string;
 } = {}): Promise<LoadedConfig> {
 	if (e2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
 	else process.env.BOBBIT_V2_E2E_VITEST = e2eFlag;
 	if (retryFreeFlag === undefined) delete process.env.BOBBIT_V2_RETRY_FREE;
 	else process.env.BOBBIT_V2_RETRY_FREE = retryFreeFlag;
-	delete process.env.VITEST_MAX_WORKERS;
+	if (workerFlag === undefined) delete process.env.VITEST_MAX_WORKERS;
+	else process.env.VITEST_MAX_WORKERS = workerFlag;
 	vi.resetModules();
 	return await import("../../vitest.config.ts") as LoadedConfig;
 }
@@ -142,6 +145,7 @@ beforeAll(async () => {
 		withE2e = await loadConfig({ e2eFlag: "1" });
 		withNonExactRetryFreeFlag = await loadConfig({ retryFreeFlag: "true" });
 		withRetryFree = await loadConfig({ retryFreeFlag: "1" });
+		withOneWorker = await loadConfig({ workerFlag: "1" });
 	} finally {
 		restoreEnvironment();
 		vi.resetModules();
@@ -296,11 +300,27 @@ describe("direct unit-stage scheduling", () => {
 			})),
 			[
 				{ name: "v2-core", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
-				{ name: "v2-dom", environment: "happy-dom", pool: "threads", isolate: true, maxWorkers: 3, retry: 3 },
+				{ name: "v2-dom", environment: "happy-dom", pool: "forks", isolate: true, maxWorkers: 3, retry: 3 },
 				{ name: "v2-integration", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
 				{ name: "v2-isolated", environment: "node", pool: "forks", isolate: true, maxWorkers: 1, retry: 3 },
 			],
 		);
+	});
+
+	it("shares one forks pool and never lets a project exceed the global worker cap", () => {
+		const standardProjects = projects(normal);
+		assert.deepEqual(
+			[...new Set(standardProjects.map(({ pool }) => pool))],
+			["forks"],
+			"separate Vitest pools each schedule independently and can exceed the suite-wide cap",
+		);
+		for (const config of [normal, withOneWorker]) {
+			const cap = config.resolveMaxWorkers({ VITEST_MAX_WORKERS: config === withOneWorker ? "1" : undefined });
+			assert.ok(
+				projects(config).every(({ maxWorkers }) => maxWorkers <= cap),
+				`each project worker count must stay at or below the resolved global cap of ${cap}`,
+			);
+		}
 	});
 
 	it("disables retries only for the exact retry-free qualification flag", () => {

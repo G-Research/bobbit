@@ -62,6 +62,32 @@ describe("UnitFileBudgetReporter", () => {
 		);
 	});
 
+	test("tracks interleaved module starts independently and fails at 25,001ms", () => {
+		let now = 0;
+		const reporter = new UnitFileBudgetReporter(() => now, {}, () => undefined);
+		const slow = moduleFor("/repo/tests2/core/slow.test.ts", "v2-core");
+		const boundary = moduleFor("/repo/tests2/dom/boundary.test.ts", "v2-dom");
+
+		reporter.onTestRunStart();
+		reporter.onTestModuleStart(slow);
+		now += 5_000;
+		reporter.onTestModuleStart(boundary);
+		now += 20_001;
+		reporter.onTestModuleEnd(slow);
+		now += 4_999;
+		reporter.onTestModuleEnd(boundary);
+
+		assert.throws(
+			() => reporter.onTestRunEnd(),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.match(error.message, /path=\/repo\/tests2\/core\/slow\.test\.ts project=v2-core duration=25001ms/);
+				assert.doesNotMatch(error.message, /boundary\.test\.ts/);
+				return true;
+			},
+		);
+	});
+
 	test("reports all over-budget files with path, project, and duration", () => {
 		const { reporter, elapse } = timedReporter();
 		elapse(moduleFor("/repo/tests2/dom/slow.test.ts", "v2-dom"), 25_250.2);
