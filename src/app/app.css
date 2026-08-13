@@ -1034,6 +1034,25 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	90%, 100% { transform: scaleY(0.75) translateY(7.2px); opacity: 1; transform-origin: 0 14.4px; }
 }
 
+/* Sidebar headset/ponytail right-facing occlusion. Two immutable canvas
+ * bitmaps swap opacity on the existing 6s eye clock. This stays compositor-only:
+ * no JS timer, canvas redraw, or main-thread animation work. */
+.bobbit-sidebar-accessory-turn-front {
+	animation: bobbit-sidebar-accessory-turn-front 6s step-end infinite;
+}
+.bobbit-sidebar-accessory-turn-right {
+	opacity: 0;
+	animation: bobbit-sidebar-accessory-turn-right 6s step-end infinite;
+}
+@keyframes bobbit-sidebar-accessory-turn-front {
+	0%, 73%, 87%, 100% { opacity: 1; }
+	74%, 86% { opacity: 0; }
+}
+@keyframes bobbit-sidebar-accessory-turn-right {
+	0%, 73%, 87%, 100% { opacity: 0; }
+	74%, 86% { opacity: 1; }
+}
+
 /* ============================================================================
  * EMPTY STATE — gentle floating animation for placeholder icons
  * ============================================================================ */

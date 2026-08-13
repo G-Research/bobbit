@@ -567,6 +567,7 @@ Finite-shape resource update routes accept only their documented request keys. A
 | `PUT` | `/api/goals/:id` | Update a goal (`title`, `cwd`, `state`, `spec`, `branch`, `reattemptOf`; `team` remains an accepted compatibility key). `team` does not change the always-on team mode. `repoPath` and `prUrl` are lifecycle/remote-state data, not update fields, and are rejected with `400`. |
 | `PATCH` | `/api/goals/:id/policy` | Update per-goal policy (`subgoalsAllowed`, `maxNestingDepth`, `divergencePolicy`, `maxConcurrentChildren`). |
 | `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
+| `POST` | `/api/goals/:id/retry-setup` | Retry a failed worktree setup. See [Goal setup recovery](#goal-setup-recovery). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Coordinated remote-state status](#coordinated-remote-state-status). |
@@ -579,6 +580,18 @@ Finite-shape resource update routes accept only their documented request keys. A
 | `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
 
 `PUT /api/goals/:id` rejects the four policy keys with `400`, names all of them in the response, and directs callers to `PATCH /api/goals/:id/policy`. That routing changes neither policy nor authorization: `subgoalsAllowed` and `maxNestingDepth` are operator-class, while `divergencePolicy` and `maxConcurrentChildren` are orchestration-class and remain team-lead-only. A mixed policy body uses the stricter orchestration class.
+
+### Goal setup recovery
+
+`POST /api/goals/:id/retry-setup` is the operator recovery path for a goal whose authoritative `setupStatus` is `error`. It has no request body. On acceptance it persistently transitions the goal to `retrying`, atomically clears the active `setupError`, broadcasts `goal_state_changed`, and returns without waiting for provisioning:
+
+```json
+{ "ok": true, "coalesced": false, "setupStatus": "retrying" }
+```
+
+Concurrent retry requests coalesce: the response may contain `coalesced: true` and the currently active setup state, but no extra worktree, Team Lead, or scheduler continuation is created. A request that joins a genuine initial `preparing` flight also reports coalescing. A persisted `preparing` state without a live flight is not treated as success; it returns `409` with an actionable explanation. A goal that is not failed or otherwise retrying/preparing returns `409`; an unknown goal returns `404`.
+
+The eventual `ready` or `error` transition is delivered through `goal_state_changed` plus the corresponding setup completion/error event. Clients must refresh their goal state on those events rather than retaining the optimistic `retrying` snapshot. `ready` has no `setupError`, so all current-warning surfaces must disappear; a current `error` keeps one actionable diagnostic and blocks goal-scoped session and team starts. For lifecycle, child-scheduler, and Git coordination semantics, see [Goals, Workflows, Tasks & Gates — Atomic goal setup lifecycle](goals-workflows-tasks.md#atomic-goal-setup-lifecycle).
 
 ### Coordinated remote-state status
 
