@@ -22,6 +22,7 @@ import {
 } from "../../src/app/sidebar-view-preferences.js";
 import { renderSidebarViewControls } from "../../src/app/sidebar.js";
 import { revealCurrentSidebarSession } from "../../src/app/sidebar-reveal.js";
+import { _setSubgoalsEnabledForTesting } from "../../src/app/subgoals-flag.js";
 import {
 	setRenderApp,
 	state,
@@ -109,6 +110,7 @@ function stubMotion(reduced: boolean): void {
 
 beforeEach(() => {
 	localStorage.clear();
+	_setSubgoalsEnabledForTesting(true);
 	clearArchivedSessionsState();
 	state.gatewaySessions = [];
 	state.archivedSessions = [];
@@ -145,6 +147,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	_setSubgoalsEnabledForTesting(false);
 	for (const key of touchedTreeKeys.splice(0)) clearSidebarTreePreference(key);
 	setRenderApp(() => {});
 	document.body.innerHTML = "";
