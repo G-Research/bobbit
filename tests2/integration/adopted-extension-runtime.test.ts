@@ -1,5 +1,5 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
+import { apiFetch, registerProject, unregisterProject } from "./_e2e/e2e-setup.js";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -439,6 +439,8 @@ test.describe("adopted extension runtime API", () => {
 			expect(await slashNames(second.id)).not.toEqual(expect.arrayContaining([`${prefix}inspect`, `${prefix}summarize`]));
 		} finally {
 			if (adoption) await remove(adoption);
+			await unregisterProject(first.id);
+			await unregisterProject(second.id);
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
