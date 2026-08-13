@@ -460,6 +460,21 @@ describe("built-in file explorer panel", () => {
 		expect(statusDispose).toHaveBeenCalledTimes(1);
 	});
 
+	it("disposes status subscriptions through element disconnect without document mutation observation", async () => {
+		class SilentMutationObserver {
+			observe(): void {}
+			disconnect(): void {}
+		}
+		vi.stubGlobal("MutationObserver", SilentMutationObserver);
+		const statusDispose = vi.fn();
+		const fakeHost = host({ list: () => list([]) }, { statusDispose });
+		const root = mount(`disconnect-lifecycle-${++mountAttempt}`, fakeHost);
+		await vi.waitFor(() => expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(1));
+
+		root.remove();
+		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
+	});
+
 	it("queues one first-idle refresh that arrives during initialization", async () => {
 		let statusCallback: ((value: { status: "idle" | "running" | "error" }) => void) | undefined;
 		const initialList = deferred<unknown>();
