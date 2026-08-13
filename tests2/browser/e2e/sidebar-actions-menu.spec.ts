@@ -159,6 +159,46 @@ test.describe("Sidebar actions menu", () => {
 		return page.evaluate((h) => `${location.origin}${location.pathname}${location.search}${h}`, hash);
 	}
 
+	test("reacquires the exact sidebar trigger when a render replaces it during lazy menu loading", async ({ page }) => {
+		const sessionId = await createSession();
+		sessionIds.push(sessionId);
+		await waitForSessionStatus(sessionId, "idle");
+		const row = await openSession(page, sessionId);
+		const trigger = triggerFor(row, "session", sessionId);
+		await row.hover();
+		await expect(trigger).toBeVisible();
+
+		// This mirrors the real failure: the click reaches the old trigger, but
+		// a render replaces that DOM node before the lazy popover import resolves.
+		await page.evaluate((id) => {
+			const current = document.querySelector<HTMLElement>(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="session"][data-sidebar-actions-id="${id}"]`);
+			if (!current) throw new Error("sidebar trigger was not rendered");
+			document.addEventListener("click", (event) => {
+				if (!(event.target instanceof Node) || !current.contains(event.target)) return;
+				const replacement = current.cloneNode(true) as HTMLElement;
+				current.replaceWith(replacement);
+				(window as any).__replacedSidebarTrigger = {
+					oldConnected: current.isConnected,
+					newConnected: replacement.isConnected,
+				};
+			}, { capture: true, once: true });
+		}, sessionId);
+
+		await trigger.click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		expect(await page.evaluate(() => (window as any).__replacedSidebarTrigger)).toEqual({ oldConnected: false, newConnected: true });
+		expect(await page.locator("sidebar-actions-popover").evaluate((element) => {
+			const anchor = (element as any).anchorEl as HTMLElement | null;
+			return {
+				connected: anchor?.isConnected,
+				kind: anchor?.dataset.sidebarActionsKind,
+				id: anchor?.dataset.sidebarActionsId,
+			};
+		})).toEqual({ connected: true, kind: "session", id: sessionId });
+		await page.keyboard.press("Escape");
+		await expect(page.locator(`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="session"][data-sidebar-actions-id="${sessionId}"]`)).toBeFocused({ timeout: 5_000 });
+	});
+
 	test("desktop session and goal action-menu smokes keep real-app quick actions wired", async ({ page }) => {
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);
