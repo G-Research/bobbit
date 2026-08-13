@@ -244,7 +244,10 @@ export type ServerMessage =
 	| { type: "ext_session_post_result"; requestId: string; ok: boolean; error?: string }
 	| { type: "auth_failed" }
 	| { type: "state"; data: unknown }
-	| { type: "messages"; data: unknown[]; serverTiming?: SnapshotServerTiming }
+	/** Root transcript rows, optionally wrapped with server-owned nested work
+	 * (for example `{ messages, subagentWork }`). Consumers must keep nested
+	 * details outside root transcript ordering. */
+	| { type: "messages"; data: unknown; serverTiming?: SnapshotServerTiming }
 	| { type: "event"; data: unknown; seq?: number; ts?: number }
 	| { type: "resume_gap"; lastSeq: number }
 	| { type: "client_joined"; clientId: string }

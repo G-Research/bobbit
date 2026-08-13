@@ -627,8 +627,21 @@ function redactDispatchFailureReason(reason: string, providerAuthFailure: boolea
  *
  * See goal `goal-fix-lastac-724b3421` for the bug this guards against.
  */
+/**
+ * Semantic SDK child-work frames are transport-only at the root-session
+ * boundary. They belong to an existing parent tool card, not to the root turn:
+ * never let their nested message/tool payloads advance root activity, lifecycle,
+ * queue, status, transcript, or accounting state.
+ */
+export function isClaudeSdkSubagentWorkEvent(event: unknown): event is { type: "claude_sdk_subagent_work" } {
+	return !!event
+		&& typeof event === "object"
+		&& !Array.isArray(event)
+		&& (event as { type?: unknown }).type === "claude_sdk_subagent_work";
+}
+
 export function isUserVisibleActivity(event: any): boolean {
-	if (!event || typeof event.type !== "string") return false;
+	if (!event || typeof event.type !== "string" || isClaudeSdkSubagentWorkEvent(event)) return false;
 	switch (event.type) {
 		case "message_update":
 		case "message_end":
@@ -5502,6 +5515,11 @@ export class SessionManager {
 		event: any,
 		opts?: { replacementOwnedTerminal?: boolean; deferQueueDrain?: boolean },
 	): void {
+		// Embedded SDK child work is sequenced and broadcast like any live frame,
+		// but it is deliberately not a root agent event. In particular, its nested
+		// `message`/tool payload must not settle prompt delivery or alter root state.
+		if (isClaudeSdkSubagentWorkEvent(event)) return;
+
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
 		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
@@ -7140,7 +7158,10 @@ export class SessionManager {
 
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
 		if (isRetryableAgentEnd(event)) return;
-		emitSessionEvent(session, truncateLargeToolContent(event));
+		// Child-work frames already contain the server-owned, bounded semantic
+		// projection. Preserve their opaque source metadata verbatim; generic tool
+		// truncation is for root transcript rows and must not rewrite this audit data.
+		emitSessionEvent(session, isClaudeSdkSubagentWorkEvent(event) ? event : truncateLargeToolContent(event));
 	}
 
 	/**
@@ -7148,6 +7169,9 @@ export class SessionManager {
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
+		// G10b preserves child usage/cost as opaque source metadata. G8 remains the
+		// sole accounting owner, so nested work must never enter this root tracker.
+		if (isClaudeSdkSubagentWorkEvent(event)) return;
 		// Message updates repeat the same usage on every streaming chunk, so only
 		// completed assistant messages are accounted. Pi 0.81 additionally reports
 		// summarizer usage once on each completed compaction event.
