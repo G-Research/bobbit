@@ -44,15 +44,17 @@ The parent card has three layers:
 2. **Embedded activity region** — one vertically stacked child section per
    confirmed child identity. Text and tool lifecycle entries appear here in
    source order.
-3. **Parent result** — the root Agent tool result/error remains the lifecycle
-   boundary and final state. A child stop alone does not complete the card.
+3. **Root result** — the root Agent tool result/error remains the root-session
+   and durable-history lifecycle authority. A child terminal can update embedded
+   card presentation, but cannot complete the root turn.
 
 ### Renderer projection required by the UX
 
-Current live translated events expose `parentToolUseId`, while
-`SubagentStart`/`SubagentStop` currently feed policy/audit lifecycle rather than
-a renderable client projection. G10b must close that gap before the states below
-can be rendered. The UI input needs, at minimum:
+Live translated events expose `parentToolUseId`. `SubagentStart`/`SubagentStop`
+identify a child but omit that parent key, so G10b projects their lifecycle only
+through the verified admission registry into semantic embedded-work frames. The
+client receives that nested projection rather than raw lifecycle hooks. The UI
+input needs, at minimum:
 
 ```ts
 interface EmbeddedAgentActivity {
@@ -240,20 +242,17 @@ The user should not see child prose flash at page level before reparenting.
 ### Recovery
 
 On reload/resume, first rebuild from the authoritative chronological
-`getSessionMessages()` snapshot. The current Bobbit SDK-access seam exposes only
-`getSessionInfo` and `getSessionMessages`; G10b must add an injected, official
-SDK capability for `listSubagents` and/or `getSubagentMessages` **only if the
-pinned SDK actually exposes it**. Do not inspect SDK files directly. If the pin
-does not provide those APIs, `getSessionMessages()` plus its official
-`parent_tool_use_id` / `parent_agent_id` annotations is the complete recovery
-source and missing detail remains unavailable rather than fabricated.
+`getSessionMessages()` snapshot. The SDK session-access seam also exposes the
+pinned official `listSubagents` and `getSubagentMessages` APIs for bounded
+supplemental recovery; it never inspects SDK transcript files directly.
+`listSubagents` supplies child ids only, not parent or lifecycle mappings. Each
+recovered row must independently carry an exact `parent_tool_use_id` that names
+a real root Agent/Task card, or it remains unavailable rather than fabricated.
 
-Use the additional capability only when the ordinary snapshot has a proven gap
-(for example, a confirmed parent Agent call with lifecycle metadata but no
-child messages, or an official child row naming a missing segment). The
-session-access/runtime boundary owns fetching; the pure normalizer/partitioner
-owns merging; the renderer receives only the projection defined above. This
-keeps SDK access out of the browser and avoids a recovery-specific renderer.
+The session-access/runtime boundary owns this bounded fetch; the pure
+normalizer/partitioner owns merging; the renderer receives only the projection
+defined above. This keeps SDK access out of the browser and avoids a
+recovery-specific renderer.
 
 For an orphan row, “confirmed relationship” means the official SDK snapshot or
 subagent API returned that exact `parent_tool_use_id`; a client-supplied id,

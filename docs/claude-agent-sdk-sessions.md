@@ -158,6 +158,33 @@ its root session; it never creates a child session, task, worktree, or cost
 account. The browser receives this server projection and must not repair raw
 tool names or reconstruct transcript attribution.
 
+### Embedded SDK helper work
+
+A constrained SDK helper is shown only inside the real root `Agent` tool card
+that admitted it. The only attachment key is the child's non-empty
+`parent_tool_use_id` / `parentToolUseId`; child id, type, timing, and nearby
+Agent calls are never fallback joins. This preserves root transcript order and
+prevents interleaved child text or tools from leaking into root assistant prose.
+
+`SubagentStart`/`SubagentStop` identify a child but do not provide that parent
+key. Bobbit therefore correlates them only through the bridge-local verified
+admission registry, then carries semantic child-work frames outside root
+lifecycle, queue, status, transcript, and accounting handling. Root `Agent`
+results remain the root-turn and durable-history terminal authority. Child
+failures use safe bounded detail rather than provider error bodies and cannot
+settle root session state.
+
+Reload, archive, resume, and compaction snapshots keep nested activity in a
+separate `subagentWork` envelope while root messages alone enter root ordering.
+When child history is incomplete, Bobbit calls the official bounded
+`listSubagents` and `getSubagentMessages` APIs. A returned row is renderable
+only when its own exact parent id names a real root Agent/Task call; a listed
+child id proves neither a parent nor lifecycle completion. This conservative
+rule favors an auditable unknown/diagnostic state over misplaced prose.
+
+See [embedded Claude Agent SDK subagent work (G10b)](design/claude-agent-sdk-subagent-rendering-g10b.md)
+for the complete projection, recovery, renderer, and debugging contract.
+
 ### Root-result usage and cost
 
 A finalized root SDK `result` is the only SDK accounting authority. Bobbit
@@ -177,9 +204,10 @@ the public snapshot shape and billed/notional semantics.
 The closed SDK environment reports subscription usage. Its SDK dollar estimate
 is `notionalCostUsd` with `costBasis: "subscription-notional"` and
 `totalCost: null`; it is not a billed API charge. A missing cost/basis remains
-unknown rather than `$0`. G10b owns visual treatment of these server fields;
-this runtime contract only publishes the durable REST, WebSocket, and state
-projection.
+unknown rather than `$0`. G10b does not aggregate or interpret child
+usage/cost metadata; accounting semantics remain outside its embedded-work
+projection. This runtime contract only publishes the durable REST, WebSocket,
+and state projection.
 
 ### SDK compaction checkpoints
 
