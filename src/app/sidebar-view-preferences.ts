@@ -145,6 +145,19 @@ export function setSidebarViewFilter(
 	return true;
 }
 
+/** Restore one view's canonical defaults without disturbing the inactive view. */
+export function resetSidebarViewFilters(
+	preferenceState: SidebarViewPreferenceState,
+	view: SidebarSessionView,
+): void {
+	const defaults = view === "status" ? SIDEBAR_STATUS_FILTER_DEFAULTS : SIDEBAR_PROJECT_FILTER_DEFAULTS;
+	setSidebarViewFilter(preferenceState, view, "showArchived", defaults.showArchived);
+	setSidebarViewFilter(preferenceState, view, "showBusy", defaults.showBusy);
+	setSidebarViewFilter(preferenceState, view, "showRead", defaults.showRead);
+	if (view === "status") setSidebarViewFilter(preferenceState, view, "showTeams", SIDEBAR_STATUS_FILTER_DEFAULTS.showTeams);
+	preferenceState.filtersPopoverOpen = false;
+}
+
 /** Route existing Archived/Busy/Read shortcuts through whichever view is active. */
 export function setActiveSidebarViewFilter(
 	preferenceState: SidebarViewPreferenceState,

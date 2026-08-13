@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, ChevronDown, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, Mail, MailOpen, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, Crosshair, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, Mail, MailOpen, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -1487,7 +1487,9 @@ function nestedGoalChildren(node: GoalTreeNode, archived: boolean): GoalTreeNode
 
 /** Render the collapsible per-project Archived subsection (desktop variant). */
 function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
-	if (!(state.showArchived || state.archivedSearchDemand) || !projectTree.archivedSectionNode) return "";
+	// The canonical model only creates this section when archived content is
+	// eligible. That includes the narrowly exempted active archived session.
+	if (!projectTree.archivedSectionNode) return "";
 	const project = projectTree.project as Project;
 	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
@@ -1605,6 +1607,45 @@ export function buildSidebarTreeModel(sidebarData = getSidebarData()): SidebarTr
 	return buildSidebarTreeModelWithSearch(sidebarData).model;
 }
 
+function activeArchivedTreePopulation(activeId: string): { sessions: GatewaySession[]; goalIds: Set<string> } {
+	const archivedById = new Map(state.archivedSessions.map(session => [session.id, session]));
+	const goalsById = new Map(state.goals.map(goal => [goal.id, goal]));
+	const sessionIds = new Set<string>();
+	const goalIds = new Set<string>();
+	const sessionQueue = [activeId];
+	const goalQueue: string[] = [];
+
+	while (sessionQueue.length > 0 || goalQueue.length > 0) {
+		while (sessionQueue.length > 0) {
+			const sessionId = sessionQueue.pop()!;
+			if (sessionIds.has(sessionId)) continue;
+			const session = archivedById.get(sessionId);
+			if (!session) continue;
+			sessionIds.add(sessionId);
+			for (const parentId of [session.parentSessionId, session.delegateOf, session.teamLeadSessionId]) {
+				if (parentId && !sessionIds.has(parentId)) sessionQueue.push(parentId);
+			}
+			for (const goalId of [session.goalId, session.teamGoalId]) {
+				if (goalId && !goalIds.has(goalId)) goalQueue.push(goalId);
+			}
+		}
+		while (goalQueue.length > 0) {
+			const goalId = goalQueue.pop()!;
+			if (goalIds.has(goalId)) continue;
+			goalIds.add(goalId);
+			const goal = goalsById.get(goalId);
+			if (!goal) continue;
+			if (goal.parentGoalId && !goalIds.has(goal.parentGoalId)) goalQueue.push(goal.parentGoalId);
+			if (goal.spawnedBySessionId && !sessionIds.has(goal.spawnedBySessionId)) sessionQueue.push(goal.spawnedBySessionId);
+		}
+	}
+
+	return {
+		sessions: state.archivedSessions.filter(session => sessionIds.has(session.id)),
+		goalIds,
+	};
+}
+
 export interface SidebarTreeVisibilityInput {
 	view?: SidebarSessionView;
 	filters?: SidebarViewFilters;
@@ -1626,9 +1667,15 @@ export function buildSidebarTreeModelWithSearch(
 		? filterStaffByQuery(staffList.filter(s => s.state !== "retired"), q)
 		: staffList.filter(s => s.state !== "retired");
 	const liveSessionsNoStaff = state.gatewaySessions.filter(s => !sidebarData.staffSessionIds.has(s.id));
-	const goalsForTree: Goal[] = state.goals;
+	const activeId = activeSessionId();
+	const activeArchived = activeId ? state.archivedSessions.find(session => session.id === activeId) : undefined;
+	const narrowActiveArchive = Boolean(activeArchived && !filters.showArchived && !bypassFilters);
+	const activeArchivePopulation = narrowActiveArchive && activeId ? activeArchivedTreePopulation(activeId) : null;
+	const goalsForTree: Goal[] = activeArchivePopulation
+		? state.goals.filter(goal => !goal.archived || activeArchivePopulation.goalIds.has(goal.id))
+		: state.goals;
 	let sessionsForTree: GatewaySession[] = liveSessionsNoStaff;
-	let archivedSessionsForTree: GatewaySession[] = state.archivedSessions;
+	let archivedSessionsForTree: GatewaySession[] = activeArchivePopulation?.sessions ?? state.archivedSessions;
 	let visibleSearchGoalIds: Set<string> | null = null;
 
 	let retainedSearchSessionIds: Set<string> | null = null;
@@ -1680,7 +1727,7 @@ export function buildSidebarTreeModelWithSearch(
 		sessions: sessionsForTree,
 		archivedSessions: archivedSessionsForTree,
 		staff: filteredStaff,
-		showArchived: filters.showArchived || bypassFilters,
+		showArchived: filters.showArchived || bypassFilters || narrowActiveArchive,
 		projectOrder: projects.map(p => p.id),
 		nestedDepthByProject: new Map(projects.map(p => [p.id, _getNestedDepthCap(p.id)])),
 		defaultNestedDepth: DEFAULT_NESTED_DEPTH_CAP,
@@ -1693,7 +1740,7 @@ export function buildSidebarTreeModelWithSearch(
 				|| view === "status"
 				|| passesSidebarFilters(session as GatewaySession, active, bypass),
 			bypassBusyReadFilters: bypassFilters || view === "status",
-			includeArchived: filters.showArchived || bypassFilters,
+			includeArchived: filters.showArchived || bypassFilters || narrowActiveArchive,
 		},
 		expansion: sidebarTreeExpansionInput(),
 	});
@@ -1813,6 +1860,10 @@ function switchSidebarView(view: SidebarSessionView): void {
 
 /** Shared compact selector/filter row used by desktop and mobile. */
 export function renderSidebarViewControls(variant: "desktop" | "mobile" = "desktop"): TemplateResult {
+	const revealSessionId = activeSessionId();
+	const revealTooltip = revealSessionId
+		? "Reveal current session in sidebar"
+		: "Open a session to reveal it in the sidebar.";
 	return html`
 		<div class="sidebar-view-controls ${variant === "mobile" ? "sidebar-view-controls--mobile" : ""}">
 			<div class="sidebar-session-mode-switch" role="group" aria-label="Session grouping">
@@ -1832,6 +1883,22 @@ export function renderSidebarViewControls(variant: "desktop" | "mobile" = "deskt
 				><span class="sidebar-view-control-icon">${icon(ListFilter, "xs")}</span><span>By Status</span></button>
 			</div>
 			${renderFiltersButton(variant)}
+			${variant === "desktop" ? html`
+				<span class="sidebar-reveal-current-control" title=${revealTooltip}>
+					<button
+						type="button"
+						class="sidebar-reveal-current-button"
+						data-testid="sidebar-reveal-current-button"
+						aria-label="Reveal current session in sidebar"
+						title=${revealTooltip}
+						?disabled=${!revealSessionId}
+						@click=${() => {
+							if (!activeSessionId()) return;
+							void import("./sidebar-reveal.js").then(module => module.revealCurrentSidebarSession());
+						}}
+					><span class="sidebar-view-control-icon">${icon(Crosshair, "xs")}</span></button>
+				</span>
+			` : nothing}
 		</div>
 	`;
 }
