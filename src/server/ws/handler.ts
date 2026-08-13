@@ -189,7 +189,7 @@ function deliveryOutboxProjection(
 			source: row.source,
 			author: row.author,
 		}));
-	return [...queued, ...inFlight].sort((left, right) => {
+	const orderedInFlight = inFlight.sort((left, right) => {
 		const leftCreated = typeof left.createdAt === "number" ? left.createdAt : 0;
 		const rightCreated = typeof right.createdAt === "number" ? right.createdAt : 0;
 		if (leftCreated !== rightCreated) return leftCreated - rightCreated;
@@ -200,6 +200,7 @@ function deliveryOutboxProjection(
 		const rightId = typeof right.id === "string" ? right.id : "";
 		return leftId.localeCompare(rightId);
 	});
+	return [...queued, ...orderedInFlight];
 }
 
 function intentProjection(
@@ -829,7 +830,21 @@ export function handleWebSocketConnection(
 			if (receiptSent) return;
 			const current = sessionManager.getSession(sessionId);
 			const admitted = current ? intentProjection(current, intentId) : undefined;
-			if (admitted) sendIntentUpdate(admitted);
+			if (admitted) {
+				sendIntentUpdate(admitted);
+				return;
+			}
+			// A delayed duplicate may arrive after the occurrence was surfaced or
+			// explicitly dismissed. Return its durable body-free disposition so the
+			// originating tab clears its pre-acceptance spool without resurrection.
+			const settlement = sessionManager.intentSettlement(sessionId, intentId);
+			if (settlement) {
+				sendIntentUpdate({
+					id: intentId,
+					deliveryState: settlement === "cancelled" ? "cancelled" : "received",
+					deliveryReason: settlement === "cancelled" ? "dismissed" : "already-settled",
+				}, settlement);
+			}
 		}, (error) => {
 			const current = sessionManager.getSession(sessionId);
 			const failed = current ? intentProjection(current, intentId) : undefined;
@@ -1051,6 +1066,13 @@ export function handleWebSocketConnection(
 			const deliveryOutbox = deliveryOutboxProjection(session);
 			send(ws, { type: "queue_update", sessionId, queue: deliveryOutbox } as unknown as ServerMessage);
 			send(ws, { type: "delivery_outbox", sessionId, outbox: deliveryOutbox } as unknown as ServerMessage);
+			for (const intentId of sessionManager.cancelledIntentIds(sessionId)) {
+				sendIntentUpdate({
+					id: intentId,
+					deliveryState: "cancelled",
+					deliveryReason: "dismissed",
+				}, "cancelled");
+			}
 			replayManualRetryRequiredOnAttach(ws, session);
 
 			// Rehydrate any on-disk proposal drafts for this session so the
@@ -1460,7 +1482,9 @@ export function handleWebSocketConnection(
 					sessionManager.steerQueued(sessionId, msg.messageId);
 					break;
 				case "remove_queued":
-					sessionManager.removeQueued(sessionId, msg.messageId);
+					if (!sessionManager.removeQueued(sessionId, msg.messageId)) {
+						send(ws, { type: "error", message: "Intent could not be dismissed", code: "INTENT_DISMISS_FAILED" });
+					}
 					break;
 				case "reorder_queue":
 					sessionManager.reorderQueue(sessionId, msg.messageIds);
