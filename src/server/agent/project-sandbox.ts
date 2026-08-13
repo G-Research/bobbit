@@ -39,6 +39,40 @@ const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL:
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
 export const CLAUDE_AGENT_SDK_SANDBOX_VERSION = "0.3.222";
+const SDK_STATE_ENTRY_LIMIT = 10_000;
+
+// Runs as root with a validated session id passed as $1. Lock the mounted
+// parent before examining children: node can no longer replace a session dir
+// between its lstat and migration. The bounded find is physical (-P), rejects
+// every symlink, and chowns each entry without dereferencing it.
+const PREPARE_CLAUDE_SDK_STATE = `
+set -eu
+parent=/bobbit-state/claude-agent-sdk
+session="$1"
+case "$session" in
+  *[!A-Za-z0-9_-]*|"") exit 64 ;;
+esac
+[ -d "$parent" ] && [ ! -L "$parent" ]
+chown -h root:root "$parent"
+chmod 0711 "$parent"
+[ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+dir="$parent/$session"
+if [ -L "$dir" ]; then exit 65; fi
+if [ -e "$dir" ]; then
+  [ -d "$dir" ] && [ ! -L "$dir" ] || exit 65
+else
+  install -d -o ${CLAUDE_AGENT_SDK_DOCKER_USER} -g ${CLAUDE_AGENT_SDK_DOCKER_USER} -m 0700 "$dir"
+fi
+# Lock the session root before walking old node-owned descendants.
+chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} "$dir"
+chmod 0700 "$dir"
+[ "$(stat -c '%u:%a' "$dir")" = "${CLAUDE_AGENT_SDK_DOCKER_UID}:700" ]
+[ -z "$(find -P "$dir" -xdev -type l -print -quit)" ]
+entries="$(find -P "$dir" -xdev -printf . | dd bs=1 count=${SDK_STATE_ENTRY_LIMIT + 1} status=none | wc -c)"
+[ "$entries" -le ${SDK_STATE_ENTRY_LIMIT} ]
+find -P "$dir" -xdev -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} +
+[ "$(stat -c '%u:%a' "$dir")" = "${CLAUDE_AGENT_SDK_DOCKER_UID}:700" ]
+`;
 
 interface DockerMountInfo {
 	Type?: string;
@@ -616,31 +650,28 @@ export class ProjectSandbox {
 	}
 
 	/**
-	 * Prepare exactly one SDK session's private config directory and its active
-	 * workspace. The fixed SDK user never shares a UID with model-invocable
-	 * `node` processes; a collaboration group grants both users workspace write
-	 * access without making the SDK config group-readable.
+	 * Secure one SDK config root before OAuth is injected. Legacy SDK state was
+	 * node-owned; migrate it only after the mounted parent is root-owned and no
+	 * longer writable by node. Workspace access is a fixed node-side probe, not
+	 * a recursive permission sweep over model-controlled files.
 	 */
 	async prepareClaudeAgentSdkSession(cwd: string, sessionId: string): Promise<void> {
 		if (!isSandboxContainerCwd(cwd) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(sessionId)) {
 			throw new Error("Claude Agent SDK sandbox session path is invalid");
 		}
 		const containerId = await this.getContainerId();
-		const configDir = `/bobbit-state/claude-agent-sdk/${sessionId}`;
 		await this.execDocker([
-			"exec", "-i", "-u", "root", containerId,
-			"install", "-d", "-o", CLAUDE_AGENT_SDK_DOCKER_USER, "-g", CLAUDE_AGENT_SDK_DOCKER_USER, "-m", "700", configDir,
+			"exec", "-i", "-u", "root", containerId, "sh", "-ceu",
+			PREPARE_CLAUDE_SDK_STATE,
+			"bobbit-sdk-state", sessionId,
+		], { timeout: 30_000, env: DOCKER_ENV });
+		// Docker resolves `-w` before executing the fixed node probe. A CWD swapped
+		// to a private 0700 SDK directory therefore fails without mutating either
+		// the workspace or config history.
+		await this.execDocker([
+			"exec", "-i", "-u", "node", "-w", cwd, containerId,
+			"sh", "-ceu", "test -O . && test -r . && test -x .",
 		], { timeout: 10_000, env: DOCKER_ENV });
-		// Never recurse as root through a session-controlled CWD. `node` owns the
-		// normal workspace and is in the collaboration group, so it can prepare
-		// ordinary workspace files but cannot traverse or change an SDK-private
-		// config directory reached through a swapped symlink. Either ownership
-		// incompatibility fails this setup before the SDK receives OAuth.
-		for (const command of [["chgrp", "-R", CLAUDE_AGENT_SDK_DOCKER_USER, "."], ["chmod", "-R", "g+rwX", "."]]) {
-			await this.execDocker([
-				"exec", "-i", "-u", "node", "-w", cwd, containerId, ...command,
-			], { timeout: 30_000, env: DOCKER_ENV });
-		}
 	}
 
 	/** Exact image and wrapper probe for the SDK-only sandbox launch path. */

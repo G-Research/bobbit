@@ -29,6 +29,7 @@ import { SearchService } from "../search/search-service.js";
 import { hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
 import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
+import { sanitizeClaudeAgentSdkErrorForLog } from "./claude-agent-sdk-error.js";
 import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
@@ -4109,8 +4110,11 @@ export class SessionManager {
 			}
 			try {
 				await sandbox.prepareClaudeAgentSdkSession(bridgeOptions.cwd, sessionId);
-			} catch {
-				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: SDK sandbox permissions are unavailable; rebuild the Docker sandbox image and retry");
+			} catch (error) {
+				const diagnostic = sanitizeClaudeAgentSdkErrorForLog(error, 160);
+				throw new ClaudeAgentSdkUnavailableError(
+					`CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: SDK sandbox state preparation failed${diagnostic ? ` (${diagnostic})` : ""}`,
+				);
 			}
 			bridgeOptions.claudeSdkSandboxLaunch = {
 				containerId,
@@ -13001,6 +13005,7 @@ export class SessionManager {
 				containerId,
 				cwd: ps.cwd,
 				bobbitSessionId: ps.id,
+				prepare: () => sandbox.prepareClaudeAgentSdkSession(ps.cwd, ps.id),
 			}),
 		};
 	}

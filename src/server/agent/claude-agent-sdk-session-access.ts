@@ -171,12 +171,16 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 	containerId: string;
 	cwd: string;
 	bobbitSessionId: string;
+	/** Re-establishes private SDK state ownership before dormant archive reads. */
+	prepare?: () => Promise<void>;
 	exec?: (args: string[]) => Promise<string>;
 }): ClaudeAgentSdkSessionApi {
 	if (!input.containerId || !isSandboxContainerCwd(input.cwd)) {
 		throw unavailable("sandbox session access is unavailable");
 	}
 	const dir = `/bobbit-state/claude-agent-sdk/${input.bobbitSessionId}`;
+	let preparation: Promise<void> | undefined;
+	const prepare = (): Promise<void> => preparation ??= input.prepare?.() ?? Promise.resolve();
 	const execute = input.exec ?? (async (args: string[]) => {
 		const { stdout } = await execFileAsync("docker", args, {
 			maxBuffer: MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES,
@@ -192,6 +196,7 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 		offset?: number;
 		includeSystemMessages?: boolean;
 	}): Promise<T> => {
+		await prepare();
 		const output = await execute([
 			"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, "-w", input.cwd,
 			"-e", `HOME=${CLAUDE_AGENT_SDK_DOCKER_HOME}`, "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

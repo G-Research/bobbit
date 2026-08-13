@@ -7,11 +7,13 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "./gateway-harness.js";
 import { apiFetch, connectWs, defaultProjectId, gitCwd, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
 import { isDockerSandboxAvailable, SANDBOX_IMAGE } from "./test-utils/docker.js";
+import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 
 const SDK_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OAUTH_POLICY = "ANTHROPIC_OAUTH_TOKEN";
@@ -219,9 +221,9 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			return { ...stats, containers: [...stats.containers, { projectId, containerId, status: "ready" }] };
 		};
 
-		const createSandboxSdkSession = async (): Promise<Response> => apiFetch("/api/sessions", {
+		const createSandboxSdkSession = async (worktree = true, cwd = gitCwd()): Promise<Response> => apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ projectId, cwd: gitCwd(), sandboxed: true, initialModel: "claude-agent-sdk/controlled-sandbox" }),
+			body: JSON.stringify({ projectId, cwd, sandboxed: true, worktree, initialModel: "claude-agent-sdk/controlled-sandbox" }),
 		});
 		const expectAsyncUnavailable = async (code: string, secret: string): Promise<void> => {
 			const response = await createSandboxSdkSession();
@@ -267,14 +269,16 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			await expectAsyncUnavailable("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE", access);
 
 			capable = true;
-			const response = await createSandboxSdkSession();
+			// This deliberately uses synchronous `executePlan` (no worktree), where
+			// SDK dispatcher preflight must wait for sandbox container wiring.
+			const response = await createSandboxSdkSession(false, nonGitCwd());
 			expect(response.status, await response.clone().text()).toBe(201);
 			const { id } = await response.json() as { id: string };
 			await waitForSessionStatus(id, "idle", 30_000);
 			expect(sdk.queries).toHaveLength(1);
 			expect(bridgeLaunches).toHaveLength(1);
 			expect(bridgeLaunches[0].containerId).toBe("controlled-sdk-container-a");
-			expect(bridgeLaunches[0].cwd).toMatch(/^\/workspace-wt\/session\/s-/);
+			expect(bridgeLaunches[0].cwd).toMatch(/^\/workspace\/\.e2e-workspaces\/non-git-/);
 			expect(bridgeLaunches[0].oauthAccessToken === access).toBe(true);
 			const initialDispatches = docker.launches();
 			expect(initialDispatches).toHaveLength(1);
@@ -349,6 +353,38 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		}
 	});
 
+	test("migrates legacy SDK state under a locked bind-mounted parent and rejects replacement", async () => {
+		const imageHasSdkUser = isDockerSandboxAvailable() && (() => {
+			try {
+				execFileSync("docker", ["run", "--rm", SANDBOX_IMAGE, "id", "-u", "bobbit-sdk"], { stdio: "ignore", timeout: 10_000 });
+				return true;
+			} catch { return false; }
+		})();
+		test.skip(!imageHasSdkUser, "requires a locally rebuilt bobbit-agent image with the SDK user");
+		const stateRoot = mkdtempSync(join(tmpdir(), "bobbit-sdk-state-"));
+		const name = `bobbit-sdk-state-${randomUUID().slice(0, 8)}`;
+		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf8", timeout: 20_000 });
+		try {
+			docker(["run", "-d", "--name", name, "-v", `${stateRoot}:/bobbit-state/claude-agent-sdk`, SANDBOX_IMAGE, "sleep", "infinity"]);
+			docker(["exec", "-u", "node", name, "sh", "-c", "mkdir -p /bobbit-state/claude-agent-sdk/legacy-session; printf legacy-history > /bobbit-state/claude-agent-sdk/legacy-session/history"]);
+			// Linux bind mounts retain the legacy node UID. Docker Desktop's host
+			// virtualization may coerce every bind-mounted file to root; production
+			// correctly fails closed there rather than claiming a writable SDK root.
+			test.skip(docker(["exec", "-u", "root", name, "stat", "-c", "%u", "/bobbit-state/claude-agent-sdk/legacy-session"]).trim() !== "1000", "Docker bind mount does not preserve container uid ownership");
+			const sandbox = new ProjectSandbox({ projectId: "sdk-state-e2e", projectDir: stateRoot, repoUrl: "https://example.test/repo.git", image: SANDBOX_IMAGE });
+			(sandbox as any).containerId = name;
+			await sandbox.prepareClaudeAgentSdkSession("/workspace", "legacy-session");
+			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%u:%a", "/bobbit-state/claude-agent-sdk", "/bobbit-state/claude-agent-sdk/legacy-session"])).toBe("0:711\n1001:700\n");
+			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
+			expect(() => docker(["exec", "-u", "node", name, "sh", "-c", "mv /bobbit-state/claude-agent-sdk/legacy-session /tmp/replaced; ln -s /tmp/replaced /bobbit-state/claude-agent-sdk/legacy-session"])).toThrow();
+			docker(["restart", name]);
+			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
+		} finally {
+			try { docker(["rm", "-f", name]); } catch { /* test cleanup */ }
+			rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+
 	test("keeps an OAuth-bearing SDK process outside the tool UID while workspace and SDK state survive restart", () => {
 		const imageHasSdkUser = isDockerSandboxAvailable() && (() => {
 			try {
@@ -364,6 +400,9 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			docker(["run", "-d", "--name", name, SANDBOX_IMAGE, "sleep", "infinity"]);
 			docker(["exec", "-u", "root", name, "install", "-d", "-o", "bobbit-sdk", "-g", "bobbit-sdk", "-m", "700", "/bobbit-state/claude-agent-sdk/sentinel"]);
 			docker(["exec", "-d", "-u", "bobbit-sdk", "-e", `CLAUDE_CODE_OAUTH_TOKEN=${sentinel}`, name, "sh", "-c", "printf sdk-history > /bobbit-state/claude-agent-sdk/sentinel/history; exec sleep 30"]);
+			// Positive control: the separate SDK UID can see its own live process
+			// environment, so the following node-UID negative check is meaningful.
+			expect(docker(["exec", "-u", "bobbit-sdk", name, "sh", "-c", "for p in /proc/[0-9]*/environ; do if grep -azq '^CLAUDE_CODE_OAUTH_TOKEN=' \"$p\" 2>/dev/null; then printf owned-env-readable; exit 0; fi; done; exit 1"])).toBe("owned-env-readable");
 
 			// An allowed tool shell scans all peer process environments. It must not
 			// observe even the secret variable name from the separate SDK UID.

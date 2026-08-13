@@ -244,6 +244,22 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		}
 	});
 
+	it("prepares migrated private state once before dormant SDK history access", async () => {
+		let preparations = 0;
+		const access = createSandboxClaudeAgentSdkSessionAccess({
+			containerId: "container-legacy-history",
+			cwd: "/workspace",
+			bobbitSessionId: "legacy-history",
+			prepare: async () => { preparations++; },
+			exec: async (args) => args.includes("info")
+				? JSON.stringify({ sessionId: SDK_ID, summary: "legacy", lastModified: 1 })
+				: JSON.stringify([]),
+		});
+		await expect(access.getSessionInfo(SDK_ID)).resolves.toMatchObject({ summary: "legacy" });
+		await expect(access.getSessionMessages(SDK_ID)).resolves.toEqual([]);
+		expect(preparations).toBe(1);
+	});
+
 	it("pages container history under explicit bounds so ordinary multi-megabyte histories remain readable", async () => {
 		const offsets: number[] = [];
 		const access = createSandboxClaudeAgentSdkSessionAccess({

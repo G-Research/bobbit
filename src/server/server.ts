@@ -8231,7 +8231,7 @@ async function handleApiRoute(
 		// For sandboxed non-goal, non-assistant sessions, generate a branch so they get
 		// a container worktree instead of defaulting to /workspace.
 		let autoSandboxBranch: string | undefined;
-		if (sandboxed && !goalId && !assistantType) {
+		if (sandboxed && wantWorktree && !goalId && !assistantType) {
 			const shortId = randomUUID().slice(0, 8);
 			autoSandboxBranch = `session/s-${shortId}`;
 		}

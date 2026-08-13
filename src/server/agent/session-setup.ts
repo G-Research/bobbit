@@ -1451,7 +1451,10 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	// SDK extension preflight requires the current Docker container/CWD. Keep
+	// Pi activation timing unchanged and defer only this sandbox SDK branch.
+	const deferSandboxSdkToolActivation = plan.sandboxed && plan.bridgeOptions.runtime === "claude-agent-sdk";
+	if (!deferSandboxSdkToolActivation) await resolveToolActivation(plan, ctx);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1472,7 +1475,14 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
 			}),
-			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
+			{
+				retries: 1,
+				delays: [1000],
+				label: "wireSandbox",
+				sessionId: plan.id,
+				nonRetryable: isUnresolvedHeadWorktreeError,
+				errorMessage: error => isClaudeAgentSdkUnavailableError(error) ? claudeAgentSdkUnavailableDiagnostic(error) : error.message,
+			},
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
 		});
@@ -1484,6 +1494,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 			resolvePrompt(plan, ctx);
 		}
 	}
+	if (deferSandboxSdkToolActivation) await resolveToolActivation(plan, ctx);
 
 	// Resolve raw last-wins Pi flags only after extensions and sandbox remaps have
 	// assembled the final argv. Invalid/cross-provider tuples fail before the

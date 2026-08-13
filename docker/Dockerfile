@@ -86,6 +86,11 @@ RUN groupadd --gid 1001 bobbit-sdk \
     && useradd --uid 1001 --gid bobbit-sdk --create-home --shell /usr/sbin/nologin bobbit-sdk \
     && usermod --append --groups bobbit-sdk node
 
+# The SDK runs as bobbit-sdk with a separate HOME, so give that user the same
+# fixed repository trust scope as node without copying any user config/credentials.
+RUN git config --system --add safe.directory /workspace \
+    && git config --system --add safe.directory '/workspace-wt/*'
+
 # Run ordinary sandbox processes as non-root `node` (uid=1000). This ensures
 # files created in /workspace via bind mount retain the existing ownership.
 USER node
