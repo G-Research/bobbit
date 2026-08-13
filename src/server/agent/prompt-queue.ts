@@ -10,6 +10,8 @@ interface PromptQueueEnqueueOptions {
 	suppressTitleGen?: boolean;
 	source?: PromptSource;
 	author?: MessageAuthor;
+	streamingBehavior?: QueuedMessage["streamingBehavior"];
+	coldStart?: boolean;
 }
 
 function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
@@ -55,6 +57,8 @@ export class PromptQueue {
 		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
 		if (opts?.source) msg.source = opts.source;
 		if (opts?.author && isMessageAuthor(opts.author)) msg.author = opts.author;
+		if (opts?.streamingBehavior) msg.streamingBehavior = opts.streamingBehavior;
+		if (opts?.coldStart) msg.coldStart = true;
 
 		this.queue.push(msg);
 		if (msg.isSteered) this.reorder();
@@ -114,6 +118,19 @@ export class PromptQueue {
 		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
 		if (opts?.source) msg.source = opts.source;
 		if (opts?.author && isMessageAuthor(opts.author)) msg.author = opts.author;
+		if (opts?.streamingBehavior) msg.streamingBehavior = opts.streamingBehavior;
+		if (opts?.coldStart) msg.coldStart = true;
+		this.queue.unshift(msg);
+		this.reorder();
+		return msg;
+	}
+
+	/**
+	 * Restore an already-admitted row at the front without allocating a new ID.
+	 * Receipts correlate dispatch/recovery/cancellation to this durable identity.
+	 */
+	restoreAtFront(message: QueuedMessage): QueuedMessage {
+		const msg = normalizeQueuedMessage(message);
 		this.queue.unshift(msg);
 		this.reorder();
 		return msg;

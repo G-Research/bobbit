@@ -105,6 +105,13 @@ export interface QueuedMessage {
 	/** Accountable author resolved by the server; absent on legacy rows. */
 	author?: MessageAuthor;
 	/**
+	 * Preserve the SDK delivery semantics across durable queue admission. A
+	 * verifier follow-up must remain a follow-up when drainQueue sends it.
+	 */
+	streamingBehavior?: "steer" | "followUp";
+	/** Wait for a restored agent to accept commands before delivery. */
+	coldStart?: boolean;
+	/**
 	 * When true, this prompt must NOT trigger first-message auto-title
 	 * generation (used for assistant auto-kickoff prompts so naming fires on
 	 * the first genuine user message instead of the kickoff text).
