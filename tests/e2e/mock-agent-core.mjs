@@ -210,6 +210,7 @@ export class MockAgentCore {
 		this._barrierJournal = [];
 		this._commandJournal = [];
 		this._commandSequence = { prompt: 0, steer: 0, abort: 0, compact: 0 };
+		this._reliableDeliveryIntentIds = new Map();
 		this._reliableScenario = { compaction: {}, steerFailures: {} };
 		this._reliableOverflowRetryActive = false;
 
@@ -282,6 +283,10 @@ export class MockAgentCore {
 
 	get barrierJournal() { return this._barrierJournal.map((entry) => ({ ...entry })); }
 	get commandJournal() { return this._commandJournal.map((entry) => ({ ...entry })); }
+
+	bindReliableDeliveryIntent(kind, occurrence, intentId) {
+		this._reliableDeliveryIntentIds.set(`${kind}:${occurrence}`, intentId);
+	}
 
 	/** Emit an agent event to the listener. Message events deliberately remain
 	 * id-free: real Pi persists the corresponding SessionEntry only after the
@@ -1040,6 +1045,11 @@ export class MockAgentCore {
 		// RPC acknowledgement alone is deliberately not enough.
 		if (delivery.kind === "steer") {
 			await this._crossBarrier(`steer:${delivery.occurrence}:before-user-start`, delivery);
+			const boundIntentId = this._reliableDeliveryIntentIds.get(`steer:${delivery.occurrence}`);
+			if (boundIntentId) {
+				delivery.intentId = boundIntentId;
+				this._reliableDeliveryIntentIds.delete(`steer:${delivery.occurrence}`);
+			}
 		}
 
 		// Echo back the user message (real agent does this).
@@ -1055,7 +1065,11 @@ export class MockAgentCore {
 		const echoImages = /ECHO_IMAGE_BLOCK/.test(text) && Array.isArray(images) && images.length
 			? images.map((im) => ({ type: "image", data: im.data, mimeType: im.mimeType || "image/png" }))
 			: [];
-		const userMsg = { role: "user", content: [{ type: "text", text }, ...echoImages] };
+		const userMsg = {
+			role: "user",
+			content: [{ type: "text", text }, ...echoImages],
+			...(delivery.intentId ? { deliveryIntentId: delivery.intentId } : {}),
+		};
 		// Optional echo-delay knob to widen the optimistic→echo race window for
 		// timing tests (env MOCK_USER_ECHO_DELAY_MS, or inline USER_ECHO_DELAY=<ms>
 		// so it survives the spawned/in-process boundary). Default: synchronous.
@@ -3318,7 +3332,11 @@ export class MockAgentCore {
 					// the sole boundary that can release next-turn prompts.
 					const delivery = { kind: "steer", occurrence, intentId };
 					await this._crossBarrier(`steer:${occurrence}:before-user-start`, delivery);
-					const userMsg = { role: "user", content: [{ type: "text", text: steeredText }] };
+					const userMsg = {
+						role: "user",
+						content: [{ type: "text", text: steeredText }],
+						...(intentId ? { deliveryIntentId: intentId } : {}),
+					};
 					this.emit({
 						type: "message_start",
 						message: userMsg,
