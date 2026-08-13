@@ -1373,6 +1373,12 @@ export class RemoteAgent {
 
 	/** Retry one failed occurrence without changing its stable identity. */
 	retryIntent(intentId: string): void {
+		const projected = this._deliveryProjection.get(intentId)
+			?? this._serverQueue.find((row) => row.id === intentId);
+		// Abort-recovery cancellation is a durable fail-closed carrier, not a safe
+		// resend affordance. Ignore stale-tab Retry clicks unless the authoritative
+		// server projection explicitly marks this exact occurrence retryable.
+		if (projected && (projected.deliveryState === "cancelled" || projected.retryable === false)) return;
 		const local = this._pendingOutbox.find((entry) => entry.row?.id === intentId);
 		if (local?.row && !local.persisted) {
 			local.row.deliveryState = "local";

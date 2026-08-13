@@ -46,6 +46,7 @@ import {
 	projectCorrelatedPromptMessage,
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
+	selectLatestPromptAuthorBinding,
 	type PromptAuthorBinding,
 } from "./author-sidecar.js";
 import {
@@ -1575,8 +1576,12 @@ export function reconcilePersistedIntentRestore(
 ): PersistedIntentRestoreState {
 	const latestByIntent = new Map<string, PromptAuthorBinding>();
 	const terminalAttempts = new Set<string>();
+	const modernIntentIds = new Set(bindings.flatMap((binding) => binding.intentId ? [binding.intentId] : []));
+	for (const intentId of modernIntentIds) {
+		const latest = selectLatestPromptAuthorBinding(bindings, (binding) => binding.intentId === intentId);
+		if (latest) latestByIntent.set(intentId, latest);
+	}
 	for (const binding of bindings) {
-		if (binding.intentId) latestByIntent.set(binding.intentId, binding);
 		if (binding.intentId && binding.attemptId && binding.settlement) {
 			terminalAttempts.add(`${binding.intentId}\0${binding.attemptId}`);
 		}
@@ -1590,7 +1595,9 @@ export function reconcilePersistedIntentRestore(
 		// yield to the terminal sidecar disposition.
 		const recovered = row as ReliableQueuedMessage;
 		return latest.settlement.outcome === "cancelled"
-			&& (recovered.deliveryState === "queued" || recovered.deliveryState === "failed")
+			&& (recovered.deliveryState === "queued"
+				|| recovered.deliveryState === "failed"
+				|| (recovered.deliveryState === "cancelled" && recovered.deliveryReason === "abort-recovery-failed"))
 			&& recovered.attemptId !== undefined
 			&& recovered.attemptId === latest.attemptId;
 	});
@@ -5340,8 +5347,10 @@ export class SessionManager {
 		if (session?.lastKeylessPromptAuthorEnd?.settled
 			&& (session.lastKeylessPromptAuthorEnd.intentId === intentId
 				|| session.lastKeylessPromptAuthorEnd.promptId === intentId)) return "surfaced";
-		const latest = [...readAuthorSidecar(sessionId)].reverse().find((binding) =>
-			binding.intentId === intentId || binding.promptId === intentId);
+		const latest = selectLatestPromptAuthorBinding(
+			readAuthorSidecar(sessionId),
+			(binding) => binding.intentId === intentId || binding.promptId === intentId,
+		);
 		return latest?.settlement?.outcome === "echoed"
 			? "surfaced"
 			: latest?.settlement?.outcome === "cancelled"
@@ -5349,17 +5358,22 @@ export class SessionManager {
 				: undefined;
 	}
 
-	/** Bounded body-free cancellation replay for reconnecting tabs. */
+	/** Bounded body-free explicit-dismissal replay for reconnecting tabs. */
 	cancelledIntentIds(sessionId: string, limit = 256): string[] {
-		const latest = new Map<string, "echoed" | "cancelled" | undefined>();
-		for (const binding of readAuthorSidecar(sessionId)) {
-			if (!binding.intentId) continue;
-			latest.set(binding.intentId, binding.settlement?.outcome);
-		}
-		return [...latest.entries()]
-			.filter(([, outcome]) => outcome === "cancelled")
-			.slice(-Math.max(0, limit))
-			.map(([intentId]) => intentId);
+		const bindings = readAuthorSidecar(sessionId);
+		const visibleIds = new Set(this.sessions.get(sessionId)?.promptQueue.toArray().map((row) => row.id) ?? []);
+		const intentIds = new Set(bindings.flatMap((binding) => binding.intentId ? [binding.intentId] : []));
+		return [...intentIds]
+			.filter((intentId) => !visibleIds.has(intentId))
+			.filter((intentId) => {
+				const latest = selectLatestPromptAuthorBinding(
+					bindings,
+					(binding) => binding.intentId === intentId,
+				);
+				return latest?.attemptId?.startsWith("dismiss:") === true
+					&& latest.settlement?.outcome === "cancelled";
+			})
+			.slice(-Math.max(0, limit));
 	}
 
 	private reliableIntentWasSettled(session: SessionInfo, intentId: string): boolean {
@@ -5367,8 +5381,10 @@ export class SessionManager {
 	}
 
 	private persistIntentCancellation(session: SessionInfo, row: ReliableQueuedMessage): boolean {
-		const existing = [...readAuthorSidecar(session.id)].reverse().find((binding) =>
-			binding.intentId === row.id || binding.promptId === row.id);
+		const existing = selectLatestPromptAuthorBinding(
+			readAuthorSidecar(session.id),
+			(binding) => binding.intentId === row.id || binding.promptId === row.id,
+		);
 		if (existing?.settlement?.outcome === "echoed") return false;
 		const settledAt = this.clock.now();
 		const recoveredAttempt = row.attemptId !== undefined && row.attemptId === existing?.attemptId;
@@ -5390,7 +5406,10 @@ export class SessionManager {
 				intentId: row.id,
 				attemptId,
 				dispatchEpoch: settledAt,
-				dispatchedAt: row.createdAt ?? settledAt,
+				// This is a synthetic terminal attempt, not the accepted occurrence.
+				// Timestamp it at settlement so lifecycle selection cannot be regressed
+				// by an older row's accepted-message timestamp.
+				dispatchedAt: settledAt,
 				modelText: row.text,
 				source,
 				author,
@@ -6232,7 +6251,7 @@ export class SessionManager {
 		// A hard-abort synthetic agent_end can reconcile the durable steer ledger
 		// before replacement hydration has rebuilt pendingPromptAuthors. Settle only
 		// the exact modern attempt; legacy prompt ids keep their established fallback.
-		const restored = [...readAuthorSidecar(session.id)].reverse().find((binding) => {
+		const restored = selectLatestPromptAuthorBinding(readAuthorSidecar(session.id), (binding) => {
 			if (binding.settlement !== undefined) return false;
 			if (typeof target === "string") return binding.promptId === target;
 			return binding.promptId === target.promptId
@@ -6545,16 +6564,51 @@ export class SessionManager {
 		}
 	}
 
-	/** Terminally cancel modern ambiguous attempts when abort recovery cannot prove history. */
+	/** Terminally park modern ambiguous attempts when abort recovery cannot prove history. */
 	private _cancelAmbiguousInFlightAfterAbort(session: SessionInfo): void {
 		const ledger = (session.inFlightSteerTexts ?? []) as ReliableInFlightRecord[];
-		const cancelled: ReliableInFlightRecord[] = [];
-		for (const record of ledger) {
-			if (!record.intentId || !record.attemptId) continue;
-			if (this.cancelRestoredPromptAuthorDispatch(session, record)) cancelled.push(record);
+		const candidates = ledger.filter((record): record is ReliableInFlightRecord & { intentId: string; attemptId: string } =>
+			!!record.intentId && !!record.attemptId);
+		if (candidates.length === 0) return;
+
+		// Persist the same-ID visible carrier while the old attempt ledger still
+		// exists. If the process dies before terminal sidecar settlement, restore
+		// sees both owners and the queue projection wins; if it dies afterwards it
+		// sees the carrier plus exact no-replay evidence. There is never no owner.
+		const queue = session.promptQueue as any;
+		for (const record of candidates) {
+			const row: ReliableQueuedMessage = {
+				id: record.intentId,
+				text: record.text,
+				isSteered: (record.kind ?? "steer") === "steer",
+				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
+				kind: record.kind ?? "steer",
+				targetTurn: record.targetTurn ?? "continuation",
+				sequence: record.sequence,
+				deliveryState: "cancelled",
+				deliveryReason: "abort-recovery-failed",
+				retryable: false,
+				attemptId: record.attemptId,
+				dispatchEpoch: record.dispatchEpoch,
+				source: record.source,
+				author: record.author,
+				images: record.images,
+				attachments: record.attachments,
+				suppressTitleGen: record.suppressTitleGen,
+			};
+			if (typeof queue.enqueueExisting === "function") queue.enqueueExisting(row);
+			else {
+				const inserted = session.promptQueue.enqueue(row.text, row);
+				Object.assign(inserted, row);
+			}
 		}
-		if (cancelled.length === 0) return;
-		const cancelledSet = new Set(cancelled);
+		this.broadcastQueue(session);
+
+		const cancelled = candidates.filter((record) => this.cancelRestoredPromptAuthorDispatch(session, record));
+		const cancelledSet = new Set<ReliableInFlightRecord>(cancelled);
+		for (const record of candidates) {
+			if (!cancelledSet.has(record)) session.promptQueue.remove(record.intentId);
+		}
 		session.inFlightSteerTexts = ledger.filter((record) => !cancelledSet.has(record));
 		this.broadcastQueue(session);
 		for (const record of cancelled) {
@@ -6562,12 +6616,11 @@ export class SessionManager {
 				type: "intent_update",
 				sessionId: session.id,
 				intent: {
-					id: record.intentId!,
+					id: record.intentId,
 					deliveryState: "cancelled",
 					deliveryReason: "abort-recovery-failed",
 					retryable: false,
 				} as unknown as ReliableQueuedMessage,
-				settlement: "cancelled",
 			});
 		}
 	}
@@ -6603,8 +6656,9 @@ export class SessionManager {
 		row.deliveryState = "queued";
 		row.retryable = false;
 		delete row.deliveryError;
-		delete row.attemptId;
-		delete row.dispatchEpoch;
+		// Keep the retired attempt tuple on the queued row until dispatch replaces
+		// it with a newly persisted ledger transition. Compaction/Stop/restart can
+		// otherwise mistake a stale terminal sidecar row for the Retry lifecycle.
 		this.broadcastQueue(session);
 		if (session.isCompacting || session.status === "aborting" || (this._sessionReplacementCoordinators?.has(session.id) ?? false)) return true;
 		if (row.kind === "steer" && row.targetTurn === "continuation" && session.status === "streaming") {

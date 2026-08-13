@@ -257,6 +257,39 @@ describe("RemoteAgent recovery snapshot delivery", () => {
 		expect(ra._state.messages.map((message: any) => message.deliveryIntentId)).toEqual(["intent-a", "intent-b"]);
 	});
 
+	it("keeps hard-abort cancellation visible in both tabs and refuses stale-tab Retry", async () => {
+		const tabs = [makeAgent(OPEN), makeAgent(OPEN)];
+		for (const ra of tabs) {
+			await ra.handleServerMessage({
+				type: "delivery_outbox",
+				outbox: [{
+					...acceptedSteer("intent-cancelled", 1),
+					deliveryState: "cancelled",
+					deliveryReason: "abort-recovery-failed",
+					retryable: false,
+				}],
+			});
+			await ra.handleServerMessage({
+				type: "intent_update",
+				intent: {
+					id: "intent-cancelled",
+					deliveryState: "cancelled",
+					deliveryReason: "abort-recovery-failed",
+					retryable: false,
+				},
+			});
+		}
+
+		for (const ra of tabs) {
+			expect(ra.getQueue()).toEqual([
+				expect.objectContaining({ id: "intent-cancelled", deliveryState: "cancelled", retryable: false }),
+			]);
+			ra.retryIntent("intent-cancelled");
+			expect(snapshot(ra).sent).not.toContainEqual(expect.objectContaining({ type: "retry_intent" }));
+			expect(ra.getQueue()).toHaveLength(1);
+		}
+	});
+
 	it("settles on a real correlated transcript snapshot row without a duplicate carrier", async () => {
 		const ra = makeAgent(OPEN);
 		await ra.handleServerMessage({
