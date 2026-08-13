@@ -21,6 +21,7 @@ import {
 	submitManualCompact,
 	transcriptIntent,
 	transcriptIntentOrder,
+	waitForRemoteStatus,
 } from "./reliable-agent-turns.fixture.js";
 
 const BUSY = "STAY_BUSY:60000 RELIABLE_TURN_BARRIER";
@@ -250,25 +251,38 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			const [queuedId] = await captureIntentIds(page, queuedText);
 
 			const steerText = "RAT_STOP_AFTER_ACK_BEFORE_ECHO";
-			const steerEcho = scenario.runtime.holdEcho(steerText);
+			const steerStart = scenario.runtime.holdNextSteerUserStart();
 			await submit(page, steerText, "steer");
 			const [steerId] = await captureIntentIds(page, steerText);
-			await steerEcho.entered;
+			steerStart.bindIntent(steerId);
+			await steerStart.entered;
 
-			const abortTerminal = scenario.runtime.holdNextAbortTerminal();
+			const abort = scenario.runtime.holdNextAbort();
 			const stop = page.getByRole("button", { name: "Stop current turn" });
 			await expect(stop).toBeVisible({ timeout: 15_000 });
 			await stop.click();
-			await abortTerminal.entered;
+			await abort.received;
+			await abort.beforeAgentEnd.entered;
 			await expect(page.getByRole("button", { name: "Stopping current turn" })).toBeVisible({ timeout: 15_000 });
 			await expectOneCarrier(page, queuedId, "outbox");
 			await expectOneCarrier(page, steerId, "outbox");
 			await expectIntentState(page, steerId, "uncertain", /Checking delivery/);
 
-			abortTerminal.release();
-			tool.release();
-			steerEcho.release();
+			expect(scenario.runtime.barrierJournal.map((entry) => entry.name)).toEqual(expect.arrayContaining([
+				steerStart.boundary,
+				abort.receivedBoundary,
+				abort.beforeAgentEnd.boundary,
+			]));
+			expect(scenario.runtime.commandJournal.filter((entry) =>
+				entry.kind === "steer" && entry.occurrence === steerStart.occurrence,
+			)).toEqual([expect.objectContaining({ text: steerText })]);
+			expect(scenario.runtime.commandJournal.filter((entry) =>
+				entry.kind === "abort" && entry.occurrence === abort.occurrence,
+			)).toHaveLength(1);
+			steerStart.release();
 			await expectOneCarrier(page, steerId, "transcript");
+			abort.beforeAgentEnd.release();
+			tool.release();
 			await queuedEcho.entered;
 			queuedEcho.release();
 			await expectOneCarrier(page, queuedId, "transcript");
@@ -282,28 +296,45 @@ test.describe("Journey: Reliable Agent Turns", () => {
 	test("Stop near compaction completion leaves every accepted occurrence in one deterministic visible channel", async ({ page, gateway }) => {
 		const scenario = await createScenario(page, gateway);
 		try {
-			const compaction = scenario.runtime.holdNextCompaction({ reason: "manual" });
-			await submitManualCompact(page);
+			const compaction = scenario.runtime.holdNextCompaction({ reason: "threshold" });
+			await submit(page, "RELIABLE_COMPACTION:threshold RAT_STOP_THRESHOLD");
 			await compaction.compaction.entered;
 
 			const text = "RAT_STOP_AT_COMPACTION_END";
-			const echo = scenario.runtime.holdEcho(text);
+			const steerStart = scenario.runtime.holdNextSteerUserStart();
 			await submit(page, text, "steer");
 			const [id] = await captureIntentIds(page, text);
+			steerStart.bindIntent(id);
 			await expectOneCarrier(page, id, "outbox");
 
 			compaction.compaction.release();
-			await echo.entered;
-			const abortTerminal = scenario.runtime.holdNextAbortTerminal();
+			await steerStart.entered;
+			const firstStreamingVersion = scenario.runtime.surfaceActiveRun();
+			await waitForRemoteStatus(page, firstStreamingVersion);
+			const activeRunVersion = scenario.runtime.surfaceActiveRun();
+			await waitForRemoteStatus(page, activeRunVersion, "streaming");
+			const abort = scenario.runtime.holdNextAbort();
 			const stop = page.getByRole("button", { name: "Stop current turn" });
 			await expect(stop).toBeVisible({ timeout: 15_000 });
 			await stop.click();
-			await abortTerminal.entered;
+			await abort.received;
+			await abort.beforeAgentEnd.entered;
 			await expectOneCarrier(page, id, "outbox");
 			await expectIntentState(page, id, "uncertain", /Checking delivery/);
-			abortTerminal.release();
-			echo.release();
+			expect(scenario.runtime.barrierJournal.map((entry) => entry.name)).toEqual(expect.arrayContaining([
+				steerStart.boundary,
+				abort.receivedBoundary,
+				abort.beforeAgentEnd.boundary,
+			]));
+			expect(scenario.runtime.commandJournal.filter((entry) =>
+				entry.kind === "steer" && entry.occurrence === steerStart.occurrence,
+			)).toEqual([expect.objectContaining({ text })]);
+			expect(scenario.runtime.commandJournal.filter((entry) =>
+				entry.kind === "abort" && entry.occurrence === abort.occurrence,
+			)).toHaveLength(1);
+			steerStart.release();
 			await expectOneCarrier(page, id, "transcript");
+			abort.beforeAgentEnd.release();
 			await expect(transcriptIntent(page, id)).toHaveCount(1);
 		} finally {
 			await scenario.cleanup();

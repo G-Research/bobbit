@@ -1,5 +1,6 @@
 import type { BrowserContext, Locator, Page } from "@playwright/test";
 import type { GatewayInfo } from "../gateway-harness.js";
+import { broadcastStatus } from "../../../src/server/agent/session-status.js";
 import { expect, navigateToHash, openApp } from "../_helpers/journey-fixture.js";
 
 /** A deterministic test seam: arrival is observable separately from release. */
@@ -41,12 +42,29 @@ interface CompactionHold {
 	retry?: TurnBarrier;
 }
 
+export interface CoreBarrierHold {
+	occurrence: number;
+	boundary: string;
+	entered: Promise<void>;
+	bindIntent(intentId: string): void;
+	release(): void;
+}
+
+export interface AbortHold {
+	occurrence: number;
+	receivedBoundary: string;
+	received: Promise<void>;
+	beforeAgentEnd: CoreBarrierHold;
+}
+
 /**
  * Browser-owned deterministic barriers around the in-process mock Pi runtime.
  * They do not add alternate delivery state: they only pause existing RPC/event
  * boundaries so the journey can inspect the visible UI without arbitrary sleeps.
  */
 export class ReliableTurnRuntime {
+	private readonly sessionManager: any;
+	private readonly sessionId: string;
 	private readonly core: any;
 	private readonly bridge: any;
 	private readonly originalHandlePrompt: (...args: any[]) => Promise<any>;
@@ -59,10 +77,14 @@ export class ReliableTurnRuntime {
 	private nextTool: TurnBarrier | undefined;
 	private activeTool: TurnBarrier | undefined;
 	private nextCompaction: CompactionHold | undefined;
+	private nextSteerUserStartOccurrence = 1;
+	private nextAbortOccurrence = 1;
 	private restored = false;
 
 	constructor(gateway: GatewayInfo, sessionId: string) {
-		const session = gateway.sessionManager?.getSession(sessionId);
+		this.sessionManager = gateway.sessionManager;
+		this.sessionId = sessionId;
+		const session = this.sessionManager?.getSession(sessionId);
 		this.bridge = session?.rpcClient;
 		this.core = this.bridge?._agent;
 		if (!this.bridge || !this.core) {
@@ -72,6 +94,8 @@ export class ReliableTurnRuntime {
 		this.originalSteer = this.bridge.steer;
 		this.originalEmit = this.core.emit;
 		this.originalSleep = this.core._sleep;
+		this.nextSteerUserStartOccurrence = Number(this.core._commandSequence?.steer ?? 0) + 1;
+		this.nextAbortOccurrence = Number(this.core._commandSequence?.abort ?? 0) + 1;
 
 		const fixture = this;
 		this.core.handlePrompt = async function heldPrompt(text: string, ...args: any[]) {
@@ -103,6 +127,16 @@ export class ReliableTurnRuntime {
 
 	holdEcho(text: string, label = `echo:${text}`): TurnBarrier {
 		return this.push(this.echoHolds, text, new TurnBarrier(label));
+	}
+
+	/** Hold the next steer after MockAgentCore has installed its abort controller. */
+	holdNextSteerUserStart(): CoreBarrierHold {
+		const occurrence = Math.max(
+			this.nextSteerUserStartOccurrence,
+			Number(this.core._commandSequence?.steer ?? 0) + 1,
+		);
+		this.nextSteerUserStartOccurrence = occurrence + 1;
+		return this.holdCoreBarrier(`steer:${occurrence}:before-user-start`, occurrence);
 	}
 
 	holdSteerAcknowledgement(text: string, label = `steer-ack:${text}`): TurnBarrier {
@@ -162,17 +196,40 @@ export class ReliableTurnRuntime {
 		return hold;
 	}
 
-	holdNextAbortTerminal(label = "abort-terminal"): TurnBarrier {
-		const occurrence = Number(this.core._commandSequence?.abort ?? 0) + 1;
-		const boundary = `abort:${occurrence}:before-agent-end`;
-		const hold = new TurnBarrier(label);
-		this.core.armBarrier(boundary);
-		void this.core.waitForBarrier(boundary).then(async () => {
-			hold.arrive();
-			await hold.wait();
-			this.core.releaseBarrier(boundary);
-		});
-		return hold;
+	/** Observe abort command receipt independently from its held terminal event. */
+	holdNextAbort(): AbortHold {
+		const occurrence = Math.max(
+			this.nextAbortOccurrence,
+			Number(this.core._commandSequence?.abort ?? 0) + 1,
+		);
+		this.nextAbortOccurrence = occurrence + 1;
+		const receivedBoundary = `abort:${occurrence}:received`;
+		return {
+			occurrence,
+			receivedBoundary,
+			received: Promise.resolve(this.core.waitForBarrier(receivedBoundary)).then(() => undefined),
+			beforeAgentEnd: this.holdCoreBarrier(`abort:${occurrence}:before-agent-end`, occurrence),
+		};
+	}
+
+	get commandJournal(): any[] {
+		return this.core.commandJournal;
+	}
+
+	get barrierJournal(): any[] {
+		return this.core.barrierJournal;
+	}
+
+	/** Project an already active held mock run after compaction overwrote its status. */
+	surfaceActiveRun(): number {
+		if (!this.core.currentAbortController) {
+			throw new Error("Cannot surface a mock run without an active abort controller");
+		}
+		this.core.emit({ type: "agent_start" });
+		const session = this.sessionManager?.getSession(this.sessionId);
+		if (!session) throw new Error("Cannot surface a missing mock session");
+		broadcastStatus(session, "streaming", { streamingStartedAt: Date.now() });
+		return session.statusVersion;
 	}
 
 	restore(): void {
@@ -215,6 +272,20 @@ export class ReliableTurnRuntime {
 			gate.wait(),
 			new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
 		]);
+	}
+
+	private holdCoreBarrier(boundary: string, occurrence: number): CoreBarrierHold {
+		this.core.armBarrier(boundary);
+		return {
+			occurrence,
+			boundary,
+			entered: Promise.resolve(this.core.waitForBarrier(boundary)).then(() => undefined),
+			bindIntent: (intentId) => {
+				const [kind] = boundary.split(":");
+				this.core.bindReliableDeliveryIntent(kind, occurrence, intentId);
+			},
+			release: () => { this.core.releaseBarrier(boundary); },
+		};
 	}
 
 	private push<T>(map: Map<string, T[]>, key: string, value: T): T {
@@ -309,6 +380,26 @@ export async function openSessionPage(page: Page, sessionId: string): Promise<vo
 	await openApp(page);
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(editor(page)).toBeVisible({ timeout: 20_000 });
+}
+
+export async function waitForRemoteStatus(
+	page: Page,
+	minimumVersion: number,
+	status?: string,
+): Promise<void> {
+	await expect.poll(() => page.evaluate(() => {
+		const remote = (window as any).bobbitState?.remoteAgent ?? (window as any).__bobbitState?.remoteAgent;
+		return {
+			status: remote?.state?.status ?? remote?._state?.status,
+			version: Number(remote?._lastStatusVersion ?? -1),
+		};
+	}), { timeout: 15_000 }).toEqual(status
+		? { status, version: expect.any(Number) }
+		: expect.objectContaining({ version: expect.any(Number) }));
+	await expect.poll(() => page.evaluate(() => {
+		const remote = (window as any).bobbitState?.remoteAgent ?? (window as any).__bobbitState?.remoteAgent;
+		return Number(remote?._lastStatusVersion ?? -1);
+	}), { timeout: 15_000 }).toBeGreaterThanOrEqual(minimumVersion);
 }
 
 export async function closeActiveSessionSocket(page: Page): Promise<void> {
