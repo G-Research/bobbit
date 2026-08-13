@@ -1,12 +1,19 @@
-# Session cost display
+# Session usage and cost
 
-Bobbit tracks model spend per session so the footer, stats popovers, and goal/task cost views can show cumulative usage across long-running work. The important constraint is that the chat transcript is not a reliable cost ledger: compaction can replace a long visible history with a short post-compaction snapshot, while the money already spent remains real.
+Bobbit persists a server-owned usage projection for each session. This projection
+survives compaction, reconnects, and gateway restarts, so a compacted visible
+transcript is never used as an accounting ledger.
 
-## Source of truth
+The projection is intentionally additive. Existing Pi session accounting remains
+unchanged; the Claude Agent SDK runtime adds root-result accounting, per-model
+attribution, context measurements, and an explicit cost basis. UI rendering is
+owned separately by G10b. These fields let clients render an authoritative
+snapshot without deriving totals from chat rows.
 
-`CostTracker` is the authoritative display source when a session has persisted cost data. It is scoped to the session's project and persists cumulative totals in the project's state directory as `session-costs.json`.
+## Snapshot contract
 
-A session cost snapshot contains:
+When usage exists, `/api/sessions/:id/cost`, `state.serverCost`, and the
+WebSocket `cost_update.cost` payload use the same `SessionUsageSnapshot` shape:
 
 ```ts
 {
@@ -14,77 +21,132 @@ A session cost snapshot contains:
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  totalCost: number;
+  cacheHitRate: number | null;
+  totalCost: number | null;
+  notionalCostUsd: number | null;
+  costBasis: "api-billed" | "api-notional" | "subscription-notional" | "unknown";
+  costBasisHistory: Array<"api-billed" | "api-notional" | "subscription-notional" | "unknown">;
+  byModel: Record<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    notionalCostUsd: number | null;
+    contextWindow: number | null;
+    maxOutputTokens: number | null;
+  }>;
+  context: {
+    currentTokens: number | null;
+    currentModel: string | null;
+    highWaterTokens: number | null;
+    highWaterModel: string | null;
+    byModel: Record<string, {
+      contextWindow: number | null;
+      currentTokens: number | null;
+      highWaterTokens: number | null;
+    }>;
+  };
 }
 ```
 
-The client stores this snapshot as `state.serverCost`. When `state.serverCost.totalCost` is present and greater than zero, the footer cost and the context popover's **Session → Total cost** row use it. Visible assistant-message `usage.cost.total` is not used as a fallback for the dollar display, because visible messages may be only the compacted tail of the session.
+The legacy token counters remain available for existing clients. `byModel`,
+context, and basis fields are additive. A session with no recorded usage has no
+server snapshot; Bobbit does not create a zero-valued record merely because a
+session was opened.
 
-Sessions without persisted cost keep `serverCost` absent/null and show no footer cost. Bobbit intentionally does not fabricate a zero-cost server snapshot, because "no cost has been recorded" is different from "the authoritative cost is exactly zero".
+`currentTokens` is the most recent authoritative occupancy reported for a model
+on an SDK root result. `highWaterTokens` is the maximum reported occupancy and
+never decreases after compaction, reconnect, or reload. Bobbit does not infer
+context from visible messages, or fill an SDK context window from Pi model
+heuristics.
 
-## Recording vs hydration
+## Cost meaning
 
-There are two separate operations:
+`totalCost` represents a billed amount only when the runtime has established
+one. `null` means it is unknown or not applicable, not zero.
 
-- **Recording** mutates `CostTracker`. `SessionManager.trackCostFromEvent()` records only completed assistant turns: `message_end` events with `role: "assistant"` and a numeric usage cost. Streaming `message_update` frames are ignored because the same usage object can appear repeatedly while a message streams.
-- **Hydration** reads `CostTracker` and sends the existing cumulative snapshot to clients. Hydration never calls `recordUsage()`.
+The closed Claude Agent SDK environment currently discovers local subscription
+usage. Its `total_cost_usd` is exposed only as `notionalCostUsd` with
+`costBasis: "subscription-notional"` and `totalCost: null`. It is an SDK usage
+estimate, never an invoice. If a supported runtime establishes a different
+basis, Bobbit persists that basis and preserves `costBasisHistory`; it does not
+rewrite earlier subscription-notional usage as billed cost. An unavailable basis
+is `"unknown"`, not a fabricated dollar value.
 
-This separation prevents double-counting when Bobbit restores a session, replays buffered events, sends a message snapshot, merges synthetic compaction-summary rows, or reconnects a client. Only a new live completed assistant turn adds to the persisted total; every attach/reconnect/refresh path just re-sends the cumulative value already on disk.
+Pi continues its existing completed-assistant and completed-compaction
+accounting. Its persisted values retain the legacy `api-billed` projection and
+are not routed through the SDK root-result ledger.
 
-## WebSocket hydration paths
+## Claude SDK exactly-once ledger
 
-The WebSocket protocol hydrates persisted cost through both a dedicated `cost_update` frame and `state.serverCost` when a `state` snapshot is sent. Both carry the same cumulative snapshot from `CostTracker`.
+For an SDK session, only a finalized **root** SDK `result` is an accounting
+source. Streaming frames, assistant `message_end` events, child partitions,
+snapshot replay, and lifecycle-only events do not change cumulative usage.
 
-Hydration happens on these paths:
+The server normalizes the result into an internal record keyed by the opaque
+SDK session/result identity. `CostTracker` atomically persists that source ID
+with the aggregate counters, per-model buckets, context high-water marks, and
+basis state. A duplicate source ID is a no-op before and after restart. The
+applied-ID ledger is private persistence: IDs are not exposed as a REST or
+WebSocket accounting field.
 
-- **Active attach / reconnect** — after `auth_ok`, the server sends `cost_update` when persisted cost exists. The async live `getState()` push and persisted fallback state are also wrapped with `serverCost`.
-- **`get_state`** — sends `cost_update` first, then a `state` frame with `serverCost` merged into the agent state or persisted fallback state.
-- **`get_messages`** — sends `cost_update` before the message snapshot, for both live and archived sessions.
-- **`resume` fallback** — sends `cost_update` before replaying buffered events or returning `resume_gap`. If the client falls back to `get_messages`, that request sends the cost again before the snapshot.
-- **Archived sessions** — initial archived attach, archived `get_state`, and archived `get_messages` all hydrate cost. Archived `state` uses the same helper that injects persisted model/image-model data, so the initial connect and later `get_state` response stay in sync.
-- **Preparing/starting sessions** — safe read-only responses for `get_state`/`get_messages` still hydrate cost if a persisted record exists.
-- **`refreshAfterCompaction()`** — broadcasts `cost_update` before the compacted `messages` snapshot, then broadcasts `state` with `serverCost` merged in.
+This separation matters because identical text, token counts, and timestamps
+can represent separate turns, while a retried terminal event can represent the
+same turn. Only the SDK result identity makes replay safe. Child SDK agents are
+audit-attributed to the root session, not separate session or cost accounts.
 
-`SessionManager.getSessionCost()` resolves cost from the live session's project first, then persisted session metadata, then a cross-project scan when needed. It returns `undefined` if no persisted record exists.
+## Hydration and compaction ordering
 
-## Compaction ordering
+`SessionManager` resolves the persisted snapshot for live, dormant, and archived
+sessions. It sends the same snapshot through both hydration paths:
 
-Compaction is the path that made visible-message cost unsafe. After compaction, the agent's `getMessages()` response may include only the summary/tail and the next visible assistant turn. If the UI summed only those rows, the footer could appear to drop even though the cumulative spend did not.
+- `cost_update` on attach, `get_state`, `get_messages`, resume recovery, and
+  compaction refresh;
+- `state.serverCost` whenever a state snapshot is sent.
 
-`refreshAfterCompaction()` therefore sends frames in this order:
+After either runtime compacts, `refreshAfterCompaction()` sends the usage
+snapshot before the compacted message snapshot, then sends state. Reload is
+therefore a snapshot recovery, not a recount of the shorter transcript.
 
-1. `cost_update` with the persisted cumulative session cost.
-2. `messages` with the compacted transcript snapshot.
-3. `state` with `serverCost` merged into the agent state.
+For Claude SDK compaction, the SDK owns the actual history change. On its
+`PreCompact` hook Bobbit stores an SDK-specific pending checkpoint with the
+normalized official pre-compaction rows. It completes the checkpoint only after
+official history changes, retains the pre-history for
+`/api/sessions/:id/transcript/before-compaction`, and reconciles a pending
+checkpoint after restart. It never treats an SDK compaction as Pi JSONL
+compaction or invents a completion from `PreCompact` alone.
 
-The first frame primes `RemoteAgent.state.serverCost` before the reduced transcript lands, so the footer and stats popover never need to fall back to the compacted visible-message sum.
+## API and implementation map
 
-## UI and REST surfaces
-
-- `RemoteAgent` writes `state.serverCost` from either `cost_update` frames or `state.serverCost`.
-- `AgentInterface.renderStats()` uses `state.serverCost.totalCost` for the footer and context popover total cost row.
-- `<cost-popover>` fetches authoritative persisted data from `/api/sessions/:id/cost/breakdown` for session breakdowns and `/api/goals/:id/cost/breakdown` for goal breakdowns.
-- `/api/sessions/:id/cost` returns the same persisted session total used for hydration. It returns 404 when the session exists but has no cost record.
-- Goal and task cost APIs continue to aggregate from `CostTracker`; this fix does not change their accounting semantics.
-
-## Regression coverage
-
-Relevant tests pin the behavior:
-
-- `tests/context-cost-stats.spec.ts` — fixture-level UI coverage that visible-message cost alone is hidden, and `serverCost` wins in the footer and session stats popover.
-- `tests/e2e/compact-cost-ws.spec.ts` — WebSocket/API coverage for active attach, `get_state`, resume fallback, archived attach/state, no-cost sessions, and `refreshAfterCompaction()` cost-before-messages ordering.
-- `tests/e2e/ui/compact-cost.spec.ts` — browser regression that seeds persisted cumulative cost, shrinks the visible transcript with a compaction-like refresh, and verifies the footer, context popover, and session cost API agree.
-- `tests/cost-tracker.test.ts` — persistence and accumulation coverage for `CostTracker` itself.
-
-## Implementation map
+- `GET /api/sessions/:id/cost` returns the same persisted projection or `404`
+  when no usage record exists.
+- `GET /api/sessions/:id/cost/breakdown` and goal/task cost endpoints retain
+  their existing aggregation contracts; consumers should preserve `null` cost
+  semantics rather than coercing them to zero.
+- `cost_update` and `state.serverCost` are the live/reload transport contract.
+  G10b owns how a client labels or renders billed versus notional values.
 
 | Concern | Primary module |
 | --- | --- |
-| Persist cumulative session cost | `src/server/agent/cost-tracker.ts` |
-| Record live completed assistant usage | `src/server/agent/session-manager.ts` (`trackCostFromEvent`) |
-| Resolve and inject persisted cost | `src/server/agent/session-manager.ts` (`getSessionCost`, `withSessionCostInState`, `getSessionCostUpdate`) |
-| WS hydration and archived state | `src/server/ws/handler.ts` |
-| Client cost state | `src/app/remote-agent.ts` |
-| Footer and context popover display | `src/ui/components/AgentInterface.ts` |
-| Session/goal cost popover | `src/ui/components/CostPopover.ts` |
-| REST cost endpoints | `src/server/server.ts` |
+| Durable usage, basis, model/context projection, and private SDK result ledger | `src/server/agent/cost-tracker.ts` |
+| Runtime-specific recording and cost/state hydration | `src/server/agent/session-manager.ts` |
+| WebSocket snapshot types | `src/server/ws/protocol.ts` |
+| Cost REST routes | `src/server/server.ts` |
+| SDK result normalization | `src/server/agent/claude-sdk-event-translator.ts` |
+| SDK compaction checkpoint | `src/server/agent/claude-sdk-compaction-checkpoint.ts` |
+
+See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md) for the SDK
+transcript, recovery, and tool-projection contract.
+
+## Regression coverage
+
+- `tests2/core/cost-tracker.test.ts` covers durable de-duplication, model
+  buckets, basis, and context high-water persistence.
+- `tests2/core/claude-sdk-event-translator.test.ts` covers root-result-only SDK
+  normalization and excludes child/malformed results.
+- `tests2/integration/cost-update-cache-hit.test.ts` covers additive usage
+  transport and hydration.
+- `tests/e2e/claude-agent-sdk-session-restart.spec.ts` exercises the
+  deterministic SDK parent demonstration across tool use, a workflow gate,
+  compaction, restart, reload, duplicate result replay, unavailable-provider
+  failure, and a co-resident Pi control session.
