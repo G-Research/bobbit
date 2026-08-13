@@ -1704,6 +1704,73 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.deepEqual(binding?.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	});
 
+	it("preserves source:verification title suppression through direct busy recovery", async () => {
+		const manager = makeManager();
+		const busy = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+		let calls = 0;
+		const prompt = vi.fn(async () => {
+			calls += 1;
+			return calls === 1 ? { success: false, error: busy } : { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-direct-verification-title-suppression",
+			titleGenerated: false,
+			rpcClient: { prompt },
+		});
+		const titleGeneration = vi.spyOn(manager, "tryGenerateTitleFromPrompt").mockImplementation(() => {});
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "continue the reviewer check", {
+				source: "verification",
+				streamingBehavior: "followUp",
+				suppressTitleGen: true,
+			}),
+			/Agent is already processing/,
+		);
+		assert.equal(session.promptQueue.peek()?.suppressTitleGen, true,
+			"direct recovery must preserve suppression when it re-enqueues the rejected prompt");
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 2);
+		assert.equal(titleGeneration.mock.calls.length, 0, "direct busy redrive must not generate a title");
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO preserves an exact verifier row's title suppression through busy redrain", async () => {
+		const manager = makeManager();
+		const busy = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+		let calls = 0;
+		const prompt = vi.fn(async () => {
+			calls += 1;
+			return calls === 1 ? { success: false, error: busy } : { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-verifier-title-suppression-redrive",
+			title: "Stable reviewer title",
+			titleGenerated: false,
+			rpcClient: { prompt },
+		});
+		const titleGeneration = vi.spyOn(manager, "tryGenerateTitleFromPrompt").mockImplementation(() => {});
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "submit the reviewer verdict exactly once");
+		await flushAsyncWork();
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.id, row.suppressTitleGen, row.verifierOwned]),
+			[[receipt.rowId, true, true]],
+			"VERIFIER_BUSY_RACE_REPRO: busy recovery must restore the same verifier row with title suppression intact",
+		);
+		assert.equal(titleGeneration.mock.calls.length, 0, "the rejected verifier dispatch must not name its ephemeral reviewer");
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		await receipt.dispatched;
+
+		assert.equal(prompt.mock.calls.length, 2, "VERIFIER_BUSY_RACE_REPRO: one busy rejection redrives the exact row once");
+		assert.equal(session.promptQueue.length, 0, "the accepted redrive consumes the original verifier row");
+		assert.equal(titleGeneration.mock.calls.length, 0, "busy redrive must not generate or replace the reviewer title");
+		assert.equal(session.title, "Stable reviewer title");
+	});
+
 	it("VERIFIER_BUSY_RACE_REPRO parks one verifier row after three busy drain rejections without duplicate delivery", async () => {
 		const manager = makeManager();
 		const busy = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
