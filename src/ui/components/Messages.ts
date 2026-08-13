@@ -88,6 +88,22 @@ export type UserMessageWithAttachments = {
 	author?: MessageAuthor;
 };
 
+/**
+ * Return only the original user-visible text represented by a prompt. This is
+ * shared by rendering and prompt-copy actions so attachments, author chrome,
+ * and other DOM labels can never leak into copied text.
+ */
+export function userVisiblePromptText(
+	message: UserMessageWithAttachments | UserMessageType,
+): string {
+	if (typeof message.content === "string") return message.content;
+	if (!Array.isArray(message.content)) return "";
+	return message.content
+		.filter((block): block is TextContent => block?.type === "text" && typeof block.text === "string")
+		.map((block) => block.text)
+		.join("");
+}
+
 // Artifact message type for session persistence
 export interface ArtifactMessage {
 	role: "artifact";
@@ -245,6 +261,9 @@ export class UserMessage extends LitElement {
 	@property({ type: Object }) message!: BobbitMessage<UserMessageWithAttachments | UserMessageType>;
 	@property({ type: Boolean }) showAuthorLabel = false;
 	@property({ attribute: false }) authorAppearance?: PromptAuthorAppearance;
+	@property({ type: Boolean }) showPromptActions = false;
+	@property({ type: Boolean }) promptActionsExpanded = false;
+	@property({ type: Boolean }) promptActionsDisabled = false;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -256,11 +275,58 @@ export class UserMessage extends LitElement {
 		this.style.display = "block";
 	}
 
+	private _openPromptActions(event: Event): void {
+		event.preventDefault();
+		event.stopPropagation();
+		if (!this.showPromptActions || this.promptActionsDisabled) return;
+		const trigger = event.currentTarget;
+		const cursor = this.message as BobbitMessage<UserMessageWithAttachments | UserMessageType> & {
+			entryId?: unknown;
+			_entryIdSource?: unknown;
+		};
+		if (!(trigger instanceof HTMLElement)
+			|| cursor._entryIdSource !== "pi-transcript"
+			|| typeof cursor.entryId !== "string"
+			|| cursor.entryId.length === 0
+			|| cursor.entryId.length > 256
+			|| cursor.entryId.trim() !== cursor.entryId) return;
+		this.dispatchEvent(new CustomEvent("prompt-actions-open", {
+			detail: {
+				entryId: cursor.entryId,
+				promptText: userVisiblePromptText(this.message),
+				trigger,
+			},
+			bubbles: true,
+			composed: true,
+		}));
+	}
+
+	private _renderPromptActionsTrigger(): TemplateResult | typeof nothing {
+		if (!this.showPromptActions) return nothing;
+		return html`
+			<span class="prompt-actions-trigger-wrap">
+				<button
+					type="button"
+					class="prompt-actions-trigger"
+					aria-label="Actions for prompt"
+					aria-haspopup="menu"
+					aria-expanded=${this.promptActionsExpanded ? "true" : "false"}
+					?disabled=${this.promptActionsDisabled}
+					data-prompt-actions-trigger
+					@click=${this._openPromptActions}
+				>
+					<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+						<circle cx="5" cy="12" r="1"></circle>
+						<circle cx="12" cy="12" r="1"></circle>
+						<circle cx="19" cy="12" r="1"></circle>
+					</svg>
+				</button>
+			</span>
+		`;
+	}
+
 	override render() {
-		const rawContent =
-			typeof this.message.content === "string"
-				? this.message.content
-				: (this.message.content ?? []).find((c) => c.type === "text")?.text || "";
+		const rawContent = userVisiblePromptText(this.message);
 		// Preserve user line breaks: append two trailing spaces before each newline
 		// so markdown renders them as <br> instead of collapsing to a single space.
 		const content = rawContent.replace(/\n/g, "  \n");
@@ -295,14 +361,18 @@ export class UserMessage extends LitElement {
 			? presentPromptAuthor(this.message.author)
 			: undefined;
 		if (!presentation) {
-			// Keep the historical all-human/legacy markup and compact geometry exact.
 			return html`
-				<div class="flex justify-start mx-2 sm:mx-4 my-1">
-					<div class="user-message-container py-2 px-3 sm:px-4">
-						${body}
-						${attachments}
+				<div class="prompt-row flex justify-start mx-2 sm:mx-4 my-1">
+					<div class="prompt-content-column">
+						<div class="user-message-container py-2 px-3 sm:px-4">
+							${body}
+							${attachments}
+						</div>
+						<div class="prompt-metadata-row">
+							${this._renderPromptActionsTrigger()}
+							<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
+						</div>
 					</div>
-					<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 				</div>
 			`;
 		}
@@ -347,14 +417,19 @@ export class UserMessage extends LitElement {
 		`;
 		return html`
 			<div class="prompt-row prompt-row--labelled flex justify-start mx-2 sm:mx-4 my-1">
-				<div class="prompt-bubble-shell">
-					${authorBadge}
-					<div class="user-message-container user-message-container--labelled py-2 px-3 sm:px-4">
-						${body}
-						${attachments}
+				<div class="prompt-content-column">
+					<div class="prompt-bubble-shell">
+						${authorBadge}
+						<div class="user-message-container user-message-container--labelled py-2 px-3 sm:px-4">
+							${body}
+							${attachments}
+						</div>
+					</div>
+					<div class="prompt-metadata-row">
+						${this._renderPromptActionsTrigger()}
+						<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 					</div>
 				</div>
-				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>
 		`;
 	}
@@ -689,6 +764,12 @@ export class ToolMessage extends LitElement {
 	// would not re-run it (design §4a).
 	private _onRenderRequested = () => { this.requestUpdate(); };
 
+	// Review open outcomes also arrive after immutable tool props settle. The
+	// top-level render is coalesced, so explicitly repaint only review cards.
+	private _onReviewOpenState = () => {
+		if (this.toolCall.name === "review_open") this.requestUpdate();
+	};
+
 	// For the non-blocking ask_user_choices widget: when a new message arrives,
 	// the tool_use card may need to flip to Answered mode because the transcript
 	// now contains a matching `[ask_user_choices_response ...]` envelope.
@@ -745,6 +826,7 @@ export class ToolMessage extends LitElement {
 		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		document.addEventListener("bobbit-review-open-state", this._onReviewOpenState);
 		this.addEventListener("load-full-content", this._onLoadFullContent);
 	}
 
@@ -754,6 +836,7 @@ export class ToolMessage extends LitElement {
 		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
 		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		document.removeEventListener("bobbit-review-open-state", this._onReviewOpenState);
 		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 

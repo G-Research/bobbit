@@ -49,21 +49,41 @@ type RuntimeModelSnapshot = {
 	thinkingLevel?: ThinkingLevel;
 };
 
+type OptionalStateMetadata = {
+	contextWindow?: unknown;
+	maxTokens?: unknown;
+	reasoning?: unknown;
+	thinkingLevelMap?: unknown;
+	input?: unknown;
+	source?: string;
+	available?: boolean;
+};
+
+function exactStateMetadata(provider: string, id: string): OptionalStateMetadata | undefined {
+	const meta = resolveModelStateMeta(provider, id) as OptionalStateMetadata | undefined;
+	if (!meta || meta.available === false || meta.source === "inferred" || meta.source === "unavailable") return undefined;
+	return meta;
+}
+
 function modelStateMessage(tuple: RuntimeModelTuple): ServerMessage {
-	const meta = resolveModelStateMeta(tuple.provider, tuple.id);
+	const meta = exactStateMetadata(tuple.provider, tuple.id);
+	const model: Record<string, unknown> = { provider: tuple.provider, id: tuple.id };
+	if (typeof meta?.contextWindow === "number" && Number.isFinite(meta.contextWindow) && meta.contextWindow > 0) {
+		model.contextWindow = meta.contextWindow;
+	}
+	if (typeof meta?.maxTokens === "number" && Number.isFinite(meta.maxTokens) && meta.maxTokens > 0) {
+		model.maxTokens = meta.maxTokens;
+	}
+	if (typeof meta?.reasoning === "boolean") model.reasoning = meta.reasoning;
+	if (meta?.thinkingLevelMap && typeof meta.thinkingLevelMap === "object" && !Array.isArray(meta.thinkingLevelMap)) {
+		model.thinkingLevelMap = meta.thinkingLevelMap;
+	}
+	if (Array.isArray(meta?.input) && meta.input.every((entry) => entry === "text" || entry === "image")) {
+		model.input = meta.input;
+	}
 	return {
 		type: "state",
-		data: {
-			model: {
-				provider: tuple.provider,
-				id: tuple.id,
-				contextWindow: meta.contextWindow,
-				maxTokens: meta.maxTokens,
-				reasoning: meta.reasoning,
-				...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
-			},
-			thinkingLevel: tuple.thinkingLevel,
-		},
+		data: { model, thinkingLevel: tuple.thinkingLevel },
 	};
 }
 
@@ -532,6 +552,7 @@ export async function applyRuntimeSessionThinkingSelection(
 	session: RuntimeModelSession,
 	thinkingLevel: string,
 	broadcastModelState?: BroadcastFn,
+	preferencesStore?: PreferencesStore,
 ): Promise<RuntimeModelTuple> {
 	const mutationRpcClient = session.rpcClient;
 	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
@@ -553,12 +574,19 @@ export async function applyRuntimeSessionThinkingSelection(
 		}
 		const requested = isKnownThinkingLevel(thinkingLevel);
 		if (!requested) throw new Error(`Unknown thinking level "${thinkingLevel}"`);
-		const meta = resolveModelStateMeta(current.provider, current.id);
+		const selectedModel = preferencesStore
+			? await requireSessionSelectableModel(preferencesStore, current.provider, current.id)
+			: exactStateMetadata(current.provider, current.id);
+		if (!selectedModel || (typeof selectedModel.reasoning !== "boolean" && selectedModel.thinkingLevelMap === undefined)) {
+			throw new Error(`Thinking metadata is unavailable for ${current.provider}/${current.id}`);
+		}
 		const effectiveThinkingLevel = clampThinkingLevel(requested, {
 			provider: current.provider,
 			id: current.id,
-			reasoning: meta.reasoning,
-			thinkingLevelMap: meta.thinkingLevelMap,
+			...(typeof selectedModel.reasoning === "boolean" ? { reasoning: selectedModel.reasoning } : {}),
+			...(selectedModel.thinkingLevelMap && typeof selectedModel.thinkingLevelMap === "object"
+				? { thinkingLevelMap: selectedModel.thinkingLevelMap as Record<string, string | null> }
+				: {}),
 		});
 		if (!effectiveThinkingLevel) {
 			throw new Error(`Thinking level "${requested}" is unavailable for ${current.provider}/${current.id}`);

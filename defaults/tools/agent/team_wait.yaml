@@ -8,7 +8,7 @@ provider:
 group: Agent
 renderer: src/ui/tools/renderers/DelegateRenderer.ts
 docs: |-
-  Wait for child agents you spawned with `team_delegate(non_blocking: true)`. Returns as soon as ONE awaited child becomes idle (or settles into a terminal state), along with a status line for every awaited child and an instruction to call `team_wait` again for the remainder. Omit `child_session_ids` to await all your live children. Use `read_session` on a returned child to read its full transcript.
+  Wait for child agents you spawned with `team_delegate(non_blocking: true)`. Returns as soon as ONE awaited child becomes idle (or settles into a terminal state), along with a status line for every awaited child and an instruction to call `team_wait` again for the remainder. Omit `child_session_ids` to await all your live children. Use `read_session(operation: "list")` on a returned child, then inspect one exact message or result.
 detail_docs: >-
   ## Purpose
 
@@ -54,5 +54,6 @@ detail_docs: >-
   children before returning. `team_wait` returns on the **first** — call it
   repeatedly to drain the set.
 
-  - Use `read_session` on a returned child id to read its full transcript;
-  `team_prompt` to re-task it; `team_dismiss` to stop it.
+  - Use `read_session(operation: "list")` on a returned child id, choose one
+  message or result index, then inspect that exact target; use `team_prompt` to
+  re-task it or `team_dismiss` to stop it.

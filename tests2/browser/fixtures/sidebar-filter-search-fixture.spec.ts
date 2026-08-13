@@ -56,7 +56,7 @@ async function loadFixture(page: Page): Promise<void> {
 	await expect(page.locator(".sidebar-edge"), `${MARK}: sidebar should render`).toBeVisible({ timeout: 10_000 });
 }
 
-async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "childSessionParent" | "firstClassChildSession" | "delegateChildSession" | "archivedDelegateChildSession" | "nestedMatchGoal" | "archivedSession", string>> {
+async function fixtureIds(page: Page): Promise<Record<"project" | "readSession" | "activeSession" | "busySession" | "goal" | "goalReadSession" | "collapsedParentGoal" | "collapsedParentSession" | "childSessionParent" | "firstClassChildSession" | "delegateChildSession" | "archivedDelegateChildSession" | "nestedMatchGoal" | "archivedSession" | "archivedSessionPageTwo" | "archivedSessionPageThree" | "archivedGoalPageTwo" | "archivedGoalPageThree" | "remoteArchivedSession", string>> {
 	return page.evaluate(() => (window as any).__sidebarFilterSearchFixtureIds);
 }
 
@@ -73,6 +73,69 @@ async function visibleSessionIds(page: Page): Promise<string[]> {
 		.filter((el) => el.offsetParent !== null)
 		.map((el) => el.dataset.sessionId || "")
 		.filter(Boolean));
+}
+
+async function normalArchiveRequestCursors(page: Page): Promise<{ sessions: Array<string | null>; goals: Array<string | null> }> {
+	return page.evaluate(() => {
+		const requests = (window as any).__sidebarFilterSearchRequests as Array<{ url: string; method: string }>;
+		const matchingCursors = (resource: "sessions" | "goals") => requests.flatMap((request) => {
+			const url = new URL(request.url);
+			const matches = request.method === "GET"
+				&& url.pathname.endsWith(`/api/${resource}`)
+				&& !url.searchParams.has("q")
+				&& (resource === "sessions"
+					? url.searchParams.get("include") === "archived"
+					: url.searchParams.get("archived") === "true");
+			return matches ? [url.searchParams.get("after")] : [];
+		});
+		return {
+			sessions: matchingCursors("sessions"),
+			goals: matchingCursors("goals"),
+		};
+	});
+}
+
+async function normalArchiveRequestCounts(page: Page): Promise<{ sessions: number; goals: number }> {
+	const cursors = await normalArchiveRequestCursors(page);
+	return { sessions: cursors.sessions.length, goals: cursors.goals.length };
+}
+
+async function archivePaginationState(page: Page): Promise<{
+	sessionCursor: number | null;
+	sessionHasMore: boolean;
+	goalCursor: number | null;
+	goalHasMore: boolean;
+	sessionIds: string[];
+	goalIds: string[];
+}> {
+	return page.evaluate(() => {
+		const fixtureState = (window as any).bobbitState;
+		return {
+			sessionCursor: fixtureState.archivedSessionsCursor,
+			sessionHasMore: fixtureState.archivedSessionsHasMore,
+			goalCursor: fixtureState.archivedGoalsCursor,
+			goalHasMore: fixtureState.archivedGoalsHasMore,
+			sessionIds: fixtureState.archivedSessions.map((session: any) => session.id),
+			goalIds: fixtureState.goals.filter((goal: any) => goal.archived).map((goal: any) => goal.id),
+		};
+	});
+}
+
+async function enableArchivedForActiveView(page: Page): Promise<void> {
+	await page.getByTestId("sidebar-filters-button").click();
+	const checkbox = page.getByTestId("sidebar-filter-archived").locator("input");
+	if (!(await checkbox.isChecked())) await checkbox.check();
+}
+
+async function selectSidebarView(page: Page, view: "project" | "status"): Promise<void> {
+	// The fixed-height fixture can geometrically overlap a lower pagination row
+	// with this sticky control. Invoke the real button handler without hit-testing.
+	await page.getByTestId(`sidebar-view-${view}`).evaluate((button: HTMLButtonElement) => button.click());
+}
+
+async function loadNextNormalArchivePages(page: Page): Promise<void> {
+	await page.getByText("Load more archived sessions…", { exact: true }).click();
+	await page.getByText("Load more archived goals…", { exact: true }).click();
 }
 
 async function expectSessionVisible(page: Page, sessionId: string, message: string): Promise<void> {
@@ -143,7 +206,10 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("ReadStandaloneAlpha");
 		await expectSessionVisible(page, ids.readSession, `${MARK}: search input applies title filter`);
 		await expectSessionHidden(page, ids.busySession, `${MARK}: search input hides non-matching rows`);
-		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(true);
+		await expect.poll(() => page.evaluate(() => ({
+			projectArchived: (window as any).bobbitState.showArchived,
+			searchDemand: (window as any).bobbitState.archivedSearchDemand,
+		})), { timeout: 5_000 }).toEqual({ projectArchived: false, searchDemand: true });
 
 		await searchInput.fill("ArchivedEchoFixture");
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("ArchivedEchoFixture");
@@ -157,7 +223,183 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		await expect(searchInput, `${MARK}: Escape clears the search input`).toHaveValue("");
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery), { timeout: 5_000 }).toBe("");
 		expect(await searchInput.evaluate((el) => document.activeElement === el), `${MARK}: Escape blurs search input`).toBe(false);
-		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.showArchived), { timeout: 5_000 }).toBe(false);
+		await expect.poll(() => page.evaluate(() => ({
+			projectArchived: (window as any).bobbitState.showArchived,
+			searchDemand: (window as any).bobbitState.archivedSearchDemand,
+		})), { timeout: 5_000 }).toEqual({ projectArchived: false, searchDemand: false });
+	});
+
+	test("Status archive search keeps Project preference independent and remote q results current", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		await page.getByTestId("sidebar-view-status").evaluate((button: HTMLButtonElement) => button.click());
+		const searchInput = page.locator("input[data-search]");
+		await searchInput.fill("RemoteBeyondFirstPageNeedle");
+
+		await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: remote archived q result beyond the unfiltered page is shown`);
+		await expect.poll(() => page.evaluate(() => ({
+			projectArchived: (window as any).bobbitState.showArchived,
+			searchDemand: (window as any).bobbitState.archivedSearchDemand,
+		})), { timeout: 5_000 }).toEqual({ projectArchived: false, searchDemand: true });
+
+		await page.getByTestId("sidebar-filters-button").click();
+		await page.getByTestId("sidebar-filter-archived").locator("input").check();
+		await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: toggling Status archived must not invalidate the active remote q result`);
+		await expect.poll(() => page.evaluate(() =>
+			(window as any).__sidebarFilterSearchRequests.filter((request: any) => request.url.includes("/api/sessions") && request.url.includes("q=RemoteBeyondFirstPageNeedle")).length,
+		), { timeout: 5_000 }).toBeGreaterThan(0);
+
+		await page.getByTestId("sidebar-view-project").evaluate((button: HTMLButtonElement) => button.click());
+		await page.getByTestId("sidebar-filters-button").click();
+		await expect(page.getByTestId("sidebar-filter-archived").locator("input"), `${MARK}: Project Show Archived stays off while query is retained`).not.toBeChecked();
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState.searchQuery)).toBe("RemoteBeyondFirstPageNeedle");
+	});
+
+	for (const view of ["Project", "Status"] as const) {
+		test(`${view} Show Archived starts a normal archive load after remote search clears`, async ({ page }) => {
+			const ids = await fixtureIds(page);
+			if (view === "Status") {
+				await page.getByTestId("sidebar-view-status").evaluate((button: HTMLButtonElement) => button.click());
+			}
+			const searchInput = page.locator("input[data-search]");
+			// The staff section performs one eager archive-session lookup. Clear a
+			// no-preference search once to exercise production cache eviction and
+			// start the regression scenario with both normal archive caches fresh.
+			await searchInput.fill("RemoteBeyondFirstPageNeedle");
+			await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: ${view} setup search shows the remote-only archived row`);
+			await searchInput.press("Escape");
+			await expect(searchInput, `${MARK}: ${view} setup search clears`).toHaveValue("");
+			const baselineRequests = await normalArchiveRequestCounts(page);
+
+			await searchInput.fill("RemoteBeyondFirstPageNeedle");
+			await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: ${view} fresh-cache search shows the remote-only archived row`);
+			await page.getByTestId("sidebar-filters-button").click();
+			await page.getByTestId("sidebar-filter-archived").locator("input").check();
+			await expect.poll(() => normalArchiveRequestCounts(page), {
+				timeout: 5_000,
+				message: `${MARK}: ${view} toggle must stay on the current remote query while search is active`,
+			}).toEqual(baselineRequests);
+
+			await searchInput.click();
+			await searchInput.press("Escape");
+			await expect(searchInput, `${MARK}: ${view} search clears`).toHaveValue("");
+			await expect.poll(() => normalArchiveRequestCounts(page), {
+				timeout: 5_000,
+				message: `${MARK}: ${view} clear must fulfil deferred normal session and goal archive demand`,
+			}).toEqual({ sessions: baselineRequests.sessions + 1, goals: baselineRequests.goals + 1 });
+			await expect.poll(() => page.evaluate((activeView) => {
+				const fixtureState = (window as any).bobbitState;
+				return activeView === "Status" ? fixtureState.statusShowArchived : fixtureState.showArchived;
+			}, view), { timeout: 5_000 }).toBe(true);
+			await expectSessionVisible(page, ids.archivedSession, `${MARK}: ${view} shows a nonmatching row from the normal archive page`);
+			await expect(page.getByText("Load more archived sessions…", { exact: true }), `${MARK}: ${view} exposes normal session pagination`).toBeVisible();
+			await expect(page.getByText("Load more archived goals…", { exact: true }), `${MARK}: ${view} exposes normal goal pagination`).toBeVisible();
+		});
+	}
+
+	test("shared archive pages and cursors survive enabling and switching the second view", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		await enableArchivedForActiveView(page);
+		await expect.poll(() => normalArchiveRequestCursors(page), {
+			timeout: 5_000,
+			message: `${MARK}: cold Project demand loads each first archive page exactly once`,
+		}).toEqual({ sessions: [null], goals: [null] });
+
+		await loadNextNormalArchivePages(page);
+		await expect.poll(() => normalArchiveRequestCursors(page), {
+			timeout: 5_000,
+			message: `${MARK}: Load more requests the second unseen page for each resource`,
+		}).toEqual({ sessions: [null, "200"], goals: [null, "200"] });
+		await expect.poll(() => archivePaginationState(page), { timeout: 5_000 }).toMatchObject({
+			sessionCursor: 100,
+			sessionHasMore: true,
+			goalCursor: 100,
+			goalHasMore: true,
+			sessionIds: expect.arrayContaining([ids.archivedSessionPageTwo]),
+			goalIds: expect.arrayContaining([ids.archivedGoalPageTwo]),
+		});
+
+		await selectSidebarView(page, "status");
+		await enableArchivedForActiveView(page);
+		await selectSidebarView(page, "project");
+		await selectSidebarView(page, "status");
+
+		await expect.poll(() => normalArchiveRequestCursors(page), {
+			timeout: 5_000,
+			message: `${MARK}: enabling and switching an archived-enabled peer view must not replay page one`,
+		}).toEqual({ sessions: [null, "200"], goals: [null, "200"] });
+		await expect.poll(() => archivePaginationState(page), { timeout: 5_000 }).toMatchObject({
+			sessionCursor: 100,
+			sessionHasMore: true,
+			goalCursor: 100,
+			goalHasMore: true,
+			sessionIds: expect.arrayContaining([ids.archivedSessionPageTwo]),
+			goalIds: expect.arrayContaining([ids.archivedGoalPageTwo]),
+		});
+
+		await loadNextNormalArchivePages(page);
+		await expect.poll(() => normalArchiveRequestCursors(page), {
+			timeout: 5_000,
+			message: `${MARK}: preserved cursors request the next unseen page`,
+		}).toEqual({ sessions: [null, "200", "100"], goals: [null, "200", "100"] });
+		await expect.poll(() => archivePaginationState(page), { timeout: 5_000 }).toMatchObject({
+			sessionCursor: null,
+			sessionHasMore: false,
+			goalCursor: null,
+			goalHasMore: false,
+			sessionIds: expect.arrayContaining([ids.archivedSessionPageTwo, ids.archivedSessionPageThree]),
+			goalIds: expect.arrayContaining([ids.archivedGoalPageTwo, ids.archivedGoalPageThree]),
+		});
+	});
+
+	test("active archive search keeps shared normal pagination untouched across view demand changes", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		await enableArchivedForActiveView(page);
+		await expect.poll(() => normalArchiveRequestCursors(page), { timeout: 5_000 })
+			.toEqual({ sessions: [null], goals: [null] });
+		await loadNextNormalArchivePages(page);
+		await expect.poll(() => normalArchiveRequestCursors(page), { timeout: 5_000 })
+			.toEqual({ sessions: [null, "200"], goals: [null, "200"] });
+
+		const searchInput = page.locator("input[data-search]");
+		await searchInput.fill("RemoteBeyondFirstPageNeedle");
+		await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: remote q result remains the active archive search source`);
+		await expect.poll(() => page.evaluate(() => {
+			const requests = (window as any).__sidebarFilterSearchRequests as Array<{ url: string; method: string }>;
+			return requests.reduce((counts, request) => {
+				const url = new URL(request.url);
+				if (request.method === "GET" && url.searchParams.get("q") === "RemoteBeyondFirstPageNeedle") {
+					if (url.pathname.endsWith("/api/sessions")) counts.sessions++;
+					if (url.pathname.endsWith("/api/goals")) counts.goals++;
+				}
+				return counts;
+			}, { sessions: 0, goals: 0 });
+		}), { timeout: 5_000, message: `${MARK}: shared search issues remote q requests for both archive resources` }).toEqual({ sessions: 1, goals: 1 });
+
+		await selectSidebarView(page, "status");
+		await enableArchivedForActiveView(page);
+		await selectSidebarView(page, "project");
+		await selectSidebarView(page, "status");
+
+		await expect.poll(() => normalArchiveRequestCursors(page), {
+			timeout: 5_000,
+			message: `${MARK}: active q transitions must not restart normal archive pagination`,
+		}).toEqual({ sessions: [null, "200"], goals: [null, "200"] });
+		await expect.poll(() => archivePaginationState(page), { timeout: 5_000 }).toMatchObject({
+			sessionCursor: 100,
+			sessionHasMore: true,
+			goalCursor: 100,
+			goalHasMore: true,
+			sessionIds: expect.arrayContaining([ids.archivedSessionPageTwo]),
+			goalIds: expect.arrayContaining([ids.archivedGoalPageTwo]),
+		});
+		await expectSessionVisible(page, ids.remoteArchivedSession, `${MARK}: view/filter transitions retain the current remote q result`);
+
+		await searchInput.press("Escape");
+		await expect(searchInput).toHaveValue("");
+		await expect.poll(() => normalArchiveRequestCursors(page), {
+			timeout: 5_000,
+			message: `${MARK}: clearing q reuses the already-loaded normal pages`,
+		}).toEqual({ sessions: [null, "200"], goals: [null, "200"] });
 	});
 
 	test("search expands retained collapsed goal ancestors ephemerally", async ({ page }) => {

@@ -102,13 +102,7 @@ Verdicts are recorded per file. Passing siblings named by a failed batch remain 
 
 ## CI and full qualification
 
-Pull requests receive a separate Ubuntu/Node 22 affected-feedback job. Checkout uses full history, the job validates the explicit PR base SHA's merge base, and it runs:
-
-```bash
-npm run test:affected -- --base "$PR_BASE_SHA" --no-cache
-```
-
-This job is advisory fast feedback only. It has no persistent affected-result cache. The existing cross-platform build/type-check/full-`test:unit` job still runs on pull requests and pushes to the primary branch, and browser/E2E workflow gates are unchanged. Main and any periodic/nightly qualification must use the full authoritative commands, not local PASS records.
+Affected testing is local developer feedback only and does not run in CI. The cross-platform build/type-check/full-`test:unit` job runs on pull requests and pushes to the primary branch, and browser/E2E workflow gates are unchanged. Main and any periodic/nightly qualification must use the full authoritative commands, not local PASS records.
 
 ## Proof and correctness qualification
 

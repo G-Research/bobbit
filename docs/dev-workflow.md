@@ -107,6 +107,10 @@ before changing `node_modules`.
 
 **Rule of thumb**: UI is hot. Server is compiled. If you touched anything under `src/server/`, you need a rebuild + restart.
 
+Development uses Vite's bundled dev mode: Rolldown serves the large eager browser graph as a small set of in-memory chunks instead of one request per source module, while preserving incremental HMR for edits and multi-file operations. Dev mode also unregisters Bobbit's production service worker and removes only the current mount's worker caches. A proxy `ECONNABORTED` during navigation means the page cancelled its API request; confirm separate `[harness]` or gateway `[boot]` logs before treating it as a server restart.
+
+Measure this path with `npm run profile:hmr`. The profiler copies the application plus representative test and documentation trees under ignored `.bobbit-qa/` storage, starts a separate bundled-development Vite server and headless Chromium, then reports cold paint, warm single-file reload percentiles, and a staggered app/test/docs edit burst. It never edits the working tree or connects to the live Vite HMR channel. Results are retained under `.bobbit-qa/vite-hmr-results/`; use `--clients <count>` and `--exercise-lazy` to reproduce a long-lived multi-tab graph, or `--max-p95-ms <milliseconds>` when comparing a candidate fix against a fixed budget.
+
 ---
 
 ## `node_modules` gets wiped while the dev server is running
@@ -427,7 +431,7 @@ A practical loop is:
    BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
    ```
 
-The affected cache under `.profiles/test-cache/` is ignored, checkout-local optimization state. Do not copy or share it, use it as evidence, or upload/restore it in CI. The PR affected-feedback job deliberately passes an explicit base SHA with `--no-cache`; a separate cross-platform job still runs the full unit suite, and browser/E2E gates are unchanged.
+The affected cache under `.profiles/test-cache/` is ignored, checkout-local optimization state. Do not copy or share it, use it as evidence, or upload/restore it in CI. Affected testing is local developer feedback only; CI runs the cross-platform full unit suite, and browser/E2E gates are unchanged.
 
 When changing test ownership or dynamically loaded repository inputs, run `npm run test:unit:inventory` and the relevant affected-runner pins. New shipped role/tool/skill/pack/workflow/config families and computed readers need declared selector edges because the same closure controls both selection and cache invalidation. Declare deletion-safe ownership for dynamic families; tombstones retain declared impact, scan, and indirect-reader edges but cannot recover undeclared or old static source imports.
 
@@ -443,13 +447,13 @@ When you list `git branch` in a Bobbit-managed repo you'll see several namespace
 
 | Prefix | Owner | Purpose | Publication policy |
 |---|---|---|---|
-| `pool/_pool-<id>` | Worktree pool | Pre-built worktrees waiting to be claimed by a session or goal. Renamed atomically on claim. (Pre-Phase 3 these used `session/_pool-*`; both prefixes are recognised on startup for back-compat.) | Local-only implementation detail. |
+| `pool/_pool-<id>` | Current live worktree pool | Pre-built worktrees waiting to be claimed by a session or goal. Renamed atomically on claim. Pre-Phase 3 entries used `session/_pool-*`; either shape is diagnostic only after its creating process exits. | Local-only implementation detail. |
 | `session/<id8>` | Live regular session | A session worktree, named immediately on pool claim (no first-prompt rename). Cleaned up on session archive. See [internals.md — Session worktrees](internals.md#session-worktrees) and [design/remove-session-worktree-rename.md](design/remove-session-worktree-rename.md). | Local-only on creation, reuse, and recovery. |
 | `goal/<slug>-<id>` | Live goal/integration branch | Spans every component repo in multi-repo projects. | Local-only until an explicit push, Ready-to-Merge command, or PR flow publishes it. |
 | `goal/<goalId8>/<role>-<short4>` | Team-member agent | Per-role worktree under a live goal. Created on `team_spawn`, cleaned up on goal archive (alongside the goal branch) or agent dismiss. Legacy `goal-goal-<slug>-<id>-<role>-<short>` from before the `pithier-te` rename is recognised by the same cleanup path. | Local-only on creation, reuse, and recovery. |
 | `staff-<name>-<id>` | Staff agent worktree | Long-lived when the staff uses a worktree; rebased onto the primary branch/base ref on each wake. No-worktree staff have no staff branch. | Local-only on creation and wake refresh. |
 
-The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted state on every server start — orphaned pool entries and renamed-but-unpersisted worktrees are cleaned up automatically. See [internals.md — Session worktrees](internals.md#session-worktrees) for the full lifecycle.
+The boot sweeper (`worktree-sweeper.ts`) scans these against persisted state for diagnostics, but never repairs or cleans a discovered worktree based on its branch or path shape. Pool initialization creates a fresh current-instance pool and does not adopt leftovers. On graceful shutdown, Bobbit stops every live pool before locally draining only its unclaimed ready entries; successful claims survive. Each pool stop and drain is bounded to 15 seconds, so failures, timeouts, crashes, or forced exits can leave diagnostic-only worktrees that Bobbit will not automatically remove. See [internals.md — Session worktrees](internals.md#session-worktrees) and [Preserve user worktrees](design/preserve-user-worktrees.md).
 
 **Worktree setup (per-component).** When a goal worktree is provisioned (whether freshly created or claimed from the pool), Bobbit runs each component's project-level `worktree_setup_command` on the host before the team starts. Failures are **non-fatal** — they are logged and the worktree is still used. The per-command timeout resolves project `worktree_setup_timeout_ms` → 120000 ms default, and timeout-aware runners wait for subprocess cleanup before returning the worktree or adding it to the pool. These commands run **non-sandboxed on the host** — set them only for trusted commands.
 

@@ -7,6 +7,7 @@ __syncBeforeAll(() => __syncCE());
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "lit";
 import { SessionPromptRenderer } from "../../src/ui/tools/renderers/SessionPromptRenderer.js";
+import { ReadSessionRenderer } from "../../src/ui/tools/renderers/ReadSessionRenderer.js";
 
 const TARGET_ID = "12345678-90ab-cdef-1234-567890abcdef";
 
@@ -129,5 +130,21 @@ describe("SessionPromptRenderer", () => {
 			(el.textContent || "").includes(errorText),
 		);
 		expect(destructive.length).toBe(1);
+	});
+});
+
+function renderRead(params: any, details: any): HTMLElement {
+	const host = document.body.appendChild(document.createElement("div"));
+	render(new ReadSessionRenderer().render(params, { role: "toolResult", toolCallId: "r", toolName: "read_session", isError: false, content: [{ type: "text", text: JSON.stringify(details) }], details, timestamp: 1 } as any, false).content, host);
+	return host;
+}
+
+describe("ReadSessionRenderer response discrimination", () => {
+	it("keeps exact inspection separate from the legacy fallback", () => {
+		const cases = [
+			[{ operation: "inspect", session_id: TARGET_ID, message_index: 9, result_index: 1 }, { operation: "inspect", result: { messageIndex: 9, resultIndex: 1, excerpt: "EXACT" } }, "result #1 from message #9", false],
+			[{ session_id: TARGET_ID }, { messages: [{ index: 2, role: "assistant", text: "historical message" }] }, "historical message", true],
+		] as const;
+		for (const [params, details, text, opensLegacy] of cases) { const node = renderRead(params, details); expect(node.textContent).toContain(text); expect(!!node.querySelector('[data-testid="read-session-open-full"]')).toBe(opensLegacy); }
 	});
 });

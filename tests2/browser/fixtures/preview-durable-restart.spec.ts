@@ -59,18 +59,19 @@ async function enablePreviewSession(sessionId: string): Promise<void> {
 	expect(resp.status, `PATCH preview=true should succeed: ${text}`).toBe(200);
 }
 
-async function mountPreview(sessionId: string): Promise<{ entry: string; mtime: number; contentHash: string; url?: string }> {
+async function mountPreview(sessionId: string): Promise<{ entry: string; mtime: number; contentHash: string; artifactId: string; url?: string }> {
 	const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 		method: "POST",
 		body: JSON.stringify({ entry: ENTRY, html: previewHtml() }),
 	});
 	const text = await resp.text();
 	expect(resp.status, `POST /api/preview/mount should succeed: ${text}`).toBe(200);
-	const body = JSON.parse(text) as { entry?: string; mtime?: number; contentHash?: string; url?: string };
+	const body = JSON.parse(text) as { entry?: string; mtime?: number; contentHash?: string; artifactId?: string; url?: string };
 	expect(body.entry).toBe(ENTRY);
 	expect(body.mtime).toBeGreaterThan(0);
 	expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
-	return body as { entry: string; mtime: number; contentHash: string; url?: string };
+	expect(body.artifactId).toBeTruthy();
+	return body as { entry: string; mtime: number; contentHash: string; artifactId: string; url?: string };
 }
 
 async function workspace(sessionId: string): Promise<any> {
@@ -127,7 +128,7 @@ async function previewDiagnostics(page: Page): Promise<string> {
 	});
 }
 
-async function expectPreviewIframeContains(page: Page, message: string, sessionId: string): Promise<void> {
+async function expectPreviewIframeContains(page: Page, message: string, sessionId: string, artifactId: string): Promise<void> {
 	await expect.poll(
 		() => previewDiagnostics(page),
 		{
@@ -140,7 +141,7 @@ async function expectPreviewIframeContains(page: Page, message: string, sessionI
 	await expect(iframe, `${message}: iframe should have an absolute preview content src`).toHaveAttribute("src", /^https?:\/\//, { timeout: 10_000 });
 	const src = new URL((await iframe.getAttribute("src"))!);
 	expect(src.origin, `${message}: iframe preview should stay on the gateway origin`).toBe(new URL(base()).origin);
-	expect(src.pathname, `${message}: iframe preview should target the restored session and entry`).toBe(`/preview/${encodeURIComponent(sessionId)}/${encodeURIComponent(ENTRY)}`);
+	expect(src.pathname, `${message}: iframe preview should target the restored immutable artifact and entry`).toBe(`/preview/${encodeURIComponent(sessionId)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(ENTRY)}`);
 	expect([...src.searchParams.keys()], `${message}: iframe preview should carry only the cache buster`).toEqual(["mtime"]);
 	expect(src.searchParams.get("mtime"), `${message}: iframe cache buster should be numeric`).toMatch(/^\d+$/);
 	expect(src.hash, `${message}: iframe preview should not carry a fragment`).toBe("");
@@ -222,7 +223,7 @@ test.describe("Durable HTML preview restart restore", () => {
 
 		await openSessionDirectly(page, sessionId);
 		await expectPreviewTabActive(page, "direct navigation restore");
-		await expectPreviewIframeContains(page, "direct navigation restore", sessionId);
+		await expectPreviewIframeContains(page, "direct navigation restore", sessionId, mount.artifactId);
 
 		// Recreate the restore race: the active server-persisted preview tab has
 		// the entry in its source/state, while the transient previewPanelEntry
@@ -238,7 +239,7 @@ test.describe("Durable HTML preview restart restore", () => {
 			() => page.evaluate(() => (window as any).bobbitState?.previewPanelEntry ?? ""),
 			{ timeout: 2_000, message: "test setup should leave the previewPanelEntry mirror empty" },
 		).toBe("");
-		await expectPreviewIframeContains(page, "direct navigation restore with empty preview mirror", sessionId);
+		await expectPreviewIframeContains(page, "direct navigation restore with empty preview mirror", sessionId, mount.artifactId);
 
 		await expect(
 			page.locator('button[title="Refresh preview"]').first(),
@@ -252,7 +253,7 @@ test.describe("Durable HTML preview restart restore", () => {
 		await expect(openPreview, "open-preview action should expose an absolute gateway URL").toHaveAttribute("href", /^https?:\/\//);
 		const openPreviewUrl = new URL((await openPreview.getAttribute("href"))!);
 		expect(openPreviewUrl.origin, "open-preview action should stay on the gateway origin").toBe(new URL(base()).origin);
-		expect(openPreviewUrl.pathname).toBe(`/preview/${encodedSessionId}/${encodedEntry}`);
+		expect(openPreviewUrl.pathname).toBe(`/preview/${encodedSessionId}/_artifact/${encodeURIComponent(mount.artifactId)}/${encodedEntry}`);
 		expect(openPreviewUrl.search, "open-preview action should not carry the iframe cache buster").toBe("");
 		expect(openPreviewUrl.hash).toBe("");
 	});
@@ -265,18 +266,18 @@ test.describe("Durable HTML preview restart restore", () => {
 		const sessionId = await createRegularSession(page);
 
 		await enablePreviewSession(sessionId);
-		await mountPreview(sessionId);
+		const mount = await mountPreview(sessionId);
 		await waitForWorkspacePreviewTab(sessionId);
 
 		await expectPreviewTabActive(page, "before restart");
-		await expectPreviewIframeContains(page, "before restart", sessionId);
+		await expectPreviewIframeContains(page, "before restart", sessionId, mount.artifactId);
 
 		await crashAndRestart(gateway, page);
 		await reloadAndReturnToSession(page, sessionId);
 
 		await waitForWorkspacePreviewTab(sessionId);
 		await expectPreviewTabActive(page, "after restart");
-		await expectPreviewIframeContains(page, "after restart", sessionId);
+		await expectPreviewIframeContains(page, "after restart", sessionId, mount.artifactId);
 
 		await closePreviewTab(page);
 		await expectWorkspaceHasNoPreviewTab(sessionId);
