@@ -236,12 +236,20 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		const starting = dispatcher.start();
 		try {
 			expect(child.stdin.listenerCount("error")).toBeGreaterThan(0);
+			child.stdin.destroy();
 			expect(() => child.stdin.emit("error", Object.assign(new Error("closed pipe"), { code: "EPIPE" }))).not.toThrow();
 			expect(child.stderr.listenerCount("data")).toBeGreaterThan(0);
 			child.stderr.write(Buffer.alloc(65 * 1024, "x"));
 			expect(child.stderr.readableLength).toBe(0);
+			expect(child.stdout.listenerCount("data")).toBe(1);
 			child.emit("exit", 1, null);
 			await expect(starting).rejects.toThrow("Bobbit extension dispatcher failed to start");
+			expect(child.stdout.listenerCount("data")).toBe(0);
+			expect(child.listenerCount("error")).toBe(0);
+			expect(child.listenerCount("exit")).toBe(0);
+			expect(child.kill).toHaveBeenCalledTimes(1);
+			child.emit("exit", 1, null);
+			expect(child.kill).toHaveBeenCalledTimes(1);
 		} finally {
 			dispatcher.dispose();
 		}

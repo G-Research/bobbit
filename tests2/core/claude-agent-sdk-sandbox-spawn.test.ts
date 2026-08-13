@@ -159,6 +159,10 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		expect(child.stdin.listenerCount("error")).toBeGreaterThan(0);
 		expect(() => child.stdin.emit("error", Object.assign(new Error("closed pipe"), { code: "EPIPE" }))).not.toThrow();
 		expect(() => child.stdin.emit("error", Object.assign(new Error("destroyed stream"), { code: "ERR_STREAM_DESTROYED" }))).not.toThrow();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		expect(() => child.stdin.emit("error", Object.assign(new Error("secret must not appear"), { code: "ECONNRESET" }))).not.toThrow();
+		expect(warn).toHaveBeenCalledWith("[docker-exec] stdin error: ECONNRESET");
+		expect(warn.mock.calls.flat().join(" ")).not.toContain("secret must not appear");
 		expect(child.stderr.listenerCount("data")).toBeGreaterThan(0);
 		child.stderr.write(Buffer.alloc(65 * 1024, "x"));
 		expect(child.stderr.readableLength).toBe(0);
