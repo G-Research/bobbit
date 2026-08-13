@@ -3,7 +3,10 @@ import { expect, test } from "./gateway-harness.js";
 import {
 	apiFetch,
 	connectWs,
+	createGoal,
 	createSession,
+	defaultProjectId,
+	deleteGoal,
 	harnessDefaultProjectRoot,
 	nonGitCwd,
 	waitForSessionStatus,
@@ -12,7 +15,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const SDK_MODEL = "claude-agent-sdk/sonnet-test";
+const SDK_UNAVAILABLE_MODEL = "claude-agent-sdk/unavailable-test";
 const SDK_SESSION_ID = "11111111-1111-4111-8111-111111111111";
+const FIDELITY_GATE_ID = "sdk-fidelity-proof";
 
 type SdkQueryArgs = { prompt: AsyncIterable<any>; options: Record<string, unknown> };
 type OfficialSessionMessage = {
@@ -40,6 +45,9 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 	}
 
 	async initializationResult(): Promise<{ session_id: string }> {
+		if (this.sdk.unavailableModels.has(String(this.args.options.model))) {
+			throw new Error("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
+		}
 		return { session_id: SDK_SESSION_ID };
 	}
 
@@ -53,21 +61,21 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 						? content.filter((block: any) => block?.type === "text").map((block: any) => block.text).join("\n")
 						: "";
 				this.inputs.push(text);
-				const assistant = this.sdk.appendFinalizedTurn(text);
-				this.emit({
+				const { assistant, result } = this.sdk.appendFinalizedTurn(text);
+				this.emitSdkEvent({
 					type: "assistant",
 					session_id: SDK_SESSION_ID,
 					uuid: assistant.uuid,
 					message: assistant.message,
 				});
-				this.emit({ type: "result", session_id: SDK_SESSION_ID, subtype: "success" });
+				this.emitSdkEvent(result);
 			}
 		} catch {
 			// Bridge shutdown closes the prompt iterable; it is not an SDK failure.
 		}
 	}
 
-	private emit(event: unknown): void {
+	emitSdkEvent(event: unknown): void {
 		const reader = this.readers.shift();
 		if (reader) reader({ done: false, value: event });
 		else this.events.push(event);
@@ -100,7 +108,7 @@ class FakeOfficialSdk {
 	preCompactRuns = 0;
 	private turn = 0;
 
-	appendFinalizedTurn(text: string): OfficialSessionMessage {
+	appendFinalizedTurn(text: string): { assistant: OfficialSessionMessage; result: Record<string, unknown> } {
 		const turn = ++this.turn;
 		const timestamp = turn;
 		this.history.push({
@@ -111,6 +119,26 @@ class FakeOfficialSdk {
 			parent_tool_use_id: null,
 			parent_agent_id: null,
 		});
+		// The official SDK owns this raw audit trail. Its history adapter must
+		// preserve the tool call/result while canonicalizing the Bobbit MCP name.
+		if (turn === 1) {
+			this.history.push({
+				type: "assistant",
+				uuid: "sdk-read-call-1",
+				session_id: SDK_SESSION_ID,
+				message: { role: "assistant", content: [{ type: "tool_use", id: "sdk-read-tool-1", name: "mcp__bobbit__read", input: { path: "README.md" } }], timestamp },
+				parent_tool_use_id: null,
+				parent_agent_id: null,
+			});
+			this.history.push({
+				type: "user",
+				uuid: "sdk-read-result-1",
+				session_id: SDK_SESSION_ID,
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "sdk-read-tool-1", content: "DETERMINISTIC_BOBBIT_READ" }], timestamp },
+				parent_tool_use_id: null,
+				parent_agent_id: null,
+			});
+		}
 		const assistant: OfficialSessionMessage = {
 			type: "assistant",
 			uuid: `sdk-assistant-${turn}`,
@@ -120,7 +148,20 @@ class FakeOfficialSdk {
 			parent_agent_id: null,
 		};
 		this.history.push(assistant);
-		return assistant;
+		return {
+			assistant,
+			result: {
+				type: "result", session_id: SDK_SESSION_ID, uuid: `sdk-result-${turn}`, subtype: "success",
+				usage: { input_tokens: turn * 10, output_tokens: turn * 4, cache_read_input_tokens: turn * 2, cache_creation_input_tokens: turn },
+				total_cost_usd: turn / 1_000,
+				modelUsage: {
+					"sonnet-test": {
+						inputTokens: turn * 10, outputTokens: turn * 4, cacheReadInputTokens: turn * 2, cacheCreationInputTokens: turn,
+						costUSD: turn / 1_000, contextWindow: 200_000, maxOutputTokens: 8_192, contextTokens: turn * 100,
+					},
+				},
+			},
+		};
 	}
 
 	async getSessionInfo(sessionId: string, options?: { dir?: string }): Promise<{ sessionId: string; summary: string; lastModified: number } | undefined> {
@@ -135,6 +176,17 @@ class FakeOfficialSdk {
 
 	async forkSession(): Promise<{ sessionId: string }> {
 		throw new Error("Fake SDK fork is outside this restart journey");
+	}
+
+	readonly unavailableModels = new Set<string>();
+
+	replayRootResult(query: FakeOfficialQuery, turn: number): void {
+		query.emitSdkEvent({
+			type: "result", session_id: SDK_SESSION_ID, uuid: `sdk-result-${turn}`, subtype: "success",
+			usage: { input_tokens: turn * 10, output_tokens: turn * 4, cache_read_input_tokens: turn * 2, cache_creation_input_tokens: turn },
+			total_cost_usd: turn / 1_000,
+			modelUsage: { "sonnet-test": { inputTokens: turn * 10, outputTokens: turn * 4, cacheReadInputTokens: turn * 2, cacheCreationInputTokens: turn, costUSD: turn / 1_000, contextWindow: 200_000, maxOutputTokens: 8_192, contextTokens: turn * 100 } },
+		});
 	}
 
 	async invokePreCompact(query: FakeOfficialQuery): Promise<void> {
@@ -164,6 +216,43 @@ class FakeOfficialSdk {
 
 const fakeSdk = new FakeOfficialSdk();
 test.use({ claudeAgentSdkBridgeDepsFactory: { create: fakeSdk.depsFactory } });
+
+async function sessionTranscript(connection: Awaited<ReturnType<typeof connectWs>>): Promise<unknown[]> {
+	const cursor = connection.messageCount();
+	connection.send({ type: "get_messages" });
+	const frame = await connection.waitForFrom(cursor, message => message.type === "messages", 15_000);
+	return Array.isArray(frame.data) ? frame.data : (frame.data as any)?.messages ?? [];
+}
+
+function fidelityWorkflowId(): string {
+	return `sdk-fidelity-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function createFidelityWorkflow(projectId: string, id: string): Promise<void> {
+	const response = await apiFetch("/api/workflows", {
+		method: "POST",
+		body: JSON.stringify({
+			projectId,
+			id,
+			name: "SDK Fidelity Demonstration",
+			gates: [{
+				id: FIDELITY_GATE_ID,
+				name: "SDK Fidelity Proof",
+				depends_on: [],
+				verify: [{ name: "Deterministic parent verification", type: "command", run: "echo sdk-fidelity-ok" }],
+			}],
+		}),
+	});
+	expect(response.status, await response.text()).toBe(201);
+}
+
+async function waitForGatePass(goalId: string): Promise<void> {
+	await expect.poll(async () => {
+		const response = await apiFetch(`/api/goals/${goalId}/gates/${FIDELITY_GATE_ID}?view=summary`);
+		return response.ok ? (await response.json()).status : undefined;
+	}, { timeout: 15_000, intervals: [100, 250, 500] }).toBe("passed");
+}
+
 test.describe.serial("Claude Agent SDK session restart", () => {
 	test.setTimeout(60_000);
 
@@ -175,6 +264,9 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 		expect(providersResponse.status, await providersResponse.clone().text()).toBe(200);
 		const originalSdkProvider = (await providersResponse.json() as Array<Record<string, unknown>>)
 			.find(provider => provider.id === "claude-agent-sdk");
+		let fidelityGoalId: string | undefined;
+		let fidelityWorkflow: string | undefined;
+		let fidelityProjectId: string | undefined;
 
 		try {
 			const provider = await apiFetch("/api/custom-providers", {
@@ -184,7 +276,10 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 					name: "claude-agent-sdk",
 					type: "manual",
 					baseUrl: "http://127.0.0.1:9",
-					models: [{ id: "sonnet-test", name: "Deterministic Claude SDK" }],
+					models: [
+						{ id: "sonnet-test", name: "Deterministic Claude SDK" },
+						{ id: "unavailable-test", name: "Deterministic unavailable Claude SDK" },
+					],
 				}),
 			});
 			expect(provider.status, await provider.text()).toBe(200);
@@ -194,9 +289,21 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				body: JSON.stringify({ "default.sessionModel": SDK_MODEL, "default.sessionThinkingLevel": "off" }),
 			});
 			expect(sdkDefault.status, await sdkDefault.text()).toBe(200);
+			const projectId = await defaultProjectId();
+			expect(projectId).toBeTruthy();
+			fidelityProjectId = projectId;
+			fidelityWorkflow = fidelityWorkflowId();
+			await createFidelityWorkflow(projectId!, fidelityWorkflow);
+			const fidelityGoal = await createGoal({
+				title: `SDK transcript fidelity ${Date.now()}`,
+				workflowId: fidelityWorkflow,
+				projectId,
+				worktree: false,
+			});
+			fidelityGoalId = fidelityGoal.id;
 			const sdkCreate = await apiFetch("/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false }),
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, projectId, goalId: fidelityGoalId }),
 			});
 			expect(sdkCreate.status, await sdkCreate.clone().text()).toBe(201);
 			const sdkId = (await sdkCreate.json()).id as string;
@@ -234,6 +341,15 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			expect(fakeSdk.queries[0].inputs).toEqual(["SDK_BEFORE_RESTART_ONE", "SDK_BEFORE_RESTART_TWO"]);
 			await waitForSessionStatus(sdkId, "idle");
 
+			// A real workflow verification must settle while the Claude session is
+			// live; this avoids treating a synthetic gate row as parent proof.
+			const gateSignal = await apiFetch(`/api/goals/${fidelityGoalId}/gates/${FIDELITY_GATE_ID}/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "Deterministic SDK parent fidelity demonstration." }),
+			});
+			expect(gateSignal.status, await gateSignal.text()).toBe(201);
+			await waitForGatePass(fidelityGoalId!);
+
 			const piConnection = await connectWs(piId);
 			try {
 				const cursor = piConnection.messageCount();
@@ -259,11 +375,29 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			]));
 			expect(fakeSdk.history.map(({ uuid, parent_tool_use_id, parent_agent_id }) => ({ uuid, parent_tool_use_id, parent_agent_id }))).toEqual([
 				{ uuid: "sdk-user-1", parent_tool_use_id: null, parent_agent_id: null },
+				{ uuid: "sdk-read-call-1", parent_tool_use_id: null, parent_agent_id: null },
+				{ uuid: "sdk-read-result-1", parent_tool_use_id: null, parent_agent_id: null },
 				{ uuid: "sdk-assistant-1", parent_tool_use_id: null, parent_agent_id: null },
 				{ uuid: "sdk-user-2", parent_tool_use_id: null, parent_agent_id: null },
 				{ uuid: "sdk-assistant-2", parent_tool_use_id: null, parent_agent_id: null },
 			]);
 			expect(JSON.stringify(beforeCompact.data)).toContain("SDK_TRANSLATED:SDK_BEFORE_RESTART_TWO");
+			expect(JSON.stringify(beforeCompact.data)).toContain("DETERMINISTIC_BOBBIT_READ");
+			expect(beforeCompact.data).toEqual(expect.arrayContaining([
+				expect.objectContaining({ id: "sdk-read-call-1", role: "assistant", content: expect.arrayContaining([expect.objectContaining({ type: "toolCall", name: "read" })]) }),
+				expect.objectContaining({ id: "sdk-read-result-1", role: "toolResult", toolName: "read" }),
+			]));
+			expect(gateway.sessionManager.getSessionCost(sdkId)).toMatchObject({
+				inputTokens: 30,
+				outputTokens: 12,
+				cacheReadTokens: 6,
+				cacheWriteTokens: 3,
+				totalCost: null,
+				notionalCostUsd: 0.003,
+				costBasis: "subscription-notional",
+				byModel: { "sonnet-test": expect.objectContaining({ inputTokens: 30, outputTokens: 12, contextWindow: 200_000, maxOutputTokens: 8_192 }) },
+				context: expect.objectContaining({ currentTokens: 200, highWaterTokens: 200, highWaterModel: "sonnet-test" }),
+			});
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "info", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "messages", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
 
@@ -280,6 +414,14 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			const onDiskSession = (Array.isArray(onDisk) ? onDisk : onDisk.sessions).find((session: any) => session.id === sdkId);
 			expect(onDiskSession).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
 
+			const preRestartReloadConnection = await connectWs(sdkId);
+			let preRestartReloadTranscript: unknown[];
+			try {
+				preRestartReloadTranscript = await sessionTranscript(preRestartReloadConnection);
+			} finally {
+				preRestartReloadConnection.close();
+			}
+
 			const piCommandsBeforeRestart = gateway.piCommandLog.length;
 			await gateway.crash();
 			await gateway.restart();
@@ -295,6 +437,24 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(restoredSdk);
 			expect(afterRestart).toEqual(beforeCompact);
 			expect(JSON.stringify(afterRestart.data)).toContain("SDK_TRANSLATED:SDK_BEFORE_RESTART_ONE");
+
+			// The replacement bridge can replay the terminal SDK result. Its durable
+			// source UUID ledger must leave cost, per-model totals, and context intact.
+			fakeSdk.replayRootResult(fakeSdk.queries[1], 2);
+			await expect.poll(() => gateway.sessionManager.getSessionCost(sdkId)?.inputTokens, { timeout: 5_000 }).toBe(30);
+			expect(gateway.sessionManager.getSessionCost(sdkId)).toMatchObject({
+				outputTokens: 12,
+				notionalCostUsd: 0.003,
+				byModel: { "sonnet-test": expect.objectContaining({ inputTokens: 30 }) },
+				context: expect.objectContaining({ highWaterTokens: 200 }),
+			});
+
+			const reloadConnection = await connectWs(sdkId);
+			try {
+				expect(await sessionTranscript(reloadConnection)).toEqual(preRestartReloadTranscript);
+			} finally {
+				reloadConnection.close();
+			}
 
 			const restartPiCommands = gateway.piCommandLog.slice(piCommandsBeforeRestart);
 			expect(restartPiCommands.filter(row => row.sessionId === sdkId)).toEqual([]);
@@ -332,7 +492,30 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			} finally {
 				resumedPiConnection.close();
 			}
+
+			// A provider start failure must settle rather than leave a queued session.
+			fakeSdk.unavailableModels.add("unavailable-test");
+			const unavailableDefault = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": SDK_UNAVAILABLE_MODEL, "default.sessionThinkingLevel": "off" }),
+			});
+			expect(unavailableDefault.status, await unavailableDefault.text()).toBe(200);
+			const unavailableQueriesBefore = fakeSdk.queries.length;
+			const unavailableCreate = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false }),
+			});
+			expect(unavailableCreate.status).toBe(500);
+			expect(await unavailableCreate.text()).toContain("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
+			expect(fakeSdk.queries).toHaveLength(unavailableQueriesBefore + 1);
+			expect(fakeSdk.queries.at(-1)?.args.options.model).toBe("unavailable-test");
+			// Returning the provider error from creation proves it settled instead
+			// of leaving a live prompt/queue hung.
 		} finally {
+			if (fidelityGoalId) await deleteGoal(fidelityGoalId);
+			if (fidelityWorkflow && fidelityProjectId) {
+				await apiFetch(`/api/workflows/${encodeURIComponent(fidelityWorkflow)}?projectId=${encodeURIComponent(fidelityProjectId)}`, { method: "DELETE" }).catch(() => undefined);
+			}
 			await apiFetch("/api/custom-providers/claude-agent-sdk", { method: "DELETE" }).catch(() => undefined);
 			if (originalSdkProvider) {
 				await apiFetch("/api/custom-providers", {
