@@ -25,7 +25,7 @@ import {
 // must all reconcile before either page reloads, then hydrate the same truth.
 test.describe("Journey: completed goal gate reset reopens live UI", () => {
 	test("reset clears Completed and updates session/sidebar/dashboard immediately, then survives reload", async ({ page, context }) => {
-		test.setTimeout(120_000);
+		test.setTimeout(60_000);
 		const goal = await createGoal({
 			title: `Completed Gate Reset ${Date.now()}`,
 			workflowId: "test-fast",
@@ -45,7 +45,20 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 			await waitForSessionStatus(teamLeadId, "idle", 30_000);
 			conn = await connectWs(teamLeadId);
 			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
-				await signalAndWaitForGate(conn, goalId, gateId, {}, ["passed"], 30_000);
+				// Observe either terminal verification result so a failed setup gate
+				// fails fast with its signal diagnostics rather than timing out.
+				const terminalGateEvent = await signalAndWaitForGate(
+					conn,
+					goalId,
+					gateId,
+					{},
+					["passed", "failed"],
+					30_000,
+				);
+				expect(
+					terminalGateEvent.status,
+					`fixture gate ${gateId} must pass before completing the reset journey`,
+				).toBe("passed");
 			}
 
 			const completeResponse = await apiFetch(`/api/goals/${goalId}/team/complete`, {
