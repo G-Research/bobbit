@@ -363,6 +363,7 @@ export function isReviewerBusyError(output: string): boolean {
 }
 
 const VERIFIER_FAILURE_PREFIX = "(?:LLM review|Agent QA) failed:";
+const VERIFIER_BUSY_PARKED_ENVELOPE = "Verifier prompt parked after reviewer contention: ";
 const VERIFIER_BUSY_TRANSPORT = "Agent is already processing\\.\\s*Specify streamingBehavior \\('steer' or 'followUp'\\) to queue the message\\.?";
 const VERIFIER_RECEIPT_TIMEOUT = "Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \\d+ms";
 const VERIFIER_RESTART_BEFORE_DISPATCH = "Verifier (?:session [a-z0-9][a-z0-9-]* (?:restarted|was terminated) before dispatch|prompt [a-z0-9][a-z0-9-]* was cancelled before dispatch)";
@@ -378,11 +379,17 @@ export function isVerifierPromptDispatchTimeoutError(output: string): boolean {
 }
 
 /**
- * Match only an error envelope emitted by the verifier transport. A reviewer
- * finding that quotes the same SDK text is content, not infrastructure.
+ * Match only the complete verifier transport envelope. SessionManager may
+ * park the same bridge rejection after its bounded queue redrains, but that
+ * marker remains verifier-only and must immediately precede the full bridge
+ * signature. A reviewer finding that quotes either message is content, not
+ * infrastructure.
  */
 export function isVerifierBusyTransportError(output: string): boolean {
-	return !!output && new RegExp(`^${VERIFIER_FAILURE_PREFIX}\\s*${VERIFIER_BUSY_TRANSPORT}$`, "i").test(output.trim());
+	return !!output && new RegExp(
+		`^${VERIFIER_FAILURE_PREFIX}\\s*(?:${VERIFIER_BUSY_PARKED_ENVELOPE})?${VERIFIER_BUSY_TRANSPORT}$`,
+		"i",
+	).test(output.trim());
 }
 
 /**

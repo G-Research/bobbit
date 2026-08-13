@@ -297,9 +297,11 @@ describe("isReviewerBusyError", () => {
 
 	it("retries only verifier transport contention with the bounded policy", () => {
 		const busyOutput = `LLM review failed: ${BUSY_REJECTION}`;
+		const parkedOutput = `Agent QA failed: Verifier prompt parked after reviewer contention: ${BUSY_REJECTION}`;
 		const timeoutOutput = "LLM review failed: Verifier prompt verifier-row-123 did not dispatch within 60000ms";
 		for (const [output, classifier] of [
 			[busyOutput, isVerifierBusyTransportError],
+			[parkedOutput, isVerifierBusyTransportError],
 			[timeoutOutput, isVerifierPromptDispatchTimeoutError],
 		] as const) {
 			assert.equal(classifier(output), true);
@@ -309,11 +311,14 @@ describe("isReviewerBusyError", () => {
 				assert.equal(shouldRetryVerificationStep({ passed: false, output, attempt: 3, maxBoundedAttempts: 3, isTransient }), "break");
 			}
 		}
+		assert.equal(isTransientReviewError(parkedOutput), false, "generic review policy must remain verifier-scoped");
+		assert.equal(isTransientQaError(parkedOutput), false, "generic QA policy must remain verifier-scoped");
 		assert.equal(isProviderBackoffError(BUSY_REJECTION), false);
 	});
 
-	it("does not mistake a reviewer finding that quotes the busy text for transport contention", () => {
-		const finding = `LLM review failed: Summary: the agent reported \"${BUSY_REJECTION}\" while testing an unrelated workflow.`;
+	it("does not mistake a reviewer summary embedding the parked envelope for transport contention", () => {
+		const parkedEnvelope = `Verifier prompt parked after reviewer contention: ${BUSY_REJECTION}`;
+		const finding = `LLM review failed: Summary: the agent reported \"${parkedEnvelope}\" while testing an unrelated workflow.`;
 		assert.equal(isVerifierBusyTransportError(finding), false);
 		assert.equal(isTransientVerifierReviewError(finding), false);
 		assert.equal(shouldRetryVerificationStep({
