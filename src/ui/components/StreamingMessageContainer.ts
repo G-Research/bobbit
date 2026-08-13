@@ -14,6 +14,8 @@ export class StreamingMessageContainer extends LitElement {
 	@property({ type: Object }) permissionBlockedTools?: Set<string>;
 	@property({ type: Object }) toolResultsById?: Map<string, ToolResultMessage>;
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
+	/** Renderer-facing SDK child activity keyed by root tool-use id. */
+	@property({ attribute: false }) embeddedSubagentWork?: unknown;
 	@property({ attribute: false }) onCostClick?: () => void;
 	@property({ type: Number }) turnStartTime: number | null = null;
 
@@ -388,6 +390,7 @@ export class StreamingMessageContainer extends LitElement {
 				.permissionBlockedTools=${this.permissionBlockedTools}
 				.toolResultsById=${this.toolResultsById}
 				.toolPartialResults=${this.toolPartialResults}
+				.embeddedSubagentWork=${this.embeddedSubagentWork}
 				.hideToolCalls=${false}
 				.onCostClick=${this.onCostClick}
 				.turnStartTime=${this.turnStartTime}
@@ -425,6 +428,7 @@ export class StreamingMessageContainer extends LitElement {
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
 					<div class="bobbit-blob__headset"></div>
+					<div class="bobbit-blob__ponytail"></div>
 					<div class="bobbit-blob__shadow"></div>
 					<div class="bobbit-blob__zzz" aria-hidden="true">
 						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--1">z</span>

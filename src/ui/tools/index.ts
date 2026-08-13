@@ -111,6 +111,17 @@ registerLazyToolRenderer("team_wait", async () => {
 	const { DelegateRenderer } = await import("./renderers/DelegateRenderer.js");
 	return new DelegateRenderer();
 });
+// Claude Agent SDK native calls share the ordinary tool-message card. The
+// renderer only specializes calls carrying an exact-parent child projection;
+// otherwise it preserves the default renderer path.
+registerLazyToolRenderer("Agent", async () => {
+	const { ClaudeSdkAgentRenderer } = await import("./renderers/DelegateRenderer.js");
+	return new ClaudeSdkAgentRenderer();
+});
+registerLazyToolRenderer("Task", async () => {
+	const { ClaudeSdkAgentRenderer } = await import("./renderers/DelegateRenderer.js");
+	return new ClaudeSdkAgentRenderer();
+});
 registerLazyToolRenderer("ask_user_choices", async () => {
 	const { AskUserChoicesRenderer } = await import("./renderers/AskUserChoicesRenderer.js");
 	return new AskUserChoicesRenderer();

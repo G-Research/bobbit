@@ -4,7 +4,9 @@ import type {
 	ToolCall,
 	ToolResultMessage as ToolResultMessageType,
 } from "@earendil-works/pi-ai";
-import { html, LitElement, type TemplateResult } from "lit";
+import { icon } from "@mariozechner/mini-lit";
+import { Copy, GitFork } from "lucide";
+import { html, LitElement, type PropertyValues, type TemplateResult } from "lit";
 import { property } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
 import { renderMessage } from "./message-renderer-registry.js";
@@ -29,6 +31,69 @@ import {
 	NO_PROMPT_AUTHOR_LABELS,
 	type PromptAuthorDisplayMode,
 } from "../message-author-presentation.js";
+import type {
+	SidebarActionsPopover,
+	SidebarActionsPopoverItem,
+} from "./SidebarActionsPopover.js";
+
+const HISTORY_ENTRY_ID_MAX_LENGTH = 256;
+const HISTORY_FORK_HELP_TEXT = "The new session will include the conversation up to, but not including, this prompt.";
+
+type HistoryPromptMessage = BobbitMessage<AgentMessage> & {
+	_origin?: unknown;
+	_pending?: unknown;
+	entryId?: unknown;
+	_entryIdSource?: unknown;
+};
+
+export interface HistoryPromptEligibilityContext {
+	canForkSource: boolean;
+}
+
+/** Fail closed unless this is a server-settled, transcript-confirmed user prompt. */
+export function isEligibleHistoryPrompt(
+	message: BobbitMessage<AgentMessage>,
+	context: HistoryPromptEligibilityContext,
+): boolean {
+	const candidate = message as HistoryPromptMessage;
+	if (!context.canForkSource || !isAccountablePromptMessage(candidate)) return false;
+	if (candidate._pending === true) return false;
+	if (candidate._origin !== "server" || candidate._entryIdSource !== "pi-transcript") return false;
+	return typeof candidate.entryId === "string"
+		&& candidate.entryId.length > 0
+		&& candidate.entryId.length <= HISTORY_ENTRY_ID_MAX_LENGTH
+		&& candidate.entryId.trim() === candidate.entryId;
+}
+
+function durableUserEntryId(message: BobbitMessage<AgentMessage>): string | undefined {
+	const candidate = message as HistoryPromptMessage;
+	if (!isAccountablePromptMessage(candidate)
+		|| candidate._origin !== "server"
+		|| candidate._entryIdSource !== "pi-transcript"
+		|| typeof candidate.entryId !== "string"
+		|| candidate.entryId.length === 0
+		|| candidate.entryId.length > HISTORY_ENTRY_ID_MAX_LENGTH
+		|| candidate.entryId.trim() !== candidate.entryId) return undefined;
+	return candidate.entryId;
+}
+
+interface PromptActionsOpenDetail {
+	entryId: string;
+	promptText: string;
+	trigger: HTMLElement;
+}
+
+interface OpenPromptActions {
+	element: SidebarActionsPopover;
+	trigger: HTMLElement;
+	entryId: string;
+	promptText: string;
+	newWorktree: boolean;
+}
+
+type PromptPopoverItem = SidebarActionsPopoverItem & {
+	help?: { id: string; ariaLabel: string; text: string };
+};
 
 /** Number of items at the bottom of the transcript that render eagerly
  *  even when the defer-offscreen perf flag is on. The transcript auto-scrolls
@@ -139,6 +204,8 @@ export class MessageList extends LitElement {
 	@property({ type: Boolean }) hasStreamMessage: boolean = false;
 	/** Partial results from long-running tools (delegate progress, etc.) */
 	@property({ type: Object }) toolPartialResults?: Record<string, any>;
+	/** Renderer-facing SDK child activity; partitions attach only by root call id. */
+	@property({ attribute: false }) embeddedSubagentWork?: unknown;
 	@property({ attribute: false }) onCostClick?: () => void;
 	@property({ attribute: false }) onDismissError?: (id: string) => void;
 	@property({ attribute: false }) onRestartAgent?: () => void;
@@ -149,6 +216,10 @@ export class MessageList extends LitElement {
 	 *  compaction card appears in the transcript, so the inline expand
 	 *  affordance can call the orphan-transcript API. */
 	@property({ type: String }) sessionId: string = "";
+	/** Whether the active source session passes the canonical live-fork rules. */
+	@property({ type: Boolean }) canForkSource = false;
+	/** Disable prompt action entry while any session creation is in flight. */
+	@property({ type: Boolean }) promptActionsBusy = false;
 	/** One immutable decision owned by AgentInterface for every loaded slice. */
 	@property({ attribute: false }) promptAuthorDisplayMode: PromptAuthorDisplayMode = NO_PROMPT_AUTHOR_LABELS;
 	@property({ attribute: false }) resolvePromptAuthorAppearance?: (author: unknown) => PromptAuthorAppearance;
@@ -158,6 +229,9 @@ export class MessageList extends LitElement {
 		messages: readonly unknown[] | undefined,
 	) => void;
 
+	private _openPromptActions: OpenPromptActions | null = null;
+	private _promptActionsRequestId = 0;
+
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
@@ -166,6 +240,128 @@ export class MessageList extends LitElement {
 		super.connectedCallback();
 		this.style.display = "block";
 	}
+
+	override disconnectedCallback(): void {
+		this._closePromptActions();
+		super.disconnectedCallback();
+	}
+
+	override updated(changedProperties: PropertyValues<this>): void {
+		super.updated(changedProperties);
+		const current = this._openPromptActions;
+		if (!current || (!changedProperties.has("messages")
+			&& !changedProperties.has("canForkSource"))) return;
+		const selected = this.messages.find((message) => durableUserEntryId(message) === current.entryId);
+		if (!selected || !isEligibleHistoryPrompt(selected, {
+			canForkSource: this.canForkSource,
+		})) this._closePromptActions();
+	}
+
+	private _closePromptActions(): void {
+		this._promptActionsRequestId++;
+		const current = this._openPromptActions;
+		if (!current) return;
+		this._openPromptActions = null;
+		current.element.open = false;
+		try { current.element.remove(); } catch { /* already detached */ }
+		this.requestUpdate();
+	}
+
+	private _promptPopoverItems(record: OpenPromptActions): PromptPopoverItem[] {
+		return [
+			{
+				id: "history-fork",
+				label: "Fork before this point",
+				title: HISTORY_FORK_HELP_TEXT,
+				icon: icon(GitFork, "sm"),
+				quick: false,
+				trailingToggle: {
+					id: "history-fork-new-worktree",
+					checked: record.newWorktree,
+					label: "New worktree",
+					ariaLabel: record.newWorktree
+						? "New worktree (on) — fork into a fresh worktree"
+						: "New worktree (off) — reuse the source worktree",
+					onToggle: () => {
+						if (this._openPromptActions !== record || !record.element.open) return;
+						record.newWorktree = !record.newWorktree;
+						record.element.items = this._promptPopoverItems(record);
+					},
+				},
+			},
+			{
+				id: "copy-prompt",
+				label: "Copy prompt",
+				icon: icon(Copy, "sm"),
+				quick: false,
+			},
+		];
+	}
+
+	private _handlePromptActionsOpen = async (event: CustomEvent<PromptActionsOpenDetail>): Promise<void> => {
+		event.stopPropagation();
+		const { entryId, promptText, trigger } = event.detail ?? {} as PromptActionsOpenDetail;
+		if (!this.canForkSource || this.promptActionsBusy
+			|| !(trigger instanceof HTMLElement)
+			|| !this.contains(trigger)
+			|| typeof entryId !== "string"
+			|| entryId.length === 0
+			|| entryId.length > HISTORY_ENTRY_ID_MAX_LENGTH
+			|| entryId.trim() !== entryId
+			|| typeof promptText !== "string") return;
+		const selected = this.messages.find((message) => durableUserEntryId(message) === entryId);
+		if (!selected || !isEligibleHistoryPrompt(selected, {
+			canForkSource: this.canForkSource,
+		})) return;
+		if (this._openPromptActions?.entryId === entryId && this._openPromptActions.element.open) {
+			this._closePromptActions();
+			return;
+		}
+		this._closePromptActions();
+		const requestId = ++this._promptActionsRequestId;
+		await import("./SidebarActionsPopover.js");
+		if (requestId !== this._promptActionsRequestId || !trigger.isConnected) return;
+
+		const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
+		const record: OpenPromptActions = {
+			element,
+			trigger,
+			entryId,
+			promptText,
+			newWorktree: false,
+		};
+		element.anchorEl = trigger;
+		element.items = this._promptPopoverItems(record);
+		element.sourceRects = [];
+		element.open = true;
+		element.addEventListener("sidebar-action-select", ((selectEvent: CustomEvent<{ actionId: string }>) => {
+			selectEvent.stopPropagation();
+			if (this._openPromptActions !== record) return;
+			this._openPromptActions = null;
+			this.requestUpdate();
+			if (selectEvent.detail.actionId === "history-fork") {
+				this.dispatchEvent(new CustomEvent("prompt-history-fork", {
+					detail: { entryId: record.entryId, newWorktree: record.newWorktree },
+					bubbles: true,
+					composed: true,
+				}));
+			} else if (selectEvent.detail.actionId === "copy-prompt") {
+				this.dispatchEvent(new CustomEvent("prompt-copy", {
+					detail: { promptText: record.promptText },
+					bubbles: true,
+					composed: true,
+				}));
+			}
+		}) as EventListener);
+		element.addEventListener("close", () => {
+			if (this._openPromptActions?.element === element) this._openPromptActions = null;
+			try { element.remove(); } catch { /* already detached */ }
+			this.requestUpdate();
+		});
+		document.body.appendChild(element);
+		this._openPromptActions = record;
+		this.requestUpdate();
+	};
 
 	private buildRenderItems() {
 		// Map tool results by call id for quick lookup
@@ -272,6 +468,10 @@ export class MessageList extends LitElement {
 
 			if (msg.role === "user" || msg.role === "user-with-attachments") {
 				const isAccountablePrompt = isAccountablePromptMessage(msg);
+				const historyEntryId = durableUserEntryId(msg);
+				const showPromptActions = isEligibleHistoryPrompt(msg, {
+					canForkSource: this.canForkSource,
+				});
 				items.push({
 					key: keyFor(msg),
 					template: html`<user-message
@@ -280,6 +480,12 @@ export class MessageList extends LitElement {
 						.authorAppearance=${isAccountablePrompt
 							? this.resolvePromptAuthorAppearance?.(msg.author)
 							: undefined}
+						.showPromptActions=${showPromptActions}
+						.promptActionsExpanded=${showPromptActions
+							&& historyEntryId === this._openPromptActions?.entryId
+							&& this._openPromptActions?.element.open === true}
+						.promptActionsDisabled=${this.promptActionsBusy}
+						@prompt-actions-open=${this._handlePromptActionsOpen}
 					></user-message>`,
 				});
 				i++;
@@ -360,6 +566,7 @@ export class MessageList extends LitElement {
 						.permissionBlockedTools=${permissionBlockedTools}
 						.toolResultsById=${resultByCallId}
 						.toolPartialResults=${this.toolPartialResults}
+						.embeddedSubagentWork=${this.embeddedSubagentWork}
 						.hideToolCalls=${false}
 						.hidePendingToolCalls=${this.isStreaming && this.hasStreamMessage}
 						.onCostClick=${this.onCostClick}

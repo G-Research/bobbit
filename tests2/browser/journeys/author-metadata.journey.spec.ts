@@ -185,8 +185,11 @@ async function expectAuthorBadgeGeometry(page: Page): Promise<void> {
 		rows: Array.from(document.querySelectorAll("user-message .prompt-row--labelled")).map((row) => {
 			const rowRect = row.getBoundingClientRect();
 			const badgeRect = row.querySelector(".prompt-author-badge")!.getBoundingClientRect();
+			const shellRect = row.querySelector(".prompt-bubble-shell")!.getBoundingClientRect();
 			const bubble = row.querySelector(".user-message-container--labelled")!;
 			const bubbleRect = bubble.getBoundingClientRect();
+			const footerRect = row.querySelector(".prompt-metadata-row")!.getBoundingClientRect();
+			const timestampRect = row.querySelector(".message-timestamp")!.getBoundingClientRect();
 			return {
 				left: rowRect.left,
 				right: rowRect.right,
@@ -196,6 +199,11 @@ async function expectAuthorBadgeGeometry(page: Page): Promise<void> {
 				rowTop: rowRect.top,
 				badgeBottom: badgeRect.bottom,
 				bubbleTop: bubbleRect.top,
+				bubbleBottom: bubbleRect.bottom,
+				shellRight: shellRect.right,
+				footerTop: footerRect.top,
+				footerRight: footerRect.right,
+				timestampRight: timestampRect.right,
 				chevronTop: getComputedStyle(bubble, "::before").top,
 			};
 		}),
@@ -209,6 +217,9 @@ async function expectAuthorBadgeGeometry(page: Page): Promise<void> {
 		expect(row.badgeTop).toBeGreaterThanOrEqual(row.rowTop);
 		expect(row.badgeBottom).toBeGreaterThan(row.bubbleTop);
 		expect(row.badgeHeight).toBeCloseTo(24, 1);
+		expect(row.footerTop).toBeGreaterThanOrEqual(row.bubbleBottom - 0.5);
+		expect(row.footerRight).toBeCloseTo(row.shellRight, 0);
+		expect(row.timestampRight).toBeCloseTo(row.footerRight, 0);
 		expect(row.chevronTop).toBe("19px");
 	}
 }

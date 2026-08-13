@@ -29,7 +29,7 @@ const { applyRuntimeSessionModelSelection } = await import("../../src/server/ws/
 const SESSION_ID = "runtime-zombie-partial-mutation";
 const DURABLE = {
 	provider: "anthropic",
-	id: "claude-sonnet-4-20250514",
+	id: "claude-sonnet-5",
 	thinkingLevel: "high",
 } as const;
 const REQUESTED = {

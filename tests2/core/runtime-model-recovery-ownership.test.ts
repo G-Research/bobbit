@@ -8,7 +8,7 @@ import { applyRuntimeSessionThinkingSelection } from "../../src/server/ws/runtim
 const SESSION_ID = "runtime-recovery-owner";
 const DURABLE_A = {
 	provider: "anthropic",
-	id: "claude-sonnet-4-20250514",
+	id: "claude-sonnet-5",
 	thinkingLevel: "high",
 } as const;
 const DURABLE_B = {

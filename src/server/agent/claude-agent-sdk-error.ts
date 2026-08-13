@@ -6,6 +6,19 @@ export const SDK_SESSION_UNAVAILABLE = "SDK_SESSION_UNAVAILABLE";
 const diagnostics = new WeakMap<ClaudeAgentSdkUnavailableError, string>();
 
 /**
+ * These are operator-facing reason codes, not credentials. They must survive
+ * generic token redaction so retry logs retain the actionable sandbox cause.
+ */
+const SAFE_SANDBOX_DIAGNOSTIC_CATEGORIES = [
+	"CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE",
+	"CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+] as const;
+const safeSandboxDiagnosticCategoryPattern = new RegExp(
+	`\\b(?:${SAFE_SANDBOX_DIAGNOSTIC_CATEGORIES.join("|")})\\b`,
+	"g",
+);
+
+/**
  * Public SDK failures intentionally contain no provider-controlled detail.
  * Retain only a bounded, redacted diagnostic in a private module-side map for
  * server logs at the owning API boundary.
@@ -30,7 +43,9 @@ export function normalizeClaudeAgentSdkUnavailableError(error?: unknown): Claude
 /** Safe, bounded diagnostic text for server logs only. */
 export function sanitizeClaudeAgentSdkErrorForLog(error: unknown, maxLength = 1_000): string {
 	const raw = error instanceof Error ? (error.stack || error.message) : String(error ?? "");
-	return redactClaudeCredentialPaths(redactSensitive(raw)).slice(0, maxLength);
+	// Redact whole credential paths before partitioning around safe categories:
+	// a category-shaped directory name must not split a sensitive path in two.
+	return sanitizePreservingSafeSandboxDiagnosticCategories(redactClaudeCredentialPaths(raw)).slice(0, maxLength);
 }
 
 export function claudeAgentSdkUnavailableDiagnostic(error: unknown): string {
@@ -42,6 +57,21 @@ export function claudeAgentSdkUnavailableDiagnostic(error: unknown): string {
 /** Stable HTTP/event payload: never spread an Error or upstream diagnostic. */
 export function claudeAgentSdkUnavailablePayload(): { error: typeof SDK_SESSION_UNAVAILABLE; code: typeof SDK_SESSION_UNAVAILABLE } {
 	return { error: SDK_SESSION_UNAVAILABLE, code: SDK_SESSION_UNAVAILABLE };
+}
+
+function sanitizePreservingSafeSandboxDiagnosticCategories(value: string): string {
+	let result = "";
+	let offset = 0;
+	for (const match of value.matchAll(safeSandboxDiagnosticCategoryPattern)) {
+		result += sanitizeUntrustedDiagnosticText(value.slice(offset, match.index));
+		result += match[0];
+		offset = (match.index ?? 0) + match[0].length;
+	}
+	return result + sanitizeUntrustedDiagnosticText(value.slice(offset));
+}
+
+function sanitizeUntrustedDiagnosticText(value: string): string {
+	return redactSensitive(value);
 }
 
 function redactClaudeCredentialPaths(value: string): string {

@@ -2,10 +2,8 @@ export const CONTEXT_HEAVY_LIMIT = 10;
 export const CONTEXT_HEAVY_ERROR_CODE = "CONTEXT_HEAVY_LIMIT_REQUIRED";
 
 export const CONTEXT_HEAVY_FLAGS = {
-	bobbit_read: ["verbose"],
 	bobbit_orchestrate: ["verbose"],
 	bobbit_admin: ["verbose"],
-	read_session: ["verbose", "include_tool_results"],
 } as const;
 
 export const CONTEXT_HEAVY_LIMIT_GUIDANCE =
@@ -23,10 +21,11 @@ export interface ContextHeavyGuardError {
 
 /** Return active context-heavy flags in their canonical per-tool order. */
 export function activeContextHeavyFlags(
-	tool: ContextHeavyTool,
+	tool: string,
 	params: Record<string, unknown>,
 ): string[] {
-	return CONTEXT_HEAVY_FLAGS[tool].filter((flag) => params[flag] === true);
+	const flags = (CONTEXT_HEAVY_FLAGS as Partial<Record<string, readonly string[]>>)[tool] ?? [];
+	return flags.filter((flag) => params[flag] === true);
 }
 
 /** Format the canonical recovery guidance for the active flags. */
@@ -42,7 +41,7 @@ export function formatContextHeavyLimitGuidance(flags: readonly string[]): strin
  * conservative integer limit. Non-pageable operations have nothing to bound.
  */
 export function contextHeavyLimitError(
-	tool: ContextHeavyTool,
+	tool: string,
 	params: Record<string, unknown>,
 	pageable: boolean,
 ): ContextHeavyGuardError | undefined {

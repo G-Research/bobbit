@@ -2,13 +2,9 @@
  * Per-model thinking-level capabilities. Single source of truth shared
  * between the server (`src/server/`) and the UI (`src/app/`, `src/ui/`).
  *
- * Resolution order:
- *   1. If the model carries upstream per-model metadata (`thinkingLevelMap`),
- *      trust it fully — this mirrors pi-ai's own `getSupportedThinkingLevels`
- *      (`@earendil-works/pi-ai`), the source of truth the agent runtime uses.
- *   2. Otherwise fall back to Bobbit's family heuristics for sparse model
- *      payloads (notably AI Gateway / fallback persisted state) that carry no
- *      `thinkingLevelMap`.
+ * Capability data is consumed exactly as supplied. A model's explicit
+ * `thinkingLevelMap` is the only authority for extended `xhigh` and `max`
+ * levels; model ids and provider names never grant capabilities.
  *
  * Map-present rules (mirror pi-ai exactly):
  *   - `reasoning === false` → only "off".
@@ -18,14 +14,10 @@
  *   - A level ABSENT from the map is KEPT (uses provider default), except
  *     "xhigh" and "max" which are kept only when present with a non-null value.
  *
- * Map-absent (heuristic) rules:
- *   - "off" is supported.
- *   - "minimal"/"low"/"medium"/"high" are supported iff `reasoning === true`.
- *   - "xhigh" is supported by:
- *       • Anthropic Claude Opus 4.6+ (claude-opus-4-6, claude-opus-4.8, …)
- *       • OpenAI gpt-5.1-codex-max
- *       • OpenAI gpt-5.2* / gpt-5.4* / gpt-5.5*
- *   - "max" is supported only when upstream per-model metadata explicitly lists it.
+ * Map-absent rules:
+ *   - `reasoning === true` supports "off" through "high".
+ *   - false or unavailable reasoning metadata supports only "off".
+ *   - "xhigh" and "max" are never inferred from a model family.
  *
  * Clamping (`clampThinkingLevel`) resolves the requested token (unknown →
  * "off"), returns it if supported, else steps **up** by rank to the
@@ -82,68 +74,9 @@ export function isKnownThinkingLevel(value: unknown): ThinkingLevel | undefined 
 	return isThinkingLevel(trimmed) ? (trimmed as ThinkingLevel) : undefined;
 }
 
-/**
- * Provider guards for xhigh capability. We fail CLOSED on cross-provider id
- * collisions: a model whose id resembles an Anthropic family but is served
- * via OpenAI (or vice versa) does not light up xhigh.
- *
- * Rules:
- *   - If `provider` is the canonical owner string for the family
- *     (`anthropic` / `openai`) → accept.
- *   - If `provider` is `aigw` (or empty) → accept, then rely on the id check.
- *     aigw routes models from many upstreams but preserves the canonical id.
- *   - Any other provider (`openai` for a `claude-*` id, `google`, etc.) →
- *     reject regardless of id.
- */
-function providerMatches(provider: string, canonical: "anthropic" | "openai"): boolean {
-	if (!provider) return true; // legacy / client state with unset provider
-	if (provider === canonical) return true;
-	if (provider === "aigw") return true;
-	return false;
-}
-
-/**
- * Does the given model's id/provider indicate Anthropic Opus 4.6 or later?
- * Matches `claude-opus-4-N` and `claude-opus-4.N` where N is 6..9 or any
- * 2+ digit number, so future 4.10+ revisions work without a code change.
- */
-function isOpusXHigh(id: string, provider: string): boolean {
-	if (!providerMatches(provider, "anthropic")) return false;
-	return /claude-opus-4(?:-|\.)(?:[6-9]|\d{2,})\b/i.test(id);
-}
-
-/**
- * Does the given model's id/provider indicate an OpenAI family that
- * supports xhigh in Bobbit's fallback heuristic? Currently
- * gpt-5.1-codex-max and any gpt-5.2* / gpt-5.4* / gpt-5.5* / gpt-5.6*.
- *
- * Matches both bare ids (`gpt-5.6-luna`) and provider/gateway-routed ids
- * (`openai/gpt-5.6-luna`) so AIGW-routed models still light up xhigh when a
- * payload arrives without an explicit thinkingLevelMap. `max` remains gated on
- * explicit upstream metadata (inferMeta supplies it for GPT 5.6).
- */
-function isOpenAiXHigh(id: string, provider: string): boolean {
-	if (!providerMatches(provider, "openai")) return false;
-	if (/(?:^|\/)gpt-5\.1-codex-max\b/i.test(id)) return true;
-	if (/(?:^|\/)gpt-5\.(?:2|4|5|6)(?:\b|[-.])/i.test(id)) return true;
-	return false;
-}
-
-/**
- * Whether the given model supports the "xhigh" thinking level.
- *
- * Prefer upstream per-model metadata when present (`thinkingLevelMap`) so
- * newly-added model families light up automatically without a Bobbit code
- * change. Fall back to id/provider heuristics for sparse payloads such as
- * AI Gateway discovery and persisted fallback state.
- */
+/** Whether exact per-model metadata advertises the "xhigh" level. */
 export function supportsXHigh(m: ModelLike): boolean {
-	if (m.thinkingLevelMap !== undefined) {
-		return m.thinkingLevelMap.xhigh !== undefined && m.thinkingLevelMap.xhigh !== null;
-	}
-	const id = m.id || "";
-	const provider = (m.provider || "").toLowerCase();
-	return isOpusXHigh(id, provider) || isOpenAiXHigh(id, provider);
+	return m.thinkingLevelMap?.xhigh !== undefined && m.thinkingLevelMap.xhigh !== null;
 }
 
 /**
@@ -154,13 +87,9 @@ export function supportsXHigh(m: ModelLike): boolean {
  * (e.g. `off: null` = forced adaptive thinking → "off" unsupported) and keeping
  * absent levels (except "xhigh" and "max", which need an explicit non-null entry).
  *
- * When the map is absent (sparse AIGW / persisted-fallback payloads), fall back
- * to Bobbit's family heuristic: off, minimal, low, medium, high (+ xhigh iff
- * `supportsXHigh`), or only "off" for non-reasoning models.
- *
- * If `reasoning` is undefined (legacy client state), default to reasoning-capable
- * so existing reasoning-capable selectors keep working; the server filters
- * non-reasoning models at the boundary via the registry-derived metadata.
+ * When the map is absent, `reasoning === true` enables the base ladder through
+ * "high". Missing reasoning metadata is treated conservatively as unknown and
+ * supports only "off".
  */
 export function getSupportedThinkingLevels(m: ModelLike): ThinkingLevel[] {
 	if (m.reasoning === false) return ["off"];
@@ -173,8 +102,9 @@ export function getSupportedThinkingLevels(m: ModelLike): ThinkingLevel[] {
 			return true;                                 // absent (undefined) → kept (provider default)
 		});
 	}
-	const base: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
-	return supportsXHigh(m) ? [...base, "xhigh"] : base;
+	return m.reasoning === true
+		? ["off", "minimal", "low", "medium", "high"]
+		: ["off"];
 }
 
 /**

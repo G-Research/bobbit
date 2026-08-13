@@ -1,8 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 
 import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
@@ -42,11 +44,119 @@ async function forceStop(child: ChildProcess): Promise<void> {
 	await waitForExit(child, 5_000);
 }
 
+function listen(server: Server): Promise<number> {
+	return new Promise((resolvePort, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			server.off("error", reject);
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				reject(new Error("port guard did not publish a TCP address"));
+				return;
+			}
+			resolvePort(address.port);
+		});
+	});
+}
+
+function close(server: Server): Promise<void> {
+	if (!server.listening) return Promise.resolve();
+	return new Promise((resolveClose, reject) => {
+		server.close((error) => error ? reject(error) : resolveClose());
+	});
+}
+
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 describe("executable CLI root and nested base-path smoke", () => {
+	it("prints only the package version and exits before all gateway side effects", async () => {
+		const packageMetadata = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+			version: string;
+			bin: { bobbit: string };
+		};
+		expect(packageMetadata.bin.bobbit).toBe("dist/server/cli.js");
+		const packageBinEntry = resolve(REPO_ROOT, packageMetadata.bin.bobbit);
+		expect(packageBinEntry).toBe(BUILT_CLI_ENTRY);
+		expect(existsSync(packageBinEntry), "the package bin target must be built before executable coverage").toBe(true);
+
+		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-version-"));
+		const projectRoot = join(root, "project");
+		const headquartersDir = join(root, "headquarters");
+		const secretsTrapParent = join(root, "secrets-trap");
+		const agentTrapParent = join(root, "agent-trap");
+		const secretsDir = join(secretsTrapParent, "secrets");
+		const agentDir = join(agentTrapParent, "agent");
+		mkdirSync(projectRoot, { recursive: true });
+		// Any token or agent-dir initialization turns these regular-file parents into
+		// a deterministic ENOTDIR failure instead of silently touching host state.
+		writeFileSync(secretsTrapParent, "token access is forbidden\n", "utf8");
+		writeFileSync(agentTrapParent, "agent initialization is forbidden\n", "utf8");
+
+		const portGuard = createServer((socket) => socket.destroy());
+		const guardedPort = await listen(portGuard);
+		const childEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			BOBBIT_DIR: headquartersDir,
+			BOBBIT_SECRETS_DIR: secretsDir,
+			BOBBIT_AGENT_DIR: agentDir,
+			BOBBIT_PI_DIR: join(root, "legacy-headquarters"),
+			PI_CODING_AGENT_DIR: join(root, "pi-agent"),
+			BOBBIT_TEST_NO_EXTERNAL: "1",
+			BOBBIT_TEST_NO_REMOTE: "1",
+			PI_OFFLINE: "1",
+			NODE_ENV: "production",
+		};
+		delete childEnv.BOBBIT_BASE_PATH;
+		delete childEnv.BOBBIT_NO_OPEN;
+
+		const startedAt = performance.now();
+		const child = spawn(process.execPath, [
+			packageBinEntry,
+			"--version",
+			"--cwd", projectRoot,
+			"--host", "127.0.0.1",
+			"--port", String(guardedPort),
+			"--no-tls",
+			"--no-ui",
+		], {
+			cwd: projectRoot,
+			env: childEnv,
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+		child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+		try {
+			const exit = await waitForExit(child, 5_000);
+			const elapsedMs = performance.now() - startedAt;
+			expect(exit).toEqual({ code: 0, signal: null });
+			expect(elapsedMs, "--version must terminate promptly without starting a long-lived gateway").toBeLessThan(5_000);
+			expect(stdout).toBe(`v${packageMetadata.version}\n`);
+			expect(stderr).toBe("");
+			expect(portGuard.listening, "the CLI must not replace or disturb the occupied gateway port").toBe(true);
+			for (const forbiddenPath of [
+				join(projectRoot, ".bobbit"),
+				headquartersDir,
+				secretsDir,
+				agentDir,
+				join(root, "legacy-headquarters"),
+				join(root, "pi-agent"),
+			]) {
+				expect(existsSync(forbiddenPath), `--version created forbidden Bobbit state: ${forbiddenPath}`).toBe(false);
+			}
+		} finally {
+			await forceStop(child);
+			await close(portGuard);
+			const cleanup = await awaitableRm(root, { maxAttempts: 3, backoffMs: 50 });
+			expect(cleanup.removed, `isolated CLI version cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+		}
+	});
+
 	it("binds an ephemeral mounted gateway, persists its URL, serves it, and exits cleanly", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-mount-smoke-"));
 		const projectRoot = join(root, "project");

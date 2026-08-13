@@ -1,6 +1,6 @@
 import { html, LitElement } from "lit";
 import { property, state } from "lit/decorators.js";
-import { marked } from "marked";
+import { Marked, type Tokens } from "marked";
 import { createTextAnnotator, type TextAnnotator } from "@recogito/text-annotator";
 import "@recogito/text-annotator/text-annotator.css";
 import {
@@ -39,8 +39,27 @@ const FORBIDDEN_HTML_TAGS = new Set([
   "template",
 ]);
 const FORBIDDEN_ATTRIBUTES = new Set(["srcdoc", "style"]);
-const CODE_PLACEHOLDER_PREFIX = "\uE000REVIEW_CODE_";
-const CODE_PLACEHOLDER_SUFFIX = "\uE001";
+
+function _escapeRawHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+// Keep review parsing isolated from Marked's process-wide singleton. Raw HTML
+// tokens are escaped at the renderer boundary, after CommonMark has identified
+// every code form, so code content is escaped exactly once by Marked's default
+// code renderers while HTML outside code remains inert.
+const reviewMarkdown = new Marked({
+  renderer: {
+    html(token: Tokens.HTML | Tokens.Tag): string {
+      return _escapeRawHtml(token.text);
+    },
+  },
+});
 
 function _normalizeUrlForSafety(value: string): string {
   return value.trim().replace(/[\u0000-\u001F\u007F\s]+/g, "");
@@ -62,21 +81,6 @@ function _isSafeMarkdownUrl(value: string, attrName?: string): boolean {
   } catch {
     return false;
   }
-}
-
-function _escapeRawHtmlOutsideCode(markdown: string): string {
-  const codeBlocks: string[] = [];
-  const protectedMarkdown = markdown.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`/g, (match) => {
-    const index = codeBlocks.length;
-    codeBlocks.push(match);
-    return `${CODE_PLACEHOLDER_PREFIX}${index}${CODE_PLACEHOLDER_SUFFIX}`;
-  });
-
-  let escaped = protectedMarkdown.replace(/</g, "&lt;");
-  codeBlocks.forEach((block, index) => {
-    escaped = escaped.replace(`${CODE_PLACEHOLDER_PREFIX}${index}${CODE_PLACEHOLDER_SUFFIX}`, block);
-  });
-  return escaped;
 }
 
 function _sanitizeSrcset(value: string): string | null {
@@ -133,8 +137,7 @@ export function sanitizeReviewMarkdownHtml(htmlContent: string): string {
 }
 
 export function renderReviewMarkdownToHtml(markdown: string): string {
-  const safeContent = _escapeRawHtmlOutsideCode(markdown);
-  const htmlContent = marked.parse(safeContent, { async: false }) as string;
+  const htmlContent = reviewMarkdown.parse(markdown, { async: false }) as string;
   return sanitizeReviewMarkdownHtml(htmlContent);
 }
 

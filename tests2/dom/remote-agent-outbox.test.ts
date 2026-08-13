@@ -206,6 +206,37 @@ describe("RemoteAgent send outbox (S2)", () => {
 		expect(afterFlush.sent[0]).toMatchObject({ type: "prompt", text: "lost-xyz" });
 	});
 
+	it("keeps the unsent suffix queued when the socket closes during a reconnect flush", async () => {
+		const ra = makeAgent(CLOSED);
+		await ra.prompt("first");
+		await ra.prompt("second");
+		await ra.prompt("third");
+
+		ra.ws.readyState = OPEN;
+		let attempts = 0;
+		ra.ws.send = (data: string) => {
+			attempts++;
+			if (attempts === 2) {
+				ra.ws.readyState = CLOSED;
+				throw new Error("racing close");
+			}
+			ra.__sentFrames.push(data);
+		};
+		ra._flushOutbox();
+
+		let afterFailure = snapshot(ra);
+		expect(afterFailure.sent.map((frame: any) => frame.text)).toEqual(["first"]);
+		expect(afterFailure.outboxLen).toBe(2);
+		expect(afterFailure.queue.map((row: any) => row.text)).toEqual(["second", "third"]);
+
+		ra.ws.readyState = OPEN;
+		ra.ws.send = (data: string) => ra.__sentFrames.push(data);
+		ra._flushOutbox();
+		afterFailure = snapshot(ra);
+		expect(afterFailure.outboxLen).toBe(0);
+		expect(afterFailure.sent.map((frame: any) => frame.text)).toEqual(["first", "second", "third"]);
+	});
+
 	it("only prompt/steer/retry are buffered; control frames are dropped", async () => {
 		const ra = makeAgent(CLOSED);
 		await ra.prompt("p1");

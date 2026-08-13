@@ -1015,7 +1015,7 @@ import { buildVerificationFailureMessage, type FailureStepLike } from "./notify-
 
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
-import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
+import { applyRuntimeSessionThinkingSelection } from "../ws/runtime-model-selection.js";
 import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import {
@@ -1026,22 +1026,6 @@ import {
 	type GateStepDiagnostics,
 	type GateStepDiagnosticsPaths,
 } from "../gate-diagnostics.js";
-
-/**
- * Clamp a thinking-level value against the resolved reviewer/QA model. When
- * the model string is in canonical `provider/modelId` form, infer reasoning
- * metadata and clamp. When no model is resolvable, return the value as-is
- * (the agent will fall back to its built-in default).
- */
-function clampReviewThinking(level: string | undefined, modelStr: string | undefined): string | undefined {
-	if (!level) return level;
-	if (!modelStr) return level;
-	const slash = modelStr.indexOf("/");
-	if (slash <= 0) return level;
-	const provider = modelStr.slice(0, slash);
-	const modelId = modelStr.slice(slash + 1);
-	return clampThinkingLevelForModel(level, provider, modelId);
-}
 
 function controlledSessionModelFallback(prefs: PreferencesStore | undefined): { enabled: boolean; model?: string } | undefined {
 	if (!prefs) return undefined;
@@ -5549,7 +5533,8 @@ export class VerificationHarness {
 			const _preInitialThinkingRaw = (_preRoleThinking && _validLevels.includes(_preRoleThinking))
 				? _preRoleThinking
 				: ((_preReviewThinkingPref && _validLevels.includes(_preReviewThinkingPref)) ? _preReviewThinkingPref : "off");
-			const _preInitialThinking = clampReviewThinking(_preInitialThinkingRaw, _preInitialModel) ?? _preInitialThinkingRaw;
+			// SessionManager owns the final exact-row clamp after all spawn args are assembled.
+			const _preInitialThinking = _preInitialThinkingRaw;
 			const reviewerMeta = buildVerificationReviewerMeta({
 				kind: "llm-review",
 				roleName,
@@ -5654,18 +5639,11 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				// Clamp against the reviewer's resolved model so xhigh on a model
-				// that doesn't support it degrades to high before the RPC.
-				level = clampReviewThinking(level, roleModel_r ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
-				if (_preInitialThinking === level) {
-					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${sessionId}`);
-				} else {
-					try {
-						await session.rpcClient.setThinkingLevel(level);
-						console.log(`[verification] Set review thinking level "${level}" for ${sessionId}${roleThinking_r ? " (role override)" : ""}`);
-					} catch (err) {
-						console.error(`[verification] Failed to set review thinking level:`, err);
-					}
+				try {
+					const tuple = await applyRuntimeSessionThinkingSelection(this.sessionManager!, session, level);
+					console.log(`[verification] Applied exact review thinking level "${tuple.thinkingLevel}" for ${sessionId}${roleThinking_r ? " (role override)" : ""}`);
+				} catch (err) {
+					console.error(`[verification] Failed to set review thinking level:`, err);
 				}
 			}
 
@@ -5999,7 +5977,8 @@ export class VerificationHarness {
 			const _preQaInitialThinkingRaw = (_preQaRoleThinking && _qaValidLevels.includes(_preQaRoleThinking))
 				? _preQaRoleThinking
 				: ((_preQaReviewThinkPref && _qaValidLevels.includes(_preQaReviewThinkPref)) ? _preQaReviewThinkPref : "off");
-			const _preQaInitialThinking = clampReviewThinking(_preQaInitialThinkingRaw, _preQaInitialModel) ?? _preQaInitialThinkingRaw;
+			// SessionManager owns the final exact-row clamp after all spawn args are assembled.
+			const _preQaInitialThinking = _preQaInitialThinkingRaw;
 			const qaReviewerMeta = buildVerificationReviewerMeta({
 				kind: "agent-qa",
 				roleName: qaRoleName,
@@ -6096,15 +6075,10 @@ export class VerificationHarness {
 					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
-				level = clampReviewThinking(level, roleModel_q ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
-				if (_preQaInitialThinking === level) {
-					console.log(`[verification] QA thinking level "${level}" already pinned at spawn for ${qaSessionId}`);
-				} else {
-					try {
-						await session.rpcClient.setThinkingLevel(level);
-					} catch (err) {
-						console.error(`[verification] Failed to set QA thinking level:`, err);
-					}
+				try {
+					await applyRuntimeSessionThinkingSelection(this.sessionManager!, session, level);
+				} catch (err) {
+					console.error(`[verification] Failed to set QA thinking level:`, err);
 				}
 			}
 
@@ -7836,12 +7810,12 @@ export class VerificationHarness {
 	 * the permit, re-enqueues the child, and drains the next eligible (the retry
 	 * hits the worktree-ready else-branch and just re-runs `startTeam`).
 	 */
-	private _startScheduledChildTeam(childGoalId: string): void | Promise<void> {
+	private async _startScheduledChildTeam(childGoalId: string): Promise<void> {
 		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
 		const goalManager = ctx?.goalManager;
 		const teamManager = this.teamManager;
 		if (!goalManager || !teamManager) return;
-		const g = goalManager.getGoal(childGoalId);
+		let g = goalManager.getGoal(childGoalId);
 		// Throw (rather than silently return) for not-found / archived / paused so
 		// the scheduler RELEASES the permit it acquired before calling us — never
 		// leak it. A paused child is re-enqueued by the scheduler and stays queued
@@ -7853,38 +7827,52 @@ export class VerificationHarness {
 		if (g.archived) throw new Error(`[scheduler] child ${childGoalId} is archived — not starting`);
 		if (g.paused) throw new Error(`[scheduler] child ${childGoalId} is paused — not starting`);
 		if (g.state === "blocked") {
-			goalManager.updateGoal(childGoalId, { state: "todo" })
-				.then(() => this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId }))
-				.catch((err) => console.warn(`[scheduler] flip blocked→todo failed for ${childGoalId} (non-fatal):`, err));
+			// State='blocked' is used for both dependency and capacity parking. The
+			// scheduler has already established that this child is eligible, so make
+			// its runnable transition durable before TeamManager rechecks it.
+			await goalManager.updateGoal(childGoalId, { state: "todo" });
+			this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+			g = goalManager.getGoal(childGoalId);
+			if (!g) throw new Error(`[scheduler] child ${childGoalId} disappeared while becoming runnable`);
 		}
-		if (g.setupStatus === "preparing") {
-			// Propagate the rejection (don't swallow) so the scheduler releases the
-			// permit + re-enqueues when the team does not actually start.
-			return goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId))
-				.then(() => { this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId }); })
-				.catch((err) => {
-					const cur = goalManager.getGoal(childGoalId);
-					if (cur?.setupStatus === "ready") {
-						// Worktree finished but the team start raced (e.g. goal
-						// paused/archived mid-start). The worktree work is preserved, so
-						// surface setup-complete (no error UI) — but STILL rethrow so the
-						// scheduler frees the permit; the re-enqueued retry takes the
-						// worktree-ready else-branch and just re-runs startTeam.
-						this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
-						console.error(`[scheduler] auto-start team failed for ${childGoalId} (worktree ready):`, err);
-					} else {
-						console.error(`[scheduler] setup failed for ${childGoalId}:`, err);
-						this.broadcastFn?.(childGoalId, { type: "goal_setup_error", goalId: childGoalId, error: String(err) });
-					}
-					throw err;
-				});
+		const setupStatus: string | undefined = g.setupStatus;
+		if (setupStatus === "preparing" || setupStatus === "retrying") {
+			// The GoalManager owns the same-goal setup promise. Await it here so the
+			// scheduler cannot call startTeam until the persisted status is ready.
+			try {
+				await goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId));
+				this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+				this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
+				return;
+			} catch (err) {
+				const cur = goalManager.getGoal(childGoalId);
+				if (cur?.setupStatus === "ready") {
+					// Setup did finish; a later lifecycle race prevented the lead start.
+					this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+					this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
+					console.error(`[scheduler] auto-start team failed for ${childGoalId} (worktree ready):`, err);
+				} else {
+					console.error(`[scheduler] setup failed for ${childGoalId}:`, err);
+					this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+					this.broadcastFn?.(childGoalId, { type: "goal_setup_error", goalId: childGoalId, error: String(err) });
+				}
+				throw err;
+			}
+		}
+		if (setupStatus !== "ready") {
+			// Failed setup is neither a dependency completion nor an operator pause.
+			// Do not create a team/session; surface a refreshable, actionable state.
+			this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+			throw new Error(`[scheduler] child ${childGoalId} setup is ${setupStatus ?? "unmigrated"}; retry setup before starting its team`);
 		}
 		// Worktree already exists (resumed/ready goal): just start the team.
 		// Propagate failure so the scheduler releases the permit + re-enqueues.
-		return Promise.resolve(teamManager.startTeam(childGoalId)).then(() => {}).catch((err) => {
+		try {
+			await teamManager.startTeam(childGoalId);
+		} catch (err) {
 			console.error(`[scheduler] startTeam failed for ${childGoalId}:`, err);
 			throw err;
-		});
+		}
 	}
 
 	/**

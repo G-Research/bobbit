@@ -79,6 +79,13 @@ export interface ClaudeSdkSubagentRegistryEntry {
 	readonly startedAt: number;
 }
 
+/** Lifecycle facts emitted only for entries already admitted by the policy registry. */
+export interface ClaudeSdkSubagentLifecycleEvent {
+	readonly kind: "start" | "stop" | "aborted";
+	readonly entry: ClaudeSdkSubagentRegistryEntry;
+	readonly at: number;
+}
+
 export type ClaudeSdkSubagentAuditEvent = Readonly<{
 	sessionId: string;
 	outcome: "admitted" | "denied" | "started" | "stopped" | "diagnostic";
@@ -100,6 +107,8 @@ export interface ClaudeSdkSubagentPolicy {
 	/** Uses only the fields provided by the pinned SubagentStart hook. */
 	readonly onStart: (input: { agent_id?: unknown; agent_type?: unknown }) => boolean;
 	readonly onStop: (input: { agent_id?: unknown; agent_type?: unknown }) => void;
+	/** Emits only facts derived from an already-admitted active registry entry. */
+	readonly subscribe: (listener: (event: ClaudeSdkSubagentLifecycleEvent) => void) => () => void;
 	readonly clear: () => void;
 	readonly dispose: () => void;
 }
@@ -260,6 +269,13 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 
 	const active = new Map<string, ClaudeSdkSubagentRegistryEntry>();
 	const admissions = new Map<string, Readonly<{ agentType?: string; admitted: boolean }>>();
+	const lifecycleListeners = new Set<(event: ClaudeSdkSubagentLifecycleEvent) => void>();
+	const publishLifecycle = (kind: ClaudeSdkSubagentLifecycleEvent["kind"], entry: ClaudeSdkSubagentRegistryEntry): void => {
+		const event = Object.freeze({ kind, entry, at: Date.now() });
+		for (const listener of lifecycleListeners) {
+			try { listener(event); } catch { /* lifecycle observers are display-only */ }
+		}
+	};
 	let pending: Readonly<{ toolUseId: string; agentType: string }> | undefined;
 	let disposed = false;
 	const record = (outcome: ClaudeSdkSubagentAuditEvent["outcome"], values: Omit<ClaudeSdkSubagentAuditEvent, "sessionId" | "outcome"> = {}) =>
@@ -317,6 +333,7 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 		pending = undefined;
 		active.set(entry.agentId, entry);
 		record("started", { toolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType });
+		publishLifecycle("start", entry);
 		return true;
 	};
 	const onStop = (input: { agent_id?: unknown; agent_type?: unknown }): void => {
@@ -326,21 +343,30 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 			record("diagnostic", { agentId: input.agent_id, ...(byType.has(input.agent_type) ? { agentType: input.agent_type } : {}) });
 			return;
 		}
+		// Publish while the matching entry is still active, so observers cannot use
+		// a stop hook to fabricate a new identity or race a replacement child.
+		publishLifecycle("stop", entry);
 		active.delete(input.agent_id);
 		// Do not trust a hook-supplied parent id in audit output: retain only the
 		// bounded id that originally admitted this exact child.
 		record("stopped", { toolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType, parentToolUseId: entry.toolUseId, durationMs: Math.max(0, Date.now() - entry.startedAt) });
 	};
+	const subscribe = (listener: (event: ClaudeSdkSubagentLifecycleEvent) => void): (() => void) => {
+		lifecycleListeners.add(listener);
+		return () => lifecycleListeners.delete(listener);
+	};
 	const clear = (): void => {
 		pending = undefined;
+		// Terminalize each currently active entry exactly once before removing it.
+		for (const entry of active.values()) publishLifecycle("aborted", entry);
 		active.clear();
 		admissions.clear();
 	};
 	return Object.freeze({
 		definitions: Object.freeze(definitions), byType, maxConcurrent: 1 as const,
 		get active() { return new Map(active); }, audit,
-		admit, authorizeChild, onStart, onStop, clear,
-		dispose: () => { disposed = true; clear(); },
+		admit, authorizeChild, onStart, onStop, subscribe, clear,
+		dispose: () => { disposed = true; clear(); lifecycleListeners.clear(); },
 	});
 }
 

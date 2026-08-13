@@ -449,7 +449,7 @@ not create a new process.
 
 For terminal, the preferred flow is:
 
-1. User clicks a session-menu entrypoint such as **Open Terminal**.
+1. User clicks a session-menu entrypoint such as **Open terminal**.
 2. `runLauncherEntrypoint()` recognizes a structured channel-panel target, e.g. `{ action:
    "open-channel-panel", channel: "terminal", panelId: "terminal.panel", singletonKey:
    "default" }`.

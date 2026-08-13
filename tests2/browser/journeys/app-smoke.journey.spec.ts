@@ -71,6 +71,45 @@ test.describe("Journey: Session Sharing", () => {
 		}
 	});
 
+	test("desktop session header keeps goal context inline without changing height", async ({ page }) => {
+		const goalTitle = `Header goal ${Date.now()}`;
+		const goal = await createGoal({ title: goalTitle, team: false, worktree: false });
+		const goalSessionId = await createSession({ goalId: goal.id as string });
+		const standaloneSessionId = await createSession();
+		await Promise.all([
+			waitForSessionStatus(goalSessionId, "idle"),
+			waitForSessionStatus(standaloneSessionId, "idle"),
+		]);
+		try {
+			await page.setViewportSize({ width: 1280, height: 800 });
+			await openApp(page);
+			await navigateToHash(page, `#/session/${goalSessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const titleLine = page.getByTestId("desktop-session-header-title-line");
+			await expect(titleLine).toBeVisible();
+			await expect(page.getByTestId("desktop-session-header-goal-separator")).toHaveText("·");
+			await expect(page.getByTestId("desktop-session-header-goal-title")).toHaveText(goalTitle);
+			const goalHeaderHeight = await page.getByTestId("app-header-row").evaluate(element => element.getBoundingClientRect().height);
+			const titleAndGoalShareLine = await titleLine.evaluate(element => {
+				const sessionTitle = element.querySelector<HTMLElement>("[data-testid='desktop-session-header-title']")!.getBoundingClientRect();
+				const goalTitleRect = element.querySelector<HTMLElement>("[data-testid='desktop-session-header-goal-title']")!.getBoundingClientRect();
+				return Math.abs((sessionTitle.top + sessionTitle.height / 2) - (goalTitleRect.top + goalTitleRect.height / 2)) < 2;
+			});
+			expect(titleAndGoalShareLine, "session and goal titles should share one desktop header line").toBe(true);
+
+			await navigateToHash(page, `#/session/${standaloneSessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByTestId("desktop-session-header-goal-title")).toHaveCount(0);
+			const standaloneHeaderHeight = await page.getByTestId("app-header-row").evaluate(element => element.getBoundingClientRect().height);
+			expect(Math.abs(goalHeaderHeight - standaloneHeaderHeight), "goal context must not change desktop header height").toBeLessThanOrEqual(1);
+		} finally {
+			await deleteSession(goalSessionId);
+			await deleteSession(standaloneSessionId);
+			await deleteGoal(goal.id as string);
+		}
+	});
+
 	test("copy-link button is present in session header", async ({ page }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");

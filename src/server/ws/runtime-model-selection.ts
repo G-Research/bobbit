@@ -47,6 +47,16 @@ export type RuntimeModelTuple = {
 
 type RuntimeThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
 
+function extractThinkingLevelMap(value: unknown): RuntimeThinkingLevelMap | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const result: RuntimeThinkingLevelMap = {};
+	for (const [level, mapped] of Object.entries(value)) {
+		const known = isKnownThinkingLevel(level);
+		if (known && (typeof mapped === "string" || mapped === null)) result[known] = mapped;
+	}
+	return result;
+}
+
 type RuntimeModelSnapshot = {
 	provider?: string;
 	id?: string;
@@ -56,39 +66,50 @@ type RuntimeModelSnapshot = {
 	thinkingLevelMap?: RuntimeThinkingLevelMap;
 };
 
+type OptionalStateMetadata = {
+	contextWindow?: unknown;
+	maxTokens?: unknown;
+	reasoning?: unknown;
+	thinkingLevelMap?: unknown;
+	input?: unknown;
+	source?: string;
+	available?: boolean;
+};
+
+function exactStateMetadata(provider: string, id: string): OptionalStateMetadata | undefined {
+	const meta = resolveModelStateMeta(provider, id) as OptionalStateMetadata | undefined;
+	if (!meta || meta.available === false || meta.source === "inferred" || meta.source === "unavailable") return undefined;
+	return meta;
+}
+
 function modelStateMessage(tuple: RuntimeModelTuple, live?: RuntimeModelSnapshot | null): ServerMessage {
-	const meta = resolveModelStateMeta(tuple.provider, tuple.id);
+	const meta = exactStateMetadata(tuple.provider, tuple.id);
 	const liveSdkCapabilities = tuple.provider === "claude-agent-sdk"
 		&& live?.provider === tuple.provider
 		&& live.id === tuple.id;
+	const model: Record<string, unknown> = { provider: tuple.provider, id: tuple.id };
+	if (typeof meta?.contextWindow === "number" && Number.isFinite(meta.contextWindow) && meta.contextWindow > 0) {
+		model.contextWindow = meta.contextWindow;
+	}
+	if (typeof meta?.maxTokens === "number" && Number.isFinite(meta.maxTokens) && meta.maxTokens > 0) {
+		model.maxTokens = meta.maxTokens;
+	}
+	if (liveSdkCapabilities) {
+		if (typeof live.reasoning === "boolean") model.reasoning = live.reasoning;
+		if (live.thinkingLevelMap) model.thinkingLevelMap = live.thinkingLevelMap;
+	} else {
+		if (typeof meta?.reasoning === "boolean") model.reasoning = meta.reasoning;
+		if (meta?.thinkingLevelMap && typeof meta.thinkingLevelMap === "object" && !Array.isArray(meta.thinkingLevelMap)) {
+			model.thinkingLevelMap = meta.thinkingLevelMap;
+		}
+	}
+	if (Array.isArray(meta?.input) && meta.input.every((entry) => entry === "text" || entry === "image")) {
+		model.input = meta.input;
+	}
 	return {
 		type: "state",
-		data: {
-			model: {
-				provider: tuple.provider,
-				id: tuple.id,
-				contextWindow: meta.contextWindow,
-				maxTokens: meta.maxTokens,
-				// SDK models are not registry-owned. Do not re-publish a configured
-				// manual row's capabilities when a live SDK bridge has stated its own.
-				reasoning: liveSdkCapabilities ? live.reasoning === true : meta.reasoning,
-				...(liveSdkCapabilities
-					? (live.thinkingLevelMap ? { thinkingLevelMap: live.thinkingLevelMap } : {})
-					: (meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {})),
-			},
-			thinkingLevel: tuple.thinkingLevel,
-		},
+		data: { model, thinkingLevel: tuple.thinkingLevel },
 	};
-}
-
-function extractThinkingLevelMap(value: unknown): RuntimeThinkingLevelMap | undefined {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-	const result: RuntimeThinkingLevelMap = {};
-	for (const [level, mapped] of Object.entries(value)) {
-		const known = isKnownThinkingLevel(level);
-		if (known && (typeof mapped === "string" || mapped === null)) result[known] = mapped;
-	}
-	return result;
 }
 
 function extractRuntimeModelSnapshot(stateRaw: unknown): RuntimeModelSnapshot {
@@ -100,13 +121,12 @@ function extractRuntimeModelSnapshot(stateRaw: unknown): RuntimeModelSnapshot {
 	const data = state.data ?? state;
 	const model = data.model;
 	const thinkingLevel = isKnownThinkingLevel(data.thinkingLevel);
-	const thinkingLevelMap = extractThinkingLevelMap(model?.thinkingLevelMap);
 	return {
 		...(typeof model?.provider === "string" ? { provider: model.provider } : {}),
 		...(typeof model?.id === "string" ? { id: model.id } : {}),
 		...(thinkingLevel ? { thinkingLevel } : {}),
 		...(typeof model?.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
-		...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+		...(extractThinkingLevelMap(model?.thinkingLevelMap) ? { thinkingLevelMap: extractThinkingLevelMap(model?.thinkingLevelMap) } : {}),
 	};
 }
 
@@ -151,13 +171,8 @@ function tuplesEqual(actual: RuntimeModelSnapshot | null | undefined, expected: 
 		&& actual.thinkingLevel === expected.thinkingLevel;
 }
 
-function broadcastTuple(
-	session: RuntimeModelSession,
-	tuple: RuntimeModelTuple,
-	broadcastModelState: BroadcastFn,
-	live?: RuntimeModelSnapshot | null,
-): void {
-	broadcastModelState(session.clients, modelStateMessage(tuple, live));
+function broadcastTuple(session: RuntimeModelSession, tuple: RuntimeModelTuple, broadcastModelState: BroadcastFn): void {
+	broadcastModelState(session.clients, modelStateMessage(tuple));
 }
 
 function commitRuntimeTuple(
@@ -180,7 +195,7 @@ export async function broadcastRuntimeSessionActualModelState(
 	const live = await readRuntimeModelSnapshot(session);
 	const actual = completeTuple(live) ?? persistedTuple(sessionManager, session.id, live);
 	if (!actual) return null;
-	broadcastTuple(session, actual, broadcastModelState, live);
+	broadcastTuple(session, actual, broadcastModelState);
 	return actual;
 }
 
@@ -272,7 +287,7 @@ async function retainVerifiedCanonicalReplacement(
 			"a newer canonical session exists, but its latest durable model tuple could not be verified without another ownership change",
 		);
 	}
-	if (broadcastModelState) broadcastTuple(candidate, currentDurable, broadcastModelState, candidateState);
+	if (broadcastModelState) broadcastTuple(candidate, currentDurable, broadcastModelState);
 	return true;
 }
 
@@ -288,7 +303,7 @@ async function recoverRuntimeTupleMutation(
 		const liveAfterFailure = await readRuntimeModelSnapshot(session);
 		const correctionAfterFailure = completeTuple(liveAfterFailure) ?? durable;
 		if (correctionAfterFailure && broadcastModelState) {
-			broadcastTuple(session, correctionAfterFailure, broadcastModelState, liveAfterFailure);
+			broadcastTuple(session, correctionAfterFailure, broadcastModelState);
 		}
 		return;
 	}
@@ -305,19 +320,13 @@ async function recoverRuntimeTupleMutation(
 	const liveAfterFailure = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 	const correctionAfterFailure = completeTuple(liveAfterFailure) ?? durable;
 	if (correctionAfterFailure && broadcastModelState) {
-		broadcastTuple(session, correctionAfterFailure, broadcastModelState, liveAfterFailure);
+		broadcastTuple(session, correctionAfterFailure, broadcastModelState);
 	}
 
 	if (durable) {
 		try {
 			const rolledBack = await rollbackRuntimeTuple(mutationRpcClient, durable);
-			const rollbackState = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
-			if (await retainVerifiedCanonicalReplacement(
-				sessionManager,
-				{ session, rpcClient: mutationRpcClient },
-				broadcastModelState,
-			)) return;
-			if (broadcastModelState) broadcastTuple(session, rolledBack, broadcastModelState, rollbackState);
+			if (broadcastModelState) broadcastTuple(session, rolledBack, broadcastModelState);
 			return;
 		} catch {
 			// One bounded rollback attempt failed or could not be verified. Replace the
@@ -351,7 +360,7 @@ async function recoverRuntimeTupleMutation(
 		if (!recoveryOwnerIsCanonical(sessionManager, recoveryOwner) || !currentDurable || !tuplesEqual(replacementTuple, currentDurable)) {
 			throw new Error("runtime selection recovery restart was superseded before its complete durable tuple could be accepted");
 		}
-		if (broadcastModelState) broadcastTuple(replacement, replacementTuple, broadcastModelState, replacementState);
+		if (broadcastModelState) broadcastTuple(replacement, replacementTuple, broadcastModelState);
 	} catch (recoveryError) {
 		throw new OwnedRuntimeRecoveryError(recoveryError, recoveryOwner);
 	}
@@ -468,24 +477,7 @@ async function requireSessionSelectableModel(
 	return selected;
 }
 
-function resolveRequestedThinkingLevel(
-	requestedThinkingLevel: string | undefined,
-	currentThinkingLevel: ThinkingLevel | undefined,
-): ThinkingLevel {
-	const requested = requestedThinkingLevel === undefined
-		? currentThinkingLevel
-		: isKnownThinkingLevel(requestedThinkingLevel);
-	if (!requested) {
-		throw new Error(`Unknown or unverifiable thinking level "${requestedThinkingLevel ?? "?"}"`);
-	}
-	return requested;
-}
-
 function effectiveSdkThinkingLevel(requested: ThinkingLevel, current: RuntimeModelSnapshot): ThinkingLevel {
-	// Capability metadata dies with the SDK Query. Absent metadata is deliberately
-	// conservative: older SDKs may always disable thinking, but `off` remains an
-	// explicit and supported setMaxThinkingTokens(null) operation. Unlike Pi's
-	// sparse maps, SDK maps list only levels the initialized Query advertised.
 	if (!current.thinkingLevelMap) {
 		if (requested === "off") return requested;
 		throw new Error(`Thinking level "${requested}" is unavailable for ${current.provider ?? "claude-agent-sdk"}/${current.id ?? "?"}`);
@@ -500,34 +492,27 @@ function effectiveSdkThinkingLevel(requested: ThinkingLevel, current: RuntimeMod
 }
 
 function effectiveThinkingForSelection(
-	requested: ThinkingLevel,
+	requestedThinkingLevel: string | undefined,
+	currentThinkingLevel: ThinkingLevel | undefined,
 	selectedModel: Awaited<ReturnType<typeof requireSessionSelectableModel>>,
 	liveModel?: RuntimeModelSnapshot | null,
 ): ThinkingLevel {
+	const requested = requestedThinkingLevel === undefined
+		? currentThinkingLevel
+		: isKnownThinkingLevel(requestedThinkingLevel);
+	if (!requested) {
+		throw new Error(`Unknown or unverifiable thinking level "${requestedThinkingLevel ?? "?"}"`);
+	}
 	if (liveModel?.provider === "claude-agent-sdk") return effectiveSdkThinkingLevel(requested, liveModel);
 	const effective = clampThinkingLevel(requested, selectedModel);
 	if (!effective) throw new Error(`Thinking level "${requested}" is unavailable for ${selectedModel.provider}/${selectedModel.id}`);
 	return effective;
 }
 
-function runtimeBridgeIsCanonical(
-	sessionManager: RuntimeModelSessionManager,
-	session: RuntimeModelSession,
-	rpcClient: RuntimeModelRpcClient,
-): boolean {
-	const canonical = sessionManager.getSession(session.id);
-	return canonical === session && canonical.rpcClient === rpcClient;
-}
-
 function runtimeLabel(runtime: SessionRuntime): string {
 	return runtime === "claude-agent-sdk" ? "Claude Agent SDK" : "Pi";
 }
 
-/**
- * Runtime is fixed when a live bridge starts. Reject a runtime change before
- * reading or mutating that bridge so recovery never touches an incompatible
- * process. The persisted model tuple wins over its denormalized runtime field.
- */
 function currentRuntimeForModelSelection(
 	sessionManager: RuntimeModelStateSessionManager,
 	session: RuntimeModelSession,
@@ -537,6 +522,15 @@ function currentRuntimeForModelSelection(
 		modelProvider: persisted?.modelProvider,
 		persistedRuntime: session.runtime ?? persisted?.runtime,
 	});
+}
+
+function runtimeBridgeIsCanonical(
+	sessionManager: RuntimeModelSessionManager,
+	session: RuntimeModelSession,
+	rpcClient: RuntimeModelRpcClient,
+): boolean {
+	const canonical = sessionManager.getSession(session.id);
+	return canonical === session && canonical.rpcClient === rpcClient;
 }
 
 export async function applyRuntimeSessionModelSelection(
@@ -564,10 +558,13 @@ export async function applyRuntimeSessionModelSelection(
 
 	try {
 		const selectedModel = await requireSessionSelectableModel(preferencesStore, provider, modelId);
-		const requestedThinkingLevel = resolveRequestedThinkingLevel(
+		const effectiveThinkingLevel = effectiveThinkingForSelection(
 			thinkingLevel,
 			durable?.thinkingLevel ?? liveBefore?.thinkingLevel,
+			selectedModel,
+			liveBefore,
 		);
+		const requested: RuntimeModelTuple = { provider, id: modelId, thinkingLevel: effectiveThinkingLevel };
 		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
 			throw new Error("runtime model read-back mismatch: the session bridge was replaced before selection");
 		}
@@ -589,10 +586,6 @@ export async function applyRuntimeSessionModelSelection(
 				`agent reports ${modelReadBack?.provider ?? "?"}/${modelReadBack?.id ?? "?"}`,
 			);
 		}
-		// The configured picker remains the source for model availability. The live
-		// SDK Query is the source for the selected model's thinking capabilities.
-		const effectiveThinkingLevel = effectiveThinkingForSelection(requestedThinkingLevel, selectedModel, modelReadBack);
-		const requested: RuntimeModelTuple = { provider, id: modelId, thinkingLevel: effectiveThinkingLevel };
 		await mutationRpcClient.setThinkingLevel(effectiveThinkingLevel);
 		const finalState = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (!tuplesEqual(finalState, requested)) {
@@ -607,7 +600,7 @@ export async function applyRuntimeSessionModelSelection(
 
 		commitRuntimeTuple(sessionManager, session, requested);
 		mutationStarted = false;
-		if (broadcastModelState) broadcastTuple(session, requested, broadcastModelState, finalState);
+		if (broadcastModelState) broadcastTuple(session, requested, broadcastModelState);
 		return requested;
 	} catch (error) {
 		return throwAfterRuntimeRecovery(
@@ -627,6 +620,7 @@ export async function applyRuntimeSessionThinkingSelection(
 	session: RuntimeModelSession,
 	thinkingLevel: string,
 	broadcastModelState?: BroadcastFn,
+	preferencesStore?: PreferencesStore,
 ): Promise<RuntimeModelTuple> {
 	const mutationRpcClient = session.rpcClient;
 	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
@@ -648,17 +642,25 @@ export async function applyRuntimeSessionThinkingSelection(
 		}
 		const requested = isKnownThinkingLevel(thinkingLevel);
 		if (!requested) throw new Error(`Unknown thinking level "${thinkingLevel}"`);
-		const effectiveThinkingLevel = current.provider === "claude-agent-sdk"
-			? effectiveSdkThinkingLevel(requested, liveBefore ?? {})
-			: (() => {
-				const meta = resolveModelStateMeta(current.provider, current.id);
-				return clampThinkingLevel(requested, {
-					provider: current.provider,
-					id: current.id,
-					reasoning: meta.reasoning,
-					thinkingLevelMap: meta.thinkingLevelMap,
-				});
-			})();
+		let effectiveThinkingLevel: ThinkingLevel | null | undefined;
+		if (current.provider === "claude-agent-sdk") {
+			effectiveThinkingLevel = effectiveSdkThinkingLevel(requested, liveBefore ?? {});
+		} else {
+			const selectedModel = preferencesStore
+				? await requireSessionSelectableModel(preferencesStore, current.provider, current.id)
+				: exactStateMetadata(current.provider, current.id);
+			if (!selectedModel || (typeof selectedModel.reasoning !== "boolean" && selectedModel.thinkingLevelMap === undefined)) {
+				throw new Error(`Thinking metadata is unavailable for ${current.provider}/${current.id}`);
+			}
+			effectiveThinkingLevel = clampThinkingLevel(requested, {
+				provider: current.provider,
+				id: current.id,
+				...(typeof selectedModel.reasoning === "boolean" ? { reasoning: selectedModel.reasoning } : {}),
+				...(selectedModel.thinkingLevelMap && typeof selectedModel.thinkingLevelMap === "object"
+					? { thinkingLevelMap: selectedModel.thinkingLevelMap as Record<string, string | null> }
+					: {}),
+			});
+		}
 		if (!effectiveThinkingLevel) {
 			throw new Error(`Thinking level "${requested}" is unavailable for ${current.provider}/${current.id}`);
 		}
@@ -682,7 +684,7 @@ export async function applyRuntimeSessionThinkingSelection(
 
 		commitRuntimeTuple(sessionManager, session, expected);
 		mutationStarted = false;
-		if (broadcastModelState) broadcastTuple(session, expected, broadcastModelState, finalState);
+		if (broadcastModelState) broadcastTuple(session, expected, broadcastModelState);
 		return expected;
 	} catch (error) {
 		return throwAfterRuntimeRecovery(

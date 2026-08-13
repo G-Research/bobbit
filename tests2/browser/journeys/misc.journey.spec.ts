@@ -221,9 +221,10 @@ test.describe("Journey: Preview Artifacts", () => {
 				body: JSON.stringify({ html: "<!DOCTYPE html><body>journey-preview</body>", entry: "journey.html" }),
 			});
 			expect(mountResp.status).toBe(200);
-			const mountBody = await mountResp.json() as { entry: string; mtime: number };
+			const mountBody = await mountResp.json() as { entry: string; mtime: number; artifactId: string };
 			expect(mountBody.entry).toBe("journey.html");
 			expect(mountBody.mtime).toBeGreaterThan(0);
+			expect(mountBody.artifactId).toBeTruthy();
 			await expect.poll(
 				() => page.evaluate(() => {
 					const s: any = (window as any).bobbitState ?? (window as any).__bobbitState;
@@ -238,7 +239,7 @@ test.describe("Journey: Preview Artifacts", () => {
 			const srcUrl = new URL(src!);
 			const gatewayOrigin = new URL(page.url()).origin;
 			expect(srcUrl.origin, "preview iframe should stay on the active gateway origin").toBe(gatewayOrigin);
-			expect(srcUrl.pathname).toBe(`/preview/${encodeURIComponent(sessionId)}/journey.html`);
+			expect(srcUrl.pathname).toBe(`/preview/${encodeURIComponent(sessionId)}/_artifact/${encodeURIComponent(mountBody.artifactId)}/journey.html`);
 			expect([...srcUrl.searchParams.keys()], "preview iframe should carry only the cache buster").toEqual(["mtime"]);
 			expect(srcUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
 			expect(srcUrl.hash).toBe("");
@@ -250,7 +251,7 @@ test.describe("Journey: Preview Artifacts", () => {
 			const href = await link.getAttribute("href");
 			const hrefUrl = new URL(href!);
 			expect(hrefUrl.origin, "preview popout should stay on the active gateway origin").toBe(gatewayOrigin);
-			expect(hrefUrl.pathname).toBe(`/preview/${encodeURIComponent(sessionId)}/journey.html`);
+			expect(hrefUrl.pathname).toBe(`/preview/${encodeURIComponent(sessionId)}/_artifact/${encodeURIComponent(mountBody.artifactId)}/journey.html`);
 			expect(hrefUrl.search, "preview popout must not carry the iframe cache buster").toBe("");
 			expect(hrefUrl.hash).toBe("");
 			const refresh = page.locator('button[title="Refresh preview"]').first();

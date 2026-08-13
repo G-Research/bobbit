@@ -15,9 +15,7 @@ that only address the *current* goal. The `bobbit` group fills the gap: an
 ergonomic, gateway-wide surface addressed by explicit id, with auth and
 error-shaping handled for you.
 
-See the design doc [`docs/design/bobbit-gateway-tool.md`](design/bobbit-gateway-tool.md)
-for full endpoint mappings (§5) and the rationale behind every resolved
-decision. This page is the user-facing reference.
+This page and each tool's `detail_docs` are authoritative; the [design](design/bobbit-gateway-tool.md) records historical rationale.
 
 ## The three tiers
 
@@ -87,72 +85,67 @@ that imports a sibling module through `../_shared/*` therefore needs that shared
 tree beside the customized group. The tool customize endpoint copies both the
 selected group and its source `tools/_shared/` directory into the target scope;
 matching shared files are refreshed while unrelated target-only files remain.
-This keeps the Bobbit and Agent extensions connected to the same context-heavy
-limit policy after customization.
 
 When copying or maintaining a tool-group override outside the customize
 endpoint, preserve the same layout and copy `tools/_shared/` too. A group-only
 copy can pass YAML discovery but fail when its extension resolves the missing
 relative import.
 
-## Compact output and bounded verbosity
+## Focused read output
 
-All three tiers project successful responses into a compact, operation-specific
-shape unless `verbose: true` is passed. This policy applies only to agent tool
-results: the gateway REST endpoints and their programmatic/UI consumers still
-receive their established response bodies.
+`bobbit_read` bounds agent-facing responses so discovery and status checks do not consume context with large or repeated payloads. These projections do not change direct REST/UI responses or the admin/orchestrate tiers.
 
-Compact mode keeps fields needed to identify an entity, judge its state, take
-the next action, page, and diagnose failures. In particular, identity and label
-fields, state/status/type, project identity, `{ error, code }`, pagination, and
-recency timestamps are retained when present. Long freeform text is shortened
-to a 200-character preview followed by
-`…(truncated; pass verbose:true)`. UI/model bookkeeping, redundant id aliases,
-and embedded goal/session workflow snapshots are omitted. A snapshot's
-`workflowId` is retained or derived so the caller can fetch the workflow
-explicitly.
+### Goal and Git status summaries
 
-Projection policy is centralized in the Bobbit extension's compact-projection
-module: every exported operation must have one explicit map entry, so adding an
-operation also requires choosing its compact shape. The projection level varies
-by operation:
+`get_goal` with `view: "summary"` returns only this identity/status allowlist when fields are present:
 
-| Operations | Compact behavior |
-|---|---|
-| Goal list/get/create/update | Keeps goal state, branch/merge/setup/team fields and a spec preview; omits filesystem paths and the embedded workflow. Archived session enrichments use the session projection. |
-| Session list/get/create/restart | Keeps role/assistant identity, goal/task relationships, recency, archive state, and error-turn diagnostics; omits cwd/path and UI/model bookkeeping. Archived delegate enrichments use the same projection. |
-| Search | Keeps hit id/type/title/score/state and a snippet preview; omits indexed bodies. |
-| Task and gate operations | Keeps ids, dependencies, assignment/workflow links, state, git handoff fields, counts, and short content/spec/result previews; omits verifier prompts and large verification bodies. |
-| Workflow list/get | Lists omit gates. A direct `get_workflow` keeps a compact gate DAG but omits each gate's verifier blocks and prompts. |
-| Project, role, tool, staff, MCP, and commit operations | Keep fields needed for selection and follow-up actions while previewing descriptions/prompts/messages and omitting large nested definitions. |
-| `goal_cost`, `session_cost` | Returned unchanged because the payloads are already small and diagnostic. |
-| Health, git/PR status, maintenance, acknowledgements, and other irregular results | Recursively remove universal bookkeeping and truncate long text while preserving short diagnostics, including legitimate `verify` fields. Verifier prompts are omitted only by the task, gate, and workflow allowlist projections above. |
+- `id`, `title`, `state`, `projectId`, `workflowId`
+- `parentGoalId`, `rootGoalId`
+- `paused`, `archived`, `archivedAt`
+- `setupStatus`, `setupError`
+- `createdAt`, `updatedAt`
 
-`verbose: true` is the escape hatch for the processed full gateway payload. For
-any paged `bobbit_read` operation, verbose mode requires an explicit integer
-`limit` from 1 through 10. Missing, invalid, or larger limits fail before the
-request is sent. Fetch successive pages only when full fields are genuinely
-needed, and watch token consumption. Non-paged reads can use verbose mode
-without a limit.
+`workflowId` may be derived from the goal's workflow snapshot. The summary omits `spec`, workflow details, paths, configuration, provider data, and branch/merge internals. This exhaustive allowlist also keeps future unclassified detail fields out of summaries. With `view` omitted, `view: "full"`, or another non-summary value, the established detail projection remains available and `spec` is not truncated.
 
-`bobbit_orchestrate` and `bobbit_admin` expose `verbose` but currently have no
-paged operations, so they do not require `limit`. If paging is added to either
-tier, the shared guard applies automatically.
+`goal_git_status` with `view: "summary"` returns one `aggregate` object. It contains available scalar status fields — `branch`, `primaryBranch`, `isOnPrimary`, `primaryRef`, `hasUpstream`, `ahead`, `behind`, `aheadOfPrimary`, `behindPrimary`, `mergedIntoPrimary`, `insertionsVsPrimary`, `deletionsVsPrimary`, `clean`, `summary`, `unpushed`, `partial`, and `untrackedIncluded` — plus `changedFiles`, the aggregate status-entry count. Top-level freshness fields (`observedAt`, `refreshedAt`, `stale`, `source`, `ageMs`) and compact `lastError` remain when available. Per-file `status` and repeated root, `repos`, and `data` aliases are omitted. Omitted and non-summary views, including `view: "full"`, retain the legacy projection and its compatibility aliases.
+
+### Gate paging
+
+`list_gates` paging is independent of `view`. Summary, omitted, and full views all honor `limit`, `offset`, `cursor`, and `after`; calls without paging controls use the standard bounded list defaults. `view` controls per-gate field detail, not page cardinality.
+
+The root `gates` array is the sole paged gate collection. The `summary` object retains compact progress counts but no longer repeats gates under `summary.gates`. `total` describes the full authorized, goal-scoped collection before slicing.
+
+The gate endpoint uses offsets, so the tool treats each non-negative integer `cursor` or `after` as an absolute REST offset. Precedence is `cursor`, then `after`, then `offset`:
+
+- Offset pages return `nextOffset` and an equivalent `nextCursor` when `hasMore` is true.
+- Cursor pages report `mode: "cursor"` and the consumed `cursor`, then return only `nextCursor` when more rows remain.
+- Terminal pages report `hasMore: false` and omit both continuation markers.
+
+### Intentional agent response-contract changes
+
+These changes apply only to compact `bobbit_read` output:
+
+- `list_gates` is always bounded, exposes gates only at root `gates`, and removes `summary.gates`.
+- `goal_git_status(view: "summary")` removes repeated aliases and per-file status in favor of one scalar aggregate.
+- `maintenance_inspect(probe: "worktrees")` pages the canonical root `items` array while retaining aggregate counts and timestamps.
+- `maintenance_inspect(probe: "archived_session_worktrees")` also pages root `items`. Its compact response suppresses nested session worktree arrays and other worktree aliases while retaining compact session/group identity and count metadata.
+
+Direct REST responses are unchanged. `goal_commits(limit: N)` now forwards `N` to the REST endpoint, so callers can bound commit history at its source.
 
 ## Operation catalogue
 
 Each tool takes an `operation` discriminator plus operation-specific params and
 returns a compact JSON projection by default. Summaries follow; for full endpoint
-mappings, methods, and body keys see each tool's `detail_docs` and
-[`docs/design/bobbit-gateway-tool.md` §5](design/bobbit-gateway-tool.md).
+mappings, methods, and body keys see each tool's `detail_docs`.
 
 ### `bobbit_read` — read-only introspection
 
 All operations are GETs with no side effects. List-style operations are bounded
 by default (`limit=50`, `offset=0`, max `200`) and return a `pagination` object.
-`list_sessions`, `list_goals`, and `search` use REST pagination; other list
-operations page the already-filtered gateway response in the tool. REST-paged
-responses are annotated, not re-sliced.
+`list_sessions`, `list_goals`, `search`, and `list_gates` forward paging to REST;
+other list operations page the already-filtered gateway response in the tool.
+REST-paged responses are annotated rather than re-sliced, while `list_gates`
+also enforces the requested bound if an older endpoint returns an unsliced array.
 
 **Archived entities are hidden by default.** Every list/search read returns
 live rows only unless the caller explicitly opts in. This keeps stale, archived
@@ -182,9 +175,11 @@ opt-in.
 
 - `health`, `connection_info` — gateway liveness + network info.
 - `list_goals` (`archived=true` to include archived goals, `q`), `get_goal` —
-  enumerate / fetch goals.
+  enumerate / fetch goals; use `get_goal(view: "summary")` for bounded identity
+  and status metadata without the goal spec.
 - `goal_cost`, `goal_git_status`, `goal_commits`, `goal_pr_status` — per-goal
-  cost, git, commit, and PR details.
+  cost, git, commit, and PR details. Git status has a deduplicated summary view,
+  and `goal_commits` forwards `limit` to REST.
 - `list_sessions` (`include=archived` to include archived sessions, `q`,
   `projectId`), `get_session`, `session_cost` — enumerate / fetch sessions and
   their cost.
@@ -195,11 +190,12 @@ opt-in.
   requires `projectId`; `get_workflow` accepts it as a scope filter).
 - `list_roles`, `list_tools` — resolved roles and the tool catalogue.
 - `list_gates`, `list_tasks` (by arbitrary `goalId`), `get_task` — cross-goal
-  gate/task boards.
+  gate/task boards. Gate pages use root `gates` as their canonical collection
+  in every view.
 - `list_staff`, `list_mcp_servers` — staff agents and MCP servers.
 - `maintenance_inspect` (`probe=`) — the GET-only maintenance probes (orphaned
   worktrees/sessions, expired archives, orphaned index rows, worktree/sandbox
-  pools, search stats).
+  pools, search stats). Worktree inventory probes page canonical root `items`.
 
 ### `bobbit_orchestrate` — runtime state mutations
 
@@ -303,20 +299,11 @@ grant policy is the authority and the admin token never leaves the server
 
 ## Result and error shape
 
-- **Success** — returns the operation's compact projection described above.
-  List-style `bobbit_read` operations first apply archive filtering and paging,
-  then project the result, so ids and pagination metadata remain usable.
-  `verbose: true` returns that processed/paged payload without projection.
+- **Success** — `bobbit_read` lists return compact identity/state/relationship data and pagination; matching gets return useful detail for one entity.
 - **204 No Content** (e.g. marketplace uninstall) — returns `{ ok: true }`.
 - **Gateway failure** — the gateway's structured `{ error, code }` body is
   surfaced as a readable error line containing the message, machine code when
   present, and HTTP status. Missing required parameters are caught before fetch.
-- **Context-heavy limit failure** — returns a tool error whose text is parseable
-  JSON with `code: "CONTEXT_HEAVY_LIMIT_REQUIRED"`. Its `error` names the active
-  heavy flag, requires an explicit `limit <= 10`, and directs the agent to use
-  smaller batches only when full verbosity is necessary and to monitor token
-  consumption. Retry the same paged operation with `limit` from 1 through 10,
-  then advance with `offset` or the returned cursor.
 
 ## See also
 

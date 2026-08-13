@@ -16,6 +16,7 @@
  */
 
 import type { MessageAuthor } from "../shared/message-author.js";
+import { isClaudeSdkSubagentFrame, parentToolUseIdOf } from "./claude-sdk-subagent-work.js";
 
 export type MessageOrigin = "server" | "optimistic" | "synthetic" | "permission";
 
@@ -348,6 +349,12 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const { frame, seq } = action;
 			const tick = state.nextTick;
 			const nextHighest = Math.max(state.highestSeq, seq);
+			// Defense in depth: RemoteAgent partitions child frames before dispatch,
+			// but a direct caller must not be able to inject parent-keyed SDK child
+			// prose into the root ordering reducer.
+			if (isClaudeSdkSubagentFrame(frame)) {
+				return { ...state, highestSeq: nextHighest };
+			}
 			// frame is an event payload — we only care about message_end here;
 			// other event types don't mutate the message list.
 			if (frame?.type !== "message_end" || !frame.message) {
@@ -454,7 +461,11 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 
 		case "snapshot": {
 			const tick = state.nextTick;
-			const enriched = action.messages.map(enrichUserMessage);
+			// Snapshots are normally projected by RemoteAgent. Keep this boundary
+			// strict for reducer consumers and older recovery paths as well.
+			const enriched = action.messages
+				.filter((message) => parentToolUseIdOf(message) === undefined)
+				.map(enrichUserMessage);
 			// Two-way compaction dedup:
 			//   (a) State has a rich synthetic (`__compaction_summary` toolCall) —
 			//       drop the server's plain-text marker from this snapshot. Rich
@@ -855,7 +866,9 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 
 		case "replace-messages": {
 			const tick = state.nextTick;
-			const enriched = action.messages.map(enrichUserMessage);
+			const enriched = action.messages
+				.filter((message) => parentToolUseIdOf(message) === undefined)
+				.map(enrichUserMessage);
 			const rows: OrderedMessage[] = enriched.map((m, i) => {
 				const explicit = (m as any)._order;
 				const order = typeof explicit === "number" ? explicit : SNAPSHOT_ORDER_FLOOR + i;

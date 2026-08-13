@@ -26,6 +26,9 @@ export interface ToolRenderContext {
 	/** The current session's goal ID, when bound to a goal. Used by Children
 	 *  tool renderers (e.g. goal_plan_propose's approval flow). */
 	goalId?: string;
+	/** Renderer-only Claude SDK child work keyed by exact root Agent tool-use id.
+	 * This is presentation state, never root transcript content. */
+	embeddedSubagentWork?: unknown;
 	/**
 	 * Look up answers for a posted `ask_user_choices` tool_use by scanning the
 	 * current session's transcript for a matching response envelope.

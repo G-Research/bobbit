@@ -36,7 +36,7 @@ test("goal archive and hard delete remove retained gate diagnostics", async () =
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gate-diagnostics-cleanup-"));
 	try {
 		const stateDir = path.join(tmp, "state");
-		const store = new GoalStore(stateDir);
+		const store = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const manager = new GoalManager(store, undefined, stateDir);
 
 		store.put(makeGoal("archive-goal"));

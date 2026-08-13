@@ -11,6 +11,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { getBuiltinModel, getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { createMemFs } from "../harness/mem-fs.js";
 
 const memfs = createMemFs();
@@ -18,7 +19,7 @@ const stateDir = path.resolve("/memfs/models-test");
 
 // Import after setup
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { discoverModelsForConfig, findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(stateDir, memfs);
 
@@ -43,7 +44,6 @@ describe("Model registry", () => {
 			assert.equal(typeof m.reasoning, "boolean", `reasoning should be boolean`);
 			assert.ok(Array.isArray(m.input), `input should be an array`);
 			assert.equal(typeof m.authenticated, "boolean", `authenticated should be boolean`);
-			assert.ok(m.runtime === "pi" || m.runtime === "claude-agent-sdk", `runtime should be derived for ${m.provider}/${m.id}`);
 			// cost object
 			assert.equal(typeof m.cost, "object", `cost should be object`);
 			assert.equal(typeof m.cost.input, "number", `cost.input should be number`);
@@ -51,26 +51,34 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("derives Claude Agent SDK runtime on custom catalog rows without making runtime selectable", async () => {
-		const [model] = await discoverModelsForConfig({
-			id: "sdk", name: "claude-agent-sdk", type: "manual", baseUrl: "http://localhost:1",
-			models: [{ id: "sonnet", name: "Sonnet" }],
-		});
-		assert.equal(model.runtime, "claude-agent-sdk");
-		assert.equal(model.provider, "claude-agent-sdk");
+	it("passes representative direct Pi rows through byte-for-byte except authentication presentation", () => {
+		const cases = [
+			["anthropic", "claude-opus-4-1"], // authoritative 200K Claude row
+			["anthropic", "claude-sonnet-4-5"], // authoritative 1M Claude row
+			["openrouter", "openai/gpt-5.2-chat"], // Pi says non-reasoning
+			["openai", "gpt-4"], // text-only GPT-4
+			["openai", "gpt-4o"], // multimodal GPT-4
+			["openrouter", "sao10k/l3.1-euryale-70b"], // `o1` substring is not a reasoning family
+		] as const;
+
+		for (const [provider, id] of cases) {
+			const pi = getBuiltinModel(provider as any, id as any);
+			assert.ok(pi, `Pi should contain ${provider}/${id}`);
+			const registry = models.find(model => model.provider === provider && model.id === id);
+			assert.ok(registry, `registry should contain ${provider}/${id}`);
+			const { authenticated, ...authoritativeFields } = registry;
+			assert.equal(typeof authenticated, "boolean");
+			assert.deepEqual(authoritativeFields, pi, `${provider}/${id} must remain exact`);
+		}
 	});
 
-	it("Claude Sonnet/Opus models report >= 1M context window", () => {
-		const claudeModels = models.filter(
-			(m) => m.id.toLowerCase().includes("claude-sonnet") || m.id.toLowerCase().includes("claude-opus"),
-		);
-		assert.ok(claudeModels.length > 0, "should have at least one Claude Sonnet or Opus model");
-
-		for (const m of claudeModels) {
-			assert.ok(
-				m.contextWindow >= 1_000_000,
-				`${m.id} contextWindow ${m.contextWindow} should be >= 1M`,
-			);
+	it("does not add any direct OpenAI rows beyond Pi's current catalogs", () => {
+		for (const provider of ["openai", "openai-codex"] as const) {
+			const registryIds = models
+				.filter(model => model.provider === provider)
+				.map(model => model.id);
+			const piIds = getBuiltinModels(provider).map(model => model.id);
+			assert.deepEqual(registryIds, piIds, `${provider} must not restore removed or historical addition rows`);
 		}
 	});
 

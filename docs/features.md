@@ -17,13 +17,13 @@ Each session selects a runtime from its configured provider. Pi sessions run a `
 - **Persistence**: Session metadata persists to `.bobbit/state/sessions.json`. Pi records retain an agent session file and restore by re-spawning the agent with `switch_session` against its `.jsonl`; SDK records retain only an opaque SDK UUID and restore through the SDK's `resume` option, with SDK-owned history. Active interactive sessions are automatically re-prompted; non-interactive verification reviewers are re-driven by the verification harness. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md).
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
-- **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. See [session-actions.md](session-actions.md).
+- **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. Eligible durable user prompts use the same popover component for exact-text copy and cut-before history forks. See [session-actions.md](session-actions.md).
 - **Sidebar tree**: Projects, goals, sessions, staff, delegates, team leads, and archived sections share one tree model for hierarchy, expansion persistence, and indentation. See [sidebar-tree-state.md](sidebar-tree-state.md) and [sidebar-tree-indentation.md](sidebar-tree-indentation.md).
 - **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session. An `"aborting"` status is broadcast immediately so the UI shows feedback during the grace period. After force-kill, any in-flight steers that the SDK accepted but never echoed are pulled off the per-session shadow ledger and re-enqueued at the front of `promptQueue`; `drainQueue()` then redispatches them as a single steered batch. See [prompt-queue.md](prompt-queue.md#abort-and-force-kill-recovery) for details.
 
 ## Maintenance
 
-Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Worktree Cleanup is the canonical surface for safe Bobbit worktree removal across archived sessions, orphaned git worktrees, pool entries, and filesystem-only diagnostics while preserving archives, transcripts, proposals, and protected live/durable references. Related cards cover orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md).
+Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Worktree Cleanup can remove an archived session worktree only when its durable repository, current Git worktree path, and non-empty branch match exactly and remain unchanged on the immediate re-scan. Unverified ordinary, Bobbit-shaped, pool-shaped, and filesystem-only candidates are diagnostic-only; naming or root placement never proves ownership. Archives, transcripts, proposals, and protected live/durable references remain intact. Related cards cover orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md) and [design/preserve-user-worktrees.md](design/preserve-user-worktrees.md).
 
 ## Goals
 
@@ -123,6 +123,10 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 ## Git status rich diff viewer
 
 The Git status widget's diff modal renders raw session/goal `git-diff` responses with `<rich-git-diff-viewer>`. Users get collapsible per-file sections, rename paths, `+/-` counts, split/inline controls, folded context expansion, truncation warnings, and accessible modal controls without changing the raw `{ diff }` endpoint contract. The parser seam is framework-neutral under `src/shared/git-diff/unified.ts`; the PR Walkthrough pack remains separate and may only share `src/shared/**` modules, not core UI. See [git-status-diff-viewer.md](git-status-diff-viewer.md) for behavior, integration, boundaries, and tests.
+
+## Built-in file explorer
+
+The file explorer is a read-only, session-rooted tree and preview surface shipped as the default-enabled `file-explorer` first-party pack. Open it from **Open File Explorer** in session actions or `/files` in the composer; both focus one restored singleton panel per session. It browses non-Git directories normally and adds staged/unstaged working-tree badges plus complete working-tree-versus-`HEAD` diffs inside Git repositories. See [file-explorer.md](file-explorer.md) for navigation, Git semantics, trusted-pack boundaries, and responsiveness limits.
 
 ## PR Walkthrough Panel
 

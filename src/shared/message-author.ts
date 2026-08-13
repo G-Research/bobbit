@@ -7,13 +7,27 @@ export interface MessageAuthor {
 	label: string;
 }
 
+/** Provenance attached only after Bobbit confirms a durable Pi transcript entry. */
+export const PI_TRANSCRIPT_ENTRY_ID_SOURCE = "pi-transcript" as const;
+export const MAX_PI_TRANSCRIPT_ENTRY_ID_LENGTH = 256;
+
 /** Additive envelope used at Bobbit boundaries without changing Pi message roles. */
 export type BobbitMessage<T extends object = Record<string, unknown>> = T & {
 	author?: MessageAuthor;
+	entryId?: string;
+	_entryIdSource?: typeof PI_TRANSCRIPT_ENTRY_ID_SOURCE;
 };
 
 export const MAX_MESSAGE_AUTHOR_ID_LENGTH = 256;
 export const MAX_MESSAGE_AUTHOR_LABEL_LENGTH = 256;
+
+/** Validate a normalized Pi transcript cursor before exposing trusted provenance. */
+export function isPiTranscriptEntryId(value: unknown): value is string {
+	return typeof value === "string"
+		&& value.length > 0
+		&& value.length <= MAX_PI_TRANSCRIPT_ENTRY_ID_LENGTH
+		&& value === value.trim();
+}
 
 export const LOCAL_USER_AUTHOR: MessageAuthor = Object.freeze({
 	kind: "user",

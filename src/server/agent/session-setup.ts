@@ -25,13 +25,26 @@ import { readAuthorSidecar } from "./author-sidecar.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions } from "./session-runtime.js";
-import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
+import {
+	rebaseAgentTranscriptCwdMetadataFile as rebaseAgentTranscriptCwdMetadataFileLegacy,
+	rebaseTranscriptCwdMetadataContent,
+	sanitizeAgentTranscriptFile as sanitizeAgentTranscriptFileLegacy,
+	sanitizeTranscriptContent,
+	type RebaseTranscriptCwdMetadataOptions,
+	type SanitizeResult,
+} from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
 import type { PersistedSession, SessionStore } from "./session-store.js";
-import { sessionFsContextForAgentFile } from "./session-fs.js";
+import {
+	sessionFileRead,
+	sessionFileRenameAtomic,
+	sessionFileWriteAtomic,
+	sessionFsContextForAgentFile,
+	type SessionFsContext,
+} from "./session-fs.js";
 import type { GoalManager } from "./goal-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { SearchService } from "../search/search-service.js";
@@ -60,12 +73,68 @@ import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-pro
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { installSessionActivityAttribution, recordSessionEventActivity } from "./session-activity.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, providerFromModel, recoverAnthropicApiKeyRuntime } from "./host-tokens.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
+
+async function transformPreExistingTranscript(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	transform: (content: string) => SanitizeResult,
+	operation: string,
+): Promise<number> {
+	try {
+		const content = await sessionFileRead(ctx, filePath, sandboxManager);
+		if (!content) return 0;
+		const result = transform(content);
+		if (!result.changed) return 0;
+		await sessionFileWriteAtomic(ctx, filePath, result.content, sandboxManager);
+		return result.rewritten;
+	} catch (error) {
+		console.warn(`[session-setup] Failed to ${operation} ${filePath} in sandbox (non-fatal):`, error);
+		return 0;
+	}
+}
+
+async function rebaseAgentTranscriptCwdMetadataFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+	options: RebaseTranscriptCwdMetadataOptions,
+): Promise<number> {
+	if (!ctx.sandboxed) {
+		return rebaseAgentTranscriptCwdMetadataFileLegacy(ctx, filePath, sandboxManager, options);
+	}
+	return transformPreExistingTranscript(
+		ctx,
+		filePath,
+		sandboxManager,
+		(content) => rebaseTranscriptCwdMetadataContent(content, options),
+		"rebase transcript cwd metadata",
+	);
+}
+
+async function sanitizeAgentTranscriptFile(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+): Promise<number> {
+	if (!ctx.sandboxed) {
+		return sanitizeAgentTranscriptFileLegacy(ctx, filePath, sandboxManager);
+	}
+	return transformPreExistingTranscript(
+		ctx,
+		filePath,
+		sandboxManager,
+		sanitizeTranscriptContent,
+		"sanitize transcript",
+	);
+}
 
 export interface PiExtensionDiagnostic {
 	status: "ok" | "disabled" | "unresolved" | "discovery-failed" | "runtime-load-failed" | "remap-failed";
@@ -236,7 +305,18 @@ export function applySandboxCwdOffset(containerBaseCwd: string, relativeOffset?:
 /** Compute a safe relative cwd offset, returning undefined when cwd is outside root. */
 export function relativeSandboxCwdOffset(rootPath?: string, cwd?: string): string | undefined {
 	if (!rootPath || !cwd) return undefined;
-	return normalizeSandboxCwdOffset(path.relative(rootPath, cwd));
+	let offsetRoot = rootPath;
+	let offsetCwd = cwd;
+	try {
+		// Resolve both existing paths before using either canonical spelling. This
+		// makes equivalent Windows long/8.3 aliases comparable while preserving
+		// the established lexical behavior when either path cannot be resolved.
+		const canonicalRoot = fs.realpathSync.native(rootPath);
+		const canonicalCwd = fs.realpathSync.native(cwd);
+		offsetRoot = canonicalRoot;
+		offsetCwd = canonicalCwd;
+	} catch { /* atomic lexical fallback */ }
+	return normalizeSandboxCwdOffset(path.relative(offsetRoot, offsetCwd));
 }
 
 // ── Interfaces ─────────────────────────────────────────────────────────────
@@ -271,6 +351,10 @@ export interface SessionSetupPlan {
 	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
+	/** Explicit no-teardown ownership marker for a writable borrowed worktree. */
+	borrowsWorktree?: boolean;
+	/** Flattened session id of the sandbox worktree lifecycle owner. */
+	borrowedWorktreeOwnerSessionId?: string;
 	repoPath?: string;
 	branch?: string;
 	repoWorktrees?: Record<string, string>;
@@ -305,6 +389,9 @@ export interface SessionSetupPlan {
 	// Bypasses the role/preference resolver in resolveBridgeOptions.
 	initialModel?: string;
 	initialThinkingLevel?: string;
+	/** Pre-fallback/pre-clamp identity retained for spawn diagnostics. */
+	requestedModel?: string;
+	requestedThinkingLevel?: string;
 
 	// Sandbox worktree: branch to create inside the container
 	sandboxBranch?: string;
@@ -322,10 +409,7 @@ export interface SessionSetupPlan {
 	 * CLI rehydrates from it (same mechanism `restoreSession` uses).
 	 */
 	preExistingAgentSessionFile?: string;
-	/**
-	 * Server-internal opaque SDK conversation identity for a continue operation.
-	 * It is forwarded only to an SDK bridge; Pi remains JSONL-backed.
-	 */
+	/** Server-internal opaque SDK conversation identity for a continue operation. */
 	claudeAgentSdkSessionId?: string;
 	/**
 	 * Continue/Fork rehydration: archived/provenance cwd values that may appear in
@@ -379,6 +463,11 @@ export interface PipelineContext {
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: SessionBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
+	/** Validate and canonicalize the fully assembled Pi tuple before bridge creation. */
+	finalizeSpawnOptions?: (
+		opts: SessionBridgeOptions,
+		requested: { model?: string; thinkingLevel?: string; role?: string; projectId?: string },
+	) => Promise<void>;
 	/** SessionManager-owned author normalization, including current staff/role lookup. */
 	prepareVisibleAgentEvent?: (session: SessionInfo, event: unknown) => unknown;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
@@ -403,6 +492,8 @@ export interface PipelineContext {
 	/** Runtime boundary flags for legacy worktree setup test hooks. */
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
 	remoteGitPolicy?: RemoteGitPolicy;
+	/** Authoritative activity clock; defaults to Date.now in narrow tests. */
+	now?: () => number;
 }
 
 // ── Retry helper ───────────────────────────────────────────────────────────
@@ -493,8 +584,8 @@ function effectiveGoalId(plan: SessionSetupPlan): string | undefined {
  * same cwd the session will boot with.
  */
 export function offsetWorktreeCwd(plan: Pick<SessionSetupPlan, "repoPath" | "cwd">, worktreeCwd: string): string {
-	const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, plan.cwd) : "";
-	return relativeOffset && relativeOffset !== "." ? path.join(worktreeCwd, relativeOffset) : worktreeCwd;
+	const relativeOffset = relativeSandboxCwdOffset(plan.repoPath, plan.cwd);
+	return relativeOffset ? path.join(worktreeCwd, relativeOffset) : worktreeCwd;
 }
 
 /**
@@ -576,10 +667,7 @@ async function dispatchGoalProvisionedHook(plan: SessionSetupPlan, ctx: Pipeline
 
 /** Step 1: Construct RpcBridgeOptions base (cliPath, env, args). */
 export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	return profile("resolveBridgeOptions", () => {
-		_resolveBridgeOptions(plan, ctx);
-		resolveSdkRuntimeOptions(plan, ctx);
-	});
+	return profile("resolveBridgeOptions", () => _resolveBridgeOptions(plan, ctx));
 }
 function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	plan.bridgeOptions = {
@@ -633,42 +721,34 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		const pinned = ctx.resolveInitialModel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinned) plan.bridgeOptions.initialModel = pinned;
 	}
-	if (plan.initialThinkingLevel) {
-		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
-	} else if (!plan.skipAutoThinking) {
-		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
-		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
-	}
-}
-
-/** Add runtime-specific bridge dependencies after model/thinking resolution. */
-function resolveSdkRuntimeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	if (!plan.sandboxed) {
-		plan.bridgeOptions.env = mergeHostAgentProviderEnv(plan.bridgeOptions.env, ctx.preferencesStore, {
-			model: plan.bridgeOptions.initialModel,
-			providers: fallbackProviderAllowlistFromPrefs(ctx.preferencesStore),
-		});
-	}
 	plan.bridgeOptions.runtime = resolveSessionRuntime({ initialModel: plan.bridgeOptions.initialModel });
 	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
 		plan.bridgeOptions.claudeAgentSdkSessionId = plan.claudeAgentSdkSessionId;
 	}
 	plan.bridgeOptions.claudeAgentSdkBridgeDepsFactory = ctx.claudeAgentSdkBridgeDepsFactory;
-
-	const lifecycleHub = ctx.lifecycleHub;
 	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
 		plan.bridgeOptions.onBeforeCompact = async ({ trigger, summary }) => {
-			// PreCompact only gives the provider trigger/instructions. Capture official
-			// SDK history first so providers receive the real about-to-be-lost span.
 			const checkpoint = await ctx.beginClaudeSdkCompaction?.(plan.id, { trigger });
-			if (lifecycleHub) {
-				await lifecycleHub.dispatch("beforeCompact", {
+			if (ctx.lifecycleHub) {
+				await ctx.lifecycleHub.dispatch("beforeCompact", {
 					sessionId: plan.id, cwd: plan.cwd, scope: "project", projectId: plan.projectId,
 					goalId: effectiveGoalId(plan), roleName: plan.role ?? plan.roleName,
 					span: checkpoint?.span, summary,
 				});
 			}
 		};
+	}
+	if (!plan.sandboxed) {
+		plan.bridgeOptions.env = mergeHostAgentProviderEnv(plan.bridgeOptions.env, ctx.preferencesStore, {
+			model: plan.bridgeOptions.initialModel,
+			providers: fallbackProviderAllowlistFromPrefs(ctx.preferencesStore),
+		});
+	}
+	if (plan.initialThinkingLevel) {
+		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
+	} else if (!plan.skipAutoThinking) {
+		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
+		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
 }
 
@@ -963,27 +1043,6 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	}
 }
 
-/**
- * Step 5: computeToolActivationArgs + writeMcpProxyExtensions + writeToolGuardExtension.
- *
- * Tool surface is selected by three intersecting paths, all funneled through
- * `effectiveRole` and the policy cascade in `tool-activation.ts`:
- *
- *   1. **Role-with-policy**: `plan.roleName` resolves to a registered role;
- *      its `toolPolicies` (allow/ask/never per group) override builtin
- *      defaults. MCP proxy + guard extensions are emitted as needed.
- *   2. **Team-lead / role-less**: `plan.roleName` is unset (regular sessions,
- *      goal team-lead, goal/project/tool assistants). `effectiveRole` is
- *      `undefined` and the cascade falls back to `groupPolicyStore` defaults
- *      (which themselves fall back to builtin defaults). The full tool
- *      surface allowed for the user is exposed.
- *   3. **MCP-only**: when `mcpManager` is present, MCP-proxy extensions are
- *      written regardless of role so MCP servers stay reachable; per-server
- *      policies still apply.
- *
- * The guard extension is emitted whenever any tool resolves to `ask` or
- * `never` so the agent can't bypass the policy by calling the tool directly.
- */
 interface ClaudeSdkPreflightDispatcher {
 	start(): Promise<ReadonlyArray<{ name: string; inputSchema: Record<string, unknown> }>>;
 	dispose(): void;
@@ -1294,13 +1353,20 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 // ── Event subscription ─────────────────────────────────────────────────────
 
 /** Shared event subscription, returns unsubscribe fn. */
-export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): () => void {
+export function subscribeToEvents(
+	session: SessionInfo,
+	ctx: PipelineContext,
+	opts: { suppressUntilPrompt?: boolean } = {},
+): () => void {
+	installSessionActivityAttribution(session, ctx.store, {
+		now: ctx.now,
+		suppressUntilPrompt: opts.suppressUntilPrompt,
+	});
 	return session.rpcClient.onEvent((event: any) => {
-		session.lastActivity = Date.now();
-		ctx.store.update(session.id, { lastActivity: session.lastActivity });
 		const preparedEvent = ctx.prepareVisibleAgentEvent
 			? ctx.prepareVisibleAgentEvent(session, event)
 			: prepareVisibleAgentEvent(session, event);
+		recordSessionEventActivity(session, preparedEvent);
 		ctx.handleAgentLifecycle(session, preparedEvent);
 		// Suppress Pi retryable agent_end ({ willRetry:true }) before it reaches
 		// clients/EventBuffer. Pi 0.80+ emits a non-terminal agent_end before each
@@ -1338,6 +1404,8 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		assistantType: plan.assistantType,
 		role: plan.role ?? plan.roleName,
 		worktreePath: plan.worktreePath,
+		borrowsWorktree: plan.borrowsWorktree,
+		borrowedWorktreeOwnerSessionId: plan.borrowedWorktreeOwnerSessionId,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
 		repoWorktrees: plan.repoWorktrees,
@@ -1382,9 +1450,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	// Sandboxed SDK dispatch owns filesystem/process tools and must be constructed
-	// only after wiring has supplied the current container CWD and scoped token.
-	if (!plan.sandboxed) await resolveToolActivation(plan, ctx);
+	resolveToolActivation(plan, ctx);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1416,8 +1482,18 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 			plan.cwd = plan.bridgeOptions.cwd;
 			resolvePrompt(plan, ctx);
 		}
-		await resolveToolActivation(plan, ctx);
 	}
+
+	// Resolve raw last-wins Pi flags only after extensions and sandbox remaps have
+	// assembled the final argv. Invalid/cross-provider tuples fail before the
+	// bridge is constructed or any effective selection is persisted.
+	await ctx.finalizeSpawnOptions?.(plan.bridgeOptions, {
+		model: plan.requestedModel ?? plan.initialModel,
+		thinkingLevel: plan.requestedThinkingLevel ?? plan.initialThinkingLevel,
+		role: plan.role ?? plan.roleName,
+		projectId: plan.projectId,
+	});
+	plan.bridgeOptions.runtime = resolveSessionRuntime({ initialModel: plan.bridgeOptions.initialModel });
 
 	// Step 7: persist BEFORE spawning — if the spawn fails (e.g. Docker ENOENT),
 	// the session metadata is still saved so the user doesn't lose the session.
@@ -1598,8 +1674,7 @@ export async function executeWorktreeAsync(
 		// Apply subdirectory offset: if the session's original CWD (project rootPath) is a
 		// subdirectory of the repo, offset the working directory within the worktree.
 		const originalCwd = plan.cwd;
-		const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
-		const sandboxCwdOffset = normalizeSandboxCwdOffset(relativeOffset);
+		const sandboxCwdOffset = relativeSandboxCwdOffset(plan.repoPath, originalCwd);
 		if (sandboxCwdOffset) plan.sandboxCwdOffset = sandboxCwdOffset;
 		// Same offset the goalProvisioned hook was dispatched with above.
 		const offsetCwd = offsetWorktreeCwd(plan, worktreeCwd);
@@ -1628,8 +1703,7 @@ export async function executeWorktreeAsync(
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	// See executePlan: sandbox SDK dispatch cannot start against host coordinates.
-	if (!plan.sandboxed) await resolveToolActivation(plan, ctx);
+	resolveToolActivation(plan, ctx);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
@@ -1664,7 +1738,6 @@ export async function executeWorktreeAsync(
 			ctx.store.update(session.id, { cwd: session.cwd });
 			resolvePrompt(plan, ctx);
 		}
-		await resolveToolActivation(plan, ctx);
 	}
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.
@@ -1676,10 +1749,19 @@ export async function executeWorktreeAsync(
 		console.log(`[session-setup] Reconciled branch for sandbox session ${session.id}: ${plan.branch}`);
 	}
 
+	// Worktree setup assembles argv after the placeholder was persisted. Validate
+	// the final target-realm tuple before replacing it with a real bridge.
+	await ctx.finalizeSpawnOptions?.(plan.bridgeOptions, {
+		model: plan.requestedModel ?? plan.initialModel,
+		thinkingLevel: plan.requestedThinkingLevel ?? plan.initialThinkingLevel,
+		role: plan.role ?? plan.roleName,
+		projectId: plan.projectId,
+	});
+	plan.bridgeOptions.runtime = resolveSessionRuntime({ initialModel: plan.bridgeOptions.initialModel });
+
 	// Create the selected runtime bridge (replacing placeholder).
 	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
-	session.runtime = plan.bridgeOptions.runtime;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
 	// resolveTools may have applied the role's accessory (generic role-accessory
 	// application); mirror it onto the live worktree session so the sidebar
@@ -1718,8 +1800,11 @@ export async function executeWorktreeAsync(
 
 	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
 
-	// Subscribe to events
-	session.unsubscribe = subscribeToEvents(session, ctx);
+	// Subscribe to events. A cloned transcript is restore-only until this
+	// session dispatches a new prompt, even if replay frames arrive late.
+	session.unsubscribe = subscribeToEvents(session, ctx, {
+		suppressUntilPrompt: !!plan.preExistingAgentSessionFile,
+	});
 
 	// Start agent with retry
 	await withRetry(
@@ -1727,9 +1812,8 @@ export async function executeWorktreeAsync(
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
 
-	// Pi continues rehydrate from the cloned JSONL. SDK resume is supplied when
-	// constructing the bridge and must never receive Pi's switch_session command.
-	if (plan.preExistingAgentSessionFile && plan.bridgeOptions.runtime !== "claude-agent-sdk") {
+	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
+	if (plan.preExistingAgentSessionFile) {
 		// Fork/continue routes copy the destination sidecar before createSession.
 		// Hydrate immediately before switch_session so replay events and their
 		// EventBuffer entries retain the source prompt identities.
@@ -1742,24 +1826,23 @@ export async function executeWorktreeAsync(
 		// actual cwd-slug before issuing switch_session.
 		const { formatAgentSessionFilePath } = await import("./agent-session-path.js");
 		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
-		if (correctPath !== plan.preExistingAgentSessionFile) {
-			const { sessionFileCopy, sessionFileDelete } = await import("./session-fs.js");
-			const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
-			// Preserve the source transcript's filesystem realm while moving it to
-			// the cwd-derived slot. The formatter returns the host mount path; a
-			// container-side source needs the corresponding container path instead.
-			const correctAgentPath = sourceFsCtx.sandboxed
-				? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
-				: correctPath;
-			const correctFsCtx = sessionFsContextForAgentFile(plan, correctAgentPath);
-			if (sourceFsCtx.sandboxed || correctFsCtx.sandboxed) {
-				// Container-side paths use the session filesystem abstraction. A
-				// host-absolute transcript owned by a sandboxed session deliberately
-				// remains host-side so it is never passed to docker exec as a host path.
-				await sessionFileCopy(sourceFsCtx, plan.preExistingAgentSessionFile, correctFsCtx, correctAgentPath, ctx.sandboxManager);
-				await sessionFileDelete(sourceFsCtx, plan.preExistingAgentSessionFile, ctx.sandboxManager).catch(() => {});
+		const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
+		// The formatter returns the host mount path. A container-coordinate clone
+		// stays in that realm through publication, rebase, persistence, and replay.
+		const correctAgentPath = sourceFsCtx.sandboxed
+			? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
+			: correctPath;
+		if (correctAgentPath !== plan.preExistingAgentSessionFile) {
+			if (sourceFsCtx.sandboxed) {
+				await sessionFileRenameAtomic(
+					sourceFsCtx,
+					plan.preExistingAgentSessionFile,
+					correctAgentPath,
+					ctx.sandboxManager,
+				);
 			} else {
-				// Host-side: prefer rename, fall back to copy+unlink for cross-device.
+				// Legacy host-absolute sandbox transcripts and ordinary local sessions
+				// retain their established host move compatibility.
 				const fsp = await import("node:fs/promises");
 				await fsp.mkdir(path.dirname(correctAgentPath), { recursive: true });
 				try {
@@ -1884,6 +1967,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
 		runtime: plan.bridgeOptions.runtime,
+		...(plan.bridgeOptions.runtime === "claude-agent-sdk" && plan.claudeAgentSdkSessionId
+			? { claudeAgentSdkSessionId: plan.claudeAgentSdkSessionId }
+			: {}),
+		borrowsWorktree: plan.borrowsWorktree,
+		borrowedWorktreeOwnerSessionId: plan.borrowedWorktreeOwnerSessionId,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn
@@ -1927,8 +2015,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	plan.bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => ctx.recordPiExtensionDiagnostic?.(session, diagnostic, extension);
 
-	// Subscribe to events
-	session.unsubscribe = subscribeToEvents(session, ctx);
+	// Subscribe to events. A cloned transcript is restore-only until this
+	// session dispatches a new prompt, even if replay frames arrive late.
+	session.unsubscribe = subscribeToEvents(session, ctx, {
+		suppressUntilPrompt: !!plan.preExistingAgentSessionFile,
+	});
 
 	// Start agent with retry
 	const __t = performance.now();
@@ -1938,9 +2029,9 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	);
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
 
-	// Pi continues rehydrate from the cloned JSONL. SDK resume is supplied when
-	// constructing the bridge and must never receive Pi's switch_session command.
-	if (plan.preExistingAgentSessionFile && plan.bridgeOptions.runtime !== "claude-agent-sdk") {
+	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
+	// before we persist or flip to idle. Same RPC the restart-resume path uses.
+	if (plan.preExistingAgentSessionFile) {
 		// See the worktree path above: this must precede switch_session replay.
 		restorePromptAuthorBindings(session, readAuthorSidecar(session.id));
 		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);

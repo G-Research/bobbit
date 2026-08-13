@@ -5,6 +5,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
+	truncateClaudeSdkSubagentWork,
+	truncateClaudeSdkSubagentWorkInSnapshot,
 	truncateLargeToolContent,
 	truncateLargeToolContentInMessages,
 	truncateSnapshotBlock,
@@ -22,6 +24,38 @@ function assertTruncatedStringDescriptor(value: any, original: string, label: st
 	assert.strictEqual(value._originalLength, original.length, `${label}: original length must be recorded`);
 	assert.strictEqual(value.preview, original.slice(0, 512), `${label}: preview must be bounded`);
 }
+
+describe("Claude SDK embedded-work truncation", () => {
+	it("immutably bounds child messages, tool events, and nested snapshots without changing audit metadata", () => {
+		const large = "x".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const event = {
+			type: "claude_sdk_subagent_work",
+			parentToolUseId: "parent-1",
+			kind: "tool_end",
+			message: {
+				id: "child-1", role: "assistant", parentToolUseId: "parent-1", parentAgentId: "agent-1",
+				content: [{ type: "text", text: large }], usage: { cost: { total: 0.25 } },
+			},
+			toolEvent: { toolCallId: "tool-1", result: { content: [{ type: "text", text: large }] } },
+		};
+		const truncated = truncateClaudeSdkSubagentWork(event);
+		assert.notStrictEqual(truncated, event);
+		assert.deepEqual(
+			{ parentToolUseId: truncated.parentToolUseId, id: truncated.message.id, parent: truncated.message.parentToolUseId, agent: truncated.message.parentAgentId, usage: truncated.message.usage },
+			{ parentToolUseId: "parent-1", id: "child-1", parent: "parent-1", agent: "agent-1", usage: { cost: { total: 0.25 } } },
+		);
+		assertTruncatedStringDescriptor(truncated.message.content[0], large, "child message");
+		assertTruncatedStringDescriptor(truncated.toolEvent.result.content[0], large, "child tool event");
+		assert.strictEqual(event.message.content[0].text, large, "source child message is not mutated");
+
+		const snapshot = { messages: [], subagentWork: [{ parentToolUseId: "parent-1", messages: [event.message] }] };
+		const truncatedSnapshot = truncateClaudeSdkSubagentWorkInSnapshot(snapshot);
+		assert.notStrictEqual(truncatedSnapshot, snapshot);
+		assert.deepEqual(truncatedSnapshot.subagentWork[0].messages[0].usage, { cost: { total: 0.25 } });
+		assertTruncatedStringDescriptor(truncatedSnapshot.subagentWork[0].messages[0].content[0], large, "snapshot child message");
+		assert.strictEqual(snapshot.subagentWork[0].messages[0].content[0].text, large, "source snapshot is not mutated");
+	});
+});
 
 describe("truncateLargeToolContent", () => {
 	it("returns the same object for non-message events", () => {
@@ -238,6 +272,37 @@ describe("truncateLargeToolContent", () => {
 		// tool_use block truncated in input
 		assert.strictEqual(result.message.content[1].input.content._truncated, true);
 		assert.strictEqual(result.message.content[1].arguments, undefined);
+	});
+
+	it("projects every message_end snapshot without mutating either Pi tool shape", () => {
+		const largeToolCall = "C".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const largeToolUse = "D".repeat(LARGE_CONTENT_THRESHOLD + 2);
+		const message = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", name: "write", arguments: { path: "a.txt", content: largeToolCall } },
+				{ type: "tool_use", name: "write", input: { path: "b.txt", content: largeToolUse } },
+			],
+		};
+		const event = {
+			type: "message_end",
+			message,
+			assistantMessageEvent: { type: "toolcall_end", partial: structuredClone(message) },
+		};
+
+		const result = truncateLargeToolContent(event);
+
+		assert.notStrictEqual(result, event);
+		assert.notStrictEqual(result.message, event.message);
+		assert.notStrictEqual(result.assistantMessageEvent, event.assistantMessageEvent);
+		for (const snapshot of [result.message, result.assistantMessageEvent.partial]) {
+			assert.strictEqual(snapshot.content[0].arguments.content._truncated, true);
+			assert.strictEqual(snapshot.content[1].input.content._truncated, true);
+		}
+		assert.strictEqual((event.message.content[0] as any).arguments.content, largeToolCall);
+		assert.strictEqual((event.message.content[1] as any).input.content, largeToolUse);
+		assert.strictEqual((event.assistantMessageEvent.partial.content[0] as any).arguments.content, largeToolCall);
+		assert.strictEqual((event.assistantMessageEvent.partial.content[1] as any).input.content, largeToolUse);
 	});
 
 	it("returns same object for small toolCall content", () => {

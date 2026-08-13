@@ -24,6 +24,9 @@ export interface SdkSessionMessage {
 export interface ClaudeAgentSdkSessionApi {
 	getSessionInfo(sessionId: string, options?: { dir?: string }): Promise<SdkSessionInfo | undefined>;
 	getSessionMessages(sessionId: string, options?: { dir?: string; limit?: number; offset?: number; includeSystemMessages?: boolean }): Promise<SdkSessionMessage[]>;
+	/** Pinned SDK API: values are child ids, never parent/lifecycle records. */
+	listSubagents(sessionId: string, options?: { dir?: string }): Promise<string[]>;
+	getSubagentMessages(sessionId: string, agentId: string, options?: { dir?: string; limit?: number; offset?: number }): Promise<SdkSessionMessage[]>;
 }
 
 export interface ClaudeAgentSdkSessionAccessDeps {
@@ -89,6 +92,43 @@ export async function readSdkSessionMessages(
 	});
 }
 
+const MAX_SUBAGENT_ID_BYTES = 512;
+
+function isSubagentId(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_SUBAGENT_ID_BYTES;
+}
+
+/** Read official child identities. An identity is never treated as a parent mapping. */
+export async function readSdkSubagents(
+	input: SdkSessionAccessInput,
+	deps: ClaudeAgentSdkSessionAccessDeps = defaultClaudeAgentSdkSessionAccessDeps,
+): Promise<string[]> {
+	return withSdk(input, deps, "read subagents", async (sdk) => {
+		const ids = await sdk.listSubagents(input.sessionId, { dir: input.cwd });
+		if (!Array.isArray(ids) || ids.some((id) => !isSubagentId(id))) throw unavailable("read subagents", new Error("SDK subagent identities are invalid"));
+		return ids;
+	});
+}
+
+/**
+ * Read one official child transcript. Its parent relationship remains on each
+ * row and must be checked by the caller before any rendering projection.
+ */
+export async function readSdkSubagentMessages(
+	input: SdkSessionAccessInput & { agentId: string; limit?: number },
+	deps: ClaudeAgentSdkSessionAccessDeps = defaultClaudeAgentSdkSessionAccessDeps,
+): Promise<SdkSessionMessage[]> {
+	if (!isSubagentId(input.agentId)) throw unavailable("invalid SDK subagent identity");
+	if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 0)) {
+		throw unavailable("invalid SDK subagent message limit");
+	}
+	return withSdk(input, deps, "read subagent messages", (sdk) =>
+		sdk.getSubagentMessages(input.sessionId, input.agentId, {
+			dir: input.cwd,
+			...(input.limit !== undefined ? { limit: input.limit } : {}),
+		}));
+}
+
 const execFileAsync = promisify(execFile);
 /** Each container invocation serializes at most one SDK API page. */
 export const SANDBOX_SDK_HISTORY_PAGE_SIZE = 100;
@@ -96,18 +136,24 @@ export const MAX_SANDBOX_SDK_HISTORY_MESSAGES = 1_000;
 export const MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES = 16 * 1024 * 1024;
 const SANDBOX_SDK_READER = `
-const [operation, sessionId, cwd, limitText, offsetText, includeSystemText] = process.argv.slice(1);
+// Keep operation at the historical argv position: deterministic Docker seams
+// inspect it while the child-only agent id remains an explicit extra input.
+const [agentId, operation, sessionId, cwd, limitText, offsetText, includeSystemText] = process.argv.slice(1);
 const sdk = await import("@anthropic-ai/claude-agent-sdk");
 const limit = Number(limitText);
 const offset = Number(offsetText);
-const options = { dir: cwd, ...(operation === "messages" ? {
+const options = { dir: cwd, ...((operation === "messages" || operation === "subagentMessages") ? {
   limit,
   offset,
   ...(includeSystemText === "true" ? { includeSystemMessages: true } : {}),
 } : {}) };
 const value = operation === "info"
   ? await sdk.getSessionInfo(sessionId, options)
-  : await sdk.getSessionMessages(sessionId, options);
+  : operation === "messages"
+    ? await sdk.getSessionMessages(sessionId, options)
+    : operation === "subagents"
+      ? await sdk.listSubagents(sessionId, options)
+      : await sdk.getSubagentMessages(sessionId, agentId, options);
 process.stdout.write(JSON.stringify(value ?? null));
 `;
 
@@ -139,8 +185,9 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 		return stdout;
 	});
 	const read = async <T>(request: {
-		operation: "info" | "messages";
+		operation: "info" | "messages" | "subagents" | "subagentMessages";
 		sessionId: string;
+		agentId?: string;
 		limit?: number;
 		offset?: number;
 		includeSystemMessages?: boolean;
@@ -150,39 +197,49 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 			"-e", "HOME=/home/node", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"-e", `CLAUDE_CONFIG_DIR=${dir}`,
 			input.containerId, "node", "--input-type=module", "-e", SANDBOX_SDK_READER,
-			request.operation, request.sessionId, input.cwd,
+			request.agentId ?? "", request.operation, request.sessionId, input.cwd,
 			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
 		]);
 		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("sandbox SDK response page exceeds limit");
 		try { return JSON.parse(output) as T; }
 		catch { throw new Error("sandbox SDK returned invalid JSON"); }
 	};
+	const readMessages = async (
+		operation: "messages" | "subagentMessages",
+		sessionId: string,
+		agentId: string | undefined,
+		options: { limit?: number; offset?: number; includeSystemMessages?: boolean } | undefined,
+	): Promise<SdkSessionMessage[]> => {
+		const requested = boundedNonNegativeInteger(options?.limit, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
+		const target = Math.min(requested, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
+		let offset = boundedNonNegativeInteger(options?.offset, 0);
+		let bytes = 0;
+		const messages: SdkSessionMessage[] = [];
+		while (messages.length < target) {
+			const limit = Math.min(SANDBOX_SDK_HISTORY_PAGE_SIZE, target - messages.length);
+			const page = await read<unknown>({ operation, sessionId, agentId, limit, offset, includeSystemMessages: options?.includeSystemMessages });
+			if (!Array.isArray(page)) throw new Error("sandbox SDK messages are invalid");
+			if (page.length > limit) throw new Error("sandbox SDK returned more messages than requested");
+			const pageBytes = Buffer.byteLength(JSON.stringify(page));
+			if (bytes + pageBytes > MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES) throw new Error("sandbox SDK history exceeds cumulative byte limit");
+			bytes += pageBytes;
+			messages.push(...page as SdkSessionMessage[]);
+			if (page.length < limit) break;
+			offset += page.length;
+		}
+		return messages;
+	};
 	return {
 		getSessionInfo: async (sessionId) => (await read<SdkSessionInfo | null>({ operation: "info", sessionId })) ?? undefined,
-		getSessionMessages: async (sessionId, options) => {
-			const requested = boundedNonNegativeInteger(options?.limit, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
-			const target = Math.min(requested, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
-			let offset = boundedNonNegativeInteger(options?.offset, 0);
-			let bytes = 0;
-			const messages: SdkSessionMessage[] = [];
-			while (messages.length < target) {
-				const limit = Math.min(SANDBOX_SDK_HISTORY_PAGE_SIZE, target - messages.length);
-				const page = await read<unknown>({
-					operation: "messages", sessionId, limit, offset,
-					includeSystemMessages: options?.includeSystemMessages,
-				});
-				if (!Array.isArray(page)) throw new Error("sandbox SDK messages are invalid");
-				if (page.length > limit) throw new Error("sandbox SDK returned more messages than requested");
-				const pageBytes = Buffer.byteLength(JSON.stringify(page));
-				if (bytes + pageBytes > MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES) {
-					throw new Error("sandbox SDK history exceeds cumulative byte limit");
-				}
-				bytes += pageBytes;
-				messages.push(...page as SdkSessionMessage[]);
-				if (page.length < limit) break;
-				offset += page.length;
-			}
-			return messages;
+		getSessionMessages: async (sessionId, options) => readMessages("messages", sessionId, undefined, options),
+		listSubagents: async (sessionId) => {
+			const ids = await read<unknown>({ operation: "subagents", sessionId });
+			if (!Array.isArray(ids) || ids.some((id) => !isSubagentId(id))) throw new Error("sandbox SDK subagent identities are invalid");
+			return ids;
+		},
+		getSubagentMessages: async (sessionId, agentId, options) => {
+			if (!isSubagentId(agentId)) throw new Error("sandbox SDK subagent identity is invalid");
+			return readMessages("subagentMessages", sessionId, agentId, options);
 		},
 	};
 }

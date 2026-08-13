@@ -13,6 +13,11 @@ import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { SessionManager } from "../../src/server/agent/session-manager.js";
 import { ToolManager } from "../../src/server/agent/tool-manager.js";
 import {
+	ClaudeAgentSdkUnavailableError,
+	claudeAgentSdkUnavailableDiagnostic,
+	SDK_SESSION_UNAVAILABLE,
+} from "../../src/server/agent/claude-agent-sdk-error.js";
+import {
 	buildSandboxAgentAuthJson,
 	detectHostTokens,
 	refreshSandboxAnthropicOAuthCredential,
@@ -74,6 +79,24 @@ afterEach(() => {
 });
 
 describe("Anthropic sandbox OAuth handoff regressions", () => {
+	it.each([
+		"CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE",
+		"CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+	] as const)("preserves the safe %s reason code while redacting embedded credentials and config paths", (category) => {
+		const secret = "sk-sandbox-diagnostic-secret";
+		const configPath = `/Users/operator/${category}/credentials.json`;
+		const error = new ClaudeAgentSdkUnavailableError(new Error(
+			`${category}: Authorization: Bearer ${secret}; credential source ${configPath}`,
+		));
+		const diagnostic = claudeAgentSdkUnavailableDiagnostic(error);
+
+		assert.equal(error.code, SDK_SESSION_UNAVAILABLE);
+		assert.equal(error.message, SDK_SESSION_UNAVAILABLE);
+		assert.match(diagnostic, new RegExp(`\\b${category}\\b`));
+		assert.doesNotMatch(diagnostic, new RegExp(secret));
+		assert.doesNotMatch(diagnostic, new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	});
+
 	it("exports only a sanctioned, current non-renewable Anthropic OAuth credential", () => {
 		const expires = Date.now() + 60_000;
 		useHostAuth({
@@ -329,7 +352,9 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 				goalId: "goal-sdk",
 				sandboxBranch: "goal/sdk",
 			}),
-			(error: any) => error?.code === "CLAUDE_AGENT_SDK_UNAVAILABLE" && /scoped sandbox gateway authority/.test(error.message),
+			(error: any) => error?.code === "SDK_SESSION_UNAVAILABLE"
+				&& error?.message === "SDK_SESSION_UNAVAILABLE"
+				&& /scoped sandbox gateway authority/.test(claudeAgentSdkUnavailableDiagnostic(error)),
 		);
 		assert.equal(bridgeOptions.gatewayToken, undefined, "the admin token must not be assigned to an SDK sandbox");
 		assert.equal(bridgeOptions.claudeSdkSandboxLaunch, undefined, "missing scoped authority must prevent SDK launch descriptor creation");
@@ -567,7 +592,12 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			manager.sessions.set(failedId, live(failedId, failedOld));
 			failCandidate = true;
 			const queryCount = queries.length;
-			await expect(manager.assignRole(failedId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" })).rejects.toThrow("candidate startup failed");
+			await assert.rejects(
+				() => manager.assignRole(failedId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" }),
+				(error: any) => error?.code === "SDK_SESSION_UNAVAILABLE"
+					&& error?.message === "SDK_SESSION_UNAVAILABLE"
+					&& /candidate startup failed/.test(claudeAgentSdkUnavailableDiagnostic(error)),
+			);
 			assert.ok(queries[queryCount]?.close.mock.calls.length, "failed SDK candidate must be disposed");
 			const failedSdk = sdkLaunches.find(candidate => candidate.input.containerId === `container-${failedId}`);
 			const failedDispatcher = dockerExecs.find(candidate => candidate.args.includes(`container-${failedId}`));
@@ -583,7 +613,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	it("maps malformed persisted SDK sandbox CWD history to the unavailable stub", async () => {
 		const manager: any = new SessionManager();
 		manager.sandboxManager = { get: () => ({ getStatus: () => ({ containerId: "container-sdk" }) }) };
-		const deps = manager.sdkSessionAccessDeps({
+		const deps = manager.getSdkSessionAccessDeps({
 			id: "session-invalid-cwd",
 			projectId: "project-sdk",
 			sandboxed: true,
@@ -592,7 +622,9 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		});
 		await assert.rejects(
 			() => deps.sandboxSdk.getSessionMessages("00000000-0000-4000-8000-000000000021"),
-			(error: any) => error?.code === "CLAUDE_AGENT_SDK_UNAVAILABLE" && /invalid working directory/.test(error.message),
+			(error: any) => error?.code === "SDK_SESSION_UNAVAILABLE"
+				&& error?.message === "SDK_SESSION_UNAVAILABLE"
+				&& /invalid working directory/.test(claudeAgentSdkUnavailableDiagnostic(error)),
 		);
 	});
 

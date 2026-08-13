@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
-import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
+import { ExternalLink, FileText, GitFork, Link, Pencil, Pin, PinOff, RotateCcw, Trash2 } from "lucide";
 import type { TemplateResult } from "lit";
-import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
+import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, sessionPathDeepLink, setSessionPinned, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
 import { confirmAction, showConnectionError, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
@@ -11,10 +11,12 @@ import { state, type GatewaySession } from "./state.js";
 import { ensureContinueSessionChooser } from "./lazy-widgets.js";
 import { errorDetails } from "./error-helpers.js";
 import { entrypointIconNode } from "./entrypoint-icon-registry.js";
+import { isPinned } from "../shared/session-tags.js";
 
 export type SessionActionId =
 	| "modify"
 	| "terminate"
+	| "pin"
 	| "refresh-agent"
 	| "fork"
 	| "copy-link"
@@ -24,6 +26,7 @@ export type SessionActionId =
 export type ArchivedSessionActionId =
 	| "continue-archived"
 	| "copy-link"
+	| "pin"
 	| "view-system-prompt"
 	| "open-new-window";
 
@@ -72,18 +75,20 @@ export interface ContinueArchivedSessionOptions {
 const BUILTIN_PRIORITIES: Record<SessionActionId, number> = {
 	"modify": 10,
 	"terminate": 20,
-	"refresh-agent": 30,
-	"fork": 40,
-	"copy-link": 50,
-	"view-system-prompt": 60,
-	"open-new-window": 70,
+	"pin": 30,
+	"refresh-agent": 40,
+	"fork": 50,
+	"copy-link": 60,
+	"view-system-prompt": 70,
+	"open-new-window": 80,
 };
 
 const ARCHIVED_BUILTIN_PRIORITIES: Record<ArchivedSessionActionId, number> = {
 	"continue-archived": 10,
 	"copy-link": 20,
-	"view-system-prompt": 30,
-	"open-new-window": 40,
+	"pin": 30,
+	"view-system-prompt": 40,
+	"open-new-window": 50,
 };
 
 // Fork's "New worktree" choice is shared across surfaces. Reset to the default
@@ -206,10 +211,11 @@ export function buildArchivedSessionActions(input: BuildArchivedSessionActionsIn
 				void copyLink(sessionDeepLink(session.id), "Copy session link");
 			},
 		},
+		buildPinSessionAction(session, ARCHIVED_BUILTIN_PRIORITIES.pin),
 		{
 			id: "view-system-prompt",
-			label: "View System Prompt",
-			title: "View System Prompt",
+			label: "View system prompt",
+			title: "View system prompt",
 			icon: icon(FileText, "xs"),
 			priority: ARCHIVED_BUILTIN_PRIORITIES["view-system-prompt"],
 			quick: false,
@@ -306,6 +312,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 					: terminateSession(session.id));
 			},
 		},
+		buildPinSessionAction(session, BUILTIN_PRIORITIES.pin),
 		{
 			id: "refresh-agent",
 			label: isRefreshingAgentSession(session.id) ? "Refreshing agent…" : "Refresh agent",
@@ -356,8 +363,8 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 		},
 		{
 			id: "view-system-prompt",
-			label: "View System Prompt",
-			title: "View System Prompt",
+			label: "View system prompt",
+			title: "View system prompt",
 			icon: icon(FileText, "xs"),
 			priority: BUILTIN_PRIORITIES["view-system-prompt"],
 			quick: false,
@@ -385,6 +392,23 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 		.sort((a, b) => a.priority - b.priority);
 }
 
+function buildPinSessionAction(session: GatewaySession, priority: number): SessionActionDescriptor {
+	const pinned = isPinned((session as GatewaySession & { user_tags?: unknown }).user_tags);
+	return {
+		id: "pin",
+		label: pinned ? "Unpin session" : "Pin session",
+		title: pinned ? "Remove this session from Pinned" : "Keep this session in Pinned",
+		icon: icon(pinned ? PinOff : Pin, "xs"),
+		priority,
+		quick: false,
+		run: (event: Event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			void setSessionPinned(session.id, !pinned);
+		},
+	};
+}
+
 function isChildSession(session: GatewaySession): boolean {
 	return !!(session.parentSessionId || session.delegateOf);
 }
@@ -403,7 +427,7 @@ function buildSessionMenuLauncherActions(sessionId: string, onRefreshStateChange
 			label: launcher.label,
 			title: isSpawn ? `Start ${launcher.label}` : launcher.label,
 			icon: icon(entrypointIconNode(launcher.icon), "xs"),
-			priority: 80 + index,
+			priority: 90 + index,
 			quick: false,
 			run: (event: Event) => {
 				event.preventDefault();
