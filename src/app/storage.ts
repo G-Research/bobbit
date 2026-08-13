@@ -1,4 +1,4 @@
-import { AppStorage, setAppStorage } from "../ui/storage/app-storage.js";
+import { AppStorage, DeliveryIntentStore, setAppStorage } from "../ui/storage/app-storage.js";
 import { IndexedDBStorageBackend } from "../ui/storage/backends/indexeddb-storage-backend.js";
 import { CommandHistoryStore } from "../ui/storage/stores/command-history-store.js";
 import { CustomProvidersStore } from "../ui/storage/stores/custom-providers-store.js";
@@ -18,7 +18,7 @@ const promptDraftAttachments = new PromptDraftAttachmentsStore();
 
 const backend = new IndexedDBStorageBackend({
 	dbName: "pi-gateway-ui",
-	version: 7,
+	version: 8,
 	stores: [
 		settings.getConfig(),
 		SessionsStore.getMetadataConfig(),
@@ -28,6 +28,7 @@ const backend = new IndexedDBStorageBackend({
 		commandHistory.getConfig(),
 		shortcutBindings.getConfig(),
 		promptDraftAttachments.getConfig(),
+		DeliveryIntentStore.getConfig(),
 	],
 });
 
