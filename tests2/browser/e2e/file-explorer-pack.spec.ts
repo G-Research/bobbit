@@ -406,7 +406,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(page.locator(PANEL)).toBeVisible();
 
 		const src = treeItem(page, "src");
-		await expect(src.locator('.bb-explorer-ancestor[aria-label="Contains changes"]')).toBeVisible();
+		await expect(src.locator(".bb-explorer-icon.kind-directory svg")).toHaveAttribute("stroke", /^url\(#folder-gradient-/);
 		await src.focus();
 		await src.press("ArrowRight");
 		await expect(src).toHaveAttribute("aria-expanded", "true");
@@ -425,7 +425,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expectBadge(page, "binary.dat", /Unstaged modified/);
 
 		const nested = treeItem(page, "nested");
-		await expect(nested.locator('.bb-explorer-ancestor[aria-label="Contains changes"]')).toBeVisible();
+		await expect(nested.locator(".bb-explorer-icon.kind-directory svg")).toHaveAttribute("stroke", "var(--warning)");
 		await nested.click();
 		await expect(nested).toHaveAttribute("aria-expanded", "true");
 		await expectBadge(page, "nested/copied.txt", /copied from copy-source\.txt/i);
