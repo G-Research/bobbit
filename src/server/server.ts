@@ -132,6 +132,10 @@ import {
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
 } from "./agent/compaction-sidecar.js";
+import {
+	initClaudeSdkCompactionCheckpointDir,
+	readClaudeSdkPreCompactionMessages,
+} from "./agent/claude-sdk-compaction-checkpoint.js";
 import { projectOwnTranscriptJsonl, readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
@@ -140,7 +144,9 @@ import { TaskStore } from "./agent/task-store.js";
 import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
-import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
+import { readTranscript, readTranscriptMessages, TranscriptReaderError } from "./agent/transcript-reader.js";
+import { readSdkSessionMessages } from "./agent/claude-agent-sdk-session-access.js";
+import { adaptSdkSessionMessages } from "./agent/claude-agent-sdk-history-adapter.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
 import {
@@ -570,6 +576,12 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, peekCachedAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel, type ApiModel } from "./agent/model-registry.js";
 import { isClaudeAgentSdkSessionId } from "./agent/claude-agent-sdk-bridge.js";
+import {
+	ClaudeAgentSdkUnavailableError,
+	claudeAgentSdkUnavailableDiagnostic,
+	claudeAgentSdkUnavailablePayload,
+	isClaudeAgentSdkUnavailableError,
+} from "./agent/claude-agent-sdk-error.js";
 import { resolveSessionRuntime } from "./agent/session-runtime.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
@@ -2282,6 +2294,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	initPromptDirs(stateDir);
 	initSkillSidecarDir(stateDir);
 	initCompactionSidecarDir(stateDir);
+	initClaudeSdkCompactionCheckpointDir(stateDir);
 	initAuthorSidecarDir(stateDir, { secretsDir, hmacKey: cookieSigningKey });
 	initAssistantRegistry(configDir);
 
@@ -7980,6 +7993,14 @@ async function handleApiRoute(
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
 		} catch (err) {
+			if (isClaudeAgentSdkUnavailableError(err)) {
+				console.error(
+					`[POST /api/sessions] SDK unavailable cwd=${cwd ?? "(none)"} project=${resolvedProjectId ?? "(none)"}: ` +
+					claudeAgentSdkUnavailableDiagnostic(err),
+				);
+				json(claudeAgentSdkUnavailablePayload(), 503);
+				return;
+			}
 			// Log full error context server-side so that flaky 500s in tests
 			// (e.g. resilience suite under FS contention) leave a usable trail.
 			// `String(err)` alone drops the stack and any error.cause chain.
@@ -14526,11 +14547,9 @@ async function handleApiRoute(
 			}
 			try {
 				await sessionManager.readSdkSessionInfo(ps);
-			} catch {
-				json({
-					error: "Claude Agent SDK session is unavailable",
-					code: "SDK_SESSION_UNAVAILABLE",
-				}, 404);
+			} catch (err) {
+				console.error(`[POST /api/sessions/${archivedId}/continue] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+				json(claudeAgentSdkUnavailablePayload(), 503);
 				return;
 			}
 
@@ -15767,8 +15786,6 @@ async function handleApiRoute(
 		// Resolve target session (live or persisted).
 		const targetPs = sessionManager.getPersistedSession(targetId);
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
-		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
-
 
 		// Parse query params.
 		const qp = url.searchParams;
@@ -15804,21 +15821,45 @@ async function handleApiRoute(
 				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
 				includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
 			};
-			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
-			const envelope = await readTranscript(params, {
-				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
-				authorContext: {
-					session: targetPs,
-					sidecarEntries: readAuthorSidecar(targetId),
-					agentDeps: {
-						getStaff: (id) => staffManager.getStaff(id),
-						getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
-					},
+			const authorContext = {
+				session: targetPs,
+				sidecarEntries: readAuthorSidecar(targetId),
+				agentDeps: {
+					getStaff: (id: string) => staffManager.getStaff(id),
+					getRole: (name: string) => resolveRoleForProject(name, targetPs.projectId),
 				},
-			});
-			json(envelope);
+			};
+			if (resolveSessionRuntime({
+				modelProvider: targetPs.modelProvider,
+				persistedRuntime: targetPs.runtime,
+			}) === "claude-agent-sdk") {
+				if (!isClaudeAgentSdkSessionId(targetPs.claudeAgentSdkSessionId)) {
+					throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: invalid SDK session identity");
+				}
+				const history = await readSdkSessionMessages({
+					sessionId: targetPs.claudeAgentSdkSessionId,
+					cwd: targetPs.cwd,
+				}, sessionManager.getSdkSessionAccessDeps(targetPs));
+				json(await readTranscriptMessages(params, {
+					messages: adaptSdkSessionMessages(history),
+					authorContext,
+				}));
+			} else {
+				if (!targetPs.agentSessionFile) {
+					json({ error: "transcript_unavailable" }, 404);
+					return;
+				}
+				const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
+				json(await readTranscript(params, {
+					readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile!, sandboxManager),
+					authorContext,
+				}));
+			}
 		} catch (err) {
-			if (err instanceof TranscriptReaderError) {
+			if (err instanceof ClaudeAgentSdkUnavailableError) {
+				console.error(`[GET /api/sessions/${targetId}/transcript] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+				json(claudeAgentSdkUnavailablePayload(), 503);
+			} else if (err instanceof TranscriptReaderError) {
 				const status = err.code === "transcript_unavailable" ? 404 : 400;
 				json({ error: err.code, detail: err.message }, status);
 			} else {
@@ -15838,17 +15879,10 @@ async function handleApiRoute(
 		const [, targetId] = beforeCompactionMatch;
 		const targetPs = sessionManager.getPersistedSession(targetId);
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
-		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
-
 
 		const compactionId = url.searchParams.get("compactionId");
 		if (!compactionId) {
 			json({ error: "invalid_params", detail: "compactionId required" }, 400);
-			return;
-		}
-		const entry = findCompactionSidecarEntry(targetId, compactionId);
-		if (!entry) {
-			json({ error: "compaction_not_found" }, 404);
 			return;
 		}
 		const qp2 = url.searchParams;
@@ -15878,6 +15912,20 @@ async function handleApiRoute(
 			}
 			return;
 		}
+		const isSdkSession = resolveSessionRuntime({
+			modelProvider: targetPs.modelProvider,
+			initialModel: targetPs.modelProvider && targetPs.modelId ? `${targetPs.modelProvider}/${targetPs.modelId}` : undefined,
+			persistedRuntime: targetPs.runtime,
+		}) === "claude-agent-sdk";
+		if (isSdkSession) {
+			const envelope = readClaudeSdkPreCompactionMessages(targetId, compactionId, { cursor, limit, verbose });
+			if (!envelope) { json({ error: "compaction_not_found" }, 404); return; }
+			json(envelope);
+			return;
+		}
+		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
+		const entry = findCompactionSidecarEntry(targetId, compactionId);
+		if (!entry) { json({ error: "compaction_not_found" }, 404); return; }
 		const ctx2 = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 		try {
 			const envelope = await readOrphanedBeforeCompaction(
@@ -16559,7 +16607,7 @@ async function handleApiRoute(
 			json({ error: "Session not found or has no project" }, 404);
 			return;
 		}
-		const cost = sessionManager.getCostTracker(sessionForCost.projectId).getSessionCost(id);
+		const cost = sessionManager.getSessionCost(id);
 		if (!cost) {
 			json({ error: "No cost data for this session" }, 404);
 			return;
@@ -16655,7 +16703,7 @@ async function handleApiRoute(
 			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
-		const cost = sessionManager.getCostTracker(taskSession.projectId).getSessionCost(task.assignedSessionId);
+		const cost = sessionManager.getSessionCost(task.assignedSessionId);
 		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 		return;
 	}

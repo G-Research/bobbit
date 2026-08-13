@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { vi } from "vitest";
 import { createSession } from "./_e2e/e2e-setup.js";
 import { invalidateModelCache } from "../../src/server/agent/model-registry.js";
 import { setClaudeAgentSdkBridgeDepsForTesting } from "../../src/server/agent/session-runtime.js";
@@ -51,6 +52,7 @@ async function removeSdkCatalogFixture(gateway: { baseURL: string; token: string
 function installReadySdkBridgeFixture(
 	gateway: { clock: any; sessionManager: any },
 	unavailableSessionIds: readonly string[] = [],
+	initializationError?: Error,
 ): { infoCalls: Array<{ sessionId: string; options: unknown }>; queryCount: () => number; restore: () => void } {
 	const unavailable = new Set(unavailableSessionIds);
 	const infoCalls: Array<{ sessionId: string; options: unknown }> = [];
@@ -62,7 +64,10 @@ function installReadySdkBridgeFixture(
 			let finish!: () => void;
 			const done = new Promise<void>(resolve => { finish = resolve; });
 			return {
-				initializationResult: async () => ({ session_id: "00000000-0000-4000-8000-000000000005" }),
+				initializationResult: async () => {
+					if (initializationError) throw initializationError;
+					return { session_id: "00000000-0000-4000-8000-000000000005" };
+				},
 				interrupt: async () => {},
 				setModel: async () => {},
 				setMaxThinkingTokens: async () => {},
@@ -196,6 +201,43 @@ test.describe("session runtime route boundary", () => {
 		}
 	});
 
+	test("returns only the stable unavailable category when SDK session creation fails", async ({ gateway }) => {
+		await registerSdkCatalogFixture(gateway);
+		const providerFailure = new Error("Authorization: Bearer sk-create-secret abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude/credentials.json opaque_12345678901234567890123456789012");
+		const sdk = installReadySdkBridgeFixture(gateway, [], providerFailure);
+		const beforePreferences = await localApiFetch(gateway, "/api/preferences");
+		expect(beforePreferences.status).toBe(200);
+		const beforeDefault = (await beforePreferences.json())["default.sessionModel"];
+		const logged: unknown[][] = [];
+		const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { logged.push(args); });
+		try {
+			const setDefault = await localApiFetch(gateway, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": `${SDK_PROVIDER}/${SDK_MODEL}` }),
+			});
+			expect(setDefault.status).toBe(200);
+			const response = await localApiFetch(gateway, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: join(gateway.bobbitDir, "default-project"), projectId: gateway.defaultProjectId, worktree: false }),
+			});
+			expect(response.status, await response.clone().text()).toBe(503);
+			const body = await response.json();
+			expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
+			for (const secret of ["sk-create-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012"]) {
+				expect(JSON.stringify(body)).not.toContain(secret);
+				expect(JSON.stringify(logged)).not.toContain(secret);
+			}
+		} finally {
+			errorSpy.mockRestore();
+			await localApiFetch(gateway, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": beforeDefault }),
+			});
+			sdk.restore();
+			await removeSdkCatalogFixture(gateway);
+		}
+	});
+
 	test("rejects unavailable SDK continue before allocating a destination or touching Pi artifacts", async ({ gateway }) => {
 		await registerSdkCatalogFixture(gateway);
 		const sourceSdkSessionId = "00000000-0000-4000-8000-000000000006";
@@ -218,9 +260,9 @@ test.describe("session runtime route boundary", () => {
 			const piSidecarsBefore = sidecarRoots.map(root => existsSync(root) ? readdirSync(root).sort() : []);
 
 			const response = await localApiFetch(gateway, `/api/sessions/${sourceId}/continue`, { method: "POST" });
-			expect(response.status).toBe(404);
+			expect(response.status).toBe(503);
 			expect(await response.json()).toEqual({
-				error: "Claude Agent SDK session is unavailable",
+				error: "SDK_SESSION_UNAVAILABLE",
 				code: "SDK_SESSION_UNAVAILABLE",
 			});
 			expect(sdk.infoCalls).toEqual([{ sessionId: sourceSdkSessionId, options: { dir: gateway.bobbitDir } }]);
@@ -255,6 +297,70 @@ test.describe("session runtime route boundary", () => {
 			expect(response.status).toBe(422);
 			expect(await response.json()).toMatchObject({ code: "RUNTIME_CONTINUE_UNSUPPORTED" });
 			expect(gateway.sessionManager.listSessions()).toHaveLength(before);
+		}
+	});
+
+	test("returns only the stable unavailable category when SDK transcript access rejects", async ({ gateway }) => {
+		const sdkSessionId = "00000000-0000-4000-8000-000000000008";
+		const sessionId = sessions.add(seedArchivedSession(gateway, {
+			runtime: "claude-agent-sdk",
+			claudeAgentSdkSessionId: sdkSessionId,
+			modelProvider: SDK_PROVIDER,
+			modelId: SDK_MODEL,
+		}));
+		const manager = gateway.sessionManager as any;
+		const original = manager.getSdkSessionAccessDeps;
+		const providerFailure = "Authorization: Bearer sk-route-secret abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude/credentials.json opaque_12345678901234567890123456789012";
+		manager.getSdkSessionAccessDeps = () => ({ loadSdk: async () => { throw new Error(providerFailure); } });
+		const logged: unknown[][] = [];
+		const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { logged.push(args); });
+		try {
+			const response = await localApiFetch(gateway, `/api/sessions/${sessionId}/transcript`);
+			expect(response.status).toBe(503);
+			const body = await response.json();
+			expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
+			for (const secret of ["sk-route-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012"]) {
+				expect(JSON.stringify(body)).not.toContain(secret);
+				expect(JSON.stringify(logged)).not.toContain(secret);
+			}
+		} finally {
+			errorSpy.mockRestore();
+			manager.getSdkSessionAccessDeps = original;
+		}
+	});
+
+	test("reads an SDK transcript through the session manager's injected SDK access seam", async ({ gateway }) => {
+		const sdkSessionId = "00000000-0000-4000-8000-000000000007";
+		const sessionId = sessions.add(seedArchivedSession(gateway, {
+			runtime: "claude-agent-sdk",
+			claudeAgentSdkSessionId: sdkSessionId,
+			modelProvider: SDK_PROVIDER,
+			modelId: SDK_MODEL,
+			agentSessionFile: "/must-not-read.jsonl",
+		}));
+		const manager = gateway.sessionManager as any;
+		const original = manager.getSdkSessionAccessDeps;
+		const calls: string[] = [];
+		manager.getSdkSessionAccessDeps = (persisted: any) => {
+			calls.push(persisted.id);
+			return {
+				loadSdk: async () => ({
+					getSessionInfo: async () => ({ sessionId: sdkSessionId, summary: "SDK history", lastModified: 1 }),
+					getSessionMessages: async () => [{
+						type: "user", uuid: "sdk-history-user", session_id: sdkSessionId,
+						message: { role: "user", content: "SDK_TRANSCRIPT_MANAGER_SEAM" },
+						parent_tool_use_id: null, parent_agent_id: null,
+					}],
+				}),
+			};
+		};
+		try {
+			const response = await localApiFetch(gateway, `/api/sessions/${sessionId}/transcript`);
+			expect(response.status).toBe(200);
+			expect(calls).toEqual([sessionId]);
+			expect(JSON.stringify(await response.json())).toContain("SDK_TRANSCRIPT_MANAGER_SEAM");
+		} finally {
+			manager.getSdkSessionAccessDeps = original;
 		}
 	});
 });

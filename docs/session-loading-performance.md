@@ -98,9 +98,13 @@ The sessions route still owns filtering, default versus `include=archived` behav
 
 `flush()` is idempotent, cancels the timer, and writes dirty state immediately. Both session-manager shutdown and project-context close call it, so the normal graceful gateway shutdown path persists the pending tail before contexts disappear. The timer is unreferenced and cannot keep the process alive. A failed save remains dirty, allowing a later mutation or flush to retry.
 
-**Crash trade-off:** a forced process kill, OOM, power loss, or other exit that bypasses graceful shutdown can lose the pending cost burst since the last successful save. Because this is a trailing debounce and each usage update restarts it, a continuously active burst can span longer than one second. Cost data is telemetry; session transcripts and metadata do not use this debounce.
+**Crash trade-off:** a forced process kill, OOM, power loss, or other exit that bypasses graceful shutdown can lose the pending legacy/Pi cost burst since the last successful save. Because this is a trailing debounce and each usage update restarts it, a continuously active burst can span longer than one second. Cost data is telemetry; session transcripts and metadata do not use this debounce.
 
-See [Session cost display](session-cost.md) for the cost data model.
+Claude Agent SDK root-result accounting does not use the debounced `recordUsage()`
+path. Its private source-result ledger and cumulative usage projection commit in
+one atomic mutation so a replay after restart is either applied once or ignored.
+
+See [Session usage and cost](session-cost.md) for the cost data model.
 
 ### Session metadata store
 

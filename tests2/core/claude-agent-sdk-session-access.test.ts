@@ -11,6 +11,7 @@ import {
 } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
 import { adaptSdkSessionMessages } from "../../src/server/agent/claude-agent-sdk-history-adapter.ts";
 import { ClaudeAgentSdkUnavailableError } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
+import { claudeAgentSdkUnavailableDiagnostic } from "../../src/server/agent/claude-agent-sdk-error.ts";
 
 const SESSION_ID = "123e4567-e89b-42d3-a456-426614174000";
 const CWD = "/workspace/project";
@@ -57,15 +58,20 @@ describe("Claude Agent SDK session access", () => {
 	it("fails absent, invalid, loader, and provider sources as sanitized unavailable errors", async () => {
 		const absent = sdkFixture({ getSessionInfo: vi.fn(async () => undefined) });
 		await expect(readSdkSessionMessages({ sessionId: SESSION_ID, cwd: CWD }, absent.deps)).rejects.toMatchObject({
-			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
-			message: expect.stringContaining("SDK_SESSION_UNAVAILABLE"),
+			code: "SDK_SESSION_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE",
 		});
 		expect(absent.sdk.getSessionMessages).not.toHaveBeenCalled();
 
-		const broken = { loadSdk: vi.fn(async () => { throw new Error("provider TOKEN=private-value unavailable"); }) };
-		await expect(readSdkSessionInfo({ sessionId: SESSION_ID, cwd: CWD }, broken)).rejects.toEqual(expect.objectContaining({
-			message: expect.stringContaining("TOKEN=<redacted>"),
-		}));
+		const providerFailure = "provider Authorization: Bearer sk-private-value abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude.json opaque_12345678901234567890123456789012 unavailable";
+		const broken = { loadSdk: vi.fn(async () => { throw new Error(providerFailure); }) };
+		const failure = await readSdkSessionInfo({ sessionId: SESSION_ID, cwd: CWD }, broken).catch(error => error);
+		expect(failure).toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
+		const diagnostic = claudeAgentSdkUnavailableDiagnostic(failure);
+		for (const secret of ["sk-private-value", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude.json", "opaque_12345678901234567890123456789012"]) {
+			expect(diagnostic).not.toContain(secret);
+			expect(JSON.stringify(failure)).not.toContain(secret);
+		}
 		await expect(readSdkSessionInfo({ sessionId: "not-a-uuid", cwd: CWD }, sdkFixture().deps)).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 	});
 

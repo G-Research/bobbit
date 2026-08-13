@@ -969,7 +969,7 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 
 **Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
 
-**SDK branch, before Pi step 1:** validate the exact persisted `claude-agent-sdk` model tuple and resume UUID, then preflight the official SDK session-info lookup with the persisted cwd **before** allocating a destination or creating a worktree/session row. Invalid metadata returns `422 RUNTIME_CONTINUE_UNSUPPORTED`; an unavailable source returns `404 SDK_SESSION_UNAVAILABLE`; both create nothing. A valid source creates a fresh Bobbit wrapper using the same UUID as SDK `resume`. It does not clone JSONL, tool-content, proposal, or author sidecars, and never sends `switch_session`.
+**SDK branch, before Pi step 1:** validate the exact persisted `claude-agent-sdk` model tuple and resume UUID, then preflight the official SDK session-info lookup with the persisted cwd **before** allocating a destination or creating a worktree/session row. Invalid metadata returns `422 RUNTIME_CONTINUE_UNSUPPORTED`; an unavailable source returns the opaque `503 SDK_SESSION_UNAVAILABLE` category; both create nothing. A valid source creates a fresh Bobbit wrapper using the same UUID as SDK `resume`. It does not clone JSONL, tool-content, proposal, or author sidecars, and never sends `switch_session`.
 
 **Pi branch:**
 
@@ -3414,7 +3414,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` worker | Durable document mirror (`index/__docs__.json` + journal), compatibility metadata, and disposable derived cache. See [Semantic search](#semantic-search). |
-| `session-costs.json` | `CostTracker` | Token/cost data. See [Session cost display](session-cost.md). |
+| `session-costs.json` | `CostTracker` | Token/cost data. See [Session usage and cost](session-cost.md). |
 | `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 
 ### `<server-cwd>/.bobbit/state/` - global, gitignored

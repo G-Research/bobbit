@@ -163,7 +163,22 @@ function expectDurablePartialMutationSnapshot(
 	expect(state.status).toBe(expectedStatus);
 	expect(state.statusVersion).toBe(expectedStatusVersion);
 	expect(state.preparing).toBe(false);
-	expect(state.serverCost).toEqual(expectedCost);
+	// Usage transport is additive: preserve every legacy counter while requiring
+	// the explicit defaults that make an un-attributed usage snapshot complete.
+	expect(state.serverCost).toMatchObject({
+		...expectedCost,
+		notionalCostUsd: null,
+		costBasis: "api-billed",
+		costBasisHistory: ["api-billed"],
+		byModel: {},
+		context: {
+			currentTokens: null,
+			currentModel: null,
+			highWaterTokens: null,
+			highWaterModel: null,
+			byModel: {},
+		},
+	});
 }
 
 async function exercisePartialMutationSnapshot(

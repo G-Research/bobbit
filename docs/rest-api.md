@@ -120,12 +120,12 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=kill` | Terminate a running process (whole tree / group); keep the now-terminal record until dismissed. `{ ok, killed }`; 404 if not found/not running |
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid?action=dismiss` | Remove the record **and** delete its persisted log/status/spool files; broadcasts `bg_process_dismissed`. `{ ok }`; 409 if still running |
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid` | Legacy: kill-if-running, else dismiss |
-| `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
+| `GET` | `/api/sessions/:id/cost` | Persisted cumulative server usage projection for one session. Returns 404 when no cost record exists. The additive response includes legacy token counters and `cacheHitRate`, plus billed/notional basis, by-model usage, and current/high-water context where available; `totalCost: null` is unknown/not-applicable, not zero. See [Session usage and cost](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex` | Preferred identity-addressed lazy-load for a truncated tool-content block. `?expected=preview-snapshot` verifies a historical preview marker before returning it (see [Large content truncation](#large-content-truncation)). |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Legacy positional lazy-load for a truncated block; retained for compatibility (see [Large content truncation](#large-content-truncation)). |
-| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`, `include_tool_results` / `includeToolResults`. Direct REST remains backward-compatible: omitted include flag keeps tool results unredacted; pass false/0 to redact. `read_session` passes false by default. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400). See [Transcript reads and tool-result redaction](read-session.md). |
-| `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
+| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`, `include_tool_results` / `includeToolResults`. Direct REST remains backward-compatible: omitted include flag keeps tool results unredacted; pass false/0 to redact. `read_session` passes false by default. Pi reads JSONL; Claude Agent SDK reads use official SDK history and canonical Bobbit tool names. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), or `SDK_SESSION_UNAVAILABLE` (503). See [Transcript reads and tool-result redaction](read-session.md) and [Claude SDK unavailable responses](#claude-sdk-unavailable-responses). |
+| `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated pre-compaction history for one canonical compaction marker. Query params: `compactionId` (required; Pi sidecar id or SDK checkpoint/marker id), `cursor` (from `nextCursor`), `limit` (default 50, range 1..200), and `verbose=true` or `verbose=1`. Both runtimes use `{ total, returned, nextCursor, messages[] }`, cursor pagination, and the normal bearer/session authentication: any authenticated caller on the same gateway that can reach the target session may read it. Pi resolves its host sidecar's `firstKeptEntryId`, then the JSONL marker's id, then that marker itself, and reads JSONL through the sandbox-aware session-file path. SDK reads its durable host checkpoint only: compact rows are `{ index, role, ts: null, content: <text> }`; verbose rows preserve raw `content` plus the normalized root `message`. It never reads a Pi `agentSessionFile` or calls the provider for this request. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). See [Compaction history](compaction-history.md) and [SDK compaction checkpoints](claude-agent-sdk-sessions.md#sdk-compaction-checkpoints). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
@@ -193,6 +193,32 @@ for the creation and modification UI boundary.
 `GET /api/sessions/:id/transcript` and the `read_session` tool share the same transcript reader but use different defaults. Direct REST calls keep the legacy behavior and leave tool results unredacted when `include_tool_results` / `includeToolResults` is omitted. Pass `include_tool_results=false`, `includeToolResults=false`, or `0` to get the redacted shape. The agent-facing `read_session` tool always sends the include flag and defaults it to false, so tool result bodies are omitted unless the agent passes `include_tool_results: true`.
 
 `verbose` changes compact summaries into full content blocks; it does not override result-body redaction. For `read_session`, `verbose: true` still omits tool result bodies unless `include_tool_results: true` is also set. Either flag is context-heavy at the agent-tool layer and requires an explicit integer `limit` from 1 through 10; rejected tool calls return `CONTEXT_HEAVY_LIMIT_REQUIRED` without reaching this route. Direct REST and other programmatic callers retain the endpoint's existing limits and behavior. Use `pattern`, `context`, `offset`, and `limit` to find a large output first, then fetch narrow batches while monitoring token consumption. Redacted placeholders carry metadata such as tool name/id, status, and size or line counts. See [Transcript reads and tool-result redaction](read-session.md) for examples and response details.
+
+For a Claude Agent SDK session, the shared reader first confirms the persisted
+opaque SDK session identity, then reads official SDK history from the persisted
+session cwd. The server adapts those rows into the same envelope and redaction
+contract as Pi, while preserving SDK UUIDs, tool-use IDs, and parent tool/agent
+partitions. Historical `mcp__bobbit__*` tool names use the same canonical name
+as live events (for example, `mcp__bobbit__read` becomes `read`). This gives
+REST, `read_session`, live reload, and lazy tool-content reads one transcript
+projection; clients must not reconstruct names or accounting from visible rows.
+
+### Claude SDK unavailable responses
+
+When the Claude Agent SDK package, provider, persisted resume identity, or
+official history is unavailable, SDK-backed session creation, continuation, and
+transcript reads return:
+
+```json
+{ "error": "SDK_SESSION_UNAVAILABLE", "code": "SDK_SESSION_UNAVAILABLE" }
+```
+
+The HTTP status is `503`. This stable public category lets callers stop waiting
+and offer recovery without exposing provider-controlled details. Credential
+values, SDK storage/config paths, resume IDs, and raw provider messages remain
+private server diagnostics. Bobbit does not return an empty successful SDK
+transcript, create a new SDK conversation, or fall back to Pi. Pi routes keep
+their existing JSONL and error behavior.
 
 ### Archived session list and query search
 
@@ -2373,7 +2399,8 @@ For Pi sources, before `switch_session`, worktree-backed continues move the clon
 
 | Status | Meaning |
 |---|---|
-| `404` | Archived session not found; a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it; or official SDK session-info preflight finds the SDK source unavailable (`SDK_SESSION_UNAVAILABLE`). The SDK failure occurs before destination allocation, worktree setup, or session-row creation and copies no Pi artifacts. |
+| `404` | Archived session not found, or a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it. |
+| `503` | Official SDK session-info preflight finds the SDK source unavailable. The response is the opaque `SDK_SESSION_UNAVAILABLE` category; no destination, worktree, session row, or Pi artifact is created. |
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
 | `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set); a Pi copy would cross realms; or an SDK source lacks its exact `claude-agent-sdk` model tuple or a valid resume UUID (`RUNTIME_CONTINUE_UNSUPPORTED`) |

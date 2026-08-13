@@ -7,9 +7,10 @@
  * Uses an injected in-memory FsLike to avoid real filesystem IO.
  */
 import path from "node:path";
-import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { CostTracker, deriveCacheHitRate } from "../../src/server/agent/cost-tracker.ts";
+import { normalizeClaudeSdkRootResultUsage } from "../../src/server/agent/claude-sdk-event-translator.ts";
 import { ProjectContext } from "../../src/server/agent/project-context.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
@@ -29,6 +30,38 @@ function trackWrites(base: MemFs, failWrites = 0): { fs: MemFs; writeCount: () =
 			}) as MemFs["writeFileSync"],
 		},
 		writeCount: () => writes,
+	};
+}
+
+/** Fail one atomic authoritative commit after a temp file has been created. */
+function failNextAuthoritativeCommit(base: MemFs, phase: "write" | "rename"): { fs: MemFs; tempFile: () => string | undefined; tempWriteOptions: () => unknown } {
+	let failed = false;
+	let temporary: string | undefined;
+	let temporaryWriteOptions: unknown;
+	const isAuthoritativeTemp = (file: unknown) => String(file).startsWith(`${STORE_FILE}.`) && String(file).endsWith(".tmp");
+	const fail = () => {
+		failed = true;
+		throw new Error(`injected authoritative ${phase} failure`);
+	};
+	return {
+		fs: {
+			...base,
+			writeFileSync: ((file: Parameters<MemFs["writeFileSync"]>[0], data: Parameters<MemFs["writeFileSync"]>[1], options?: unknown) => {
+				if (isAuthoritativeTemp(file)) {
+					temporary = String(file);
+					temporaryWriteOptions = options;
+				}
+				const value = (base.writeFileSync as (...args: unknown[]) => unknown)(file, data, options);
+				if (phase === "write" && !failed && isAuthoritativeTemp(file)) fail();
+				return value;
+			}) as MemFs["writeFileSync"],
+			renameSync: ((from: Parameters<MemFs["renameSync"]>[0], to: Parameters<MemFs["renameSync"]>[1]) => {
+				if (phase === "rename" && !failed && isAuthoritativeTemp(from)) fail();
+				return (base.renameSync as (...args: unknown[]) => unknown)(from, to);
+			}) as MemFs["renameSync"],
+		},
+		tempFile: () => temporary,
+		tempWriteOptions: () => temporaryWriteOptions,
 	};
 }
 
@@ -481,6 +514,140 @@ describe("CostTracker", () => {
 			const tracker = new CostTracker(stateDir, memfs);
 			const cost = tracker.getSessionCost("s1")!;
 			assert.equal(cost.cacheHitRate, 0.75);
+		});
+	});
+
+	describe("authoritative SDK usage ledger", () => {
+		const result = (uuid: string, model = "claude-sonnet", cacheReadInputTokens = 10) => {
+			const normalized = normalizeClaudeSdkRootResultUsage({
+				type: "result", uuid, session_id: "sdk-session", total_cost_usd: 0.42,
+				usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: cacheReadInputTokens, cache_creation_input_tokens: 0 },
+				modelUsage: {
+					[model]: {
+						inputTokens: 100, outputTokens: 20, cacheReadInputTokens, cacheCreationInputTokens: 0,
+						costUSD: 0.42, contextWindow: 200_000, maxOutputTokens: 16_384,
+					},
+				},
+			}, {
+				model, inputTokens: 100, cacheReadTokens: cacheReadInputTokens, cacheWriteTokens: 0,
+			});
+			if (!normalized) throw new Error("expected a valid pinned SDK result");
+			return normalized;
+		};
+
+		it("does not acknowledge or mutate the ledger when the temp write fails", () => {
+			vi.spyOn(console, "error").mockImplementation(() => undefined);
+			const oldStore = {
+				sdk: { inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 },
+			};
+			memfs.writeFileSync(STORE_FILE, JSON.stringify(oldStore), "utf-8");
+			const failing = failNextAuthoritativeCommit(memfs, "write");
+			const tracker = new CostTracker(stateDir, failing.fs);
+
+			const outcome = tracker.recordAuthoritativeUsage("sdk", result("write-failure"), "goal");
+
+			expect(outcome.applied).toBe(false);
+			expect(outcome.snapshot.inputTokens).toBe(7);
+			expect(tracker.getSessionUsage("sdk")?.inputTokens).toBe(7);
+			expect(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"))).toEqual(oldStore);
+			expect(failing.tempFile()).toBeDefined();
+			expect(failing.tempWriteOptions()).toMatchObject({ mode: 0o600, flag: "wx" });
+			expect(memfs.existsSync(failing.tempFile()!)).toBe(false);
+		});
+
+		it("does not acknowledge on rename failure, then accepts one retry and deduplicates after reload", () => {
+			vi.spyOn(console, "error").mockImplementation(() => undefined);
+			const failing = failNextAuthoritativeCommit(memfs, "rename");
+			const tracker = new CostTracker(stateDir, failing.fs);
+			const usage = result("rename-failure");
+
+			const first = tracker.recordAuthoritativeUsage("sdk", usage, "goal");
+			expect(first.applied).toBe(false);
+			expect(tracker.getSessionUsage("sdk")).toBeUndefined();
+			expect(memfs.existsSync(STORE_FILE)).toBe(false);
+			expect(failing.tempFile()).toBeDefined();
+			expect(memfs.existsSync(failing.tempFile()!)).toBe(false);
+
+			const retry = tracker.recordAuthoritativeUsage("sdk", usage, "goal");
+			expect(retry.applied).toBe(true);
+			expect(retry.snapshot.inputTokens).toBe(100);
+			const reloaded = new CostTracker(stateDir, memfs);
+			const replay = reloaded.recordAuthoritativeUsage("sdk", usage, "goal");
+			expect(replay.applied).toBe(false);
+			expect(replay.snapshot.inputTokens).toBe(100);
+		});
+
+		it("ignores a torn temporary ledger file and loads the prior complete store", () => {
+			const oldStore = {
+				sdk: { inputTokens: 7, outputTokens: 3, cacheReadTokens: 2, cacheWriteTokens: 1, totalCost: 0 },
+			};
+			memfs.writeFileSync(STORE_FILE, JSON.stringify(oldStore), "utf-8");
+			memfs.writeFileSync(`${STORE_FILE}.interrupted.tmp`, "{ incomplete", "utf-8");
+
+			const reloaded = new CostTracker(stateDir, memfs);
+
+			expect(reloaded.getSessionCost("sdk")).toMatchObject(oldStore.sdk);
+			expect(() => JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"))).not.toThrow();
+		});
+
+		it("persists the source-result ledger before accepting a replay after reload", () => {
+			const tracker = new CostTracker(stateDir, memfs);
+			const first = tracker.recordAuthoritativeUsage("sdk", result("sdk-result-1"), "goal");
+			expect(first.applied).toBe(true);
+			expect(first.snapshot.totalCost).toBeNull();
+			expect(first.snapshot.notionalCostUsd).toBe(0.42);
+			const reloaded = new CostTracker(stateDir, memfs);
+			const replay = reloaded.recordAuthoritativeUsage("sdk", result("sdk-result-1"), "goal");
+			expect(replay.applied).toBe(false);
+			expect(replay.snapshot.inputTokens).toBe(100);
+			expect(replay.snapshot.byModel["claude-sonnet"].outputTokens).toBe(20);
+			expect(replay.snapshot.context.highWaterTokens).toBe(110);
+			expect(replay.snapshot.costBasis).toBe("subscription-notional");
+		});
+
+		it("keeps separate equal-valued results, model attribution, and context high-water", () => {
+			const tracker = new CostTracker(stateDir, memfs);
+			tracker.recordAuthoritativeUsage("sdk", result("one"));
+			const second = tracker.recordAuthoritativeUsage("sdk", result("two", "claude-opus", 0));
+			expect(second.applied).toBe(true);
+			expect(second.snapshot.inputTokens).toBe(200);
+			expect(second.snapshot.byModel["claude-sonnet"].inputTokens).toBe(100);
+			expect(second.snapshot.byModel["claude-opus"].inputTokens).toBe(100);
+			expect(second.snapshot.context.currentTokens).toBe(100);
+			expect(second.snapshot.context.highWaterTokens).toBe(110);
+			expect(second.snapshot.context.highWaterModel).toBe("claude-sonnet");
+		});
+
+		it("projects root assistant request usage into current and high-water model context", () => {
+			const tracker = new CostTracker(stateDir, memfs);
+			const normalize = (uuid: string, inputTokens: number, cacheReadInputTokens: number, cacheCreationInputTokens: number) => normalizeClaudeSdkRootResultUsage({
+				type: "result", uuid, session_id: "sdk-session",
+				usage: { input_tokens: inputTokens, output_tokens: 5, cache_read_input_tokens: cacheReadInputTokens, cache_creation_input_tokens: cacheCreationInputTokens },
+				modelUsage: {
+					"claude-sonnet": {
+						inputTokens, outputTokens: 5, cacheReadInputTokens, cacheCreationInputTokens,
+						costUSD: 0.01, contextWindow: 200_000, maxOutputTokens: 16_384,
+					},
+				},
+			}, {
+				model: "claude-sonnet", inputTokens, cacheReadTokens: cacheReadInputTokens, cacheWriteTokens: cacheCreationInputTokens,
+			});
+			const first = normalize("result-1", 60_000, 15_000, 5_000);
+			const second = normalize("result-2", 35_000, 4_000, 1_000);
+			expect(first).toBeDefined();
+			expect(second).toBeDefined();
+
+			tracker.recordAuthoritativeUsage("sdk", first!);
+			const outcome = tracker.recordAuthoritativeUsage("sdk", second!);
+
+			expect(outcome.snapshot.byModel["claude-sonnet"].inputTokens).toBe(95_000);
+			expect(outcome.snapshot.context).toMatchObject({
+				currentModel: "claude-sonnet",
+				currentTokens: 40_000,
+				highWaterModel: "claude-sonnet",
+				highWaterTokens: 80_000,
+				byModel: { "claude-sonnet": { contextWindow: 200_000, currentTokens: 40_000, highWaterTokens: 80_000 } },
+			});
 		});
 	});
 
