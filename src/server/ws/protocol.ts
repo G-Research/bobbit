@@ -102,6 +102,12 @@ export interface QueuedMessage {
 	createdAt: number;
 	/** Internal prompt provenance; absent on legacy persisted queue rows. */
 	source?: PromptSource;
+	/**
+	 * Explicit lifecycle ownership for prompts admitted by enqueueVerifierPrompt.
+	 * Source remains attribution/UI metadata: legacy source:"verification" rows
+	 * are ordinary durable work unless this flag is true.
+	 */
+	verifierOwned?: boolean;
 	/** Accountable author resolved by the server; absent on legacy rows. */
 	author?: MessageAuthor;
 	/**

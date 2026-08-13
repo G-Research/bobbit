@@ -2811,7 +2811,7 @@ export class SessionManager {
 	private removeVerifierPromptRow(sessionId: string, rowId: string): boolean {
 		const owner = this._promptQueueOwner(sessionId);
 		const row = owner?.promptQueue.toArray().find(candidate => candidate.id === rowId);
-		if (!owner || row?.source !== "verification") return false;
+		if (!owner || row?.verifierOwned !== true) return false;
 		const removed = owner.promptQueue.remove(rowId);
 		if (removed) this.broadcastQueue(owner);
 		return removed;
@@ -2830,12 +2830,12 @@ export class SessionManager {
 	 */
 	private abandonVerifierPromptDispatchRows(session: SessionInfo, rows: Array<{
 		id?: string;
-		source?: PromptSource;
+		verifierOwned?: boolean;
 	}>, durableQueueRowIds: Array<string | undefined> | undefined, error: Error): boolean {
 		let abandoned = false;
 		for (let index = 0; index < rows.length; index += 1) {
 			const row = rows[index];
-			if (row.source !== "verification") continue;
+			if (row.verifierOwned !== true) continue;
 			const rowId = durableQueueRowIds?.[index] ?? row.id;
 			if (!rowId) continue;
 			this.abandonVerifierPrompt(session.id, rowId, error);
@@ -2853,7 +2853,7 @@ export class SessionManager {
 			const owner = this._promptQueueOwner(sessionId);
 			const rows = owner?.promptQueue?.toArray?.() ?? [];
 			for (const row of rows) {
-				if (row.source === "verification") this.removeVerifierPromptRow(sessionId, row.id);
+				if (row.verifierOwned === true) this.removeVerifierPromptRow(sessionId, row.id);
 			}
 		} catch {
 			console.warn(`[session-manager] Best-effort verifier queue purge failed for ${sessionId}`);
@@ -5338,6 +5338,7 @@ export class SessionManager {
 			&& !this._sessionReplacementCoordinators.has(sessionId);
 		const row = session.promptQueue.enqueue(text, {
 			source: "verification",
+			verifierOwned: true,
 			author: BOBBIT_SYSTEM_AUTHOR,
 			streamingBehavior: opts?.streamingBehavior ?? "followUp",
 			coldStart: opts?.coldStart,
@@ -6204,6 +6205,7 @@ export class SessionManager {
 		attachments?: unknown[];
 		isSteered?: boolean;
 		source?: PromptSource;
+		verifierOwned?: boolean;
 		author?: MessageAuthor;
 		streamingBehavior?: PromptStreamingBehavior;
 		coldStart?: boolean;
@@ -6222,7 +6224,7 @@ export class SessionManager {
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); preserving ${rows.length} row(s) at front`);
 		if (isReviewerBusyError(reason)) {
 			for (const row of rows) {
-				if (row.id && row.source === "verification") this.markVerifierPromptBusyRecovered(session.id, row.id);
+				if (row.id && row.verifierOwned === true) this.markVerifierPromptBusyRecovered(session.id, row.id);
 			}
 		}
 		// A coordinated poison redrive keeps its initiating row durable until the
@@ -6248,6 +6250,7 @@ export class SessionManager {
 					isSteered: r.isSteered ?? false,
 					createdAt: this.clock.now(),
 					source: r.source,
+					verifierOwned: r.verifierOwned,
 					author: r.author,
 					streamingBehavior: r.streamingBehavior,
 					coldStart: r.coldStart,
@@ -6257,6 +6260,7 @@ export class SessionManager {
 					attachments: r.attachments,
 					isSteered: r.isSteered,
 					source: r.source,
+					verifierOwned: r.verifierOwned,
 					author: r.author,
 					streamingBehavior: r.streamingBehavior,
 					coldStart: r.coldStart,
@@ -6366,13 +6370,14 @@ export class SessionManager {
 		promptId = promptAttemptId("prompt"),
 		streamingBehavior?: PromptStreamingBehavior,
 		manualRecoveryRequired = durableQueueRowId !== undefined,
+		verifierOwned = false,
 	): Promise<void> {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
 
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author, streamingBehavior, coldStart }];
+		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, verifierOwned, author, streamingBehavior, coldStart }];
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const consumeDurableAcceptanceRow = () => {
@@ -6445,8 +6450,21 @@ export class SessionManager {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		if (session.promptQueue.isEmpty) return;
 
-		// Batch all steered messages at the front into a single prompt
-		const steered = session.promptQueue.dequeueAllSteered();
+		// Batch compatible steered messages at the front into a single prompt.
+		// A verifier-owned row has a receipt and cancellation lifecycle that cannot
+		// be represented by a mixed batch: on recovery, retryLastPrompt must redrive
+		// its exact durable row rather than the batch's lastPromptText. Keep an
+		// ownership boundary between verifier and ordinary steers.
+		const allSteered = session.promptQueue.dequeueAllSteered();
+		const firstSteerVerifierOwned = allSteered[0]?.verifierOwned === true;
+		const ownershipBoundary = allSteered.findIndex(row => (row.verifierOwned === true) !== firstSteerVerifierOwned);
+		const steered = ownershipBoundary === -1 ? allSteered : allSteered.slice(0, ownershipBoundary);
+		if (ownershipBoundary !== -1) {
+			// restoreAtFront unshifts, so reverse the suffix to preserve FIFO order.
+			for (let index = allSteered.length - 1; index >= ownershipBoundary; index -= 1) {
+				session.promptQueue.restoreAtFront(allSteered[index]);
+			}
+		}
 		let next: QueuedMessage | undefined;
 
 		if (steered.length > 0) {
@@ -6486,8 +6504,8 @@ export class SessionManager {
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
 		// when drainQueue races the SDK's finishRun() during a graceful abort).
 		const dispatchedRowsForRecovery = steered.length > 0
-			? steered.map(r => ({ id: r.id, text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart }))
-			: [{ id: next.id, text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart }];
+			? steered.map(r => ({ id: r.id, text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart }))
+			: [{ id: next.id, text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart }];
 		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
@@ -7577,7 +7595,7 @@ export class SessionManager {
 			const recoveredVerifierRow = isAuto
 				? session.recoveredPromptDispatchQueueIds
 					?.map((id) => session.promptQueue.toArray().find((row) => row.id === id))
-					.find((row): row is QueuedMessage => row?.source === "verification")
+					.find((row): row is QueuedMessage => row?.verifierOwned === true)
 				: undefined;
 			const consumedRecovered = this.consumeRecoveredPromptDispatchRows(
 				session,
@@ -7604,6 +7622,7 @@ export class SessionManager {
 				undefined,
 				recoveredVerifierRow?.streamingBehavior,
 				manualRecoveryRequired,
+				recoveredVerifierRow?.verifierOwned === true,
 			);
 		} else {
 			// Fallback (e.g. session predates error tracking)
@@ -8760,10 +8779,10 @@ export class SessionManager {
 	/** Remove stale harness-owned rows before either live or dormant restoration. */
 	private pruneRestoredVerifierPromptRows(ps: PersistedSession): QueuedMessage[] {
 		const persistedQueue = ps.messageQueue ?? [];
-		const restoredQueue = persistedQueue.filter(row => row.source !== "verification");
+		const restoredQueue = persistedQueue.filter(row => row.verifierOwned !== true);
 		if (restoredQueue.length === persistedQueue.length) return restoredQueue;
 		for (const row of persistedQueue) {
-			if (row.source === "verification") {
+			if (row.verifierOwned === true) {
 				this.settleVerifierPromptReceipt(ps.id, row.id, new Error(`Verifier prompt ${row.id} was discarded during session restore`));
 			}
 		}
