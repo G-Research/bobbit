@@ -33,6 +33,38 @@ function trackWrites(base: MemFs, failWrites = 0): { fs: MemFs; writeCount: () =
 	};
 }
 
+/** Fail one atomic authoritative commit after a temp file has been created. */
+function failNextAuthoritativeCommit(base: MemFs, phase: "write" | "rename"): { fs: MemFs; tempFile: () => string | undefined; tempWriteOptions: () => unknown } {
+	let failed = false;
+	let temporary: string | undefined;
+	let temporaryWriteOptions: unknown;
+	const isAuthoritativeTemp = (file: unknown) => String(file).startsWith(`${STORE_FILE}.`) && String(file).endsWith(".tmp");
+	const fail = () => {
+		failed = true;
+		throw new Error(`injected authoritative ${phase} failure`);
+	};
+	return {
+		fs: {
+			...base,
+			writeFileSync: ((file: Parameters<MemFs["writeFileSync"]>[0], data: Parameters<MemFs["writeFileSync"]>[1], options?: unknown) => {
+				if (isAuthoritativeTemp(file)) {
+					temporary = String(file);
+					temporaryWriteOptions = options;
+				}
+				const value = (base.writeFileSync as (...args: unknown[]) => unknown)(file, data, options);
+				if (phase === "write" && !failed && isAuthoritativeTemp(file)) fail();
+				return value;
+			}) as MemFs["writeFileSync"],
+			renameSync: ((from: Parameters<MemFs["renameSync"]>[0], to: Parameters<MemFs["renameSync"]>[1]) => {
+				if (phase === "rename" && !failed && isAuthoritativeTemp(from)) fail();
+				return (base.renameSync as (...args: unknown[]) => unknown)(from, to);
+			}) as MemFs["renameSync"],
+		},
+		tempFile: () => temporary,
+		tempWriteOptions: () => temporaryWriteOptions,
+	};
+}
+
 describe("CostTracker", () => {
 	beforeEach(() => {
 		memfs = createMemFs();
@@ -500,6 +532,61 @@ describe("CostTracker", () => {
 			if (!normalized) throw new Error("expected a valid pinned SDK result");
 			return normalized;
 		};
+
+		it("does not acknowledge or mutate the ledger when the temp write fails", () => {
+			vi.spyOn(console, "error").mockImplementation(() => undefined);
+			const oldStore = {
+				sdk: { inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 },
+			};
+			memfs.writeFileSync(STORE_FILE, JSON.stringify(oldStore), "utf-8");
+			const failing = failNextAuthoritativeCommit(memfs, "write");
+			const tracker = new CostTracker(stateDir, failing.fs);
+
+			const outcome = tracker.recordAuthoritativeUsage("sdk", result("write-failure"), "goal");
+
+			expect(outcome.applied).toBe(false);
+			expect(outcome.snapshot.inputTokens).toBe(7);
+			expect(tracker.getSessionUsage("sdk")?.inputTokens).toBe(7);
+			expect(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"))).toEqual(oldStore);
+			expect(failing.tempFile()).toBeDefined();
+			expect(failing.tempWriteOptions()).toMatchObject({ mode: 0o600, flag: "wx" });
+			expect(memfs.existsSync(failing.tempFile()!)).toBe(false);
+		});
+
+		it("does not acknowledge on rename failure, then accepts one retry and deduplicates after reload", () => {
+			vi.spyOn(console, "error").mockImplementation(() => undefined);
+			const failing = failNextAuthoritativeCommit(memfs, "rename");
+			const tracker = new CostTracker(stateDir, failing.fs);
+			const usage = result("rename-failure");
+
+			const first = tracker.recordAuthoritativeUsage("sdk", usage, "goal");
+			expect(first.applied).toBe(false);
+			expect(tracker.getSessionUsage("sdk")).toBeUndefined();
+			expect(memfs.existsSync(STORE_FILE)).toBe(false);
+			expect(failing.tempFile()).toBeDefined();
+			expect(memfs.existsSync(failing.tempFile()!)).toBe(false);
+
+			const retry = tracker.recordAuthoritativeUsage("sdk", usage, "goal");
+			expect(retry.applied).toBe(true);
+			expect(retry.snapshot.inputTokens).toBe(100);
+			const reloaded = new CostTracker(stateDir, memfs);
+			const replay = reloaded.recordAuthoritativeUsage("sdk", usage, "goal");
+			expect(replay.applied).toBe(false);
+			expect(replay.snapshot.inputTokens).toBe(100);
+		});
+
+		it("ignores a torn temporary ledger file and loads the prior complete store", () => {
+			const oldStore = {
+				sdk: { inputTokens: 7, outputTokens: 3, cacheReadTokens: 2, cacheWriteTokens: 1, totalCost: 0 },
+			};
+			memfs.writeFileSync(STORE_FILE, JSON.stringify(oldStore), "utf-8");
+			memfs.writeFileSync(`${STORE_FILE}.interrupted.tmp`, "{ incomplete", "utf-8");
+
+			const reloaded = new CostTracker(stateDir, memfs);
+
+			expect(reloaded.getSessionCost("sdk")).toMatchObject(oldStore.sdk);
+			expect(() => JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"))).not.toThrow();
+		});
 
 		it("persists the source-result ledger before accepting a replay after reload", () => {
 			const tracker = new CostTracker(stateDir, memfs);
