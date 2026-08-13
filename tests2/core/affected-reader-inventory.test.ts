@@ -106,6 +106,7 @@ const REPOSITORY_SCAN_RULE_IDS = [
 	"client-source-guards",
 	"server-typescript-source-guards",
 	"async-background-cleanup-source-guard",
+	"metadata-retirement-source-guard",
 	"search-worker-main-thread-boundary",
 	"preview-cookie-server-source-guard",
 	"worktree-setup-source-guard",

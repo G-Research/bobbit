@@ -1,4 +1,5 @@
 import { render } from "lit";
+import { clearArchivedSessionsState } from "../../src/app/api.js";
 import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { renderSidebar, isProjectExpanded, toggleProjectExpanded } from "../../src/app/sidebar.js";
 import {
@@ -29,6 +30,12 @@ const DELEGATE_CHILD_SESSION_ID = "sidebar-filter-delegate-child-session";
 const ARCHIVED_DELEGATE_CHILD_SESSION_ID = "sidebar-filter-archived-delegate-child-session";
 const NESTED_MATCH_GOAL_ID = "sidebar-filter-nested-match-goal";
 const ARCHIVED_SESSION_ID = "sidebar-filter-archived-session";
+const ARCHIVED_SESSION_PAGE_TWO_ID = "sidebar-filter-archived-session-page-two";
+const ARCHIVED_SESSION_PAGE_THREE_ID = "sidebar-filter-archived-session-page-three";
+const ARCHIVED_GOAL_PAGE_ONE_ID = "sidebar-filter-archived-goal-page-one";
+const ARCHIVED_GOAL_PAGE_TWO_ID = "sidebar-filter-archived-goal-page-two";
+const ARCHIVED_GOAL_PAGE_THREE_ID = "sidebar-filter-archived-goal-page-three";
+const REMOTE_ARCHIVED_SESSION_ID = "sidebar-filter-remote-archived-session";
 const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
 const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 
@@ -92,6 +99,11 @@ const IDS = {
 	archivedDelegateChildSession: ARCHIVED_DELEGATE_CHILD_SESSION_ID,
 	nestedMatchGoal: `goal:${NESTED_MATCH_GOAL_ID}`,
 	archivedSession: ARCHIVED_SESSION_ID,
+	archivedSessionPageTwo: ARCHIVED_SESSION_PAGE_TWO_ID,
+	archivedSessionPageThree: ARCHIVED_SESSION_PAGE_THREE_ID,
+	archivedGoalPageTwo: ARCHIVED_GOAL_PAGE_TWO_ID,
+	archivedGoalPageThree: ARCHIVED_GOAL_PAGE_THREE_ID,
+	remoteArchivedSession: REMOTE_ARCHIVED_SESSION_ID,
 };
 
 class FixtureWebSocket {
@@ -143,7 +155,44 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	});
 	const route = mountedRoute(url);
 	if (route === "/api/projects") return response({ projects: [{ ...PROJECT }] });
+	if (route.startsWith("/api/sessions") && route.includes("q=RemoteBeyondFirstPageNeedle")) {
+		return response({
+			sessions: [{
+				id: REMOTE_ARCHIVED_SESSION_ID,
+				title: "RemoteBeyondFirstPageNeedle",
+				cwd: PROJECT.rootPath,
+				projectId: PROJECT_ID,
+				status: "archived",
+				createdAt: 1,
+				lastActivity: 1,
+				lastReadAt: 2,
+				clientCount: 0,
+				archived: true,
+			}],
+			archivedDelegates: [], total: 1, hasMore: false, nextCursor: null,
+		});
+	}
+	if (route.startsWith("/api/sessions") && url.searchParams.get("include") === "archived") {
+		const after = url.searchParams.get("after");
+		if (after === "200") {
+			return response({ sessions: [fixtureArchivedPageSession(ARCHIVED_SESSION_PAGE_TWO_ID, "Archived Session Page Two", 3_000)], archivedDelegates: [], total: 4, hasMore: true, nextCursor: 100 });
+		}
+		if (after === "100") {
+			return response({ sessions: [fixtureArchivedPageSession(ARCHIVED_SESSION_PAGE_THREE_ID, "Archived Session Page Three", 2_000)], archivedDelegates: [], total: 4, hasMore: false, nextCursor: null });
+		}
+		return response({ sessions: fixtureArchivedSessions(), archivedDelegates: [], total: 4, hasMore: true, nextCursor: 200 });
+	}
 	if (route.startsWith("/api/sessions")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
+	if (route.startsWith("/api/goals") && url.searchParams.get("archived") === "true" && !url.searchParams.has("q")) {
+		const after = url.searchParams.get("after");
+		if (after === "200") {
+			return response({ goals: [fixtureArchivedGoal(ARCHIVED_GOAL_PAGE_TWO_ID, "Archived Goal Page Two", 3_000)], total: 3, hasMore: true, nextCursor: 100, archivedSessions: [] });
+		}
+		if (after === "100") {
+			return response({ goals: [fixtureArchivedGoal(ARCHIVED_GOAL_PAGE_THREE_ID, "Archived Goal Page Three", 2_000)], total: 3, hasMore: false, nextCursor: null, archivedSessions: [] });
+		}
+		return response({ goals: [fixtureArchivedGoal(ARCHIVED_GOAL_PAGE_ONE_ID, "Archived Goal Page One", 4_000)], total: 3, hasMore: true, nextCursor: 200, archivedSessions: [] });
+	}
 	if (route.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
 	if (route === "/api/staff" || route.startsWith("/api/staff?") || route === "/api/staff/orphaned") return response({ staff: [] });
 	if (route === "/api/preferences") return response({});
@@ -186,6 +235,38 @@ function readFilterStorage(): void {
 	state.showArchived = localStorage.getItem("bobbit-show-archived") === "true";
 	state.showBusy = localStorage.getItem("bobbit-show-busy") !== "false";
 	state.showRead = localStorage.getItem("bobbit-show-read") !== "false";
+}
+
+function fixtureArchivedGoal(id: string, title: string, archivedAt: number): Goal {
+	return {
+		id,
+		title,
+		cwd: PROJECT.rootPath,
+		projectId: PROJECT_ID,
+		state: "complete",
+		spec: `${title} pagination fixture.`,
+		createdAt: archivedAt - 100,
+		updatedAt: archivedAt,
+		setupStatus: "ready",
+		archived: true,
+		archivedAt,
+	};
+}
+
+function fixtureArchivedPageSession(id: string, title: string, archivedAt: number): GatewaySession {
+	return {
+		id,
+		title,
+		cwd: PROJECT.rootPath,
+		projectId: PROJECT_ID,
+		status: "terminated",
+		createdAt: archivedAt - 100,
+		lastActivity: archivedAt - 50,
+		lastReadAt: archivedAt,
+		clientCount: 0,
+		archived: true,
+		archivedAt,
+	};
 }
 
 function fixtureArchivedSessions(): GatewaySession[] {
@@ -330,12 +411,18 @@ function fixtureSessions(): GatewaySession[] {
 async function resetFixture(opts: { preserveFilterStorage?: boolean } = {}): Promise<void> {
 	// Publish a valid mounted connection before renderSidebar persists missing session colours.
 	commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, FIXTURE_GATEWAY_TOKEN);
+	clearArchivedSessionsState();
 	(window as any).__sidebarFilterSearchRequests = [];
 	installFixtureStyle();
 	if (!opts.preserveFilterStorage) {
 		localStorage.removeItem("bobbit-show-archived");
 		localStorage.removeItem("bobbit-show-busy");
 		localStorage.removeItem("bobbit-show-read");
+		localStorage.removeItem("bobbit-sidebar-session-view");
+		localStorage.removeItem("bobbit-status-show-archived");
+		localStorage.removeItem("bobbit-status-show-busy");
+		localStorage.removeItem("bobbit-status-show-read");
+		localStorage.removeItem("bobbit-status-show-teams");
 	}
 	localStorage.removeItem("bobbit-expanded-goals");
 	localStorage.removeItem("bobbit-sidebar-tree-state:v1");
@@ -361,8 +448,14 @@ async function resetFixture(opts: { preserveFilterStorage?: boolean } = {}): Pro
 		keyboardNavActiveId: null,
 		activeProjectId: PROJECT_ID,
 		sidebarCollapsed: false,
+		sidebarSessionView: "project",
+		statusShowArchived: false,
+		statusShowBusy: true,
+		statusShowRead: true,
+		statusShowTeams: false,
 		filtersPopoverOpen: false,
 		searchQuery: "",
+		archivedSearchDemand: false,
 		sessionsLoading: false,
 		sessionsError: "",
 		creatingSession: false,

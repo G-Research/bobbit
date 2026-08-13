@@ -110,6 +110,8 @@ export interface PersistedSession {
 	lastActivity: number;
 	/** Epoch ms when the user last viewed this session. 0 / undefined = never read. */
 	lastReadAt?: number;
+	/** Durable user-owned session metadata. Missing legacy values normalize to an empty array. */
+	user_tags?: string[];
 	/** Optional goal this session belongs to */
 	goalId?: string;
 	/** Whether the agent was actively streaming when the server last knew about it */
@@ -156,6 +158,10 @@ export interface PersistedSession {
 	teamLeadSessionId?: string;
 	/** Path to the git worktree for this session */
 	worktreePath?: string;
+	/** This writable session uses another session's worktree but never owns its teardown. */
+	borrowsWorktree?: boolean;
+	/** Flattened session id of the sandbox worktree lifecycle owner. Provenance only. */
+	borrowedWorktreeOwnerSessionId?: string;
 	/** Assistant type: "goal" | "role" | "tool" */
 	assistantType?: string;
 	// Legacy boolean fields — kept for backward compat during migration
@@ -229,6 +235,7 @@ export type UpdatableSessionFields = Pick<
 	| "title"
 	| "lastActivity"
 	| "lastReadAt"
+	| "user_tags"
 	| "agentSessionFile"
 	| "goalId"
 	| "wasStreaming"
@@ -244,6 +251,8 @@ export type UpdatableSessionFields = Pick<
 	| "teamGoalId"
 	| "teamLeadSessionId"
 	| "worktreePath"
+	| "borrowsWorktree"
+	| "borrowedWorktreeOwnerSessionId"
 	| "assistantType"
 	| "goalAssistant"
 	| "roleAssistant"
@@ -754,8 +763,10 @@ export class SessionStore {
 	 * activity debounce and enter the serialized async writer immediately; the
 	 * public `flush()`/`flushAsync()` paths retain shutdown durability.
 	 *
-	 * `lastActivity` / `lastReadAt` are intentionally excluded — they fire on
-	 * every event and benefit from coalescing.
+	 * `lastActivity` is intentionally excluded because genuine activity can be
+	 * high-frequency and benefits from coalescing. `lastReadAt` normally shares
+	 * that path, while the mark-read API explicitly awaits `flushAsync()` before
+	 * acknowledging so a successful read survives graceful restart.
 	 */
 	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
@@ -765,7 +776,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel", "humanSelectionPins",
-		"manualRetryRequired", "inFlightSteerTexts",
+		"manualRetryRequired", "inFlightSteerTexts", "user_tags",
 		"sidePanelWorkspace", "scheduledAdvisorTurnCount",
 	];
 
@@ -790,6 +801,25 @@ export class SessionStore {
 		if (updates.title !== undefined || updates.archived !== undefined || updates.role !== undefined || updates.goalId !== undefined) {
 			this.onIndexUpdate?.(existing);
 		}
+	}
+
+	/**
+	 * Restore the exact optional-field shape captured before a failed pin write.
+	 * Legacy records may omit `user_tags` or contain a malformed raw value, so a
+	 * normal typed update cannot faithfully compensate the mutation.
+	 */
+	restoreUserTagsShape(id: string, present: boolean, value: unknown): boolean {
+		const existing = this.sessions.get(id);
+		if (!existing) return false;
+		this.generation++;
+		if (present) {
+			(existing as unknown as { user_tags: unknown }).user_tags = value;
+		} else {
+			delete existing.user_tags;
+		}
+		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
+		this.saveNow();
+		return true;
 	}
 
 

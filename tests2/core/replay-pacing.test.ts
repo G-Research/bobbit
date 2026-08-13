@@ -16,6 +16,7 @@ import { paceAndSend, PACE_THRESHOLD_BYTES } from "../../src/server/replay-pacin
 interface FakeClient {
 	readyState: number;
 	bufferedAmount: number;
+	streamBackpressureCutover?: boolean;
 	send(d: string): void;
 	terminate(): void;
 	sendCount: number;
@@ -86,9 +87,25 @@ describe("paceAndSend", () => {
 		const c = makeClient({ readyState: 3, bufferedAmount: 0 });
 		let sleeps = 0;
 		const sleep = async (_ms: number) => { sleeps++; };
-		await paceAndSend(c, "x", Date.now() + 2000, sleep);
+		const sent = await paceAndSend(c, "x", Date.now() + 2000, sleep);
+		assert.equal(sent, false);
 		assert.equal(c.sendCount, 0);
 		assert.equal(c.terminateCount, 0);
 		assert.equal(sleeps, 0);
+	});
+
+	it("cancels during pacing without sending after a stream cutover", async () => {
+		const c = makeClient({ bufferedAmount: PACE_THRESHOLD_BYTES + 1 });
+		let sleeps = 0;
+		const sleep = async (_ms: number) => {
+			sleeps++;
+			c.streamBackpressureCutover = true;
+		};
+
+		const sent = await paceAndSend(c, "must-not-send", Date.now() + 2000, sleep);
+
+		assert.equal(sent, false);
+		assert.equal(c.sendCount, 0);
+		assert.equal(sleeps, 1);
 	});
 });

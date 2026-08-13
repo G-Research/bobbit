@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: clean
 
 /**
- * Unit tests for inferMeta() and modelRecencyRank().
+ * Unit tests for the explicitly legacy AIGW metadata fallback and modelRecencyRank().
  *
  * These import from the built dist/ modules (compiled by npm run build:server
  * before tests run). No server needed — pure function tests.
@@ -12,15 +12,15 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
-import { inferMeta } from "../../src/server/agent/aigw-manager.ts";
+import { inferLegacyAigwMeta } from "../../src/server/agent/aigw-manager.ts";
 import { modelRecencyRank as serverModelRecencyRank } from "../../src/server/agent/model-registry.ts";
 import { modelRecencyRank } from "../../src/shared/model-ranks.ts";
 
-// ── inferMeta tests ────────────────────────────────────────────────
+// ── Legacy /v1/models inference tests ─────────────────────────────
 
-describe("inferMeta()", () => {
+describe("inferLegacyAigwMeta()", () => {
 	it("Claude Opus → 1M context, 32K max, reasoning=true", () => {
-		const meta = inferMeta("claude-opus-4-6");
+		const meta = inferLegacyAigwMeta("claude-opus-4-6");
 		assert.equal(meta.contextWindow, 1_000_000);
 		assert.equal(meta.maxTokens, 32_768);
 		assert.equal(meta.reasoning, true);
@@ -28,14 +28,14 @@ describe("inferMeta()", () => {
 	});
 
 	it("Claude Opus (Bedrock style) → 1M context", () => {
-		const meta = inferMeta("us.anthropic.claude-opus-4-5-v1:0");
+		const meta = inferLegacyAigwMeta("us.anthropic.claude-opus-4-5-v1:0");
 		assert.equal(meta.contextWindow, 1_000_000);
 		assert.equal(meta.maxTokens, 32_768);
 		assert.equal(meta.reasoning, true);
 	});
 
 	it("Claude Sonnet → 1M context, 16K max, reasoning=true", () => {
-		const meta = inferMeta("claude-sonnet-4-6");
+		const meta = inferLegacyAigwMeta("claude-sonnet-4-6");
 		assert.equal(meta.contextWindow, 1_000_000);
 		assert.equal(meta.maxTokens, 16_384);
 		assert.equal(meta.reasoning, true);
@@ -43,13 +43,13 @@ describe("inferMeta()", () => {
 	});
 
 	it("Claude Sonnet 4.5 → 1M context", () => {
-		const meta = inferMeta("claude-sonnet-4-5-20250929");
+		const meta = inferLegacyAigwMeta("claude-sonnet-4-5-20250929");
 		assert.equal(meta.contextWindow, 1_000_000);
 		assert.equal(meta.reasoning, true);
 	});
 
 	it("Claude Haiku → 200K context, reasoning=false", () => {
-		const meta = inferMeta("claude-haiku-4-5");
+		const meta = inferLegacyAigwMeta("claude-haiku-4-5");
 		assert.equal(meta.contextWindow, 200_000);
 		assert.equal(meta.maxTokens, 8_192);
 		assert.equal(meta.reasoning, false);
@@ -57,20 +57,20 @@ describe("inferMeta()", () => {
 	});
 
 	it("generic Claude model → 200K context", () => {
-		const meta = inferMeta("claude-3-5-turbo");
+		const meta = inferLegacyAigwMeta("claude-3-5-turbo");
 		assert.equal(meta.contextWindow, 200_000);
 		assert.equal(meta.reasoning, false);
 	});
 
 	it("GPT-5 → 400K context", () => {
-		const meta = inferMeta("gpt-5");
+		const meta = inferLegacyAigwMeta("gpt-5");
 		assert.equal(meta.contextWindow, 400_000);
 		assert.equal(meta.maxTokens, 32_768);
 		assert.ok(meta.input!.includes("image"));
 	});
 
 	it("GPT-5.2 → 400K context", () => {
-		const meta = inferMeta("openai/gpt-5.2");
+		const meta = inferLegacyAigwMeta("openai/gpt-5.2");
 		assert.equal(meta.contextWindow, 400_000);
 	});
 
@@ -78,13 +78,13 @@ describe("inferMeta()", () => {
 		// Only families that explicitly opt in (GPT 5.6) should flip this flag; a
 		// broad all-reasoning change would regress the conservative gateway default.
 		for (const id of ["openai/gpt-5.2", "gpt-5.5", "gpt-5.4", "o4-mini", "claude-sonnet-4-6"]) {
-			const meta = inferMeta(id);
+			const meta = inferLegacyAigwMeta(id);
 			assert.equal(meta.compat!.supportsReasoningEffort, false, `${id} must keep supportsReasoningEffort:false`);
 		}
 	});
 
 	it("GPT-5.4 → 272K context and reasoning=true so xhigh does not clamp to off", () => {
-		const meta = inferMeta("gpt-5.4");
+		const meta = inferLegacyAigwMeta("gpt-5.4");
 		assert.equal(meta.contextWindow, 272_000);
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
@@ -92,7 +92,7 @@ describe("inferMeta()", () => {
 	});
 
 	it("GPT-5.5 → 272K context, 128K max, reasoning=true", () => {
-		const meta = inferMeta("gpt-5.5");
+		const meta = inferLegacyAigwMeta("gpt-5.5");
 		assert.equal(meta.contextWindow, 272_000);
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
@@ -100,7 +100,7 @@ describe("inferMeta()", () => {
 	});
 
 	it("GPT-5.6 Luna (routed id) → reasoning + thinkingLevelMap xhigh/max", () => {
-		const meta = inferMeta("openai/gpt-5.6-luna");
+		const meta = inferLegacyAigwMeta("openai/gpt-5.6-luna");
 		assert.equal(meta.reasoning, true);
 		assert.equal(meta.contextWindow, 272_000);
 		assert.equal(meta.maxTokens, 128_000);
@@ -121,79 +121,79 @@ describe("inferMeta()", () => {
 
 	it("GPT-5.6 Sol/Terra (bare + routed) → reasoning + max map", () => {
 		for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "openai/gpt-5.6-terra"]) {
-			const meta = inferMeta(id);
+			const meta = inferLegacyAigwMeta(id);
 			assert.equal(meta.reasoning, true, `${id} should be reasoning-capable`);
 			assert.equal(meta.thinkingLevelMap!.max, "max", `${id} should expose max`);
 		}
 	});
 
 	it("GPT-5.6 does not disturb the generic GPT-5 non-reasoning fallback", () => {
-		const meta = inferMeta("gpt-5");
+		const meta = inferLegacyAigwMeta("gpt-5");
 		assert.equal(meta.reasoning, false);
 		assert.equal(meta.thinkingLevelMap, undefined);
 	});
 
 	it("GPT-5.5 pro → 1.05M context, 128K max, reasoning=true", () => {
-		const meta = inferMeta("gpt-5.5-pro");
+		const meta = inferLegacyAigwMeta("gpt-5.5-pro");
 		assert.equal(meta.contextWindow, 1_050_000);
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
 	});
 
 	it("o4-mini → 200K context, reasoning=true", () => {
-		const meta = inferMeta("o4-mini");
+		const meta = inferLegacyAigwMeta("o4-mini");
 		assert.equal(meta.contextWindow, 200_000);
 		assert.equal(meta.maxTokens, 65_536);
 		assert.equal(meta.reasoning, true);
 	});
 
 	it("o3 → 200K context, reasoning=true", () => {
-		const meta = inferMeta("o3");
+		const meta = inferLegacyAigwMeta("o3");
 		assert.equal(meta.contextWindow, 200_000);
 		assert.equal(meta.reasoning, true);
 		assert.ok(meta.input!.includes("image"));
 	});
 
 	it("o3-mini → 200K context, reasoning=true", () => {
-		const meta = inferMeta("o3-mini");
+		const meta = inferLegacyAigwMeta("o3-mini");
 		assert.equal(meta.contextWindow, 200_000);
 		assert.equal(meta.maxTokens, 65_536);
 		assert.equal(meta.reasoning, true);
 	});
 
 	it("GPT-4o → 128K context", () => {
-		const meta = inferMeta("gpt-4o");
+		const meta = inferLegacyAigwMeta("gpt-4o");
 		assert.equal(meta.contextWindow, 128_000);
 		assert.equal(meta.reasoning, false);
 	});
 
 	it("OpenRouter Z.ai GLM 5.x → reasoning=true", () => {
 		for (const id of ["z-ai/glm-5.2", "z-ai/glm-5-air"]) {
-			const meta = inferMeta(id);
+			const meta = inferLegacyAigwMeta(id);
 			assert.equal(meta.reasoning, true, `${id} should be reasoning-capable`);
 		}
 	});
 
 	it("older Z.ai GLM families remain non-reasoning by heuristic", () => {
 		for (const id of ["z-ai/glm-4.5", "z-ai/glm-130b", "glm-4-plus"]) {
-			const meta = inferMeta(id);
+			const meta = inferLegacyAigwMeta(id);
 			assert.equal(meta.reasoning, false, `${id} should not be marked reasoning-capable by the GLM 5.x rule`);
 		}
 	});
 
 	it("Qwen → 1M context", () => {
-		const meta = inferMeta("qwen3-coder-480b");
+		const meta = inferLegacyAigwMeta("qwen3-coder-480b");
 		assert.equal(meta.contextWindow, 1_000_000);
 		assert.equal(meta.maxTokens, 32_768);
 	});
 
 	it("Qwen (prefixed) → 1M context", () => {
-		const meta = inferMeta("gresearch/qwen3-coder-480b-a35b");
+		const meta = inferLegacyAigwMeta("gresearch/qwen3-coder-480b-a35b");
 		assert.equal(meta.contextWindow, 1_000_000);
 	});
 
 	it("Unknown model → 128K default context", () => {
-		const meta = inferMeta("totally-unknown-model-xyz");
+		const meta = inferLegacyAigwMeta("totally-unknown-model-xyz");
 		assert.equal(meta.contextWindow, 128_000);
 		assert.equal(meta.maxTokens, 16_384);
 		assert.equal(meta.reasoning, false);
@@ -205,7 +205,7 @@ describe("inferMeta()", () => {
 			"qwen3-coder", "unknown-model",
 		];
 		for (const id of models) {
-			const meta = inferMeta(id);
+			const meta = inferLegacyAigwMeta(id);
 			assert.ok(meta.compat !== undefined, `${id} should have compat`);
 			assert.equal(meta.compat!.supportsStore, false);
 		}

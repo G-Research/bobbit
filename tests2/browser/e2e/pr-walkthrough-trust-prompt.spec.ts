@@ -81,7 +81,7 @@ async function clickPrWalkthroughLauncher(page: Page): Promise<void> {
 	await expect(trigger).toBeVisible({ timeout: 10_000 });
 	await trigger.click();
 	await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-	const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR Walkthrough" }).first();
+	const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR walkthrough" }).first();
 	await expect(launcher).toBeVisible({ timeout: 10_000 });
 	await launcher.click();
 }

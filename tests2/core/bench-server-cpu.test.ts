@@ -64,7 +64,7 @@ describe("bench-server-cpu summary generation", () => {
 				cpuPct: 3,
 				delayP95Ms: 4,
 				rest: { "GET /api/projects": { count: 2, p95Ms: 5, bytes: 100 } },
-				ws: { "session:message_update": { frames: 4, bytes: 400, recipients: 4 } },
+				ws: { "session:message_update": { frames: 4, bytes: 400, recipients: 4, retainedBytes: 2048 } },
 			},
 			{
 				kind: "cpu",
@@ -90,6 +90,7 @@ describe("bench-server-cpu summary generation", () => {
 		assert.equal(summary.wsBytesPerSec, 250);
 		assert.equal(summary.wsRecipientCount, 6);
 		assert.equal(summary.wsRecipientsPerSec, 3);
+		assert.equal(summary.wsTypes["session:message_update"].retainedBytes, 2048);
 		assert.equal(summary.wsTypes["goal:gate_status_changed"].scanned, 5);
 		assert.equal(summary.wsTypes["goal:gate_status_changed"].matchedGoal, 1);
 		assert.equal(summary.wsTypes["goal:gate_status_changed"].fallback, 1);

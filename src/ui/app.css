@@ -117,13 +117,18 @@
 	}
 }
 
-/* Tell Tailwind to scan mini-lit components */
+/* Scan only UI-owned sources. Tests, docs, runtime state, and agent output must
+   not enter Tailwind's development rebuild queue. */
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
+@source "../";
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
+@source "../../index.html";
 /* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind 4 source directive */
 @source "../../node_modules/@mariozechner/mini-lit/dist";
 
-/* Import Tailwind */
-/* biome-ignore lint/correctness/noInvalidPositionAtImportRule: fuck you */
-@import "tailwindcss";
+/* Import Tailwind without its default repository-wide source detection. */
+/* biome-ignore lint/correctness/noInvalidPositionAtImportRule: Tailwind extension */
+@import "tailwindcss" source(none);
 
 /* ── Bobbit palette overrides ──
    Warm the neutrals with a hint of green-yellow (hue ~140) so the
@@ -4406,6 +4411,134 @@ html {
 	padding-left: 24px;
 	box-shadow: 0 1px 4px var(--user-msg-shadow), 0 2px 8px var(--user-msg-shadow2);
 }
+/* Prompt metadata sits below the bubble so it never reduces the readable width. */
+.prompt-row {
+	align-items: flex-start;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.prompt-content-column {
+	display: flex;
+	flex: 0 1 auto;
+	flex-direction: column;
+	align-items: flex-start;
+	width: fit-content;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.prompt-content-column > .user-message-container {
+	flex: 0 1 auto;
+	min-width: 0;
+}
+
+.prompt-metadata-row {
+	display: flex;
+	align-items: center;
+	align-self: flex-end;
+	justify-content: flex-end;
+	min-width: 0;
+}
+
+.prompt-actions-trigger-wrap {
+	display: grid;
+	place-items: center;
+	flex: 0 0 32px;
+	width: 32px;
+	height: 32px;
+	margin-left: 2px;
+}
+
+.prompt-actions-trigger {
+	display: inline-grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.prompt-actions-trigger:hover,
+.prompt-actions-trigger[aria-expanded="true"] {
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+
+.prompt-actions-trigger:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 1px;
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+
+.prompt-actions-trigger:disabled {
+	cursor: wait;
+	opacity: 0.45;
+}
+
+/* The canonical popover supplies the visuals; these bounds keep its nested
+   help affordance comfortably operable on pointer and touch surfaces. */
+.bobbit-sidebar-actions-help,
+[data-sidebar-actions-help] {
+	min-width: 28px;
+	min-height: 28px;
+	touch-action: manipulation;
+}
+
+@media (max-width: 639px), (hover: none), (pointer: coarse) {
+	.prompt-actions-trigger-wrap {
+		flex-basis: 44px;
+		width: 44px;
+		height: 44px;
+		margin-left: 0;
+	}
+
+	.prompt-actions-trigger {
+		position: relative;
+		width: 44px;
+		height: 44px;
+		background: transparent;
+	}
+
+	.prompt-actions-trigger:hover,
+	.prompt-actions-trigger:focus-visible,
+	.prompt-actions-trigger[aria-expanded="true"] {
+		background: transparent;
+	}
+
+	.prompt-actions-trigger::before {
+		content: "";
+		position: absolute;
+		width: 28px;
+		height: 28px;
+		border-radius: 5px;
+		background: transparent;
+	}
+
+	.prompt-actions-trigger:hover::before,
+	.prompt-actions-trigger:focus-visible::before,
+	.prompt-actions-trigger[aria-expanded="true"]::before {
+		background: var(--accent);
+	}
+
+	.prompt-actions-trigger svg {
+		position: relative;
+		z-index: 1;
+	}
+
+	.bobbit-sidebar-actions-help,
+	[data-sidebar-actions-help] {
+		min-width: 36px;
+		min-height: 36px;
+	}
+}
+
 /* Sage green chevron marker */
 .user-message-container::before {
 	content: '❯';
@@ -4423,9 +4556,6 @@ html {
 /* Prompt author attribution. The badge and bubble share one grid cell so the
    badge participates in intrinsic width while remaining over the top border. */
 .prompt-row--labelled {
-	align-items: flex-end;
-	min-width: 0;
-	max-width: 100%;
 	padding-top: 2px;
 }
 
@@ -4559,7 +4689,8 @@ html {
 	letter-spacing: 0.07em;
 }
 
-.prompt-row--labelled > .message-timestamp {
+.prompt-metadata-row > .message-timestamp {
+	align-self: auto;
 	flex-shrink: 0;
 }
 

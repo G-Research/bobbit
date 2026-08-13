@@ -56,11 +56,14 @@ async function runFailureNotification(options: {
 	projectConfigStore?: unknown;
 }): Promise<{ message: string; persistedGuidance: string | undefined }> {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "failure-guidance-integration-"));
+	let initialGoalStore: GoalStore | undefined;
+	let goalStore: GoalStore | undefined;
+	let gateStore: GateStore | undefined;
 	try {
 		const frozenWorkflow = workflowFor(options.goalId, options.stepName, FROZEN_GUIDANCE);
 		const runtimeWorkflow = workflowFor(options.goalId, options.stepName, MUTATED_GUIDANCE);
 		const runtimeGate = runtimeWorkflow.gates[0] as WorkflowGate;
-		const initialGoalStore = new GoalStore(stateDir);
+		initialGoalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const goal: PersistedGoal = {
 			id: options.goalId,
 			title: "Frozen failure guidance",
@@ -74,13 +77,14 @@ async function runFailureNotification(options: {
 			enabledOptionalSteps: [],
 		};
 		initialGoalStore.put(goal);
-		await initialGoalStore.flush();
+		await initialGoalStore.close();
+		initialGoalStore = undefined;
 
 		// Reload from disk so notification lookup exercises the persisted frozen
 		// snapshot rather than sharing the runtime verifier's workflow object.
-		const goalStore = new GoalStore(stateDir);
+		goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 		const persistedGuidance = goalStore.get(options.goalId)?.workflow?.gates[0].verify?.[0]?.failureGuidance;
-		const gateStore = new GateStore(stateDir);
+		gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 		gateStore.initGatesForGoal(options.goalId, [GATE_ID]);
 		const context = {
 			goalStore,
@@ -129,6 +133,9 @@ async function runFailureNotification(options: {
 		expect(notifications).toHaveLength(1);
 		return { message: notifications[0], persistedGuidance };
 	} finally {
+		await Promise.allSettled([initialGoalStore, goalStore, gateStore]
+			.filter((store): store is GoalStore | GateStore => store !== undefined)
+			.map(store => store.close()));
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
 }

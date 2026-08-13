@@ -10,22 +10,23 @@ Use the review pane as the single decision surface for gate sign-off content. Th
 
 Order the bottom review controls to match how a reviewer works:
 
-1. Read the markdown document and add inline comments where needed.
-2. Write an optional final comment in a dedicated section.
-3. Choose **Approve** or **Reject**.
+1. Navigate the review's files and add inline comments where needed.
+2. Write one optional review-level final comment in a dedicated section.
+3. Choose **Approve** or **Reject** for the whole review.
 
 Place the final comment section directly above the decision buttons so the reviewer sees their last chance to summarize before committing the decision.
 
 Recommended structure:
 
 ```text
-[review document with inline comments]
+[secondary file navigation, for multi-file reviews]
+[selected file with inline comments]
 
 Final comment
 [textarea]
 Helper text / validation message
 
-[Dismiss]                         [Approve] [Reject]
+[Dismiss]                         [Reject] [Approve]
 ```
 
 Guidance:
@@ -37,12 +38,9 @@ Guidance:
 
 ## Decision button order
 
-Use this button order:
+Keep **Reject** adjacent to **Approve**, with **Approve** as the rightmost primary forward action. **Dismiss** remains separated as the quiet action.
 
-1. **Approve**
-2. **Reject**
-
-Rationale: sign-off is usually a confirmation task after review, so the primary forward action should appear first. Rejection remains adjacent and explicit, but must not be the first decision control the user reaches.
+Rationale: sign-off is usually a confirmation task after review. Putting the primary action at the end of the action row preserves that forward progression while keeping rejection explicit without making it visually louder.
 
 Button treatment:
 - **Approve**: primary action styling.
@@ -53,7 +51,7 @@ Button treatment:
 
 Approval may submit with no comments.
 
-Rejection must include at least one comment: either an inline comment or a non-empty final comment.
+Rejection must include at least one comment: either an inline comment on any file or a non-empty review-level final comment.
 
 Use this inline validation message below the final comment field when the user clicks **Reject** without any comments:
 
@@ -72,8 +70,8 @@ Decision submissions should include:
 For human-readable feedback, order the content as:
 
 1. Decision summary.
-2. Final comment.
-3. Inline comments grouped with quoted context.
+2. Inline comments grouped by file in review order, with quoted context.
+3. The single review-level final comment.
 
 Approval with no comments should still produce a concise positive signal for arbitrary markdown reviews, e.g. `Approved with no comments.` Verification sign-off approvals may omit feedback if the endpoint allows it.
 
@@ -81,10 +79,10 @@ Approval with no comments should still produce a concise positive signal for arb
 
 The widget is a launcher, not a reading surface.
 
-When the user clicks **View content** on a pending sign-off:
+When the user clicks **Start Review** on a pending sign-off:
 
 1. Fetch the submitted gate signal content.
-2. Open or focus a review-pane document titled with goal, gate, and sign-off step context.
+2. Open or focus a one-file review titled with goal, gate, and sign-off step context.
 3. Close the popover after a successful handoff.
 4. Show a compact row-level error if content cannot be loaded.
 
@@ -100,6 +98,6 @@ Only add a signal suffix when needed to disambiguate repeated submissions.
 
 ## Persistence and closure
 
-A review opened from the widget should survive reload/navigation until the user submits a decision or closes the document. Closing without submitting should keep the existing unsent-comment warning behavior when inline comments exist.
+A review opened from the widget should survive reload/navigation until its decision cleanup completes or its primary workspace tab is successfully closed. Closing without submitting should warn once when any file has an inline comment or the review has a non-empty final draft.
 
-After successful submission, clear the document, its persisted review context, and its annotations for that title.
+After feedback succeeds, first close and confirm absence of every primary workspace tab for that review. Only then remove its persisted group, clear annotations by stable review/file identity, discard its final draft, and write the applicable tombstone. If workspace close fails, preserve that state and show a retry error; a decision retry may repeat feedback that was already delivered. Duplicate titles and sibling reviews must remain intact. See the main reference for the exact tombstone and cleanup rules.

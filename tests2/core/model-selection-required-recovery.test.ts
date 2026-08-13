@@ -23,7 +23,7 @@ process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 
 const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
 resetAgentDirStateForTests?.();
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager, buildModelStateData } = await import("../../src/server/agent/session-manager.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
@@ -169,6 +169,16 @@ afterAll(() => {
 });
 
 describe("retired persisted model cold recovery", () => {
+	it("omits input modalities when exact recovery metadata is unavailable", () => {
+		invalidateModelCache();
+		const state = buildModelStateData("custom", "unavailable-recovery-model");
+		assert.deepEqual(state.model, {
+			provider: "custom",
+			id: "unavailable-recovery-model",
+		});
+		assert.equal(Object.prototype.hasOwnProperty.call(state.model, "input"), false);
+	});
+
 	it("keeps history attachable under MODEL_SELECTION_REQUIRED without spawning or retrying Pi", async () => {
 		const preferences = new PreferencesStore(path.resolve("/memfs/model-selection-required"), createMemFs());
 		preferences.set("providerKey.anthropic", "test-anthropic-key");
@@ -317,9 +327,14 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(restoreSession.mock.calls.length, 0, "condition bypasses must not attempt restore");
 
 		const replacement = catalog.find((model: any) =>
-			model.provider === "anthropic" && model.sessionSelectable !== false,
+			model.provider === "anthropic"
+			&& model.sessionSelectable !== false
+			&& Array.isArray(model.input)
+			&& model.input.length === 2
+			&& model.input[0] === "text"
+			&& model.input[1] === "image",
 		);
-		assert.ok(replacement, "fixture requires a current session-selectable replacement");
+		assert.ok(replacement, "fixture requires a current session-selectable text/image replacement");
 
 		let failedOptions: Record<string, any> | undefined;
 		let failedBridge: any;
@@ -517,8 +532,20 @@ describe("retired persisted model cold recovery", () => {
 		assert.equal(store.get(SESSION_ID)?.modelProvider, replacement.provider, "only verified activation publishes provider");
 		assert.equal(store.get(SESSION_ID)?.modelId, replacement.id, "only verified activation publishes model");
 		assert.equal(store.get(SESSION_ID)?.effectiveThinkingLevel, activated.thinkingLevel, "published thinking is the verified clamp");
-		assert.equal(explicitConditionClearFrames(firstClient).length, 1, "verified activation must publish one explicit condition clear");
-		assert.equal(explicitConditionClearFrames(duringActivationClient).length, 1, "verified activation must clear the condition for clients attached during staging");
+		const firstConditionClearFrames = explicitConditionClearFrames(firstClient);
+		const duringActivationConditionClearFrames = explicitConditionClearFrames(duringActivationClient);
+		assert.equal(firstConditionClearFrames.length, 1, "verified activation must publish one explicit condition clear");
+		assert.equal(duringActivationConditionClearFrames.length, 1, "verified activation must clear the condition for clients attached during staging");
+		assert.deepEqual(
+			firstConditionClearFrames[0]?.data?.model?.input,
+			["text", "image"],
+			"the full-replacement recovery frame must retain exact validated input modalities",
+		);
+		assert.deepEqual(
+			duringActivationConditionClearFrames[0]?.data?.model?.input,
+			["text", "image"],
+			"clients attached during recovery must receive the same exact modalities",
+		);
 		assert.deepEqual(durableTupleAtConditionClear, {
 			modelProvider: replacement.provider,
 			modelId: replacement.id,

@@ -19,7 +19,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { assertDockerToolResultGateCompatibility, buildAgentArgs } from "../../src/server/agent/rpc-bridge.ts";
+import { assertDockerToolResultGateCompatibility, buildAgentArgs, resolveEffectivePiSelection } from "../../src/server/agent/rpc-bridge.ts";
 
 describe("Docker result-gate preflight", () => {
 	it("requires both a read-only gate mount and patched Pi markers before protected launch", () => {
@@ -36,6 +36,67 @@ describe("Docker result-gate preflight", () => {
 			() => assertDockerToolResultGateCompatibility("sandbox-1", () => "/bobbit-state/tool-result-filter true\n"),
 			/patched Docker Pi runtime and read-only gate mount/,
 		);
+	});
+});
+
+describe("resolveEffectivePiSelection", () => {
+	it("resolves repeated raw flags with Pi last-wins semantics and strips selection args", () => {
+		assert.deepEqual(resolveEffectivePiSelection({
+			initialModel: "anthropic/claude-opus-5",
+			initialThinkingLevel: "high",
+			args: [
+				"--provider", "openai",
+				"--model", "gpt-4o",
+				"--thinking", "low",
+				"--extension", "/foo.ts",
+				"--provider", "openrouter",
+				"--model", "anthropic/claude-sonnet-4",
+				"--thinking", "xhigh",
+			],
+		}), {
+			requestedModel: "anthropic/claude-opus-5",
+			effectiveModel: "openrouter/anthropic/claude-sonnet-4",
+			requestedThinking: "high",
+			effectiveThinking: "xhigh",
+			sanitizedArgs: ["--extension", "/foo.ts"],
+		});
+	});
+
+	it("lets a qualified model-only override cross providers while preserving nested IDs", () => {
+		assert.deepEqual(resolveEffectivePiSelection({
+			initialModel: "anthropic/claude-opus-5",
+			requestedModel: "anthropic/claude-opus-5",
+			args: ["--model", "openrouter/anthropic/claude-opus-5", "--tools", "read"],
+		}), {
+			requestedModel: "anthropic/claude-opus-5",
+			effectiveModel: "openrouter/anthropic/claude-opus-5",
+			sanitizedArgs: ["--tools", "read"],
+		});
+	});
+
+	it("retains the initial provider for a bare model override and supports Pi's thinking shorthand", () => {
+		assert.deepEqual(resolveEffectivePiSelection({
+			initialModel: "anthropic/claude-opus-5",
+			args: ["--model", "claude-sonnet-4:low"],
+		}), {
+			requestedModel: "anthropic/claude-opus-5",
+			effectiveModel: "anthropic/claude-sonnet-4",
+			effectiveThinking: "low",
+			sanitizedArgs: [],
+		});
+	});
+
+	it("strips a matching provider prefix when both raw flags provide it", () => {
+		assert.equal(resolveEffectivePiSelection({
+			initialModel: "openai/gpt-4o",
+			args: ["--provider", "openrouter", "--model", "openrouter/anthropic/claude-opus-5"],
+		}).effectiveModel, "openrouter/anthropic/claude-opus-5");
+	});
+
+	it("fails closed on missing or unknown selection values", () => {
+		assert.throws(() => resolveEffectivePiSelection({ args: ["--provider"] }), /expected a non-empty value/);
+		assert.throws(() => resolveEffectivePiSelection({ args: ["--model", "--tools"] }), /expected a non-empty value/);
+		assert.throws(() => resolveEffectivePiSelection({ args: ["--thinking", "turbo"] }), /unknown level/);
 	});
 });
 

@@ -3,6 +3,8 @@
 **Goal**: Fix live-streaming message duplication and reordering.
 **Scope**: Live streaming only (not reload-replay). Agent execution is correct; this is a transport/rendering bug.
 
+> **Historical status.** This document preserves the original diagnosis, decision rationale, and implementation sketch. Its count-only `EventBuffer` and resume-before-other-traffic statements describe an earlier design stage and are superseded. The current contract uses head-only retention bounded by both 1,000 events and 2 MiB of estimated serialized UTF-8, treats oversized/unserializable events and `pushFrame()` sequences as resume holes, validates a contiguous suffix with `canResumeFrom()` before `since()`, and flushes the reconnect intent outbox before resume or snapshot traffic. See the canonical [WebSocket protocol](../websocket-protocol.md#cumulative-assistant-stream-compaction) and [current internals](../internals.md#event-stream-ordering--dedup).
+>
 > **Related, parallel pattern.** A separate but structurally similar duplication bug affects the gate verification event family (`gate_verification_*`), which fan-outs across all session WSs in a goal team. The fix mirrors this one — server-stamped monotonic `seq`, plus a client-side dedupe funnel (`src/app/verification-event-bus.ts`). See [docs/internals.md — Verification event dedupe](../internals.md#verification-event-dedupe) and [docs/debugging.md — Verification log duplicated Nx](../debugging.md#verification-log-duplicated-nx).
 >
 > **Single-allocation pin for non-`event` frames.** The `tool_permission_needed` frame also carries a `seq`/`ts` from `EventBuffer.pushFrame()`, but unlike live events it must NOT be re-allocated on late-joiner replay — doing so leaves a hole in the live-seq stream of already-attached clients. The on-attach branch in `ws/handler.ts` replays the original `seq`/`ts` stashed on `pendingGrantRequest`. See [`perm-frame-late-joiner-seq-replay.md`](./perm-frame-late-joiner-seq-replay.md).
@@ -135,7 +137,7 @@ If future work needs cross-reload dedup (e.g. re-opening an archived session whi
 ### Constraints satisfied
 
 - Additive on-wire fields (`seq`, `ts`) — existing clients ignore unknown keys (`JSON.parse` → extra properties are tolerated; no consumer checks for strict equality). ✔
-- EventBuffer stays bounded (1000 entries) — adding `{seq, event}` tuples vs raw events is O(1) overhead per entry. ✔
+- EventBuffer stays bounded (the original plan used count only; the current implementation also enforces a serialized-byte budget) — adding sequence metadata remains O(1) overhead per entry. ✔
 - RE-07 reconnect catch-up is strengthened, not regressed — the new code path is the one RE-07 exercises. ✔
 - Backward-compat: if client doesn't send `resumeFromSeq`, server falls back to today's `getState()` + `get_messages` behaviour. ✔
 
@@ -277,7 +279,7 @@ this._drainOrderedEvents();
 
 `_drainOrderedEvents` pops entries from `_pendingEvents` whose `seq === _highestSeq + 1`, dispatching in order.
 
-On reconnect (when the WS opens), if `_highestSeq > 0`, send `{type:"resume", fromSeq: this._highestSeq}` **before** any other traffic. On `resume_gap`, fall back to today's `get_messages` path (reset `_highestSeq` from the server's reported `lastSeq`).
+The original sketch sent `{type:"resume", fromSeq: this._highestSeq}` before other reconnect traffic. That ordering is superseded: after `auth_ok`, the current client first flushes queued `prompt`, `steer`, and `retry` intent in FIFO order, preserving the failed current item and unsent suffix if the replacement socket closes during flush. It then requests resume when `_highestSeq > 0`, or a snapshot otherwise. On `resume_gap`, it falls back to `get_messages` and resets `_highestSeq` from the server's reported `lastSeq`.
 
 > **Update (unified-message-ordering-reducer):** the `_liveEventMessages` text-merge hack referenced by earlier revisions of this doc no longer exists. The unified reducer in `src/app/message-reducer.ts` reconciles live events and snapshots by id (`_order` / `_insertionTick`) for both the happy path and the `resume_gap` fallback, so there is no carve-out to gate. See [`docs/design/unified-message-ordering-reducer.md`](./unified-message-ordering-reducer.md) and the "Reducer ordering invariant" section in [`docs/internals.md`](../internals.md).
 
@@ -357,7 +359,7 @@ The test uses the existing spawned-gateway harness (`tests/e2e/ui/gateway-harnes
 | Risk | Mitigation |
 |------|------------|
 | `seq` wraps (uint overflow) after 2^53 events | Session lifetime is finite; seq resets on session restart. `Number.MAX_SAFE_INTEGER` ≫ any realistic session. |
-| 1000-entry ring evicts mid-reconnect on a very busy session | Server sends `resume_gap`; client falls back to snapshot. Consider bumping to 5000 if telemetry shows frequent gaps — separate tuning change, not blocking. |
+| Retention cannot cover the reconnect cursor | The current dual-bounded buffer sends `resume_gap` after count/byte head eviction or an unretained-sequence hole; the client falls back to an authoritative snapshot. Capacity tuning is separate from the ordering design. |
 | Out-of-order buffer grows unbounded on a permanently-gapped client | Drain on every ingest; if `_pendingEvents.length > 500`, abandon and force a snapshot reload. |
 | Other broadcast types (`session_status`, etc.) also race | Out of scope — they're idempotent snapshots. The bug is about `{type:"event"}` only. |
 

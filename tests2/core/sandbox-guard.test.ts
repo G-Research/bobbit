@@ -44,6 +44,12 @@ describe("sandbox route guard", () => {
 		}
 	});
 
+	it("allows only secret-authenticated review upload from sandboxes", () => {
+		assert.equal(isSandboxAllowed("/api/sessions/session-1/review-payloads", "POST", scope()), true);
+		assert.equal(isSandboxAllowed("/api/sessions/session-1/review-payloads/payload-1", "GET", scope()), false);
+		assert.equal(isSandboxAllowed("/api/sessions/session-1/review-payloads/payload-1/open", "POST", scope()), false);
+	});
+
 	it("allows first-party goal tools only for the token's own goal", () => {
 		const ownGoalRoutes: Array<[string, string]> = [
 			["GET", "/api/goals/goal-1"],

@@ -1,173 +1,87 @@
 # Per-model thinking-level capabilities
 
-The "thinking level" picker controls how much reasoning effort the underlying
-model spends before answering. Not every model supports every level. In Pi
-`0.82.1`, direct Anthropic and supported Amazon Bedrock Claude Opus 5 entries
-publish both `xhigh` and `max`; Opus 4.8 publishes `xhigh` but not `max`; plain
-`gpt-4` exposes no reasoning levels. The supported set has to stay consistent
-across UI selectors, REST endpoints, the WebSocket boundary, and the
-verification harness.
+Thinking level controls how much reasoning effort a model uses. Support is a property of an exact model row, not a provider name or model-family pattern. Bobbit shares one capability implementation between the server and UI so selectors, runtime changes, restore, and spawn use the same rules.
 
-Rather than scattering hardcoded `["off","minimal","low","medium","high"]`
-arrays around the codebase, all capability questions go through one shared
-module: [`src/shared/thinking-levels.ts`](../src/shared/thinking-levels.ts).
+The canonical definitions live in [`src/shared/thinking-levels.ts`](../src/shared/thinking-levels.ts).
 
-This page documents the rules that module enforces, where it is consulted,
-and why the design clamps rather than rejects.
+## Metadata authority
 
-## Why a single source of truth
+Bobbit consumes capability metadata from the model's authoritative source:
 
-Bobbit talks to many model families across many providers (Anthropic direct,
-OpenAI direct, AI-Gateway-routed, Google, local) and the set of levels a
-particular model accepts is a property of the model — not the provider, not
-the UI, not the user's preference. Before this module landed, the same enum
-was duplicated in roughly ten places:
+- direct built-ins use the exact Pi catalog row;
+- well-known AIGW models use the gateway's advertised `reasoning` and `variants` fields;
+- custom and user-owned AIGW models use the exact row composed for the active target realm.
 
-- server boundary validation (role POST/PUT, project & system prefs, WS
-  `set_thinking_level`, CLI flag whitelist for the spawned agent),
-- the verification harness (six reviewer/QA/legacy sub-session sites),
-- UI selectors (per-session footer, settings page, role manager, message
-  editor callback type).
+Model IDs and provider names never grant reasoning capability or extended thinking tiers. The only model-name inference retained in production is `inferLegacyAigwMeta`, used exclusively while translating the legacy AIGW `/v1/models` fallback. Its result does not enter direct-Pi, well-known, custom-composed, live-state, or thinking-clamp paths.
 
-Adding `xhigh` or `max` upstream would have meant editing all of them. Worse,
-the duplication had already drifted: picking an xhigh-capable Opus model in
-Bobbit silently capped the user at `high` because the server's value table
-never knew `xhigh` existed, and the settings page offered `minimal` on models
-that don't support it.
+This separation matters because a plausible family match can still be wrong: chat variants can be non-reasoning, different Claude rows can advertise different context and thinking support, and unrelated IDs can contain strings such as `o1`.
 
-The shared module collapses every capability decision to one function and
-one clamping rule. When upstream model metadata includes a per-model
-`thinkingLevelMap`, Bobbit now consumes it **as the full source of truth**
-(not just for `xhigh` detection) — mirroring pi-ai's own
-`getSupportedThinkingLevels` / `clampThinkingLevel`, which is what the agent
-runtime actually enforces. Only sparse payloads with no map still rely on the
-fallback family regex. See [Mirroring pi-ai when a `thinkingLevelMap` is
-present](#mirroring-pi-ai-when-a-thinkinglevelmap-is-present) below.
-
-## The canonical set
+## Canonical levels
 
 ```ts
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const THINKING_LEVELS = [
+  "off", "minimal", "low", "medium", "high", "xhigh", "max"
+] as const;
 ```
 
-Ranked low→high. `off` is available unless upstream explicitly disables it
-with `off: null` (forced adaptive thinking). `xhigh` is supported by catalog
-metadata or the narrow fallback families below. `max` is never inferred: it
-is exposed only when the exact model's upstream `thinkingLevelMap` explicitly
-includes it. Pi `0.82.1` publishes both extended entries for direct Anthropic
-and supported Amazon Bedrock Claude Opus 5, so those rows expose the full
-`off` through `max` ladder.
+`getSupportedThinkingLevels(model)` applies these rules:
 
-The canonical `ThinkingLevel` type, the `ModelLike` shape consumed by
-capability detection, and the helpers below all live in
-`src/shared/thinking-levels.ts` and are imported by both the server
-(`src/server/`) and the UI (`src/app/`, `src/ui/`).
-
-## Capability rules
-
-`getSupportedThinkingLevels(model)` returns the subset valid for the given
-model. The first branch that applies wins:
-
-| Model trait | Returned levels |
+| Exact metadata | Supported levels |
 |---|---|
-| `reasoning === false` | `["off"]` |
-| `thinkingLevelMap` **present** | map-filtered ladder — see below |
-| `thinkingLevelMap` **absent** and `supportsXHigh(model)` | `off, minimal, low, medium, high, xhigh` |
-| `thinkingLevelMap` **absent** otherwise | `off, minimal, low, medium, high` |
+| `reasoning === false` | `off` only |
+| `thinkingLevelMap` present | The canonical ladder filtered by the map rules below |
+| `reasoning === true`, no map | `off` through `high` |
+| reasoning unavailable, no map | `off` only |
 
-`max` is intentionally absent from all map-less fallback rows. Bobbit only
-offers `max` when Pi's catalog explicitly advertises it.
+For a present `thinkingLevelMap`:
 
-### Mirroring pi-ai when a `thinkingLevelMap` is present
+- a `null` value explicitly removes that level;
+- an absent base level (`off` through `high`) uses the provider default and remains available;
+- `xhigh` and `max` require an explicit non-null map entry.
 
-When the model carries a `thinkingLevelMap`, Bobbit trusts it **completely**
-and filters the canonical ladder exactly the way pi-ai's own
-`getSupportedThinkingLevels` does (the map is upstream's per-model declaration
-of which efforts the model accepts). The rule per level is:
+For example, `off: null` means adaptive thinking cannot be disabled, while an absent `max` means Bobbit must not offer `max`. A well-known AIGW document contributes only variants it advertises; advertised `none` also maps Bobbit's `off` level to the wire value `none`.
 
-- **Map value is exactly `null`** → the level is **dropped** (explicitly
-  unsupported). Crucially, `off: null` means *forced adaptive thinking* — the
-  model cannot have reasoning disabled — so `off` itself is removed.
-- **Level absent from the map** → **kept** (the provider applies its default
-  for that effort). The extended levels `xhigh` and `max` are exceptions:
-  they are kept only when present with a non-null value.
+## Clamping
 
-Why trust the map fully rather than only reading `xhigh`/`max` from it?
-Because the map is what the agent runtime obeys. If Bobbit offered a level the
-model rejects (or hid one it accepts), the picker and the runtime would
-disagree — exactly the drift this module exists to prevent. Reading only the
-extended levels from the map while assuming the full `off→high` ladder was
-wrong the moment a model started dropping `off` (Fable) or a middle level
-(gpt-5.5's `minimal: null`).
+`clampThinkingLevel(level, model)` keeps a supported request unchanged. Otherwise it searches upward for the nearest supported level, then downward if none exists above. This mirrors Pi and preserves reasoning intent when a model removes a low or middle tier.
 
-**Worked outcomes (verified against the live pi-ai catalog):**
+Examples:
 
-| Model | `thinkingLevelMap` | Supported levels |
-|---|---|---|
-| Claude Fable 5 | `{ off: null, xhigh: "xhigh", max: "max" }` | `minimal, low, medium, high, xhigh, max` — **no `off`** |
-| Claude Opus 5 (direct Anthropic and supported Bedrock profiles, Pi `0.82.1`) | `{ xhigh: "xhigh", max: "max" }` | `off, minimal, low, medium, high, xhigh, max` |
-| Claude Opus 4.8 | `{ xhigh: "xhigh" }` | `off, minimal, low, medium, high, xhigh` — **no `max`** |
-| gpt-5.2 | `{ off: "none", xhigh: "xhigh" }` | `off, minimal, low, medium, high, xhigh` |
-| gpt-5.5 | `{ off: "none", xhigh: "xhigh", minimal: null }` | `off, low, medium, high, xhigh` — **no `minimal`** |
-| gpt-5.6 Luna/Sol/Terra | non-null `xhigh` and `max` entries | `off, minimal, low, medium, high, xhigh, max` |
+- if `minimal` is explicitly unsupported but `low` is supported, `minimal` clamps to `low`;
+- if `off` is explicitly unsupported, `off` clamps to the lowest available reasoning tier;
+- `max` clamps to `xhigh` when only `xhigh` is advertised;
+- any reasoning request clamps to `off` for an exact non-reasoning row.
 
-Fable is the headline case: `off: null` forces adaptive thinking, so the
-thinking selector appears **without an Off option** offering
-minimal/low/medium/high/xhigh/max — not the old full `off→high` ladder, and
-not "only Off + Extra high".
+Stored role and preference values may outlive the model that originally supported them. Bobbit therefore preserves the stored intent and clamps at use time against the selected exact row rather than deleting the preference.
 
-### Family heuristic when the map is absent
+## Live-state metadata
 
-Sparse payloads (AI-Gateway discovery, persisted-fallback state) carry no
-`thinkingLevelMap`. For those, `supportsXHigh(model)` decides the top step via
-family matching:
+`resolveModelStateMeta(provider, id)` supplies capability fields for live and rehydrated `state.model` frames:
 
-When the map is present, `supportsXHigh` is irrelevant to
-`getSupportedThinkingLevels` — the map alone decides. `supportsXHigh` still
-resolves metadata-first (non-null `xhigh` map entry) so callers that ask it
-directly stay correct, then falls back to family matching. There is no
-`supportsMax` family heuristic: `max` requires explicit metadata.
+1. the last exact assembled registry row, keyed by provider and ID;
+2. the exact Pi built-in row for a direct provider;
+3. an explicit unavailable result with no fabricated capability fields.
 
-The fallback families currently qualify:
+The assembled row is retained beyond the normal registry cache TTL. For an unchanged AIGW/custom source, a transient discovery failure therefore does not erase trustworthy context, output, reasoning, modalities, or thinking-map metadata. Reconnect, restore, role changes, and thinking controls continue to display and clamp from the last exact row.
 
-- **Anthropic Claude Opus 4.6+ within the 4.x ID family** — matched by
-  `/claude-opus-4(?:-|\.)(?:[6-9]|\d{2,})\b/i`, so `claude-opus-4-6`,
-  `claude-opus-4-8`, dotted `claude-opus-4.8`, and any future `-4-10`+
-  light up without a code change. This heuristic does not infer extended
-  levels for a map-less Opus 5 payload; authoritative Pi `0.82.1` Opus 5
-  rows carry the explicit `xhigh`/`max` map.
-- **OpenAI gpt-5.1-codex-max and any gpt-5.2\* / gpt-5.4\* / gpt-5.5\* /
-  gpt-5.6\*** — matched by `/^gpt-5\.1-codex-max\b/i` and
-  `/^gpt-5\.(?:2|4|5|6)(?:\b|[-.])/i`. `gpt-5.2-codex`, `gpt-5.4-mini`,
-  `gpt-5.5-pro`, and `gpt-5.6-luna` are covered by the second regex.
+A successful discovery result remains authoritative. If it omits a row, the previous row is not merged back. When exact composed metadata is unavailable and Pi supplies identity-matching live state, Bobbit may preserve capability fields from that live state; missing fields remain missing rather than becoming guessed defaults.
 
-### Why the regex tolerates 4-10+ but not 4-5
+This fail-closed behavior prevents a reconnect or fallback frame from silently changing a context window, hiding an advertised tier, or enabling reasoning on the wrong model.
 
-The `[6-9]|\d{2,}` branch lets the matcher accept `4-6` through `4-9` and
-anything with two or more digits (`4-10`, `4-11`, …). Both hyphenated and
-dotted separators are accepted because providers and gateways may expose
-`claude-opus-4-8` or `claude-opus-4.8`. `4-5` and earlier are deliberately
-excluded — Anthropic's earlier Opus 4 generations did not support `xhigh` and
-we don't want a false positive on them.
+## Server boundaries
 
-### Provider guard — fail closed on id collisions
+The UI clamps eagerly for immediate feedback, but the server repeats validation because API clients, extensions, stale preferences, and raw spawn arguments can bypass the UI.
 
-A model id alone is not a reliable signal. AI-Gateway-routed deployments
-preserve the canonical id (`claude-opus-4-7`) but report `provider: "aigw"`;
-some custom OpenAI-compatible gateways have served Claude-shaped ids; future
-providers may collide intentionally.
+- Live `set_model` validates the exact session-selectable row, clamps the requested level, applies the model, and verifies the complete tuple before persistence.
+- Live `set_thinking_level` resolves exact metadata for the currently bound tuple and refuses the change when thinking metadata is unavailable.
+- Session, delegate, review, QA, restore, role-replacement, and force-abort spawns pass through the final spawn tuple validator. It clamps the effective thinking level against the exact effective provider/model after all raw arguments are assembled.
+- State frames use the same exact registry metadata, so the selector after selection or reload matches the catalog row shown before selection.
 
-`providerMatches(provider, canonical)` is the guard:
+Only a verified provider, model, and effective-thinking tuple becomes durable. An unrequested Pi fallback or a family-derived capability is not accepted as success.
 
-- `provider === canonical` (e.g. `anthropic` for a `claude-*` id) → accept.
-- `provider === "aigw"` → accept; aigw routes from many upstreams but keeps
-  the canonical id, so the regex still discriminates correctly.
-- `provider === ""` (legacy client state with the field unset) → accept.
-- Anything else (e.g. `openai` with a `claude-*` id) → **reject**.
+## UI behavior
 
-The default is closed: an unknown or mismatched provider does **not** light
-up `xhigh`, even if the id matches the family regex. This pin is covered by
-the cross-provider-collision case in `tests2/core/thinking-levels.test.ts`.
+Every thinking selector derives its options from `getSupportedThinkingLevels` and clamps through the shared helper.
 
 ## Clamping, not rejection
 
@@ -387,36 +301,16 @@ stages both fields, and calls `session.setModel(model, effectiveLevel)` once.
 {
   "type": "set_model",
   "provider": "anthropic",
-  "modelId": "claude-opus-4-8",
+  "modelId": "claude-opus-5",
   "thinkingLevel": "xhigh"
 }
 ```
 
-This example starts from a stored `max`: Opus 4.8 does not advertise `max`, so
-the picker clamps it to `xhigh` before sending. The same `max` remains `max`
-when selecting a Pi `0.82.1` Opus 5 row because that exact row advertises both
-`xhigh` and `max`. The picker does **not** send a follow-up
-`set_thinking_level` for the same model choice; keeping the two values in one
-request prevents an intervening command from observing a model-only picker
-state.
+The client updates optimistically, then replaces both model and thinking fields with the server's authoritative state. Standalone thinking changes use `set_thinking_level`. On failure, the client requests state again so an optimistic value cannot remain displayed.
 
-For an ordinary live switch, the server validates the model, re-clamps the
-requested level, applies and reads back the complete tuple, and broadcasts a
-`state` frame containing both `model` and `thinkingLevel`. That frame is
-authoritative and replaces both optimistic fields. On `SET_MODEL_FAILED`, the
-server first broadcasts the observed or previous durable tuple, attempts a
-verified rollback, and uses the existing restart path if a partial mutation
-cannot be verified. The client also requests `get_state`, so a rejected model
-or thinking write cannot leave either optimistic field displayed.
+A session in `MODEL_SELECTION_REQUIRED` keeps its unavailable requested tuple visible until an exact replacement starts, restores, clamps, and verifies successfully. See [Controlled session model fallback](session-model-fallback.md).
 
-A session with `MODEL_SELECTION_REQUIRED` uses the same picker for a different
-purpose. The footer hides standalone thinking selection and keeps the
-unavailable tuple visible while the gateway starts, rehydrates, clamps, and
-verifies the selected replacement. Only successful activation publishes the
-new model/thinking tuple with `condition: null`; failure returns
-`MODEL_SELECTION_RECOVERY_FAILED` and leaves the old tuple and condition in
-place. See [Model and thinking selection](websocket-protocol.md#model-and-thinking-selection)
-and [Restored session requires a model](debugging.md#restored-session-requires-a-model).
+## Related documentation
 
 ### Standalone thinking changes
 
@@ -487,6 +381,8 @@ in the wiring between the shared module and the UI / server boundary.
 
 ## Related docs
 
+- [Metadata-shim retirement decision](design/openai-model-additions-retirement.md)
+- [AI Gateway routing](ai-gateway-routing.md)
 - [Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides)
   — how roles can pin model + level overrides, and how the cascade resolves
   them.

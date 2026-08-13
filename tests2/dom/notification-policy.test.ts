@@ -8,10 +8,13 @@ __syncBeforeAll(() => __syncCE());
 // assert the identical rule-table facts.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	isSessionUnread,
 	needsHumanAttention,
 	needsHumanAttentionOnIdleTransition,
 	needsImmediateHumanAttention,
 } from "../../src/app/notification-policy.js";
+import { hasUnseenActivity } from "../../src/app/render-helpers.js";
+import { isSessionUnread as sharedIsSessionUnread } from "../../src/shared/session-unread-policy.js";
 import { state, type GatewaySession, type Goal } from "../../src/app/state.js";
 
 interface SeedOpts {
@@ -106,6 +109,46 @@ function resetState() {
 // alive across files, so leave it clean for the next file too).
 beforeEach(resetState);
 afterEach(resetState);
+
+describe("notification policy — shared unread parity", () => {
+	it("keeps the app export as the shared canonical implementation", () => {
+		expect(isSessionUnread).toBe(sharedIsSessionUnread);
+	});
+
+	it.each([
+		["unread standalone", { id: "standalone", status: "idle", lastActivity: 20, lastReadAt: 10 }, true],
+		["read standalone", { id: "standalone", status: "idle", lastActivity: 20, lastReadAt: 20 }, false],
+		["active work", { id: "standalone", status: "streaming", lastActivity: 20, lastReadAt: 10 }, false],
+		["delegate", { id: "delegate", status: "idle", delegateOf: "parent", lastActivity: 20, lastReadAt: 10 }, false],
+	] as const)("matches the production sidebar for %s", (_label, partial, expected) => {
+		seed({ sessions: [partial] });
+		const session = findSession(partial.id);
+		const canonical = isSessionUnread(session, {
+			goal: resolveGoal(session),
+			allSessions: state.gatewaySessions,
+			gateStatusCache: state.gateStatusCache,
+		});
+		expect(canonical).toBe(expected);
+		expect(canonical).toBe(hasUnseenActivity(session));
+	});
+
+	it("keeps immediate human action unread after its activity was read", () => {
+		seed({ sessions: [{
+			id: "parked",
+			status: "idle",
+			lastActivity: 20,
+			lastReadAt: 20,
+			lastTurnErrored: true,
+			consecutiveErrorTurns: 3,
+		}] });
+		const session = findSession("parked");
+		expect(isSessionUnread(session, {
+			allSessions: state.gatewaySessions,
+			gateStatusCache: state.gateStatusCache,
+		})).toBe(true);
+		expect(hasUnseenActivity(session)).toBe(true);
+	});
+});
 
 describe("notification policy — legacy rule rows (pre-rewrite parity)", () => {
 	it("Row 1: standalone idle session → notify", () => {
