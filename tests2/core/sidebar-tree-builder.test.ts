@@ -239,6 +239,62 @@ describe("buildSidebarTree", () => {
 		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "spawned-child" })), true);
 	});
 
+	it("applies the owning project's depth cap to a spawned goal subtree without widening another project", () => {
+		const deepGoals = (prefix: string, projectId: string, teamId: string, leadId: string) => [
+			goal({ id: teamId, projectId, team: true, createdAt: 1 }),
+			goal({ id: `${prefix}-spawned`, projectId, parentGoalId: teamId, spawnedBySessionId: leadId, createdAt: 2 }),
+			...Array.from({ length: 7 }, (_, index) => goal({
+				id: `${prefix}-deep-${index + 1}`,
+				projectId,
+				parentGoalId: index === 0 ? `${prefix}-spawned` : `${prefix}-deep-${index}`,
+				createdAt: index + 3,
+			})),
+		];
+		const model = buildSidebarTree({
+			projects: [project("p1"), project("p2")],
+			goals: [
+				...deepGoals("target", "p1", "target-team", "target-lead"),
+				...deepGoals("other", "p2", "other-team", "other-lead"),
+			],
+			sessions: [
+				session({ id: "target-lead", projectId: "p1", goalId: "target-team", teamGoalId: "target-team", role: "team-lead" }),
+				session({ id: "target-session", projectId: "p1", goalId: "target-deep-7" }),
+				session({ id: "other-lead", projectId: "p2", goalId: "other-team", teamGoalId: "other-team", role: "team-lead" }),
+				session({ id: "other-session", projectId: "p2", goalId: "other-deep-7" }),
+			],
+			archivedSessions: [],
+			showArchived: false,
+			nestedDepthByProject: new Map([
+				["p1", 10],
+				["p2", 5],
+			]),
+			defaultNestedDepth: 5,
+		});
+
+		const targetSessionKey = sidebarTreeKey({ kind: "session", sessionId: "target-session" });
+		const targetNode = model.flatByKey.get(targetSessionKey);
+		assert.ok(targetNode, "expanded p1 cap should materialize the deep target session");
+		const expectedAncestors = [
+			sidebarTreeKey({ kind: "goal", goalId: "target-deep-7" }),
+			...Array.from({ length: 6 }, (_, index) => sidebarTreeKey({ kind: "goal", goalId: `target-deep-${6 - index}` })),
+			sidebarTreeKey({ kind: "goal", goalId: "target-spawned" }),
+			sidebarTreeKey({ kind: "team-lead", sessionId: "target-lead" }),
+			sidebarTreeKey({ kind: "goal", goalId: "target-team" }),
+			sidebarTreeKey({ kind: "project", projectId: "p1" }),
+		];
+		const actualAncestors: string[] = [];
+		let parentKey = targetNode.parentKey;
+		while (parentKey) {
+			actualAncestors.push(parentKey);
+			parentKey = model.flatByKey.get(parentKey)?.parentKey ?? null;
+		}
+		assert.deepEqual(actualAncestors, expectedAncestors);
+		assert.equal((model.flatByKey.get(sidebarTreeKey({ kind: "goal", goalId: "target-spawned" }))?.context as any).renderPlacement, "team-lead-spawned");
+		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "session", sessionId: "other-session" })), false,
+			"p1's raised cap must not widen p2's spawned subtree");
+		assert.equal(model.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "other-deep-6" })), false);
+	});
+
 	it("keeps spawned goals in the normal goal forest when their owning team lead is filtered out", () => {
 		const model = buildSidebarTree({
 			projects: [project()],
