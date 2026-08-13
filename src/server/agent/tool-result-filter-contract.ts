@@ -266,8 +266,11 @@ function validSource(raw: unknown): raw is ToolResultFilterSource {
 		&& typeof raw.priority === "number" && Number.isFinite(raw.priority);
 }
 function sourceKey(source: ToolResultFilterSource): string { return `extension:${source.packId}:${source.hookId}`; }
+function compareCodeUnits(a: string, b: string): number {
+	return a === b ? 0 : a < b ? -1 : 1;
+}
 function compareSource(a: ToolResultFilterSource, b: ToolResultFilterSource): number {
-	return b.priority - a.priority || sourceKey(a).localeCompare(sourceKey(b));
+	return b.priority - a.priority || compareCodeUnits(sourceKey(a), sourceKey(b));
 }
 function severity(action: ToolResultFilterAction): number {
 	return action === "reject" ? 3 : action === "redact" ? 2 : action === "replace" ? 1 : 0;

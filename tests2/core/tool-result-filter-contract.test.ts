@@ -96,6 +96,17 @@ describe("tool result filter contract", () => {
 		expect(tied.source).toMatchObject({ packId: "a-pack" });
 	});
 
+	it("uses code-unit source ties regardless of input order", () => {
+		const replacement = validateToolResultFilterProposal(proposal("replace"));
+		const candidates = [
+			{ source: { packId: "pack-2", hookId: "hook.1", priority: 4 }, proposal: replacement },
+			{ source: { packId: "pack.1", hookId: "hook-2", priority: 4 }, proposal: replacement },
+		];
+		for (const ordered of [candidates, [...candidates].reverse()]) {
+			expect(reduceToolResultFilters(ordered)).toMatchObject({ action: "replace", source: { packId: "pack-2", hookId: "hook.1" } });
+		}
+	});
+
 	it("releases only original pass bytes, replacement bytes, or fixed synthetic rejection", () => {
 		const canonical = validateCanonicalToolResult(original);
 		const replacement = validateToolResultFilterProposal(proposal("redact"));

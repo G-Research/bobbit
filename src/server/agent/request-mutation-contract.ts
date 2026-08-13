@@ -216,9 +216,12 @@ function sourceKey(source: RequestMutationSource): string {
 	// Dispatcher reserves the `core` principal for its internal-only shapers.
 	return source.packId === "core" ? `core:${source.hookId}` : `extension:${source.packId}:${source.hookId}`;
 }
+function compareCodeUnits(a: string, b: string): number {
+	return a === b ? 0 : a < b ? -1 : 1;
+}
 function compareSource(a: RequestMutationSource, b: RequestMutationSource): number {
 	if (a.priority !== b.priority) return b.priority - a.priority;
-	return sourceKey(a).localeCompare(sourceKey(b));
+	return compareCodeUnits(sourceKey(a), sourceKey(b));
 }
 
 /** Higher priority wins; tied sources are ordered by core-owned stable identity. */

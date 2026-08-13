@@ -187,6 +187,32 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		}
 	});
 
+	test("orders tied overrides by code units independently of proposal input order", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prompt-override-order-"));
+		const changes = [
+			{ packId: "pack.1", sectionId: "section-1", content: "period pack", expectedRevision: 0 },
+			{ packId: "pack-2", sectionId: "section.1", content: "period section", expectedRevision: 0 },
+			{ packId: "pack-2", sectionId: "section-2", content: "hyphen section", expectedRevision: 0 },
+		];
+		const accept = (input: typeof changes, suffix: string) => {
+			const stateDir = path.join(root, suffix);
+			fs.mkdirSync(stateDir, { recursive: true });
+			const store = new ProjectConfigStore(stateDir);
+			return acceptPromptExtensionProposal(store, input, {
+				actor: "operator", hasStaticGrant: () => true, hasSection: () => true,
+				resolveEffectiveSections: overrides => overrides,
+				now: () => new Date("2026-01-02T03:04:05.000Z"),
+			});
+		};
+		try {
+			const expected = ["pack-2/section-2", "pack-2/section.1", "pack.1/section-1"];
+			expect(accept(changes, "forward").map(row => `${row.packId}/${row.sectionId}`)).toEqual(expected);
+			expect(accept([...changes].reverse(), "reverse").map(row => `${row.packId}/${row.sectionId}`)).toEqual(expected);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test("requires a separate author grant and accepts only the stored proposal while retaining direct-seed audit detail", async ({ gateway }) => {
 		const packName = `prompt-proposal-${FIXTURE_SUFFIX}`;
 		const packDir = writeApiPack(gateway.bobbitDir, packName);

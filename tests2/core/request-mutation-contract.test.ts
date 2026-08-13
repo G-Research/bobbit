@@ -67,6 +67,28 @@ describe("request mutation contract", () => {
 		expect(toolResult).toMatchObject({ action: "deny", reason: "Tool denied", source: { packId: "lower-deny" } });
 	});
 
+	it("uses code-unit source ties regardless of input order", () => {
+		const firstPrompt = validateRequestMutationHookOutput(prompt("hyphen"), "beforePrompt", promptRequest)!;
+		const secondPrompt = validateRequestMutationHookOutput(prompt("period"), "beforePrompt", promptRequest)!;
+		const promptCandidates = [
+			{ source: { packId: "pack-2", hookId: "hook", priority: 4 }, proposal: firstPrompt as any },
+			{ source: { packId: "pack.1", hookId: "hook", priority: 4 }, proposal: secondPrompt as any },
+		];
+		for (const candidates of [promptCandidates, [...promptCandidates].reverse()]) {
+			expect(reducePromptShape(candidates)).toMatchObject({ action: "replace", text: "hyphen", source: { packId: "pack-2" } });
+		}
+
+		const firstDeny = validateRequestMutationHookOutput(tool("deny"), "beforeToolCall", toolRequest)!;
+		const secondDeny = validateRequestMutationHookOutput(tool("deny"), "beforeToolCall", toolRequest)!;
+		const toolCandidates = [
+			{ source: { packId: "pack", hookId: "hook-2", priority: 4 }, proposal: firstDeny as any },
+			{ source: { packId: "pack", hookId: "hook.1", priority: 4 }, proposal: secondDeny as any },
+		];
+		for (const candidates of [toolCandidates, [...toolCandidates].reverse()]) {
+			expect(reduceToolSafety(candidates)).toMatchObject({ action: "deny", source: { hookId: "hook-2" } });
+		}
+	});
+
 	it("never manufactures a replacement or tool permission without a candidate", () => {
 		expect(reducePromptShape([])).toEqual({ action: "pass", reason: "Unavailable" });
 		expect(reduceToolSafety([])).toEqual({ action: "pass", reason: "Unavailable" });
