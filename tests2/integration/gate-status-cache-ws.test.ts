@@ -46,7 +46,7 @@ test.describe("Gate status WebSocket broadcast", () => {
 		const memfs = createMemFs();
 		const stateDir = path.resolve("/memfs/gate-status-cache-ws");
 		memfs.mkdirSync(stateDir, { recursive: true });
-		const gateStore = new GateStore(stateDir, memfs);
+		const gateStore = new GateStore(stateDir, memfs, { persistence: "json" });
 		const goalStore = new GoalStore(stateDir, memfs);
 		const clock = createManualClock(1_700_000_000_000);
 		const hub = new FakeGoalEventHub();

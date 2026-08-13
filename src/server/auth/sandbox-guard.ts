@@ -20,6 +20,9 @@ function isOwnSessionToolEndpoint(subpath: string, method: string): boolean {
 	// the session named by this already scope-checked route.
 	if (method === "POST" && subpath === "/tool-result-filter") return true;
 	if (method === "POST" && subpath === "/activate-skill") return true;
+	// Sandboxed agents may upload their own tool output with the owning session
+	// secret, but payload reads and workspace opens are browser/admin surfaces.
+	if (method === "POST" && subpath === "/review-payloads") return true;
 	if (method === "GET" && subpath === "/transcript") return true;
 	if (method === "POST" && subpath === "/prompt") return true;
 	if (method === "GET" && subpath === "/proposals") return true;

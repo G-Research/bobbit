@@ -109,6 +109,8 @@ before changing `node_modules`.
 
 Development uses Vite's bundled dev mode: Rolldown serves the large eager browser graph as a small set of in-memory chunks instead of one request per source module, while preserving incremental HMR for edits and multi-file operations. Dev mode also unregisters Bobbit's production service worker and removes only the current mount's worker caches. A proxy `ECONNABORTED` during navigation means the page cancelled its API request; confirm separate `[harness]` or gateway `[boot]` logs before treating it as a server restart.
 
+Measure this path with `npm run profile:hmr`. The profiler copies the application plus representative test and documentation trees under ignored `.bobbit-qa/` storage, starts a separate bundled-development Vite server and headless Chromium, then reports cold paint, warm single-file reload percentiles, and a staggered app/test/docs edit burst. It never edits the working tree or connects to the live Vite HMR channel. Results are retained under `.bobbit-qa/vite-hmr-results/`; use `--clients <count>` and `--exercise-lazy` to reproduce a long-lived multi-tab graph, or `--max-p95-ms <milliseconds>` when comparing a candidate fix against a fixed budget.
+
 ---
 
 ## `node_modules` gets wiped while the dev server is running

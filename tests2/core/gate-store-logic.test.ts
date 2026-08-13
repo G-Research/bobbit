@@ -44,7 +44,7 @@ describe("GateStore", () => {
 		memfs = createMemFs();
 		stateDir = path.resolve("/memfs/gate-store", `state-${dirSeq++}`);
 		memfs.mkdirSync(stateDir);
-		store = new GateStore(stateDir, memfs);
+		store = new GateStore(stateDir, memfs, { persistence: "json" });
 	});
 
 	// --- initGatesForGoal ---
@@ -99,7 +99,7 @@ describe("GateStore", () => {
 			assert.equal(memfs.existsSync(path.join(stateDir, "gates.json.tmp")), false, "rename publishes without leaving a tmp artifact");
 			const metrics = store.getPersistenceMetrics();
 			assert.ok(metrics && metrics.bytes > 0 && metrics.durationMs >= 0, "flush reports byte and duration diagnostics");
-			const restored = new GateStore(stateDir, memfs);
+			const restored = new GateStore(stateDir, memfs, { persistence: "json" });
 			assert.equal(restored.getGate("goal-1", "design")?.status, "passed");
 			assert.equal(restored.getGate("goal-1", "design")?.currentContent, "# Design");
 		});
@@ -198,7 +198,7 @@ describe("GateStore", () => {
 
 			store.reconcileGatesForGoal("goal-1", ["keep", "modify", "new"], ["modify"]);
 			await store.flush();
-			const reloaded = new GateStore(stateDir, memfs);
+			const reloaded = new GateStore(stateDir, memfs, { persistence: "json" });
 
 			assert.equal(reloaded.getGate("goal-1", "keep")?.status, "passed");
 			assert.equal(reloaded.getGate("goal-1", "remove"), undefined);

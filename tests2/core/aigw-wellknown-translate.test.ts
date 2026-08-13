@@ -28,7 +28,8 @@ describe("translateWellKnown — provider → pi-ai api mapping", () => {
 			none: "none", low: "low", high: "high", xhigh: "xhigh", max: "max", off: "none",
 		});
 		const luna = byId(models, "gpt-5.6-luna");
-		assert.deepEqual(luna.thinkingLevelMap, { low: "low", high: "high", xhigh: "xhigh", off: "none" });
+		assert.deepEqual(luna.thinkingLevelMap, { low: "low", high: "high", xhigh: "xhigh" },
+			"off must not be synthesized when none was not advertised");
 	});
 
 	it("sets compat.supportsReasoningEffort=true only for openai-style endpoints", () => {
@@ -87,8 +88,8 @@ describe("translateWellKnown — filters and metadata", () => {
 			"well-known cost is per-1M and maps straight across (incl cache_read/cache_write)");
 
 		const luna = byId(models, "gpt-5.6-luna");
-		// cost without cache_* → heuristic cache ratios applied off input.
-		assert.deepEqual(luna.cost, { input: 0.5, output: 4, cacheRead: 0.05, cacheWrite: 0.625 });
+		// Missing cache prices remain conservatively unknown/zero.
+		assert.deepEqual(luna.cost, { input: 0.5, output: 4, cacheRead: 0, cacheWrite: 0 });
 		assert.deepEqual(luna.input, ["text"]);
 	});
 });
@@ -125,7 +126,12 @@ describe("well-known collision, validation, and pricing invariants", () => {
 	const provider = (baseURL: string, name: string) => ({
 		npm: "@ai-sdk/openai",
 		options: { baseURL },
-		models: { shared: { name } },
+		models: { shared: {
+			name,
+			limit: { context: 128_000, output: 16_384 },
+			reasoning: false,
+			modalities: { input: ["text"] },
+		} },
 	});
 
 	it("emits one bare ID and prefers config.model provider, otherwise insertion order", () => {
@@ -186,6 +192,24 @@ describe("well-known collision, validation, and pricing invariants", () => {
 		assert.deepEqual(await lookup(), [{ address: "93.184.216.34", family: 4 }]);
 		await assert.rejects(lookup, /non-public address/);
 		assert.equal(lookupCount, 2, "DNS must be revalidated for each actual connection lookup");
+	});
+
+	it("omits incomplete capability rows and unknown adapters rather than fabricating metadata", () => {
+		const models = translateWellKnown({ provider: {
+			incomplete: {
+				npm: "@ai-sdk/openai",
+				options: { baseURL: `${GATEWAY}/openai/v1` },
+				models: { missing: { name: "Missing limits" } },
+			},
+			unknown: {
+				npm: "@vendor/unknown",
+				options: { baseURL: `${GATEWAY}/vendor/v1` },
+				models: { guessed: {
+					limit: { context: 1, output: 1 }, reasoning: false, modalities: { input: ["text"] },
+				} },
+			},
+		} }, GATEWAY);
+		assert.deepEqual(models, []);
 	});
 
 	it("keeps legacy per-token and well-known per-million costs one million-fold apart", () => {

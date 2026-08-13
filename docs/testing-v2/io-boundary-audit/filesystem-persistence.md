@@ -82,6 +82,8 @@ This covers goals, gates, inbox, plan mutations, preferences, PR status, annotat
 
 **Keep real FS.** One real restart owner per distinct durability/recovery contract is enough; API permutations should not all use real disk. Browser reload alone is not disk durability.
 
+**Post-audit coverage note.** After this audit's fixed evidence cutoff, goal and task production persistence moved to native SQLite while injected/memfs fixtures retained JSON. Focused real-filesystem tests now own migration, transaction, recovery, retirement, corruption, and native-handle behavior. The daily `tests/e2e/goal-task-sqlite-upgrade-restart.spec.ts` journey boots from legacy JSON, exercises supported API mutations and deletion, gracefully restarts against the same state directory, and verifies authoritative SQLite rows after shutdown. This note does not retroactively change the merge-base classification above; it records the current owner for the new durability contract. See [Goal and task store SQLite persistence](../../design/goal-task-store-sqlite-persistence.md#test-ownership).
+
 ### P-04 — native project-YAML serialization seam — **PARTIAL**
 
 **Boundary-independent unit assertions.** `tests2/core/project-config-store-native-yaml.test.ts` pins native YAML round trips, legacy JSON-string loading and native rewrite, omission of secret values, and absence of JSON-encoded YAML scalars (45–219). Those are byte-serialization assertions suitable for an injected `FsLike`.

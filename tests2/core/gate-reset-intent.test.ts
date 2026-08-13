@@ -43,7 +43,7 @@ async function fixture(memfs = createMemFs(), suffix = Math.random().toString(36
 	const stateDir = path.resolve("/memfs/gate-reset-intent", suffix);
 	memfs.mkdirSync(stateDir, { recursive: true });
 	const goals = new GoalStore(stateDir, memfs);
-	const gates = new GateStore(stateDir, memfs);
+	const gates = new GateStore(stateDir, memfs, { persistence: "json" });
 	if (!goals.get("goal-1")) goals.put(goal());
 	if (gates.getGatesForGoal("goal-1").length === 0) {
 		gates.initGatesForGoal("goal-1", ["root", "child"]);
@@ -70,7 +70,7 @@ function beginReset(ctx: Fixture) {
 
 async function restart(ctx: Fixture): Promise<Fixture> {
 	const goals = new GoalStore(ctx.stateDir, ctx.memfs);
-	const gates = new GateStore(ctx.stateDir, ctx.memfs);
+	const gates = new GateStore(ctx.stateDir, ctx.memfs, { persistence: "json" });
 	const coordinator = new GateResetCoordinator(ctx.stateDir, goals, gates, ctx.memfs);
 	await coordinator.recovery;
 	return { ...ctx, goals, gates, coordinator };
@@ -123,7 +123,7 @@ describe("durable gate-reset intent", () => {
 		}).intent;
 
 		const goals = new GoalStore(ctx.stateDir, ctx.memfs);
-		const gates = new GateStore(ctx.stateDir, ctx.memfs);
+		const gates = new GateStore(ctx.stateDir, ctx.memfs, { persistence: "json" });
 		const coordinator = new GateResetCoordinator(ctx.stateDir, goals, gates, ctx.memfs);
 
 		// No await: construction must restore all WAL intent state before the
@@ -157,7 +157,7 @@ describe("durable gate-reset intent", () => {
 		};
 
 		const goals = new GoalStore(ctx.stateDir, ctx.memfs);
-		const gates = new GateStore(ctx.stateDir, ctx.memfs);
+		const gates = new GateStore(ctx.stateDir, ctx.memfs, { persistence: "json" });
 		const coordinator = new GateResetCoordinator(ctx.stateDir, goals, gates, ctx.memfs);
 		expect(gates.getGate("goal-1", "root")?.status).toBe("pending");
 		await coordinator.recovery;
@@ -165,7 +165,7 @@ describe("durable gate-reset intent", () => {
 
 		(ctx.memfs.promises as any).rename = originalRename;
 		const durableGoals = new GoalStore(ctx.stateDir, ctx.memfs);
-		const durableGates = new GateStore(ctx.stateDir, ctx.memfs);
+		const durableGates = new GateStore(ctx.stateDir, ctx.memfs, { persistence: "json" });
 		expect(durableGoals.get("goal-1")?.state).toBe("complete");
 		expect(durableGates.getGate("goal-1", "root")?.status).toBe("passed");
 		expect(durableGates.getGate("goal-1", "child")?.status).toBe("passed");
