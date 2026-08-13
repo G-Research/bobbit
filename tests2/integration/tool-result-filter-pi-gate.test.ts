@@ -131,12 +131,20 @@ function createPatchedPiHarness(): string {
 	const targetPackage = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
 	const sourceAgentCore = join(sourceNodeModules, "@earendil-works", "pi-agent-core");
 	const targetAgentCore = join(root, "node_modules", "@earendil-works", "pi-agent-core");
-	cpSync(sourcePackage, targetPackage, { recursive: true });
-	cpSync(sourceAgentCore, targetAgentCore, { recursive: true });
-	// The copied Pi packages are the only code we modify. Agent-core's
-	// dependencies remain read-only references to the runner's tree; the coding
-	// package keeps its private dependency layout because it owns pi-tui.
-	rmSync(join(targetAgentCore, "node_modules"), { recursive: true, force: true });
+	// Both Pi packages contain large private dependency trees which the shipped
+	// patches never touch. Copy only the package source under test, then retain
+	// the exact private layouts as read-only links to the installed packages.
+	// This removes the 157 MiB copy/delete fixture cycle that Defender serializes
+	// on Windows while preserving Node's package-resolution behavior (including
+	// coding-agent's private pi-tui and nested Pi dependencies).
+	const withoutPrivateNodeModules = (source: string) => source !== join(sourcePackage, "node_modules")
+		&& source !== join(sourceAgentCore, "node_modules");
+	cpSync(sourcePackage, targetPackage, { recursive: true, filter: withoutPrivateNodeModules });
+	cpSync(sourceAgentCore, targetAgentCore, { recursive: true, filter: withoutPrivateNodeModules });
+	// The copied Pi package sources are the only code we modify. Their dependencies
+	// remain read-only references to the runner's tree, matching the prior copied
+	// module layout without the Windows-heavy duplicate filesystem work.
+	symlinkSync(join(sourcePackage, "node_modules"), join(targetPackage, "node_modules"), "dir");
 	symlinkSync(sourceNodeModules, join(targetAgentCore, "node_modules"), "dir");
 	symlinkSync(join(sourceNodeModules, "@earendil-works", "pi-ai"), join(root, "node_modules", "@earendil-works", "pi-ai"), "dir");
 	for (const patch of packagePatches) applyShippedPatch(root, patch);
