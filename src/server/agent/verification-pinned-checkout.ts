@@ -150,15 +150,9 @@ export class PinnedCheckoutError extends Error {
 }
 
 type CleanupRetryTimer = ReturnType<typeof setTimeout>;
-type RepositoryPathOps = {
-	lstat(path: string): Promise<Stats>;
-	realpath(path: string): Promise<string>;
-};
 
 export interface VerificationPinnedCheckoutManagerOptions {
 	commandRunner?: CommandRunner;
-	/** Test seam for deterministic directory-swap checks; production uses Node's filesystem. */
-	pathOps?: RepositoryPathOps;
 	readInventory?: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	now?: () => number;
 	/** Injectable only for deterministic retry-clock tests. The callback resolves when its serialized retry settles. */
@@ -341,7 +335,6 @@ function sameWritableIgnoredDirectories(left: readonly string[], right: readonly
  */
 export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager {
 	private readonly commandRunner: CommandRunner;
-	private readonly pathOps: RepositoryPathOps;
 	private readonly inventory: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	private readonly now: () => number;
 	private readonly scheduleTimeout: (callback: () => void | Promise<void>, delayMs: number) => CleanupRetryTimer;
@@ -364,7 +357,6 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		this.privateRoot = path.join(this.stateDir, "verification-checkouts-private");
 		this.stateFile = path.join(this.stateDir, "verification-checkouts.json");
 		this.commandRunner = options.commandRunner ?? realCommandRunner;
-		this.pathOps = options.pathOps ?? { lstat, realpath };
 		this.inventory = options.readInventory ?? readVerificationSourceInventory;
 		this.now = options.now ?? Date.now;
 		this.scheduleTimeout = options.setTimeout ?? setTimeout;
@@ -548,8 +540,13 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				// must remain disjoint so no component can shadow another.
 				if (!repoKey || seenKeys.has(repoKey) || !COMMIT_SHA.test(source.commitSha)) throw new Error("invalid repository");
 				seenKeys.add(repoKey);
-				const sourceRoot = await this.resolveStableContainedRepositoryRoot(containerRoot, repoKey, source.sourceRoot);
-				if (seenRoots.some(root => root.repoKey !== "." && repoKey !== "." && (isWithin(root.sourceRoot, sourceRoot) || isWithin(sourceRoot, root.sourceRoot)))) throw new Error("unsafe repository");
+				const expected = path.resolve(containerRoot, repoKey);
+				const rawInfo = await lstat(source.sourceRoot);
+				if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("unsafe repository");
+				const sourceRoot = await realpath(source.sourceRoot);
+				const info = await lstat(sourceRoot);
+				if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected
+					|| seenRoots.some(root => root.repoKey !== "." && repoKey !== "." && (isWithin(root.sourceRoot, sourceRoot) || isWithin(sourceRoot, root.sourceRoot)))) throw new Error("unsafe repository");
 				const repoRoot = await this.gitTopLevel(sourceRoot);
 				if (repoRoot !== sourceRoot) throw new Error("not repository root");
 				await this.assertCommit(repoRoot, source.commitSha);
@@ -609,44 +606,6 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				&& source.sourceRoot === repository.sourceRoot
 				&& source.commitSha.toLowerCase() === repository.commitSha;
 		});
-	}
-
-	/**
-	 * Bind raw and expected spellings to one directory identity before Git sees
-	 * either. A post-realpath canonical containment check and identity recheck
-	 * reject a directory→junction swap instead of accepting its outside target.
-	 */
-	private async resolveStableContainedRepositoryRoot(containerRoot: string, repoKey: string, sourceRoot: string): Promise<string> {
-		const expected = path.resolve(containerRoot, repoKey);
-		const expectedIdentities = await this.containedDirectoryIdentities(containerRoot, expected);
-		const expectedIdentity = expectedIdentities[expectedIdentities.length - 1]!;
-		const sourceIdentity = rootIdentity(await this.pathOps.lstat(sourceRoot));
-		const same = (left: PinnedCheckoutRootIdentity, right: PinnedCheckoutRootIdentity): boolean => left.dev === right.dev && left.ino === right.ino;
-		if (!same(expectedIdentity, sourceIdentity)) throw new Error("repository identity mismatch");
-		const expectedRoot = await this.pathOps.realpath(expected);
-		if (!isWithin(containerRoot, expectedRoot)) throw new Error("repository canonical path escapes container");
-		const [currentExpectedIdentities, currentSource, canonicalIdentity] = await Promise.all([
-			this.containedDirectoryIdentities(containerRoot, expected),
-			this.pathOps.lstat(sourceRoot).then(rootIdentity),
-			this.pathOps.lstat(expectedRoot).then(rootIdentity),
-		]);
-		if (expectedIdentities.length !== currentExpectedIdentities.length
-			|| expectedIdentities.some((identity, index) => !same(identity, currentExpectedIdentities[index]!))
-			|| !same(sourceIdentity, currentSource) || !same(expectedIdentity, canonicalIdentity)) throw new Error("repository path changed");
-		return expectedRoot;
-	}
-
-	/** Capture every lexical component so an in-container link is never accepted. */
-	private async containedDirectoryIdentities(root: string, leaf: string): Promise<PinnedCheckoutRootIdentity[]> {
-		if (!isWithin(root, leaf)) throw new Error("repository escapes container");
-		const identities: PinnedCheckoutRootIdentity[] = [];
-		let cursor = root;
-		identities.push(rootIdentity(await this.pathOps.lstat(cursor)));
-		for (const segment of path.relative(root, leaf).split(path.sep).filter(Boolean)) {
-			cursor = path.join(cursor, segment);
-			identities.push(rootIdentity(await this.pathOps.lstat(cursor)));
-		}
-		return identities;
 	}
 
 	/** The non-repository path components are immutable container structure. */

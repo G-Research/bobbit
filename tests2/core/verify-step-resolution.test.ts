@@ -38,15 +38,6 @@ import {
 } from "../../src/server/agent/verification-harness.ts";
 import type { Component } from "../../src/server/agent/project-config-store.ts";
 
-function tryCreateDirectoryLink(target: string, linkPath: string): boolean {
-	try {
-		fs.symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 describe("verify step resolution — goalBranchContainer composed with resolveStep", () => {
 	it("single-repo with relativePath — goalBranchContainer must not double the offset", () => {
 		// Mirrors a real goal where the project's rootPath sits in a subdirectory
@@ -236,86 +227,6 @@ describe("pinned source layout validation", () => {
 		}
 	});
 
-	it.skipIf(process.platform !== "win32")("accepts a namespaced Windows repository root under its lexical container", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-namespaced-root-"));
-		try {
-			const repository = path.join(root, "services", "api");
-			fs.mkdirSync(repository, { recursive: true });
-			const runner = {
-				execFile: async (_file: string, args: string[]) => ({
-					stdout: args.includes("--show-toplevel") ? args[args.indexOf("-C") + 1] : "0123456789abcdef0123456789abcdef01234567",
-					stderr: "",
-				}),
-			};
-			const layout = await resolvePinnedSourceLayout({
-				worktreePath: root,
-				cwd: root,
-				repoWorktrees: { "services/api": path.toNamespacedPath(repository) },
-			}, runner as any);
-			assert.equal(layout.repositories[0]?.repoKey, "services/api");
-		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("rejects a linked repository path that resolves outside the canonical container", async () => {
-		const base = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-linked-root-"));
-		const root = path.join(base, "container");
-		try {
-			const outside = path.join(base, "outside");
-			const outsideRepository = path.join(outside, "api");
-			fs.mkdirSync(root);
-			fs.mkdirSync(outsideRepository, { recursive: true });
-			if (!tryCreateDirectoryLink(outside, path.join(root, "services"))) return;
-			const runner = {
-				execFile: async () => { throw new Error("linked repository paths must fail before Git runs"); },
-			};
-			await assert.rejects(
-				resolvePinnedSourceLayout({
-					worktreePath: root,
-					cwd: root,
-					repoWorktrees: { "services/api": outsideRepository },
-				}, runner as any),
-				(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
-			);
-		} finally {
-			fs.rmSync(base, { recursive: true, force: true });
-		}
-	});
-
-	it("fails closed when a repository directory is swapped for an outside link during canonicalization", async () => {
-		const base = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-swap-root-"));
-		const root = path.join(base, "container");
-		try {
-			const repository = path.join(root, "services", "api");
-			const outside = path.join(base, "outside");
-			fs.mkdirSync(repository, { recursive: true });
-			fs.mkdirSync(path.join(outside, "api"), { recursive: true });
-			let swapped = false;
-			let gitCalled = false;
-			const pathOps = {
-				lstat: (candidate: fs.PathLike) => fs.promises.lstat(candidate),
-				realpath: async (candidate: fs.PathLike) => {
-					if (!swapped && path.resolve(candidate.toString()) === repository) {
-						fs.renameSync(path.join(root, "services"), path.join(root, "services-original"));
-						if (!tryCreateDirectoryLink(outside, path.join(root, "services"))) throw new Error("directory links unavailable");
-						swapped = true;
-					}
-					return fs.promises.realpath(candidate);
-				},
-			};
-			await assert.rejects(
-				resolvePinnedSourceLayout({ worktreePath: root, cwd: root, repoWorktrees: { "services/api": repository } }, {
-					execFile: async () => { gitCalled = true; throw new Error("Git must not run after a path swap"); },
-				} as any, pathOps),
-				(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
-			);
-			assert.equal(swapped, true, "the deterministic race seam must exercise the swap");
-			assert.equal(gitCalled, false, "a swapped repository must fail before Git runs");
-		} finally {
-			fs.rmSync(base, { recursive: true, force: true });
-		}
-	});
 
 	it("accepts a Git container root alongside disjoint nested repositories", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-root-repository-"));

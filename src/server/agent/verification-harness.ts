@@ -1283,75 +1283,6 @@ function hasAuthoritativePinnedSourceLayout(goal: unknown): goal is { worktreePa
 
 const SANDBOX_REPOSITORY_KEY = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u;
 
-type RepositoryPathOps = {
-	lstat(path: string): Promise<import("node:fs").Stats>;
-	realpath(path: string): Promise<string>;
-};
-
-interface DirectoryIdentity {
-	dev: number;
-	ino: number;
-}
-
-function directoryIdentity(info: import("node:fs").Stats): DirectoryIdentity {
-	if (!info.isDirectory() || info.isSymbolicLink() || !Number.isSafeInteger(info.dev) || !Number.isSafeInteger(info.ino)) {
-		throw new Error("unsafe repository directory");
-	}
-	return { dev: info.dev, ino: info.ino };
-}
-
-function sameDirectoryIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
-	return left.dev === right.dev && left.ino === right.ino;
-}
-
-function isContainedPath(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
-}
-
-async function containedDirectoryIdentities(root: string, leaf: string, fileSystem: RepositoryPathOps): Promise<DirectoryIdentity[]> {
-	if (!isContainedPath(root, leaf)) throw new Error("repository escapes container");
-	const identities: DirectoryIdentity[] = [];
-	let cursor = root;
-	identities.push(directoryIdentity(await fileSystem.lstat(cursor)));
-	for (const segment of path.relative(root, leaf).split(path.sep).filter(Boolean)) {
-		cursor = path.join(cursor, segment);
-		identities.push(directoryIdentity(await fileSystem.lstat(cursor)));
-	}
-	return identities;
-}
-
-/**
- * Bind both lexical spellings to one directory identity before canonicalizing.
- * The repeated identity check closes the lstat→realpath swap where a junction
- * can briefly make the expected and supplied paths canonically agree outside
- * the container. Canonical containment is deliberately checked after realpath.
- */
-async function resolveContainedRepositoryRoot(
-	containerRoot: string,
-	repoKey: string,
-	sourceRoot: string,
-	fileSystem: RepositoryPathOps = { lstat, realpath },
-): Promise<string> {
-	const expected = path.resolve(containerRoot, repoKey);
-	const expectedIdentities = await containedDirectoryIdentities(containerRoot, expected, fileSystem);
-	const expectedIdentity = expectedIdentities[expectedIdentities.length - 1]!;
-	const sourceIdentity = directoryIdentity(await fileSystem.lstat(sourceRoot));
-	if (!sameDirectoryIdentity(expectedIdentity, sourceIdentity)) throw new Error("repository identity mismatch");
-	const expectedRoot = await fileSystem.realpath(expected);
-	if (!isContainedPath(containerRoot, expectedRoot)) throw new Error("repository canonical path escapes container");
-	const [currentExpectedIdentities, currentSource, canonicalInfo] = await Promise.all([
-		containedDirectoryIdentities(containerRoot, expected, fileSystem),
-		fileSystem.lstat(sourceRoot).then(directoryIdentity),
-		fileSystem.lstat(expectedRoot).then(directoryIdentity),
-	]);
-	if (expectedIdentities.length !== currentExpectedIdentities.length
-		|| expectedIdentities.some((identity, index) => !sameDirectoryIdentity(identity, currentExpectedIdentities[index]!))
-		|| !sameDirectoryIdentity(sourceIdentity, currentSource)
-		|| !sameDirectoryIdentity(expectedIdentity, canonicalInfo)) throw new Error("repository path changed");
-	return expectedRoot;
-}
-
 /** A D-4 repository key must survive the sandbox's path grammar unchanged. */
 function sandboxRepositoryKey(value: unknown): string | undefined {
 	const key = verificationRepositoryKey(value);
@@ -1362,16 +1293,15 @@ function sandboxRepositoryKey(value: unknown): string | undefined {
 export async function resolvePinnedSourceLayout(
 	goal: { worktreePath?: string; cwd: string; repoWorktrees?: Record<string, string> },
 	commandRunner: CommandRunner = realCommandRunner,
-	fileSystem: RepositoryPathOps = { lstat, realpath },
 ): Promise<PinnedSourceLayout> {
 	// Do not expose filesystem or Git diagnostics from a live worktree through a
 	// gate signal. Every validation and I/O failure has the same closed result.
 	try {
 		const containerInput = goalBranchContainer(goal);
-		const containerInputInfo = await fileSystem.lstat(containerInput);
+		const containerInputInfo = await lstat(containerInput);
 		if (!containerInputInfo.isDirectory() || containerInputInfo.isSymbolicLink()) throw new Error("invalid container");
-		const containerRoot = await fileSystem.realpath(containerInput);
-		const containerInfo = await fileSystem.lstat(containerRoot);
+		const containerRoot = await realpath(containerInput);
+		const containerInfo = await lstat(containerRoot);
 		if (!containerInfo.isDirectory() || containerInfo.isSymbolicLink()) throw new Error("invalid container");
 		const entries = Object.entries(goal.repoWorktrees ?? {});
 		if (entries.length === 0) {
@@ -1387,11 +1317,16 @@ export async function resolvePinnedSourceLayout(
 			const foldedKey = repoKey?.toLowerCase();
 			if (!repoKey || !foldedKey || typeof rawRoot !== "string" || seen.has(repoKey) || seenFolded.has(foldedKey)) throw new Error("invalid repository");
 			seen.add(repoKey); seenFolded.add(foldedKey);
-			const sourceRoot = await resolveContainedRepositoryRoot(containerRoot, repoKey, rawRoot, fileSystem);
+			const rawInfo = await lstat(rawRoot);
+			if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("invalid source");
+			const sourceRoot = await realpath(rawRoot);
+			const expected = path.resolve(containerRoot, repoKey);
+			const info = await lstat(sourceRoot);
 			// A genuine container-root repository may coexist with nested component
 			// repositories. Named repositories remain mutually disjoint; only `.`
 			// may enclose them.
-			if (roots.some(root => root.repoKey !== "." && repoKey !== "." && (isContainedPath(root.sourceRoot, sourceRoot) || isContainedPath(sourceRoot, root.sourceRoot)))) throw new Error("invalid source");
+			if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected
+				|| roots.some(root => root.repoKey !== "." && repoKey !== "." && (sourceRoot.startsWith(`${root.sourceRoot}${path.sep}`) || root.sourceRoot.startsWith(`${sourceRoot}${path.sep}`)))) throw new Error("invalid source");
 			const topLevel = await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--show-toplevel"], { timeout: 15_000 });
 			if (await realpath(execOutputToString(topLevel.stdout).trim()) !== sourceRoot) throw new Error("invalid git root");
 			const commit = execOutputToString((await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--verify", "HEAD^{commit}"], { timeout: 15_000 })).stdout).trim().toLowerCase();
