@@ -5031,40 +5031,44 @@ export class VerificationHarness {
 	): Promise<boolean> {
 		const gateIdSet = new Set(gateIds);
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
-		const cancellations: ActiveVerification[] = [];
+		const stale = Array.from(this.activeVerifications.entries())
+			.filter(([, active]) => active.goalId === goalId && gateIdSet.has(active.gateId));
+		const terminalResourceCleanups: ActiveVerification[] = [];
 
-		for (const [signalId, active] of Array.from(this.activeVerifications)) {
-			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
-			// A re-signal invalidates live work, not a verdict already published.
-			// Keep the exact row private and drive its retained cleanup lease instead.
+		// This phase deliberately has no await. Re-signal callers do not await this
+		// method, so every old generation must record cancellation intent before the
+		// fresh signal is persisted. Exact cleanup remains owned below.
+		for (const [, active] of stale) {
 			if (this._isTerminalResourceCleanup(active)) {
-				await this._releaseTerminalVerificationResources(active);
+				terminalResourceCleanups.push(active);
 				continue;
 			}
-
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
-
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
-			this._persistActive();
+			this._drainPendingSignoffsForSignal(active.signalId);
+		}
+		if (stale.length > 0) this._persistActive();
+
+		for (const active of terminalResourceCleanups) {
+			await this._releaseTerminalVerificationResources(active);
+		}
+
+		const cancellations: ActiveVerification[] = [];
+		for (const [signalId, active] of stale) {
+			if (this._isTerminalResourceCleanup(active)) continue;
 			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
 			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 			const liveTransportCleanupSettled = persistedCleanupSettled
 				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
 			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
-			this._drainPendingSignoffsForSignal(signalId);
-			if (commandKillsSettled) {
-				cancellations.push(active);
-			} else {
-				this._scheduleCommandKillCleanupRetry(signalId);
-			}
-
+			if (commandKillsSettled) cancellations.push(active);
+			else this._scheduleCommandKillCleanupRetry(signalId);
 		}
 
 		if (cancellations.length > 0) this._persistActive();
-
 		for (const active of cancellations) {
 			await this._finalizeCancelledVerification(active);
 			console.log(`[verification] Cancelled stale verification ${active.signalId} for gate ${active.gateId}`);
@@ -7482,15 +7486,9 @@ export class VerificationHarness {
 			const handleSpawnError = (err: Error): { passed: boolean; output: string; diagnostics?: GateStepDiagnostics } => {
 				appendRetainedLogChunk(outFile, "");
 				appendRetainedLogChunk(errFile, err.message);
-				if (expectFailure && errorPattern) {
-					try {
-						const regex = new RegExp(errorPattern, "i");
-						return withDiagnostics({ passed: regex.test(err.message), output: err.message });
-					} catch {
-						return withDiagnostics({ passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` });
-					}
-				}
-				return withDiagnostics({ passed: expectFailure, output: err.message });
+				return withDiagnostics(expectFailure
+					? matchExpectFailure(null, err.message, errorPattern)
+					: { passed: false, output: err.message });
 			};
 
 			// IMPORTANT: do NOT re-introduce `spawn(..., { timeout })` here.

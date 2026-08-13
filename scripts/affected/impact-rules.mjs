@@ -1223,15 +1223,6 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
-		consumer: "tests2/integration/cancel-verification.test.ts",
-		allowReason: "test-owned copied Git-template fixture and generated verification state",
-		reads: frozen([
-			{ expression: "path.join(gitDir, \"objects\", sha.slice(0, 2), sha.slice(2))", count: 1 },
-			{ expression: "path.join(gitDir, \"HEAD\")", count: 1 },
-			{ expression: "path.join(gitDir, ref)", count: 1 },
-		]),
-	},
-	{
 		consumer: "tests2/core/verification-pinned-checkout.test.ts",
 		allowReason: "test-owned Git-template clone and pinned-checkout fixture output",
 		reads: frozen([
