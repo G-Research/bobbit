@@ -280,7 +280,7 @@ test.describe("Abort status E2E", () => {
 		}
 	});
 
-	test("PI-25c: live-steer + followup during aborting window preserves order", async ({ gateway }) => {
+	test("PI-25c: graceful Stop preserves followup without redriving an acknowledged steer", async ({ gateway }) => {
 		const directId = "pi25c-steer-0001";
 		const followupId = "pi25c-followup-0002";
 		sessionId = await createSession();
@@ -342,25 +342,53 @@ test.describe("Abort status E2E", () => {
 			core.releaseBarrier("tool:before-end");
 			await core.waitForBarrier("tool:after-end");
 			core.releaseBarrier("abort:1:before-agent-end");
-			await core.waitForBarrier("prompt:2:received");
-			const recoveredProjection = latestIntentProjection(conn.messages);
-			expect(intentRows(recoveredProjection).map(intentId)).toEqual([directId, followupId]);
+			const followupReceipt = await core.waitForBarrier("prompt:2:received");
+			const recoveredProjection = await conn.waitForFrom(cursor, (frame) => {
+				const rows = intentRows(frame);
+				return rows.map(intentId).join(",") === [directId, followupId].join(",")
+					&& rows.find((row) => intentId(row) === directId)?.deliveryState === "uncertain";
+			});
+			const recoveredRows = intentRows(recoveredProjection);
+			expect(recoveredRows.map(intentId)).toEqual([directId, followupId]);
+			const followupRow = recoveredRows.find((row) => intentId(row) === followupId);
+			expect({
+				kind: followupReceipt.kind,
+				occurrence: followupReceipt.occurrence,
+				text: followupReceipt.text,
+				intentId: intentId(followupRow),
+			}).toEqual({
+				kind: "prompt",
+				occurrence: 2,
+				text: "FOLLOWUP",
+				intentId: followupId,
+			});
+			expect(recoveredRows.find((row) => intentId(row) === directId)).toMatchObject({
+				deliveryState: "uncertain",
+				retryable: false,
+			});
+
 			core.releaseBarrier("prompt:2:received");
 			await conn.waitForFrom(cursor, (frame) =>
-				userMessageEnds([frame], "S_DIRECT").length === 1,
+				userMessageEnds([frame], "FOLLOWUP")
+					.some((messageEnd) => deliveryIntentId(messageEnd) === followupId),
 			);
-			const directEnds = userMessageEnds(conn.messages.slice(cursor), "S_DIRECT")
-				.filter((frame) => deliveryIntentId(frame) === directId);
-			expect(directEnds, "PI-25c: recovered steer surfaces exactly once before follow-up dispatch").toHaveLength(1);
-			const betweenProjection = latestIntentProjection(conn.messages);
-			expect(intentRows(betweenProjection).map(intentId)).toEqual([followupId]);
-			expect(userMessageEnds(conn.messages.slice(cursor), "FOLLOWUP"),
-				"PI-25c: the follow-up remains solely in the outbox until the recovered steer turn settles").toHaveLength(0);
+
+			const followupEnds = userMessageEnds(conn.messages.slice(cursor), "FOLLOWUP")
+				.filter((frame) => deliveryIntentId(frame) === followupId);
+			expect(followupEnds, "PI-25c: the queued follow-up surfaces exactly once after Stop").toHaveLength(1);
+			expect(userMessageEnds(conn.messages.slice(cursor), "S_DIRECT"),
+				"PI-25c: the acknowledged/no-echo steer must remain uncertain and never replay").toHaveLength(0);
+
+			const finalOutbox = [...conn.messages].reverse().find((frame) => frame.type === "queue_update");
+			expect(intentRows(finalOutbox).map(intentId)).toEqual([directId]);
+			expect(intentRows(finalOutbox)[0]).toMatchObject({
+				deliveryState: "uncertain",
+				retryable: false,
+			});
+			expect(core.commandJournal.filter((entry) => entry.kind === "steer").map((entry) => entry.text))
+				.toEqual(["S_DIRECT"]);
 			expect(core.commandJournal.filter((entry) => entry.kind === "prompt").map((entry) => entry.text))
-				.toEqual(["RELIABLE_TOOL_HOLD", "S_DIRECT"]);
-			expect(directEnds.length + intentRows(betweenProjection).filter((row) => intentId(row) === directId).length).toBe(1);
-			expect(userMessageEnds(conn.messages.slice(cursor), "FOLLOWUP").length
-				+ intentRows(betweenProjection).filter((row) => intentId(row) === followupId).length).toBe(1);
+				.toEqual(["RELIABLE_TOOL_HOLD", "FOLLOWUP"]);
 		} finally {
 			core.releaseAllBarriers();
 			followupConn.close();
