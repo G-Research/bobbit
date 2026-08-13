@@ -544,12 +544,17 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false }),
 			});
-			expect(unavailableCreate.status).toBe(500);
-			expect(await unavailableCreate.text()).toContain("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
+			const unavailableBody = await unavailableCreate.text();
+			expect(unavailableCreate.status).toBe(503);
+			expect(JSON.parse(unavailableBody)).toEqual({
+				error: "SDK_SESSION_UNAVAILABLE",
+				code: "SDK_SESSION_UNAVAILABLE",
+			});
+			expect(unavailableBody).not.toContain("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
 			expect(fakeSdk.queries).toHaveLength(unavailableQueriesBefore + 1);
 			expect(fakeSdk.queries.at(-1)?.args.options.model).toBe("unavailable-test");
-			// Returning the provider error from creation proves it settled instead
-			// of leaving a live prompt/queue hung.
+			// Returning a stable unavailable category proves it settled instead of
+			// leaving a live prompt/queue hung or leaking provider diagnostics.
 		} finally {
 			if (fidelityGoalId) await deleteGoal(fidelityGoalId);
 			if (fidelityWorkflow && fidelityProjectId) {
