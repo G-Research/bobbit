@@ -102,6 +102,16 @@ class FixtureSdkQuery implements AsyncIterable<unknown> {
 		});
 	}
 
+	/** The official history ends the real root Agent call with a safe result.
+	 * This is distinct from the child terminal frame, which is not durable SDK
+	 * session history and therefore cannot be the source of reload state. */
+	emitRootFailureResult(): void {
+		this.emit({
+			type: "user", uuid: "root-agent-safe-failure", session_id: SDK_SESSION_ID,
+			message: { content: [{ type: "tool_result", tool_use_id: PARENT_TOOL_USE_ID, is_error: true, content: SAFE_CHILD_FAILURE }] },
+		});
+	}
+
 	[Symbol.asyncIterator](): AsyncIterator<unknown> {
 		return {
 			next: () => {
@@ -216,14 +226,21 @@ test.describe("Claude SDK embedded subagent card", () => {
 			await expect(reloadedParent).not.toContainText(CHILD_FAILURE);
 			await expectNoRootChildProse(page);
 
-			// Reload after failure: a less-specific recovery snapshot must not clobber
-			// the live terminal/error state or render the raw SDK sentinel.
+			// The child terminal is live-only. Persist the completed root Agent result
+			// using the SDK's durable user/tool_result history shape before reload.
+			queries[0].emitRootFailureResult();
+			await expect(reloadedParent).toContainText(SAFE_CHILD_FAILURE);
+			await expect(reloadedParent).not.toContainText(CHILD_FAILURE);
+			await expectNoRootChildProse(page);
+
+			// Reload after failure: the authoritative root result keeps the card failed
+			// without deriving an unsafe child terminal from absent history.
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
 			const terminalReloadedParent = page.locator(`[data-subagent-parent-tool-use-id="${PARENT_TOOL_USE_ID}"]`);
 			await expect(terminalReloadedParent).toBeVisible({ timeout: 20_000 });
-			await expect(terminalReloadedParent.locator(`[data-subagent-agent-id="${CHILD_AGENT_ID}"]`)).toContainText("Failed");
-			await expect(terminalReloadedParent.locator('[role="alert"]')).toContainText(SAFE_CHILD_FAILURE);
+			await expect(terminalReloadedParent).toContainText("Failed");
+			await expect(terminalReloadedParent).toContainText(SAFE_CHILD_FAILURE);
 			await expect(terminalReloadedParent).not.toContainText(CHILD_FAILURE);
 			await expectNoRootChildProse(page);
 
