@@ -343,46 +343,80 @@ describe("reveal current sidebar session control", () => {
 		expect(document.querySelector('[data-nav-id="session:first"]')).toBeNull();
 	});
 
-	it("materializes and explicitly expands a seven-goal target path without changing another project's cap", async () => {
+	it("materializes a capped spawned-goal path under its canonical team lead without changing another project", async () => {
 		state.projects = [project("p"), project("unrelated")];
 		state.goals = [
-			...Array.from({ length: 7 }, (_, index) => goal(`g${index + 1}`, {
+			goal("team", { projectId: "p", team: true, createdAt: 1 }),
+			goal("spawned", { projectId: "p", parentGoalId: "team", spawnedBySessionId: "lead", createdAt: 2 }),
+			...Array.from({ length: 7 }, (_, index) => goal(`deep-${index + 1}`, {
 				projectId: "p",
-				parentGoalId: index === 0 ? undefined : `g${index}`,
-				createdAt: index + 1,
+				parentGoalId: index === 0 ? "spawned" : `deep-${index}`,
+				createdAt: index + 3,
 			})),
-			...Array.from({ length: 7 }, (_, index) => goal(`u${index + 1}`, {
+			goal("unrelated-team", { projectId: "unrelated", team: true, createdAt: 20 }),
+			goal("unrelated-spawned", {
 				projectId: "unrelated",
-				parentGoalId: index === 0 ? undefined : `u${index}`,
-				createdAt: 20 + index,
+				parentGoalId: "unrelated-team",
+				spawnedBySessionId: "unrelated-lead",
+				createdAt: 21,
+			}),
+			...Array.from({ length: 7 }, (_, index) => goal(`unrelated-deep-${index + 1}`, {
+				projectId: "unrelated",
+				parentGoalId: index === 0 ? "unrelated-spawned" : `unrelated-deep-${index}`,
+				createdAt: index + 22,
 			})),
 		];
-		state.gatewaySessions = [session("target", { projectId: "p", goalId: "g7", createdAt: 30 })];
+		state.gatewaySessions = [
+			session("lead", { projectId: "p", goalId: "team", teamGoalId: "team", role: "team-lead", createdAt: 30 }),
+			session("target", { projectId: "p", goalId: "deep-7", createdAt: 31 }),
+			session("unrelated-lead", {
+				projectId: "unrelated",
+				goalId: "unrelated-team",
+				teamGoalId: "unrelated-team",
+				role: "team-lead",
+				createdAt: 32,
+			}),
+			session("unrelated-target", { projectId: "unrelated", goalId: "unrelated-deep-7", createdAt: 33 }),
+		];
 		openSession("target");
+		state.keyboardNavActiveId = "session:unrelated-target";
 
 		const targetPath: SidebarTreeNodeKey[] = [
 			{ kind: "project", projectId: "p" },
-			...Array.from({ length: 7 }, (_, index): SidebarTreeNodeKey => ({ kind: "goal", goalId: `g${index + 1}` })),
+			{ kind: "goal", goalId: "team" },
+			{ kind: "team-lead", sessionId: "lead" },
+			{ kind: "goal", goalId: "spawned" },
+			...Array.from({ length: 7 }, (_, index): SidebarTreeNodeKey => ({ kind: "goal", goalId: `deep-${index + 1}` })),
 		];
 		const unrelatedProject: SidebarTreeNodeKey = { kind: "project", projectId: "unrelated" };
 		for (const key of targetPath) setTreeExpanded(key, false);
 		setTreeExpanded(unrelatedProject, false);
 
+		const targetSessionKey = sidebarTreeKey({ kind: "session", sessionId: "target" });
+		const unrelatedDeepGoalKey = sidebarTreeKey({ kind: "goal", goalId: "unrelated-deep-7" });
 		const before = buildSidebarTreeModel();
-		expect(before.flatByKey.has(sidebarTreeKey({ kind: "session", sessionId: "target" }))).toBe(false);
-		expect(before.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "u7" }))).toBe(false);
+		expect(before.flatByKey.has(targetSessionKey), "default cap must clip the target before explicit reveal").toBe(false);
+		expect(before.flatByKey.has(unrelatedDeepGoalKey)).toBe(false);
 		const row = mountSessionRow("target");
 
 		await revealCurrentSidebarSession();
 
 		const after = buildSidebarTreeModel();
-		expect(after.flatByKey.has(sidebarTreeKey({ kind: "session", sessionId: "target" }))).toBe(true);
-		for (const key of targetPath) {
-			expect(isSidebarTreeExpanded(key), sidebarTreeKey(key)).toBe(true);
+		const targetNode = after.flatByKey.get(targetSessionKey);
+		expect(targetNode, "explicit project cap must materialize the target session").toBeDefined();
+		const actualAncestors: string[] = [];
+		let parentKey = targetNode?.parentKey ?? null;
+		while (parentKey) {
+			actualAncestors.push(parentKey);
+			parentKey = after.flatByKey.get(parentKey)?.parentKey ?? null;
 		}
+		expect(actualAncestors).toEqual([...targetPath].reverse().map(sidebarTreeKey));
+		for (const key of targetPath) expect(isSidebarTreeExpanded(key), sidebarTreeKey(key)).toBe(true);
 		expect(isSidebarTreeExpanded(unrelatedProject)).toBe(false);
-		expect(after.flatByKey.has(sidebarTreeKey({ kind: "goal", goalId: "u7" }))).toBe(false);
+		expect(after.flatByKey.has(unrelatedDeepGoalKey), "unrelated project cap must stay at its default").toBe(false);
+		expect(state.keyboardNavActiveId).toBe("session:target");
 		expect(row.scrollIntoView).toHaveBeenCalledWith({ block: "nearest", behavior: "smooth" });
+		expect(row.classList.contains("sidebar-reveal-emphasis")).toBe(true);
 
 		const persisted = JSON.parse(localStorage.getItem(SIDEBAR_TREE_STATE_STORAGE_KEY) || "{}") as {
 			expansion?: Record<string, string>;
