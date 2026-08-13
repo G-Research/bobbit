@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	getRegisteredRpcBridgeFactory,
@@ -14,7 +16,14 @@ import {
 } from "../../src/server/gateway-deps.js";
 import { installGatewayBridgeDeps } from "../../src/server/server.js";
 
+const SERVER_SOURCE = readFileSync(fileURLToPath(new URL("../../src/server/server.ts", import.meta.url)), "utf8");
+
 describe("GatewayDeps default-real wiring", () => {
+	it("passes the injected SDK bridge factory into SessionManager", () => {
+		const construction = SERVER_SOURCE.match(/const sessionManager = new SessionManager\(\{([\s\S]*?)\n\t\}\);/);
+		expect(construction?.[1]).toContain("claudeAgentSdkBridgeDepsFactory: gatewayDeps.claudeAgentSdkBridgeDepsFactory,");
+	});
+
 	it("resolves real deps when no deps are provided", () => {
 		const deps = resolveGatewayDeps();
 		expect(deps.clock).toBe(realClock);
