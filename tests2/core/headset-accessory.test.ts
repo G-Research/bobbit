@@ -58,6 +58,15 @@ describe("headset accessory", () => {
 		assert.ok(has(5, 7, "#1f2937") && has(6, 7, "#1f2937"), "boom arm from the right cup");
 	});
 
+	it("provides a minimal right-facing sidebar frame", () => {
+		const right = ACCESSORY_HEADSET.sidebarRightFacingPixels ?? [];
+		const rightHas = (x: number, y: number) => right.some(([px, py]) => px === x && py === y);
+		assert.ok(right.length > 0 && right.length < ACCESSORY_HEADSET.pixels.length, "right frame is a pixel subset");
+		assert.ok(rightHas(1, 4), "near/left cup remains visible");
+		assert.ok(!rightHas(8, 4) && !rightHas(9, 4), "far/right cup is occluded");
+		assert.ok(rightHas(7, 1) && rightHas(8, 1), "top band remains intact");
+	});
+
 	it("uses only neutral greys + the foam pop (stays neutral across hues)", () => {
 		const allowed = new Set(["#000", "#1f2937", "#374151", "#4b5563", "#6b7280", "#f97316"]);
 		for (const [, , c] of ACCESSORY_HEADSET.pixels) {
@@ -88,14 +97,22 @@ describe("headset accessory", () => {
 		assert.ok(chatDivs.length >= 2, "headset div in both bobbit-render templates");
 		// Sidebar canvas seat special-case (+0.5 sprite px).
 		assert.match(render, /isHeadset/, "sidebar accTransform seat special-case");
-		// Sidebar canvas must preserve negative accessory x pixels by rasterizing
-		// from minX and shifting the shared body/accessory origin together.
+		// Sidebar canvas must preserve negative accessory x pixels and cache both
+		// immutable frames; CSS swaps opacity without any JS animation timer.
 		assert.match(render, /let minX = Infinity/, "sidebar accessory bounds track minX");
 		assert.match(render, /const xShift = Math\.min\(0, minX\)/, "sidebar accessory keeps negative x extent");
-		assert.match(render, /const srcW = maxX - xShift \+ 1/, "sidebar accessory canvas includes negative x pixels");
-		assert.match(render, /fillRect\(\(x - xShift\) \* HI/, "sidebar accessory rasterization offsets by minX");
+		assert.match(render, /srcW: maxX - xShift \+ 1/, "sidebar accessory canvas includes negative x pixels");
+		assert.match(render, /fillRect\(\(x - bounds\.xShift\) \* HI/, "sidebar rasterization offsets by minX");
+		assert.match(render, /sidebarRightFacingPixels/, "sidebar consumes the right-facing frame");
+		assert.match(render, /isSelected && \(!isCompacting \|\| isCancelling\)/, "cancelling compaction keeps the eye/accessory turn synchronized");
+		assert.match(render, /`\$\{acc\.id\}\|right`/, "right-facing bitmap has a stable cache key");
 		assert.match(render, /left:\$\{sidebarOriginX\}px/, "sidebar body layers share adjusted x origin");
 		assert.match(render, /left:\$\{accLeft\}px/, "sidebar accessory layer uses minX-aware left edge");
+		const sidebarCss = read("src/app/app.css");
+		assert.match(sidebarCss, /bobbit-sidebar-accessory-turn-front 6s step-end infinite/, "front frame uses compositor step animation");
+		assert.match(sidebarCss, /bobbit-sidebar-accessory-turn-right 6s step-end infinite/, "right frame uses compositor step animation");
+		assert.match(sidebarCss, /74%, 86% \{ opacity: 1; \}/, "right frame aligns with the sidebar right-gaze beat");
+		assert.doesNotMatch(render, /setInterval|requestAnimationFrame/, "sidebar frame swap adds no polling loop");
 		assert.match(read("src/ui/components/StreamingMessageContainer.ts"), /bobbit-blob__headset/);
 
 		// Role-manager inline display rules (per-blob gating, no html-class leak).

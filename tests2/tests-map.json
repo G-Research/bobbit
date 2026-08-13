@@ -1868,7 +1868,7 @@
     },
     {
       "path": "tests2/core/headset-accessory.test.ts",
-      "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
+      "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat and cached compositor-only right-facing frame, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1877,7 +1877,7 @@
     },
     {
       "path": "tests2/core/ponytail-accessory.test.ts",
-      "reason": "Pins the 'ponytail' accessory end-to-end wiring (sprite data, app.css overlay + occlusion keyframes, blob DOM templates, role-manager inline rules, staff allowlist) plus the two properties easy to 'tidy' into bugs: the parting/forehead/mouth are drawn by omission (never baked body colour, which would break hue rotation) and the right-facing turn moves the tail to negative x rather than hiding it.",
+      "reason": "Pins the 'ponytail' accessory end-to-end wiring (sprite data, app.css overlay + chat occlusion keyframes, cached compositor-only sidebar right-facing frame, blob DOM templates, role-manager inline rules, staff allowlist) plus the omission and turn-direction invariants that are easy to break.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
