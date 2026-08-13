@@ -130,7 +130,9 @@ export const MAX_SANDBOX_SDK_HISTORY_MESSAGES = 1_000;
 export const MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES = 16 * 1024 * 1024;
 const SANDBOX_SDK_READER = `
-const [operation, sessionId, cwd, limitText, offsetText, includeSystemText, agentId] = process.argv.slice(1);
+// Keep operation at the historical argv position: deterministic Docker seams
+// inspect it while the child-only agent id remains an explicit extra input.
+const [agentId, operation, sessionId, cwd, limitText, offsetText, includeSystemText] = process.argv.slice(1);
 const sdk = await import("@anthropic-ai/claude-agent-sdk");
 const limit = Number(limitText);
 const offset = Number(offsetText);
@@ -189,8 +191,8 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 			"-e", "HOME=/home/node", "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"-e", `CLAUDE_CONFIG_DIR=${dir}`,
 			input.containerId, "node", "--input-type=module", "-e", SANDBOX_SDK_READER,
-			request.operation, request.sessionId, input.cwd,
-			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true), request.agentId ?? "",
+			request.agentId ?? "", request.operation, request.sessionId, input.cwd,
+			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
 		]);
 		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("sandbox SDK response page exceeds limit");
 		try { return JSON.parse(output) as T; }

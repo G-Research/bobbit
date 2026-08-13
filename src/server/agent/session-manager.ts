@@ -28,7 +28,7 @@ import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeA
 import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
-import { projectClaudeSdkEmbeddedWork } from "./claude-sdk-subagent-work.js";
+import { projectClaudeSdkEmbeddedWork, recoverClaudeSdkEmbeddedWork } from "./claude-sdk-subagent-work.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -10103,14 +10103,19 @@ export class SessionManager {
 		const partitioned = isClaudeSdk && !alreadyProjected && sourceMessages
 			? projectClaudeSdkEmbeddedWork(sourceMessages as any)
 			: undefined;
-		const snapshotWithNestedWork = partitioned
+		// Keep the historical array wire shape when there is no child work. The
+		// envelope is introduced only when nested rows actually need to survive a
+		// reload/archive snapshot; this avoids changing ordinary SDK consumers.
+		const snapshotWithNestedWork = partitioned && partitioned.workByParent.size > 0
 			? {
 				...(Array.isArray(source) ? {} : source),
 				messages: partitioned.rootMessages,
 				subagentWork: [...partitioned.workByParent.values()],
 				...(partitioned.diagnostics.length > 0 ? { subagentWorkDiagnostics: partitioned.diagnostics } : {}),
 			}
-			: source;
+			: partitioned
+				? partitioned.rootMessages
+				: source;
 		const visible = buildVisibleMessageSnapshotData(snapshotWithNestedWork, {
 			sessionId: id,
 			session: {
@@ -11452,6 +11457,8 @@ export class SessionManager {
 			return { ...base, sandboxSdk: {
 				getSessionInfo: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
 				getSessionMessages: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
+				listSubagents: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
+				getSubagentMessages: async () => { throw new ClaudeAgentSdkUnavailableError(`SDK_SESSION_UNAVAILABLE: ${reason}`); },
 			} };
 		}
 		return {
@@ -11482,11 +11489,17 @@ export class SessionManager {
 		if (runtimeForPersistedSession(ps) === "claude-agent-sdk") {
 			if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return [];
 			try {
+				const access = this.getSdkSessionAccessDeps(ps) ?? defaultClaudeAgentSdkSessionAccessDeps;
 				const messages = await readSdkSessionMessages({
 					sessionId: ps.claudeAgentSdkSessionId,
 					cwd: ps.cwd,
-				}, this.getSdkSessionAccessDeps(ps));
-				return this.buildVisibleMessageSnapshot(id, adaptSdkSessionMessages(messages));
+				}, access);
+				const recovered = await recoverClaudeSdkEmbeddedWork(adaptSdkSessionMessages(messages), {
+					sessionId: ps.claudeAgentSdkSessionId,
+					cwd: ps.cwd,
+					access,
+				});
+				return this.buildVisibleMessageSnapshot(id, recovered);
 			} catch (error) {
 				// Sandbox SDK history is authoritative in the container. Returning an
 				// empty snapshot here hides an unavailable container or bounded-reader

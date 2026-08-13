@@ -2577,6 +2577,51 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/claude-sdk-subagent-work.test.ts",
+      "reason": "G10b server projection and official SDK recovery: exact parent partitioning, identity lifecycle aggregation, child-local tool state, replay metadata, and rejection of inferred recovery joins.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-sdk-subagent-client.test.ts",
+      "reason": "G10b client projection: semantic-frame and snapshot partitioning preserve child-local ordering, lifecycle, opaque metadata, and exclude all child prose from the root reducer.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/claude-sdk-subagent-card.test.ts",
+      "reason": "G10b DOM coverage for rendering only exact-parent Claude SDK child work inside the native Agent card, including collapse persistence and accessible terminal child failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/session-manager-claude-sdk-subagent-rendering.test.ts",
+      "reason": "G10b SessionManager transport coverage: semantic child frames sequence and resume without root lifecycle, activity, cost, or transcript effects, and reload snapshots retain nested work only.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/claude-sdk-subagent-card.spec.ts",
+      "reason": "G10b browser journey covering exact-parent embedded Claude SDK child work in the native Agent card, terminal visibility, reload-safe nested state, and no standalone child surface.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

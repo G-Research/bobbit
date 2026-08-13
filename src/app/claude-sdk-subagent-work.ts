@@ -27,9 +27,13 @@ export interface ClaudeSdkEmbeddedWork {
 	readonly parentToolUseId: string;
 	readonly agentId?: string;
 	readonly agentType?: string;
+	/** All admitted child identities for the same root Agent call. */
+	readonly identities?: readonly ClaudeSdkSubagentIdentity[];
 	readonly phase: ClaudeSdkSubagentPhase;
 	readonly startedAt?: number;
 	readonly stoppedAt?: number;
+	/** Terminal failure stays local to the embedded work, never root prose. */
+	readonly error?: string;
 	readonly messages: readonly ClaudeSdkSubagentMessage[];
 	readonly pendingToolCallIds: readonly string[];
 	readonly diagnostic?: "unknown-parent" | "recovery-unavailable" | "recovery-mismatch";
@@ -95,6 +99,37 @@ function terminalPhase(value: unknown): ClaudeSdkSubagentPhase | undefined {
 		: undefined;
 }
 
+function normalizeIdentities(parentToolUseId: string, value: unknown): ClaudeSdkSubagentIdentity[] {
+	if (!Array.isArray(value)) return [];
+	const seen = new Set<string>();
+	const identities: ClaudeSdkSubagentIdentity[] = [];
+	for (const candidate of value) {
+		if (!isRecord(candidate)) continue;
+		const agentId = typeof candidate.agentId === "string" && candidate.agentId ? candidate.agentId : undefined;
+		const agentType = typeof candidate.agentType === "string" && candidate.agentType ? candidate.agentType : undefined;
+		if (!agentId && !agentType) continue;
+		const key = agentId ? `id:${agentId}` : `type:${agentType}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		identities.push({ parentToolUseId, ...(agentId ? { agentId } : {}), ...(agentType ? { agentType } : {}) });
+	}
+	return identities;
+}
+
+function mergeIdentity(
+	identities: readonly ClaudeSdkSubagentIdentity[] | undefined,
+	identity: ClaudeSdkSubagentIdentity | undefined,
+): ClaudeSdkSubagentIdentity[] | undefined {
+	if (!identity?.agentId && !identity?.agentType) return identities ? [...identities] : undefined;
+	const key = identity.agentId ? `id:${identity.agentId}` : `type:${identity.agentType}`;
+	const prior = identities ?? [];
+	const index = prior.findIndex((candidate) => (candidate.agentId ? `id:${candidate.agentId}` : `type:${candidate.agentType}`) === key);
+	const next = prior.slice();
+	if (index >= 0) next[index] = { ...next[index], ...identity };
+	else next.push(identity);
+	return next;
+}
+
 function normalizeWork(parentToolUseId: string, value?: unknown): ClaudeSdkEmbeddedWork {
 	const raw = isRecord(value) ? value : {};
 	const messages = Array.isArray(raw.messages)
@@ -106,13 +141,18 @@ function normalizeWork(parentToolUseId: string, value?: unknown): ClaudeSdkEmbed
 	const diagnostic = raw.diagnostic === "unknown-parent" || raw.diagnostic === "recovery-unavailable" || raw.diagnostic === "recovery-mismatch"
 		? raw.diagnostic
 		: undefined;
+	const identities = normalizeIdentities(parentToolUseId, raw.identities);
+	const agentId = typeof raw.agentId === "string" && raw.agentId ? raw.agentId : identities[0]?.agentId;
+	const agentType = typeof raw.agentType === "string" && raw.agentType ? raw.agentType : identities[0]?.agentType;
 	return {
 		parentToolUseId,
-		...(typeof raw.agentId === "string" && raw.agentId ? { agentId: raw.agentId } : {}),
-		...(typeof raw.agentType === "string" && raw.agentType ? { agentType: raw.agentType } : {}),
+		...(agentId ? { agentId } : {}),
+		...(agentType ? { agentType } : {}),
+		...(identities.length > 0 ? { identities } : {}),
 		phase: terminalPhase(raw.phase) ?? "unknown",
 		...(finiteTime(raw.startedAt) !== undefined ? { startedAt: finiteTime(raw.startedAt) } : {}),
 		...(finiteTime(raw.stoppedAt) !== undefined ? { stoppedAt: finiteTime(raw.stoppedAt) } : {}),
+		...(typeof raw.error === "string" && raw.error ? { error: raw.error } : {}),
 		messages: sortMessages(messages),
 		pendingToolCallIds: [...new Set(pending)],
 		...(diagnostic ? { diagnostic } : {}),
@@ -153,6 +193,8 @@ function applyEvent(current: ClaudeSdkEmbeddedWork | undefined, raw: Record<stri
 	let pendingToolCallIds = base.pendingToolCallIds;
 	let startedAt = base.startedAt;
 	let stoppedAt = base.stoppedAt;
+	let error = base.error;
+	const identities = mergeIdentity(base.identities, identity);
 
 	if (kind === "start") {
 		phase = "running";
@@ -177,14 +219,17 @@ function applyEvent(current: ClaudeSdkEmbeddedWork | undefined, raw: Record<stri
 		phase = terminalPhase(event.terminal?.phase) ?? "unknown";
 		stoppedAt = finiteTime((raw as any).at) ?? finiteTime(raw.timestamp) ?? stoppedAt;
 	}
+	if (typeof event.terminal?.error === "string" && event.terminal.error) error = event.terminal.error;
 
 	return {
 		...base,
 		...(typeof identity?.agentId === "string" && identity.agentId ? { agentId: identity.agentId } : {}),
 		...(typeof identity?.agentType === "string" && identity.agentType ? { agentType: identity.agentType } : {}),
+		...(identities && identities.length > 0 ? { identities } : {}),
 		phase,
 		...(startedAt !== undefined ? { startedAt } : {}),
 		...(stoppedAt !== undefined ? { stoppedAt } : {}),
+		...(error ? { error } : {}),
 		messages,
 		pendingToolCallIds,
 	};

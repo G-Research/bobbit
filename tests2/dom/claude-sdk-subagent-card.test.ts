@@ -42,16 +42,19 @@ async function mount(work: unknown, parentId = "root-agent-a") {
 describe("Claude SDK embedded subagent card", () => {
 	it("renders exact-parent child activity inside the native Agent tool card", async () => {
 		const host = await mount({
-			"root-agent-a": [{
+			"root-agent-a": {
 				parentToolUseId: "root-agent-a",
-				agentId: "sdk-child-1",
-				displayLabel: "Backend parity reviewer",
-				state: "working",
-				orderedMessages: [
-					{ type: "text", text: "Checking the recovery boundary." },
-					{ type: "toolCall", id: "child-read", name: "mcp__bobbit__read", arguments: { path: "src/server/a.ts" } },
-				],
-			}],
+				phase: "running",
+				identities: [{ parentToolUseId: "root-agent-a", agentId: "sdk-child-1", agentType: "Backend parity reviewer" }],
+				messages: [{
+					id: "sdk-child-message-1", role: "assistant", parentToolUseId: "root-agent-a", parentAgentId: "sdk-child-1",
+					content: [
+						{ type: "text", text: "Checking the recovery boundary." },
+						{ type: "toolCall", id: "child-read", name: "mcp__bobbit__read", arguments: { path: "src/server/a.ts" } },
+					],
+				}],
+				pendingToolCallIds: ["child-read"],
+			},
 		});
 
 		const outer = host.querySelector('[data-tool-name="Agent"]') as HTMLElement;
@@ -66,13 +69,12 @@ describe("Claude SDK embedded subagent card", () => {
 
 	it("never mounts a partition with a different or absent parent", async () => {
 		const host = await mount({
-			"root-agent-other": [{
-				parentToolUseId: "root-agent-other",
-				agentId: "sdk-child-other",
-				displayLabel: "Must stay hidden",
-				state: "working",
-				orderedMessages: [{ type: "text", text: "unattached child prose" }],
-			}],
+			"root-agent-other": {
+				parentToolUseId: "root-agent-other", phase: "running",
+				identities: [{ parentToolUseId: "root-agent-other", agentId: "sdk-child-other", agentType: "Must stay hidden" }],
+				messages: [{ id: "hidden-child", role: "assistant", parentToolUseId: "root-agent-other", parentAgentId: "sdk-child-other", content: [{ type: "text", text: "unattached child prose" }] }],
+				pendingToolCallIds: [],
+			},
 		});
 
 		expect(host.querySelector("embedded-agent-card")).toBeNull();
@@ -81,13 +83,12 @@ describe("Claude SDK embedded subagent card", () => {
 
 	it("preserves user collapse while status updates and marks terminal failure accessibly", async () => {
 		const work = {
-			"root-agent-a": [{
-				parentToolUseId: "root-agent-a",
-				agentId: "sdk-child-1",
-				displayLabel: "Backend parity reviewer",
-				state: "working",
-				orderedMessages: [{ type: "text", text: "first update" }],
-			}],
+			"root-agent-a": {
+				parentToolUseId: "root-agent-a", phase: "running",
+				identities: [{ parentToolUseId: "root-agent-a", agentId: "sdk-child-1", agentType: "Backend parity reviewer" }],
+				messages: [{ id: "first-update", role: "assistant", parentToolUseId: "root-agent-a", parentAgentId: "sdk-child-1", content: [{ type: "text", text: "first update" }] }],
+				pendingToolCallIds: [],
+			},
 		};
 		const host = await mount(work);
 		const card = host.querySelector("embedded-agent-card") as any;
@@ -98,7 +99,9 @@ describe("Claude SDK embedded subagent card", () => {
 		expect(toggle.getAttribute("aria-expanded")).toBe("false");
 
 		card.activities = [{
-			...work["root-agent-a"][0],
+			parentToolUseId: "root-agent-a",
+			agentId: "sdk-child-1",
+			displayLabel: "Backend parity reviewer",
 			state: "failed",
 			failureReason: "Child tool failed",
 			orderedMessages: [{ type: "toolCall", id: "dangling", name: "grep", arguments: { pattern: "x" } }],

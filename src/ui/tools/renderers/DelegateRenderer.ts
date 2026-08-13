@@ -42,10 +42,9 @@ function getTextOutput(result: ToolResultMessage<any> | undefined): string {
 	return result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n") || "";
 }
 
-// Claude SDK child activity is deliberately rendered here, within the existing
-// tool renderer path. These structural types tolerate snapshots from older
-// gateways while the client projection is being rolled out; the exact parent
-// key is still mandatory before anything is mounted.
+// Claude SDK child activity is deliberately rendered here, inside the existing
+// root Agent/Task tool card. The map key and the work object's parent id must
+// agree; child data never receives a proximity-based fallback.
 interface EmbeddedAgentActivity {
 	parentToolUseId?: string;
 	parent_tool_use_id?: string;
@@ -62,6 +61,17 @@ interface EmbeddedAgentActivity {
 	messages?: unknown[];
 }
 
+interface EmbeddedWork {
+	parentToolUseId?: string;
+	parent_tool_use_id?: string;
+	agentId?: string;
+	agentType?: string;
+	identities?: Array<{ agentId?: string; agentType?: string }>;
+	phase?: string;
+	error?: string;
+	messages?: unknown[];
+}
+
 const CANONICAL_SDK_TOOL_NAMES = new Set([
 	"bash", "readonly_bash", "read", "write", "edit", "ls", "find", "grep",
 	"browser_screenshot", "browser_navigate", "browser_click", "browser_type", "browser_eval", "browser_wait",
@@ -70,40 +80,76 @@ const CANONICAL_SDK_TOOL_NAMES = new Set([
 
 function canonicalToolName(name: unknown): string {
 	if (typeof name !== "string") return "unknown";
-	const match = /^mcp__bobbit__([a-z0-9_]+)$/.exec(name);
-	return match && CANONICAL_SDK_TOOL_NAMES.has(match[1]) ? match[1] : name;
+	const mcp = /^mcp__bobbit__([a-z0-9_]+)$/.exec(name);
+	if (mcp && CANONICAL_SDK_TOOL_NAMES.has(mcp[1])) return mcp[1];
+	const lower = name.toLowerCase();
+	return CANONICAL_SDK_TOOL_NAMES.has(lower) ? lower : name;
 }
 
 function asRecord(value: unknown): Record<string, any> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : undefined;
 }
 
-/** Return only activity explicitly keyed to this exact root tool-use id. */
-function workForParent(source: unknown, parentToolUseId: string): EmbeddedAgentActivity[] {
+function parentOf(value: Record<string, any> | undefined): string | undefined {
+	const parent = value?.parentToolUseId ?? value?.parent_tool_use_id;
+	return typeof parent === "string" && parent.length > 0 ? parent : undefined;
+}
+
+function phaseState(phase: unknown): string {
+	switch (phase) {
+		case "pending": return "starting";
+		case "running": return "working";
+		case "completed": return "completed";
+		case "error": return "failed";
+		case "aborted": return "stopped";
+		default: return "working";
+	}
+}
+
+/** Convert the server's one-work-per-parent wire shape into display-only
+ * activity rows. Legacy array input is tolerated only for rolling upgrades. */
+function activitiesForParent(source: unknown, parentToolUseId: string): EmbeddedAgentActivity[] {
 	let candidate: unknown;
 	if (source instanceof Map) candidate = source.get(parentToolUseId);
 	else {
 		const record = asRecord(source);
-		if (!record) return [];
-		candidate = record.byParentToolUseId?.[parentToolUseId]
-			?? record.byParent?.[parentToolUseId]
-			?? record[parentToolUseId]
-			?? (record.parentToolUseId === parentToolUseId ? record : undefined);
+		candidate = record?.byParentToolUseId?.[parentToolUseId]
+			?? record?.byParent?.[parentToolUseId]
+			?? record?.[parentToolUseId]
+			?? (parentOf(record) === parentToolUseId ? record : undefined);
 	}
-	const record = asRecord(candidate);
-	const parent = record?.parentToolUseId ?? record?.parent_tool_use_id;
-	// A keyed map is an authoritative partition; a direct object must carry its
-	// own matching parent id so proximity can never attach work to the wrong card.
-	if (parent !== undefined && parent !== parentToolUseId) return [];
-	const activities = Array.isArray(candidate)
-		? candidate
-		: record?.children ?? record?.agents ?? record?.activities ?? [];
-	return Array.isArray(activities) ? activities.filter((activity): activity is EmbeddedAgentActivity => {
-		const child = asRecord(activity);
-		if (!child) return false;
-		const childParent = child.parentToolUseId ?? child.parent_tool_use_id ?? parent;
-		return childParent === parentToolUseId;
-	}) : [];
+	if (Array.isArray(candidate)) {
+		return candidate.filter((item): item is EmbeddedAgentActivity => parentOf(asRecord(item)) === parentToolUseId);
+	}
+	const work = asRecord(candidate) as EmbeddedWork | undefined;
+	if (!work || parentOf(work as Record<string, any>) !== parentToolUseId) return [];
+	const rows = Array.isArray(work.messages) ? work.messages : [];
+	const identities = Array.isArray(work.identities) && work.identities.length > 0
+		? work.identities
+		: [{ agentId: work.agentId, agentType: work.agentType }];
+	return identities.map((identity) => {
+		const agentId = typeof identity?.agentId === "string" && identity.agentId ? identity.agentId : undefined;
+		const agentType = typeof identity?.agentType === "string" && identity.agentType ? identity.agentType : undefined;
+		// Rows from the SDK history adapter retain parentAgentId. When a single
+		// lifecycle identity has no matching annotation, preserve the exact parent
+		// partition rather than discarding auditable recovered rows.
+		const messages = agentId
+			? rows.filter((row) => {
+				const record = asRecord(row);
+				const owner = record?.parentAgentId ?? record?.parent_agent_id;
+				return owner === undefined || owner === agentId;
+			})
+			: rows;
+		return {
+			parentToolUseId,
+			...(agentId ? { agentId } : {}),
+			...(agentType ? { agentType } : {}),
+			displayLabel: agentType,
+			state: phaseState(work.phase),
+			failureReason: work.error,
+			orderedMessages: messages,
+		};
+	});
 }
 
 function safeLabel(activity: EmbeddedAgentActivity): string {
@@ -147,14 +193,19 @@ function toolResultFor(message: Record<string, any>): ToolResultMessage<any> | u
 	};
 }
 
-/** Activity body: child-local messages are rendered through existing markdown,
- * thinking, and tool-message components, never the root assistant renderer. */
+function blocksFor(message: Record<string, any>): unknown[] {
+	if (message.role === "assistant" && Array.isArray(message.content)) return message.content;
+	if (message.role === "assistant" && typeof message.content === "string") return [{ type: "text", text: message.content }];
+	return [message];
+}
+
+/** Activity body: child-local messages reuse markdown, thinking, and tool
+ * renderers, but are never fed through the root assistant message renderer. */
 class EmbeddedAgentActivitySection extends LitElement {
 	@property({ type: Object }) activity!: EmbeddedAgentActivity;
 	@property({ type: Boolean }) parentStreaming = false;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment { return this; }
-
 	override connectedCallback(): void { super.connectedCallback(); this.style.display = "block"; }
 
 	private _messages(): Record<string, any>[] {
@@ -172,10 +223,10 @@ class EmbeddedAgentActivitySection extends LitElement {
 		const parts: TemplateResult[] = [];
 		for (const message of messages) {
 			if (toolResultFor(message)) continue;
-			const blocks = message.role === "assistant" && Array.isArray(message.content)
-				? message.content : [message];
-			for (const block of blocks) {
-				if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
+			for (const rawBlock of blocksFor(message)) {
+				const block = asRecord(rawBlock);
+				if (!block) continue;
+				if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
 					parts.push(html`<markdown-block .content=${block.text}></markdown-block>`);
 				} else if (block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
 					parts.push(html`<thinking-block .content=${block.thinking} .isStreaming=${this.parentStreaming && !isTerminal(this.activity)}></thinking-block>`);
@@ -188,13 +239,10 @@ class EmbeddedAgentActivitySection extends LitElement {
 					const dangling = terminalWithoutResult ? {
 						role: "toolResult", toolCallId: id, toolName: call.name, isError: true,
 						content: [{ type: "text", text: "Tool call ended before a result was received." }], timestamp: Date.now(),
-						} as ToolResultMessage<any> : result;
+					} as ToolResultMessage<any> : result;
 					parts.push(html`<div class="py-1.5"><tool-message
-						.toolCall=${call}
-						.result=${dangling}
-						.pending=${!dangling && !isTerminal(this.activity)}
-						.isStreaming=${this.parentStreaming && !isTerminal(this.activity)}
-						.embedded=${true}
+						.toolCall=${call} .result=${dangling} .pending=${!dangling && !isTerminal(this.activity)}
+						.isStreaming=${this.parentStreaming && !isTerminal(this.activity)} .embedded=${true}
 					></tool-message></div>`);
 				}
 			}
@@ -202,10 +250,7 @@ class EmbeddedAgentActivitySection extends LitElement {
 		const failure = this.activity.error ?? this.activity.failureReason;
 		return html`
 			<section class="border-l border-border pl-3" data-subagent-agent-id=${this.activity.agentId ?? this.activity.agent_id ?? "unknown"}>
-				<div class="flex items-center gap-2 text-xs font-medium">
-					<span class="truncate" title=${safeLabel(this.activity)}>${safeLabel(this.activity)}</span>
-					<span class="text-muted-foreground">${displayState(this.activity.state)}</span>
-				</div>
+				<div class="flex items-center gap-2 text-xs font-medium"><span class="truncate" title=${safeLabel(this.activity)}>${safeLabel(this.activity)}</span><span class="text-muted-foreground">${displayState(this.activity.state)}</span></div>
 				${failure ? html`<p class="mt-1 text-sm text-destructive break-words" role="alert">${String(failure).slice(0, 500)}</p>` : nothing}
 				${parts.length ? html`<div class="mt-2 flex flex-col gap-2">${parts}</div>` : nothing}
 			</section>`;
@@ -222,56 +267,27 @@ class EmbeddedAgentCard extends LitElement {
 	private _lastParent = "";
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment { return this; }
-
 	override connectedCallback(): void { super.connectedCallback(); this.style.display = "block"; this._applyDefault(); }
-	override updated(changed: Map<string, unknown>): void {
-		if (changed.has("parentToolUseId") && this._lastParent !== this.parentToolUseId) this._applyDefault();
-	}
-
-	private _applyDefault(): void {
-		this._lastParent = this.parentToolUseId;
-		if (this._userToggled) return;
-		this._expanded = this.parentState !== "completed";
-	}
-
+	override updated(changed: Map<string, unknown>): void { if (changed.has("parentToolUseId") && this._lastParent !== this.parentToolUseId) this._applyDefault(); }
+	private _applyDefault(): void { this._lastParent = this.parentToolUseId; if (!this._userToggled) this._expanded = this.parentState !== "completed"; }
 	private _toggle(): void { this._userToggled = true; this._expanded = !this._expanded; }
 
 	override render(): TemplateResult {
-		const count = this.activities.reduce((total, activity) => total + (activity.orderedMessages ?? activity.messages ?? []).flatMap((m: any) => m?.content ?? [m]).filter((b: any) => b?.type === "toolCall" || b?.type === "tool_call").length, 0);
+		const count = this.activities.reduce((total, activity) => total + (activity.orderedMessages ?? activity.messages ?? []).flatMap((m: any) => blocksFor(asRecord(m) ?? {})).filter((b: any) => b?.type === "toolCall" || b?.type === "tool_call").length, 0);
 		const failed = this.activities.filter((activity) => activity.state === "failed").length;
 		const role = safeLabel(this.activities[0] ?? {});
-		const status = this.parentState === "completed" ? "Completed"
-			: this.parentState === "failed" ? "Failed"
-			: this.parentState === "stopped" ? "Stopped"
-			: failed ? `Working · ${failed} failed`
-			: this.activities.some((activity) => !isTerminal(activity)) ? `Working${count ? ` · ${count} tools` : ""}`
-			: this.activities.length ? `Finishing…${count ? ` · ${count} tools` : ""}`
-			: "Starting…";
+		const status = this.parentState === "completed" ? "Completed" : this.parentState === "failed" ? "Failed" : this.parentState === "stopped" ? "Stopped" : failed ? `Working · ${failed} failed` : this.activities.some((activity) => !isTerminal(activity)) ? `Working${count ? ` · ${count} tools` : ""}` : this.activities.length ? `Finishing…${count ? ` · ${count} tools` : ""}` : "Starting…";
 		const regionId = stableDomId(this.parentToolUseId);
 		const iconName = this.parentState === "completed" ? CheckCircle2 : this.parentState === "failed" ? CircleAlert : Bot;
 		const iconClass = this.parentState === "completed" ? "text-green-600 dark:text-green-500" : this.parentState === "failed" ? "text-destructive" : "text-foreground";
 		const busy = this.parentState === "starting" || this.parentState === "working";
 		return html`
 			<div data-subagent-parent-tool-use-id=${this.parentToolUseId} data-subagent-state=${this.parentState} data-subagent-count=${String(this.activities.length)}>
-				<button
-					type="button"
-					class="w-full min-h-11 flex items-center gap-2 text-left text-sm text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] rounded"
-					aria-expanded=${String(this._expanded)}
-					aria-controls=${regionId}
-					aria-label=${`Agent, ${role}, ${status.toLowerCase()}, ${count} tools`}
-					@click=${this._toggle}
-				>
-					<span class=${iconClass} aria-hidden="true">${icon(iconName, "sm")}</span>
-					<span class="min-w-0 truncate"><strong>Agent</strong> · <span title=${role}>${role}</span></span>
-					<span class="ml-auto shrink-0 text-xs">${status}</span>
-					${busy ? html`<span class="text-foreground animate-spin" aria-hidden="true">${icon(Loader, "sm")}</span>` : nothing}
-					<span aria-hidden="true">${icon(this._expanded ? ChevronUp : ChevronDown, "sm")}</span>
+				<button type="button" class="w-full min-h-11 flex items-center gap-2 text-left text-sm text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] rounded" aria-expanded=${String(this._expanded)} aria-controls=${regionId} aria-label=${`Agent, ${role}, ${status.toLowerCase()}, ${count} tools`} @click=${this._toggle}>
+					<span class=${iconClass} aria-hidden="true">${icon(iconName, "sm")}</span><span class="min-w-0 truncate"><strong>Agent</strong> · <span title=${role}>${role}</span></span><span class="ml-auto shrink-0 text-xs">${status}</span>${busy ? html`<span class="text-foreground animate-spin" aria-hidden="true">${icon(Loader, "sm")}</span>` : nothing}<span aria-hidden="true">${icon(this._expanded ? ChevronUp : ChevronDown, "sm")}</span>
 				</button>
 				<span class="sr-only" role="status" aria-live="polite" aria-atomic="true">${status}</span>
-				<div id=${regionId} ?hidden=${!this._expanded} aria-busy=${String(busy)} class="mt-3 space-y-3">
-					${this.activities.map((activity) => html`<embedded-agent-activity-section .activity=${activity} .parentStreaming=${busy}></embedded-agent-activity-section>`)}
-					${this.parentOutput ? html`<div class="text-sm ${this.parentState === "failed" ? "text-destructive" : "text-muted-foreground"}"><markdown-block .content=${this.parentOutput}></markdown-block></div>` : nothing}
-				</div>
+				<div id=${regionId} ?hidden=${!this._expanded} aria-busy=${String(busy)} class="mt-3 space-y-3">${this.activities.map((activity) => html`<embedded-agent-activity-section .activity=${activity} .parentStreaming=${busy}></embedded-agent-activity-section>`)}${this.parentOutput ? html`<div class="text-sm ${this.parentState === "failed" ? "text-destructive" : "text-muted-foreground"}"><markdown-block .content=${this.parentOutput}></markdown-block></div>` : nothing}</div>
 			</div>`;
 	}
 }
@@ -283,23 +299,13 @@ if (!customElements.get("embedded-agent-card")) customElements.define("embedded-
 export class ClaudeSdkAgentRenderer implements ToolRenderer {
 	render(params: unknown, result: ToolResultMessage<any> | undefined, isStreaming?: boolean, ctx?: unknown): ToolRenderResult {
 		const parentToolUseId = (ctx as any)?.toolUseId;
-		const source = (ctx as any)?.embeddedSubagentWork ?? (params as any)?.embeddedSubagentWork;
 		const activities = typeof parentToolUseId === "string"
-			? workForParent(source, parentToolUseId) : [];
-		if (!parentToolUseId || activities.length === 0) {
-			// Preserve the normal safe fallback for native calls with no confirmed child work.
-			return new DefaultRenderer("Agent").render(params, result, isStreaming);
-		}
-		const parentState = result?.isError ? "failed" : result ? "completed" : isStreaming ? "working" : "starting";
-		return {
-			content: html`<embedded-agent-card
-				.parentToolUseId=${parentToolUseId}
-				.activities=${activities}
-				.parentState=${parentState}
-				.parentOutput=${getTextOutput(result)}
-			></embedded-agent-card>`,
-			isCustom: false,
-		};
+			? activitiesForParent((ctx as any)?.embeddedSubagentWork ?? (params as any)?.embeddedSubagentWork, parentToolUseId)
+			: [];
+		if (!parentToolUseId || activities.length === 0) return new DefaultRenderer("Agent").render(params, result, isStreaming);
+		const childFailure = activities.some((activity) => activity.state === "failed");
+		const parentState = childFailure ? "failed" : result?.isError ? "failed" : result ? "completed" : isStreaming ? "working" : "starting";
+		return { content: html`<embedded-agent-card .parentToolUseId=${parentToolUseId} .activities=${activities} .parentState=${parentState} .parentOutput=${getTextOutput(result)}></embedded-agent-card>`, isCustom: false };
 	}
 }
 
