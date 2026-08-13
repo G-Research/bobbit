@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/large-write-stream-bounds.test.ts",
+      "reason": "Core regression coverage proving cumulative large write snapshots remain bounded in retained events and capable-client wire frames.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/large-write-renderer.test.ts",
+      "reason": "DOM regression coverage proving truncated HTML and SVG writes render their descriptor without source-string delegation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/session-tags.test.ts",
       "reason": "Core coverage for session tag normalization, keyed mutation, projection, team classification, and legacy compatibility for sidebar status views.",
       "execution": {

@@ -379,6 +379,19 @@ function truncateMessageContentBlock(block: any, threshold: number): any {
 	return truncateToolBlock(block, threshold);
 }
 
+function truncateMessageContent(message: any, threshold: number): any {
+	const content = message?.content;
+	if (!Array.isArray(content)) return message;
+
+	let changed = false;
+	const projectedContent = content.map((block: any) => {
+		const projected = truncateMessageContentBlock(block, threshold);
+		if (projected !== block) changed = true;
+		return projected;
+	});
+	return changed ? { ...message, content: projectedContent } : message;
+}
+
 /**
  * Truncate large content inside a list of persisted messages (as returned by
  * the agent's `get_messages` RPC). Used when sending history to clients on
@@ -422,31 +435,31 @@ export function truncateLargeToolContentInMessages(messages: any, threshold: num
  * Returns the original event unchanged when no truncation is needed.
  */
 export function truncateLargeToolContent(event: any, threshold: number = LARGE_CONTENT_THRESHOLD): any {
-	// Fast-path: only process message events with content arrays
 	const eventType = event?.type;
 	if (eventType !== "message_update" && eventType !== "message_end") return event;
 
-	const content = event.message?.content;
-	if (!Array.isArray(content)) return event;
-
-	let needsTruncation = false;
-	for (const block of content) {
-		if (truncateMessageContentBlock(block, threshold) !== block) {
-			needsTruncation = true;
-			break;
-		}
-	}
-
-	if (!needsTruncation) return event;
-
-	// Build a shallow clone of the event with truncated content blocks
-	const newContent = content.map((block: any) => truncateMessageContentBlock(block, threshold));
+	// Project every cumulative assistant snapshot and completed tool-call checkpoint
+	// at this single live transport boundary. Pi owns the original event, so clone
+	// only changed ancestors before EventBuffer retention and stream compaction.
+	const message = truncateMessageContent(event.message, threshold);
+	const assistantMessageEvent = event.assistantMessageEvent;
+	const partial = truncateMessageContent(assistantMessageEvent?.partial, threshold);
+	const toolCall = truncateToolBlock(assistantMessageEvent?.toolCall, threshold);
+	const assistantMessageEventChanged = partial !== assistantMessageEvent?.partial
+		|| toolCall !== assistantMessageEvent?.toolCall;
+	if (message === event.message && !assistantMessageEventChanged) return event;
 
 	return {
 		...event,
-		message: {
-			...event.message,
-			content: newContent,
-		},
+		...(message === event.message ? {} : { message }),
+		...(assistantMessageEventChanged
+			? {
+				assistantMessageEvent: {
+					...assistantMessageEvent,
+					...(partial === assistantMessageEvent?.partial ? {} : { partial }),
+					...(toolCall === assistantMessageEvent?.toolCall ? {} : { toolCall }),
+				},
+			}
+			: {}),
 	};
 }
