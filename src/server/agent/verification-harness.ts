@@ -2166,6 +2166,12 @@ export class VerificationHarness {
 	private static _warnedCmdExeDetached = false;
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
 	private activeVerifications = new Map<string, ActiveVerification>();
+	/**
+	 * Signal generations cancelled in this process. Keep this fence after their
+	 * active row is finalized: an already-running verifier loop can otherwise
+	 * enqueue a follow-up after its cancelled row has been removed.
+	 */
+	private cancelledVerificationSignals = new Set<string>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
@@ -2453,10 +2459,11 @@ export class VerificationHarness {
 		const cancelled = persisted.filter(v => v.cancelled || v.overallStatus === "cancelled");
 		for (const v of cancelled) {
 			const active = this.activeVerifications.get(v.signalId) ?? v;
-			active.cancelled = true;
-			active.overallStatus = "cancelled";
 			this.activeVerifications.set(active.signalId, active);
-			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: true, reason: "cancelled" });
+			this._markVerificationCancelled(active);
+			this._persistActive();
+			await this._terminateCancelledReviewers(this._snapshotRunningReviewers([active]));
+			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 			if (settled) {
 				await this._finalizeCancelledVerification(active);
 			} else {
@@ -2487,9 +2494,10 @@ export class VerificationHarness {
 				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
 					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
 					// A retry after the crash window must delete this record, not resume it.
-					v.cancelled = true;
-					v.overallStatus = "cancelled";
-					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: true, reason: "cancelled" });
+					this._markVerificationCancelled(v);
+					this._persistActive();
+					await this._terminateCancelledReviewers(this._snapshotRunningReviewers([v]));
+					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: false });
 					if (settled) {
 						await this._finalizeCancelledVerification(v);
 					} else {
@@ -3868,6 +3876,42 @@ export class VerificationHarness {
 		return !Array.isArray(signals) || signals.length === 0 || signals[signals.length - 1]?.id === active.signalId;
 	}
 
+	private _markVerificationCancelled(active: ActiveVerification): void {
+		active.cancelled = true;
+		active.overallStatus = "cancelled";
+		active.cancelRequestedAt ??= Date.now();
+		this.cancelledVerificationSignals.add(active.signalId);
+		this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+	}
+
+	/** Snapshot every live reviewer before any asynchronous command cleanup can yield. */
+	private _snapshotRunningReviewers(actives: readonly ActiveVerification[]): Array<{ goalId: string; sessionId: string }> {
+		const reviewers = new Map<string, { goalId: string; sessionId: string }>();
+		for (const active of actives) {
+			for (const step of active.steps) {
+				if (step.status === "running" && step.sessionId) {
+					reviewers.set(step.sessionId, { goalId: active.goalId, sessionId: step.sessionId });
+				}
+			}
+		}
+		return [...reviewers.values()];
+	}
+
+	/**
+	 * Stop reviewer-owned queues before command cleanup waits. Session termination
+	 * purges the exact verifier receipts, so a late agent_end cannot redrain them.
+	 */
+	private async _terminateCancelledReviewers(reviewers: readonly { goalId: string; sessionId: string }[]): Promise<void> {
+		const cleanup: Promise<unknown>[] = [];
+		for (const { goalId, sessionId } of reviewers) {
+			// Start both operations now. Do not let a slow stop RPC defer reviewer
+			// ownership removal until after another lifecycle event has redrained it.
+			cleanup.push(Promise.resolve(this.sessionManager?.terminateSession(sessionId)).catch(() => {}));
+			cleanup.push(Promise.resolve(this.teamManager?.unregisterReviewerSession(goalId, sessionId)).catch(() => {}));
+		}
+		await Promise.all(cleanup);
+	}
+
 	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
 	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
 		if (this._hasPendingCommandKillCleanup(active)) return;
@@ -3875,11 +3919,6 @@ export class VerificationHarness {
 		// cleanup was settling. The obsolete generation must not publish anything.
 		if (this.activeVerifications.get(active.signalId) !== active) return;
 		this.activeVerifications.delete(active.signalId);
-		for (const step of active.steps) {
-			if (!step.sessionId || step.status !== "running") continue;
-			try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* already stopped */ }
-			try { await this.teamManager?.unregisterReviewerSession(active.goalId, step.sessionId); } catch { /* already stopped */ }
-		}
 		const stillCurrent = this._isCurrentGateSignal(active);
 		this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
 			status: "failed",
@@ -4208,14 +4247,16 @@ export class VerificationHarness {
 	 */
 	async cancelAllVerifications(goalId: string): Promise<boolean> {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
-		for (const [signalId, active] of Array.from(this.activeVerifications)) {
-			if (active.goalId !== goalId) continue;
-			active.cancelled = true;
-			active.overallStatus = "cancelled";
-			active.cancelRequestedAt ??= Date.now();
+		const cancellations = Array.from(this.activeVerifications.values()).filter(active => active.goalId === goalId);
+		for (const active of cancellations) this._markVerificationCancelled(active);
+		// Persist the cancellation fence before yielding, then snapshot and tear down
+		// all reviewer queues before any command-child ownership barrier can block.
+		if (cancellations.length > 0) this._persistActive();
+		const reviewers = this._snapshotRunningReviewers(cancellations);
+		await this._terminateCancelledReviewers(reviewers);
 
-			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
-			this._persistActive();
+		for (const active of cancellations) {
+			const { signalId } = active;
 			// Partition siblings by ownership domain. A live docker-exec transport
 			// is never reaped through the recovered sentinel path.
 			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
@@ -4225,15 +4266,6 @@ export class VerificationHarness {
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
 			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
-
-			for (const step of active.steps) {
-				if (step.sessionId && step.status === "running") {
-					try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* ignore */ }
-					if (this.teamManager) {
-						try { await this.teamManager.unregisterReviewerSession(goalId, step.sessionId); } catch { /* ignore */ }
-					}
-				}
-			}
 
 			if (commandKillsSettled) {
 				await this._finalizeCancelledVerification(active);
@@ -4270,17 +4302,18 @@ export class VerificationHarness {
 	): Promise<boolean> {
 		const gateIdSet = new Set(gateIds);
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
+		const targets = Array.from(this.activeVerifications.values())
+			.filter(active => active.goalId === goalId && gateIdSet.has(active.gateId));
+		for (const active of targets) this._markVerificationCancelled(active);
+		// Cancellation must fence verifier admission and stop every reviewer before
+		// a held command cleanup yields to an old agent_end or late tool result.
+		if (targets.length > 0) this._persistActive();
+		const reviewers = this._snapshotRunningReviewers(targets);
+		await this._terminateCancelledReviewers(reviewers);
+
 		const cancellations: ActiveVerification[] = [];
-
-		for (const [signalId, active] of Array.from(this.activeVerifications)) {
-			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
-
-			active.cancelled = true;
-			active.overallStatus = "cancelled";
-			active.cancelRequestedAt ??= Date.now();
-
-			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
-			this._persistActive();
+		for (const active of targets) {
+			const { signalId } = active;
 			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
 			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 			const liveTransportCleanupSettled = persistedCleanupSettled
@@ -4293,7 +4326,6 @@ export class VerificationHarness {
 			} else {
 				this._scheduleCommandKillCleanupRetry(signalId);
 			}
-
 		}
 
 		if (cancellations.length > 0) this._persistActive();
@@ -5296,6 +5328,19 @@ export class VerificationHarness {
 		},
 	): Promise<void> {
 		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1}`;
+		if (args.signalId) {
+			const active = this.activeVerifications.get(args.signalId);
+			const rejected = this.cancelledVerificationSignals.has(args.signalId)
+				|| (!!active && (active.cancelled
+					|| active.overallStatus === "cancelled"
+					|| active.goalId !== args.goalId
+					|| active.gateId !== args.gateId
+					|| !this._isCurrentGateSignal(active)));
+			if (rejected) {
+				console.warn(`[verification][verifier-dispatch] ${fields} mode=queued decision=cancelled-generation`);
+				throw new Error(`Verifier prompt admission rejected for cancelled or superseded signal ${args.signalId}`);
+			}
+		}
 		const manager = this.sessionManager;
 		if (manager && typeof manager.enqueueVerifierPrompt === "function") {
 			const receipt = manager.enqueueVerifierPrompt(session.id, text, {

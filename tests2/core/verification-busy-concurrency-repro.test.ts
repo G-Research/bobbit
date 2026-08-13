@@ -297,6 +297,102 @@ describe("verifier busy concurrency reproductions", () => {
 		assert.equal(transport.commands.length, 0, "the queued receipt must not dispatch after its owner timed out");
 	});
 
+	it("fences queued reviewers before held same-phase command cleanup in stale-gate and goal-wide cancellation", async () => {
+		for (const cancellation of [
+			{ name: "stale-gate", run: (harness: any, goalId: string) => harness.cancelStaleVerificationsForGates(goalId, ["review-gate"]) },
+			{ name: "goal-wide", run: (harness: any, goalId: string) => harness.cancelAllVerifications(goalId) },
+		]) {
+			const stateDir = makeStateDir(`verifier-cancel-order-${cancellation.name}-`);
+			const manager = makeSessionManager(stateDir);
+			const transport = new BusyPiTransport();
+			installReviewerCreation(manager, transport);
+			const goalId = `goal-cancel-order-${cancellation.name}`;
+			const { harness, verificationWrites, gates } = makeHarness([goalId], stateDir, manager);
+			const oldSignal = signal(goalId, `signal-cancel-order-old-${cancellation.name}`);
+			gates.get(goalId)!.signals.push(oldSignal);
+			const oldSessionId = `reviewer-cancel-order-${cancellation.name}`;
+			const oldSession = putReviewer(manager, transport, oldSessionId, goalId);
+			oldSession.status = "streaming";
+			const active = {
+				goalId,
+				gateId: "review-gate",
+				signalId: oldSignal.id,
+				overallStatus: "running",
+				startedAt: Date.now(),
+				steps: [
+					{ name: "held command", type: "command", status: "running", phase: 0, startedAt: Date.now() },
+					{ name: "queued review", type: "llm-review", status: "running", phase: 0, startedAt: Date.now(), sessionId: oldSessionId },
+				],
+			};
+			harness.activeVerifications.set(oldSignal.id, active);
+			harness._persistActive();
+			let lateVerdicts = 0;
+			harness.pendingResults.set(oldSessionId, () => { lateVerdicts += 1; });
+
+			const queued = harness.dispatchVerifierPrompt(oldSession, "queued old verifier", {
+				goalId,
+				gateId: "review-gate",
+				signalId: oldSignal.id,
+				stepName: "queued review",
+				verifierKind: "llm-review",
+				promptKind: "reminder",
+			});
+			const queuedRejected = assert.rejects(queued, /terminated|cancelled|unavailable/i);
+			await eventually(
+				() => oldSession.promptQueue.toArray().some((row: any) => row.text === "queued old verifier"),
+				`${MARKER}: ${cancellation.name} must start with one queued reviewer receipt`,
+			);
+
+			const cleanupStarted = deferred<void>();
+			const releaseCleanup = deferred<void>();
+			harness._killTrackedForSignal = async () => {
+				cleanupStarted.resolve();
+				await releaseCleanup.promise;
+				return true;
+			};
+			harness._killPersistedCommandSteps = async () => true;
+			const cancelling = cancellation.run(harness, goalId);
+			await cleanupStarted.promise;
+
+			assert.equal(manager.getSession(oldSessionId), undefined, `${MARKER}: ${cancellation.name} must terminate the queued reviewer before command cleanup settles`);
+			await queuedRejected;
+			assert.equal(oldSession.promptQueue.toArray().some((row: any) => row.text === "queued old verifier"), false, `${MARKER}: ${cancellation.name} must purge its exact queued verifier receipt`);
+			await assert.rejects(
+				harness.dispatchVerifierPrompt(oldSession, "must not enqueue after cancellation", {
+					goalId, gateId: "review-gate", signalId: oldSignal.id, stepName: "queued review",
+					verifierKind: "llm-review", promptKind: "reminder",
+				}),
+				/cancelled or superseded signal/,
+				`${MARKER}: ${cancellation.name} must reject enqueue after its exact signal generation is cancelled`,
+			);
+			// A stale agent_end after termination must find no verifier row to drain.
+			oldSession.status = "idle";
+			(manager as any).drainQueue(oldSession);
+			await Promise.resolve();
+			assert.equal(transport.commands.length, 0, `${MARKER}: stale agent_end must not dispatch an old reviewer turn`);
+			harness.pendingResults.get(oldSessionId)?.({ verdict: true, summary: "STALE_LATE_VERDICT" });
+			assert.equal(lateVerdicts, 1, `${MARKER}: test must model the late old verdict`);
+			assert.equal(verificationWrites.length, 0, `${MARKER}: no cancellation or stale verdict may publish while command cleanup is held`);
+
+			releaseCleanup.resolve();
+			await cancelling;
+			assert.equal(harness.activeVerifications.has(oldSignal.id), false, `${MARKER}: old cancellation finalizes only after command cleanup`);
+
+			const replacementSignal = signal(goalId, `signal-cancel-order-replacement-${cancellation.name}`);
+			gates.get(goalId)!.signals.push(replacementSignal);
+			const replacementRun = harness.verifyGateSignal(replacementSignal, gate(), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
+			await eventually(() => transport.commands.length === 1, `${MARKER}: replacement alone must dispatch its reviewer`);
+			const replacementSessionId = transport.commands[0].sessionId;
+			transport.accept(replacementSessionId);
+			harness.pendingResults.get(replacementSessionId)?.({ verdict: true, summary: "replacement only verdict" });
+			manager.getSession(replacementSessionId).status = "idle";
+			await replacementRun;
+			const replacementWrite = verificationWrites.find(write => write.signalId === replacementSignal.id);
+			assert.equal(replacementWrite?.verification.status, "passed", `${MARKER}: ${cancellation.name} replacement alone must publish the verdict`);
+			assert.doesNotMatch(JSON.stringify(replacementWrite), /STALE_LATE_VERDICT/);
+		}
+	});
+
 	it("terminates a queued followUp on cancel/re-signal and fences its late verdict from the replacement", async () => {
 		const stateDir = makeStateDir("verifier-busy-resignal-");
 		const manager = makeSessionManager(stateDir);
