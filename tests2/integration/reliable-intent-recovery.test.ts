@@ -174,14 +174,12 @@ test.describe("Reliable intent recovery protocol", () => {
 			conn.send({ type: "steer", text: SAME_TEXT, intentId: STEER_B_ID });
 			await core.waitForBarrier("steer:1:before-ack");
 
-			const projectionAtAck = [...conn.messages.slice(steerCursor)].reverse().find((frame) =>
+			const projectionAtAck = await conn.waitForFrom(steerCursor, (frame) =>
 				frameHasIntentIds(frame, [STEER_A_ID, STEER_B_ID]),
 			);
-			expect(
-				projectionAtAck,
-				"RELIABLE_IDENTICAL_ACK_CONTINUITY: both accepted occurrences must remain in the outbox until correlated Pi user starts",
-			).toBeDefined();
-			expect(intentRows(projectionAtAck).map(intentId)).toEqual([STEER_A_ID, STEER_B_ID]);
+			expect(intentRows(projectionAtAck).map(intentId),
+				"RELIABLE_IDENTICAL_ACK_CONTINUITY: both accepted occurrences must remain ordered in the outbox until correlated Pi user starts",
+			).toEqual([STEER_A_ID, STEER_B_ID]);
 			expect(userMessageEnds(conn.messages.slice(steerCursor), SAME_TEXT)).toHaveLength(0);
 
 			core.releaseBarrier("steer:1:before-ack");
@@ -191,13 +189,14 @@ test.describe("Reliable intent recovery protocol", () => {
 			await closeConnection(conn);
 			conn = await connectWs(sessionId);
 			const snapshotCursor = conn.messageCount();
+			const reconnectProjection = conn.waitForFrom(0, (frame) =>
+				frameHasIntentIds(frame, [STEER_A_ID, STEER_B_ID]),
+			);
 			conn.send({ type: "get_messages" });
-			const snapshot = await conn.waitForFrom(snapshotCursor, (frame) => frame.type === "messages");
-			expect(
-				frameHasIntentIds(snapshot, [STEER_A_ID, STEER_B_ID])
-				|| conn.messages.some((frame) => frameHasIntentIds(frame, [STEER_A_ID, STEER_B_ID])),
+			await conn.waitForFrom(snapshotCursor, (frame) => frame.type === "messages");
+			expect(intentRows(await reconnectProjection).map(intentId),
 				"reconnect must project both dispatching occurrences before either Pi user start",
-			).toBe(true);
+			).toEqual([STEER_A_ID, STEER_B_ID]);
 
 			core.releaseBarrier("tool:before-end");
 			await core.waitForBarrier("steer:1:before-user-start");
@@ -286,7 +285,8 @@ test.describe("Reliable intent recovery protocol", () => {
 			const cursor = conn.messageCount();
 			conn.send({ type: "steer", text: "AMBIGUOUS_LATE_ECHO", intentId: intentIdValue });
 			await core.waitForBarrier("steer:1:before-ack");
-			expect(conn.messages.slice(cursor).some((frame) => frameHasIntentIds(frame, [intentIdValue]))).toBe(true);
+			const heldProjection = await conn.waitForFrom(cursor, (frame) => frameHasIntentIds(frame, [intentIdValue]));
+			expect(intentRows(heldProjection).map(intentId)).toContain(intentIdValue);
 			core.releaseBarrier("steer:1:before-ack");
 
 			const uncertain = await conn.waitForFrom(cursor, (frame) =>
@@ -296,9 +296,13 @@ test.describe("Reliable intent recovery protocol", () => {
 
 			await closeConnection(conn);
 			conn = await connectWs(sessionId);
-			expect(conn.messages.some((frame) =>
+			const reconnectCursor = conn.messageCount();
+			const restoredUncertain = conn.waitForFrom(0, (frame) =>
 				intentRows(frame).some((row) => intentId(row) === intentIdValue && row.deliveryState === "uncertain"),
-			)).toBe(true);
+			);
+			conn.send({ type: "get_messages" });
+			await conn.waitForFrom(reconnectCursor, (frame) => frame.type === "messages");
+			expect(intentRows(await restoredUncertain).find((row) => intentId(row) === intentIdValue)?.retryable).toBe(false);
 
 			conn.send({ type: "retry_intent", intentId: intentIdValue });
 			core.releaseBarrier("tool:before-end");
