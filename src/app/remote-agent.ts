@@ -63,6 +63,12 @@ import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSu
 import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
+import {
+	applyClaudeSdkSubagentWorkFrame,
+	isClaudeSdkSubagentFrame,
+	projectClaudeSdkSubagentSnapshot,
+	type ClaudeSdkEmbeddedWork,
+} from "./claude-sdk-subagent-work.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
 import {
 	buildCompactionSummaryMessages,
@@ -346,6 +352,10 @@ export class RemoteAgent {
 	// for transcript order; `_state.messages` is mirrored from `reducerState.messages`
 	// after every dispatch so existing UI bindings keep working.
 	private reducerState: ReducerState = initialState();
+	/** Nested SDK child work keyed only by the root Agent tool-use id. This is
+	 * intentionally outside reducerState: child rows must never affect root
+	 * transcript order, streaming prose, proposals, or host transcript events. */
+	subagentWorkByParent = new Map<string, ClaudeSdkEmbeddedWork>();
 	// Streaming preview message id — render filters this from messages so
 	// the same row doesn't appear twice (in message list and streaming container).
 	// Public for the AgentInterface render filter; not part of the RPC surface.
@@ -670,6 +680,7 @@ export class RemoteAgent {
 			archivedAt: null as number | null,
 			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number; cacheHitRate?: number | null } | null,
 			streamingMessage: null as BobbitMessage<AgentMessage> | null,
+			subagentWorkByParent: this.subagentWorkByParent,
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
 			turnStartTime: null as number | null,
@@ -1361,6 +1372,8 @@ export class RemoteAgent {
 	reset(): void {
 		this.reducerState = initialState();
 		this._state.messages = this.reducerState.messages;
+		this.subagentWorkByParent = new Map();
+		this._state.subagentWorkByParent = this.subagentWorkByParent;
 		this._state.streamingMessage = null;
 		this.streamingMessageId = undefined;
 		this._state.status = "idle";
@@ -1837,14 +1850,25 @@ export class RemoteAgent {
 			case "messages": {
 				const msgs = Array.isArray(msg.data) ? msg.data : msg.data?.messages;
 				if (Array.isArray(msgs)) {
+					// The server snapshot is an envelope for SDK sessions. Partition child
+					// rows before the root reducer sees them; old servers can still send
+					// parentToolUseId rows in `messages`, which are handled identically.
+					const projection = projectClaudeSdkSubagentSnapshot(
+						msgs,
+						Array.isArray(msg.data) ? undefined : msg.data?.subagentWork,
+						this.subagentWorkByParent,
+					);
+					this.subagentWorkByParent = projection.subagentWorkByParent;
+					this._state.subagentWorkByParent = this.subagentWorkByParent;
+					const rootMessages = projection.rootMessages;
 					// Boot-timing: bracket the get_state snapshot replay — the cost
 					// that scales with transcript length. Opt-in; no-op when disarmed.
-					bootTimingMeta({ sessionId: this._sessionId, transcriptMessages: msgs.length });
-					bootMark(`snapshot-received(${msgs.length} msgs)`);
+					bootTimingMeta({ sessionId: this._sessionId, transcriptMessages: rootMessages.length });
+					bootMark(`snapshot-received(${rootMessages.length} msgs)`);
 					// Server snapshot is authoritative for any id it contains. The
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
-					this.apply({ type: "snapshot", messages: msgs });
+					this.apply({ type: "snapshot", messages: [...rootMessages] });
 					bootMark("snapshot-applied");
 					// The reducer triggers a re-render via rAF; mark + flush after it
 					// paints so the table captures the full reload incl. MessageList.
@@ -2858,6 +2882,15 @@ export class RemoteAgent {
 	private handleAgentEvent(event: any) {
 		// Track current event seq so live-event reducer dispatches use it.
 		const eventSeq = this._highestSeq;
+		// Child frames are a nested projection, never root agent events. Handle the
+		// semantic frame and defensive pre-G10b parentToolUseId frames before every
+		// root streaming/proposal/host/transcript side effect.
+		if (isClaudeSdkSubagentFrame(event)) {
+			this.subagentWorkByParent = applyClaudeSdkSubagentWorkFrame(this.subagentWorkByParent, event);
+			this._state.subagentWorkByParent = this.subagentWorkByParent;
+			this.emit({ type: "render" });
+			return;
+		}
 		// Update local state BEFORE emitting (UI reads state in event handlers)
 		switch (event.type) {
 			case "agent_start":
