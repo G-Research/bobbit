@@ -314,6 +314,57 @@ describe("reliable intent abort and stale-attempt fences", () => {
 		expect(session.promptQueue.toArray().some((row: any) => row.id === "intent-late")).toBe(false);
 	});
 
+	it("keeps acknowledged no-echo attempts uncertain at a graceful Stop terminal while retargeting only queued work", async () => {
+		const steer = vi.fn(async () => ({ success: true }));
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+
+		await manager.deliverLiveSteer(session.id, "late graceful echo", { intentId: "intent-graceful-late" });
+		(session.promptQueue as any).enqueueExisting({
+			id: "intent-queued-after-stop",
+			text: "queued after stop",
+			isSteered: true,
+			createdAt: 1_700_000_000_050,
+			kind: "steer",
+			targetTurn: "continuation",
+			sequence: 2,
+			deliveryState: "queued",
+		});
+		session.status = "aborting";
+
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false }, {
+			replacementOwnedTerminal: true,
+			deferQueueDrain: true,
+		});
+
+		expect(steer).toHaveBeenCalledTimes(1);
+		expect(ledgerFor(session, "intent-graceful-late")).toMatchObject({
+			state: "uncertain",
+			retryable: false,
+		});
+		expect(manager.projectDeliveryOutbox(session.id).filter((row: any) => row.id === "intent-graceful-late"))
+			.toEqual([expect.objectContaining({ deliveryState: "uncertain", retryable: false })]);
+		expect(session.promptQueue.toArray()).toEqual([
+			expect.objectContaining({
+				id: "intent-queued-after-stop",
+				targetTurn: "next-turn",
+				deliveryReason: "continuation-aborted",
+			}),
+		]);
+
+		const lateStart = manager.prepareVisibleAgentEvent(session, userStart("late graceful echo", "pi-graceful-late"));
+		manager.handleAgentLifecycle(session, lateStart);
+		expect(lateStart.deliveryIntentId).toBe("intent-graceful-late");
+		expect(ledgerFor(session, "intent-graceful-late")).toBeUndefined();
+		expect(manager.projectDeliveryOutbox(session.id).some((row: any) => row.id === "intent-graceful-late")).toBe(false);
+		expect(steer).toHaveBeenCalledTimes(1);
+	});
+
 	it("leaves an attempt uncertain when Stop wins before its RPC acknowledgement", async () => {
 		const ack = barrier<any>();
 		const steer = vi.fn(() => ack.hold());
