@@ -928,6 +928,111 @@ describe("verifier lifecycle reproductions", () => {
 		assert.equal(cancelCount, 1, `${MARKER}: QA exact queued receipt must be cancelled before late acknowledgement`);
 	});
 
+	it("VERIFIER_BUSY_RACE_REPRO honors a failing LLM verdict when its parked receipt rejects", async () => {
+		const goalId = "goal-verdict-on-rejected-llm-receipt";
+		const stateDir = makeStateDir("verdict-on-rejected-llm-receipt-");
+		const sessionId = "rejected-llm-receipt-reviewer";
+		const acknowledgement = deferred<void>();
+		let cancelCount = 0;
+		let deliveries = 0;
+		let createdSessions = 0;
+		let harness: any;
+		const session = { id: sessionId, status: "idle", lastTurnErrored: false, rpcClient: { onEvent: () => () => {}, prompt: async () => ({ success: true }) } };
+		const { projectContextManager } = makeProjectContext(goalId, { get: () => undefined, getAll: () => [] });
+		const sessionManager = {
+			isSandboxEnabled: false, createSession: async () => { createdSessions += 1; return session; }, setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => session,
+			enqueueVerifierPrompt: () => {
+				deliveries += 1;
+				queueMicrotask(() => {
+					acknowledgement.reject(new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."));
+					queueMicrotask(() => harness.pendingResults.get(sessionId)?.({ verdict: false, summary: "FAIL_VERDICT_AFTER_RECEIPT_REJECTION" }));
+				});
+				return { rowId: "parked-llm-row", mode: "queued", dispatched: acknowledgement.promise, cancel: () => { cancelCount += 1; return true; } };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Rejected parked LLM receipt", prompt: "Review", timeout: 1, role: "reviewer" }, stateDir, goalId,
+			{ name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "kickoff", 1_000, sessionId,
+		);
+		await Promise.resolve();
+		assert.equal(result.passed, false, `${MARKER}: a first FAIL verdict must win over its parked receipt rejection. result=${JSON.stringify(result)}`);
+		assert.equal(result.output, "FAIL_VERDICT_AFTER_RECEIPT_REJECTION", `${MARKER}: late busy rejection must not overwrite the attempt-scoped verdict`);
+		assert.equal(createdSessions, 1, `${MARKER}: receipt contention must retain one reviewer session`);
+		assert.equal(deliveries, 1, `${MARKER}: rejected receipt plus verdict must not retry or redrain`);
+		assert.equal(cancelCount, 1, `${MARKER}: the rejected parked receipt must be cancelled exactly once`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO preserves QA reportHtml when its parked receipt rejects", async () => {
+		const goalId = "goal-verdict-on-rejected-qa-receipt";
+		const stateDir = makeStateDir("verdict-on-rejected-qa-receipt-");
+		const sessionId = "rejected-qa-receipt-reviewer";
+		const acknowledgement = deferred<void>();
+		let cancelCount = 0;
+		let deliveries = 0;
+		let createdSessions = 0;
+		let harness: any;
+		const session = { id: sessionId, status: "idle", lastTurnErrored: false, rpcClient: { onEvent: () => () => {}, prompt: async () => ({ success: true }) } };
+		const { roleStore, projectContextManager } = makeProjectContext(goalId, qaRoleStore());
+		const sessionManager = {
+			isSandboxEnabled: false, createSession: async () => { createdSessions += 1; return session; }, setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => session,
+			enqueueVerifierPrompt: () => {
+				deliveries += 1;
+				queueMicrotask(() => {
+					acknowledgement.reject(new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."));
+					queueMicrotask(() => harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "QA_VERDICT_AFTER_RECEIPT_REJECTION", reportHtml: "<p>QA artifact survives receipt rejection</p>" }));
+				});
+				return { rowId: "parked-qa-row", mode: "queued", dispatched: acknowledgement.promise, cancel: () => { cancelCount += 1; return true; } };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, roleStore, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runAgentQaStep(
+			{ name: "Rejected parked QA receipt", prompt: "Test", timeout: 1, role: "qa-tester" }, stateDir, goalId,
+			{ branch: "goal/qa", commit: "abc123" }, "signal", {}, "goal", new Map(), sessionId,
+		);
+		await Promise.resolve();
+		assert.equal(result.passed, true, `${MARKER}: QA verdict must win over parked receipt rejection. result=${JSON.stringify(result)}`);
+		assert.equal(result.output, "QA_VERDICT_AFTER_RECEIPT_REJECTION");
+		assert.deepEqual(result.artifact, { content: "<p>QA artifact survives receipt rejection</p>", contentType: "text/html" }, `${MARKER}: rejected receipt must not lose QA reportHtml`);
+		assert.equal(createdSessions, 1, `${MARKER}: QA receipt contention must retain one reviewer session`);
+		assert.equal(deliveries, 1, `${MARKER}: QA rejected receipt plus verdict must not retry or redrain`);
+		assert.equal(cancelCount, 1, `${MARKER}: QA rejected receipt must be cancelled exactly once`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO honors a verdict resolved before receipt result subscription", async () => {
+		const stateDir = makeStateDir("pre-resolved-verdict-receipt-");
+		const sessionId = "pre-resolved-verdict-reviewer";
+		const verdict = Promise.resolve({ verdict: false, summary: "PRE_RESOLVED_VERDICT_WINS" });
+		let deliveries = 0;
+		let cancelCount = 0;
+		const session = { id: sessionId, status: "idle", rpcClient: {} };
+		const sessionManager = {
+			enqueueVerifierPrompt: (receivedSessionId: string) => {
+				deliveries += 1;
+				assert.equal(receivedSessionId, sessionId, `${MARKER}: pre-resolved verdict retains the original reviewer session`);
+				return { rowId: "pre-resolved-row", mode: "queued", dispatched: Promise.reject(new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.")), cancel: () => { cancelCount += 1; return true; } };
+			},
+		} as any;
+		const harness = new VerificationHarness(stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager, verifierTeamManager() as any, undefined, undefined, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const outcome = await harness.dispatchVerifierPrompt(session, "Review", {
+			goalId: "goal-pre-resolved-verdict",
+			gateId: "gate-pre-resolved-verdict",
+			signalId: "signal-pre-resolved-verdict",
+			stepName: "Pre-resolved verdict",
+			verifierKind: "llm-review",
+			promptKind: "kickoff",
+			resultPromise: verdict,
+		});
+		assert.deepEqual(outcome, { type: "result", result: { verdict: false, summary: "PRE_RESOLVED_VERDICT_WINS" } }, `${MARKER}: verdict settled before receipt subscription must still win`);
+		assert.equal(deliveries, 1, `${MARKER}: pre-resolved verdict does not re-deliver the prompt`);
+		assert.equal(cancelCount, 1, `${MARKER}: rejected receipt is cancelled exactly once after accepting pre-resolved verdict`);
+	});
+
 	it("agent-qa honors a late verification_result posted during teardown", async () => {
 		const goalId = "goal-agent-qa-late-verdict";
 		const stateDir = makeStateDir("verifier-agent-qa-late-verdict-");

@@ -5438,6 +5438,16 @@ export class VerificationHarness {
 				return { type: "dispatched" };
 			} catch (error) {
 				receipt.cancel();
+				// A rejected receipt can race a verification_result accepted by the
+				// tool handler for this same attempt. Give the already-subscribed
+				// result promise one turn to settle before treating transport failure
+				// as retryable contention; never discard a first verdict (including
+				// agent-qa's reportHtml) merely because acknowledgement lost the race.
+				await Promise.resolve();
+				if (settledResult && signalIsCurrent()) {
+					console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=verdict-before-ack row=${receipt.rowId}`);
+					return { type: "result", result: settledResult };
+				}
 				const message = error instanceof Error ? error.message : String(error);
 				const decision = isReviewerBusyError(message)
 					? "busy-contention"
