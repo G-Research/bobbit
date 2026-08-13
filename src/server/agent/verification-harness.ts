@@ -2086,6 +2086,11 @@ const MAX_REVIEWER_REMINDERS = 2;
 const REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS = 20_000;
 const MAX_VERIFIER_SAME_SESSION_RESURRECTIONS = 3;
 
+type VerifierPromptDispatchOutcome =
+	| { type: "dispatched" }
+	| { type: "result"; result: VerificationResult }
+	| { type: "cancelled"; reason: string };
+
 function isRetryableLlmReviewRecovery(output: string): boolean {
 	return isTransientVerifierReviewError(output) || isRetryableGenericAgentError(output);
 }
@@ -2172,6 +2177,8 @@ export class VerificationHarness {
 	 * enqueue a follow-up after its cancelled row has been removed.
 	 */
 	private cancelledVerificationSignals = new Set<string>();
+	/** Exact prompt admissions waiting to learn that their signal generation was cancelled. */
+	private verifierDispatchCancellationWaiters = new Map<string, Set<(reason: string) => void>>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
@@ -3082,7 +3089,7 @@ export class VerificationHarness {
 			// `pending` when the rerun context is unavailable).
 			let reminderStarted = false;
 			try {
-				await this.dispatchVerifierPrompt(session, reminderPrompt, {
+				const reminderDispatch = await this.dispatchVerifierPrompt(session, reminderPrompt, {
 					goalId: v.goalId,
 					gateId: v.gateId,
 					signalId: v.signalId,
@@ -3090,7 +3097,14 @@ export class VerificationHarness {
 					verifierKind: step.type === "agent-qa" ? "agent-qa" : "llm-review",
 					promptKind: useRestartContinuationPrompt ? "restart-resume" : "reminder",
 					whenReady: true,
+					resultPromise,
 				});
+				if (reminderDispatch.type === "result") {
+					return { name: step.name, type: step.type, passed: reminderDispatch.result.verdict, output: reminderDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+				}
+				if (reminderDispatch.type === "cancelled") {
+					return { name: step.name, type: step.type, passed: false, output: reminderDispatch.reason, duration_ms: Date.now() - step.startedAt };
+				}
 				// dispatchVerifierPrompt waited for this exact durable row's provider
 				// acceptance; do not let an unrelated streaming turn prove readiness.
 				reminderStarted = true;
@@ -3149,7 +3163,7 @@ export class VerificationHarness {
 				console.log(`[verification] Restart continuation for resumed session ${step.sessionId} ended without verification_result, sending ${fallbackKind} fallback reminder...`);
 				let fallbackStarted = false;
 				try {
-					await this.dispatchVerifierPrompt(session, fallbackPrompt, {
+					const fallbackDispatch = await this.dispatchVerifierPrompt(session, fallbackPrompt, {
 						goalId: v.goalId,
 						gateId: v.gateId,
 						signalId: v.signalId,
@@ -3157,7 +3171,14 @@ export class VerificationHarness {
 						verifierKind: step.type === "agent-qa" ? "agent-qa" : "llm-review",
 						promptKind: "fallback",
 						whenReady: true,
+						resultPromise,
 					});
+					if (fallbackDispatch.type === "result") {
+						return { name: step.name, type: step.type, passed: fallbackDispatch.result.verdict, output: fallbackDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+					}
+					if (fallbackDispatch.type === "cancelled") {
+						return { name: step.name, type: step.type, passed: false, output: fallbackDispatch.reason, duration_ms: Date.now() - step.startedAt };
+					}
 					fallbackStarted = true;
 				} catch (resumeErr) {
 					const msg = (resumeErr as Error)?.message || String(resumeErr);
@@ -3881,6 +3902,9 @@ export class VerificationHarness {
 		active.overallStatus = "cancelled";
 		active.cancelRequestedAt ??= Date.now();
 		this.cancelledVerificationSignals.add(active.signalId);
+		const waiters = this.verifierDispatchCancellationWaiters.get(active.signalId);
+		this.verifierDispatchCancellationWaiters.delete(active.signalId);
+		for (const notify of waiters ?? []) notify(`Verifier prompt signal ${active.signalId} was cancelled or superseded`);
 		this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 	}
 
@@ -5325,38 +5349,93 @@ export class VerificationHarness {
 			promptKind: "kickoff" | "reminder" | "restart-resume" | "fallback" | "resurrection";
 			whenReady?: boolean;
 			attempt?: number;
+			/** First verdict from this same reviewer, registered before prompt admission. */
+			resultPromise?: Promise<VerificationResult>;
 		},
-	): Promise<void> {
+	): Promise<VerifierPromptDispatchOutcome> {
 		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1}`;
-		if (args.signalId) {
+		const signalIsCurrent = () => {
+			if (!args.signalId) return true;
 			const active = this.activeVerifications.get(args.signalId);
-			const rejected = this.cancelledVerificationSignals.has(args.signalId)
-				|| (!!active && (active.cancelled
-					|| active.overallStatus === "cancelled"
-					|| active.goalId !== args.goalId
-					|| active.gateId !== args.gateId
-					|| !this._isCurrentGateSignal(active)));
-			if (rejected) {
-				console.warn(`[verification][verifier-dispatch] ${fields} mode=queued decision=cancelled-generation`);
-				throw new Error(`Verifier prompt admission rejected for cancelled or superseded signal ${args.signalId}`);
-			}
+			return !this.cancelledVerificationSignals.has(args.signalId)
+				&& (!active || (!active.cancelled
+					&& active.overallStatus !== "cancelled"
+					&& active.goalId === args.goalId
+					&& active.gateId === args.gateId
+					&& this._isCurrentGateSignal(active)));
+		};
+		if (!signalIsCurrent()) {
+			console.warn(`[verification][verifier-dispatch] ${fields} mode=queued decision=cancelled-generation`);
+			return { type: "cancelled", reason: `Verifier prompt admission rejected for cancelled or superseded signal ${args.signalId}` };
 		}
+		const cancellation = (() => {
+			if (!args.signalId) return { promise: new Promise<{ type: "cancelled"; reason: string }>(() => {}), dispose: () => {} };
+			let notify: ((reason: string) => void) | undefined;
+			const promise = new Promise<{ type: "cancelled"; reason: string }>(resolve => {
+				notify = reason => resolve({ type: "cancelled", reason });
+				const waiters = this.verifierDispatchCancellationWaiters.get(args.signalId!) ?? new Set();
+				waiters.add(notify);
+				this.verifierDispatchCancellationWaiters.set(args.signalId!, waiters);
+			});
+			return {
+				promise,
+				dispose: () => {
+					const waiters = this.verifierDispatchCancellationWaiters.get(args.signalId!);
+					if (!waiters || !notify) return;
+					waiters.delete(notify);
+					if (waiters.size === 0) this.verifierDispatchCancellationWaiters.delete(args.signalId!);
+				},
+			};
+		})();
 		const manager = this.sessionManager;
 		if (manager && typeof manager.enqueueVerifierPrompt === "function") {
-			const receipt = manager.enqueueVerifierPrompt(session.id, text, {
-				coldStart: args.whenReady,
-				streamingBehavior: "followUp",
-				suppressTitleGen: true,
-			});
+			const receipt = (() => {
+				try {
+					return manager.enqueueVerifierPrompt(session.id, text, {
+						coldStart: args.whenReady,
+						streamingBehavior: "followUp",
+						suppressTitleGen: true,
+					});
+				} catch (error) {
+					// Admission itself can fail (for example model setup fencing) before
+					// a receipt exists; do not leave a cancellation waiter behind.
+					cancellation.dispose();
+					throw error;
+				}
+			})();
 			let timer: TimerHandle | undefined;
+			let settledResult: VerificationResult | undefined;
+			const resultArrival = args.resultPromise?.then(result => {
+				settledResult = result;
+				return { type: "result" as const, result };
+			});
 			try {
-				await Promise.race([
-					receipt.dispatched,
-					new Promise<never>((_, reject) => {
-						timer = this.clock.setTimeout(() => reject(new Error(`Verifier prompt ${receipt.rowId} did not dispatch within ${VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS}ms`)), VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS);
+				const winner = await Promise.race([
+					receipt.dispatched.then(() => ({ type: "dispatched" as const })),
+					...(resultArrival ? [resultArrival] : []),
+					cancellation.promise,
+					new Promise<{ type: "timeout" }>(resolve => {
+						timer = this.clock.setTimeout(() => resolve({ type: "timeout" }), VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS);
 					}),
 				]);
+				// A tool POST can arrive between the provider accepting a turn and its
+				// RPC acknowledgement reaching the receipt. Prefer that first verdict
+				// over a new reminder/retry, even when both promises settle this tick.
+				await Promise.resolve();
+				if (winner.type === "result" || settledResult) {
+					const result = winner.type === "result" ? winner.result : settledResult!;
+					receipt.cancel();
+					console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=verdict-before-ack row=${receipt.rowId}`);
+					return { type: "result", result };
+				}
+				if (winner.type === "cancelled" || !signalIsCurrent()) {
+					receipt.cancel();
+					console.warn(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=cancelled-generation row=${receipt.rowId}`);
+					return { type: "cancelled", reason: winner.type === "cancelled" ? winner.reason : `Verifier prompt ${receipt.rowId} was superseded before acknowledgement` };
+				}
+				if (winner.type === "timeout") throw new Error(`Verifier prompt ${receipt.rowId} did not dispatch within ${VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS}ms`);
 				console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=dispatched row=${receipt.rowId}`);
+				return { type: "dispatched" };
 			} catch (error) {
 				receipt.cancel();
 				const message = error instanceof Error ? error.message : String(error);
@@ -5370,9 +5449,10 @@ export class VerificationHarness {
 				throw error;
 			} finally {
 				if (timer) this.clock.clearTimeout(timer);
+				cancellation.dispose();
 			}
-			return;
 		}
+		cancellation.dispose();
 		// Legacy test shims predate row receipts. Retain their queue API while
 		// keeping production on enqueueVerifierPrompt above.
 		// Legacy restart shims label the old generic resume continuation as a
@@ -5398,7 +5478,7 @@ export class VerificationHarness {
 			if (compatibilityStreamingSettleMs && typeof (manager as any).waitForStreaming === "function") {
 				await (manager as any).waitForStreaming(session.id, compatibilityStreamingSettleMs);
 			}
-			return;
+			return { type: "dispatched" };
 		}
 		console.log(`[verification][verifier-dispatch] ${fields} mode=direct decision=followUp`);
 		await dispatchTrackedSystemPrompt(session, text, {
@@ -5410,6 +5490,7 @@ export class VerificationHarness {
 		if (compatibilityStreamingSettleMs && manager && typeof (manager as any).waitForStreaming === "function") {
 			await (manager as any).waitForStreaming(session.id, compatibilityStreamingSettleMs);
 		}
+		return { type: "dispatched" };
 	}
 
 	/** Distinguish a real idle turn from expiry of its active-thinking allowance. */
@@ -5566,7 +5647,7 @@ export class VerificationHarness {
 				const session = sessionManager.getSession(args.sessionId);
 				if (!session?.rpcClient) throw new Error("Session missing after same-session resurrection");
 
-				await this.dispatchVerifierPrompt(session, args.prompt, {
+				const resurrectionDispatch = await this.dispatchVerifierPrompt(session, args.prompt, {
 					goalId: args.goalId,
 					gateId: args.gateId,
 					signalId: args.signalId,
@@ -5575,7 +5656,10 @@ export class VerificationHarness {
 					promptKind: "resurrection",
 					whenReady: typeof session.rpcClient.promptWhenReady === "function",
 					attempt,
+					resultPromise: args.resultPromise,
 				});
+				if (resurrectionDispatch.type === "result") return { type: "result", ...resurrectionDispatch.result };
+				if (resurrectionDispatch.type === "cancelled") return { type: "failed", output: resurrectionDispatch.reason };
 
 				// The exact resurrection row is provider-accepted above. Session-wide
 				// streaming may still describe the interrupted turn and is not evidence.
@@ -5804,14 +5888,17 @@ export class VerificationHarness {
 			});
 
 			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
-			await this.dispatchVerifierPrompt(session, kickoff, {
+			const kickoffDispatch = await this.dispatchVerifierPrompt(session, kickoff, {
 				goalId,
 				gateId: verificationContext?.gateId,
 				signalId: verificationContext?.signalId,
 				stepName: step.name,
 				verifierKind: "llm-review",
 				promptKind: "kickoff",
+				resultPromise,
 			});
+			if (kickoffDispatch.type === "result") return { passed: kickoffDispatch.result.verdict, output: kickoffDispatch.result.summary, sessionId };
+			if (kickoffDispatch.type === "cancelled") return { passed: false, output: kickoffDispatch.reason, sessionId };
 
 			// Kickoff transport is outside the allowance. Once dispatched, distinguish
 			// a real idle turn from expiry of the full active-thinking window.
@@ -5854,7 +5941,7 @@ export class VerificationHarness {
 				const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
 				const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await this.dispatchVerifierPrompt(session, reminderPrompt, {
+				const reminderDispatch = await this.dispatchVerifierPrompt(session, reminderPrompt, {
 					goalId,
 					gateId: verificationContext?.gateId,
 					signalId: verificationContext?.signalId,
@@ -5862,7 +5949,16 @@ export class VerificationHarness {
 					verifierKind: "llm-review",
 					promptKind: "reminder",
 					attempt: reminderNum,
+					resultPromise,
 				});
+				if (reminderDispatch.type === "result") {
+					reminderOutcome = { type: "result", verdict: reminderDispatch.result.verdict, summary: reminderDispatch.result.summary };
+					break;
+				}
+				if (reminderDispatch.type === "cancelled") {
+					reminderOutcome = { type: "errored", output: reminderDispatch.reason };
+					break;
+				}
 				// The receipt above identifies this reminder; do not use the preceding
 				// turn's session-level streaming state as its start acknowledgement.
 				const started = true;
@@ -6249,14 +6345,22 @@ export class VerificationHarness {
 			});
 
 			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
-			await this.dispatchVerifierPrompt(session, kickoff, {
+			const kickoffDispatch = await this.dispatchVerifierPrompt(session, kickoff, {
 				goalId,
 				gateId: verificationContext?.gateId,
 				signalId: verificationContext?.signalId,
 				stepName: step.name,
 				verifierKind: "agent-qa",
 				promptKind: "kickoff",
+				resultPromise,
 			});
+			if (kickoffDispatch.type === "result") {
+				const artifact = kickoffDispatch.result.reportHtml
+					? { content: kickoffDispatch.result.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+					: undefined;
+				return { passed: kickoffDispatch.result.verdict, output: kickoffDispatch.result.summary, sessionId: qaSessionId, artifact };
+			}
+			if (kickoffDispatch.type === "cancelled") return { passed: false, output: kickoffDispatch.reason, sessionId: qaSessionId };
 
 			// Kickoff transport is outside the allowance. Each active QA turn gets
 			// the full resolved window once the prompt has been dispatched.
@@ -6301,7 +6405,7 @@ export class VerificationHarness {
 				const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
 				const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await this.dispatchVerifierPrompt(session, qaReminderPrompt, {
+				const reminderDispatch = await this.dispatchVerifierPrompt(session, qaReminderPrompt, {
 					goalId,
 					gateId: verificationContext?.gateId,
 					signalId: verificationContext?.signalId,
@@ -6309,7 +6413,16 @@ export class VerificationHarness {
 					verifierKind: "agent-qa",
 					promptKind: "reminder",
 					attempt: reminderNum,
+					resultPromise,
 				});
+				if (reminderDispatch.type === "result") {
+					qaReminderOutcome = { type: "result", verdict: reminderDispatch.result.verdict, summary: reminderDispatch.result.summary, reportHtml: reminderDispatch.result.reportHtml };
+					break;
+				}
+				if (reminderDispatch.type === "cancelled") {
+					qaReminderOutcome = { type: "errored", output: reminderDispatch.reason };
+					break;
+				}
 				// dispatchVerifierPrompt awaited this exact QA reminder row.
 				const started = true;
 				const result2 = await this.waitForReviewTurn(qaSessionId, resultPromise, timeoutMs);

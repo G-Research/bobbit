@@ -337,7 +337,7 @@ describe("verifier busy concurrency reproductions", () => {
 				verifierKind: "llm-review",
 				promptKind: "reminder",
 			});
-			const queuedRejected = assert.rejects(queued, /terminated|cancelled|unavailable/i);
+			const queuedCancelled = queued;
 			await eventually(
 				() => oldSession.promptQueue.toArray().some((row: any) => row.text === "queued old verifier"),
 				`${MARKER}: ${cancellation.name} must start with one queued reviewer receipt`,
@@ -360,16 +360,13 @@ describe("verifier busy concurrency reproductions", () => {
 			await cleanupStarted.promise;
 
 			assert.equal(manager.getSession(oldSessionId), undefined, `${MARKER}: ${cancellation.name} must terminate the queued reviewer before command cleanup settles`);
-			await queuedRejected;
+			assert.equal((await queuedCancelled).type, "cancelled", `${MARKER}: ${cancellation.name} must resolve the exact queued receipt as cancelled before teardown`);
 			assert.equal(oldSession.promptQueue.toArray().some((row: any) => row.text === "queued old verifier"), false, `${MARKER}: ${cancellation.name} must purge its exact queued verifier receipt`);
-			await assert.rejects(
-				harness.dispatchVerifierPrompt(oldSession, "must not enqueue after cancellation", {
-					goalId, gateId: "review-gate", signalId: oldSignal.id, stepName: "queued review",
-					verifierKind: "llm-review", promptKind: "reminder",
-				}),
-				/cancelled or superseded signal/,
-				`${MARKER}: ${cancellation.name} must reject enqueue after its exact signal generation is cancelled`,
-			);
+			const cancelledAdmission = await harness.dispatchVerifierPrompt(oldSession, "must not enqueue after cancellation", {
+				goalId, gateId: "review-gate", signalId: oldSignal.id, stepName: "queued review",
+				verifierKind: "llm-review", promptKind: "reminder",
+			});
+			assert.equal(cancelledAdmission.type, "cancelled", `${MARKER}: ${cancellation.name} must fence admission after its exact signal generation is cancelled`);
 			// A stale agent_end after termination must find no verifier row to drain.
 			oldSession.status = "idle";
 			(manager as any).drainQueue(oldSession);
