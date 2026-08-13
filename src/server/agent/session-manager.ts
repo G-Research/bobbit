@@ -3228,8 +3228,8 @@ export class SessionManager {
 			this._sessionReplacementCoordinators.delete(sessionId);
 			owned.active = undefined;
 			// Termination destroys the session. Stop destroys only the current turn:
-			// its proven-no-start reconciliation deliberately leaves accepted rows for
-			// this sole post-abort drain boundary.
+			// queued continuation rows are retargeted for this sole post-abort drain
+			// boundary, while ambiguous dispatched attempts remain in their ledger.
 			if (!canonical || owned.terminalRequest === "terminate") return;
 			if (process.env.BOBBIT_DEBUG && canonical) {
 				console.log(`[reliable-turn] replacement-release session=${sessionId} terminal=${owned.terminalRequest ?? "none"} status=${canonical.status} queued=${canonical.promptQueue.length} drain=${owned.drainOnRelease}`);
@@ -6459,11 +6459,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Drain the shadow ledger and re-enqueue any unresolved steers at the
-	 * front of promptQueue as steered rows. Called after restore and from
-	 * abort-reconciliation paths where a steer the SDK accepted may never echo
-	 * because the turn was torn down. The next drainQueue picks the rows up as
-	 * a steered batch via `_dispatchSteer`, redispatching exactly once.
+	 * Reconcile unresolved steer attempts. Modern occurrences redrive only after
+	 * authoritative replay proves no start; ambiguous terminals retain the ledger
+	 * carrier. Legacy ledgers have no attempt barrier and keep their established
+	 * restore/abort behavior.
 	 */
 	/** Mark only modern exact attempts ambiguous; legacy recovery stays at its established boundary. */
 	private _markModernInFlightAttemptsUncertain(session: SessionInfo): boolean {
@@ -6537,10 +6536,16 @@ export class SessionManager {
 
 	private _reconcileAfterAbort(
 		session: SessionInfo,
-		opts?: { outcome?: "ambiguous" | "proven-no-start" },
+		opts?: {
+			outcome?: "ambiguous" | "proven-no-start";
+			/** Stop always retargets work that never left the queue; this is independent of in-flight proof. */
+			retargetQueuedContinuation?: boolean;
+		},
 	): void {
 		const queue = session.promptQueue as any;
-		if (opts?.outcome === "proven-no-start") {
+		const retargetQueuedContinuation = opts?.retargetQueuedContinuation
+			?? (opts?.outcome === "proven-no-start");
+		if (retargetQueuedContinuation) {
 			if (typeof queue.retargetContinuationToNextTurn === "function") {
 				queue.retargetContinuationToNextTurn("continuation-aborted");
 			} else {
@@ -6557,10 +6562,10 @@ export class SessionManager {
 			}
 		}
 		this._reconcileInFlightSteers(session, {
-			...opts,
+			outcome: opts?.outcome,
 			retargetContinuation: opts?.outcome === "proven-no-start",
 		});
-		if (session._reliableCompactionReleaseDeferred && opts?.outcome === "proven-no-start") {
+		if (session._reliableCompactionReleaseDeferred && retargetQueuedContinuation) {
 			session._reliableCompactionReleaseDeferred = false;
 		}
 	}
@@ -7437,11 +7442,15 @@ export class SessionManager {
 			// duplicate agent_end cannot reinterpret the next turn as cancelled.
 			session.abortShapedTerminal = undefined;
 			if (wasAborting || abortShapedTerminal) {
-				// A real final agent_end orders after every user start for the cancelled
-				// run, so anything unresolved has proven no start. Synthetic hard-kill
-				// bookkeeping opts into ambiguity until replacement replay proves history.
+				// Stop destroys the current turn, so work that never left Bobbit's queue
+				// becomes next-turn work immediately. A graceful terminal does not prove
+				// whether an acknowledged Pi steer entered its transcript: its user start
+				// may still arrive late. Keep modern dispatched attempts uncertain until
+				// an exact late start settles them or replacement transcript replay proves
+				// no start. Synthetic hard-kill bookkeeping follows the same ambiguity rule.
 				this._reconcileAfterAbort(session, {
-					outcome: opts?.abortAttemptOutcome ?? "proven-no-start",
+					outcome: opts?.abortAttemptOutcome ?? "ambiguous",
+					retargetQueuedContinuation: true,
 				});
 				this.broadcastQueue(session);
 
@@ -15046,8 +15055,8 @@ export class SessionManager {
 		const eligible = !!coordinator || !!session && (session.status === "streaming" || session.isCompacting);
 		// Stop admission is the ambiguity boundary. Persist and project every
 		// unresolved modern attempt before replacement ownership or abort RPC can
-		// produce a terminal event. Exact late starts and proven-no-start recovery
-		// continue to settle the same ledger occurrence afterward.
+		// produce a terminal event. Exact late starts settle the same ledger
+		// occurrence; only authoritative replacement replay may prove no start.
 		if (eligible && session && this._markModernInFlightAttemptsUncertain(session)) {
 			this.broadcastQueue(session);
 		}

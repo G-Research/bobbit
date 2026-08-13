@@ -220,6 +220,52 @@ test.describe("Reliable intent recovery protocol", () => {
 		}
 	});
 
+	test("graceful Stop does not redrive an acknowledged steer whose original user start arrives late", async ({ gateway }) => {
+		const sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+		const core = reliableMockCore(gateway, sessionId);
+		const lateIntentId = "intent-graceful-stop-late-0001";
+		const lateText = "GRACEFUL_STOP_LATE_ORIGINAL_ECHO";
+		try {
+			core.armBarrier("tool:before-end");
+			conn.send({ type: "prompt", text: "RELIABLE_TOOL_HOLD" });
+			await core.waitForBarrier("tool:before-end");
+
+			core.armBarrier("steer:1:before-ack");
+			core.armBarrier("steer:1:before-user-start");
+			conn.send({ type: "steer", text: lateText, intentId: lateIntentId });
+			await core.waitForBarrier("steer:1:before-ack");
+			core.releaseBarrier("steer:1:before-ack");
+
+			const stopCursor = conn.messageCount();
+			conn.send({ type: "abort" });
+			await conn.waitForFrom(stopCursor, (frame) => frame.type === "event"
+				&& frame.data?.type === "agent_end");
+			await conn.waitForFrom(stopCursor, statusPredicate("idle"));
+
+			core.releaseBarrier("tool:before-end");
+			await core.waitForBarrier("steer:1:before-user-start");
+			expect(core.commandJournal.filter((entry) => entry.text === lateText)).toHaveLength(1);
+			const uncertainProjection = await conn.waitForFrom(stopCursor, (frame) =>
+				intentRows(frame).some((row) => intentId(row) === lateIntentId && row.deliveryState === "uncertain"),
+			);
+			expect(intentRows(uncertainProjection).find((row) => intentId(row) === lateIntentId)?.retryable).toBe(false);
+
+			core.releaseBarrier("steer:1:before-user-start");
+			await conn.waitFor((frame) => frame.type === "event"
+				&& frame.data?.type === "message_end"
+				&& deliveryIntentId(frame) === lateIntentId);
+
+			expect(core.commandJournal.filter((entry) => entry.text === lateText)).toHaveLength(1);
+			expect(userMessageEnds(conn.messages, lateText).map(deliveryIntentId)).toEqual([lateIntentId]);
+			expect(intentRows(latestIntentProjection(conn.messages))).toEqual([]);
+		} finally {
+			core.releaseAllBarriers();
+			await closeConnection(conn);
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("gateway restore preserves the accepted intent ID and redrives a proven unechoed steer once", async ({ gateway }) => {
 		const sessionId = await createSession();
 		let conn = await connectWs(sessionId);
