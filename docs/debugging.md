@@ -1247,7 +1247,7 @@ Only renders when (a) the session is archived, (b) it has no `goalId`, (c) it ha
 
 This diagnostic is runtime-specific. For a Pi source, Continue clones the `.jsonl` losslessly: confirm the clone exists at the new `agentSessionFile` path. Worktree-backed Pi sources are rebased onto the worktree-cwd slug directory in `executeWorktreeAsync`; a missing rebase is the usual cause.
 
-For a Claude Agent SDK source, do not inspect a clone path: its history remains in the original official SDK conversation. Check the persisted runtime, UUID, and cwd, then confirm the SDK conversation remains accessible from that cwd. `404 SDK_SESSION_UNAVAILABLE` means the source conversation is unavailable, not that a Pi clone failed; malformed UUID/model metadata instead returns `422 RUNTIME_CONTINUE_UNSUPPORTED`. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md) and [Continue-Archived endpoint](rest-api.md#continue-archived-endpoint).
+For a Claude Agent SDK source, do not inspect a clone path: its history remains in the original official SDK conversation. Check the persisted runtime, UUID, and cwd, then confirm the SDK conversation remains accessible from that cwd. The opaque `503 SDK_SESSION_UNAVAILABLE` category means the source conversation is unavailable, not that a Pi clone failed; malformed UUID/model metadata instead returns `422 RUNTIME_CONTINUE_UNSUPPORTED`. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md) and [Continue-Archived endpoint](rest-api.md#continue-archived-endpoint).
 
 ## Stale draft resurrection
 

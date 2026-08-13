@@ -120,7 +120,7 @@ work:
    `readSdkSessionInfo({ sessionId: ps.claudeAgentSdkSessionId, cwd: ps.cwd })`
    **before destination allocation**. Missing/malformed persisted metadata
    returns `422 RUNTIME_CONTINUE_UNSUPPORTED`; an unavailable SDK source returns
-   `404 SDK_SESSION_UNAVAILABLE` with a clear “SDK conversation is unavailable”
+   `503 SDK_SESSION_UNAVAILABLE` with a clear “SDK conversation is unavailable”
    message. Either failure creates nothing.
 2. Create a fresh Bobbit wrapper through the existing internal
    `SessionManager.createSession(...)` path, passing the **same** SDK UUID only
@@ -201,7 +201,7 @@ normalized snapshot adapter remains pure and testable.
 | `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` | manager restore + history | Valid UUID fixture (not `sdk-opaque-session-id`); `get_messages` and archived messages use official helper; no `switch_session`; no Pi JSONL access. |
 | same | queue/steer and resume failure | Unechoed steer requeues exactly once; echoed steer clears ledger; unavailable source becomes dormant with sanitized `restoreError`, preserves queue, and never starts unrelated history. |
 | same | force-abort/role replacement after `PreCompact` | Ready replacement receives the persisted current UUID before queue drain; Pi remains unchanged. |
-| focused server integration/E2E route suite | archived SDK Continue | `getSessionInfo` preflight occurs before allocation; a valid source creates a new Bobbit id with the same SDK id and `resume`; unavailable source returns `404 SDK_SESSION_UNAVAILABLE`; invalid metadata returns `422 RUNTIME_CONTINUE_UNSUPPORTED`; no copy/switch/destination on failure. |
+| focused server integration/E2E route suite | archived SDK Continue | `getSessionInfo` preflight occurs before allocation; a valid source creates a new Bobbit id with the same SDK id and `resume`; unavailable source returns `503 SDK_SESSION_UNAVAILABLE`; invalid metadata returns `422 RUNTIME_CONTINUE_UNSUPPORTED`; no copy/switch/destination on failure. |
 | focused server integration/E2E route suite | live SDK Fork rejection | Returns stable `422 RUNTIME_FORK_UNSUPPORTED` before destination allocation and proves no SDK fork call, Pi transcript resolution/copy, `switch_session`, sidecar/tool-content/proposal work, or worktree/config creation. |
 | `tests/e2e/claude-agent-sdk-session-restart.spec.ts` | restart/compaction/history | Existing restart proof plus reconnect snapshot equality before/after restart, automatic compaction then resume, and co-resident Pi `switch_session` regression. |
 
