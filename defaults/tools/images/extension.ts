@@ -1,4 +1,4 @@
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";

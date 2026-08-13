@@ -9,7 +9,7 @@
  * a headless browser. Falls back gracefully on errors.
  */
 
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";

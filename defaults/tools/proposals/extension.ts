@@ -8,7 +8,7 @@
  *
  * Loaded automatically via --extension for sessions with an assistantType.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getGatewayUrl, getGatewayToken } from "../_shared/gateway.ts";
 
