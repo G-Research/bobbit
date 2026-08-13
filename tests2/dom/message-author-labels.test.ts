@@ -4,6 +4,7 @@ __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { initialState, reduce } from "../../src/app/message-reducer.js";
 import {
 	NO_PROMPT_AUTHOR_LABELS,
 	presentPromptAuthor,
@@ -142,6 +143,26 @@ describe("prompt author badge DOM", () => {
 		expect(list.querySelectorAll('user-message[data-intent-id="intent-fallback"]')).toHaveLength(1);
 		expect(Array.from(list.querySelectorAll("user-message")).map((row) => row.getAttribute("data-intent-id")))
 			.toEqual(["intent-modern", "intent-fallback", null, null]);
+	});
+
+	it("renders one user-message host for duplicate modern snapshot occurrences", async () => {
+		const intentId = "intent-duplicate-host";
+		const legacyA = prompt("legacy-a", USER);
+		const legacyB = { ...prompt("legacy-b", USER), content: legacyA.content };
+		const state = reduce(initialState(), {
+			type: "snapshot",
+			messages: [
+				{ ...prompt("authoritative", USER), deliveryIntentId: intentId },
+				legacyA,
+				legacyB,
+				{ ...prompt("recovery-copy", USER), intentId },
+			],
+		});
+		const list = await renderMessageList(state.messages);
+
+		expect(list.querySelectorAll(`user-message[data-intent-id="${intentId}"]`)).toHaveLength(1);
+		expect(list.querySelector(`user-message[data-intent-id="${intentId}"]`)?.textContent).toContain("authoritative");
+		expect(list.querySelectorAll("user-message")).toHaveLength(3);
 	});
 
 	it("leaves all-human markup unlabelled", async () => {
