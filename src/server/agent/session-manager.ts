@@ -38,6 +38,7 @@ import {
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
 import {
+	appendPromptAuthorDismissalTombstone,
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	digestPromptModelText,
@@ -5386,43 +5387,30 @@ export class SessionManager {
 			(binding) => binding.intentId === row.id || binding.promptId === row.id,
 		);
 		if (existing?.settlement?.outcome === "echoed") return false;
-		const settledAt = this.clock.now();
 		const recoveredAttempt = row.attemptId !== undefined && row.attemptId === existing?.attemptId;
 		if (existing?.settlement?.outcome === "cancelled" && !recoveredAttempt) return true;
-		let attemptId = existing?.attemptId;
-		let promptId = existing?.promptId ?? row.id;
-		if (!existing || recoveredAttempt) {
-			// A recovered queue row legitimately follows a cancelled delivery attempt.
-			// Give explicit dismissal a fresh exact attempt so restore can distinguish
-			// terminal intent cancellation from the retired attempt marker on the row.
-			attemptId = promptAttemptId("dismiss");
-			promptId = row.id;
-			const source = row.source ?? "user";
-			const author = resolveAcceptedPromptAuthor(source, row.author);
-			if (!appendPromptAuthorDispatch(session.id, {
-				schemaVersion: 2,
-				type: "prompt-author",
-				promptId,
-				intentId: row.id,
-				attemptId,
-				dispatchEpoch: settledAt,
-				// This is a synthetic terminal attempt, not the accepted occurrence.
-				// Timestamp it at settlement so lifecycle selection cannot be regressed
-				// by an older row's accepted-message timestamp.
-				dispatchedAt: settledAt,
-				modelText: row.text,
-				source,
-				author,
-			})) return false;
-		}
-		return appendPromptAuthorSettlement(session.id, {
+
+		// A recovered queue row legitimately follows a cancelled delivery attempt.
+		// Give explicit dismissal a fresh exact attempt so restore can distinguish
+		// terminal intent cancellation from the retired attempt marker on the row.
+		// Identity and terminal settlement share one fsynced ledger record: after it
+		// succeeds, even a crash before queue persistence cannot revive this row.
+		const settledAt = this.clock.now();
+		const attemptId = promptAttemptId("dismiss");
+		const source = row.source ?? "user";
+		const author = resolveAcceptedPromptAuthor(source, row.author);
+		return appendPromptAuthorDismissalTombstone(session.id, {
 			schemaVersion: 2,
-			type: "prompt-author-settlement",
-			promptId,
+			type: "prompt-author-dismissal",
+			promptId: row.id,
 			intentId: row.id,
-			...(attemptId === undefined ? {} : { attemptId }),
+			attemptId,
+			dispatchEpoch: settledAt,
+			dispatchedAt: settledAt,
 			settledAt,
-			outcome: "cancelled",
+			modelText: row.text,
+			source,
+			author,
 		});
 	}
 

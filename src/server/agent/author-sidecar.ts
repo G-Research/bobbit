@@ -55,7 +55,30 @@ export interface PromptAuthorSettlementRecord {
 	messageTimestamp?: number;
 }
 
-export type AuthorSidecarRecord = PromptAuthorDispatchRecord | PromptAuthorSettlementRecord;
+/**
+ * One durable explicit-dismissal record. It carries both the synthetic attempt
+ * identity and its terminal cancelled settlement, so no crash boundary can
+ * expose one without the other.
+ */
+export interface PromptAuthorDismissalTombstoneRecord {
+	schemaVersion: 2;
+	type: "prompt-author-dismissal";
+	promptId: string;
+	intentId: string;
+	attemptId: string;
+	dispatchEpoch: number;
+	dispatchedAt: number;
+	settledAt: number;
+	modelTextDigest: string;
+	source: PromptSource;
+	author: MessageAuthor;
+	modelPrefix?: string;
+}
+
+export type AuthorSidecarRecord =
+	| PromptAuthorDispatchRecord
+	| PromptAuthorSettlementRecord
+	| PromptAuthorDismissalTombstoneRecord;
 
 /** Non-serialized append evidence used only to break equal lifecycle timestamps. */
 const PROMPT_AUTHOR_LIFECYCLE_ORDER = Symbol("prompt-author-lifecycle-order");
@@ -91,6 +114,22 @@ export interface PromptAuthorSettlementInput {
 	outcome: "echoed" | "cancelled";
 	messageId?: string;
 	messageTimestamp?: number;
+}
+
+export interface PromptAuthorDismissalTombstoneInput {
+	schemaVersion?: 2;
+	type?: "prompt-author-dismissal";
+	promptId: string;
+	intentId: string;
+	attemptId: string;
+	dispatchEpoch: number;
+	dispatchedAt: number;
+	settledAt: number;
+	/** Exact text is accepted only in memory and immediately becomes a keyed digest. */
+	modelText: string;
+	source: PromptSource;
+	author: MessageAuthor;
+	modelPrefix?: string;
 }
 
 /**
@@ -233,6 +272,24 @@ function isSettlementRecord(value: unknown): value is PromptAuthorSettlementReco
 		&& (record.messageTimestamp === undefined || validTimestamp(record.messageTimestamp));
 }
 
+function isDismissalTombstoneRecord(value: unknown): value is PromptAuthorDismissalTombstoneRecord {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return record.schemaVersion === 2
+		&& record.type === "prompt-author-dismissal"
+		&& validKey(record.promptId)
+		&& validKey(record.intentId)
+		&& validKey(record.attemptId)
+		&& validOptionalEpoch(record.dispatchEpoch)
+		&& record.dispatchEpoch !== undefined
+		&& validTimestamp(record.dispatchedAt)
+		&& validTimestamp(record.settledAt)
+		&& validDigest(record.modelTextDigest)
+		&& isPromptSource(record.source)
+		&& isMessageAuthor(record.author)
+		&& hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix });
+}
+
 function isLegacyDispatchRecord(value: unknown): value is LegacyPromptAuthorDispatchRecord {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
@@ -292,10 +349,29 @@ function canonicalSettlementRecord(record: PromptAuthorSettlementRecord): Prompt
 	};
 }
 
+function canonicalDismissalTombstoneRecord(
+	record: PromptAuthorDismissalTombstoneRecord,
+): PromptAuthorDismissalTombstoneRecord {
+	return {
+		schemaVersion: 2,
+		type: "prompt-author-dismissal",
+		promptId: record.promptId,
+		intentId: record.intentId,
+		attemptId: record.attemptId,
+		dispatchEpoch: record.dispatchEpoch,
+		dispatchedAt: record.dispatchedAt,
+		settledAt: record.settledAt,
+		modelTextDigest: record.modelTextDigest,
+		source: record.source,
+		author: canonicalAuthor(record.author),
+		...(record.modelPrefix === undefined ? {} : { modelPrefix: record.modelPrefix }),
+	};
+}
+
 function canonicalRecord(record: AuthorSidecarRecord): AuthorSidecarRecord {
-	return record.type === "prompt-author"
-		? canonicalDispatchRecord(record)
-		: canonicalSettlementRecord(record);
+	if (record.type === "prompt-author") return canonicalDispatchRecord(record);
+	if (record.type === "prompt-author-settlement") return canonicalSettlementRecord(record);
+	return canonicalDismissalTombstoneRecord(record);
 }
 
 function isPromptAuthorBinding(value: unknown): value is PromptAuthorBinding {
@@ -521,7 +597,9 @@ function recordsFromText(text: string): AuthorSidecarRecord[] {
 		if (!trimmed) continue;
 		try {
 			const parsed: unknown = JSON.parse(trimmed);
-			if (isDispatchRecord(parsed) || isSettlementRecord(parsed)) records.push(canonicalRecord(parsed));
+			if (isDispatchRecord(parsed) || isSettlementRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
+				records.push(canonicalRecord(parsed));
+			}
 		} catch { /* a partial final line is expected after some crashes */ }
 	}
 	return records;
@@ -599,7 +677,7 @@ function migrateLegacyFile(legacyFile: string, sessionId: string, legacyDir: str
 					...(parsed.messageId === undefined ? {} : { messageId: parsed.messageId }),
 					...(parsed.messageTimestamp === undefined ? {} : { messageTimestamp: parsed.messageTimestamp }),
 				});
-			} else if (isDispatchRecord(parsed) || isSettlementRecord(parsed)) {
+			} else if (isDispatchRecord(parsed) || isSettlementRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
 				migrated.push(canonicalRecord(parsed));
 			}
 		} catch { /* malformed/future rows safely degrade to inference */ }
@@ -762,6 +840,30 @@ export function appendPromptAuthorSettlement(
 	return appendRecord(sessionId, record);
 }
 
+/** Persist synthetic dismissal identity and terminal cancellation in one fsynced append. */
+export function appendPromptAuthorDismissalTombstone(
+	sessionId: string,
+	input: PromptAuthorDismissalTombstoneInput,
+): boolean {
+	const modelTextDigest = digestPromptModelText(input.modelText);
+	const record: PromptAuthorDismissalTombstoneRecord = {
+		schemaVersion: 2,
+		type: "prompt-author-dismissal",
+		promptId: input.promptId,
+		intentId: input.intentId,
+		attemptId: input.attemptId,
+		dispatchEpoch: input.dispatchEpoch,
+		dispatchedAt: input.dispatchedAt,
+		settledAt: input.settledAt,
+		modelTextDigest: modelTextDigest ?? "",
+		source: input.source,
+		author: isMessageAuthor(input.author) ? canonicalAuthor(input.author) : input.author,
+		...(input.modelPrefix === undefined ? {} : { modelPrefix: input.modelPrefix }),
+	};
+	if (!isDismissalTombstoneRecord(record)) return false;
+	return appendRecord(sessionId, record);
+}
+
 /**
  * Compare sidecar lifecycle evidence for one occurrence. Modern attempts are
  * ordered by their dispatch epoch, never by accepted-message time. Settlement
@@ -817,6 +919,39 @@ export function foldAuthorSidecarRecords(records: AuthorSidecarRecord[]): Prompt
 		if (isDispatchRecord(record)) {
 			const key = record.attemptId ? `attempt:${record.attemptId}` : `prompt:${record.promptId}`;
 			const binding: OrderedPromptAuthorBinding = { ...record };
+			Object.defineProperty(binding, PROMPT_AUTHOR_LIFECYCLE_ORDER, {
+				value: recordIndex,
+				writable: true,
+				configurable: true,
+			});
+			bindings.set(key, binding);
+			latestKeyByPromptId.set(record.promptId, key);
+			continue;
+		}
+		if (isDismissalTombstoneRecord(record)) {
+			const key = `attempt:${record.attemptId}`;
+			const binding: OrderedPromptAuthorBinding = {
+				schemaVersion: 2,
+				type: "prompt-author",
+				promptId: record.promptId,
+				intentId: record.intentId,
+				attemptId: record.attemptId,
+				dispatchEpoch: record.dispatchEpoch,
+				dispatchedAt: record.dispatchedAt,
+				modelTextDigest: record.modelTextDigest,
+				source: record.source,
+				author: record.author,
+				...(record.modelPrefix === undefined ? {} : { modelPrefix: record.modelPrefix }),
+				settlement: {
+					schemaVersion: 2,
+					type: "prompt-author-settlement",
+					promptId: record.promptId,
+					intentId: record.intentId,
+					attemptId: record.attemptId,
+					settledAt: record.settledAt,
+					outcome: "cancelled",
+				},
+			};
 			Object.defineProperty(binding, PROMPT_AUTHOR_LIFECYCLE_ORDER, {
 				value: recordIndex,
 				writable: true,
