@@ -2804,6 +2804,15 @@
       }
     },
     {
+      "path": "tests2/core/typecheck-memory-policy.test.ts",
+      "reason": "Pins the unchanged server and web type checks plus the scoped 4 GiB heap for only the tests2 compiler, without replacing caller NODE_OPTIONS.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/project-registry-root-paths.test.ts",
       "reason": "Cross-platform project registry path identity coverage for dialect-aware canonicalization, containment, and case evidence.",
       "execution": {
