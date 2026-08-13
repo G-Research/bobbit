@@ -161,7 +161,7 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			try {
 				const compaction = scenario.runtime.holdNextCompaction({ reason: mode });
 				if (mode === "manual") await submitManualCompact(page);
-				else await submit(page, "AUTO_COMPACT:3 RAT_THRESHOLD");
+				else await submit(page, "RELIABLE_COMPACTION:threshold RAT_THRESHOLD");
 				await compaction.compaction.entered;
 				await expect(page.getByTestId("compaction-summary-card").first()).toBeVisible({ timeout: 15_000 });
 
@@ -183,10 +183,17 @@ test.describe("Journey: Reliable Agent Turns", () => {
 				await expectIntentState(page, steerId, "queued", /Compacting|Steer queued/);
 
 				compaction.compaction.release();
-				await steerEcho.entered;
-				steerEcho.release();
-				await promptEcho.entered;
-				promptEcho.release();
+				if (mode === "manual") {
+					await promptEcho.entered;
+					promptEcho.release();
+					await steerEcho.entered;
+					steerEcho.release();
+				} else {
+					await steerEcho.entered;
+					steerEcho.release();
+					await promptEcho.entered;
+					promptEcho.release();
+				}
 				await expectOneCarrier(page, promptId, "transcript");
 				await expectOneCarrier(page, steerId, "transcript");
 				const expectedOrder = mode === "manual" ? [promptId, steerId] : [steerId, promptId];
@@ -201,13 +208,12 @@ test.describe("Journey: Reliable Agent Turns", () => {
 		const scenario = await createScenario(page, gateway);
 		try {
 			const overflow = scenario.runtime.holdNextCompaction({ reason: "overflow", willRetry: true });
-			await submit(page, "AUTO_COMPACT:3 RAT_OVERFLOW");
+			await submit(page, "RELIABLE_COMPACTION:overflow RAT_OVERFLOW");
 			await overflow.compaction.entered;
 
 			const promptText = "RAT_OVERFLOW_NEXT_TURN";
 			const steerText = "RAT_OVERFLOW_CONTINUATION";
 			const promptEcho = scenario.runtime.holdEcho(promptText);
-			const steerEcho = scenario.runtime.holdEcho(steerText);
 			await submit(page, promptText);
 			const [promptId] = await captureIntentIds(page, promptText);
 			await submit(page, steerText, "steer");
@@ -217,8 +223,6 @@ test.describe("Journey: Reliable Agent Turns", () => {
 
 			overflow.compaction.release();
 			await overflow.retry!.entered;
-			await steerEcho.entered;
-			steerEcho.release();
 			await expectOneCarrier(page, steerId, "transcript");
 			await expectOneCarrier(page, promptId, "outbox");
 			await expectIntentState(page, promptId, "queued", /Queued for next turn/);
@@ -251,14 +255,17 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			const [steerId] = await captureIntentIds(page, steerText);
 			await steerEcho.entered;
 
+			const abortTerminal = scenario.runtime.holdNextAbortTerminal();
 			const stop = page.getByRole("button", { name: "Stop current turn" });
 			await expect(stop).toBeVisible({ timeout: 15_000 });
 			await stop.click();
+			await abortTerminal.entered;
 			await expect(page.getByRole("button", { name: "Stopping current turn" })).toBeVisible({ timeout: 15_000 });
 			await expectOneCarrier(page, queuedId, "outbox");
 			await expectOneCarrier(page, steerId, "outbox");
 			await expectIntentState(page, steerId, "uncertain", /Checking delivery/);
 
+			abortTerminal.release();
 			tool.release();
 			steerEcho.release();
 			await expectOneCarrier(page, steerId, "transcript");
@@ -287,11 +294,14 @@ test.describe("Journey: Reliable Agent Turns", () => {
 
 			compaction.compaction.release();
 			await echo.entered;
+			const abortTerminal = scenario.runtime.holdNextAbortTerminal();
 			const stop = page.getByRole("button", { name: "Stop current turn" });
 			await expect(stop).toBeVisible({ timeout: 15_000 });
 			await stop.click();
+			await abortTerminal.entered;
 			await expectOneCarrier(page, id, "outbox");
 			await expectIntentState(page, id, "uncertain", /Checking delivery/);
+			abortTerminal.release();
 			echo.release();
 			await expectOneCarrier(page, id, "transcript");
 			await expect(transcriptIntent(page, id)).toHaveCount(1);

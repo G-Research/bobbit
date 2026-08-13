@@ -136,12 +136,14 @@ test.describe("Reliable intent recovery protocol", () => {
 
 			core.releaseBarrier("manual:compaction-start");
 			await conn.waitFor((frame) => frame.type === "event" && frame.data?.type === "compaction_end");
-			await conn.waitFor((frame) => frame.type === "event"
-				&& frame.data?.type === "message_end"
-				&& deliveryIntentId(frame) === MANUAL_STEER_ID);
-			await conn.waitFor((frame) => frame.type === "event"
+			const promptEcho = await conn.waitFor((frame) => frame.type === "event"
 				&& frame.data?.type === "message_end"
 				&& deliveryIntentId(frame) === MANUAL_PROMPT_ID);
+			const promptEchoIndex = conn.messages.indexOf(promptEcho);
+			const steerEcho = await conn.waitForFrom(promptEchoIndex + 1, (frame) => frame.type === "event"
+				&& frame.data?.type === "message_end"
+				&& deliveryIntentId(frame) === MANUAL_STEER_ID);
+			expect(conn.messages.indexOf(promptEcho)).toBeLessThan(conn.messages.indexOf(steerEcho));
 
 			expect(commandTexts(core).filter((text) => text === SAME_TEXT)).toHaveLength(2);
 			expect(userMessageEnds(conn.messages, SAME_TEXT).map(deliveryIntentId).sort()).toEqual(

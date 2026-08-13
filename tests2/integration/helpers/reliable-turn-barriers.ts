@@ -1,6 +1,7 @@
 import type { WsMsg } from "../_e2e/e2e-setup.js";
 
 export interface ReliableMockCore {
+	readonly env: Record<string, string | undefined>;
 	armBarrier(name: string): string;
 	waitForBarrier(name: string): Promise<Record<string, unknown>>;
 	releaseBarrier(name: string): boolean;

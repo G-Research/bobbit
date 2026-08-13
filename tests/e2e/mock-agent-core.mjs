@@ -211,6 +211,7 @@ export class MockAgentCore {
 		this._commandJournal = [];
 		this._commandSequence = { prompt: 0, steer: 0, abort: 0, compact: 0 };
 		this._reliableScenario = { compaction: {}, steerFailures: {} };
+		this._reliableOverflowRetryActive = false;
 
 		// Serializes concurrent handlePrompt calls so a second prompt queued
 		// while the first is still in flight runs after the first completes.
@@ -1114,6 +1115,7 @@ export class MockAgentCore {
 		if (reliableCompactionMatch) {
 			const reason = reliableCompactionMatch[1];
 			if (reason === "overflow") {
+				this._reliableOverflowRetryActive = true;
 				const truncated = {
 					role: "assistant",
 					content: [{ type: "text", text: "truncated recoverable length tail" }],
@@ -1124,6 +1126,7 @@ export class MockAgentCore {
 			}
 			const completed = await this._handleAutoCompaction(3, reason);
 			if (!completed || !this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this._reliableOverflowRetryActive = false;
 				this.currentAbortController = null;
 				this.emit({ type: "agent_end", willRetry: false });
 				this.emit({ type: "session_status", status: "idle" });
@@ -1137,6 +1140,7 @@ export class MockAgentCore {
 			await this._crossBarrier(`${reason}:before-final-agent-end`, { reason });
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end", willRetry: false });
+			this._reliableOverflowRetryActive = false;
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
@@ -3288,7 +3292,8 @@ export class MockAgentCore {
 				if (configuredFailure === "pre-dispatch") {
 					throw new Error("deterministic pre-dispatch steer rejection");
 				}
-				if (this.currentAbortController) {
+				const reliableContinuation = this._reliableOverflowRetryActive;
+				if (this.currentAbortController && !reliableContinuation) {
 					this.currentAbortController.abort();
 				}
 
@@ -3306,7 +3311,27 @@ export class MockAgentCore {
 				const dropSteerEcho = this.env.MOCK_STEER_QUEUE_DROP === "always"
 					|| (this.env.MOCK_STEER_QUEUE_DROP === "1" && this._abortedRecently);
 
-				if (steeredText && !dropSteerEcho) {
+				if (steeredText && !dropSteerEcho && reliableContinuation) {
+					// A continuation steer belongs to the retrying overflow run. Surface
+					// its correlated Pi user event inside that run without replacing or
+					// aborting the retry controller; the controlled final agent_end remains
+					// the sole boundary that can release next-turn prompts.
+					const delivery = { kind: "steer", occurrence, intentId };
+					await this._crossBarrier(`steer:${occurrence}:before-user-start`, delivery);
+					const userMsg = { role: "user", content: [{ type: "text", text: steeredText }] };
+					this.emit({
+						type: "message_start",
+						message: userMsg,
+						...(intentId ? { deliveryIntentId: intentId } : {}),
+					});
+					await this._crossBarrier(`steer:${occurrence}:after-user-start`, delivery);
+					this.conversationMessages.push(userMsg);
+					this.emit({
+						type: "message_end",
+						message: userMsg,
+						...(intentId ? { deliveryIntentId: intentId } : {}),
+					});
+				} else if (steeredText && !dropSteerEcho) {
 					// Test-only knob (MOCK_STEER_ECHO_DELAY_MS=N): delay the
 					// steered handlePrompt by N ms so the dispatch→echo race
 					// window in SessionManager._dispatchSteer (queue row

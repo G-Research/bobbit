@@ -53,16 +53,12 @@ export class ReliableTurnRuntime {
 	private readonly originalSteer: (...args: any[]) => Promise<any>;
 	private readonly originalEmit: (event: any) => void;
 	private readonly originalSleep: (ms: number, signal?: AbortSignal) => Promise<void>;
-	private readonly originalAutoCompaction: (preCount: number, reason?: string) => Promise<void>;
 	private readonly echoHolds = new Map<string, TurnBarrier[]>();
 	private readonly steerAckHolds = new Map<string, TurnBarrier[]>();
 	private readonly steerFailures = new Map<string, Error[]>();
 	private nextTool: TurnBarrier | undefined;
 	private activeTool: TurnBarrier | undefined;
 	private nextCompaction: CompactionHold | undefined;
-	private activeCompaction: CompactionHold | undefined;
-	private overflowAwaitingTerminal: CompactionHold | undefined;
-	private overflowRetryInProgress = false;
 	private restored = false;
 
 	constructor(gateway: GatewayInfo, sessionId: string) {
@@ -76,7 +72,6 @@ export class ReliableTurnRuntime {
 		this.originalSteer = this.bridge.steer;
 		this.originalEmit = this.core.emit;
 		this.originalSleep = this.core._sleep;
-		this.originalAutoCompaction = this.core._handleAutoCompaction;
 
 		const fixture = this;
 		this.core.handlePrompt = async function heldPrompt(text: string, ...args: any[]) {
@@ -96,10 +91,6 @@ export class ReliableTurnRuntime {
 			return fixture.emitWithBarriers(this, event);
 		};
 		this.core.setSleep(async (ms: number, signal?: AbortSignal) => {
-			if (fixture.activeCompaction) {
-				await fixture.waitUnlessAborted(fixture.activeCompaction.compaction, signal);
-				return;
-			}
 			if (fixture.activeTool) {
 				const gate = fixture.activeTool;
 				fixture.activeTool = undefined;
@@ -108,17 +99,6 @@ export class ReliableTurnRuntime {
 			}
 			return fixture.originalSleep(ms, signal);
 		});
-		this.core._handleAutoCompaction = async function heldCompaction(preCount: number, reason?: string) {
-			const hold = fixture.nextCompaction;
-			fixture.nextCompaction = undefined;
-			if (!hold) return fixture.originalAutoCompaction.call(this, preCount, reason);
-			fixture.activeCompaction = hold;
-			try {
-				return await fixture.originalAutoCompaction.call(this, preCount, hold.reason);
-			} finally {
-				fixture.activeCompaction = undefined;
-			}
-		};
 	}
 
 	holdEcho(text: string, label = `echo:${text}`): TurnBarrier {
@@ -144,7 +124,7 @@ export class ReliableTurnRuntime {
 		outcome?: CompactionHold["outcome"];
 		willRetry?: boolean;
 	}): CompactionHold {
-		if (this.nextCompaction || this.activeCompaction) throw new Error("A compaction barrier is already armed");
+		if (this.nextCompaction) throw new Error("A compaction barrier is already armed");
 		const hold: CompactionHold = {
 			reason: options.reason,
 			outcome: options.outcome ?? "success",
@@ -152,6 +132,46 @@ export class ReliableTurnRuntime {
 			...(options.willRetry ? { retry: new TurnBarrier(`retry:${options.reason}`) } : {}),
 		};
 		this.nextCompaction = hold;
+		this.core.configureReliableScenario({
+			compaction: {
+				[options.reason]: {
+					outcome: hold.outcome,
+					willRetry: options.willRetry,
+				},
+			},
+		});
+
+		const compactionBoundary = `${options.reason}:compaction-start`;
+		this.core.armBarrier(compactionBoundary);
+		void this.core.waitForBarrier(compactionBoundary).then(async () => {
+			hold.compaction.arrive();
+			await hold.compaction.wait();
+			this.core.releaseBarrier(compactionBoundary);
+			this.nextCompaction = undefined;
+		});
+
+		if (hold.retry) {
+			const finalBoundary = `${options.reason}:before-final-agent-end`;
+			this.core.armBarrier(finalBoundary);
+			void this.core.waitForBarrier(finalBoundary).then(async () => {
+				hold.retry!.arrive();
+				await hold.retry!.wait();
+				this.core.releaseBarrier(finalBoundary);
+			});
+		}
+		return hold;
+	}
+
+	holdNextAbortTerminal(label = "abort-terminal"): TurnBarrier {
+		const occurrence = Number(this.core._commandSequence?.abort ?? 0) + 1;
+		const boundary = `abort:${occurrence}:before-agent-end`;
+		const hold = new TurnBarrier(label);
+		this.core.armBarrier(boundary);
+		void this.core.waitForBarrier(boundary).then(async () => {
+			hold.arrive();
+			await hold.wait();
+			this.core.releaseBarrier(boundary);
+		});
 		return hold;
 	}
 
@@ -162,9 +182,7 @@ export class ReliableTurnRuntime {
 		this.activeTool?.release();
 		this.nextCompaction?.compaction.release();
 		this.nextCompaction?.retry?.release();
-		this.activeCompaction?.compaction.release();
-		this.activeCompaction?.retry?.release();
-		this.overflowAwaitingTerminal?.retry?.release();
+		this.core.releaseAllBarriers();
 		for (const gates of [...this.echoHolds.values(), ...this.steerAckHolds.values()]) {
 			for (const gate of gates) gate.release();
 		}
@@ -172,7 +190,6 @@ export class ReliableTurnRuntime {
 		this.bridge.steer = this.originalSteer;
 		this.core.emit = this.originalEmit;
 		this.core.setSleep(this.originalSleep);
-		this.core._handleAutoCompaction = this.originalAutoCompaction;
 	}
 
 	private emitWithBarriers(receiver: any, input: any): void {
@@ -182,34 +199,6 @@ export class ReliableTurnRuntime {
 			this.nextTool = undefined;
 			this.activeTool.arrive();
 		}
-		if (event?.type === "compaction_start" || event?.type === "auto_compaction_start") {
-			this.activeCompaction?.compaction.arrive();
-		}
-		if ((event?.type === "compaction_end" || event?.type === "auto_compaction_end") && this.activeCompaction) {
-			if (this.activeCompaction.outcome === "failure") {
-				event = { ...event, result: undefined, error: "fixture-compaction-failed" };
-			}
-			if (this.activeCompaction.reason === "overflow" && this.activeCompaction.retry) {
-				this.overflowAwaitingTerminal = this.activeCompaction;
-			}
-		}
-		if (event?.type === "agent_end" && event.willRetry !== true && this.overflowAwaitingTerminal?.retry) {
-			const hold = this.overflowAwaitingTerminal;
-			const retry = hold.retry!;
-			this.overflowAwaitingTerminal = undefined;
-			this.overflowRetryInProgress = true;
-			this.originalEmit.call(receiver, { ...event, willRetry: true });
-			retry.arrive();
-			void retry.wait().then(() => {
-				this.overflowRetryInProgress = false;
-				this.originalEmit.call(receiver, { ...event, willRetry: false });
-				this.originalEmit.call(receiver, { type: "session_status", status: "idle" });
-			});
-			return;
-		}
-		// The mock normally emits idle immediately after agent_end. During the held
-		// overflow retry, final idle belongs to the retry barrier above.
-		if (event?.type === "session_status" && event.status === "idle" && this.overflowRetryInProgress) return;
 		this.originalEmit.call(receiver, event);
 	}
 
