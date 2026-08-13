@@ -130,11 +130,14 @@ describe("verify step resolution — goalBranchContainer composed with resolveSt
 			location: { kind: "component", repoKey: "services/api", relativePath: "packages/web" },
 		});
 
+		// `mapPinnedLocation()` resolves its persisted checkout root. Resolve this
+		// fixture root too, so the assertion includes a Windows volume when present.
+		const frozenRoot = path.resolve("/frozen/checkouts/signal-42");
 		const mapped = mapPinnedLocation({
-			path: "/frozen/checkouts/signal-42",
+			path: frozenRoot,
 			repositories: [{ repoKey: "services/api", publicRelativePath: "services/api" }],
 		} as any, logical.location);
-		assert.equal(mapped.hostCwd, path.join("/frozen/checkouts/signal-42", "services", "api", "packages", "web"));
+		assert.equal(mapped.hostCwd, path.join(frozenRoot, "services", "api", "packages", "web"));
 		assert.equal(mapped.relativePath, "services/api/packages/web");
 		assert.notEqual(mapped.hostCwd, childGoal.cwd, "a pinned mapping never falls back to the child live cwd");
 		assert.equal(mapped.hostCwd.includes("packages/web/packages/web"), false, "the component relative path is not applied twice");
@@ -142,7 +145,7 @@ describe("verify step resolution — goalBranchContainer composed with resolveSt
 
 	it("maps a container-root component through its v2 manifest entry", () => {
 		const checkout = {
-			path: "/frozen/checkouts/signal-42",
+			path: path.resolve("/frozen/checkouts/signal-42"),
 			repositories: [{ repoKey: ".", publicRelativePath: "." }, { repoKey: "apps/web", publicRelativePath: "apps/web" }],
 		} as any;
 		assert.deepEqual(

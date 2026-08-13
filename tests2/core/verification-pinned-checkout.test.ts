@@ -316,7 +316,11 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.equal(await readFile(path.join(checkout.path, "new.txt"), "utf8"), "untracked\n");
 		await assert.rejects(readFile(path.join(checkout.path, "deleted.txt")), /ENOENT/);
 		await assert.rejects(readFile(path.join(checkout.path, "ignored")), /ENOENT/);
-		assert.equal((await lstat(path.join(checkout.path, "exec.sh"))).mode & 0o111, 0o111);
+		// Windows has no executable mode bit for chmod/lstat to preserve. The
+		// Unix assertion remains where that source attribute exists.
+		if (process.platform !== "win32") {
+			assert.equal((await lstat(path.join(checkout.path, "exec.sh"))).mode & 0o111, 0o111);
+		}
 		assert.ok(checkout.contentDigest.digest);
 		assert.deepEqual(checkout.writableIgnoredDirectories, ["ignored"], "only a literal frozen .gitignore directory is retained");
 		assert.ok(git.calls.some(call => call.args.includes("check-ignore") && call.args.includes("--no-index") && call.args.at(-1) === "ignored/"), "the private Git worktree confirms the literal directory");

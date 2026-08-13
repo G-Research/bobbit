@@ -55,8 +55,12 @@ describe("computeVerificationContentDigest", () => {
 		await writeFile(path.join(root, "new.txt"), "untracked source\n");
 		assert.notEqual((await computeVerificationContentDigest(root, inventory(TRACKED, ["new.txt"]))).digest, initial.digest, "untracked source enters inventory");
 		await unlink(path.join(root, "new.txt"));
-		await chmod(path.join(root, "source.txt"), 0o755);
-		assert.notEqual((await computeVerificationContentDigest(root, inventory(TRACKED))).digest, initial.digest, "executable mode enters aggregate");
+		// Windows does not expose Unix executable bits through chmod/lstat, so it
+		// cannot supply a distinct mode witness. Unix platforms still pin it.
+		if (process.platform !== "win32") {
+			await chmod(path.join(root, "source.txt"), 0o755);
+			assert.notEqual((await computeVerificationContentDigest(root, inventory(TRACKED))).digest, initial.digest, "executable mode enters aggregate");
+		}
 	});
 
 	it("uses hasha's raw SHA-256 bytes in the aggregate", async () => {

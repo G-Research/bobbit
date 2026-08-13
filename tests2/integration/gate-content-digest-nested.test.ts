@@ -66,7 +66,8 @@ describe("nested goal content-digest cache isolation", () => {
 		roots.push(root);
 		const parentWorktree = path.join(root, "parent-worktree");
 		const childWorktree = path.join(root, "child-worktree");
-		const source = path.join("packages", "app", "source.ts");
+		// Git's `ls-files -z` inventory is POSIX-separated on every platform.
+		const source = "packages/app/source.ts";
 		await Promise.all([mkdir(path.join(parentWorktree, "packages", "app"), { recursive: true }), mkdir(path.join(childWorktree, "packages", "app"), { recursive: true })]);
 		await Promise.all([
 			writeFile(path.join(parentWorktree, source), "export const value = 'before';\n"),

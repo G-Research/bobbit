@@ -543,9 +543,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				const expected = path.resolve(containerRoot, repoKey);
 				const rawInfo = await lstat(source.sourceRoot);
 				if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("unsafe repository");
-				const sourceRoot = await realpath(source.sourceRoot);
+				// Both paths must be canonical before comparison: Windows realpath may
+				// add a volume prefix that path.resolve intentionally does not.
+				const [sourceRoot, expectedRoot] = await Promise.all([realpath(source.sourceRoot), realpath(expected)]);
 				const info = await lstat(sourceRoot);
-				if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected
+				if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expectedRoot
 					|| seenRoots.some(root => root.repoKey !== "." && repoKey !== "." && (isWithin(root.sourceRoot, sourceRoot) || isWithin(sourceRoot, root.sourceRoot)))) throw new Error("unsafe repository");
 				const repoRoot = await this.gitTopLevel(sourceRoot);
 				if (repoRoot !== sourceRoot) throw new Error("not repository root");
