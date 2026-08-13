@@ -40,16 +40,39 @@ function restoreSmokeEnvironment(environment: Map<string, string | undefined>): 
 }
 
 /** Keep assertions diagnostic-safe: never stringify SDK-owned transcript rows. */
-function hasCanonicalTool(snapshot: unknown, toolName: string): boolean {
-	const visit = (value: unknown): boolean => {
-		if (!value || typeof value !== "object") return false;
-		if (Array.isArray(value)) return value.some(visit);
-		const row = value as Record<string, unknown>;
-		if (row.type === "toolCall" && row.name === toolName) return true;
-		if (row.type === "toolResult" && row.toolName === toolName) return true;
-		return Object.values(row).some(visit);
-	};
-	return visit(snapshot);
+function rootMessages(snapshot: unknown): Record<string, unknown>[] {
+	const messages = Array.isArray(snapshot)
+		? snapshot
+		: snapshot && typeof snapshot === "object" && Array.isArray((snapshot as { messages?: unknown }).messages)
+			? (snapshot as { messages: unknown[] }).messages
+			: [];
+	return messages.filter((message): message is Record<string, unknown> => !!message && typeof message === "object" && !Array.isArray(message));
+}
+
+function hasRootCanonicalToolCall(snapshot: unknown, toolName: string): boolean {
+	return rootMessages(snapshot).some((message) =>
+		Array.isArray(message.content) && message.content.some((part: unknown) =>
+			!!part && typeof part === "object" && (part as Record<string, unknown>).type === "toolCall" && (part as Record<string, unknown>).name === toolName,
+		),
+	);
+}
+
+function hasSuccessfulRootToolResult(snapshot: unknown, toolName: string): boolean {
+	const callIds = new Set(rootMessages(snapshot).flatMap((message) =>
+		Array.isArray(message.content)
+			? message.content.flatMap((part: unknown) => {
+				const row = part && typeof part === "object" ? part as Record<string, unknown> : undefined;
+				return row?.type === "toolCall" && row.name === toolName && typeof row.id === "string" ? [row.id] : [];
+			})
+			: [],
+	));
+	return callIds.size > 0 && rootMessages(snapshot).some((message) =>
+		message.role === "toolResult"
+		&& message.toolName === toolName
+		&& message.isError !== true
+		&& typeof message.toolCallId === "string"
+		&& callIds.has(message.toolCallId),
+	);
 }
 
 function hasOneNestedHelper(snapshot: unknown): boolean {
@@ -67,14 +90,22 @@ function hasOneNestedHelper(snapshot: unknown): boolean {
 function hasDurableSubscriptionUsage(cost: unknown): boolean {
 	if (!cost || typeof cost !== "object") return false;
 	const value = cost as Record<string, unknown>;
-	const context = value.context as Record<string, unknown> | undefined;
+	const context = value.context;
+	const isNullableNumber = (entry: unknown): boolean => entry === null || typeof entry === "number";
+	const has = (record: Record<string, unknown>, key: string): boolean => Object.prototype.hasOwnProperty.call(record, key);
+	if (!context || typeof context !== "object" || Array.isArray(context)) return false;
+	const contextValue = context as Record<string, unknown>;
 	return value.costBasis === "subscription-notional"
 		&& value.totalCost === null
-		&& typeof value.notionalCostUsd === "number"
-		&& typeof value.inputTokens === "number"
-		&& typeof value.outputTokens === "number"
-		&& typeof context?.highWaterTokens === "number"
-		&& typeof context?.currentTokens === "number";
+		&& has(value, "notionalCostUsd")
+		&& isNullableNumber(value.notionalCostUsd)
+		&& has(value, "inputTokens") && typeof value.inputTokens === "number"
+		&& has(value, "outputTokens") && typeof value.outputTokens === "number"
+		&& has(value, "cacheReadTokens") && typeof value.cacheReadTokens === "number"
+		&& has(value, "cacheWriteTokens") && typeof value.cacheWriteTokens === "number"
+		&& has(value, "context")
+		&& has(contextValue, "highWaterTokens") && isNullableNumber(contextValue.highWaterTokens)
+		&& has(contextValue, "currentTokens") && isNullableNumber(contextValue.currentTokens);
 }
 
 function sameTranscriptProjection(before: unknown, after: unknown): boolean {
@@ -205,6 +236,20 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			});
 			expect(projectResponse.status).toBe(201);
 			const project = await projectResponse.json() as { id: string };
+			const goalResponse = await api("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `sdk-smoke-goal-${nonce}`,
+					cwd: projectRoot,
+					projectId: project.id,
+					workflowId: "general",
+					spec: "Isolated Claude Agent SDK manual lifecycle smoke.",
+					worktree: false,
+					autoStartTeam: false,
+				}),
+			});
+			expect(goalResponse.status).toBe(201);
+			const goal = await goalResponse.json() as { id: string };
 			// Configure an isolated role before session setup: one harmless tool must
 			// ask so the real SessionManager permission-card lifecycle is exercised,
 			// while the read-only gate query remains non-interactive.
@@ -237,7 +282,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(preferencesResponse.status).toBe(200);
 			const createResponse = await api("/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false }),
+				body: JSON.stringify({ projectId: project.id, goalId: goal.id, cwd: projectRoot, worktree: false }),
 			});
 			expect(createResponse.status).toBe(201);
 			const created = await createResponse.json() as { id: string };
@@ -248,6 +293,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(session.runtime, `default session model ${sessionModel} must select the Claude Agent SDK runtime`).toBe("claude-agent-sdk");
 			await session.rpcClient.waitForReady(90_000);
 			expect(session.rpcClient.running, "SDK query must remain usable after readiness").toBe(true);
+			const persistedSdkSessionId = gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
+			expect(typeof persistedSdkSessionId).toBe("string");
 			const runTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
 				const before = session.agentObservedTurnVersion ?? 0;
 				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
@@ -303,13 +350,17 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "canonical Bobbit tool turn", 120_000);
 			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "canonical Bobbit tool turn to settle", 120_000);
 			let transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(transcript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "read")).toBe(true);
-			expect(transcript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "ask_user_choices")).toBe(true);
+			expect(transcript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "read")).toBe(true);
+			expect(transcript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "ask_user_choices")).toBe(true);
 
 			// This is read-only: it observes workflow state without signaling a real gate.
 			await runTurn("Use only Bobbit gate_list to inspect the current workflow state; do not signal or modify any gate.", "read-only workflow-gate tool action");
 			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(transcript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "gate_list")).toBe(true);
+			const visibleTranscript = transcript.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data)
+				: undefined;
+			expect(transcript.success && hasRootCanonicalToolCall(visibleTranscript, "gate_list")).toBe(true);
+			expect(transcript.success && hasSuccessfulRootToolResult(visibleTranscript, "gate_list")).toBe(true);
 
 			await runTurn("Use exactly one foreground bobbit-backend-parity-reviewer helper to read README.md. Do not create a Bobbit task, team, worktree, or another helper.", "constrained foreground helper");
 			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
@@ -340,6 +391,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			baseURL = `http://127.0.0.1:${restartedPort}`;
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "SDK gateway restart/resume", 120_000);
 			await session.rpcClient.waitForReady(90_000);
+			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
 			const reloaded = await api(`/api/sessions/${created.id}/transcript`);
 			expect(reloaded.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
@@ -447,6 +499,20 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const projectResponse = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: `sdk-sandbox-${nonce}`, rootPath: projectRoot, acceptCanonical: true }) });
 			expect(projectResponse.status).toBe(201);
 			const project = await projectResponse.json() as { id: string };
+			const goalResponse = await api("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `sdk-sandbox-goal-${nonce}`,
+					cwd: projectRoot,
+					projectId: project.id,
+					workflowId: "general",
+					spec: "Isolated Claude Agent SDK Docker manual lifecycle smoke.",
+					worktree: false,
+					autoStartTeam: false,
+				}),
+			});
+			expect(goalResponse.status).toBe(201);
+			const goal = await goalResponse.json() as { id: string };
 			const roleResponse = await api("/api/roles/general");
 			expect(roleResponse.status).toBe(200);
 			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
@@ -481,7 +547,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
 			});
 			expect(preferencesResponse.status).toBe(200);
-			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, cwd: projectRoot, worktree: false }) });
+			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, goalId: goal.id, cwd: projectRoot, worktree: false }) });
 			expect(createdResponse.status).toBe(201);
 			const created = await createdResponse.json() as { id: string };
 			let session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK bridge installation");
@@ -489,9 +555,11 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(session.sandboxed).toBe(true);
 			expect(session.cwd).toBe("/workspace");
 			await session.rpcClient.waitForReady(120_000);
-			const runSandboxTurn = async (text: string, label: string) => {
+			const persistedSdkSessionId = gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
+			expect(typeof persistedSdkSessionId).toBe("string");
+			const runSandboxTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
 				const before = session.agentObservedTurnVersion ?? 0;
-				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user" });
+				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
 				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
 				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, `${label} to settle`, 120_000);
 			};
@@ -503,8 +571,9 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(sandboxSlash.expansions.length === 1 && sandboxSlash.unknown.length === 0).toBe(true);
 			const { createComposerSlashRegistry, resolveComposerSlashDispatch } = await import("../../src/app/composer-slash-dispatch.ts");
 			const sandboxRegistry = createComposerSlashRegistry({ runtime: "claude-agent-sdk", skills: [{ name: "sdk-sandbox-dogfood", description: "isolated sandbox lifecycle proof", source: "project" }], launchers: [] });
+			expect(resolveComposerSlashDispatch("/sdk-sandbox-dogfood", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("skill");
 			expect(resolveComposerSlashDispatch("/compact", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("unsupported-compact");
-			await runSandboxTurn(sandboxSlash.modelText, "sandbox Bobbit-owned slash prompt");
+			await runSandboxTurn(sandboxSlash.originalText, "sandbox Bobbit-owned slash prompt", { modelText: sandboxSlash.modelText, skillExpansions: sandboxSlash.expansions });
 
 			const firstVersion = session.agentObservedTurnVersion ?? 0;
 			await gateway.sessionManager.enqueuePrompt(created.id, "Reply with exactly: SDK_SANDBOX_READY", { source: "user" });
@@ -519,11 +588,15 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "sandbox canonical Bobbit tool turn", 120_000);
 			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox canonical Bobbit tool turn to settle", 120_000);
 			let sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(sandboxTranscript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "read")).toBe(true);
-			expect(sandboxTranscript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "ask_user_choices")).toBe(true);
+			expect(sandboxTranscript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "read")).toBe(true);
+			expect(sandboxTranscript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "ask_user_choices")).toBe(true);
 			await runSandboxTurn("Use only Bobbit gate_list to inspect current workflow state. Do not signal or modify any gate.", "sandbox read-only workflow-gate tool action");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(sandboxTranscript.success && hasCanonicalTool(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "gate_list")).toBe(true);
+			const visibleSandboxTranscript = sandboxTranscript.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
+				: undefined;
+			expect(sandboxTranscript.success && hasRootCanonicalToolCall(visibleSandboxTranscript, "gate_list")).toBe(true);
+			expect(sandboxTranscript.success && hasSuccessfulRootToolResult(visibleSandboxTranscript, "gate_list")).toBe(true);
 			await runSandboxTurn("Use exactly one foreground bobbit-backend-parity-reviewer helper to read README.md. Do not create a Bobbit task, team, worktree, or another helper.", "sandbox constrained foreground helper");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(sandboxTranscript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data))).toBe(true);
@@ -548,6 +621,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			await gateway.sessionManager.forceAbort(created.id);
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id)?.rpcClient?.running ? gateway!.sessionManager.getSession(created.id) : undefined, "sandbox SDK replacement");
 			expect(session.runtime).toBe("claude-agent-sdk");
+			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
 			// Rebuild the gateway against the same isolated state. This exercises the
 			// persisted SDK UUID, fresh container wiring, and subscription handoff a
 			// second time without exposing any credential material to the test.
@@ -556,6 +630,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			port = await (gateway as any).start();
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK gateway restart");
 			await session.rpcClient.waitForReady(120_000);
+			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
 			const sandboxReload = await api(`/api/sessions/${created.id}/transcript`);
 			expect(sandboxReload.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
