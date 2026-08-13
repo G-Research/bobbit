@@ -3,6 +3,7 @@ import {
 	readSdkSubagentMessages,
 	readSdkSubagents,
 	type ClaudeAgentSdkSessionAccessDeps,
+	type SdkSessionMessage,
 } from "./claude-agent-sdk-session-access.js";
 
 export type ClaudeSdkSubagentPhase = "pending" | "running" | "completed" | "error" | "aborted" | "unknown";
@@ -59,7 +60,11 @@ export interface ClaudeSdkSubagentRecoveryOptions {
 }
 
 const MAX_ID_BYTES = 512;
-const MAX_RECOVERY_SUBAGENTS = 32;
+export const MAX_RECOVERY_SUBAGENTS = 32;
+export const MAX_RECOVERY_CONCURRENCY = 4;
+export const MAX_RECOVERY_ROWS = 1_000;
+export const MAX_RECOVERY_BYTES = 16 * 1024 * 1024;
+export const MAX_RECOVERY_MESSAGES_PER_SUBAGENT = 100;
 
 function boundedId(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_ID_BYTES;
@@ -159,6 +164,118 @@ function publicWork(state: WorkState): ClaudeSdkEmbeddedWork {
 		pendingToolCallIds: [...state.pendingToolCallIds],
 		...(state.diagnostic ? { diagnostic: state.diagnostic } : {}),
 	};
+}
+
+type RecoveredSubagentRows = {
+	readonly rowsByParent: ReadonlyMap<string, readonly ClaudeAgentSdkHistoryMessage[]>;
+	readonly unavailable: boolean;
+	readonly boundedMismatch: boolean;
+};
+
+function recoverySubagentLimit(value: number | undefined): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? Math.min(value, MAX_RECOVERY_SUBAGENTS)
+		: MAX_RECOVERY_SUBAGENTS;
+}
+
+function serializedByteLength(value: unknown): number | undefined {
+	try {
+		const serialized = JSON.stringify(value);
+		return typeof serialized === "string" ? Buffer.byteLength(serialized, "utf8") : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Reads the official child store once for an entire root snapshot.  The SDK
+ * child id only selects a bounded transcript request; every recovered row must
+ * independently name an existing root Agent/Task call before it is admitted.
+ */
+async function recoverSubagentRows(
+	parents: ReadonlySet<string>,
+	recovery: ClaudeSdkSubagentRecoveryOptions,
+): Promise<RecoveredSubagentRows> {
+	const rowsByParent = new Map<string, ClaudeAgentSdkHistoryMessage[]>();
+	for (const parent of parents) rowsByParent.set(parent, []);
+	let listed: string[];
+	try {
+		listed = await readSdkSubagents({ sessionId: recovery.sessionId, cwd: recovery.cwd }, recovery.access);
+	} catch {
+		return { rowsByParent, unavailable: true, boundedMismatch: false };
+	}
+
+	const uniqueIds = [...new Set(listed)];
+	const maxSubagents = recoverySubagentLimit(recovery.maxSubagents);
+	const ids = uniqueIds.slice(0, maxSubagents);
+	let boundedMismatch = uniqueIds.length > ids.length;
+	let unavailable = false;
+	let remainingRows = MAX_RECOVERY_ROWS;
+	let remainingBytes = MAX_RECOVERY_BYTES;
+	let next = 0;
+	const sourceRows: SdkSessionMessage[][] = Array.from({ length: ids.length }, () => []);
+
+	const worker = async (): Promise<void> => {
+		while (next < ids.length && remainingRows > 0 && remainingBytes > 0) {
+			const index = next++;
+			const idsRemaining = ids.length - index;
+			// Reserve the row allowance before awaiting. This makes concurrent calls
+			// globally bounded while still allowing every capped child a chance.
+			const limit = Math.min(MAX_RECOVERY_MESSAGES_PER_SUBAGENT, Math.max(1, Math.floor(remainingRows / idsRemaining)));
+			remainingRows -= limit;
+			let fetched: SdkSessionMessage[];
+			try {
+				fetched = await readSdkSubagentMessages({
+					sessionId: recovery.sessionId,
+					cwd: recovery.cwd,
+					agentId: ids[index],
+					limit,
+				}, recovery.access);
+			} catch {
+				unavailable = true;
+				continue;
+			}
+			if (!Array.isArray(fetched)) {
+				unavailable = true;
+				continue;
+			}
+			if (fetched.length > limit) boundedMismatch = true;
+			for (const sourceRow of fetched.slice(0, limit)) {
+				const bytes = serializedByteLength(sourceRow);
+				if (bytes === undefined || bytes > remainingBytes) {
+					boundedMismatch = true;
+					break;
+				}
+				remainingBytes -= bytes;
+				sourceRows[index].push(sourceRow);
+			}
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(MAX_RECOVERY_CONCURRENCY, ids.length) }, worker));
+	if (next < ids.length || remainingRows === 0 || remainingBytes === 0) boundedMismatch = true;
+
+	// Flatten in SDK list order, not worker-completion order. Child-local order
+	// comes directly from the one bounded SDK request for that child.
+	let acceptedRows = 0;
+	for (const childRows of sourceRows) {
+		let rows: ClaudeAgentSdkHistoryMessage[];
+		try { rows = adaptSdkSessionMessages(childRows); }
+		catch { boundedMismatch = true; continue; }
+		for (const row of rows) {
+			if (acceptedRows >= MAX_RECOVERY_ROWS) {
+				boundedMismatch = true;
+				break;
+			}
+			const parent = boundedId(row.parentToolUseId) ? row.parentToolUseId : undefined;
+			if (!parent || !parents.has(parent)) {
+				boundedMismatch = true;
+				continue;
+			}
+			rowsByParent.get(parent)!.push(row);
+			acceptedRows += 1;
+		}
+	}
+	return { rowsByParent, unavailable, boundedMismatch };
 }
 
 /**
@@ -302,27 +419,12 @@ export class ClaudeSdkSubagentWorkAssembler {
 
 	private async recoverOnce(parentToolUseId: string): Promise<readonly ClaudeSdkEmbeddedWorkEvent[]> {
 		const state = this.state(parentToolUseId);
-		try {
-			const knownIds = [...state.identities.values()].map(identity => identity.agentId).filter((id): id is string => !!id);
-			const listed = knownIds.length > 0 ? knownIds : await readSdkSubagents({ sessionId: this.recovery!.sessionId, cwd: this.recovery!.cwd }, this.recovery!.access);
-			const ids = [...new Set(listed)].slice(0, this.recovery!.maxSubagents ?? MAX_RECOVERY_SUBAGENTS);
-			const events: ClaudeSdkEmbeddedWorkEvent[] = [];
-			let mismatch = false;
-			for (const agentId of ids) {
-				const messages = await readSdkSubagentMessages({ sessionId: this.recovery!.sessionId, cwd: this.recovery!.cwd, agentId }, this.recovery!.access);
-				const rows = adaptSdkSessionMessages(messages);
-				const parents = new Set(rows.map(row => row.parentToolUseId).filter((parent): parent is string => boundedId(parent)));
-				// An SDK child id is not a parent join. Accept only one exact annotated parent.
-				if (parents.size !== 1 || !parents.has(parentToolUseId)) { mismatch = true; continue; }
-				for (const row of rows) if (row.parentToolUseId === parentToolUseId) events.push(...this.ingestMessage(row, "recovered"));
-			}
-			if (mismatch) state.diagnostic = "recovery-mismatch";
-			else if (events.length > 0 && state.diagnostic === "recovery-unavailable") state.diagnostic = undefined;
-			return events;
-		} catch {
-			state.diagnostic = "recovery-unavailable";
-			return [];
-		}
+		const recovered = await recoverSubagentRows(new Set([parentToolUseId]), this.recovery!);
+		const events = recovered.rowsByParent.get(parentToolUseId)?.flatMap(row => this.ingestMessage(row, "recovered")) ?? [];
+		if (recovered.unavailable) state.diagnostic = "recovery-unavailable";
+		else if (recovered.boundedMismatch) state.diagnostic = "recovery-mismatch";
+		else if (events.length > 0 && state.diagnostic === "recovery-unavailable") state.diagnostic = undefined;
+		return events;
 	}
 }
 
@@ -344,30 +446,27 @@ function rootAgentParentToolUseIds(messages: readonly ClaudeAgentSdkHistoryMessa
 
 /** Bounded official-SDK recovery for a snapshot with real root Agent/Task
  * parents. It never infers a parent from an agent id and returns only rows
- * annotated with one exact parent. */
+ * annotated with an exact real root parent. */
 export async function recoverClaudeSdkEmbeddedWork(
 	messages: readonly ClaudeAgentSdkHistoryMessage[],
 	recovery: ClaudeSdkSubagentRecoveryOptions,
 ): Promise<ClaudeAgentSdkHistoryMessage[]> {
 	const parents = rootAgentParentToolUseIds(messages);
 	if (parents.size === 0) return [...messages];
-	const assembler = new ClaudeSdkSubagentWorkAssembler({ recovery });
-	assembler.setKnownParentToolUseIds([...parents]);
 	const existing = new Set(messages.flatMap((message) => {
 		const parent = boundedId(message.parentToolUseId) ? message.parentToolUseId : undefined;
 		const id = sourceId(message);
 		return parent && id ? [`${parent}:${id}`] : [];
 	}));
-	for (const message of messages) if (boundedId(message.parentToolUseId)) assembler.ingestMessage(message);
-	const recovered = (await Promise.all([...parents].map((parent) => assembler.recover(parent))))
-		.flatMap((events) => events.flatMap((event) => event.message ? [event.message] : []));
+	const recovered = await recoverSubagentRows(parents, recovery);
 	const combined = [...messages];
-	for (const message of recovered) {
-		const parent = boundedId(message.parentToolUseId) ? message.parentToolUseId : undefined;
-		const id = sourceId(message);
-		if (!parent || !id || existing.has(`${parent}:${id}`)) continue;
-		existing.add(`${parent}:${id}`);
-		combined.push(message);
+	for (const parent of parents) {
+		for (const message of recovered.rowsByParent.get(parent) ?? []) {
+			const id = sourceId(message);
+			if (!id || existing.has(`${parent}:${id}`)) continue;
+			existing.add(`${parent}:${id}`);
+			combined.push(message);
+		}
 	}
 	return combined;
 }
