@@ -18,6 +18,13 @@ const { RpcBridge } = await import("../../src/server/agent/rpc-bridge.js");
 
 const MARKER = "VERIFIER_LIFECYCLE_REPRO";
 
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
 function makeStateDir(prefix: string): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	const stateDir = path.join(root, "state");
@@ -820,6 +827,105 @@ describe("verifier lifecycle reproductions", () => {
 		assert.equal(providerAccepted.length, 2, `${MARKER}: VERIFIER_BUSY_RACE_REPRO accepts QA kickoff and reminder once each`);
 		assert.equal(verdicts, 1, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder publishes one verdict`);
 		assert.deepEqual(result.artifact, { content: "<p>queued reminder</p>", contentType: "text/html" }, `${MARKER}: VERIFIER_BUSY_RACE_REPRO QA reminder preserves report artifact`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO accepts a failing LLM verdict before its kickoff receipt acknowledgement and ignores a late acknowledgement", async () => {
+		const goalId = "goal-verdict-before-ack-llm";
+		const stateDir = makeStateDir("verdict-before-ack-llm-");
+		const sessionId = "verdict-before-ack-llm-reviewer";
+		const acknowledgement = deferred<void>();
+		let cancelCount = 0;
+		let deliveries = 0;
+		let harness: any;
+		const session = { id: sessionId, status: "idle", lastTurnErrored: false, rpcClient: { onEvent: () => () => {}, prompt: async () => ({ success: true }) } };
+		const { projectContextManager } = makeProjectContext(goalId, { get: () => undefined, getAll: () => [] });
+		const sessionManager = {
+			isSandboxEnabled: false,
+			createSession: async () => session,
+			setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => session,
+			enqueueVerifierPrompt: () => {
+				deliveries += 1;
+				harness.pendingResults.get(sessionId)?.({ verdict: false, summary: "FAIL_VERDICT_BEFORE_ACK" });
+				return { rowId: "kickoff-row", mode: "queued", dispatched: acknowledgement.promise, cancel: () => { cancelCount += 1; return true; } };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Verdict before ACK", prompt: "Review", timeout: 1, role: "reviewer" }, stateDir, goalId,
+			{ name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "kickoff", 1_000, sessionId,
+		);
+		acknowledgement.resolve();
+		await Promise.resolve();
+		assert.equal(result.passed, false, `${MARKER}: the first failing verdict must win over a pending kickoff receipt. result=${JSON.stringify(result)}`);
+		assert.equal(result.output, "FAIL_VERDICT_BEFORE_ACK");
+		assert.equal(deliveries, 1, `${MARKER}: a late RPC acknowledgement must not trigger a retry/redrain`);
+		assert.equal(cancelCount, 1, `${MARKER}: verdict-before-ack must cancel the exact queued receipt`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO cancels a queued LLM reminder when the prior turn's verdict arrives before reminder acknowledgement", async () => {
+		const goalId = "goal-verdict-before-ack-reminder";
+		const stateDir = makeStateDir("verdict-before-ack-reminder-");
+		const sessionId = "verdict-before-ack-reminder-reviewer";
+		const reminderAcknowledgement = deferred<void>();
+		let deliveries = 0;
+		let reminderCancels = 0;
+		let harness: any;
+		const session = { id: sessionId, status: "idle", lastTurnErrored: false, rpcClient: { onEvent: () => () => {}, prompt: async () => ({ success: true }) } };
+		const { projectContextManager } = makeProjectContext(goalId, { get: () => undefined, getAll: () => [] });
+		const sessionManager = {
+			isSandboxEnabled: false, createSession: async () => session, setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => session,
+			enqueueVerifierPrompt: () => {
+				deliveries += 1;
+				if (deliveries === 1) return { rowId: "kickoff-row", mode: "direct", dispatched: Promise.resolve(), cancel: () => true };
+				harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "PRIOR_TURN_VERDICT_BEFORE_REMINDER_ACK" });
+				return { rowId: "reminder-row", mode: "queued", dispatched: reminderAcknowledgement.promise, cancel: () => { reminderCancels += 1; return true; } };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runLlmReviewViaSession(
+			{ name: "Reminder prior verdict", prompt: "Review", timeout: 1, role: "reviewer" }, stateDir, goalId,
+			{ name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "kickoff", 1_000, sessionId,
+		);
+		reminderAcknowledgement.resolve();
+		await Promise.resolve();
+		assert.equal(result.passed, true, `${MARKER}: prior turn verdict must prevent a fresh reminder retry. result=${JSON.stringify(result)}`);
+		assert.equal(result.output, "PRIOR_TURN_VERDICT_BEFORE_REMINDER_ACK");
+		assert.equal(deliveries, 2, `${MARKER}: only kickoff and the cancelled reminder intent may be admitted`);
+		assert.equal(reminderCancels, 1, `${MARKER}: the exact queued reminder must be purged before its late acknowledgement`);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO preserves the QA report artifact when verdict arrives before kickoff acknowledgement", async () => {
+		const goalId = "goal-verdict-before-ack-qa";
+		const stateDir = makeStateDir("verdict-before-ack-qa-");
+		const sessionId = "verdict-before-ack-qa-reviewer";
+		const acknowledgement = deferred<void>();
+		let cancelCount = 0;
+		let harness: any;
+		const session = { id: sessionId, status: "idle", lastTurnErrored: false, rpcClient: { onEvent: () => () => {}, prompt: async () => ({ success: true }) } };
+		const { roleStore, projectContextManager } = makeProjectContext(goalId, qaRoleStore());
+		const sessionManager = {
+			isSandboxEnabled: false, createSession: async () => session, setTitle: () => {}, updateSessionMeta: () => {}, getSession: () => session,
+			enqueueVerifierPrompt: () => {
+				harness.pendingResults.get(sessionId)?.({ verdict: true, summary: "QA_VERDICT_BEFORE_ACK", reportHtml: "<p>QA report survives</p>" });
+				return { rowId: "qa-kickoff-row", mode: "queued", dispatched: acknowledgement.promise, cancel: () => { cancelCount += 1; return true; } };
+			},
+			waitForIdle: async () => {}, waitForStreaming: async () => {}, terminateSession: async () => {},
+		} as any;
+		harness = new VerificationHarness(stateDir, undefined, () => {}, roleStore, undefined, sessionManager, verifierTeamManager() as any, undefined, projectContextManager as any, undefined, { clock: makeFakeClock() as any }) as any;
+
+		const result = await harness.runAgentQaStep(
+			{ name: "QA verdict before ACK", prompt: "Test", timeout: 1, role: "qa-tester" }, stateDir, goalId,
+			{ branch: "goal/qa", commit: "abc123" }, "signal", {}, "goal", new Map(), sessionId,
+		);
+		acknowledgement.resolve();
+		await Promise.resolve();
+		assert.equal(result.passed, true, `${MARKER}: QA verdict before ACK must be honored. result=${JSON.stringify(result)}`);
+		assert.deepEqual(result.artifact, { content: "<p>QA report survives</p>", contentType: "text/html" }, `${MARKER}: QA report artifact must survive verdict-before-ack`);
+		assert.equal(cancelCount, 1, `${MARKER}: QA exact queued receipt must be cancelled before late acknowledgement`);
 	});
 
 	it("agent-qa honors a late verification_result posted during teardown", async () => {
