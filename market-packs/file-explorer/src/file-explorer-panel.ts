@@ -8,6 +8,10 @@ import python from "highlight.js/lib/languages/python";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
+import {
+	ArrowLeft, Box, Braces, ChevronDown, ChevronRight, Diff, File, FileCode2, FileText,
+	Folder, FolderUp, Image, Link, ListCollapse, Lock, Pencil, Search, X, type IconNode,
+} from "lucide";
 import { parseUnifiedDiff, type UnifiedDiffLine } from "../../../src/shared/git-diff/unified.ts";
 
 for (const [name, grammar] of Object.entries({ bash, css, javascript, json, markdown, python, typescript, xml, yaml })) {
@@ -94,6 +98,7 @@ type BrowseSnapshot = {
 	selectedKind?: EntryKind;
 	location: { path: string; kind: LocationKind };
 	view: ViewMode;
+	preferredView: ViewMode;
 	narrowPane: "tree" | "preview";
 	filePreview: PreviewState;
 	diffPreview: PreviewState;
@@ -120,6 +125,8 @@ type ExplorerState = {
 	tree: HTMLElement;
 	previewPane: HTMLElement;
 	preview: HTMLElement;
+	content: HTMLElement;
+	splitter: HTMLElement;
 	pathBar: HTMLElement;
 	searchInput: HTMLInputElement;
 	clearSearchButton: HTMLButtonElement;
@@ -128,9 +135,10 @@ type ExplorerState = {
 	feedback: HTMLElement;
 	alert: HTMLElement;
 	backButton: HTMLButtonElement;
-	refreshButton: HTMLButtonElement;
+	upButton: HTMLButtonElement;
 	live: HTMLElement;
 	host?: HostApi;
+	rootPath?: string;
 	directories: Map<string, DirectoryState>;
 	discovered: Map<string, TreeEntry>;
 	expanded: Set<string>;
@@ -142,6 +150,7 @@ type ExplorerState = {
 	selected?: string;
 	selectedKind?: EntryKind;
 	view: ViewMode;
+	preferredView: ViewMode;
 	filePreview: PreviewState;
 	diffPreview: PreviewState;
 	refreshGeneration: number;
@@ -177,6 +186,7 @@ type ExplorerState = {
 	statusDispose?: () => void;
 	resizeObserver?: ResizeObserver;
 	detachObserver?: MutationObserver;
+	treePaneWidth?: number;
 	storeTimer?: number;
 	lastFocusedElement?: HTMLElement;
 };
@@ -204,6 +214,13 @@ export default function createFileExplorerPanel() {
 			});
 			return state.root;
 		},
+		async refresh(params: Record<string, unknown> | undefined, host: HostApi | undefined) {
+			const sid = typeof params?.__sessionId === "string" ? params.__sessionId : "default";
+			const state = states.get(sid);
+			if (!state) return;
+			state.host = host;
+			await refresh(state, true);
+		},
 	};
 }
 
@@ -212,17 +229,10 @@ function createState(sid: string): ExplorerState {
 	root.dataset.testid = "file-explorer-panel";
 	root.setAttribute("aria-label", "File explorer");
 
-	const toolbar = el("header", "bb-explorer-toolbar");
-	const titleWrap = el("div", "bb-explorer-heading");
-	const title = el("strong", "bb-explorer-title", "Explorer");
-	const subtitle = el("span", "bb-explorer-subtitle", "Session files");
-	titleWrap.append(title, subtitle);
-	const refreshButton = iconButton("refresh", "Refresh explorer", "bb-explorer-refresh");
-	refreshButton.dataset.testid = "file-explorer-refresh";
-	toolbar.append(titleWrap, refreshButton);
-
-	const pathBar = el("div", "bb-explorer-pathbar");
+	const pathBar = el("header", "bb-explorer-pathbar");
 	pathBar.dataset.testid = "file-explorer-pathbar";
+	const upButton = iconButton("arrow-up", "Up one level", "bb-explorer-path-button");
+	upButton.dataset.action = "up-path";
 
 	const content = el("div", "bb-explorer-content");
 	const treePane = el("aside", "bb-explorer-tree-pane");
@@ -242,7 +252,7 @@ function createState(sid: string): ExplorerState {
 	const clearSearchButton = iconButton("x", "Clear search", "bb-explorer-control bb-explorer-clear-search");
 	clearSearchButton.hidden = true;
 	searchWrap.append(searchInput, clearSearchButton);
-	const changedButton = iconButton("filter", "Changed files only", "bb-explorer-control bb-explorer-changed");
+	const changedButton = iconButton("diff", "Changed files only", "bb-explorer-control bb-explorer-changed");
 	changedButton.setAttribute("aria-pressed", "false");
 	changedButton.append(el("span", "bb-explorer-control-label", "Changed"));
 	const collapseButton = iconButton("collapse", "Collapse all", "bb-explorer-control bb-explorer-collapse");
@@ -263,7 +273,13 @@ function createState(sid: string): ExplorerState {
 	const preview = el("div", "bb-explorer-preview");
 	preview.dataset.testid = "file-explorer-preview";
 	previewPane.append(backButton, preview);
-	content.append(treePane, previewPane);
+	const splitter = el("div", "bb-explorer-splitter");
+	splitter.dataset.testid = "file-explorer-splitter";
+	splitter.setAttribute("role", "separator");
+	splitter.setAttribute("aria-label", "Resize file tree");
+	splitter.setAttribute("aria-orientation", "vertical");
+	splitter.tabIndex = 0;
+	content.append(treePane, splitter, previewPane);
 
 	const live = el("div", "bb-explorer-live");
 	live.setAttribute("role", "status");
@@ -271,21 +287,23 @@ function createState(sid: string): ExplorerState {
 	const alert = el("div", "bb-explorer-live");
 	alert.setAttribute("role", "alert");
 	alert.setAttribute("aria-live", "assertive");
-	root.append(toolbar, pathBar, content, live, alert);
+	root.append(pathBar, content, live, alert);
 
 	const state: ExplorerState = {
-		sid, root, treePane, tree, previewPane, preview, pathBar, searchInput, clearSearchButton,
-		changedButton, collapseButton, feedback, alert, backButton, refreshButton, live,
+		sid, root, treePane, tree, previewPane, preview, content, splitter, pathBar, searchInput, clearSearchButton,
+		changedButton, collapseButton, feedback, alert, backButton, upButton, live,
 		directories: new Map(), discovered: new Map(), expanded: new Set(), statuses: new Map(), ancestors: new Set(),
-		changedOnly: false, focused: "", view: "file", filePreview: idlePreview(), diffPreview: idlePreview(),
+		changedOnly: false, focused: "", view: "file", preferredView: "file", filePreview: idlePreview(), diffPreview: idlePreview(),
 		refreshGeneration: 0, selectionGeneration: 0, navigationGeneration: 0,
 		location: { path: "", kind: "root" }, pathEditing: false, pathDraft: "", pathLoading: false,
 		search: { query: "", phase: "idle", results: [], activeIndex: -1, count: 0, truncated: false, generation: 0 },
 		initialized: false, initializing: false, uiStateRestored: false, durableMutationGeneration: 0, initializationQueued: false, lifecycleGeneration: 0,
 		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
-	refreshButton.addEventListener("click", () => void refresh(state!, true));
 	backButton.addEventListener("click", () => showTree(state!, true));
+	splitter.addEventListener("pointerdown", (event) => beginSplitResize(state!, event));
+	splitter.addEventListener("keydown", (event) => resizeSplitByKeyboard(state!, event));
+	splitter.addEventListener("dblclick", () => setTreePaneWidth(state!, undefined));
 	searchInput.addEventListener("input", () => onSearchInput(state!));
 	searchInput.addEventListener("keydown", (event) => onSearchKeydown(state!, event));
 	clearSearchButton.addEventListener("click", () => clearSearch(state!, true));
@@ -315,6 +333,55 @@ function createState(sid: string): ExplorerState {
 	renderTree(state);
 	renderPreview(state);
 	return state;
+}
+
+function setTreePaneWidth(state: ExplorerState, width?: number): void {
+	if (width === undefined) {
+		state.treePaneWidth = undefined;
+		state.content.style.removeProperty("--tree-pane-width");
+		state.splitter.removeAttribute("aria-valuenow");
+		return;
+	}
+	const total = state.content.getBoundingClientRect().width || state.root.getBoundingClientRect().width;
+	const maximum = Math.max(180, total - 247);
+	const value = Math.round(Math.min(maximum, Math.max(180, width)));
+	state.treePaneWidth = value;
+	state.content.style.setProperty("--tree-pane-width", `${value}px`);
+	state.splitter.setAttribute("aria-valuemin", "180");
+	state.splitter.setAttribute("aria-valuemax", String(Math.round(maximum)));
+	state.splitter.setAttribute("aria-valuenow", String(value));
+}
+
+function beginSplitResize(state: ExplorerState, event: PointerEvent): void {
+	if (state.narrow || event.button !== 0) return;
+	event.preventDefault();
+	const startX = event.clientX;
+	const startWidth = state.treePane.getBoundingClientRect().width;
+	try { state.splitter.setPointerCapture(event.pointerId); } catch { /* optional in DOM fixtures */ }
+	document.body.style.cursor = "col-resize";
+	document.body.style.userSelect = "none";
+	state.splitter.classList.add("is-dragging");
+	const move = (next: PointerEvent) => setTreePaneWidth(state, startWidth + next.clientX - startX);
+	const end = () => {
+		document.removeEventListener("pointermove", move);
+		document.removeEventListener("pointerup", end);
+		document.removeEventListener("pointercancel", end);
+		document.body.style.removeProperty("cursor");
+		document.body.style.removeProperty("user-select");
+		state.splitter.classList.remove("is-dragging");
+	};
+	document.addEventListener("pointermove", move);
+	document.addEventListener("pointerup", end);
+	document.addEventListener("pointercancel", end);
+}
+
+function resizeSplitByKeyboard(state: ExplorerState, event: KeyboardEvent): void {
+	if (state.narrow || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+	event.preventDefault();
+	const current = state.treePaneWidth ?? state.treePane.getBoundingClientRect().width;
+	if (event.key === "Home") setTreePaneWidth(state, 180);
+	else if (event.key === "End") setTreePaneWidth(state, Number.MAX_SAFE_INTEGER);
+	else setTreePaneWidth(state, current + (event.key === "ArrowLeft" ? -16 : 16));
 }
 
 function activate(state: ExplorerState): void {
@@ -373,8 +440,6 @@ function deactivate(state: ExplorerState): void {
 	state.copyMessage = undefined;
 	renderDiscoveryControls(state);
 	closeContextMenu(state, false);
-	state.refreshButton.disabled = false;
-	state.refreshButton.classList.remove("is-spinning");
 	state.tree.setAttribute("aria-busy", "false");
 	state.statusDispose?.();
 	state.statusDispose = undefined;
@@ -467,8 +532,6 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<boolean
 		renderPathBar(state);
 	}
 	const generation = ++state.refreshGeneration;
-	state.refreshButton.disabled = true;
-	state.refreshButton.classList.add("is-spinning");
 	state.tree.setAttribute("aria-busy", "true");
 	if (announce) setLive(state, "Refreshing files…");
 	const expanded = [...state.expanded].sort((a, b) => depth(a) - depth(b));
@@ -483,8 +546,6 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<boolean
 	pruneState(state);
 	renderTree(state);
 	if (state.selected) await loadSelectedContent(state, state.selected, true);
-	state.refreshButton.disabled = false;
-	state.refreshButton.classList.remove("is-spinning");
 	state.tree.setAttribute("aria-busy", "false");
 	if (activeQuery) scheduleSearch(state, true);
 	if (announce) setLive(state, rootOkay ? "Explorer refreshed." : "Explorer refresh failed.");
@@ -492,17 +553,28 @@ async function refresh(state: ExplorerState, announce: boolean): Promise<boolean
 	return true;
 }
 
+function nativePath(value: string): string {
+	return /^[A-Za-z]:\//.test(value) || value.startsWith("//") ? value.replace(/\//g, "\\") : value;
+}
+function rootedBody(state: ExplorerState, body: Record<string, unknown>): Record<string, unknown> {
+	return state.rootPath ? { ...body, rootPath: nativePath(state.rootPath) } : body;
+}
+
 async function loadDirectory(state: ExplorerState, path: string, includeStatus: boolean, generation = state.refreshGeneration): Promise<boolean> {
 	const previous = state.directories.get(path);
 	state.directories.set(path, { state: "loading", entries: previous?.entries ?? [], truncated: previous?.truncated ?? false });
 	renderTree(state);
 	try {
-		const value = await callValue(state, "list", { path, ...(includeStatus ? { includeStatus: true } : {}) });
+		const value = await callValue(state, "list", rootedBody(state, { path, ...(includeStatus ? { includeStatus: true } : {}) }));
 		if (generation !== state.refreshGeneration) return false;
 		const object = recordOf(value);
 		const rawEntries = arrayOf(object?.entries ?? object?.children ?? value);
 		const entries = rawEntries.map(normalizeEntry).filter((entry): entry is TreeEntry => !!entry);
 		const truncated = object?.truncated === true;
+		if (path === "" && typeof object?.rootPath === "string" && object.rootPath) {
+			state.rootPath = object.rootPath;
+			renderPathBar(state);
+		}
 		state.directories.set(path, {
 			state: "ready",
 			entries: sortEntries(entries),
@@ -637,7 +709,7 @@ function renderTree(state: ExplorerState): void {
 	state.tree.setAttribute("aria-label", "Files");
 	state.tree.removeAttribute("aria-activedescendant");
 	const rootDirectory = state.directories.get("");
-	state.tree.setAttribute("aria-busy", String(state.refreshButton.disabled || !rootDirectory || rootDirectory.state === "loading"));
+	state.tree.setAttribute("aria-busy", String(!rootDirectory || rootDirectory.state === "loading"));
 	if (!rootDirectory || (rootDirectory.state === "loading" && rootDirectory.entries.length === 0)) {
 		state.tree.append(messageRow("loading", "Loading files…"));
 		finishRender();
@@ -673,17 +745,16 @@ function renderTree(state: ExplorerState): void {
 			twisty.innerHTML = entry.kind === "directory" ? iconSvg(state.expanded.has(entry.path) ? "chevron-down" : "chevron-right") : "";
 			const icon = el("span", `bb-explorer-icon kind-${entry.kind}`);
 			icon.setAttribute("aria-hidden", "true");
-			icon.innerHTML = iconSvg(iconForEntry(entry));
+			const decoration = gitDecorationForEntry(state, entry);
+			icon.innerHTML = entry.kind === "directory" && decoration?.kind === "descendant"
+				? folderOutlineSvg(decoration.tones, `${state.sid}:${entry.path}`)
+				: iconSvg(iconForEntry(entry));
+			if (entry.kind === "directory" && decoration?.kind === "descendant") icon.classList.add("has-git-outline");
 			const label = el("span", "bb-explorer-name", entry.name);
+			if (decoration?.kind === "direct") item.classList.add(`git-${decoration.tone}`);
 			item.append(twisty, icon, label);
 			const status = state.statuses.get(entry.path);
 			if (status) item.append(renderBadges(status));
-			else if (entry.kind === "directory" && state.ancestors.has(entry.path)) {
-				const ancestor = el("span", "bb-explorer-ancestor", "•");
-				ancestor.setAttribute("aria-label", "Contains changes");
-				ancestor.title = "Contains changes";
-				item.append(ancestor);
-			}
 			container.append(item);
 			if (entry.kind === "directory" && state.expanded.has(entry.path)) {
 				const group = el("div", "bb-explorer-group");
@@ -783,6 +854,8 @@ function renderSearchResults(state: ExplorerState): void {
 	}
 	state.search.results.forEach((entry, index) => {
 		const option = el("div", "bb-explorer-search-result");
+		const decoration = gitDecorationForEntry(state, entry);
+		if (decoration?.kind === "direct") option.classList.add(`git-${decoration.tone}`);
 		option.id = `${state.tree.id}-option-${index}`;
 		option.dataset.path = entry.path;
 		option.dataset.kind = entry.kind;
@@ -792,7 +865,10 @@ function renderSearchResults(state: ExplorerState): void {
 		option.title = entry.path;
 		const icon = el("span", `bb-explorer-icon kind-${entry.kind}`);
 		icon.setAttribute("aria-hidden", "true");
-		icon.innerHTML = iconSvg(iconForEntry(entry));
+		icon.innerHTML = entry.kind === "directory" && decoration?.kind === "descendant"
+			? folderOutlineSvg(decoration.tones, `${state.sid}:search:${entry.path}`)
+			: iconSvg(iconForEntry(entry));
+		if (entry.kind === "directory" && decoration?.kind === "descendant") icon.classList.add("has-git-outline");
 		const text = el("span", "bb-explorer-search-result-text");
 		text.append(el("span", "bb-explorer-search-result-name", entry.name), el("span", "bb-explorer-search-result-parent", parentOf(entry.path) || "Session files"));
 		option.append(icon, text);
@@ -948,24 +1024,78 @@ function onTreeKeydown(state: ExplorerState, event: KeyboardEvent): void {
 	}
 }
 
+function isAbsolutePath(value: string): boolean {
+	return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+function displayPath(value: string): string { return value.replace(/\\/g, "/"); }
+function absolutePathForRelative(state: ExplorerState, relativePath: string): string {
+	const rootPath = displayPath(state.rootPath ?? "");
+	return rootPath ? `${rootPath.replace(/\/$/, "")}/${relativePath}` : relativePath;
+}
+function absoluteLocation(state: ExplorerState): string {
+	if (!state.rootPath) return state.location.path;
+	const rootPath = displayPath(state.rootPath);
+	if (!state.location.path) return rootPath;
+	return `${rootPath.replace(/\/$/, "")}/${state.location.path}`;
+}
+
+function filesystemParent(rootPath?: string): string | undefined {
+	if (!rootPath) return undefined;
+	const normalized = rootPath.replace(/[\\/]+$/, "");
+	if (/^[A-Za-z]:$/.test(normalized) || normalized === "" || normalized === "/") return undefined;
+	const index = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+	if (index < 0) return undefined;
+	const parent = normalized.slice(0, index) || "/";
+	return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
+function resetForRootChange(state: ExplorerState, rootPath: string): void {
+	state.rootPath = rootPath;
+	state.directories.clear();
+	state.discovered.clear();
+	state.expanded.clear();
+	state.statuses.clear();
+	state.ancestors.clear();
+	state.gitAvailable = undefined;
+	state.selected = undefined;
+	state.selectedKind = undefined;
+	state.focused = "";
+	state.filePreview = idlePreview();
+	state.diffPreview = idlePreview();
+}
+
+function absoluteBreadcrumbSegments(rootPath: string): Array<{ label: string; relativePath: string }> {
+	const displayed = displayPath(rootPath);
+	const windows = /^[A-Za-z]:\//.test(displayed) || displayed.startsWith("//");
+	const rootParts = displayed.split(/\/+/).filter(Boolean);
+	if (!windows && displayed.startsWith("/")) rootParts.unshift("/");
+	return rootParts.map((label, index) => {
+		let absolute = rootParts.slice(0, index + 1).join("/");
+		if (!windows && displayed.startsWith("/")) absolute = index === 0 ? "/" : `/${rootParts.slice(1, index + 1).join("/")}`;
+		if (windows && displayed.startsWith("//")) absolute = `//${absolute}`;
+		if (windows && index === 0 && /^[A-Za-z]:$/.test(label)) absolute = `${label}/`;
+		return { label, relativePath: absolute };
+	});
+}
+
 function renderPathBar(state: ExplorerState): void {
 	state.pathBar.replaceChildren();
+	state.upButton.disabled = !state.location.path && !filesystemParent(state.rootPath);
 	if (state.pathEditing) {
 		const form = el("div", "bb-explorer-path-edit");
 		form.setAttribute("aria-busy", String(state.pathLoading));
-		const prefix = el("span", "bb-explorer-path-prefix", "Session files /");
-		prefix.setAttribute("aria-hidden", "true");
 		const input = el("input", "bb-explorer-path-input");
 		input.type = "text";
 		input.value = state.pathDraft;
-		input.placeholder = "e.g. src/server/server.ts";
+		input.placeholder = state.rootPath ? displayPath(state.rootPath) : "Enter an absolute path";
 		input.setAttribute("aria-label", "Relative path");
 		input.setAttribute("aria-describedby", `bb-explorer-path-help-${hash(state.sid)}`);
 		input.setAttribute("aria-invalid", String(!!state.pathError));
 		input.readOnly = state.pathLoading;
-		form.append(prefix, input);
+		form.append(input);
 		state.pathBar.append(form);
-		const help = el("span", "bb-explorer-path-help", state.pathError?.message ?? "Enter a path relative to the session root.");
+		const help = el("span", "bb-explorer-path-help", state.pathError?.message ?? "Enter an absolute filesystem path.");
 		help.id = `bb-explorer-path-help-${hash(state.sid)}`;
 		if (state.pathError) {
 			help.classList.add("is-error");
@@ -978,14 +1108,23 @@ function renderPathBar(state: ExplorerState): void {
 		return;
 	}
 	const nav = el("nav", "bb-explorer-breadcrumbs");
-	nav.setAttribute("aria-label", "Current path");
+	nav.setAttribute("aria-label", "Current absolute path");
+	nav.title = absoluteLocation(state);
 	const segments = state.location.path ? state.location.path.split("/") : [];
-	const rootButton = el("button", "bb-explorer-crumb", "Session files");
-	rootButton.type = "button";
-	rootButton.dataset.path = "";
-	rootButton.setAttribute("aria-label", segments.length ? "Go to Session root" : "Session root");
-	if (!segments.length) rootButton.setAttribute("aria-current", "location");
-	nav.append(rootButton);
+	const absoluteSegments = state.rootPath ? absoluteBreadcrumbSegments(state.rootPath) : [{ label: "Session files", relativePath: "" }];
+	absoluteSegments.forEach((segment, index) => {
+		if (index) {
+			const separator = el("span", "bb-explorer-path-separator", "/");
+			separator.setAttribute("aria-hidden", "true");
+			nav.append(separator);
+		}
+		const button = el("button", "bb-explorer-crumb", segment.label);
+		button.type = "button";
+		button.dataset.absolutePath = segment.relativePath;
+		button.setAttribute("aria-label", segments.length || index < absoluteSegments.length - 1 ? `Go to ${segment.relativePath}` : `Current root, ${segment.relativePath}`);
+		if (!segments.length && index === absoluteSegments.length - 1) button.setAttribute("aria-current", "location");
+		nav.append(button);
+	});
 	segments.forEach((segment, index) => {
 		const separator = el("span", "bb-explorer-path-separator", "/");
 		separator.setAttribute("aria-hidden", "true");
@@ -998,9 +1137,9 @@ function renderPathBar(state: ExplorerState): void {
 		if (current) button.setAttribute("aria-current", "location");
 		nav.append(separator, button);
 	});
-	const edit = iconButton("edit", "Edit path (Ctrl+L)", "bb-explorer-path-edit-button");
+	const edit = iconButton("edit", "Edit path (Ctrl+L)", "bb-explorer-path-button");
 	edit.dataset.action = "edit-path";
-	state.pathBar.append(nav, edit);
+	state.pathBar.append(state.upButton, nav, edit);
 	requestAnimationFrame(() => nav.querySelector("[aria-current]")?.scrollIntoView?.({ inline: "nearest", block: "nearest" }));
 }
 
@@ -1008,10 +1147,18 @@ function onPathBarClick(state: ExplorerState, event: Event): void {
 	const target = event.target as Element | null;
 	const retry = target?.closest<HTMLElement>("[data-action=retry-path]");
 	if (retry) { void navigateToPath(state, state.pathDraft, "path"); return; }
+	if (target?.closest("[data-action=up-path]")) {
+		if (state.location.path) void navigateToPath(state, parentOf(state.location.path), "breadcrumb");
+		else {
+			const parent = filesystemParent(state.rootPath);
+			if (parent) void navigateToPath(state, parent, "path");
+		}
+		return;
+	}
 	const crumb = target?.closest<HTMLButtonElement>("button.bb-explorer-crumb");
 	if (crumb) {
 		if (state.search.query) clearSearch(state, true);
-		void navigateToPath(state, crumb.dataset.path ?? "", "breadcrumb");
+		void navigateToPath(state, crumb.dataset.absolutePath ?? crumb.dataset.path ?? "", crumb.dataset.absolutePath ? "path" : "breadcrumb");
 		return;
 	}
 	if (target?.closest("[data-action=edit-path]") || target === state.pathBar || target?.classList.contains("bb-explorer-breadcrumbs")) enterPathEdit(state, target as HTMLElement | null);
@@ -1046,7 +1193,7 @@ function enterPathEdit(state: ExplorerState, invoker?: HTMLElement | null): void
 	if (state.pathEditing) return;
 	if (state.search.query) clearSearch(state, true);
 	state.pathEditing = true;
-	state.pathDraft = state.location.path;
+	state.pathDraft = absoluteLocation(state);
 	state.pathOrigin = { ...state.location };
 	state.pathInvoker = invoker?.closest<HTMLElement>("button") ?? undefined;
 	state.pathError = undefined;
@@ -1079,11 +1226,12 @@ function cancelPathEdit(state: ExplorerState, restoreFocus: boolean): void {
 async function navigateToPath(state: ExplorerState, rawPath: string, source: "path" | "breadcrumb" | "search"): Promise<boolean> {
 	closeContextMenu(state, false);
 	if (source === "path" && state.pathLoading) return false;
-	const path = rawPath;
-	if (safeRelative(path, true) === undefined || path.split("/").includes(".git")) {
+	const absolute = source === "path" && isAbsolutePath(rawPath);
+	const path = absolute ? rawPath : rawPath;
+	if ((!absolute && safeRelative(path, true) === undefined) || (!absolute && path.split("/").includes(".git"))) {
 		if (source === "path") {
 			state.pathDraft = rawPath;
-			state.pathError = { code: "INVALID_PATH", message: "Enter a canonical path relative to Session files.", retryable: false };
+			state.pathError = { code: "INVALID_PATH", message: "Enter an absolute filesystem path.", retryable: false };
 			renderPathBar(state);
 			requestAnimationFrame(() => state.pathBar.querySelector<HTMLInputElement>(".bb-explorer-path-input")?.focus());
 			setAlert(state, state.pathError.message);
@@ -1100,11 +1248,13 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 		setLive(state, `Opening ${path || "Session files"}…`);
 	}
 	try {
-		const value = recordOf(await callValue(state, "resolve", { path })) ?? {};
+		const value = recordOf(await callValue(state, "resolve", absolute ? { absolutePath: nativePath(path) } : rootedBody(state, { path }))) ?? {};
 		if (generation !== state.navigationGeneration) return false;
 		const resolvedPath = safeRelative(value.path, true);
 		const kind = value.kind;
+		const nextRootPath = typeof value.rootPath === "string" && value.rootPath ? value.rootPath : state.rootPath;
 		if (resolvedPath === undefined || !["root", "directory", "file", "symlink", "other"].includes(kind)) throw { code: "READ_FAILED" };
+		if (absolute && nextRootPath) resetForRootChange(state, nextRootPath);
 		for (const rawEntry of arrayOf(value.chain)) {
 			const entry = normalizeEntry(rawEntry);
 			if (entry) state.discovered.set(entry.path, entry);
@@ -1116,6 +1266,10 @@ async function navigateToPath(state: ExplorerState, rawPath: string, source: "pa
 			setLive(state, "Showing all files so the requested path can be revealed.");
 		}
 		state.location = { path: resolvedPath, kind: kind as LocationKind };
+		if (absolute) {
+			const listed = await loadDirectory(state, "", true, state.refreshGeneration);
+			if (!listed || generation !== state.navigationGeneration) return false;
+		}
 		if (source === "path") commitPathEdit(state);
 		if (kind === "root") {
 			state.focused = nearestFocus(state.focused, flattenRows(state).map((row) => row.entry.path));
@@ -1173,7 +1327,7 @@ function commitPathEdit(state: ExplorerState): void {
 function mapNavigationFailure(error: unknown): PanelFailure {
 	const failure = mapRouteFailure(error, "Could not open this path.");
 	const messages: Record<string, string> = {
-		INVALID_PATH: "Enter a canonical path relative to Session files.",
+		INVALID_PATH: "Enter an absolute filesystem path.",
 		NOT_FOUND: "No file or folder exists at this path.",
 		NOT_DIRECTORY: "This path is not a folder.",
 		UNSUPPORTED_FILE: "This item cannot be opened. It can still be revealed in the tree.",
@@ -1222,7 +1376,7 @@ async function runSearch(state: ExplorerState, generation: number, query: string
 	renderTree(state);
 	setLive(state, "Searching Session files.");
 	try {
-		const value = recordOf(await callValue(state, "search", { query })) ?? {};
+		const value = recordOf(await callValue(state, "search", rootedBody(state, { query }))) ?? {};
 		if (generation !== state.search.generation || query !== state.search.query) return;
 		state.search.results = arrayOf(value.results).map(normalizeEntry).filter((entry): entry is TreeEntry => !!entry);
 		state.search.count = typeof value.count === "number" ? value.count : state.search.results.length;
@@ -1292,7 +1446,7 @@ async function revealSearchResult(state: ExplorerState, entry: TreeEntry): Promi
 function captureBrowseSnapshot(state: ExplorerState): BrowseSnapshot {
 	return {
 		expanded: new Set(state.expanded), focused: state.focused, selected: state.selected, selectedKind: state.selectedKind,
-		location: { ...state.location }, view: state.view, narrowPane: state.narrowPane,
+		location: { ...state.location }, view: state.view, preferredView: state.preferredView, narrowPane: state.narrowPane,
 		filePreview: { ...state.filePreview }, diffPreview: { ...state.diffPreview },
 	};
 }
@@ -1311,6 +1465,7 @@ function clearSearch(state: ExplorerState, restore: boolean): void {
 		state.selectedKind = snapshot.selectedKind;
 		state.location = { ...snapshot.location };
 		state.view = snapshot.view;
+		state.preferredView = snapshot.preferredView;
 		state.narrowPane = snapshot.narrowPane;
 		state.filePreview = { ...snapshot.filePreview };
 		state.diffPreview = { ...snapshot.diffPreview };
@@ -1380,12 +1535,17 @@ function openContextMenu(state: ExplorerState, target: TreeEntry, invoker?: HTML
 	const menu = el("div", "bb-explorer-context-menu");
 	menu.setAttribute("role", "menu");
 	menu.setAttribute("aria-label", "Path actions");
-	for (const [action, label] of [["copy-path", "Copy relative path"], ["copy-name", "Copy filename"]] as const) {
+	const actions: Array<{ action: "set-root" | "copy-path" | "copy-name"; label: string }> = [
+		...(target.kind === "directory" && !target.virtual ? [{ action: "set-root" as const, label: "Set root" }] : []),
+		{ action: "copy-path", label: "Copy relative path" },
+		{ action: "copy-name", label: target.kind === "directory" ? "Copy folder name" : "Copy filename" },
+	];
+	for (const { action, label } of actions) {
 		const item = el("button", "bb-explorer-menuitem", label);
 		item.type = "button";
 		item.setAttribute("role", "menuitem");
 		item.dataset.action = action;
-		item.addEventListener("click", () => void copyPathAction(state, action));
+		item.addEventListener("click", () => action === "set-root" ? void setDirectoryRoot(state) : void copyPathAction(state, action));
 		menu.append(item);
 	}
 	menu.addEventListener("keydown", (event) => onContextMenuKeydown(state, event));
@@ -1425,6 +1585,14 @@ function closeContextMenu(state: ExplorerState, restoreFocus: boolean): void {
 	if (restoreFocus) requestAnimationFrame(() => invoker?.isConnected && invoker.focus());
 }
 
+async function setDirectoryRoot(state: ExplorerState): Promise<void> {
+	const menu = state.menu;
+	if (!menu || menu.target.kind !== "directory" || menu.target.virtual) return;
+	const absolutePath = absolutePathForRelative(state, menu.target.path);
+	closeContextMenu(state, false);
+	await navigateToPath(state, absolutePath, "path");
+}
+
 async function copyPathAction(state: ExplorerState, action: "copy-path" | "copy-name"): Promise<void> {
 	const menu = state.menu;
 	if (!menu) return;
@@ -1454,7 +1622,7 @@ async function selectEntry(state: ExplorerState, entry: TreeEntry, navigationGen
 	state.location = { path: entry.path, kind: entry.kind };
 	renderPathBar(state);
 	const status = state.statuses.get(entry.path);
-	state.view = isDeleted(status) ? "diff" : "file";
+	state.view = isDeleted(status) ? "diff" : state.preferredView;
 	state.filePreview = idlePreview(entry.path);
 	state.diffPreview = idlePreview(entry.path);
 	if (state.narrow) {
@@ -1493,7 +1661,7 @@ async function loadFile(state: ExplorerState, path: string, generation = ++state
 	state.filePreview = { state: "loading", path };
 	renderPreview(state);
 	try {
-		const value = recordOf(await callValue(state, "read", { path })) ?? {};
+		const value = recordOf(await callValue(state, "read", rootedBody(state, { path }))) ?? {};
 		if (generation !== state.selectionGeneration || state.selected !== path) return;
 		state.filePreview = normalizePreview(value, path, "text");
 	} catch (error) {
@@ -1507,7 +1675,7 @@ async function loadDiff(state: ExplorerState, path: string, generation = ++state
 	state.diffPreview = { state: "loading", path };
 	renderPreview(state);
 	try {
-		const value = recordOf(await callValue(state, "diff", { path })) ?? {};
+		const value = recordOf(await callValue(state, "diff", rootedBody(state, { path }))) ?? {};
 		if (generation !== state.selectionGeneration || state.selected !== path) return;
 		state.diffPreview = normalizePreview(value, path, "text");
 	} catch (error) {
@@ -1659,9 +1827,6 @@ function renderDiff(state: ExplorerState, preview: PreviewState): void {
 	scroller.setAttribute("aria-label", "Working tree compared with HEAD");
 	for (const file of parsed.files) {
 		const fileBlock = el("section", "bb-explorer-diff-file");
-		const fileHeader = el("div", "bb-explorer-diff-file-header", file.displayPath);
-		if (file.status === "renamed" || file.status === "copied") fileHeader.dataset.status = file.status;
-		fileBlock.append(fileHeader);
 		for (const meta of file.meta.filter((line) => /^(rename|copy|similarity|new file|deleted file)/.test(line))) {
 			fileBlock.append(el("div", "bb-explorer-diff-meta", meta));
 		}
@@ -1693,6 +1858,7 @@ function onPreviewClick(state: ExplorerState, event: Event): void {
 	if (!action) return;
 	if (action === "view-file" || action === "view-diff") {
 		state.view = action === "view-diff" ? "diff" : "file";
+		state.preferredView = state.view;
 		renderPreview(state);
 		queueStore(state);
 		if (state.selected) void loadSelectedContent(state, state.selected, false);
@@ -1760,6 +1926,7 @@ async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<
 		if (mutationGeneration !== state.durableMutationGeneration) return;
 		const value = recordOf(stored);
 		if (value?.version !== STORE_VERSION) return;
+		if (typeof value.rootPath === "string" && isAbsolutePath(value.rootPath)) state.rootPath = value.rootPath;
 		for (const candidate of arrayOf(value.expanded)) {
 			const path = safeRelative(candidate, false);
 			if (path) state.expanded.add(path);
@@ -1768,7 +1935,7 @@ async function restoreUiState(state: ExplorerState, lifecycle: number): Promise<
 		if (selected) state.selected = selected;
 		const focused = safeRelative(value.focused, false);
 		if (focused) state.focused = focused;
-		if (value.view === "file" || value.view === "diff") state.view = value.view;
+		if (value.view === "file" || value.view === "diff") state.view = state.preferredView = value.view;
 		state.changedOnly = value.changedOnly === true;
 	} catch {
 		// Persistence is best-effort and never blocks browsing.
@@ -1787,6 +1954,7 @@ function queueStore(state: ExplorerState, userMutation = true): void {
 		state.storeTimer = undefined;
 		const value = {
 			version: STORE_VERSION,
+			...(state.rootPath ? { rootPath: state.rootPath } : {}),
 			expanded: [...state.expanded].filter((path) => safeRelative(path, false) !== undefined),
 			...(state.selected && safeRelative(state.selected, false) ? { selected: state.selected } : {}),
 			...(state.focused && safeRelative(state.focused, false) ? { focused: state.focused } : {}),
@@ -1849,6 +2017,41 @@ function parentsOf(path: string): string[] { const out: string[] = []; for (let 
 function depth(path: string): number { return path ? path.split("/").length : 0; }
 function isDeleted(status?: StatusRecord): boolean { return !!status && (status.deleted === true || status.summary === "deleted" || status.index === "D" || status.worktree === "D"); }
 function isChanged(status?: StatusRecord): boolean { return !!status; }
+function gitToneForStatus(status: StatusRecord): "added" | "deleted" | "modified" {
+	if (status.conflict || status.summary === "conflict" || status.deleted || status.summary === "deleted" || status.index === "D" || status.worktree === "D" || status.index === "U" || status.worktree === "U") return "deleted";
+	if (status.summary === "modified" || status.renamed || status.copied || status.index === "M" || status.worktree === "M" || status.index === "R" || status.worktree === "R" || status.index === "C" || status.worktree === "C") return "modified";
+	return "added";
+}
+type GitTone = "added" | "deleted" | "modified";
+type GitDecoration = { kind: "direct"; tone: GitTone } | { kind: "descendant"; tones: GitTone[] };
+function gitDecorationForEntry(state: ExplorerState, entry: TreeEntry): GitDecoration | undefined {
+	const direct = state.statuses.get(entry.path);
+	if (direct) return { kind: "direct", tone: gitToneForStatus(direct) };
+	if (entry.kind !== "directory") return undefined;
+	const tones = new Set<GitTone>();
+	const prefix = `${entry.path}/`;
+	for (const [path, status] of state.statuses) {
+		if (path.startsWith(prefix)) tones.add(gitToneForStatus(status));
+	}
+	const ordered = (["added", "modified", "deleted"] as const).filter((tone) => tones.has(tone));
+	if (entry.virtual && ordered.length === 1 && ordered[0] === "deleted") return { kind: "direct", tone: "deleted" };
+	return ordered.length ? { kind: "descendant", tones: ordered } : undefined;
+}
+function folderOutlineSvg(tones: GitTone[], key: string): string {
+	const colors: Record<GitTone, string> = { added: "var(--positive)", modified: "var(--warning)", deleted: "var(--negative)" };
+	if (tones.length === 1) return iconSvg("folder").replace('stroke="currentColor"', `stroke="${colors[tones[0]]}"`);
+	const id = `folder-gradient-${hash(key)}`;
+	const count = tones.length;
+	const stops = tones.map((tone, index) => {
+		const start = Math.round(index * 100 / count);
+		const end = Math.round((index + 1) * 100 / count);
+		return `<stop offset="${start}%" stop-color="${colors[tone]}"/><stop offset="${end}%" stop-color="${colors[tone]}"/>`;
+	}).join("");
+	return iconSvg("folder")
+		.replace("<svg ", `<svg `)
+		.replace(">", `><defs><linearGradient id="${id}" x1="0" y1="1" x2="1" y2="0">${stops}</linearGradient></defs>`)
+		.replace('stroke="currentColor"', `stroke="url(#${id})"`);
+}
 function idlePreview(path?: string): PreviewState { return { state: "idle", ...(path ? { path } : {}) }; }
 function nearestFocus(previous: string, paths: string[]): string { let value = previous; while (value) { if (paths.includes(value)) return value; value = parentOf(value); } return paths[0] ?? ""; }
 function recordOf(value: unknown): Record<string, any> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : undefined; }
@@ -1919,22 +2122,34 @@ function iconForEntry(entry: TreeEntry): string {
 	return "file";
 }
 
+const icons: Record<string, IconNode> = {
+	"arrow-up": FolderUp,
+	"search": Search,
+	"x": X,
+	"diff": Diff,
+	"collapse": ListCollapse,
+	"edit": Pencil,
+	"arrow-left": ArrowLeft,
+	"chevron-right": ChevronRight,
+	"chevron-down": ChevronDown,
+	"folder": Folder,
+	"file": File,
+	"file-text": FileText,
+	"file-code": FileCode2,
+	"image": Image,
+	"braces": Braces,
+	"link": Link,
+	"box": Box,
+	"lock": Lock,
+};
+
 function iconSvg(name: string): string {
-	const paths: Record<string, string> = {
-		"refresh": '<path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/>',
-		"search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>', "x": '<path d="m6 6 12 12M18 6 6 18"/>',
-		"filter": '<path d="M4 5h16M7 12h10M10 19h4"/>', "collapse": '<path d="m7 9 5-5 5 5M7 15l5 5 5-5"/>',
-		"edit": '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>',
-		"arrow-left": '<path d="m15 18-6-6 6-6"/>', "chevron-right": '<path d="m9 18 6-6-6-6"/>', "chevron-down": '<path d="m6 9 6 6 6-6"/>',
-		"folder": '<path d="M3 6h5l2 2h11v10H3z"/>', "file": '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6"/>',
-		"file-text": '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M9 13h6M9 17h6"/>',
-		"file-code": '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M11 13l-2 2 2 2M15 13l2 2-2 2"/>',
-		"image": '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
-		"braces": '<path d="M8 3H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h1M16 3h1a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2h-1"/>',
-		"link": '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1-1"/>',
-		"box": '<path d="m21 8-9-5-9 5 9 5zM3 8v8l9 5 9-5V8M12 13v8"/>', "lock": '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
-	};
-	return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? paths.file}</svg>`;
+	const nodes = icons[name] ?? File;
+	const body = nodes.map(([tag, attrs]) => {
+		const attributes = Object.entries(attrs).map(([key, value]) => `${key}="${String(value)}"`).join(" ");
+		return `<${tag} ${attributes}/>`;
+	}).join("");
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -1957,27 +2172,23 @@ function installStyles(): void {
 	style.textContent = `
 .bb-explorer{display:flex;flex-direction:column;height:100%;min-height:0;color:var(--foreground);background:var(--background);font-size:.8125rem;}
 .bb-explorer *{box-sizing:border-box}.bb-explorer button{font:inherit;color:inherit}.bb-explorer svg{width:1rem;height:1rem;display:block}
-.bb-explorer-toolbar{display:flex;align-items:center;gap:.75rem;min-height:2.75rem;padding:.45rem .65rem;border-bottom:1px solid var(--border);background:var(--card)}
-.bb-explorer-heading{display:flex;align-items:baseline;gap:.5rem;min-width:0;flex:1}.bb-explorer-title{font-size:.875rem}.bb-explorer-subtitle{font-size:.7rem;color:var(--muted-foreground);white-space:nowrap}
-.bb-explorer-refresh{display:grid;place-items:center;width:1.85rem;height:1.85rem;padding:0;border:1px solid transparent;border-radius:.4rem;background:transparent;cursor:pointer}
-.bb-explorer-refresh:hover:not(:disabled){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-refresh:focus-visible,.bb-explorer-button:focus-visible,.bb-explorer-back:focus-visible,.bb-explorer-path-edit-button:focus-visible,.bb-explorer-control:focus-visible,.bb-explorer-crumb:focus-visible,.bb-explorer-menuitem:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.bb-explorer-refresh:disabled,.bb-explorer-control:disabled,.bb-explorer-control[aria-disabled=true]{opacity:.55}.bb-explorer-refresh.is-spinning svg{animation:bb-explorer-spin .8s linear infinite}
-.bb-explorer-pathbar{min-height:2.25rem;display:flex;align-items:center;border-bottom:1px solid var(--border);background:var(--card);position:relative}.bb-explorer-breadcrumbs{display:flex;align-items:center;min-width:0;flex:1;overflow-x:auto;white-space:nowrap;padding:.25rem .2rem .25rem .5rem;scrollbar-width:thin}.bb-explorer-crumb,.bb-explorer-path-edit-button{border:0;background:transparent;border-radius:.35rem;cursor:pointer;height:1.7rem}.bb-explorer-crumb{max-width:14rem;min-width:3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:.15rem .35rem}.bb-explorer-crumb:hover,.bb-explorer-path-edit-button:hover{background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-crumb[aria-current]{font-weight:600}.bb-explorer-path-separator{color:var(--muted-foreground)}.bb-explorer-path-edit-button{display:grid;place-items:center;flex:0 0 2rem;margin-right:.3rem}.bb-explorer-path-edit{display:flex;align-items:center;gap:.35rem;min-width:0;width:100%;padding:.25rem .5rem}.bb-explorer-path-prefix{color:var(--muted-foreground);white-space:nowrap}.bb-explorer-path-input{min-width:0;flex:1;height:1.75rem;border:1px solid var(--border);border-radius:.35rem;background:var(--background);color:var(--foreground);padding:.2rem .4rem;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.bb-explorer-path-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-path-input[aria-invalid=true]{border-color:var(--negative)}.bb-explorer-path-help{position:absolute;z-index:5;top:calc(100% + 1px);left:.5rem;right:.5rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:0 0 .35rem .35rem;background:var(--card);color:var(--muted-foreground);font-size:.72rem;display:flex;align-items:center;gap:.5rem}.bb-explorer-path-help:not(.is-error){position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0)}.bb-explorer-path-help.is-error{color:var(--negative)}
-.bb-explorer-content{display:grid;grid-template-columns:minmax(210px,32%) minmax(0,1fr);flex:1;min-height:0}.bb-explorer-tree-pane{min-width:0;min-height:0;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--card)}
+.bb-explorer-pathbar{min-height:2.75rem;display:flex;align-items:center;gap:.15rem;border-bottom:1px solid var(--border);background:var(--card);position:relative;padding:0 .35rem}.bb-explorer-breadcrumbs{display:flex;align-items:center;min-width:0;flex:1;overflow-x:auto;white-space:nowrap;padding:.25rem .2rem;scrollbar-width:thin;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.72rem}.bb-explorer-crumb,.bb-explorer-path-button{border:0;background:transparent;border-radius:.35rem;cursor:pointer;height:1.8rem}.bb-explorer-crumb{max-width:14rem;min-width:1.5rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:.15rem .3rem;color:var(--muted-foreground)}.bb-explorer-crumb:hover,.bb-explorer-path-button:hover:not(:disabled){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-crumb[aria-current]{font-weight:600;color:var(--foreground)}.bb-explorer-path-separator{color:var(--muted-foreground)}.bb-explorer-path-button{display:grid;place-items:center;flex:0 0 2rem}.bb-explorer-path-button:disabled{opacity:.4;cursor:default}.bb-explorer-button:focus-visible,.bb-explorer-back:focus-visible,.bb-explorer-path-button:focus-visible,.bb-explorer-control:focus-visible,.bb-explorer-crumb:focus-visible,.bb-explorer-menuitem:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.bb-explorer-control:disabled,.bb-explorer-control[aria-disabled=true]{opacity:.55}.bb-explorer-path-edit{display:flex;align-items:center;gap:.35rem;min-width:0;width:100%;padding:.25rem .15rem}.bb-explorer-path-prefix{color:var(--muted-foreground);white-space:nowrap}.bb-explorer-path-input{min-width:0;flex:1;height:1.75rem;border:1px solid var(--border);border-radius:.35rem;background:var(--background);color:var(--foreground);padding:.2rem .4rem;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.bb-explorer-path-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-path-input[aria-invalid=true]{border-color:var(--negative)}.bb-explorer-path-help{position:absolute;z-index:5;top:calc(100% + 1px);left:.5rem;right:.5rem;padding:.35rem .5rem;border:1px solid var(--border);border-radius:0 0 .35rem .35rem;background:var(--card);color:var(--muted-foreground);font-size:.72rem;display:flex;align-items:center;gap:.5rem}.bb-explorer-path-help:not(.is-error){position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0)}.bb-explorer-path-help.is-error{color:var(--negative)}
+.bb-explorer-content{display:grid;grid-template-columns:var(--tree-pane-width,minmax(210px,32%)) 7px minmax(0,1fr);flex:1;min-height:0}.bb-explorer-tree-pane{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--card)}.bb-explorer-splitter{position:relative;cursor:col-resize;touch-action:none;background:transparent}.bb-explorer-splitter::before{content:"";position:absolute;inset:0 3px;background:var(--border);transition:background 120ms ease}.bb-explorer-splitter:hover::before,.bb-explorer-splitter:focus-visible::before,.bb-explorer-splitter.is-dragging::before{inset-inline:2px;background:var(--primary)}.bb-explorer-splitter:focus-visible{outline:none}
 .bb-explorer-tree-toolbar{display:flex;align-items:center;gap:.3rem;padding:.4rem .45rem;border-bottom:1px solid var(--border);flex-wrap:wrap}.bb-explorer-search{position:relative;display:flex;align-items:center;min-width:7.5rem;flex:1}.bb-explorer-search>svg{position:absolute;left:.45rem;width:.85rem;height:.85rem;color:var(--muted-foreground);pointer-events:none}.bb-explorer-search-input{width:100%;height:2rem;padding:.25rem 1.8rem .25rem 1.65rem;border:1px solid var(--border);border-radius:.4rem;background:transparent;color:var(--foreground);font:inherit;font-size:.75rem}.bb-explorer-search-input:focus{outline:2px solid var(--primary);outline-offset:-1px}.bb-explorer-search-input::-webkit-search-cancel-button{display:none}.bb-explorer-control{height:2rem;min-width:2rem;display:flex;align-items:center;justify-content:center;gap:.28rem;border:1px solid transparent;border-radius:.4rem;padding:0 .4rem;background:transparent;cursor:pointer}.bb-explorer-control:hover:not(:disabled):not([aria-disabled=true]){background:color-mix(in oklch,var(--foreground) 7%,transparent)}.bb-explorer-control[aria-pressed=true]{border-color:var(--primary);background:color-mix(in oklch,var(--primary) 13%,transparent);color:var(--primary)}.bb-explorer-clear-search{position:absolute;right:.1rem;padding:0;width:1.75rem;height:1.75rem}.bb-explorer-control-label{font-size:.7rem}.bb-explorer-feedback:empty{display:none}.bb-explorer-inline-feedback{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.3rem .55rem;border-bottom:1px solid var(--border);color:var(--positive);font-size:.72rem}.bb-explorer-inline-feedback.is-error{color:var(--negative)}.bb-explorer-tree{flex:1;min-height:0;overflow:auto;padding:.15rem 0 .5rem;outline:none}
-.bb-explorer-row{--indent:calc((var(--tree-level) - 1)*.9rem);height:1.7rem;padding:0 .45rem 0 calc(.3rem + var(--indent));display:flex;align-items:center;gap:.18rem;min-width:max-content;width:100%;cursor:default;border-left:2px solid transparent;user-select:none}
+.bb-explorer-row{--indent:calc((var(--tree-level) - 1)*.9rem);height:1.7rem;padding:0 .45rem 0 calc(.3rem + var(--indent));display:flex;align-items:center;gap:.28rem;min-width:max-content;width:100%;cursor:default;border-left:2px solid transparent;user-select:none}
 .bb-explorer-row:hover{background:color-mix(in oklch,var(--foreground) 6%,transparent)}.bb-explorer-row[aria-selected=true]{background:color-mix(in oklch,var(--primary) 13%,transparent);border-left-color:var(--primary)}.bb-explorer-row:focus{outline:none;background:color-mix(in oklch,var(--primary) 18%,transparent)}.bb-explorer-row:focus-visible{box-shadow:inset 0 0 0 1px color-mix(in oklch,var(--primary) 65%,transparent)}.bb-explorer-row.is-context-target{box-shadow:inset 0 0 0 1px var(--primary)}
 .bb-explorer-search-result{min-height:2.5rem;padding:.3rem .55rem;display:flex;align-items:center;gap:.35rem;cursor:pointer}.bb-explorer-search-result:hover,.bb-explorer-search-result[aria-selected=true]{background:color-mix(in oklch,var(--primary) 13%,transparent)}.bb-explorer-search-result-text{display:flex;flex-direction:column;min-width:0;flex:1}.bb-explorer-search-result-name,.bb-explorer-search-result-parent{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bb-explorer-search-result-parent{font-size:.68rem;color:var(--muted-foreground)}
-.bb-explorer-twisty{width:.9rem;flex:0 0 .9rem;color:var(--muted-foreground)}.bb-explorer-twisty svg{width:.85rem;height:.85rem}.bb-explorer-icon{width:1rem;flex:0 0 1rem;color:var(--muted-foreground)}.bb-explorer-icon.kind-directory{color:var(--chart-3)}.bb-explorer-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:22rem}.bb-explorer-badges{display:flex;margin-left:auto;gap:.14rem;padding-left:.5rem}.bb-explorer-badge{min-width:.9rem;font-size:.68rem;font-weight:700;text-align:center}.status-modified{color:var(--warning)}.status-added,.status-untracked{color:var(--positive)}.status-deleted,.status-conflict{color:var(--negative)}.status-renamed,.status-copied{color:var(--info)}.bb-explorer-ancestor{margin-left:auto;color:var(--warning);font-size:1rem;line-height:1}
+.bb-explorer-twisty{width:.9rem;flex:0 0 .9rem;color:var(--muted-foreground);margin-right:-.1rem}.bb-explorer-twisty svg{width:.85rem;height:.85rem}.bb-explorer-icon{width:1rem;flex:0 0 1rem;color:var(--muted-foreground)}.bb-explorer-icon.kind-directory{color:var(--foreground)}.bb-explorer-icon.kind-directory.has-git-outline{color:inherit}.bb-explorer-name{position:relative;top:-1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:22rem}.bb-explorer-row.git-modified .bb-explorer-icon,.bb-explorer-row.git-modified .bb-explorer-name,.bb-explorer-search-result.git-modified .bb-explorer-icon,.bb-explorer-search-result.git-modified .bb-explorer-search-result-name{color:var(--warning)}.bb-explorer-row.git-added .bb-explorer-icon,.bb-explorer-row.git-added .bb-explorer-name,.bb-explorer-search-result.git-added .bb-explorer-icon,.bb-explorer-search-result.git-added .bb-explorer-search-result-name{color:var(--positive)}.bb-explorer-row.git-deleted .bb-explorer-icon,.bb-explorer-row.git-deleted .bb-explorer-name,.bb-explorer-search-result.git-deleted .bb-explorer-icon,.bb-explorer-search-result.git-deleted .bb-explorer-search-result-name{color:var(--negative)}.bb-explorer-badges{display:flex;margin-left:auto;gap:.14rem;padding-left:.5rem}.bb-explorer-badge{min-width:.9rem;font-size:.68rem;font-weight:700;text-align:center}.status-modified{color:var(--warning)}.status-added,.status-untracked{color:var(--positive)}.status-deleted,.status-conflict{color:var(--negative)}.status-renamed,.status-copied{color:var(--info)}.bb-explorer-ancestor{margin-left:auto;color:var(--warning);font-size:1rem;line-height:1}
 .bb-explorer-tree-message{--indent:calc((var(--tree-level,1) - 1)*.9rem);padding:.42rem .6rem .42rem calc(1.75rem + var(--indent));color:var(--muted-foreground);font-size:.73rem;display:flex;align-items:center;gap:.5rem}.bb-explorer-tree-message.message-error{color:var(--negative)}.bb-explorer-tree-message.is-compact{border-bottom:1px solid var(--border)}
 .bb-explorer-button{border:1px solid var(--border);border-radius:.35rem;padding:.18rem .48rem;background:var(--background);cursor:pointer}.bb-explorer-button:hover{border-color:var(--primary);color:var(--primary)}
 .bb-explorer-preview-pane{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--background)}.bb-explorer-back{display:none;align-items:center;gap:.25rem;border:0;border-bottom:1px solid var(--border);background:var(--card);padding:.5rem .65rem;cursor:pointer}.bb-explorer-preview{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}.bb-explorer-preview-header{min-height:2.35rem;display:flex;align-items:center;gap:.65rem;padding:.35rem .65rem;border-bottom:1px solid var(--border);background:var(--card)}.bb-explorer-preview-path{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.74rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}.bb-explorer-readonly{display:flex;align-items:center;gap:.25rem;color:var(--muted-foreground);font-size:.68rem;white-space:nowrap}.bb-explorer-readonly svg{width:.75rem;height:.75rem}
 .bb-explorer-tabs{display:flex;align-self:stretch;margin:-.35rem 0}.bb-explorer-tabs .bb-explorer-button{border:0;border-radius:0;background:transparent;padding:.45rem .55rem;border-bottom:2px solid transparent;color:var(--muted-foreground)}.bb-explorer-tabs .bb-explorer-button[aria-selected=true]{border-bottom-color:var(--primary);color:var(--foreground)}
 .bb-explorer-preview-empty,.bb-explorer-preview-message{margin:auto;display:flex;flex-direction:column;align-items:center;gap:.35rem;text-align:center;color:var(--muted-foreground);padding:1.5rem}.bb-explorer-preview-empty svg{width:1.6rem;height:1.6rem}.bb-explorer-preview-empty strong,.bb-explorer-preview-message strong{color:var(--foreground);font-weight:500}.bb-explorer-preview-message.message-error strong{color:var(--negative)}
 .bb-explorer-code-scroll,.bb-explorer-diff-scroll{flex:1;min-height:0;overflow:auto;background:var(--background);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.75rem;line-height:1.5}.bb-explorer-code{min-width:max-content;padding:.35rem 0}.bb-explorer-code-line{display:grid;grid-template-columns:3.4rem minmax(0,1fr);min-height:1.12rem}.bb-explorer-line-number{position:sticky;left:0;text-align:right;padding-right:.8rem;color:var(--muted-foreground);background:var(--background);border-right:1px solid var(--border);user-select:none}.bb-explorer-line-code{white-space:pre;padding:0 .8rem}.hljs-keyword,.hljs-selector-tag,.hljs-literal{color:var(--chart-1)}.hljs-string,.hljs-attr{color:var(--chart-2)}.hljs-number,.hljs-symbol{color:var(--chart-3)}.hljs-comment,.hljs-quote{color:var(--muted-foreground);font-style:italic}.hljs-title,.hljs-function{color:var(--chart-4)}.hljs-variable,.hljs-template-variable{color:var(--chart-5)}
-.bb-explorer-diff-file{min-width:max-content;padding-bottom:.65rem}.bb-explorer-diff-file-header{position:sticky;top:0;z-index:2;padding:.4rem .65rem;background:var(--card);border-bottom:1px solid var(--border);font-weight:600}.bb-explorer-diff-meta,.bb-explorer-hunk{padding:.16rem .65rem;color:var(--muted-foreground);background:color-mix(in oklch,var(--info) 8%,transparent)}.bb-explorer-hunk{color:var(--info);margin-top:.2rem}.bb-explorer-diff-line{display:grid;grid-template-columns:3.2rem 3.2rem minmax(0,1fr);min-height:1.12rem}.bb-explorer-diff-number{text-align:right;padding-right:.55rem;color:var(--muted-foreground);border-right:1px solid color-mix(in oklch,var(--border) 70%,transparent);user-select:none}.bb-explorer-diff-code{white-space:pre;padding:0 .65rem}.bb-explorer-diff-line.diff-add{background:color-mix(in oklch,var(--positive) 12%,transparent)}.bb-explorer-diff-line.diff-remove{background:color-mix(in oklch,var(--negative) 12%,transparent)}.bb-explorer-diff-line.diff-add .bb-explorer-diff-code{color:var(--positive)}.bb-explorer-diff-line.diff-remove .bb-explorer-diff-code{color:var(--negative)}
+.bb-explorer-diff-file{min-width:max-content;padding-bottom:.65rem}.bb-explorer-diff-meta,.bb-explorer-hunk{padding:.16rem .65rem;color:var(--muted-foreground);background:color-mix(in oklch,var(--info) 8%,transparent)}.bb-explorer-hunk{color:var(--info);margin-top:.2rem}.bb-explorer-diff-line{display:grid;grid-template-columns:3.2rem 3.2rem minmax(0,1fr);min-height:1.12rem}.bb-explorer-diff-number{text-align:right;padding-right:.55rem;color:var(--muted-foreground);border-right:1px solid color-mix(in oklch,var(--border) 70%,transparent);user-select:none}.bb-explorer-diff-code{white-space:pre;padding:0 .65rem}.bb-explorer-diff-line.diff-add{background:color-mix(in oklch,var(--positive) 12%,transparent)}.bb-explorer-diff-line.diff-remove{background:color-mix(in oklch,var(--negative) 12%,transparent)}.bb-explorer-diff-line.diff-add .bb-explorer-diff-code{color:var(--positive)}.bb-explorer-diff-line.diff-remove .bb-explorer-diff-code{color:var(--negative)}
 .bb-explorer-context-menu{position:fixed;z-index:1000;width:min(15rem,calc(100vw - 1rem));display:flex;flex-direction:column;gap:.125rem;padding:.25rem;border:1px solid var(--border);border-radius:.5rem;background:var(--popover,var(--background));box-shadow:0 .5rem 1.5rem color-mix(in oklch,var(--foreground) 16%,transparent)}.bb-explorer-menuitem{border:0;border-radius:.3rem;background:transparent;text-align:left;padding:.42rem .55rem;cursor:pointer}.bb-explorer-menuitem:hover,.bb-explorer-menuitem:focus{background:color-mix(in oklch,var(--primary) 12%,transparent);outline:none}
-.bb-explorer-live{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.bb-explorer.is-narrow .bb-explorer-content{display:flex}.bb-explorer.is-narrow .bb-explorer-tree-pane,.bb-explorer.is-narrow .bb-explorer-preview-pane{width:100%;border-right:0}.bb-explorer.is-narrow .bb-explorer-back:not([hidden]){display:flex}
-[hidden]{display:none!important}@keyframes bb-explorer-spin{to{transform:rotate(360deg)}}@media (max-width:480px){.bb-explorer-subtitle{display:none}}@media (max-width:360px){.bb-explorer-control-label{display:none}}@media (max-width:300px){.bb-explorer-search{flex-basis:100%}.bb-explorer-tree-toolbar{justify-content:flex-end}.bb-explorer-search{order:-1}}@media (prefers-reduced-motion:reduce){.bb-explorer-refresh.is-spinning svg{animation:none}}
+.bb-explorer-live{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.bb-explorer.is-narrow .bb-explorer-content{display:flex}.bb-explorer.is-narrow .bb-explorer-splitter{display:none}.bb-explorer.is-narrow .bb-explorer-tree-pane,.bb-explorer.is-narrow .bb-explorer-preview-pane{width:100%;border-right:0}.bb-explorer.is-narrow .bb-explorer-back:not([hidden]){display:flex}
+[hidden]{display:none!important}@media (max-width:480px){.bb-explorer-breadcrumbs .bb-explorer-crumb:not(:last-child),.bb-explorer-breadcrumbs .bb-explorer-path-separator:not(:nth-last-child(2)){display:none}}@media (max-width:360px){.bb-explorer-control-label{display:none}}@media (max-width:300px){.bb-explorer-search{flex-basis:100%}.bb-explorer-tree-toolbar{justify-content:flex-end}.bb-explorer-search{order:-1}}
 `;
 	document.head.append(style);
 }

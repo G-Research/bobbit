@@ -106,7 +106,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { openInboxPanel } from "./inbox-panel.js";
-import { renderPackPanelContent } from "./pack-panels.js";
+import { packPanelCanRefresh, packPanelTitle, refreshPackPanel, renderPackPanelContent } from "./pack-panels.js";
 import {
 	closeSidePanelTab as closeServerSidePanelTab,
 	getSidePanelWorkspace,
@@ -2655,6 +2655,11 @@ export function doRenderApp(): void {
 
 	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => {
 		if (tab.kind === "review") return tab.title || tab.label || "Review";
+		if (tab.kind === "pack") {
+			const ref = packPanelRefFromTabId(tab.id);
+			const currentTitle = ref ? packPanelTitle(ref.packId, ref.panelId) : undefined;
+			if (currentTitle) return currentTitle;
+		}
 		return tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "");
 	};
 
@@ -3037,14 +3042,34 @@ export function doRenderApp(): void {
 			data-testid="side-panel-popout"
 		>${icon(ExternalLink, "sm")}</a>`;
 
-	const sidePanelActionButtons = (tab: UnifiedContentTab) => html`
-		${tab.kind === "preview" && (previewEntryFromTab(tab) || state.previewPanelEntry) ? html`
-			<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview">
-				${icon(RotateCw, "sm")}
-			</button>
-		` : ""}
-		${tab.kind === "preview" && !(previewEntryFromTab(tab) || state.previewPanelEntry) ? "" : sidePanelPopoutButton(tab)}
-	`;
+	const packPanelDetails = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "pack") return undefined;
+		const source = (tab.source || {}) as Record<string, unknown>;
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const ref = packPanelRefFromTabId(tab.id);
+		const packId = ref?.packId || (typeof source.packId === "string" ? source.packId : "") || (typeof tabState.packId === "string" ? tabState.packId : "");
+		const panelId = ref?.panelId || (typeof source.panelId === "string" ? source.panelId : "") || (typeof tabState.panelId === "string" ? tabState.panelId : "");
+		const params = (source.params as Record<string, unknown> | undefined) || (tabState.params as Record<string, unknown> | undefined);
+		const sessionId = (typeof source.sessionId === "string" ? source.sessionId : "") || (typeof tabState.sessionId === "string" ? tabState.sessionId : "") || undefined;
+		return packId && panelId ? { packId, panelId, params, sessionId } : undefined;
+	};
+
+	const sidePanelActionButtons = (tab: UnifiedContentTab) => {
+		const pack = packPanelDetails(tab);
+		return html`
+			${tab.kind === "preview" && (previewEntryFromTab(tab) || state.previewPanelEntry) ? html`
+				<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview">
+					${icon(RotateCw, "sm")}
+				</button>
+			` : ""}
+			${pack && packPanelCanRefresh(pack.packId, pack.panelId) ? html`
+				<button @click=${() => refreshPackPanel(pack.packId, pack.panelId, pack.params, pack.sessionId)} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh panel" data-testid="pack-panel-refresh">
+					${icon(RotateCw, "sm")}
+				</button>
+			` : ""}
+			${tab.kind === "preview" && !(previewEntryFromTab(tab) || state.previewPanelEntry) ? "" : sidePanelPopoutButton(tab)}
+		`;
+	};
 
 	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => {
 		const fullscreenTitle = tab.kind === "preview"

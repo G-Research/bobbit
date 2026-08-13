@@ -48,7 +48,7 @@ function mount(sid: string, fakeHost: ReturnType<typeof host>): HTMLElement {
 const row = (root: HTMLElement, path: string) => root.querySelector<HTMLElement>(`[role="treeitem"][data-path="${path}"]`)!;
 const click = (element: Element) => element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 const key = (element: Element, value: string) => element.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }));
-const list = (entries: Entry[], statuses: Status[] = [], truncated = false) => ({ entries, truncated, git: { kind: "repository", entries: statuses } });
+const list = (entries: Entry[], statuses: Status[] = [], truncated = false) => ({ rootPath: "C:\\Users\\tester\\worktrees\\bobbit", entries, truncated, git: { kind: "repository", entries: statuses } });
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -85,9 +85,18 @@ describe("built-in file explorer panel", () => {
 		const tree = root.querySelector('[role="tree"]')!;
 		expect(tree.getAttribute("aria-label")).toBe("Files");
 		expect(tree.getAttribute("aria-busy")).toBe("false");
+		const rootPath = root.querySelector('[aria-label="Current absolute path"]');
+		expect(rootPath?.textContent).toBe("C:/Users/tester/worktrees/bobbit");
+		expect(rootPath?.getAttribute("title")).toBe("C:/Users/tester/worktrees/bobbit");
+		expect(root.textContent).not.toContain("Explorer");
 		expect(row(root, "src").getAttribute("aria-expanded")).toBe("false");
 		expect(row(root, "src").getAttribute("aria-level")).toBe("1");
-		expect(row(root, "src").querySelector('[aria-label="Contains changes"]')).not.toBeNull();
+		expect(row(root, "src").querySelector('[aria-label="Contains changes"]')).toBeNull();
+		expect(row(root, "src").classList.contains("git-modified")).toBe(false);
+		expect(row(root, "src").querySelector(".bb-explorer-name")?.getAttribute("style")).toBeNull();
+		expect(row(root, "src").querySelector(".bb-explorer-icon")?.classList.contains("kind-directory")).toBe(true);
+		expect(row(root, "src").querySelector(".bb-explorer-icon svg")?.getAttribute("stroke")).toBe("var(--warning)");
+		expect(row(root, "README.md").classList.contains("git-modified")).toBe(false);
 		expect(root.querySelectorAll('[role="treeitem"][tabindex="0"]')).toHaveLength(1);
 
 		click(row(root, "src"));
@@ -96,6 +105,7 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector('[role="group"]')?.getAttribute("aria-label")).toBe("src contents");
 		expect(row(root, "src/app.ts").getAttribute("aria-level")).toBe("2");
 		expect(row(root, "src/app.ts").querySelector(".bb-explorer-badges")?.getAttribute("aria-label")).toBe("Staged copied from src/base.ts, Unstaged modified");
+		expect(row(root, "src/app.ts").classList.contains("git-modified")).toBe(true);
 
 		click(row(root, "src/app.ts"));
 		await tick();
@@ -106,8 +116,65 @@ describe("built-in file explorer panel", () => {
 		expect([...root.querySelectorAll(".bb-explorer-line-number")].map((node) => node.textContent)).toEqual(["1", "2"]);
 		expect(root.querySelector("textarea, [contenteditable=true], input[aria-label=\"Relative path\"]")).toBeNull();
 		expect(root.querySelector('input[aria-label="Search files and folders"]')).not.toBeNull();
-		expect(fakeHost.callRoute).toHaveBeenCalledWith("list", expect.objectContaining({ body: { path: "src" } }));
-		expect(fakeHost.callRoute).toHaveBeenCalledWith("read", expect.objectContaining({ body: { path: "src/app.ts" } }));
+		expect(fakeHost.callRoute).toHaveBeenCalledWith("list", expect.objectContaining({ body: { path: "src", rootPath: "C:\\Users\\tester\\worktrees\\bobbit" } }));
+		expect(fakeHost.callRoute).toHaveBeenCalledWith("read", expect.objectContaining({ body: { path: "src/app.ts", rootPath: "C:\\Users\\tester\\worktrees\\bobbit" } }));
+	});
+
+	it("resizes the file tree with pointer and keyboard controls", async () => {
+		const root = mount("split-resize", host({ list: () => list([]) }));
+		await tick();
+		const content = root.querySelector<HTMLElement>(".bb-explorer-content")!;
+		const treePane = root.querySelector<HTMLElement>(".bb-explorer-tree-pane")!;
+		const splitter = root.querySelector<HTMLElement>('[role="separator"][aria-label="Resize file tree"]')!;
+		Object.defineProperty(content, "getBoundingClientRect", { value: () => ({ width: 1000 }) });
+		Object.defineProperty(treePane, "getBoundingClientRect", { value: () => ({ width: 320 }) });
+
+		splitter.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, clientX: 320 }));
+		document.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 400 }));
+		document.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+		expect(content.style.getPropertyValue("--tree-pane-width")).toBe("400px");
+		expect(splitter.getAttribute("aria-valuenow")).toBe("400");
+		key(splitter, "ArrowLeft");
+		expect(content.style.getPropertyValue("--tree-pane-width")).toBe("384px");
+		splitter.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		expect(content.style.getPropertyValue("--tree-pane-width")).toBe("");
+	});
+
+	it("renders descendant Git states as single, split, and three-way folder outlines", async () => {
+		const fakeHost = host({
+			list: () => list([
+				{ path: "added", name: "added", kind: "directory" },
+				{ path: "added-modified", name: "added-modified", kind: "directory" },
+				{ path: "added-deleted", name: "added-deleted", kind: "directory" },
+				{ path: "modified-deleted", name: "modified-deleted", kind: "directory" },
+				{ path: "all", name: "all", kind: "directory" },
+			], [
+				{ path: "added/new.ts", index: "A", added: true },
+				{ path: "added-modified/new.ts", index: "A", added: true },
+				{ path: "added-modified/edit.ts", worktree: "M", summary: "modified" },
+				{ path: "added-deleted/new.ts", index: "A", added: true },
+				{ path: "added-deleted/old.ts", worktree: "D", deleted: true },
+				{ path: "modified-deleted/edit.ts", worktree: "M", summary: "modified" },
+				{ path: "modified-deleted/old.ts", worktree: "D", deleted: true },
+				{ path: "all/new.ts", index: "A", added: true },
+				{ path: "all/edit.ts", worktree: "M", summary: "modified" },
+				{ path: "all/old.ts", worktree: "D", deleted: true },
+			]),
+		});
+		const root = mount("folder-outlines", fakeHost);
+		await tick();
+
+		const stroke = (path: string) => row(root, path).querySelector(".bb-explorer-icon svg")?.getAttribute("stroke") ?? "";
+		expect(stroke("added")).toBe("var(--positive)");
+		for (const path of ["added-modified", "added-deleted", "modified-deleted", "all"]) {
+			expect(stroke(path)).toMatch(/^url\(#folder-gradient-/);
+			expect(row(root, path).className).not.toMatch(/git-(added|modified|deleted)/);
+		}
+		const stops = (path: string) => [...row(root, path).querySelectorAll("stop")].map((stop) => stop.getAttribute("stop-color"));
+		expect(new Set(stops("added-modified"))).toEqual(new Set(["var(--positive)", "var(--warning)"]));
+		expect(new Set(stops("added-deleted"))).toEqual(new Set(["var(--positive)", "var(--negative)"]));
+		expect(new Set(stops("modified-deleted"))).toEqual(new Set(["var(--warning)", "var(--negative)"]));
+		expect(new Set(stops("all"))).toEqual(new Set(["var(--positive)", "var(--warning)", "var(--negative)"]));
 	});
 
 	it("renders conflicts once and scopes clean and mixed copy and rename badges to their Git columns", async () => {
@@ -139,12 +206,13 @@ describe("built-in file explorer panel", () => {
 		await tick();
 
 		for (const path of ["aa.txt", "dd.txt"]) {
+			expect(row(root, path).classList.contains("git-deleted")).toBe(true);
 			const badges = row(root, path).querySelector(".bb-explorer-badges");
 			expect(badges?.getAttribute("aria-label")).toBe("Conflict");
 			expect(badges?.querySelectorAll(".bb-explorer-badge")).toHaveLength(1);
 			expect(badges?.textContent).toBe("!");
 		}
-		expect(row(root, "src").querySelector('[aria-label="Contains changes"]')).not.toBeNull();
+		expect(row(root, "src").querySelector('[aria-label="Contains changes"]')).toBeNull();
 
 		click(row(root, "src"));
 		await tick();
@@ -219,12 +287,50 @@ describe("built-in file explorer panel", () => {
 		await tick();
 		expect(root.querySelector('[data-action="view-diff"]')?.getAttribute("aria-selected")).toBe("true");
 		expect(root.querySelector('[aria-label="Working tree compared with HEAD"]')).not.toBeNull();
+		expect(root.querySelector(".bb-explorer-diff-file-header")).toBeNull();
 		expect(root.textContent).toContain("−old value");
 		expect(root.textContent).toContain("+new value");
-		expect(fakeHost.callRoute).toHaveBeenCalledWith("diff", expect.objectContaining({ body: { path: "changed.ts" } }));
+		expect(fakeHost.callRoute).toHaveBeenCalledWith("diff", expect.objectContaining({ body: { path: "changed.ts", rootPath: "C:\\Users\\tester\\worktrees\\bobbit" } }));
 		click(root.querySelector('[data-action="view-file"]')!);
 		await tick();
 		expect(root.textContent).toContain("new value");
+	});
+
+	it("remembers the File or Diff choice across file navigation", async () => {
+		const fakeHost = host({
+			list: () => list([
+				{ path: "first.ts", name: "first.ts", kind: "file" },
+				{ path: "clean.ts", name: "clean.ts", kind: "file" },
+				{ path: "second.ts", name: "second.ts", kind: "file" },
+			], [
+				{ path: "first.ts", worktree: "M", summary: "modified" },
+				{ path: "second.ts", worktree: "M", summary: "modified" },
+			]),
+			read: ({ path }) => ({ kind: "text", text: `file ${path}` }),
+			diff: ({ path }) => ({ kind: "text", text: `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+new\n` }),
+		});
+		const root = mount("remember-preview-mode", fakeHost);
+		await tick();
+
+		click(row(root, "first.ts"));
+		await tick();
+		click(root.querySelector('[data-action="view-diff"]')!);
+		await tick();
+		click(row(root, "clean.ts"));
+		await tick();
+		expect(root.querySelector('[data-action="view-diff"]')).toBeNull();
+		expect(root.textContent).toContain("file clean.ts");
+		click(row(root, "second.ts"));
+		await tick();
+		expect(root.querySelector('[data-action="view-diff"]')?.getAttribute("aria-selected")).toBe("true");
+		expect(root.querySelector('[aria-label="Working tree compared with HEAD"]')).not.toBeNull();
+
+		click(root.querySelector('[data-action="view-file"]')!);
+		await tick();
+		click(row(root, "first.ts"));
+		await tick();
+		expect(root.querySelector('[data-action="view-file"]')?.getAttribute("aria-selected")).toBe("true");
+		expect(root.textContent).toContain("file first.ts");
 	});
 
 	it("renders non-empty metadata-only copy and rename diffs through the shared parser", async () => {
@@ -248,7 +354,7 @@ describe("built-in file explorer panel", () => {
 		await tick();
 		click(root.querySelector('[data-action="view-diff"]')!);
 		await tick();
-		expect(root.querySelector(".bb-explorer-diff-file-header")?.textContent).toBe("base.ts → copied.ts");
+		expect(root.querySelector(".bb-explorer-diff-file-header")).toBeNull();
 		expect(root.textContent).toContain("copy from base.ts");
 		expect(root.textContent).toContain("copy to copied.ts");
 
@@ -256,7 +362,7 @@ describe("built-in file explorer panel", () => {
 		await tick();
 		click(root.querySelector('[data-action="view-diff"]')!);
 		await tick();
-		expect(root.querySelector(".bb-explorer-diff-file-header")?.textContent).toBe("old.ts → renamed.ts");
+		expect(root.querySelector(".bb-explorer-diff-file-header")).toBeNull();
 		expect(root.textContent).toContain("rename from old.ts");
 		expect(root.textContent).toContain("rename to renamed.ts");
 	});
@@ -326,7 +432,7 @@ describe("built-in file explorer panel", () => {
 		expect(row(root, "keep.txt").getAttribute("aria-selected")).toBe("true");
 
 		entries = [];
-		click(root.querySelector('[data-testid="file-explorer-refresh"]')!);
+		await createFileExplorerPanel().refresh?.({ __sessionId: "refresh-lifecycle" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
 		await tick();
 		expect(root.textContent).toContain("This folder is empty.");
 		expect(root.textContent).toContain("Select a file to preview");
@@ -450,7 +556,7 @@ describe("built-in file explorer panel", () => {
 		await tick();
 		expect(remounted.querySelector(".bb-explorer-preview-path")?.textContent).toBe("new.txt");
 		expect(remounted.textContent).toContain("preview new.txt");
-		expect(remounted.querySelector('[aria-label="Current path"]')?.textContent).toContain("new.txt");
+		expect(remounted.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("new.txt");
 
 		staleList.resolve(list([{ path: "stale.txt", name: "stale.txt", kind: "file" }]));
 		await tick();
@@ -467,7 +573,7 @@ describe("built-in file explorer panel", () => {
 		expect(row(remounted, "new.txt").getAttribute("aria-selected")).toBe("true");
 		expect(row(remounted, "old.txt").getAttribute("aria-selected")).not.toBe("true");
 		expect(remounted.querySelector(".bb-explorer-preview-path")?.textContent).toBe("new.txt");
-		expect(remounted.querySelector('[aria-label="Current path"]')?.textContent).toContain("new.txt");
+		expect(remounted.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("new.txt");
 		expect(remounted.textContent).toContain("preview new.txt");
 		expect(remounted.textContent).not.toContain("stale.txt");
 		expect(listCalls).toBe(2);
@@ -566,7 +672,7 @@ describe("built-in file explorer panel", () => {
 		await tick();
 		await tick();
 		expect(remounted.querySelector(".bb-explorer-preview-path")?.textContent).toBe("new.txt");
-		expect(remounted.querySelector('[aria-label="Current path"]')?.textContent).toContain("new.txt");
+		expect(remounted.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("new.txt");
 		expect(remounted.textContent).toContain("preview new.txt");
 
 		currentStore.resolve({
@@ -585,7 +691,7 @@ describe("built-in file explorer panel", () => {
 		expect(row(remounted, "new.txt").getAttribute("aria-selected")).toBe("true");
 		expect(row(remounted, "old.txt").getAttribute("aria-selected")).not.toBe("true");
 		expect(remounted.querySelector(".bb-explorer-preview-path")?.textContent).toBe("new.txt");
-		expect(remounted.querySelector('[aria-label="Current path"]')?.textContent).toContain("new.txt");
+		expect(remounted.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("new.txt");
 		expect(remounted.textContent).toContain("preview new.txt");
 		expect(remounted.textContent).not.toContain("preview old.txt");
 
@@ -654,7 +760,7 @@ describe("built-in file explorer panel", () => {
 		expect(root.querySelector<HTMLElement>(".bb-explorer-preview-pane")?.hidden).toBe(true);
 		await tick(200);
 		expect(put).toHaveBeenCalledWith("ui/restored-narrow", expect.objectContaining({ version: 1, expanded: ["src"], selected: "src/restored.txt" }));
-		expect(root.querySelector('[aria-label="Current path"]')).not.toBeNull();
+		expect(root.querySelector('[aria-label="Current absolute path"]')).not.toBeNull();
 		const search = root.querySelector<HTMLInputElement>('[aria-label="Search files and folders"]')!;
 		search.value = "transient";
 		search.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -710,7 +816,7 @@ describe("built-in file explorer panel", () => {
 		const pathRemount = mount(sid, fakeHost);
 		expect(pathRemount).toBe(root);
 		expect(pathRemount.querySelector('[aria-label="Relative path"]')).toBeNull();
-		expect(pathRemount.querySelector('[aria-label="Current path"]')).not.toBeNull();
+		expect(pathRemount.querySelector('[aria-label="Current absolute path"]')).not.toBeNull();
 		expect(row(pathRemount, "src").getAttribute("aria-expanded")).toBe("true");
 		expect(row(pathRemount, "src/restored.txt").getAttribute("aria-selected")).toBe("true");
 		expect(pathRemount.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Diff");
@@ -776,8 +882,12 @@ describe("built-in file explorer panel", () => {
 					{ path: "deep/nested", name: "nested", kind: "directory" },
 					{ path, name: "file.ts", kind: "file" },
 				] }
-				: path === "deep" ? { path, kind: "directory", chain: [{ path: "deep", name: "deep", kind: "directory" }] }
-					: { path: "", kind: "root", chain: [] },
+				: path === "deep/nested" ? { path, kind: "directory", chain: [
+					{ path: "deep", name: "deep", kind: "directory" },
+					{ path, name: "nested", kind: "directory" },
+				] }
+					: path === "deep" ? { path, kind: "directory", chain: [{ path: "deep", name: "deep", kind: "directory" }] }
+						: { path: "", kind: "root", chain: [] },
 			read: ({ path }) => ({ kind: "text", text: String(path) }),
 			diff: () => ({ kind: "empty" }),
 		});
@@ -797,7 +907,7 @@ describe("built-in file explorer panel", () => {
 		input.dispatchEvent(new InputEvent("input", { bubbles: true }));
 		key(input, "Enter");
 		await tick();
-		expect(root.textContent).toContain("Enter a canonical path relative to Session files.");
+		expect(root.textContent).toContain("Enter an absolute filesystem path.");
 		expect(root.querySelector('[aria-selected="true"]')?.getAttribute("data-path")).toBe(selectedBefore);
 		input = root.querySelector<HTMLInputElement>('[aria-label="Relative path"]')!;
 		key(input, "Escape");
@@ -813,12 +923,16 @@ describe("built-in file explorer panel", () => {
 		key(input, "Enter");
 		await tick();
 		expect(row(root, "deep/nested/file.ts").getAttribute("aria-selected")).toBe("true");
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/deep/nested/file.ts");
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("C:/Users/tester/worktrees/bobbit/deep/nested/file.ts");
+		expect(root.querySelector('[aria-label="Up one level"]')?.hasAttribute("disabled")).toBe(false);
+		click(root.querySelector('[aria-label="Up one level"]')!);
+		await tick();
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("C:/Users/tester/worktrees/bobbit/deep/nested");
 		expect(root.textContent).toContain("deep/nested/file.ts");
 		click(root.querySelector<HTMLButtonElement>('.bb-explorer-crumb[data-path="deep"]')!);
 		await tick();
 		expect(document.activeElement).toBe(row(root, "deep"));
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/deep");
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("C:/Users/tester/worktrees/bobbit/deep");
 	});
 
 	it("preserves exact spaced paths and commits a resolved file before its preview read settles", async () => {
@@ -841,7 +955,7 @@ describe("built-in file explorer panel", () => {
 		key(input, "Enter");
 		await tick();
 
-		expect(fakeHost.callRoute).toHaveBeenCalledWith("resolve", expect.objectContaining({ body: { path: exactPath } }));
+		expect(fakeHost.callRoute).toHaveBeenCalledWith("resolve", expect.objectContaining({ body: { path: exactPath, rootPath: "C:\\Users\\tester\\worktrees\\bobbit" } }));
 		expect(root.querySelector('[aria-label="Relative path"]')).toBeNull();
 		expect(root.querySelector('.bb-explorer-crumb[data-path=" report "]')?.textContent).toBe(exactPath);
 		expect(row(root, exactPath).getAttribute("aria-selected")).toBe("true");
@@ -942,7 +1056,7 @@ describe("built-in file explorer panel", () => {
 		expect(document.activeElement).toBe(root.querySelector('[aria-label="Edit path (Ctrl+L)"]'));
 		pending.resolve({ path: "slow", kind: "directory", chain: [{ path: "slow", name: "slow", kind: "directory" }] });
 		await tick();
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toBe("Session files");
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toBe("C:/Users/tester/worktrees/bobbit");
 		expect(root.querySelector('[data-path="slow"]')).toBeNull();
 	});
 
@@ -992,7 +1106,7 @@ describe("built-in file explorer panel", () => {
 		failure = undefined;
 		click(root.querySelector('[data-action="retry-path"]')!);
 		await tick();
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("eventual");
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("eventual");
 	});
 
 	it("keeps a navigated directory location through refresh while preserving the selected preview", async () => {
@@ -1012,10 +1126,10 @@ describe("built-in file explorer panel", () => {
 		input.value = "folder";
 		key(input, "Enter");
 		await tick();
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("folder");
-		click(root.querySelector('[aria-label="Refresh explorer"]')!);
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("folder");
+		await createFileExplorerPanel().refresh?.({ __sessionId: "location-refresh" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
 		await tick();
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("folder");
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("folder");
 		expect(root.querySelector(".bb-explorer-preview-path")?.textContent).toBe("keep.txt");
 		expect(root.textContent).toContain("selected preview");
 	});
@@ -1130,7 +1244,7 @@ describe("built-in file explorer panel", () => {
 		expect(search.value).toBe("");
 		expect(row(root, "src").getAttribute("aria-expanded")).toBe("true");
 		expect(row(root, "src/original.txt").getAttribute("aria-selected")).toBe("true");
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/src/original.txt");
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("C:/Users/tester/worktrees/bobbit/src/original.txt");
 		originalRead.resolve({ kind: "text", text: "stale original read" });
 		await tick();
 		expect(root.textContent).toContain("Loading file…");
@@ -1175,7 +1289,7 @@ describe("built-in file explorer panel", () => {
 		expect(search.value).toBe("");
 		expect(row(root, "src").getAttribute("aria-expanded")).toBe("true");
 		expect(row(root, "src/changed.ts").getAttribute("aria-selected")).toBe("true");
-		expect(root.querySelector('[aria-label="Current path"]')?.textContent).toContain("Session files/src/changed.ts");
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toContain("C:/Users/tester/worktrees/bobbit/src/changed.ts");
 		expect(root.querySelector('[data-action="view-diff"]')?.getAttribute("aria-selected")).toBe("true");
 		originalDiff.resolve({ kind: "text", text: "stale original diff" });
 		await tick();
@@ -1464,19 +1578,45 @@ describe("built-in file explorer panel", () => {
 		expect(row(root, "clean.txt")).not.toBeNull();
 
 		git = { kind: "none" };
-		click(root.querySelector('[aria-label="Refresh explorer"]')!);
+		await createFileExplorerPanel().refresh?.({ __sessionId: "git-availability" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
 		await tick();
 		expect(changed.disabled).toBe(true);
 		expect(changed.title).toContain("not a Git worktree");
 		expect(row(root, "clean.txt")).not.toBeNull();
 
 		git = { kind: "git", head: "present", entries: [{ path: "changed.txt", index: "M" }] };
-		click(root.querySelector('[aria-label="Refresh explorer"]')!);
+		await createFileExplorerPanel().refresh?.({ __sessionId: "git-availability" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
 		await tick();
 		expect(changed.disabled).toBe(false);
 		expect(changed.getAttribute("aria-pressed")).toBe("true");
 		expect(root.querySelector('[data-path="clean.txt"]')).toBeNull();
 		expect(row(root, "changed.txt")).not.toBeNull();
+	});
+
+	it("sets a real directory as the explorer root from its context menu", async () => {
+		const nextRoot = "C:\\Users\\tester\\worktrees\\bobbit\\folder";
+		const fakeHost = host({
+			list: ({ rootPath }) => rootPath === nextRoot
+				? { rootPath: nextRoot, entries: [{ path: "inside.txt", name: "inside.txt", kind: "file" }], truncated: false, git: { kind: "none" } }
+				: list([{ path: "folder", name: "folder", kind: "directory" }]),
+			resolve: ({ absolutePath }) => absolutePath === nextRoot
+				? { path: "", rootPath: nextRoot, kind: "root", chain: [] }
+				: { path: "", kind: "root", chain: [] },
+		});
+		const root = mount("set-directory-root", fakeHost);
+		await tick();
+
+		row(root, "folder").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 16 }));
+		await tick();
+		expect([...root.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(["Set root", "Copy relative path", "Copy folder name"]);
+		click([...root.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "Set root")!);
+		await tick();
+		await tick();
+
+		expect(fakeHost.callRoute).toHaveBeenCalledWith("resolve", expect.objectContaining({ body: { absolutePath: nextRoot } }));
+		expect(root.querySelector('[aria-label="Current absolute path"]')?.textContent).toBe("C:/Users/tester/worktrees/bobbit/folder");
+		expect(row(root, "inside.txt")).not.toBeNull();
+		expect(root.querySelector('[data-path="folder"]')).toBeNull();
 	});
 
 	it("opens row path actions by mouse and keyboard, copies both canonical values, and reports clipboard failure", async () => {

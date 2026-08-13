@@ -475,7 +475,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await treeItem(page, "src/changed.ts").click();
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		write(root!, "new-after-refresh.txt", "created outside Bobbit\n");
-		await panel.getByRole("button", { name: "Refresh explorer" }).click();
+		await page.getByTestId("pack-panel-refresh").click();
 		await showTreeIfNarrow(panel);
 		await expect(treeItem(page, "new-after-refresh.txt")).toBeVisible({ timeout: 15_000 });
 		await expect(src, "manual refresh preserves valid expansion").toHaveAttribute("aria-expanded", "true");
