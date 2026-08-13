@@ -64,7 +64,7 @@ Normal unit collection is exactly four map-built projects:
 | Project | Environment/pool | Isolation | Membership |
 |---|---|---|---|
 | `v2-core` | `node`, `forks` | `isolate:false` | explicitly tagged core tests |
-| `v2-dom` | `happy-dom`, `threads` | `isolate:true` | explicitly tagged DOM tests |
+| `v2-dom` | `happy-dom`, `forks` | `isolate:true` | explicitly tagged DOM tests |
 | `v2-integration` | `node`, `forks` | `isolate:false` | explicitly tagged gateway/API tests |
 | `v2-isolated` | `node`, `forks`, `maxWorkers:1` | `isolate:true` | at most ten documented environment/module-global bleeders |
 

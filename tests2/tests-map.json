@@ -1895,7 +1895,7 @@
     },
     {
       "path": "tests2/core/unit-lanes-scheduling.test.ts",
-      "reason": "Pins the direct Vitest unit stage, fixed three-worker cap with valid 1/2-worker lowering, shared process-scoped transform cache, project isolation, retry controls, and invocation-aware Git-template handoff certification: focused/affected subsets never certify while the exact canonical inventory uses the resolved 1/2/default-3 identity expectation.",
+      "reason": "Pins the direct Vitest unit stage, one shared forks pool and fixed three-worker cap with valid 1/2-worker lowering, shared process-scoped transform cache, project isolation, retry controls, and invocation-aware Git-template handoff certification: focused/affected subsets never certify while the exact canonical inventory uses the resolved 1/2/default-3 identity expectation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2354,7 +2354,7 @@
     },
     {
       "path": "tests2/core/unit-file-budget-reporter.test.ts",
-      "reason": "Pins the 25-second tier-1 file budget reporter boundary, aggregation, retry accounting, E2E exclusion, and Windows path rendering.",
+      "reason": "Pins the 25-second tier-1 file budget reporter boundary, interleaved-module timing, aggregation, retry accounting, E2E exclusion, and Windows path rendering.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
