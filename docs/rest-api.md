@@ -43,6 +43,44 @@ obtain the weak operator cookie. Cookies have
 localhost HTTP mode. Individual cookies are not independently revocable;
 rotating the signing key invalidates all of them.
 
+### Cross-origin API preflight
+
+Every `/api/` response advertises the API's complete request-method contract:
+`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`. An `OPTIONS` preflight
+returns `204` and additionally caches that approval for 600 seconds via
+`Access-Control-Max-Age`. This lets a UI on a different origin perform every
+supported API mutation, including `PATCH`, rather than having the browser
+reject a valid request before it reaches the gateway.
+
+The preflight allows these non-simple request headers:
+
+- `Authorization`
+- `Content-Type`
+- `If-Match`
+- `X-Bobbit-Session-Id`
+- `X-Bobbit-Spawning-Session`
+- `X-Bobbit-Session-Secret`
+
+These headers are permitted so authenticated, concurrency-aware, and
+session-scoped API calls can cross origins; permission is not authentication.
+In particular, a remote UI normally authenticates with its explicit Bearer
+token. CORS is intentionally non-credentialed: the gateway does not send
+`Access-Control-Allow-Credentials`, so browsers must not rely on cross-origin
+cookie authentication. Same-origin cookie flows remain governed by their
+normal authentication rules.
+
+This does not broaden the origin policy. A gateway serving its UI reflects the
+request origin (and varies by `Origin`); a gateway not serving the UI continues
+to advertise `*`. The method and header contract is separate from that origin
+decision.
+
+For example, the side-panel workspace persists a tab edit through
+`PATCH /api/sessions/:id/side-panel-workspace/tabs/:tabId`. When the UI and
+gateway use different origins, the browser preflights that `PATCH` before the
+request. Advertising `PATCH`, `Authorization`, and any applicable session or
+concurrency header lets the persistence request reach its existing route, so a
+side-panel edit is retained instead of appearing to be forgotten after reload.
+
 ### Driving the gateway from an agent
 
 Agents should prefer the **`bobbit` tool group** over hand-rolled `curl` for
@@ -70,7 +108,7 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 
 ### Quiet optional probes
 
-A small set of UI probe endpoints accept `optional=1` to represent expected absence without producing browser-console-noisy `404` responses. In quiet mode, an existing session or goal with no optional data returns `204 No Content` and no body; genuinely missing sessions or goals still return `404`. Bare endpoints keep the legacy `404` absence contract. See [Quiet optional probes](quiet-204-probes.md).
+A small set of UI probe endpoints accept `optional=1` to represent definitive expected absence without producing browser-console-noisy `404` responses. A missing prompt draft on an existing session returns empty `204`; its bare request retains `404`. PR status returns empty `204` only when the target is ineligible/unresolved or an eligible lookup definitively found no PR. Eligible cold, in-flight, failed, and found PR states remain `200` snapshot envelopes in both modes. Missing sessions or goals remain `404`, and no-worktree Git restrictions remain `409`. Never parse a `204` body. See [Quiet optional probes](quiet-204-probes.md) for the exact state matrix and [Coordinated remote-state status](#coordinated-remote-state-status) for the PR envelope.
 
 ### Health & Info
 
@@ -96,24 +134,25 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
+| `GET` | `/api/sessions` | List sessions. Every serialized row includes normalized `user_tags` and fresh derived `server_tags`. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) and [Session list tags and pinning](#session-list-tags-and-pinning). |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
-| `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live session. Body `{ newWorktree?: boolean, entryId?: string }`: omit `entryId` to clone the whole source JSONL, or supply a durable Pi prompt cursor to clone the active branch strictly before that prompt. See [Fork session endpoint](#fork-session-endpoint). |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
-| `DELETE` | `/api/sessions/:id` | Terminate a session |
+| `DELETE` | `/api/sessions/:id` | Terminate a session. A sandbox worktree owner with a live history-fork borrower returns typed `409 SHARED_SANDBOX_WORKTREE_IN_USE` without changing the owner. |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
-| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
+| `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. A processless target awaiting model recovery returns `409 { code: "MODEL_SELECTION_REQUIRED" }` before prompt or steer acceptance, so no queue or transcript work is created; select a replacement through the session picker/`set_model` path. The existing `409 { code: "GOAL_PAUSED" }` response still applies when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
+| `PUT` | `/api/sessions/:id/pin` | Set or remove the durable `pinned=true` user tag. The body must be exactly `{ "pinned": boolean }`; success returns `{ "user_tags": string[] }`. See [Session list tags and pinning](#session-list-tags-and-pinning). |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
-| `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. |
+| `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. See [Coordinated remote-state status](#coordinated-remote-state-status). |
 | `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/git-diff` | Unified diff for the working tree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
-| `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the session exists. |
+| `GET` | `/api/sessions/:id/pr-status` | Coordinated PR fast state for the session branch. See [Coordinated remote-state status](#coordinated-remote-state-status) for the snapshot envelope and missing-PR behavior. |
 | `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
 | `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
 | `GET` | `/api/sessions/:id/bg-processes/:pid/wait` | Long-poll until a background process exits, times out, or is interrupted |
@@ -122,8 +161,9 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid` | Legacy: kill-if-running, else dismiss |
 | `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
-| `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`, `include_tool_results` / `includeToolResults`. Direct REST remains backward-compatible: omitted include flag keeps tool results unredacted; pass false/0 to redact. `read_session` passes false by default. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400). See [Transcript reads and tool-result redaction](read-session.md). |
+| `GET` | `/api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex` | Preferred identity-addressed lazy-load for a truncated tool-content block. `?expected=preview-snapshot` verifies a historical preview marker before returning it (see [Large content truncation](#large-content-truncation)). |
+| `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Legacy positional lazy-load for a truncated block; retained for compatibility (see [Large content truncation](#large-content-truncation)). |
+| `GET` | `/api/sessions/:id/transcript` | Without `operation`, preserves legacy direct REST/UI paging and the `verbose`, `include_tool_results`, and `includeToolResults` aliases. Agent calls use `operation=list` for compact discovery or `operation=inspect` for one exact message/result. See [Focused transcript reads](read-session.md). |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
@@ -171,9 +211,7 @@ for the creation and modification UI boundary.
 
 ### Transcript reader and `read_session`
 
-`GET /api/sessions/:id/transcript` and the `read_session` tool share the same transcript reader but use different defaults. Direct REST calls keep the legacy behavior and leave tool results unredacted when `include_tool_results` / `includeToolResults` is omitted. Pass `include_tool_results=false`, `includeToolResults=false`, or `0` to get the redacted shape. The agent-facing `read_session` tool always sends the include flag and defaults it to false, so tool result bodies are omitted unless the agent passes `include_tool_results: true`.
-
-`verbose` changes compact summaries into full content blocks; it does not override result-body redaction. For `read_session`, `verbose: true` still omits tool result bodies unless `include_tool_results: true` is also set. Either flag is context-heavy at the agent-tool layer and requires an explicit integer `limit` from 1 through 10; rejected tool calls return `CONTEXT_HEAVY_LIMIT_REQUIRED` without reaching this route. Direct REST and other programmatic callers retain the endpoint's existing limits and behavior. Use `pattern`, `context`, `offset`, and `limit` to find a large output first, then fetch narrow batches while monitoring token consumption. Redacted placeholders carry metadata such as tool name/id, status, and size or line counts. See [Transcript reads and tool-result redaction](read-session.md) for examples and response details.
+No-operation requests retain the legacy direct REST/UI aliases and behavior. Agent `read_session` requests instead use `operation=list` to choose an index, then `operation=inspect` for exactly that message or result; its closed schema does not accept the legacy aliases. See [Focused transcript reads](read-session.md).
 
 ### Archived session list and query search
 
@@ -203,6 +241,34 @@ With `limit`, the response shape is:
 ```
 
 `total`, `hasMore`, and `nextCursor` describe only the filtered archived corpus. `sessions` contains the current live sessions followed by the requested archived page, so clients that need only archived results should filter for `archived === true` or `status === "archived"`. `q` is applied before pagination so older matching archived sessions can be found without loading non-matching pages.
+
+### Session list tags and pinning
+
+Every serialized live or archived session-list row exposes two arrays:
+
+```ts
+{
+  server_tags: string[];
+  user_tags: string[];
+}
+```
+
+Legacy missing or malformed values serialize as empty `user_tags`. Valid tags use lowercase kebab-case keys in `key=value` form; normalization keeps the last valid value for each key and preserves unknown keys. `server_tags` is rebuilt for every list serialization from canonical state and is never persisted or accepted from clients. Its projection includes read, activity, archive, and team state, plus project and goal ids when present. This projection exists so clients can consume consistent metadata without becoming another writer of runtime state.
+
+`PUT /api/sessions/:id/pin` is the only user-tag mutation exposed by this feature:
+
+```http
+PUT /api/sessions/<id>/pin
+Content-Type: application/json
+
+{ "pinned": true }
+```
+
+Pin replaces any existing `pinned` value with one `pinned=true`; unpin removes that key. Both preserve unrelated user tags and leave server tags unchanged. The route works for live, dormant, terminated, and archived persisted sessions. Repeating a request is idempotent.
+
+The body must be an object containing only the boolean `pinned` field. Malformed JSON, extra fields, and other value types return `400`; an unknown session returns `404`. The route uses the normal API authentication boundary.
+
+Mutations for one session are serialized in admitted order while different sessions remain independent. The server waits for durable store flush before returning `200 { "user_tags": [...] }` and broadcasting `sessions_changed` with the same authoritative tags to authenticated UI clients. A failed write restores the prior in-memory tag shape, attempts to persist that compensation, returns `500`, and does not emit the success invalidation. This ordering prevents an acknowledged pin from disappearing after restart and prevents a later queued mutation from starting from failed optimistic state. See [Sidebar grouping](internals.md#sidebar-grouping) for the client reconciliation path and the [approved sidebar specification](design/session-manager-sidebar-views.md) for the normative product contract.
 
 ### Side-panel workspace
 
@@ -261,37 +327,100 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+`POST /api/sessions/:id/fork` creates a writable live session that rehydrates through `switch_session` from a server-built clone of the source Pi transcript. The route supports two modes so whole-session and prompt-history forks share source eligibility, context assembly, worktree provisioning, cleanup, and response behavior.
 
-Request body (optional):
+#### Request
 
-```json
-{ "newWorktree": true }
-```
-
-- `newWorktree: true` (default when omitted) — create a fresh worktree/branch off the project repo (a plain project-root session when the project isn't a git repo).
-- `newWorktree: false` — reuse the source session's existing worktree directly. The fork's `cwd` is set to the source's `worktreePath` and **no** new worktree is created; the two live sessions intentionally share the worktree/branch. The fork does not register worktree metadata, so terminating either session never tears down the shared tree. When the source has no worktree, the fork reuses the project-root cwd.
-
-Success returns `201`:
-
-```json
-{
-  "id": "new-session-id",
-  "cwd": "/repo-or-worktree",
-  "status": "idle",
-  "projectId": "project-id",
-  "goalId": "goal-id",
-  "title": "Fork: Source title"
+```ts
+interface ForkSessionRequest {
+  newWorktree?: boolean;
+  entryId?: string;
 }
 ```
 
-`goalId` is omitted when not applicable. The new session title is `Fork: <source title>` (`markGenerated`, so the first prompt's auto-titler won't overwrite it).
+| Request | Transcript boundary | Worktree default |
+|---|---|---|
+| `{}` or `{ newWorktree }` | Copy the whole source transcript file. | Omission means `newWorktree: true`, preserving the session-level **Fork** contract. |
+| `{ entryId, newWorktree }` | Clone the active branch strictly before the named prompt. | The prompt UI always sends the boolean and opens with `false`; direct API callers that omit it still get the endpoint default of `true`. |
 
-The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
+`newWorktree`, when present, must be boolean. A history `entryId` must be a trimmed, non-empty string of at most 256 UTF-16 code units. Unknown request fields are ignored, but the server never accepts a browser message array, rendered index, prompt text, or client-computed branch as the boundary.
 
-Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty source transcript returns `404`; a cross-realm clone returns `422`.
+#### History boundary and cursor eligibility
 
-See [Sidebar Actions Menu](sidebar-actions-menu.md#fork-session-endpoint) for the user-facing behavior.
+A prompt action exposes `entryId` only when the row is a settled server-origin user prompt with Bobbit's transcript-confirmed Pi cursor provenance. This client check keeps actions off assistant, tool-result-only, synthetic, optimistic, pending, archived, non-interactive, child/team, and current in-flight rows. It is only an affordance check: the server independently resolves the id in one immutable read of the source JSONL and requires that it name an ordinary accountable user prompt on Pi's current parent-linked active branch.
+
+Before that read, the route resolves `agentSessionFile` through the session manager instead of trusting the persisted string. Sandbox paths must be canonical paths under a supported container sessions root, and host paths must pass the persisted-transcript read policy. An absent or rejected value falls back to recovery within trusted sessions roots; if no validated source can be resolved, the route returns `404` before creating destination state.
+
+The destination contains the exact raw session header followed by the selected prompt's active ancestors in parent order. Retained model changes, assistant/tool records, compaction records, timestamps, line endings, and unknown additive Pi fields remain lossless. The selected prompt, its response, every later active entry, and inactive-branch records are physically absent. Selecting the first prompt therefore produces a transcript containing only the session header. The route never prefills, resends, or appends the selected prompt.
+
+The immutable read is also the concurrency boundary: entries appended afterward cannot enter the destination. One unterminated final append fragment may be ignored; a malformed complete record or structurally ambiguous tree fails closed. The source transcript is never opened for write.
+
+#### Worktree modes and ownership
+
+- `newWorktree: false` reuses the source session's exact live `cwd`, including a nested directory within its worktree, and therefore shares the same filesystem state and branch. A history fork is persisted as a writable borrowed-worktree session without worktree/repository/branch teardown coordinates. It does not register, claim, reset, clean, stash, adopt, repair, or remove that tree. For a sandbox source, Bobbit resolves and persists the flattened final owner rather than treating an intermediate borrower as the owner; this keeps borrower chains on one teardown authority. Terminating or recovering a borrower cannot tear down or recreate the shared tree.
+- `newWorktree: true` uses the established session-level Fork lifecycle. A Git-backed project gets a fresh owned `session/...` branch/worktree and the response waits for setup to finish; a non-Git project uses the established project-root behavior. Sandbox provisioning follows the same fresh-fork path rather than a history-specific lifecycle.
+
+Sandbox borrower creation, borrower termination/archive, and final-owner termination/archive serialize through one FIFO keyed by that final owner. Reuse-fork launch revalidates the live source, cwd, and owner inside the FIFO, so it cannot attach after owner teardown. Final-owner teardown checks for live borrowers before any lifecycle mutation and returns `409 { "error": "...", "code": "SHARED_SANDBOX_WORKTREE_IN_USE" }` if one remains; callers should terminate borrowers first and retry. This rejection leaves the owner live and unchanged.
+
+Both modes pass prior runtime cwd values only as provenance for rebasing top-level Pi runtime metadata during `switch_session`. User and assistant content mentioning an old path is not rewritten.
+
+#### Preserved context and filtered state
+
+Both fork modes preserve the source context that still applies: project; goal, task, and reattempt-goal association; assistant type; staff identity/environment or role/accessory configuration; sandbox realm; allowed tools; selected/effective model and thinking level; and generated `Fork: <source title>` naming. A valid fork may transition an associated todo goal through the existing shared behavior, but cursor validation completes first.
+
+Whole-session forks retain their established full-JSONL and best-effort cache-copy behavior. History forks instead apply the cut consistently to destination state:
+
+- proposal drafts and their history are copied because they are session-level;
+- author bindings are copied only when an echoed settlement's exact Pi message ID names a retained prompt and its digest confirms the same model text; each retained row can admit at most one binding. History cuts disable timestamp- and text-only fallback matching so a discarded duplicate prompt cannot transfer its author to identical retained text;
+- slash-skill/file-mention and compaction sidecars are copied only when their proven Pi entry or checkpoint survives the cut;
+- positional tool-content cache directories are not copied because their indexes may refer to discarded rows; retained tool content remains in the JSONL;
+- live prompt queues, in-flight steer state, EventBuffer snapshots, and other source-only runtime state are not copied.
+
+A filtered sidecar copy failure fails the request instead of returning a destination with stale references. Launch failures purge the destination transcript, session record, proposals, caches, and copied sidecars. Cleanup never mutates the source or a borrowed worktree.
+
+For a sandbox history fork, the materialized transcript stays in container coordinates through initial publication, cwd rebasing, sanitization, final-path rename, persistence, and `switch_session`. The host creates only an exclusive owner-only flat stage in the trusted sessions mount; fixed in-container code copies it to an exclusive sibling temporary file, flushes complete bytes, and atomically renames it over the destination. Transcript content is never passed in command arguments, and each invocation removes only its own host stage and sibling temporary file.
+
+Failure cleanup validates canonical container session paths and deletes generated transcripts only through the live container. It never translates an attacker-influenced container path into direct host deletion. If the sandbox is unavailable, Bobbit still purges the host-owned destination record and sidecars but leaves the transcript orphan for trusted maintenance rather than risk host filesystem mutation.
+
+#### Source immutability, single-flight, and navigation
+
+The source process, session record, transcript bytes, sidecars, cwd/branch, prompt queue, running project state, connected clients, and session-list entry remain unchanged. The server reserves each exact `(sourceId, entryId, newWorktree)` history request while it runs; an identical concurrent request receives `HISTORY_FORK_IN_PROGRESS`, while different boundaries remain independent. The reservation is released on success and failure.
+
+The browser also disables prompt actions while session creation is pending. On a successful `201`, the initiating client refreshes the session list, connects to the returned id as an existing session, refetches cloned history when ready, and navigates there. Other clients may observe the new session through normal session-list invalidation, but they are not navigated away from the source. A request, launch, or connection failure stays on the source route and uses the existing visible connection-error surface.
+
+#### Success response
+
+Success returns `201`:
+
+```ts
+interface ForkSessionResponse {
+  id: string;
+  cwd: string;
+  status: string;
+  projectId: string;
+  goalId?: string;
+  title: string;
+}
+```
+
+`goalId` is omitted when not applicable. The title is `Fork: <source title>` and is marked generated so first-prompt auto-titling does not replace it.
+
+#### Errors
+
+History validation uses the standard `{ error, code }` response shape:
+
+| Status | Code | `error` |
+|---|---|---|
+| `400` | `HISTORY_FORK_CURSOR_INVALID` | `Invalid history fork entry id` |
+| `409` | `HISTORY_FORK_CURSOR_NOT_FOUND` | `This prompt is no longer available` |
+| `409` | `HISTORY_FORK_CURSOR_INACTIVE` | `This prompt is no longer on the active conversation branch` |
+| `422` | `HISTORY_FORK_CURSOR_NOT_USER` | `History forks must start before a user prompt` |
+| `409` | `HISTORY_FORK_TRANSCRIPT_INVALID` | `The session transcript changed or is not valid for history forking` |
+| `409` | `HISTORY_FORK_IN_PROGRESS` | `A fork from this prompt is already being created` |
+
+An invalid `newWorktree` value returns `400 { "error": "Invalid newWorktree flag" }` without a code. A sandbox reuse request whose final owner cannot be resolved returns `422 { "error": "The source sandbox worktree owner is unavailable for history forking", "code": "HISTORY_FORK_SOURCE_UNAVAILABLE" }`. If the source cwd or owner changes before serialized launch, the route returns the same status and code with `error: "The source session is no longer available for history forking"`. Existing route failures remain unchanged: missing persisted source or transcript is `404`; an unregistered project or missing goal is `410`; archived, terminated/non-live, delegate, child, read-only, non-interactive, team, or cross-realm sources are `422`; clone, filtered-sidecar, worktree-setup, and launch failures are `500` with a descriptive `error`.
+
+See [Unified Session Actions — Historic prompt actions](session-actions.md#historic-prompt-actions) for the user-facing controls and [History Fork Prompt Actions](design/history-fork-prompt-actions.md) for the design rationale.
 
 ### Background processes
 
@@ -400,6 +529,18 @@ Structured proposal validation failures share this JSON shape across seed, edit,
 
 **Revision snapshots.** Every successful `seed` and `edit` write also writes an immutable per-rev snapshot under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>` (filename grammar `^(\d+)\.(md|yaml)$`; integer rev parsed back from filenames — no metadata file). The server stamps the resulting `rev` on every `proposal_update` WS event (single source of truth — the client overwrites `slot.rev` with the server value, never increments locally). Snapshot-write failures are non-fatal: the live draft is committed and the broadcast carries `rev: 0`, which the client treats as "snapshot system unavailable". Chat-card "Open proposal" buttons parse the `__proposal_rev_v1__:<n>` marker and, for older revisions, call the non-mutating `GET /snapshot` endpoint to populate read-only historical tabs. The mutating `restore` endpoint remains available for explicit rollback flows but is not used for ordinary history browsing. Full design: [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
 
+### Review payload artifacts
+
+These session-scoped routes persist canonical `review_open` Markdown outside the bounded tool result, then address it by exact identity. See [Durable review opening](review-open-architecture.md) for the receipt, persistence, workspace, and cleanup contract.
+
+| Method | Path | Authentication and identity contract |
+|---|---|---|
+| `POST` | `/api/sessions/:id/review-payloads` | Upload a canonical review for the exact owning session. Requires normal gateway authentication plus that session's `X-Bobbit-Session-Secret`; a sandbox credential may call only its own session collection route. The cumulative Markdown limit is 10 MiB in UTF-8 bytes across all files. |
+| `GET` | `/api/sessions/:id/review-payloads/:payloadId?toolCallId=:toolCallId&reviewId=:reviewId&hash=:hash` | Fetch only when the route owner and payload id plus the complete `toolCallId`, `reviewId`, and SHA-256 `hash` tuple match the stored artifact. This is a browser/admin surface; sandbox credentials cannot fetch Markdown. |
+| `POST` | `/api/sessions/:id/review-payloads/:payloadId/open` | Explicitly open or reopen the exact stored review through its owning session's workspace. This browser/admin-only route requires the body to repeat the exact `payloadId`, `toolCallId`, `reviewId`, and `hash`; sandbox credentials cannot mutate the workspace. |
+
+The 10 MiB bound applies only to cumulative review Markdown. The upload route has a narrowly larger JSON request allowance for escaping and bounded metadata; it does not raise generic API-body, WebSocket, transcript, event-buffer, or tool-result limits.
+
 ### Review Annotations
 
 Per-session review annotations are stored server-side so they survive browser close/reopen, server restart, and are visible from any connected client (on refresh). Annotations are stored in `.bobbit/state/review-annotations-{sessionId}.json`. The client `AnnotationStore` uses a cache-first pattern: reads are synchronous from an in-memory cache, writes update the cache immediately and send async server requests.
@@ -425,14 +566,103 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
-| `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Coordinated remote-state status](#coordinated-remote-state-status). |
 | `GET` | `/api/goals/:id/git-diff` | Unified diff for the goal worktree, or for one committed file when `commit=<sha>&file=<path>` is supplied. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/pr-status` | Coordinated PR fast state for the goal branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Coordinated remote-state status](#coordinated-remote-state-status) for the snapshot envelope and missing-PR behavior. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
+
+### Coordinated remote-state status
+
+The session and goal `git-status` and `pr-status` routes use the server-owned remote-state coordinator. This keeps remote freshness authoritative on the server so additional browsers and surfaces do not multiply equivalent `git fetch` or GitHub reads. The full identity, budget, failure, and redaction model is in [Remote-state coordinator](remote-state-coordinator.md).
+
+#### Request intent
+
+All four routes accept `intent`:
+
+| Value | Behavior |
+|---|---|
+| omitted or `automatic` | Return the current snapshot immediately and start or join eligible stale revalidation under the active cadence. |
+| `visible` | Return immediate stale-while-revalidate state for a visibility return. Freshness, backoff, and single-flight still apply. |
+| `explicit` | Await forced refresh. It bypasses freshness and automatic backoff, but concurrent and short-burst forced requests still coalesce. |
+| `sidebar` | Request automatic PR state under the 60-second sidebar window instead of the 20-second active window. It does not create a browser-specific record. |
+
+`sidebar` changes cadence only for PR state; a Git route still uses the repository's normal automatic policy. On Git routes, legacy `fetch=true` has the same blocking revalidation role as `intent=explicit`. It may be combined with `untracked=1` so the response reflects newly fetched refs and includes the full untracked-file scan. Without either explicit form, stale revalidation completes asynchronously and is delivered through WebSocket.
+
+#### Response envelopes
+
+The public coordinator metadata is:
+
+```ts
+type RemoteStateMetadata = {
+  observedAt: number;
+  refreshedAt?: number;
+  ageMs: number;
+  stale: boolean;
+  source: "repository" | "pr";
+  lastError?: "offline" | "auth" | "rate_limited" | "unavailable";
+};
+```
+
+A successful Git-status response remains a flat `GitStatusEnvelope` for compatibility and also contains the metadata plus `data`, a copy of that entity's local `GitStatusEnvelope` projection:
+
+```ts
+type CoordinatedGitStatus = GitStatusEnvelope &
+  RemoteStateMetadata & {
+    source: "repository";
+    data: GitStatusEnvelope;
+  };
+```
+
+The nested projection remains entity-local: sibling worktrees share fetched refs, not dirty or untracked files. A cold remote-ref record has no `refreshedAt`; the Git route can still return local status in both the flat fields and `data`.
+
+PR-status responses use the envelope directly:
+
+```ts
+type PullRequestFastState = {
+  number: number;
+  url: string; // canonical credential-free HTTPS URL for the validated repository/number
+  title: string;
+  state: "OPEN" | "MERGED" | "CLOSED";
+  mergeable: string | null;
+  reviewDecision: string | null;
+  viewerIsAdmin: boolean;
+  viewerCanMergeAsAdmin: boolean;
+};
+
+type CoordinatedPrStatus = RemoteStateMetadata & {
+  source: "pr";
+  data?: PullRequestFastState | null;
+};
+```
+
+On a cold eligible PR record, `data` and `refreshedAt` are absent while the first automatic refresh runs. A successful lookup that finds no PR sets `data: null`. After a transient failure, the envelope retains the last successful `data` and `refreshedAt`, marks `stale: true`, advances `ageMs`, and sets a safe `lastError`; a cold failure has no retained `data` or `refreshedAt`. Explicit reads await that success or failure envelope.
+
+PR absence has two distinct route outcomes:
+
+- If the target cannot be resolved to an eligible GitHub or trusted GitHub Enterprise repository and head, the default response is `404 { error: "No PR found" }`; `optional=1` returns empty `204`. No independent fallback lookup runs.
+- If the target is eligible and a successful lookup returns `data: null`, the default response is `200` with that envelope; `optional=1` returns empty `204`. Cold and failed eligible snapshots remain `200` envelopes even with `optional=1`, because their freshness/error metadata is meaningful.
+
+Unknown entities, missing host worktrees, no-worktree goals/Headquarters sessions, sandbox resolution, and the existing explicit Git/PR mutation routes retain their endpoint-specific behavior.
+
+#### Completion WebSocket frame
+
+A completed refresh is entity-addressed and wraps the snapshot body:
+
+```ts
+{
+  type: "remote_state_snapshot";
+  resource: "git" | "pr";
+  sessionId?: string;
+  goalId?: string;
+  snapshot: RemoteStateSnapshot;
+}
+```
+
+`resource` is the routing discriminator. `snapshot.source` is independently `"repository" | "pr"`. Session completions carry `sessionId`; goal and sidebar completions carry `goalId` on their authorized channel. Clients apply the completion directly and must not trigger another equivalent REST, `git fetch`, or GitHub read.
 
 ### Child-goal integration
 
@@ -649,7 +879,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals/:id/team` | Get team state for a goal |
-| `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
+| `POST` | `/api/goals/:id/team/start` | Explicitly start a team (creates or returns its live team-lead session). See [Explicit start lifecycle](#explicit-start-lifecycle). |
 | `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
 | `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`); returns the structured dismiss result documented below |
 | `POST` | `/api/goals/:id/team/steer` | Backward-compatible streaming-only steer for a team agent (`{ sessionId, message }`) |
@@ -660,6 +890,52 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
 
 Restart semantics: boot restores persisted active team entries and re-subscribes their sessions; it does not call `/team/start` implicitly for existing teamless goals. After `/team/teardown`, or after creating a goal with `autoStartTeam: false`, the goal remains teamless across restart and this explicit start route remains the manual recovery path.
+
+#### Explicit start lifecycle
+
+`POST /api/goals/:id/team/start` (and its legacy `/swarm/start` alias) is an
+explicit operator action. A successful request returns `201` with
+`{ sessionId, title }`. It is single-flight per goal: concurrent requests join
+the same start, and a later repeat returns the existing live team lead rather
+than creating another one. If retained team state has no live lead, the route
+returns `409 TEAM_LEAD_UNAVAILABLE`; callers must stop that team before starting
+a replacement.
+
+For an **operator-paused** otherwise-startable goal, explicit start first uses
+the canonical *single-goal* resume lifecycle, then creates (or returns) the
+lead. The resume durably clears `paused` and any stale merge-conflict marker and
+broadcasts `goal_state_changed` before lead creation. It deliberately does not
+use the cascade resume route: starting one team must not reactivate descendants.
+This composition exists so a user can resume work intentionally without a
+separate click while retaining the normal lifecycle's persistence and UI
+notification rules.
+
+Paused auto-resume is deliberately narrow:
+
+- It requires a verified signed UI operator cookie, or the authentic secret of
+  the goal's authoritative existing team lead (`X-Bobbit-Session-Secret`). A
+  global Bearer token, the public spawning-session header, and another
+  session's secret cannot resume the goal; they receive `403 NOT_TEAM_LEAD`.
+- The goal must have team mode enabled, ready setup, and a usable spec. Archived,
+  shelved, completed, and setup-incomplete paused goals remain paused and return
+  concise structured errors such as `GOAL_ARCHIVED`, `GOAL_SHELVED`,
+  `GOAL_COMPLETE`, or `GOAL_SETUP_INCOMPLETE`.
+- Scheduler-owned `state: "blocked"` is never resumed or bypassed; it returns
+  `409 GOAL_BLOCKED`. This preserves dependency scheduling as the sole owner of
+  that state.
+
+The transition is revalidated after the awaited resume. Therefore another
+lifecycle mutation can make the goal non-startable after resume; in that case
+start fails with a structured code, but the already durable resume is not rolled
+back. Clients refresh goals and sessions after **both** a successful and failed
+start request, and also reconcile the `goal_state_changed` broadcast, so this
+committed state is visible without a manual page reload.
+
+Non-paused starts keep their ordinary behavior. In particular, a completed goal
+that is not operator-paused is not implicitly resumed; after its team has been
+explicitly torn down, a normal explicit start can create a new lead as before.
+All explicit-start failures use `{ error, code, goalId }` with concise,
+actionable text; this route never returns an exception stack to the client.
 
 ### Orchestration routes (child agents)
 
@@ -825,7 +1101,9 @@ Staff records include a persisted `accessory` string as part of the staff identi
 | `GET` | `/api/projects/:id` | Get a single project. `GET /api/projects/headquarters` works even when Headquarters is hidden from normal lists. |
 | `GET` | `/api/projects/:id/base-ref/detect` | Read-only `base_ref` resolver helper. Returns `{ resolved, detected }`. `resolved` is exactly what worktrees branch off right now (`resolveBaseRef` against the pool/primary repo). `detected` is the live `git ls-remote --symref origin HEAD` result as `origin/<branch>`, **filtered to be saveable** — it is `null` unless it passes the same grammar + cross-component existence checks add-time pinning applies, so any non-`null` value can be saved without rejection. No mutation. Drives the Settings "Detect from remote" action. See [design/base-ref.md](design/base-ref.md). |
 | `PUT` | `/api/projects/:id` | Update normal-project name/color/root/palette. Headquarters and hidden/system projects are immutable. |
-| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete files on disk). The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
+| `DELETE` | `/api/projects/:id` | Unregister a normal project (does not delete the registered project root). The server drains its worktree pool, terminates live history-fork borrowers before their owners and other sessions, and removes project state only after no live project session remains. The last normal project may be removed; Headquarters remains as the built-in workspace unless hidden by preference. `DELETE /api/projects/headquarters` returns 403 `HEADQUARTERS_IMMUTABLE`. The hidden `system` project is unaffected by this flow. |
+
+Project deletion uses normal per-owner sandbox lifecycle serialization rather than bypassing shared-worktree ownership. If a concurrent launch or replacement leaves any live project session after termination, deletion stops before project-context removal and returns `409 { "error": "Project still has active sessions", "code": "PROJECT_SESSIONS_STILL_ACTIVE", "sessionIds": [...] }`. A shared sandbox owner conflict is likewise a typed `409` with `code: "SHARED_SANDBOX_WORKTREE_IN_USE"`. These fail-closed responses preserve the registered project and its remaining live sessions so the caller can terminate borrowers or other survivors and retry.
 
 #### Add Project directory helpers
 
@@ -1196,7 +1474,7 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. A discovery failure returns `models: []` as live status even when `/api/models` can use the matching last-published catalog. |
+| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. `models: []` describes that live status request and does not clear eligible durable or same-process retention in `/api/models`. |
 | `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
 | `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
 | `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
@@ -1205,7 +1483,9 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
 
-Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. On a discovery error, `/api/models` may read the last atomically published `providers.aigw.models` only when its normalized `baseUrl` exactly matches the currently configured URL. A successful discovery is authoritative, including model omissions; retained rows are never merged back into a successful result. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, outage retention, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
+Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. If discovery throws, `/api/models` uses Pi's exact rows from a valid marked publication when its normalized `baseUrl` matches the saved `aigw.url`. If the target is absent, or a marked target cannot supply rows, it may instead use the current process's last exact discovery snapshot keyed to that unchanged normalized URL. This snapshot is in memory only and does not survive restart. A valid unmarked target remains user-owned and authoritative through Pi composition; discovery retention never bypasses it. A malformed or ambiguous target fails closed.
+
+A successful discovery result replaces the same-process snapshot and is authoritative even when empty after validation or filtering; retained rows are not merged into it. `GET /api/aigw/status` performs its own fresh discovery and may return `models: []` without mutating `models.json` or the catalog retention used by `/api/models`. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md#transient-discovery-outages) for the full outage matrix, precedence, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
 
 ### OAuth
 
@@ -1427,9 +1707,25 @@ The preview side-panel iframe is fed by a per-session content mount served from 
 
 **Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the signed `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Preview content verifies cookies entirely in memory and never issues or renews them. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
 
+#### Historical `preview_open` snapshot markers
+
+A successful `preview_open` result includes a v3 marker that lets its preview card reopen the historical preview, preferring an immutable artifact when its identity is present. The normal payload stores the complete mount route and host-invariant path:
+
+```json
+{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
+```
+
+`entry` is a raw single filename, not a percent-encoded URL segment. The writer stores it verbatim and encodes it exactly once when forming a full route; the reader preserves it verbatim and encodes it exactly once when reconstructing a compact route. This makes literal-percent names such as `100%.html` and `%41.html`, Unicode names, and URL-significant characters refer to their original files rather than to decoded or double-encoded names. Compaction compares the raw or encoded suffix consistently, so it applies to every accepted filename rather than only ASCII names.
+
+The complete marker block has a hard 250 UTF-8-byte cap so tool output stays bounded. The writer selects the first lossless payload in its compatibility-preserving order: a normal full route when it fits, then compact forms that remove duplicated route/path data and use the validated `aid` or `a` artifact-id aliases. Readers also recognize the historical `artifact_id` spelling. Valid `contentHash` and artifact identity are replay metadata, not expendable space-saving fields: neither is silently dropped. If no lossless form can fit, `preview_open` fails with `PREVIEW_SNAPSHOT_CAP`, naming the affected filename and the byte-budget reason instead of emitting a truncated or dead marker.
+
+The usual compact form is `url: "/preview/<sid>/"` with a safe raw `entry`; it may omit the redundant `path`. For a long filename, the final compact form can omit `entry` as well, but only when both validated `contentHash` and artifact identity remain. That form is meaningful only beside the parameters of its own `preview_open` call: the renderer obtains the trusted raw basename from `file` (or `inline.html` for `html`), then validates and reconstructs the route. A standalone historical marker without its entry remains strict and malformed rather than guessing a file.
+
+The compact URL is an encoding for a marker, not a relaxation of preview routing. The reader reconstructs `/preview/<sid>/<encoded-entry>` and passes it through the same strict preview-route validation as a full URL. A compact URL without a safe explicit entry or permitted same-tool fallback, traversal-shaped data, invalid metadata, or an invalid artifact route remains malformed. This read compatibility is necessary because historical markers cannot be rewritten; recognized same-origin/base-path forms are reduced to the validated internal route rather than used as public navigation URLs.
+
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount, OR restore an immutable artifact. Body is one of: `{ html, entry? }` (inline), `{ file: "/abs/path/report.html", assets?: string[], manifest?: string }` (copy entry plus explicitly declared siblings), or `{ artifactId }` (restore a previously captured artifact — mutually exclusive with `html`/`file`/`assets`/`manifest`). Returns `200 { url, path, relPath, entry, mtime, contentHash, artifactId }` for inline, plus `assets: string[]` (resolved + sorted) for the `file` form. `contentHash` is a lowercase SHA-256 hex string for the populated mount tree; `artifactId` is the id of the immutable artifact written alongside the mount (see [docs/design/side-panel-tab-contract.md](design/side-panel-tab-contract.md) and the [Preview architecture](preview-architecture.md) doc for lifecycle). `relPath` is the host-invariant `<sessionId>/<entry>` identifier (forward slashes on all OS) used by the agent tool to build the v3 snapshot marker. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm` / `assets` or `manifest` passed with `html` / invalid asset path (absolute, `..`, `\`, `\0`, `**`, `[...]`, `{a,b}`) / manifest JSON parse error / `artifactId` combined with another body field; `403` sandbox-out-of-scope or symlink escape; `404` source file / manifest file / literal asset missing / `artifactId` unknown or owned by a different session. No size cap — asset inclusion is explicit and agent-driven. On success the server fans out a `preview-changed` SSE event. |
+| `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount, OR restore an immutable artifact. Body is one of: `{ html, entry? }` (inline), `{ file: "/abs/path/report.html", assets?: string[], manifest?: string }` (copy the entry plus explicitly declared source-directory assets), or `{ artifactId }` (restore a previously captured artifact — mutually exclusive with `html`/`file`/`assets`/`manifest`). A `file` may itself be in a source subdirectory; its mounted `entry` is the raw basename and each `assets`/manifest path is resolved relative to that file's source directory, preserving declared nested asset paths in the mount. Undeclared siblings are not copied. Returns `200 { url, path, relPath, entry, mtime, contentHash, artifactId }` for inline, plus `assets: string[]` (resolved + sorted) for the `file` form. `contentHash` is a lowercase SHA-256 hex string for the populated mount tree; `artifactId` is the id of the immutable artifact written alongside the mount (see [docs/design/side-panel-tab-contract.md](design/side-panel-tab-contract.md) and the [Preview architecture](preview-architecture.md) doc for lifecycle). `relPath` is the host-invariant `<sessionId>/<entry>` identifier (forward slashes on all OS) used by the agent tool to build the v3 snapshot marker. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm` / `assets` or `manifest` passed with `html` / invalid asset path (absolute, `..`, `\`, `\0`, `**`, `[...]`, `{a,b}`) / manifest JSON parse error / `artifactId` combined with another body field; `403` sandbox-out-of-scope or symlink escape; `404` source file / manifest file / literal asset missing / `artifactId` unknown or owned by a different session. No size cap — asset inclusion is explicit and agent-driven. On success the server fans out a `preview-changed` SSE event. |
 | `POST` | `/api/preview/artifacts/<artifactId>/restore?sessionId=<sid>` | Restore a previously captured immutable preview artifact into the session's live mount and broadcast `preview-changed`. The artifact must belong to `<sid>`; cross-session ids return `404`. Returns the same shape as the mount `POST` (`{ url, path, relPath, entry, mtime, contentHash, artifactId }`). Used by the preview-renderer Open button on historical `preview_open` tool cards. Equivalent to `POST /api/preview/mount` with `{ artifactId }` body; this dedicated route keeps the URL self-describing for the client restore path. |
 | `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns `{ url, path, relPath, entry, mtime, contentHash, artifactId? }` (artifactId present iff an artifact was persisted for the current mount), or `404 { error: "no preview mount" }` if the mount is missing or empty. |
 | `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. This route authenticates but never issues or renews a cookie. |
@@ -1442,7 +1738,7 @@ Maintenance endpoints back Settings → Maintenance. They are preview-first and 
 |---|---|---|
 | `GET` | `/api/maintenance/worktrees` | Canonical unified worktree inventory. Optional `?include=all|actionable|troubleshooting`; default is `all`. |
 | `POST` | `/api/maintenance/cleanup-worktrees` | Canonical cleanup for all safe or selected unified worktree inventory items. Also accepts legacy orphan cleanup bodies. |
-| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy compatibility view of safe unowned Bobbit `session/*` git worktrees. |
+| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy `{ worktrees }` compatibility shape; excludes ownership-unverified Git worktrees. Use the canonical troubleshooting inventory for diagnostics. |
 | `GET` | `/api/maintenance/archived-session-worktrees` | Legacy compatibility view of archived-session worktree candidates. `?includeAlreadyCleaned=1` includes disabled diagnostic rows whose worktree path and git metadata are already gone. |
 | `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Legacy compatibility cleanup for archived-session worktree candidates. |
 | `GET` | `/api/maintenance/orphaned-sessions` | List orphaned non-interactive sessions. |
@@ -1502,7 +1798,7 @@ Use `?include=actionable` to return only cleanup candidates. Use `?include=troub
 
 `mode: "all-safe"` rejects selectors. `mode: "selected"` requires `itemIds` as an array of strings. If `itemIds` is present without `mode`, the request returns `400`. Non-object bodies are rejected.
 
-The server always re-runs the unified inventory before cleanup and only removes fresh actionable candidates. Filesystem-only directories, pool entries, protected rows, stale selections, and invalid ids are skipped. Branch deletion is best-effort and blocked when any live or durable Bobbit record still references the branch.
+The server always re-runs the unified inventory before cleanup and only removes fresh actionable candidates. Ownership-unverified Git worktrees, filesystem-only directories, pool entries, protected rows, stale selections, and invalid ids are skipped without mutation. Branch deletion is best-effort and blocked when any live or durable Bobbit record still references the branch.
 
 ```ts
 interface CleanupWorktreeInventoryResponse {
@@ -1533,9 +1829,9 @@ interface CleanupWorktreeInventoryResponse {
 }
 ```
 
-Legacy orphan cleanup bodies are still supported for compatibility. `{}` cleans all currently safe legacy orphan candidates and `{ worktrees: [{ path, branch, repoPath }] }` cleans matching safe candidates. Legacy responses keep the older `{ cleaned: number }` shape. Unknown keys in a legacy body return `400`.
+Legacy orphan cleanup body shapes remain supported: `{}` and `{ worktrees: [{ path, branch, repoPath }] }`. Ownership-unverified Git worktrees are excluded or skipped without mutation; legacy responses keep the older `{ cleaned: number }` shape. Unknown keys in a legacy body return `400`.
 
-**`GET /api/maintenance/orphaned-worktrees`** returns the legacy `{ worktrees }` shape. It is a filtered view of the unified inventory containing only actionable unowned Bobbit `session/*` git worktrees with `{ path, branch, repoPath }`.
+**`GET /api/maintenance/orphaned-worktrees`** returns the legacy `{ worktrees }` shape but excludes ownership-unverified Git worktrees. Inspect those non-actionable rows through `GET /api/maintenance/worktrees?include=troubleshooting` instead.
 
 **`GET /api/maintenance/archived-session-worktrees`** returns the existing archived-session compatibility shape: `sessions`, flattened `items`, `groups`, `selectionPresets`, additive `counts`, and `generatedAt`. It is backed by the unified inventory. Default scans omit sessions whose rows are all `already-cleaned`; use `?includeAlreadyCleaned=1` for diagnostics.
 
@@ -1551,20 +1847,20 @@ These modes are compatibility filters over the fresh unified scan; they do not b
 
 ### Search
 
-Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by a per-project FlexSearch index. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md).
+Lexical (BM25-style) search over goals, sessions, messages, and staff. A per-project worker owns the FlexSearch index; a compact journaled document mirror is durable and the index is derived lazily. See [Semantic search](internals.md#semantic-search) and [Search worker and persistence](search-worker-persistence.md).
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/search` | Query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`, `includeArchived?` / `include=archived`. Omit `projectId` to search across all projects. Archived rows are excluded unless explicitly requested. |
 | `POST` | `/api/search/rebuild` | Kick off a full rebuild in the background (`{ projectId }`) |
 | `GET` | `/api/search/stats` | Stats for the project's search index (`?projectId=`) |
-| `POST` | `/api/search/compact` | No-op under FlexSearch; retained for API compatibility (`{ projectId }`) |
+| `POST` | `/api/search/compact` | Compact the worker-owned document mirror into an atomic snapshot (`{ projectId }`) |
 | `GET` | `/api/maintenance/orphaned-index-rows` | List index rows whose parent entity no longer exists (`?projectId=`) |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned index rows (`{ projectId }`) |
 
 `GET /api/search` defaults to live-only results. Pass `includeArchived=true` or `include=archived` to include archived goals, sessions, messages, and staff matches. The full search UI uses `includeArchived=true` intentionally so archived badges/results remain visible; agent-facing `bobbit_read.search` stays live-only unless its caller opts in.
 
-**Disabled-service responses:** All Search endpoints return **503** with `{ error: "search-unavailable", reason, state }` when the service is disabled. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` mirrors `state` for diagnostic symmetry. The disabled path is catastrophic store-open failure — rare, and the Settings → Maintenance → Search Index panel exposes **Rebuild Index** as the recovery action.
+**Unavailable-service responses:** A query returns **503** with `{ error: "search-unavailable", reason, state }` whenever complete results cannot be guaranteed. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` additionally distinguishes temporary worker conditions such as `backpressure`, `degraded`, or `worker-backoff`. This is explicit rather than a partial-result mode. Rebuild Index is the recovery action for a persistent mirror/worker failure.
 
 **`POST /api/search/rebuild`** — body `{ projectId }`. Returns **202 Accepted** on success; progress is streamed via the `index:progress` / `index:complete` / `index:error` WebSocket events (see [websocket-protocol.md](websocket-protocol.md)). **400** if `projectId` is missing.
 
@@ -1577,13 +1873,15 @@ Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by
   "datasetBytes": 8432104,
   "engine": "flexsearch",
   "engineVersion": "0.8.158",
-  "state": "ready"
+  "state": "ready",
+  "degraded": false,
+  "unavailableReason": null
 }
 ```
 
-Returns **400** if `projectId` is missing, **404** if the project is not registered.
+Returns **400** if `projectId` is missing, **404** if the project is not registered. Unlike a query, stats reports temporary worker/degradation state rather than returning incomplete search results.
 
-**`POST /api/search/compact`** — body `{ projectId }`. No-op under the current engine; always returns `{ ok: true }`. Kept to avoid 404s from older clients.
+**`POST /api/search/compact`** — body `{ projectId }`. Requests compaction of the worker-owned append-only mirror into an atomic snapshot, then returns `{ ok: true }`. The worker serializes this request with mutations so it cannot race a journal/snapshot write.
 
 **`GET /api/maintenance/orphaned-index-rows?projectId=<id>`** — scans the dataset for rows whose parent entity (goal, session, message, staff) no longer exists in the source-of-truth stores. Returns:
 
@@ -1599,6 +1897,16 @@ Returns **400** if `projectId` is missing, **404** if the project is not registe
 `sample` is capped (~10 entries) for preview in the Maintenance UI.
 
 **`POST /api/maintenance/cleanup-index-rows`** — body `{ projectId }`. Deletes all orphaned rows found by the scan above. Returns `{ deleted: <count> }`.
+
+**Maintenance availability:** Both endpoints require a complete search dataset. While the lazy mirror is being recovered, or whenever the worker cannot guarantee completeness, they return the retryable **503** envelope instead of a success body:
+
+```json
+{ "error": "search-unavailable", "reason": "rebuilding", "state": "ready" }
+```
+
+`reason` describes the recovery fence and may be `"rebuilding"` even when the public service lifecycle in `state` is already `"ready"`. A 503 therefore means the scan or cleanup did not produce a successful result; clients must not interpret it as `{ "count": 0 }` or `{ "deleted": 0 }`. Wait for automatic recovery (or an `index:complete` event), then retry with bounded client backoff. If unavailability persists, request a source-backed rebuild and retry after it completes. No `Retry-After` header is part of this endpoint contract.
+
+The existing error statuses remain unchanged: **400** for a missing `projectId`, **404** for an unregistered project, and **500** for an unexpected scan or cleanup failure.
 
 ### Summary views (`?view=summary`)
 
@@ -2186,12 +2494,30 @@ Before `switch_session`, worktree-backed continues move the cloned JSONL into th
 
 When an agent writes a large file (>32KB of tool input content), the server truncates the content in WebSocket broadcasts and the EventBuffer to prevent memory pressure from multi-megabyte payloads being serialized/deserialized on every streaming token. The full content is preserved in the agent's `.jsonl` session file and available on demand.
 
-**`GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`** — Returns the full, untruncated tool input content for a specific content block.
+### Tool-content identity resolution
 
-- `messageIndex` — zero-based index into the session's message history
-- `blockIndex` — zero-based index into the message's content blocks
+**`GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`** is the preferred full-content route. It returns `200 { content: string }` for the requested zero-based content block, resolved by the URL-encoded tool-call id rather than a visible message position.
 
-Returns `200` with `{ content: string }` on success. Returns `404` if the session, message, or block is not found, or if the block has no extractable content.
+The route resolves the identity against the runtime transcript in both forms that can carry it:
+
+- a `toolResult` message whose `toolCallId` equals `:toolCallId`;
+- an assistant `toolCall` or `tool_use` content block whose `id` equals `:toolCallId`.
+
+Without `expected`, the assistant call is selected when present (otherwise the tool result); the requested block must be the exact identity-bearing assistant-call block, so a neighbouring block on the same assistant message is refused. With `?expected=preview-snapshot`, the matching tool-result message is selected and the returned text must begin with a supported preview-snapshot marker. This lets historical, truncated preview cards retrieve their snapshot without trusting client-visible positions, while preserving legacy v1/v2 parsing in the renderer.
+
+The route fails closed rather than returning a block from a different call:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `404` | `session_not_found` | The live session is unavailable. |
+| `404` | `transcript_tool_call_unavailable` | Neither a matching tool result nor assistant tool-call block remains in the runtime transcript. |
+| `404` | `transcript_block_unavailable` | The requested block is absent or has no extractable text/input content. |
+| `409` | `tool_call_block_mismatch` | Generic identity lookup named a block other than the assistant tool-call block. |
+| `409` | `snapshot_block_mismatch` | A preview lookup named the wrong block or the returned text is not a supported snapshot marker. |
+
+`PreviewRenderer` uses this route for truncated historical snapshots. The other full-content UI consumer, the generic **Load full content** path, was migrated to the same identity resolution so client-only rows cannot misaddress the runtime transcript.
+
+**`GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`** remains available for positional callers. It returns the full, untruncated tool input content for a specific block at a zero-based runtime message and content-block index. It returns `200 { content: string }` on success and the legacy `404` responses when the session, message, block, or extractable content is missing. New client callers should use the identity route because their rendered history can contain rows absent from the runtime transcript.
 
 **How truncation works:**
 

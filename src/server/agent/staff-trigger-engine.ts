@@ -8,6 +8,25 @@ import type { SessionManager } from "./session-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
 import type { PersistedStaff, StaffTrigger } from "./staff-store.js";
 
+/**
+ * Minimal coordinator dependency used by Git-trigger polling. The coordinator
+ * owns canonical repository identity and joins concurrent refreshes; this
+ * engine only needs to wait for its repository snapshot before comparing the
+ * watched ref. `data.fetched` is the coordinator's internal indication that
+ * this canonical repository has an origin; `hasRemote` supports adapters that
+ * expose the identity result directly.
+ */
+export interface RepositorySnapshotFreshener {
+	ensureFreshRepository(repo: string, options: { reason: "staff-trigger" }): Promise<{
+		stale?: boolean;
+		lastError?: unknown;
+		hasRemote?: boolean;
+		data?: { fetched?: boolean };
+	}>;
+}
+
+type StaffGitRunner = (args: readonly string[], cwd: string, timeout?: number) => Buffer;
+
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
 	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
@@ -126,6 +145,16 @@ export function cronMatches(expr: string, date: Date): boolean {
 	return true;
 }
 
+/** Ordered refs used after the coordinator has refreshed remote-tracking refs. */
+function comparisonRefCandidates(branch: string, hasRemote: boolean): string[] {
+	if (!hasRemote) return [branch];
+	if (branch === "HEAD") return ["@{u}", "HEAD"];
+	// Explicit remote-qualified and fully-qualified refs already identify exactly
+	// what the trigger author wants to watch.
+	if (branch.startsWith("origin/") || branch.startsWith("refs/")) return [branch];
+	return [`refs/remotes/origin/${branch}`, branch];
+}
+
 /**
  * TriggerEngine polls every 60 seconds, checking active staff agents' triggers.
  *
@@ -138,12 +167,15 @@ export function cronMatches(expr: string, date: Date): boolean {
  */
 export class TriggerEngine {
 	private intervalHandle: ReturnType<Clock["setInterval"]> | null = null;
+	private tickInFlight = false;
 
 	constructor(
 		private staffManager: StaffManager,
 		private sessionManager: SessionManager,
 		private inboxManager: InboxManager,
 		private readonly clock: Clock = realClock,
+		private readonly repositoryFreshener?: RepositorySnapshotFreshener,
+		private readonly gitRunner: StaffGitRunner = execGitSync,
 	) {
 		// `sessionManager` kept on the instance for future use (e.g. trigger
 		// preflight checks that need session state). `fireTrigger` itself no
@@ -152,8 +184,8 @@ export class TriggerEngine {
 	}
 
 	start(): void {
-		this.tick();
-		this.intervalHandle = this.clock.setInterval(() => this.tick(), 60_000);
+		void this.tick();
+		this.intervalHandle = this.clock.setInterval(() => void this.tick(), 60_000);
 		console.log("[trigger-engine] Started (60s poll interval)");
 	}
 
@@ -165,7 +197,13 @@ export class TriggerEngine {
 		}
 	}
 
-	private tick(): void {
+	private async tick(): Promise<void> {
+		// A repository refresh may outlive the 60-second interval. Skip an
+		// overlapping callback rather than comparing and firing the same trigger
+		// concurrently; the next interval will observe the completed refresh.
+		if (this.tickInFlight) return;
+		this.tickInFlight = true;
+
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? {
@@ -201,7 +239,7 @@ export class TriggerEngine {
 						fired = this.checkScheduleTrigger(staff, trigger);
 					} else if (trigger.type === "git") {
 						if (counters) counters.gitChecks++;
-						fired = this.checkGitTrigger(staff, trigger);
+						fired = await this.checkGitTrigger(staff, trigger);
 					} else if (counters) {
 						counters.manualTriggers++;
 					}
@@ -212,6 +250,7 @@ export class TriggerEngine {
 				}
 			}
 		} finally {
+			this.tickInFlight = false;
 			if (diagEnabled) {
 				getCpuDiagnostics().recordTimer("staff-trigger-engine:tick", performance.now() - diagStart, counters);
 			}
@@ -236,18 +275,41 @@ export class TriggerEngine {
 	}
 
 	/** Returns true if the trigger was fired. */
-	private checkGitTrigger(staff: PersistedStaff, trigger: StaffTrigger): boolean {
+	private async checkGitTrigger(staff: PersistedStaff, trigger: StaffTrigger): Promise<boolean> {
 		const repo = trigger.config.repo || staff.cwd;
 		const branch = trigger.config.branch || "HEAD";
+		let hasRemote = false;
 
-		let sha: string;
-		try {
-			sha = execGitSync(["log", "--format=%H", "-1", branch], repo)
-				.toString()
-				.trim();
-		} catch {
-			// Git command failed — repo may not exist or branch is invalid. Skip silently.
-			return false;
+		if (this.repositoryFreshener) {
+			try {
+				const snapshot = await this.repositoryFreshener.ensureFreshRepository(repo, { reason: "staff-trigger" });
+				// Only a fresh successful snapshot may order the comparison. Stale
+				// last-good state can also be returned when cadence/backoff prevents a
+				// refresh, so an error marker alone is not sufficient.
+				if (snapshot.stale || snapshot.lastError) return false;
+				hasRemote = snapshot.hasRemote ?? snapshot.data?.fetched === true;
+			} catch {
+				// Coordinator resolution/refresh failures must not produce a trigger.
+				return false;
+			}
+		}
+
+		const candidates = comparisonRefCandidates(branch, hasRemote);
+		let sha: string | undefined;
+		for (const candidate of candidates) {
+			try {
+				const candidateSha = this.gitRunner(["log", "--format=%H", "-1", candidate], repo)
+					.toString()
+					.trim();
+				// `%H` must yield exactly one full object id. Besides rejecting broken
+				// probes, this keeps repository-controlled text out of the staff prompt.
+				if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(candidateSha)) {
+					sha = candidateSha.toLowerCase();
+					break;
+				}
+			} catch {
+				// A missing upstream/tracking ref falls through to the local ref.
+			}
 		}
 
 		if (!sha) return false;
@@ -255,16 +317,14 @@ export class TriggerEngine {
 		const previousSha = trigger.lastSeenSha;
 
 		if (previousSha && previousSha !== sha) {
-			// New commit(s) detected — build context and fire
-			let context = `New commit on ${branch}: ${sha}`;
-			try {
-				const log = execGitSync(["log", "--oneline", `${previousSha}..${sha}`], repo)
-					.toString()
-					.trim();
-				if (log) context += "\n\nRecent commits:\n" + log;
-			} catch {
-				// Diff log failed — proceed with basic context
-			}
+			// The configured ref is operator-owned and the object id is validated
+			// above. Never read commit subjects here: fetched remote history is an
+			// untrusted detection source, not an instruction channel for staff.
+			const context = [
+				"Git ref changed.",
+				`Configured ref: ${JSON.stringify(branch)}`,
+				`Commit: ${sha}`,
+			].join("\n");
 
 			// Always update lastSeenSha before firing
 			this.staffManager.updateTriggerState(staff.id, trigger.id, { lastSeenSha: sha });

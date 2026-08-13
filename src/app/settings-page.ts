@@ -2760,7 +2760,7 @@ function renderGeneralTab() {
 					<span class="text-sm font-medium text-foreground">Show message timestamps</span>
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
-					Display timestamps next to user and assistant messages.
+					Display timestamps with user and assistant messages.
 				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">
@@ -4466,6 +4466,20 @@ function currentProjectIdForSearch(): string | undefined {
 	return state.activeProjectId ?? undefined;
 }
 
+function searchRecoveryState(stats: SearchStats | null): { unavailable: boolean; label: string; notice: string } {
+	const reason = stats?.unavailableReason;
+	if (reason === "rebuilding" || reason === "initializing") {
+		return { unavailable: true, label: "Rebuilding", notice: "Search is rebuilding. Results will return automatically when it finishes." };
+	}
+	if (reason === "backpressure") {
+		return { unavailable: true, label: "Catching up", notice: "Search is catching up with a busy queue. Results will return automatically." };
+	}
+	if (stats?.degraded || reason === "degraded" || reason === "worker-backoff") {
+		return { unavailable: true, label: "Recovering", notice: "Search is recovering its worker. Results will return automatically." };
+	}
+	return { unavailable: false, label: stats?.state ?? "unknown", notice: "" };
+}
+
 async function loadSearchStats(): Promise<void> {
 	maintenanceLoading = "search";
 	renderApp();
@@ -4504,6 +4518,7 @@ function ensureSearchIndexWsSubscribed(): void {
 }
 
 async function rebuildSearchIndex(): Promise<void> {
+	if (searchRecoveryState(searchIndexStats).unavailable) return;
 	if (!window.confirm("Rebuild the search index? This re-embeds every goal, session, message, and staff record for the active project. It runs in the background.")) return;
 	maintenanceLoading = "search";
 	renderApp();
@@ -5676,6 +5691,7 @@ function renderMaintenanceTab() {
 		void loadSearchStats();
 	}
 
+	const recovery = searchRecoveryState(searchIndexStats);
 	const progressPct = (() => {
 		if (!searchIndexProgress) return null;
 		const { completed, total } = searchIndexProgress;
@@ -5701,11 +5717,14 @@ function renderMaintenanceTab() {
 				</p>
 				${searchIndexStats ? html`
 					<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-1 text-xs">
-						<div class="flex justify-between gap-2"><span class="text-muted-foreground">State</span><span class="text-foreground font-medium" data-search-state="${searchIndexStats.state}">${searchIndexStats.state}</span></div>
+						<div class="flex justify-between gap-2"><span class="text-muted-foreground">State</span><span class="text-foreground font-medium" data-search-state="${searchIndexStats.state}" data-search-recovery="${recovery.unavailable ? "true" : "false"}">${recovery.label}</span></div>
 						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Last rebuild</span><span class="text-foreground">${formatTimestamp(searchIndexStats.lastRebuildAt)}</span></div>
 						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Engine</span><span class="text-foreground font-mono truncate" title="${searchIndexStats.engine}">${searchIndexStats.engine} (${searchIndexStats.engineVersion})</span></div>
 						<div class="flex justify-between gap-2"><span class="text-muted-foreground">Dataset size</span><span class="text-foreground">${formatBytes(searchIndexStats.datasetBytes)}</span></div>
 					</div>
+					${recovery.unavailable ? html`
+						<p class="text-xs text-amber-700 dark:text-amber-300 mt-1" data-search-unavailable>${recovery.notice}</p>
+					` : ""}
 					${Object.keys(searchIndexStats.rowCountsBySource || {}).length > 0 ? html`
 						<div class="flex flex-wrap gap-1.5 mt-1">
 							${Object.entries(searchIndexStats.rowCountsBySource).map(([src, n]) => html`
@@ -5745,7 +5764,7 @@ function renderMaintenanceTab() {
 					>Refresh</button>
 					<button
 						class="${actionBtnClass}"
-						?disabled=${maintenanceLoading === "search" || !!searchIndexProgress}
+						?disabled=${maintenanceLoading === "search" || !!searchIndexProgress || recovery.unavailable}
 						@click=${rebuildSearchIndex}
 						data-action="rebuild-search-index"
 					>Rebuild Index</button>

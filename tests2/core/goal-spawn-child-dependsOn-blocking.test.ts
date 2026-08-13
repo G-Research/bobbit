@@ -59,7 +59,7 @@ async function makeHarness(): Promise<Harness> {
 	fs.mkdirSync(configDir);
 	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
 
-	const goalStore = new GoalStore(stateDir);
+	const goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
 	const cookieStore = new CookieStore(Buffer.alloc(32, 0x42));
 	// These tests exercise dependsOn scheduling, not authz. spawn-child /
 	// integrate-child are ORCHESTRATION-class verbs (the cookie does NOT
@@ -88,7 +88,7 @@ async function makeHarness(): Promise<Harness> {
 		},
 	]);
 	const goalManager = new GoalManager(goalStore, wf);
-	const gateStore = new GateStore(stateDir);
+	const gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
 	goalStore.update(parent.id, {

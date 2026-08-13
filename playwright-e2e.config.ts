@@ -3,6 +3,10 @@ import { basename, join } from "node:path";
 import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
 import { capturePlaywrightBrowserRegistry, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
 
+export function resolveE2EOutputDir(runRoot = getRunRoot()): string {
+	return join(runRoot, "playwright-e2e-results");
+}
+
 // Config evaluation precedes isolated E2E worker imports. Preserve host-only
 // runtime inputs before the harness redirects HOME and TMPDIR for Bobbit discovery.
 process.env.BOBBIT_V2_LEDGER_DIR = captureMachineGlobalLedgerDirectory();
@@ -81,6 +85,9 @@ export default {
 	// providing a meaningful wall-clock win once browser project is capped
 	// at 3 anyway.
 	workers: 4,
+	// Playwright otherwise writes test-results/.last-run.json in the checkout,
+	// allowing simultaneous coordinators to overwrite one another's artifacts.
+	outputDir: resolveE2EOutputDir(),
 	// `line` reporter streams one line per test completion to stdout, with
 	// no batching — unlike `list` which redraws in place and buffers heavily
 	// when stdout is not a TTY (the verification-harness tailer sees nothing

@@ -38,6 +38,7 @@ import {
 } from "./subgoal-nesting-limit.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
+import { resumeOperatorPausedGoal } from "./goal-resume.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
@@ -1279,15 +1280,11 @@ export async function tryHandleNestedGoalRoute(
 			{ includeRoot: true, includeArchived: false, ...(cascade ? {} : { maxDepth: 0 }) },
 			{
 				order: "top-down",
-				apply: async (g) => {
-					if (!g.paused) return 0;
-					const gm = getGoalManagerForGoal(g.id);
-					// Resume clears any durable merge-conflict flag so the child
-					// is retried clean (data contract for /descendants).
-					await gm.updateGoal(g.id, { paused: false, ...(g.mergeConflict ? { mergeConflict: false } : {}) });
-					broadcastToAll({ type: "goal_state_changed", goalId: g.id });
-					return 1;
-				},
+				apply: async (g) => Number(await resumeOperatorPausedGoal(
+					g,
+					getGoalManagerForGoal(g.id),
+					(goalId) => broadcastToAll({ type: "goal_state_changed", goalId }),
+				)),
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);

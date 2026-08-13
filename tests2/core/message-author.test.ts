@@ -225,7 +225,7 @@ describe("message author primitives", () => {
 		expect(normalizeVisibleAgentEvent({ id: "abc" }, lifecycle)).toBe(lifecycle);
 	});
 
-	it("preserves queue author provenance across persistence restore and accepts legacy rows", () => {
+	it("preserves queue author provenance across persistence restore and accepts legacy rows", async () => {
 		const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
 		const queued = new PromptQueue();
 		queued.enqueue("notification", { isSteered: true, source: "task-notification", author: systemAuthor });
@@ -244,6 +244,7 @@ describe("message author primitives", () => {
 			lastActivity: 1,
 			messageQueue: persisted,
 		} as any);
+		await store.flushAsync();
 		const reloaded = new SessionStore(stateDir, memoryFs).get("author-queue-session");
 		const restored = new PromptQueue(reloaded?.messageQueue).toArray();
 		expect(restored[0]).toMatchObject({

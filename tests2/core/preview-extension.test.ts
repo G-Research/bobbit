@@ -242,6 +242,36 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.strictEqual(body.file, undefined);
 	});
 
+	it.each(["100%.html", "%41.html"])("preserves raw literal-percent entry %s in compact v3 markers", async (entry) => {
+		const tool = getTool();
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return {
+					status: 200,
+					body: {
+						url: `/preview/${SID}/${entry}`,
+						path: `/state/preview/${SID}/${entry}`,
+						relPath: `${SID}/${entry}`,
+						entry,
+						mtime: 1714512345678,
+						contentHash: HASH,
+						artifactId: ARTIFACT_ID,
+					},
+				};
+			}
+			return { status: 200, body: { ok: true } };
+		};
+
+		const res = await tool.execute(`call-literal-percent-${entry}`, { html: "<p>literal percent</p>" });
+		const parsed = parseSnapshot(res.content[1]?.text);
+		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") {
+			assert.equal(parsed.url, `/preview/${SID}/`, "capped marker should use the compact directory URL");
+			assert.equal(parsed.path, entry);
+			assert.equal(parsed.entry, entry, "snapshot entry must remain raw rather than URL-decoded");
+		}
+	});
+
 	it("v3 marker block is constant-size and ≤ 250 bytes for the canonical normalised path", async () => {
 		// Canonical normalised form — `<sid>/<entry>` regardless of host OS.
 		// This is what the extension feeds the builder in production.
@@ -263,26 +293,38 @@ describe("preview_open extension (v3 mount contract)", () => {
 		}
 	});
 
-	it("v3 builder omits contentHash when it would exceed the 250 byte cap", async () => {
-		const entry = "x".repeat(8) + ".html";
+	it("v3 builder fails explicitly rather than omitting a valid contentHash at the cap", () => {
+		// Without an artifact identity, a compact marker must retain `entry` to
+		// reopen. This valid hash-only input has no lossless <=250 B shape.
+		const entry = "x".repeat(100) + ".html";
 		const url = `/preview/${SID}/${entry}`;
 		const relPath = `${SID}/${entry}`;
-		const withHashPayload = PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify({
-			kind: "preview",
-			url,
-			path: relPath,
-			contentHash: HASH,
-		}) + "\n";
-		assert.ok(withHashPayload.length > 250, `fixture must exceed cap with hash, got ${withHashPayload.length}`);
 
-		const block = buildPreviewSnapshotV3Block(url, relPath, HASH);
-		assert.ok(block.length <= 250, `fallback block must stay ≤ 250 bytes, got ${block.length} (${block})`);
-		assert.ok(block.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		assert.throws(
+			() => buildPreviewSnapshotV3Block(url, relPath, HASH, { entry }),
+			/PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity .*250 UTF-8 byte snapshot cap/,
+			"a valid contentHash must never be silently dropped to satisfy the cap",
+		);
+	});
+
+	it("v3 builder validates optional metadata before serialising a capped fallback", () => {
+		const entry = "report.html";
+		const block = buildPreviewSnapshotV3Block(
+			`/preview/${SID}/${entry}`,
+			`${SID}/${entry}`,
+			"not-a-sha256",
+			{ artifactId: "invalid artifact id", entry },
+		);
+		assert.ok(block.length <= 250, `fallback must stay capped, got ${block.length} (${block})`);
+		const payload = JSON.parse(block.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.equal(payload.contentHash, undefined);
+		assert.equal(payload.artifactId, undefined);
+		assert.equal(payload.aid, undefined);
 		const parsed = parseSnapshot(block);
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
-			assert.strictEqual(parsed.path, relPath);
-			assert.strictEqual(parsed.contentHash, undefined);
+			assert.equal(parsed.contentHash, undefined);
+			assert.equal(parsed.artifactId, undefined);
 		}
 	});
 

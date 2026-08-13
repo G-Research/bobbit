@@ -18,8 +18,14 @@ export interface FailureStepLike {
 	type: string;
 	passed: boolean;
 	skipped?: boolean;
-	status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
 	output?: string;
+}
+
+export interface AuthoredFailureStepLike {
+	name: string;
+	type: string;
+	failureGuidance?: string;
 }
 
 const MAX_STEP_NAMES_LISTED = 5;
@@ -59,14 +65,20 @@ function isRestartInterruptedFailureStep(step: FailureStepLike): boolean {
  *              phases skipped after an earlier failure have no logs to inspect.
  *              Pass an empty array if step detail is unavailable — the
  *              builder degrades to a generic inspect/status prompt.
+ * @param authoredSteps Ordered step definitions from the goal's frozen workflow
+ *              snapshot. Guidance is joined only when result index, name, and
+ *              type all match, so missing or drifted definitions fail closed.
  */
 export function buildVerificationFailureMessage(
 	gateId: string,
 	steps: ReadonlyArray<FailureStepLike>,
+	authoredSteps?: ReadonlyArray<AuthoredFailureStepLike>,
 ): string {
-	const failed = steps.filter((s) =>
-		!s.passed && !s.skipped && !isRestartInterruptedFailureStep(s),
-	);
+	const failed = steps
+		.map((step, index) => ({ step, index }))
+		.filter(({ step }) =>
+			!step.passed && !step.skipped && !isRestartInterruptedFailureStep(step),
+		);
 
 	const lines: string[] = [];
 	lines.push("**Gate verification FAILED**");
@@ -84,17 +96,29 @@ export function buildVerificationFailureMessage(
 
 	const head = failed.slice(0, MAX_STEP_NAMES_LISTED);
 	const overflow = failed.length - head.length;
-	const namesQuoted = head.map((s) => `\`${s.name}\``).join(", ");
+	const namesQuoted = head.map(({ step }) => `\`${step.name}\``).join(", ");
 	let summary = `**Failed gate:** \`${gateId}\` — ${namesQuoted}`;
 	if (overflow > 0) summary += ` and ${overflow} more`;
 	lines.push(summary);
 	lines.push("");
 	lines.push("Inspect the failed gate output before retrying or continuing.");
 
-	for (const step of failed) {
+	for (const { step, index } of failed) {
 		lines.push("");
 		lines.push(`**Failed step:** ${describeFailedStep(step)}`);
 		appendInspectBlock(lines, gateInspectCommand(gateId, step.name));
+
+		const authored = authoredSteps?.[index];
+		const guidance = step.status !== "waiting"
+			&& authored?.name === step.name
+			&& authored.type === step.type
+			? authored.failureGuidance
+			: undefined;
+		if (typeof guidance === "string" && guidance.trim().length > 0) {
+			lines.push("");
+			lines.push("**Workflow remediation guidance**");
+			lines.push(guidance);
+		}
 	}
 
 	lines.push("");

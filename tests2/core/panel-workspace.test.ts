@@ -21,6 +21,7 @@ import {
 	normalizeSidePanelTabs,
 	packPanelRefFromTabId,
 	packPanelTabId,
+	previewArtifactIdFromTab,
 	previewContentHashFromTab,
 	previewEntryLabel,
 	previewEntryTabId,
@@ -35,7 +36,9 @@ import {
 	rememberReviewDocumentIdentity,
 	reviewDocumentIdForTitle,
 	reviewDocumentIdFromPanelTab,
+	reviewIdFromPanelTab,
 	reviewPanelTabId,
+	reviewPanelTabIdFromReviewId,
 	setActivePanelTabIdForSession,
 	type PanelWorkspaceTab,
 } from "../../src/app/panel-workspace.ts";
@@ -85,6 +88,21 @@ function reviewTab(title = "Notes"): PanelWorkspaceTab {
 		legacyTab: "review",
 		source: { type: "review", title, reviewTitle: title },
 	};
+}
+
+function reviewWorkspaceInput(reviewGroups: Array<Record<string, unknown>>): Parameters<typeof buildPanelWorkspaceTabs>[0] {
+	return {
+		sessionId: "s1",
+		isPreviewSession: false,
+		previewEntry: "",
+		activeProposalTypes: [],
+		assistantProposalType: null,
+		reviewTitles: [],
+		reviewGroups,
+		reviewPanelOpen: true,
+		inboxPanelOpen: false,
+		inboxHasPending: false,
+	} as unknown as Parameters<typeof buildPanelWorkspaceTabs>[0];
 }
 
 function inboxTab(): PanelWorkspaceTab {
@@ -140,6 +158,75 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(firstContentPanelTab(tabs)?.id, INBOX_PANEL_TAB_ID);
 	});
 
+	it("creates one reviewId-keyed primary tab for a multi-file review", () => {
+		const tabs = buildPanelWorkspaceTabs(reviewWorkspaceInput([
+			{
+				reviewId: "review-alpha",
+				title: "Architecture",
+				activeFileId: "file-api",
+				files: [
+					{ fileId: "file-api", title: "api.md", markdown: "# API" },
+					{ fileId: "file-ui", title: "ui.md", markdown: "# UI" },
+					{ fileId: "file-tests", title: "tests.md", markdown: "# Tests" },
+				],
+			},
+		]));
+		const reviewTabs = tabs.filter((tab) => tab.kind === "review");
+
+		assert.equal(reviewTabs.length, 1, "REVIEW_GROUP_PRIMARY_TAB: files must not become primary workspace tabs");
+		assert.equal(reviewTabs[0].id, reviewPanelTabIdFromReviewId("review-alpha"));
+		assert.equal((reviewTabs[0].source as Record<string, unknown>).reviewId, "review-alpha");
+		assert.equal(reviewTabs[0].title, "Review: Architecture");
+	});
+
+	it("keeps reviews with duplicate display titles as distinct reviewId-keyed primary tabs", () => {
+		const tabs = buildPanelWorkspaceTabs(reviewWorkspaceInput([
+			{
+				reviewId: "review-first",
+				title: "Findings",
+				activeFileId: "first-file",
+				files: [{ fileId: "first-file", title: "notes.md", markdown: "First" }],
+			},
+			{
+				reviewId: "review-second",
+				title: "Findings",
+				activeFileId: "second-file",
+				files: [{ fileId: "second-file", title: "notes.md", markdown: "Second" }],
+			},
+		]));
+		const reviewTabs = tabs.filter((tab) => tab.kind === "review");
+
+		assert.equal(reviewTabs.length, 2, "REVIEW_GROUP_PRIMARY_TAB: duplicate review titles must not collapse");
+		assert.deepEqual(reviewTabs.map((tab) => tab.id), ["review:review-first", "review:review-second"]);
+		assert.deepEqual(reviewTabs.map((tab) => tab.label), ["Review: Findings", "Review: Findings"]);
+	});
+
+	it("never exposes review files as primary workspace tab identities", () => {
+		const tabs = buildPanelWorkspaceTabs(reviewWorkspaceInput([
+			{
+				reviewId: "review-one",
+				title: "One",
+				activeFileId: "shared-file",
+				files: [
+					{ fileId: "shared-file", title: "Shared", markdown: "One shared" },
+					{ fileId: "one-extra", title: "Extra", markdown: "One extra" },
+				],
+			},
+			{
+				reviewId: "review-two",
+				title: "Two",
+				activeFileId: "shared-file",
+				files: [{ fileId: "shared-file", title: "Shared", markdown: "Two shared" }],
+			},
+		]));
+		const reviewTabs = tabs.filter((tab) => tab.kind === "review");
+		const primaryIds = reviewTabs.map((tab) => tab.id);
+
+		assert.deepEqual(primaryIds, ["review:review-one", "review:review-two"], "REVIEW_GROUP_PRIMARY_TAB: only review identities may be primary");
+		assert.equal(primaryIds.some((id) => id.includes("shared-file") || id.includes("one-extra")), false);
+		assert.equal(reviewTabs.some((tab) => "fileId" in (tab.source as Record<string, unknown>)), false);
+	});
+
 	it("findPanelTab is exact-id keyed except legacy preview/review migration", () => {
 		const tabs = buildPanelWorkspaceTabs({
 			sessionId: "s1",
@@ -186,8 +273,10 @@ describe("panel workspace side-pane tab contract", () => {
 		rememberReviewDocumentIdentity("Findings", "review-doc:s1:abc");
 		const tab = reviewTab("Findings");
 		assert.equal(tab.id, "review:review-doc%3As1%3Aabc");
-		assert.equal(reviewDocumentIdFromPanelTab(tab), "review-doc:s1:abc");
+		assert.equal(reviewIdFromPanelTab(tab), "review-doc:s1:abc");
+		assert.equal(reviewDocumentIdFromPanelTab(tab), "review-doc:s1:abc", "legacy getter remains a compatibility alias");
 		assert.equal(findPanelTab([tab], "review:Findings")?.id, tab.id);
+		assert.equal(reviewPanelTabIdFromReviewId("opaque id"), "review:opaque%20id");
 	});
 
 	it("active helpers never return or store chat", () => {
@@ -364,6 +453,12 @@ describe("panel workspace side-pane tab contract", () => {
 });
 
 describe("panel workspace preview tab compatibility", () => {
+	it("uses immutable artifact identity for current and historical preview tabs", () => {
+		assert.equal(previewArtifactIdFromTab(previewTab(previewEntryTabId("live.html"), { live: true, artifactId: "artifact-live" })), "artifact-live");
+		assert.equal(previewArtifactIdFromTab(previewTab(previewVersionedTabId("old.html", 1), { artifactId: "artifact-source" }, { artifactId: "artifact-state" })), "artifact-state");
+		assert.equal(previewArtifactIdFromTab(previewTab(previewEntryTabId("fallback.html"), { live: true })), "");
+	});
+
 	it("distinguishes current preview tabs from historical preview tool-card tabs", () => {
 		assert.equal(isLivePreviewTab(previewTab("preview")), true);
 		assert.equal(isLivePreviewTab(previewTab("preview:live")), true);

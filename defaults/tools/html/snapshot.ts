@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 /**
  * Shared sentinels and helpers for the `preview_open` snapshot block.
  *
@@ -15,19 +17,29 @@
  *   v2 (legacy file-mode, just a path on disk — read-only, archived sessions only):
  *     __preview_snapshot_v2__\n{"kind":"file","path":"/abs/path/to/report.html"}\n
  *
- *   v3 (current — per-session preview mount; constant ≤250 byte payload;
- *   `artifactId`, `entry`, and `contentHash` are included when they fit the cap):
+ *   v3 (current — per-session preview mount; entire block is at most 250 UTF-8
+ *   bytes; valid `artifactId` and `contentHash` are never dropped to fit it):
  *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}\n
+ *
+ *   `entry` is always the raw single filename from the mount, never a
+ *   percent-encoded segment. Full marker routes encode that raw value exactly
+ *   once; compacting compares the URL suffix in its raw or encoded form, so
+ *   literal percent sequences and non-ASCII filenames round-trip unchanged.
  *
  *   The `path` field normally carries the project-root-relative identifier
  *   (`<sessionId>/<entry>`, forward slashes on every OS) rather than the
- *   host-absolute path. When artifact metadata plus the SHA-256 hash would
- *   exceed the 250 B cap, the builder emits compact aliases (`e`/`a`/`h`) and
- *   may shorten `path` to the entry filename because `entry` is explicit.
- *   Block size is therefore bounded by content shape, not by where
- *   `bobbitStateDir()` lives on disk. Archived sessions that recorded the
- *   legacy host-absolute path still parse — `parseSnapshot` only requires a
- *   non-empty string.
+ *   host-absolute path. To retain validated hash and artifact identity within
+ *   the cap, the builder can use `/preview/<sid>/`, artifact-id aliases (`aid`
+ *   or `a`), and omit duplicated `path`. For a long filename it can omit
+ *   `entry` only when both identities survive: the renderer may then recover
+ *   the raw filename from the trusted parameters of that same `preview_open`
+ *   call. Other stored markers require their own safe entry; a compact
+ *   directory URL never independently becomes a valid preview route.
+ *
+ *   If no lossless form fits, the builder throws `PREVIEW_SNAPSHOT_CAP` rather
+ *   than writing a truncated marker or silently dropping replay identity.
+ *   Archived sessions that recorded the legacy host-absolute path still parse
+ *   — `parseSnapshot` only requires a non-empty string.
  *
  * v1 and v2 marker constants and parser arms are preserved for archived-session
  * compatibility. New code emits **only** v3 — the v1/v2 *builder* functions have
@@ -69,7 +81,7 @@ export function extractSnapshot(text: string): string {
 export type ParsedSnapshot =
 	| { kind: "inline"; html: string }
 	| { kind: "file"; path: string }
-	| { kind: "preview"; url: string; path: string; entry?: string; contentHash?: string; artifactId?: string };
+	| { kind: "preview"; url: string; path?: string; entry?: string; contentHash?: string; artifactId?: string };
 
 /**
  * Parse a snapshot text block into a discriminated union. Returns null if
@@ -95,9 +107,9 @@ function normalizeArtifactId(value: unknown): string | undefined {
 
 function normalizeEntry(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
-	const entry = value.trim();
-	if (!entry || entry.length > 255) return undefined;
-	if (entry.includes("\0") || entry.includes("/") || entry.includes("\\")) return undefined;
+	const entry = value;
+	if (!entry || entry.length > 255 || entry === "." || entry === "..") return undefined;
+	if (/[\\/\u0000-\u001f\u007f]/u.test(entry)) return undefined;
 	return entry;
 }
 
@@ -126,16 +138,16 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
 				parsed &&
 				parsed.kind === "preview" &&
 				typeof parsed.url === "string" && parsed.url.length > 0 &&
-				typeof parsed.path === "string" && parsed.path.length > 0
+				(parsed.path === undefined || (typeof parsed.path === "string" && parsed.path.length > 0))
 			) {
 				const contentHash = normalizeContentHash(parsed.contentHash);
-				const artifactId = normalizeArtifactId(parsed.artifactId ?? parsed.artifact_id ?? parsed.aid);
+				const artifactId = normalizeArtifactId(parsed.artifactId ?? parsed.artifact_id ?? parsed.aid ?? parsed.a);
 				const entry = normalizeEntry(parsed.entry ?? parsed.e);
-				const result: { kind: "preview"; url: string; path: string; entry?: string; contentHash?: string; artifactId?: string } = {
+				const result: { kind: "preview"; url: string; path?: string; entry?: string; contentHash?: string; artifactId?: string } = {
 					kind: "preview",
 					url: parsed.url,
-					path: parsed.path,
 				};
+				if (typeof parsed.path === "string") result.path = parsed.path;
 				if (entry) result.entry = entry;
 				if (contentHash) result.contentHash = contentHash;
 				if (artifactId) result.artifactId = artifactId;
@@ -152,15 +164,14 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
 /**
  * Build a v3 marker block for a per-session preview-mount entry.
  *
- * Pre-condition: total result block must be ≤ 250 bytes (the unit test
- * asserts this for typical session id + `report.html`).
+ * Every returned block is at most 250 UTF-8 bytes. Valid caller-supplied
+ * identity is never omitted to meet that cap: when no lossless form fits, this
+ * throws `PREVIEW_SNAPSHOT_CAP` so `preview_open` can report the filename.
  *
  * @param url       Content-origin URL (always `/preview/<sid>/<entry>`).
  * @param entryPath The path identifier shown in the block. Callers should pass
  *                  the project-root-relative form (`<sid>/<entry>`) when
- *                  available. Artifact-backed blocks may compact `path` to the
- *                  entry filename if needed to keep `contentHash` under the
- *                  250 B cap.
+ *                  available.
  */
 export function buildPreviewSnapshotV3Block(
 	url: string,
@@ -171,56 +182,94 @@ export function buildPreviewSnapshotV3Block(
 	const hash = normalizeContentHash(contentHash);
 	const artifactId = normalizeArtifactId(options?.artifactId);
 	const entry = normalizeEntry(options?.entry);
-	// Payloads carry `string | undefined` so we can stage "omit artifactId,
-	// use aid instead" variants without an `as never` cast. Undefined fields
-	// are stripped before serialisation below.
-	const payloads: Array<Record<string, string | undefined>> = [];
-	const addPayload = (payload: Record<string, string | undefined>) => {
-		const key = JSON.stringify(payload);
-		if (!payloads.some(p => JSON.stringify(p) === key)) payloads.push(payload);
-	};
 	const shortUrl = entry ? compactPreviewUrl(url, entry) : undefined;
+	// Mount responses contain the raw filename in `url`, while marker `entry`
+	// deliberately remains raw. Encode that filename exactly once for every full
+	// route stored in the marker so literal percent sequences cannot be decoded
+	// into a different file when the route is later served.
+	const storedUrl = shortUrl && entry ? `${shortUrl}${encodeURIComponent(entry)}` : url;
+	const payloads: Array<Record<string, string>> = [];
+	const addPayload = (payload: Record<string, string>) => {
+		const key = JSON.stringify(payload);
+		if (!payloads.some(candidate => JSON.stringify(candidate) === key)) payloads.push(payload);
+	};
 
-	const basePayload: Record<string, string | undefined> = { kind: "preview", url, path: entryPath };
-	if (entry) basePayload.entry = entry;
-	if (artifactId) basePayload.artifactId = artifactId;
-	if (hash) addPayload({ ...basePayload, contentHash: hash });
+	const withMetadata = (base: Record<string, string>) => hash ? { ...base, contentHash: hash } : base;
+	const addArtifact = (base: Record<string, string>, key: "artifactId" | "aid" | "a") => {
+		if (artifactId) addPayload({ ...base, [key]: artifactId });
+	};
+	const addArtifactAliases = (base: Record<string, string>) => {
+		if (!artifactId) {
+			addPayload(base);
+			return;
+		}
+		addArtifact(base, "artifactId");
+		addArtifact(base, "aid");
+		addArtifact(base, "a");
+	};
+	const fullRoute = withMetadata({
+		kind: "preview",
+		url: storedUrl,
+		path: entryPath,
+		...(entry ? { entry } : {}),
+	});
 
-	if (entry && hash) {
-		const compactFull: Record<string, string | undefined> = {
-			kind: "preview",
-			url: shortUrl || url,
-			path: entry,
-			entry,
-			contentHash: hash,
-		};
-		if (artifactId) compactFull.artifactId = artifactId;
-		addPayload(compactFull);
-		if (artifactId) addPayload({ ...compactFull, artifactId: undefined, aid: artifactId });
+	// The original full route with the canonical artifactId key remains first for
+	// backwards-compatible payload selection. When it does not fit, a compact
+	// route is more valuable than a shorter full-route artifact-key alias: the
+	// compact route protects preview reopen and preserves the raw entry.
+	if (artifactId) addArtifact(fullRoute, "artifactId");
+	else addPayload(fullRoute);
+
+	if (shortUrl && entry) {
+		// The compact URL and raw entry are an intentional writer/reader pair: the
+		// reader encodes the raw entry exactly once when reconstructing the route.
+		const compactRoute = withMetadata({ kind: "preview", url: shortUrl, path: entry, entry });
+		addArtifactAliases(compactRoute);
+
+		// Try the full route's shorter artifact-key aliases only after every compact
+		// shape that carries an explicit entry. This ordering avoids selecting a
+		// barely-fitting full route over a robust compact snapshot.
+		if (artifactId) {
+			addArtifact(fullRoute, "aid");
+			addArtifact(fullRoute, "a");
+		}
+
+		// `path` duplicates `entry` in a compact marker, so remove it before
+		// removing entry. This is essential for non-ASCII names under the byte cap.
+		addArtifactAliases(withMetadata({ kind: "preview", url: shortUrl, entry }));
+		// The final lossless compact form relies on preview_open's trusted entry
+		// parameter. It is safe only when both identities survive for artifact
+		// replay; otherwise a missing entry would create an unrecoverable preview.
+		if (hash && artifactId) addArtifactAliases(withMetadata({ kind: "preview", url: shortUrl }));
+	} else if (artifactId) {
+		// No safe compact route exists, so the full route aliases are the only
+		// lossless alternatives to an explicit cap failure.
+		addArtifact(fullRoute, "aid");
+		addArtifact(fullRoute, "a");
 	}
-
-	addPayload(basePayload);
-	if (entry) {
-		const compactNoHash: Record<string, string | undefined> = { kind: "preview", url: shortUrl || url, path: entry, entry };
-		if (artifactId) compactNoHash.artifactId = artifactId;
-		addPayload(compactNoHash);
-		if (artifactId) addPayload({ ...compactNoHash, artifactId: undefined, aid: artifactId });
-	}
-	addPayload({ kind: "preview", url, path: entryPath });
 
 	for (const payload of payloads) {
-		for (const [key, value] of Object.entries(payload)) {
-			if (value === undefined) delete payload[key];
-		}
 		const block = PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify(payload) + "\n";
-		if (block.length <= 250) return block;
+		if (Buffer.byteLength(block, "utf8") <= 250) return block;
 	}
 
-	return PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify({ kind: "preview", url, path: entryPath }) + "\n";
+	const subject = entry ?? entryPath;
+	throw new Error(
+		`PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity for ${JSON.stringify(subject)} within the 250 UTF-8 byte snapshot cap`,
+	);
 }
 
+/**
+ * `entry` is the raw filename supplied by the preview mount, not a URI-encoded
+ * route segment. The mount URL may contain either form, so compare equivalent
+ * raw and encoded segments rather than matching a raw filename against an
+ * encoded URL. Marker construction always stores the raw entry separately and
+ * encodes it exactly once when it writes a full route.
+ */
 function compactPreviewUrl(url: string, entry: string): string | undefined {
-	const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const match = new RegExp(`^(/preview/[A-Fa-f0-9-]{36}/)${escaped}$`).exec(url);
-	return match ? match[1] : undefined;
+	const match = /^(\/preview\/[A-Fa-f0-9-]{36}\/)(.*)$/.exec(url);
+	if (!match) return undefined;
+	const [, directoryUrl, storedEntry] = match;
+	return storedEntry === entry || storedEntry === encodeURIComponent(entry) ? directoryUrl : undefined;
 }

@@ -30,7 +30,7 @@ function stubSleep(_ms: number, signal: AbortSignal): Promise<void> {
 	return Promise.resolve();
 }
 
-function okResult(branch = "main"): GitStatusResult {
+function okResult(branch = "main"): Extract<GitStatusResult, { kind: "ok" }> {
 	return {
 		kind: "ok",
 		data: {
@@ -168,6 +168,60 @@ describe("runWidgetGitRefresh — quiet recheck integration", () => {
 		assert.deepEqual(cacheWrites, ["no"], "cache written 'no'");
 		// Not a quiet-'no' recheck (quiet was false), so finally clears loading.
 		assert.equal(ai.gitStatusLoading, false, "loading cleared in finally");
+	});
+
+	it("cold coordinator state stays unknown/loading without retries or hidden caching", async () => {
+		const { ai, loadingWrites } = makeWidget({ gitRepoKnown: "unknown" });
+		let fetches = 0;
+		const cacheWrites: Array<"yes" | "no" | "hidden"> = [];
+		const pendingMetadata: unknown[] = [];
+		const ctl = new AbortController();
+
+		await runWidgetGitRefresh(ai, {
+			signal: ctl.signal,
+			quiet: false,
+			fetch: async () => {
+				fetches++;
+				return { kind: "pending", metadata: { observedAt: 123, stale: true, source: "repository" } };
+			},
+			sleep: stubSleep,
+			isStale: () => false,
+			applyOk,
+			onPending: (metadata) => pendingMetadata.push(metadata),
+			onCache: (state) => cacheWrites.push(state),
+		});
+
+		assert.equal(fetches, 1, "cold SWR joins the coordinator instead of client-side retrying");
+		assert.equal(ai.gitRepoKnown, "unknown", "cold state is not classified as hidden or not-a-repo");
+		assert.equal(ai.gitStatus, undefined, "cold metadata does not invent empty Git data");
+		assert.equal(ai.gitStatusLoading, true, "first-load skeleton remains until the completion broadcast");
+		assert.deepEqual(cacheWrites, [], "cold state is never persisted as hidden");
+		assert.deepEqual(pendingMetadata, [{ observedAt: 123, stale: true, source: "repository" }]);
+		assert.deepEqual(loadingWrites, [true], "pending completion does not clear the first-load skeleton");
+	});
+
+	it("cold coordinator metadata preserves already-rendered last-good state", async () => {
+		const current = okResult("feature/retained");
+		const { ai } = makeWidget({
+			gitRepoKnown: "yes",
+			gitStatus: current.data,
+			branch: "feature/retained",
+		});
+		const ctl = new AbortController();
+
+		await runWidgetGitRefresh(ai, {
+			signal: ctl.signal,
+			quiet: false,
+			fetch: async () => ({ kind: "pending", metadata: { stale: true, source: "repository" } }),
+			sleep: stubSleep,
+			isStale: () => false,
+			applyOk,
+			onCache: () => assert.fail("pending state must not replace the last-good cache"),
+		});
+
+		assert.equal(ai.gitRepoKnown, "yes");
+		assert.equal(ai.gitStatus, current.data);
+		assert.equal(ai.branch, "feature/retained");
 	});
 
 	it("quiet=true but gitRepoKnown already 'unknown' is NOT quiet (skeleton allowed)", async () => {

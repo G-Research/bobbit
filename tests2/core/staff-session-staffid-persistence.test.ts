@@ -111,7 +111,7 @@ describe("staff session staffId persistence", () => {
 		memfs = createSessionStoreMemFs();
 	});
 
-	it("createSession must thread staffId through plan-builder to persisted record (regression)", () => {
+	it("createSession must thread staffId through plan-builder to persisted record (regression)", async () => {
 		// ── Part A: source-level guards on the two plan literals inside
 		// `SessionManager.createSession`. Both must forward `opts?.staffId`.
 		// This is the part that FAILS on master — neither plan builder had
@@ -150,7 +150,7 @@ describe("staff session staffId persistence", () => {
 			lastActivity: Date.now(),
 			staffId: "staff-x",
 		});
-		store.flush();
+		await store.flushAsync();
 
 		const reloaded = new SessionStore(stateDir, memfs).get("sess-spawn-1");
 		assert.ok(reloaded, "session must be reloaded from disk");
@@ -167,7 +167,7 @@ describe("staff session staffId persistence", () => {
 		);
 	});
 
-	it("staffId in the persistOnce payload round-trips correctly (forward guard)", () => {
+	it("staffId in the persistOnce payload round-trips correctly (forward guard)", async () => {
 		// Forward-looking guard: if a future refactor drops the
 		// `staffId: plan.staffId` line from `persistOnce`
 		// (src/server/agent/session-setup.ts:556), this fails.
@@ -181,7 +181,7 @@ describe("staff session staffId persistence", () => {
 			lastActivity: 1,
 			staffId: "staff-y",
 		});
-		store.flush();
+		await store.flushAsync();
 
 		const reloaded = new SessionStore(stateDir, memfs).get("sess-2")!;
 		assert.equal(reloaded.staffId, "staff-y", "staffId must round-trip when supplied in put payload");

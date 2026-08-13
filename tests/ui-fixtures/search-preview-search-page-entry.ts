@@ -6,6 +6,7 @@ type FetchLogEntry = { url: string; method: string; body: unknown };
 
 let results: SearchResultItem[] = [];
 let total = 0;
+let searchResponses: Array<{ status?: number; reason?: string; state?: string; retryAfter?: string; results?: SearchResultItem[]; total?: number }> = [];
 let fetchLog: FetchLogEntry[] = [];
 
 class FixtureWebSocket {
@@ -23,10 +24,10 @@ class FixtureWebSocket {
 localStorage.setItem("gateway.url", "http://fixture.test");
 localStorage.setItem("gateway.token", "fixture-token");
 
-function response(body: unknown, status = 200): Response {
+function response(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
 	return new Response(JSON.stringify(body), {
 		status,
-		headers: { "Content-Type": "application/json" },
+		headers: { "Content-Type": "application/json", ...headers },
 	});
 }
 
@@ -50,7 +51,15 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const method = (init?.method || "GET").toUpperCase();
 	fetchLog.push({ url, method, body: parseBody(init) });
 	if (url.startsWith("/api/search?")) {
-		return response({ results, total: total || results.length });
+		const next = searchResponses.shift();
+		if (next?.status === 503) {
+			return response(
+				{ error: "search-unavailable", reason: next.reason || "degraded", state: next.state || "ready" },
+				503,
+				next.retryAfter ? { "Retry-After": next.retryAfter } : {},
+			);
+		}
+		return response({ results: next?.results ?? results, total: next?.total ?? (total || results.length) }, next?.status ?? 200);
 	}
 	if (url === "/api/search/rebuild" && method === "POST") return response({ queued: true }, 202);
 	return response({});
@@ -68,9 +77,11 @@ setRenderApp(doRender);
 	query?: string;
 	results?: SearchResultItem[];
 	total?: number;
+	searchResponses?: Array<{ status?: number; reason?: string; state?: string; retryAfter?: string; results?: SearchResultItem[]; total?: number }>;
 }) => {
 	results = opts.results || [];
 	total = opts.total ?? results.length;
+	searchResponses = [...(opts.searchResponses || [])];
 	fetchLog = [];
 	resetSearchPage();
 	window.location.hash = opts.query ? `#/search?q=${encodeURIComponent(opts.query)}` : "#/search";

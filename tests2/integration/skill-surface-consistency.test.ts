@@ -22,9 +22,9 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { waitForHealth, apiFetch, registerProject } from "./_e2e/e2e-setup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const P_SKILL = "only-in-p";
 const R_SKILL = "only-in-custom-dir";
@@ -53,12 +53,25 @@ async function fetchNames(path: string): Promise<string[]> {
 	return (data.skills ?? []).map((s: { name: string }) => s.name);
 }
 
-test.beforeAll(async () => {
-	await waitForHealth();
+function removeOwnedRoot(root: string | undefined): unknown {
+	if (!root) return undefined;
+	try {
+		rmSync(root, { recursive: true, force: true });
+	} catch (error) {
+		return error;
+	}
+	return undefined;
+}
 
-	const stamp = `${process.pid}-${Date.now()}`;
-	pRoot = join(tmpdir(), `bobbit-skill-surface-p-${stamp}`);
-	qRoot = join(tmpdir(), `bobbit-skill-surface-q-${stamp}`);
+test.beforeAll(async () => {
+	// Each fixture root has a separate atomic owner so partial setup cannot
+	// consume a sibling fixture created by another coordinator.
+	pRoot = mkdtempSync(join(tmpdir(), "bobbit-skill-surface-p-"));
+	qRoot = mkdtempSync(join(tmpdir(), "bobbit-skill-surface-q-"));
+	rRoot = mkdtempSync(join(tmpdir(), "bobbit-skill-surface-r-"));
+	rCustomDir = mkdtempSync(join(tmpdir(), "bobbit-skill-custom-dir-"));
+
+	await waitForHealth();
 
 	// Project-only skill lives under P's rootPath. Q gets no custom skill.
 	writeSkill(pRoot, P_SKILL, "A skill that exists only under project P");
@@ -66,14 +79,12 @@ test.beforeAll(async () => {
 
 	// Project R exercises a PROJECT-SCOPE custom skill directory (Facet 1b): the
 	// skill lives in a directory OUTSIDE R's rootPath, wired via config_directories.
-	rRoot = join(tmpdir(), `bobbit-skill-surface-r-${stamp}`);
-	rCustomDir = join(tmpdir(), `bobbit-skill-custom-dir-${stamp}`);
 	mkdirSync(join(rRoot, ".claude", "skills"), { recursive: true });
 	writeSkill(rCustomDir, R_SKILL, "A skill wired via a project-scope custom directory");
 
-	const p = await registerProject({ name: `skill-surface-p-${stamp}`, rootPath: pRoot, seedWorkflows: false });
-	const q = await registerProject({ name: `skill-surface-q-${stamp}`, rootPath: qRoot, seedWorkflows: false });
-	const r = await registerProject({ name: `skill-surface-r-${stamp}`, rootPath: rRoot, seedWorkflows: false });
+	const p = await registerProject({ name: `skill-surface-p-${basename(pRoot)}`, rootPath: pRoot, seedWorkflows: false });
+	const q = await registerProject({ name: `skill-surface-q-${basename(qRoot)}`, rootPath: qRoot, seedWorkflows: false });
+	const r = await registerProject({ name: `skill-surface-r-${basename(rRoot)}`, rootPath: rRoot, seedWorkflows: false });
 	pProjectId = p.id;
 	qProjectId = q.id;
 	rProjectId = r.id;
@@ -83,6 +94,13 @@ test.afterAll(async () => {
 	if (pProjectId) await apiFetch(`/api/projects/${pProjectId}`, { method: "DELETE" }).catch(() => {});
 	if (qProjectId) await apiFetch(`/api/projects/${qProjectId}`, { method: "DELETE" }).catch(() => {});
 	if (rProjectId) await apiFetch(`/api/projects/${rProjectId}`, { method: "DELETE" }).catch(() => {});
+
+	const cleanupErrors = [pRoot, qRoot, rRoot, rCustomDir]
+		.map(removeOwnedRoot)
+		.filter((error): error is unknown => error !== undefined);
+	if (cleanupErrors.length > 0) {
+		throw new AggregateError(cleanupErrors, "Failed to clean skill-surface fixture roots");
+	}
 });
 
 test.describe("Skill surface consistency — page details vs composer autocomplete", () => {

@@ -188,6 +188,27 @@ describe("AgentInterface stream bridge", () => {
 		assert.equal(session.streamFn, wrapped, "re-subscribing must preserve the existing default wrapper");
 	});
 
+	it("routes message_update only to the rAF-batched streaming container", async () => {
+		const session = new FixtureSession([]);
+		session.state.isStreaming = true;
+		const { el } = await mountSession(session);
+		const streamingContainer = (el as any)._streamingContainer;
+		assert.ok(streamingContainer, "streaming container should be mounted");
+
+		let hostUpdates = 0;
+		const originalRequestUpdate = el.requestUpdate.bind(el);
+		el.requestUpdate = () => {
+			hostUpdates++;
+			originalRequestUpdate();
+		};
+
+		const message = { id: "stream-1", role: "assistant", content: [{ type: "text", text: "partial" }] };
+		session.emit({ type: "message_update", message });
+
+		assert.equal(hostUpdates, 0, "cumulative token frames must not re-render the whole AgentInterface transcript");
+		assert.equal(streamingContainer._pendingMessage, message, "the streaming container should still receive the latest frame");
+	});
+
 	it("installs the proxy wrapper on Pi Agent.streamFunction without repeated wrapping", async () => {
 		const session = new Agent({ streamFn: (() => undefined) as never });
 		const { el } = await mountSession(session);

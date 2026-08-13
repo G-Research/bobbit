@@ -41,16 +41,16 @@ The harness generates `BOBBIT_E2E_RUN_ID`; callers must not supply it or any run
 
 Synchronize on the event that proves the behavior: a health/readiness response, route or hydration completion, mutation registered before the action, correlated stream marker, settled output condition, focus boundary, media completion, or process/terminal close. Cleanup must wait for the resource it owns to settle.
 
-Qualification is retry-free. Unit qualification uses `npm run test:unit -- --retry=0`. Browser and E2E normal developer runs retain `retries: 3`; E2E Group A is naturally retryless because its `tsx --test` invocation has no retry control. `BOBBIT_V2_RETRY_FREE=1` changes Groups B, C, and D to zero retries.
+Qualification is retry-free. The default `retry: 3` / `retries: 3` settings protect ordinary developer and workflow runs; they are not qualification evidence. The exact `BOBBIT_V2_RETRY_FREE=1` control makes the unit configuration and retry-capable browser/E2E groups use zero retries. E2E Group A is already retryless because its `tsx --test` invocation has no retry control.
 
-Run browser and E2E qualification with these exact commands:
+Run qualification only through these repository wrappers:
 
-| Shell | Browser | E2E |
-| --- | --- | --- |
-| POSIX | `BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0` | `BOBBIT_V2_RETRY_FREE=1 npm run test:e2e` |
-| PowerShell | `$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:browser -- --retries=0` | `$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:e2e` |
+| Shell | Unit | Browser | E2E |
+| --- | --- | --- | --- |
+| POSIX | `BOBBIT_V2_RETRY_FREE=1 npm run test:unit` | `BOBBIT_V2_RETRY_FREE=1 npm run test:browser` | `BOBBIT_V2_RETRY_FREE=1 npm run test:e2e` |
+| PowerShell | `$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:unit` | `$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:browser` | `$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:e2e` |
 
-The explicit browser flag is forwarded by its wrapper; the environment also makes the Playwright configuration retryless. Normal developer retries do not demonstrate stability and must not be used to qualify a change.
+A qualification record must show zero observed retries. Direct runner flags may aid diagnosis, but they are not qualification authority.
 
 ### Prohibited flake masking
 

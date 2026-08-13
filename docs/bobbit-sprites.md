@@ -8,7 +8,7 @@ The **Bobbit** is a squishy green pixel-art blob — think Stardew Valley slime 
 - **Chat blob** — a larger 3.5× scale animated character in the `StreamingMessageContainer`, expressing the agent's activity state through Disney-style animations
 - **Role page** — inline blobs at arbitrary sizes inside role cards and the accessory picker
 
-The bobbit is drawn entirely with CSS `box-shadow` — no images, no SVGs. Each pixel is a 1px box-shadow at integer coordinates, scaled up via `transform: scale()`. Accessories (crown, bandana, magnifying glass, etc.) are separate overlay `<div>`s with their own box-shadow pixel art, counter-hue-rotated to maintain color stability across session identities.
+The bobbit uses one canonical pixel grid across renderers. Sidebar sprites and accessories use CSS `box-shadow`; chat and inline body sprites use a device-pixel canvas so eye frames can be swapped atomically without resampling artifacts. There are no image or SVG assets. Accessories remain separate overlay `<div>`s and are counter-hue-rotated to maintain color stability across session identities.
 
 ---
 
@@ -129,6 +129,7 @@ interface AccessoryDefinition {
 | `none` | None | — | false | No accessory | — |
 | `crown` | Crown | Head-worn | **true** | Gold crown with three points and a red jewel. Yellow (`#fef08a`, `#fde047`) and gold (`#ca8a04`, `#eab308`) tones. | Adds 4px top padding to blob container; `translateX(-0.5px)` nudge in sidebar |
 | `bandana` | Bandana | Head-worn | false | Red headband (`#ef4444`, `#dc2626`, `#b91c1c`) with a trailing knot/tail on the right side. | Tail hides when facing right; shifts up (`translate: 0 -1.75px`) to sit on forehead; has dedicated `blob-bandana-shadow` keyframes that sync tail visibility with eye direction |
+| `ponytail` | Ponytail | Head-worn | false | Centre-parted curtain fringe in slate (`#0e0d18` rim, `#454363` mass, `#7c7aa4` sheen) with a red-tied tail on the right (x10/x11, the bandana's columns) and translucent stubble on rows 6-7. | Parting, forehead and mouth are drawn by **omission** — never bake body colour in, or it breaks under hue rotation. `blob-ponytail-shadow` swings the tail to negative x and hides the far curtain when facing right (see below); `blob-ponytail-adjust` adds the headset's turn nudge. CSS is **generated** — see `design/gen-ponytail-animated.mjs` |
 | `magnifier` | Magnifying Glass | Hand-held | false | Circular glass lens (light blue `#87ceeb`, `#b0e0f0`, `#e0f4ff`) with brown handle (`#8b4513`). | Uses `magnifier-depth-busy/idle` z-index keyframes to go behind body when facing right |
 | `palette` | Paint Palette | Hand-held | false | Brown wooden palette (`#a16207`) with three paint dots: red, green, blue. | Depth keyframes; `translate(-0.5px, -0.5px)` offset |
 | `pencil` | Pencil | Hand-held | false | Yellow pencil body (`#fde047`, `#fbbf24`) with pink eraser (`#f9a8d4`, `#ec4899`), silver ferrule (`#9ca3af`, `#d1d5db`), wood section (`#f4a460`, `#cd853f`), and graphite tip (`#4b5563`). | Depth keyframes |
@@ -138,7 +139,33 @@ interface AccessoryDefinition {
 
 ### Head-worn vs hand-held
 
-- **Head-worn** (crown, bandana): Positioned on top of/around the bobbit's head. Follow the body transform directly. The bandana has special box-shadow keyframes to hide its trailing tail when the bobbit faces right.
+- **Head-worn** (crown, bandana, ponytail): Positioned on top of/around the bobbit's head. Follow the body transform directly. The bandana has special box-shadow keyframes to hide its trailing tail when the bobbit faces right.
+
+#### Right-facing occlusion (bandana / headset / ponytail)
+
+Three accessories change shape when the bobbit looks right, all on the same phase
+stops — `0 / 34 / 57 / 60 / 65 / 96 / 98` — synced to `blob-busy-eyes`. Note the
+**eyes-up-right beat at 60% gets the same treatment as eyes-right at 34%**: the head
+is still turned, so the far side is still hidden. Missing that is an easy bug.
+
+| Accessory | On the turn |
+|---|---|
+| `bandana` | Tail hidden; thinned at eyes-up so the pupils show |
+| `headset` | Far/right ear cup hidden; whole overlay nudged `2px` right |
+| `ponytail` | Tail **swings to negative x** (the head rotates right, so the back of it moves left in screen space), far curtain hidden, right-cheek stubble flattens to row 7 |
+
+**These keyframes are not masks.** Each re-declares the accessory's entire
+`box-shadow` per phase, so they cannot be shared between accessories — only the
+phase boundaries are reusable knowledge. `blob-bandana-shadow` is 7 near-identical
+copies of ~40 pixels. The ponytail's copies are **generated** by
+`design/gen-ponytail-animated.mjs` and spliced in by
+`design/apply-ponytail-css.mjs`, so edit the pixel source and re-run rather than
+hand-editing the lists in `app.css`.
+
+> **Refactor worth doing:** moving the tail to its own overlay element would let one
+> shared visibility keyframe replace all of this duplication. It rewrites shipped
+> bandana CSS, so land a browser test pinning tail visibility per phase first —
+> `blob-bandana-shadow` currently has none.
 - **Hand-held** (magnifier, palette, pencil, shield, set-square, flask): Positioned on the right side of the bobbit body. Use **depth keyframes** (`magnifier-depth-busy`, `magnifier-depth-idle`) to toggle `z-index` between `1` (in front) and `-1` (behind) when the bobbit faces right, creating the illusion of the item being held on the far side.
 
 ### addsHeight behavior
@@ -185,9 +212,9 @@ The core busy animation is a 10-second Disney 12-principles choreography:
 | Settle | 87–95% | Asymmetric follow-through — overshoot, counter-correct, damp |
 | Moving hold | 95–100% | Never fully static — subtle breathing micro-wobble |
 
-### Eye animation (`blob-busy-eyes`, 10s cycle, `steps(1)`)
+### Busy eye sequence (10s discrete cycle)
 
-Eyes lead body direction by 2–4% (anticipation principle). Implemented as box-shadow keyframes that redraw the entire sprite with moved eye pixels:
+Eyes lead body direction by 2–4% (anticipation principle). `BUSY_EYE_SEQUENCE` defines the discrete gaze/blink frames. The canvas renderer swaps a cached complete sprite bitmap at each sequence boundary while a matching CSS animation remains the phase clock:
 
 | Time | Eye state | Purpose |
 |------|-----------|---------|
@@ -208,6 +235,52 @@ Eye directions are achieved by shifting the 2×2 dark pixel blocks (`#1a3010`):
 - **Up**: columns 4,7 at rows 3,4 (shifted up one row)
 - **Blink**: Only bottom row of eyes visible (squished to one row)
 
+#### Canvas eye scheduling contract
+
+`startCanvasEyeAnimation()` in the Bobbit renderer is boundary-driven, not
+display-frame-driven. This matters because the eye pose is discrete: inspecting
+the CSS clock at 60 Hz cannot improve visible smoothness between two unchanged
+pixel frames, but it does keep the main thread awake.
+
+- The renderer resolves and caches the canvas's duration-matching Web Animations
+  API `Animation`. At every wake it re-reads `currentTime`, subtracts the
+  effect's delay, and normalizes that active time into the sequence cycle. This
+  keeps negative CSS phase delays and cycle wrap aligned with the compositor.
+- It selects the latest `EyeFrame` boundary at or before the live phase, draws
+  only when the gaze/blink key changed, and schedules one bounded timeout for
+  the next boundary. It never accumulates elapsed wall time, so a late or
+  throttled callback jumps directly to the correct live frame without drift.
+- The current canonical 10-second sequences wake at 15 busy boundaries or 11
+  idle boundaries: about 1.5 or 1.1 callbacks per second. Deterministic coverage
+  pins 30 busy and 22 idle callbacks over two fake cycles, with zero scheduler
+  rAF callbacks. The controlled diagnosis observed about 1,201 callbacks over
+  20 seconds from the previous 60 Hz inspection loop; that measurement is a
+  comparison baseline, not a cross-machine timing assertion.
+- `SLEEP_EYE_SEQUENCE` is one frame. It paints the closed eyes once and installs
+  no timer, animation lookup, or lifecycle listener, so a settled sleeping chat
+  Bobbit has zero steady-state eye work.
+- While the document is hidden, pending work is cleared. Visibility restoration
+  immediately samples the live CSS phase, redraws if needed, and schedules the
+  next boundary. `animationstart` and `animationcancel` invalidate the cached
+  phase source so a cancelled, replaced, or transition animation is recovered
+  without polling.
+- Cleanup clears the timeout, removes listeners, and makes already-queued stale
+  callbacks inert. It does not pause or cancel CSS animation.
+
+Only the eye bitmap uses this scheduler. Body movement, breathing, bounce,
+shimmer, accessories, and entry/exit transitions remain CSS-driven and smooth;
+archived/static Bobbits bypass the scheduler entirely.
+
+**Verification:**
+`tests2/browser/fixtures/canvas-eye-getanimations.spec.ts` uses fake time and
+controlled `Animation.currentTime` to pin every busy/idle boundary, negative
+delay, wrap, late wake, callback budget, single-frame sleep, visibility resync,
+Animation replacement, stale callback, cleanup, and archived zero-work behavior.
+Its real-CSS browser case also checks that the body animation stays `running`,
+its transform advances across display frames, and eye pixels change only at the
+expected boundary. CDP task duration is recorded only as a finite activity
+proxy, never as a battery-duration or cross-machine timing assertion.
+
 ### Shimmer (`blob-shimmer`, 8s cycle)
 
 A subtle pearlescent skin shift applied to the sprite via filter animation:
@@ -224,7 +297,9 @@ The shimmer delay is randomized via `--bobbit-shimmer-delay` to prevent multiple
 
 ### Idle animation (`blob-idle-eyes`, 10s cycle)
 
-When idle, the bobbit sits offset left (`translateX(-7px)`) and only its eyes animate:
+The idle sequence is used by inline/role renderers. It keeps the body offset left
+(`translateX(-7px)`) while the eyes look around. A settled chat Bobbit instead
+uses the one-frame sleeping sequence described above.
 
 | Time | Action |
 |------|--------|
@@ -235,12 +310,13 @@ When idle, the bobbit sits offset left (`translateX(-7px)`) and only its eyes an
 | 45–55% | Center eyes |
 | 55–67% | Look right (at chat area) |
 | 67–70% | Blink (right position) |
-| 70–85% | Look up-right again |
-| 85–93% | Center eyes |
-| 93–96% | Blink (center) |
-| 96–100% | Center eyes |
+| 70–80% | Look up-right again |
+| 80–90% | Center eyes |
+| 90–95% | Blink (center) |
+| 95–100% | Center eyes |
 
-Blinks squish pupils to a single row in the current gaze direction. Timing is irregular (22%, 67%, 93%) to feel natural.
+Blinks squish pupils to a single row in the current gaze direction. Their
+irregular spacing keeps the motion from feeling mechanical.
 
 ### Entry/exit animations
 
@@ -369,7 +445,7 @@ A Lit web component that manages the blob animation state machine.
 **DOM structure**:
 ```html
 <div class="bobbit-blob [state-class]">
-  <div class="bobbit-blob__sprite"></div>
+  <canvas class="bobbit-blob__sprite"></canvas>
   <div class="bobbit-blob__crown"></div>
   <div class="bobbit-blob__bandana"></div>
   <div class="bobbit-blob__magnifier"></div>
@@ -395,7 +471,7 @@ Compaction has a minimum duration of 3.5s and a safety timeout of 10 minutes.
 **Sprite CSS** (from `src/ui/app.css`):
 - `margin: 8px 18px 28px 18px` — provides bounce space
 - `transform-origin: 5px 8px` — pivot at bottom center
-- Three simultaneous animations during busy: `blob-busy-move` (body), `blob-busy-eyes` (eyes), `blob-shimmer` (skin)
+- Busy body movement and shimmer remain CSS animations; canvas eyes follow the body animation's live phase through the boundary scheduler above
 
 > **Note**: A General-settings toggle can replace this sprite with an animated
 > status-text label for the chat blob only. See [section 10, Text-Replacement Mode](#10-text-replacement-mode-settings-toggle).

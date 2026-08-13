@@ -5,9 +5,11 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: pr-${{ github.workflow }}-${{ github.ref }}
@@ -49,3 +51,26 @@ jobs:
 
       - name: Unit gate
         run: npm run test:unit
+
+  release-contract:
+    name: Release contract
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.19.0'
+
+      - name: Validate release contract
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/release/validate-release-commit.mjs --mode pre-merge --pull-request "$PR_NUMBER"

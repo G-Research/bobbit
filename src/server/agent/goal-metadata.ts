@@ -26,6 +26,19 @@ export interface GoalMetadataLookup {
 	get(id: string): { parentGoalId?: string; metadata?: GoalMetadata } | undefined;
 }
 
+/** A bounded descendant-to-ancestor walk shared by metadata and scope readers. */
+export interface GoalMetadataLineageEntry {
+	readonly id: string;
+	readonly node: { parentGoalId?: string; metadata?: GoalMetadata; title?: string; archived?: boolean };
+}
+
+export interface GoalMetadataLineage {
+	/** Leaf first. Consumers needing display order reverse a copied array. */
+	readonly entries: readonly GoalMetadataLineageEntry[];
+	/** True only when the chain ends at a live root without a cycle or cap. */
+	readonly complete: boolean;
+}
+
 /** Defensive cap on parent-chain walks (mirrors NESTING_WALK_DEPTH_CAP). */
 export const GOAL_METADATA_WALK_DEPTH_CAP = 64;
 
@@ -96,29 +109,38 @@ export function resolveGoalMetadata(
 	lookup: GoalMetadataLookup,
 	goalId: string | undefined,
 ): GoalMetadata {
-	if (!goalId) return {};
-
-	// Walk descendant-first, collecting each node's own metadata.
-	const chainDescendantFirst: GoalMetadata[] = [];
-	const seen = new Set<string>();
-	let cursor: string | undefined = goalId;
-	let depth = 0;
-	while (cursor && depth < GOAL_METADATA_WALK_DEPTH_CAP) {
-		if (seen.has(cursor)) break; // cycle guard
-		seen.add(cursor);
-		const node = lookup.get(cursor);
-		if (!node) break; // missing parent / unknown goal id
-		if (isPlainObject(node.metadata)) {
-			chainDescendantFirst.push(node.metadata);
-		}
-		cursor = node.parentGoalId;
-		depth++;
-	}
-
 	// Merge root-first so descendants override their ancestors per key.
 	let result: GoalMetadata = {};
-	for (let i = chainDescendantFirst.length - 1; i >= 0; i--) {
-		result = deepMergeMetadata(result, chainDescendantFirst[i]);
+	for (const { node } of walkGoalMetadataLineage(lookup, goalId).entries.slice().reverse()) {
+		if (isPlainObject(node.metadata)) result = deepMergeMetadata(result, node.metadata);
 	}
 	return result;
+}
+
+/**
+ * Walk a goal's parent chain once, with the established cap and cycle guard.
+ * `complete` is intentionally strict: a missing leaf/parent, repeated id, or
+ * cap exhaustion never masquerades as a root-to-leaf lineage.
+ */
+export function walkGoalMetadataLineage(
+	lookup: GoalMetadataLookup,
+	goalId: string | undefined,
+): GoalMetadataLineage {
+	if (!goalId) return { entries: [], complete: false };
+
+	const entries: GoalMetadataLineageEntry[] = [];
+	const seen = new Set<string>();
+	let cursor: string | undefined = goalId;
+	while (cursor) {
+		if (entries.length >= GOAL_METADATA_WALK_DEPTH_CAP || seen.has(cursor)) {
+			return { entries, complete: false };
+		}
+		seen.add(cursor);
+		const node = lookup.get(cursor);
+		if (!node) return { entries, complete: false };
+		entries.push({ id: cursor, node });
+		if (!node.parentGoalId) return { entries, complete: true };
+		cursor = node.parentGoalId;
+	}
+	return { entries, complete: true };
 }

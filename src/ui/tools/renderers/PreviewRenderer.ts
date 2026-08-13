@@ -1,7 +1,7 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing } from "lit";
 import { PanelRight } from "lucide";
-import { previewRouteFromStoredValue } from "../../../app/gateway-fetch.js";
+import { previewEntryFromStoredValue, previewRouteFromStoredValue } from "../../../app/gateway-fetch.js";
 import { gatewayRoute, type GatewayRoute } from "../../../shared/base-path.js";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import * as previewPanel from "../../../app/preview-panel.js";
@@ -35,21 +35,40 @@ type ParsedSnapshot =
 	| { kind: "file"; path: string }
 	| { kind: "preview"; url: GatewayRoute; path: string; entry?: string; contentHash?: string; artifactId?: string };
 
-function parseSnapshotText(text: string): ParsedSnapshot | null {
+function parseSnapshotText(text: string, params?: PreviewOpenParams): ParsedSnapshot | null {
 	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3)) {
 		const body = text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length).trim();
 		try {
 			const parsed = JSON.parse(body);
 			if (parsed && parsed.kind === "preview" && typeof parsed.url === "string" && parsed.url) {
-				const url = previewRouteFromStoredValue(parsed.url);
+				const rawEntry = parsed.entry !== undefined ? parsed.entry : parsed.e;
+				let entry = rawEntry === undefined ? undefined : previewEntryFromStoredValue(rawEntry);
+				const rawContentHash = parsed.contentHash;
+				const rawArtifactId = parsed.artifactId ?? parsed.artifact_id ?? parsed.aid ?? parsed.a;
+				const contentHash = normalizeContentHash(rawContentHash);
+				const artifactId = normalizeArtifactId(rawArtifactId);
+				// An omitted hash/artifact id is valid for legacy v3 snapshots, but a
+				// supplied malformed value must never silently become "missing".
+				if ((rawContentHash != null && !contentHash) || (rawArtifactId != null && !artifactId)) return null;
+				if (rawEntry !== undefined && !entry) return null;
+
+				// The shortest current writer variant omits its duplicate raw entry.
+				// It may use this same-tool-call fallback only when both immutable
+				// replay identifiers are valid; generic stored markers remain strict.
+				let url = previewRouteFromStoredValue(parsed.url, rawEntry);
+				if (!url && rawEntry === undefined && contentHash && artifactId) {
+					const fallbackEntry = previewEntryFromParams(params);
+					if (fallbackEntry) {
+						url = previewRouteFromStoredValue(parsed.url, fallbackEntry);
+						if (url) entry = fallbackEntry;
+					}
+				}
 				if (!url) return null;
-				const contentHash = normalizeContentHash(parsed.contentHash);
-				const artifactId = normalizeArtifactId(parsed.artifactId ?? parsed.artifact_id ?? parsed.aid);
 				return {
 					kind: "preview",
 					url,
 					path: typeof parsed.path === "string" ? parsed.path : "",
-					entry: typeof parsed.entry === "string" ? parsed.entry : undefined,
+					...(entry ? { entry } : {}),
 					...(contentHash ? { contentHash } : {}),
 					...(artifactId ? { artifactId } : {}),
 				};
@@ -98,23 +117,6 @@ function findSnapshotBlock(result: ToolResultMessage<any> | undefined): { block:
 	return null;
 }
 
-/** Locate (messageIndex, blockIndex) for a tool_result message whose toolCallId matches. */
-async function locateToolResultBlock(toolUseId: string | undefined, blockIndexInResult: number): Promise<{ messageIndex: number; blockIndex: number } | null> {
-	if (!toolUseId) return null;
-	const { state: appState } = await import("../../../app/state.js");
-	const messages: any[] | undefined = (appState as any).remoteAgent?.state?.messages;
-	if (!Array.isArray(messages)) return null;
-	for (let mi = 0; mi < messages.length; mi++) {
-		const msg = messages[mi];
-		const role = msg?.role;
-		const isToolResult = role === "toolResult" || role === "tool_result" || role === "tool";
-		if (!isToolResult) continue;
-		if (msg.toolCallId !== toolUseId) continue;
-		return { messageIndex: mi, blockIndex: blockIndexInResult };
-	}
-	return null;
-}
-
 function normalizeContentHash(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const hash = value.trim().toLowerCase();
@@ -135,8 +137,20 @@ function normalizeArtifactId(value: unknown): string | undefined {
 
 function baseName(path: string | undefined): string {
 	if (!path) return "";
-	const clean = path.split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "";
+	const clean = path.replace(/\\/g, "/").replace(/\/+$/, "");
 	return clean.split("/").filter(Boolean).pop() || clean || "";
+}
+
+/**
+ * The entry-omitted compact marker is only meaningful beside its own
+ * `preview_open` parameters. File paths are raw filesystem paths, so preserve
+ * literal `?` and `#` in their basename before applying the marker validator.
+ */
+function previewEntryFromParams(params: PreviewOpenParams | undefined): string | undefined {
+	if (!params) return undefined;
+	if (typeof params.file === "string") return previewEntryFromStoredValue(baseName(params.file)) ?? undefined;
+	if (typeof params.html === "string") return "inline.html";
+	return undefined;
 }
 
 function legacyPreviewParamsSnapshot(params: PreviewOpenParams | undefined): ParsedSnapshot | null {
@@ -318,7 +332,7 @@ function rememberPreviewSnapshotFromRender(
 	if (isStreaming || !result || result.isError || !ctx?.sessionId) return;
 	const snap = findSnapshotBlock(result);
 	if (!snap || snap.block._truncated) return;
-	const parsed = parseSnapshotText(snap.block.text);
+	const parsed = parseSnapshotText(snap.block.text, params);
 	if (!parsed || parsed.kind !== "preview" || !parsed.contentHash) return;
 	const entry = entryFromSnapshot(parsed, params);
 	const key = `${ctx.sessionId}:${ctx.toolUseId || ""}:${snap.index}:${entry}:${parsed.contentHash}`;
@@ -349,7 +363,9 @@ function rememberPreviewSnapshotFromRender(
 				url: parsed.url,
 				source: tabSource,
 				state: tabState,
-				select: false,
+				// A newly registered snapshot must open its tab; select:false only
+				// updates an existing side-panel tab and silently drops this metadata.
+				select: true,
 				setAssistantTab: false,
 			});
 			renderApp();
@@ -411,7 +427,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 
 			try {
 				// Lazy-load helpers that are not already part of the app-shell graph.
-				const [{ gatewayFetch }, { fetchToolContent }, { state: appState, renderApp }, workspace] = await Promise.all([
+				const [{ gatewayFetch }, { fetchToolContentByToolCall }, { state: appState, renderApp }, workspace] = await Promise.all([
 					import("../../../app/gateway-fetch.js"),
 					import("../../utils/fetch-tool-content.js"),
 					import("../../../app/state.js"),
@@ -421,14 +437,26 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				// 1. Resolve full snapshot text (inline or lazy-load)
 				let snapshotText = snap.block.text;
 				if (snap.block._truncated) {
-					const located = await locateToolResultBlock(ctx?.toolUseId, snap.index);
-					if (!located) throw new Error("Could not locate snapshot block in transcript");
-					snapshotText = await fetchToolContent(sessionId, located.messageIndex, located.blockIndex);
+					if (!ctx?.toolUseId) {
+						const error = Object.assign(new Error("Transcript block is no longer available"), {
+							status: 404,
+							code: "transcript_block_unavailable",
+						});
+						throw error;
+					}
+					// Client-visible messages may contain synthetic compaction rows, so their
+					// positional indices cannot address the runtime transcript safely.
+					snapshotText = await fetchToolContentByToolCall(sessionId, ctx.toolUseId, snap.index, "preview-snapshot");
 				}
 
 				// 2. Parse snapshot — v1 (inline), v2 (file), or v3 (artifact-backed preview mount).
-				const parsed = parseSnapshotText(snapshotText);
-				if (!parsed) throw new Error("Snapshot block could not be parsed");
+				const parsed = parseSnapshotText(snapshotText, params);
+				if (!parsed) {
+					btn.textContent = "Malformed snapshot marker";
+					btn.title = "This saved preview snapshot is malformed and cannot be reopened";
+					btn.disabled = true;
+					return;
+				}
 
 				let entry = entryFromSnapshot(parsed, params);
 				const snapshotContentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
@@ -510,7 +538,17 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 								body: JSON.stringify({ artifactId: snapshotArtifactId }),
 							});
 							if (!restoreResp.ok) {
-								selectRestoreError(restoreResp.status, "Preview artifact unavailable");
+								const evicted = restoreResp.status === 404;
+								selectRestoreError(
+									restoreResp.status,
+									evicted ? "Preview artifact was evicted — rerun preview_open" : "Preview artifact unavailable",
+								);
+								if (evicted) {
+									btn.textContent = "Artifact evicted — rerun preview_open";
+									btn.title = "This preview artifact was evicted; rerun preview_open to create it again";
+									btn.disabled = true;
+									return;
+								}
 								throw new Error(`Preview artifact restore failed: ${restoreResp.status}`);
 							}
 							const data = await restoreResp.json().catch(() => ({} as any));
@@ -591,6 +629,19 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 					btn.disabled = false;
 				}, 1500);
 			} catch (err) {
+				const contentError = err as { status?: unknown; code?: unknown };
+				if (contentError.code === "transcript_tool_call_unavailable" || contentError.code === "transcript_block_unavailable") {
+					btn.textContent = "Transcript block unavailable";
+					btn.title = "The saved transcript block is no longer available";
+					btn.disabled = true;
+					return;
+				}
+				if (contentError.code === "snapshot_block_mismatch" || contentError.code === "tool_call_block_mismatch") {
+					btn.textContent = "Malformed snapshot marker";
+					btn.title = "The saved transcript block is not a preview snapshot";
+					btn.disabled = true;
+					return;
+				}
 				btn.textContent = "Failed — retry";
 				btn.disabled = false;
 				// eslint-disable-next-line no-console

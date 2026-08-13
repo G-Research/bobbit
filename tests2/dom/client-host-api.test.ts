@@ -57,6 +57,7 @@ function callStub(which: string): string | null {
 		"ui.openPanel": () => h.ui.openPanel({ panelId: "p" }),
 		"ui.navigate": () => h.ui.navigate({ route: "r" }),
 		"store.get": () => h.store.get("k"),
+		"store.read": () => h.store.read("k"),
 		"store.put": () => h.store.put("k", 1),
 		"store.list": () => h.store.list(),
 		"store.delete": () => h.store.delete("k"),
@@ -80,7 +81,30 @@ function callStub(which: string): string | null {
 
 function storeMethods() {
 	const h: any = getHostApi("sess-1", "tu-1");
-	return ["get", "put", "list", "delete", "deletePrefix", "stats"].map((name) => `${name}:${typeof h.store[name]}`);
+	return ["get", "read", "put", "list", "delete", "deletePrefix", "stats"].map((name) => `${name}:${typeof h.store[name]}`);
+}
+
+async function clientStoreRead() {
+	const originalFetch = window.fetch;
+	let request: { path?: string; body?: Record<string, unknown> } = {};
+	registerSurfaceTokenMinter("sess-read", async () => "surface-read-token");
+	window.fetch = (async (input: any, init?: any) => {
+		const path = String(input);
+		if (path.includes("/api/ext/store/read")) {
+			request = { path: new URL(path, window.location.href).pathname, body: JSON.parse(String(init?.body ?? "{}")) };
+			return new Response(JSON.stringify({ state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true } }), {
+				status: 200, headers: { "content-type": "application/json" },
+			});
+		}
+		return new Response("not found", { status: 404 });
+	}) as any;
+	try {
+		const h: any = getHostApi("sess-read", undefined, { kind: "pack", packId: "hindsight", contributionKind: "panel", contributionId: "status" });
+		return { result: await h.store.read("retain-queue"), request };
+	} finally {
+		window.fetch = originalFetch;
+		unregisterSurfaceTokenMinter("sess-read");
+	}
 }
 
 async function callRouteHttpError() {
@@ -303,7 +327,17 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 	});
 
 	it("host.store exposes scoped persistence methods", () => {
-		expect(storeMethods()).toEqual(["get:function", "put:function", "list:function", "delete:function", "deletePrefix:function", "stats:function"]);
+		expect(storeMethods()).toEqual(["get:function", "read:function", "put:function", "list:function", "delete:function", "deletePrefix:function", "stats:function"]);
+	});
+
+	it("transports the tri-state durable read through its scoped surface token", async () => {
+		await expect(clientStoreRead()).resolves.toEqual({
+			result: { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true } },
+			request: {
+				path: "/api/ext/store/read",
+				body: { sessionId: "sess-read", surfaceToken: "surface-read-token", key: "retain-queue" },
+			},
+		});
 	});
 
 	it("host.callRoute includes structured JSON error bodies on non-2xx responses", async () => {

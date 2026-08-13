@@ -1,0 +1,151 @@
+import type { Clock, FsLike } from "../gateway-deps.js";
+import { realClock } from "../gateway-deps.js";
+import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
+
+export interface JsonWriteMetrics {
+	bytes: number;
+	durationMs: number;
+}
+
+type Barrier = {
+	revision: number;
+	resolve: () => void;
+	reject: (error: unknown) => void;
+};
+
+/**
+ * Serializes whole-file JSON snapshots without allowing a mutation burst to
+ * create concurrent or unbounded writes. Every atomic rename, including a
+ * strict lifecycle publication, passes through this one queue: an older async
+ * rename can therefore never overtake a strict publication.
+ */
+export class CoalescedJsonWriter {
+	private timer: ReturnType<Clock["setTimeout"]> | null = null;
+	private inFlight: Promise<void> | null = null;
+	private requested = false;
+	private lastWriteMetrics: JsonWriteMetrics | null = null;
+	/** Bumped for every requested snapshot. */
+	private revision = 0;
+	private publishedRevision = 0;
+	private barriers: Barrier[] = [];
+
+	constructor(
+		private readonly fs: FsLike,
+		private readonly directory: string,
+		private readonly file: string,
+		private readonly snapshot: () => string,
+		private readonly label: string,
+		private readonly debounceMs = 500,
+		private readonly clock: Clock = realClock,
+		private readonly onWrite?: (metrics: JsonWriteMetrics) => void,
+	) {}
+
+	/** Metrics for the latest atomic publish, for low-cost persistence diagnostics. */
+	getLastWriteMetrics(): JsonWriteMetrics | null {
+		return this.lastWriteMetrics;
+	}
+
+	/** Mark the current in-memory snapshot dirty and arrange a trailing write. */
+	schedule(): void {
+		this.revision++;
+		this.requested = true;
+		if (this.inFlight || this.timer) return;
+		this.timer = this.clock.setTimeout(() => {
+			this.timer = null;
+			void this.startDrain();
+		}, this.debounceMs);
+	}
+
+	/**
+	 * A durability barrier for the current snapshot. Unlike hot-path schedule(),
+	 * this rejects when its requested generation cannot be atomically published.
+	 */
+	flush(): Promise<void> {
+		return this.requestBarrier();
+	}
+
+	/**
+	 * Queue a fail-loud lifecycle publication behind any older coalesced write.
+	 * This is a real publication fence, not a revision check before rename.
+	 */
+	publishStrict(): Promise<void> {
+		return this.requestBarrier();
+	}
+
+	private requestBarrier(): Promise<void> {
+		const revision = ++this.revision;
+		this.requested = true;
+		if (this.timer) {
+			this.clock.clearTimeout(this.timer);
+			this.timer = null;
+		}
+		const barrier = new Promise<void>((resolve, reject) => {
+			this.barriers.push({ revision, resolve, reject });
+		});
+		void this.startDrain();
+		return barrier;
+	}
+
+	private settlePublished(revision: number): void {
+		this.publishedRevision = Math.max(this.publishedRevision, revision);
+		const pending: Barrier[] = [];
+		for (const barrier of this.barriers) {
+			if (barrier.revision <= this.publishedRevision) barrier.resolve();
+			else pending.push(barrier);
+		}
+		this.barriers = pending;
+	}
+
+	private settleFailed(revision: number, error: unknown): void {
+		const pending: Barrier[] = [];
+		for (const barrier of this.barriers) {
+			if (barrier.revision <= revision) barrier.reject(error);
+			else pending.push(barrier);
+		}
+		this.barriers = pending;
+	}
+
+	private startDrain(): Promise<void> {
+		if (!this.inFlight) {
+			this.inFlight = this.drain().finally(() => {
+				this.inFlight = null;
+				// Defer a trailing retry to let a strict caller synchronously roll
+				// back its in-memory mutation after a rejected barrier.
+				if (this.requested) queueMicrotask(() => { void this.startDrain(); });
+			});
+		}
+		return this.inFlight;
+	}
+
+	private async drain(): Promise<void> {
+		while (this.requested) {
+			this.requested = false;
+			const revision = this.revision;
+			try {
+				const serializeStartedAt = performance.now();
+				const json = this.snapshot();
+				const bytes = Buffer.byteLength(json);
+				const serializeMs = performance.now() - serializeStartedAt;
+				recordEventLoopOperation(`${this.label}:serialize`, serializeMs, { bytes });
+				getCpuDiagnostics().recordPersistence(`${this.label}:serialize`, serializeMs, bytes);
+				const writeStartedAt = performance.now();
+				await this.fs.promises.mkdir(this.directory, { recursive: true });
+				const tmp = `${this.file}.tmp`;
+				await this.fs.promises.writeFile(tmp, json, "utf-8");
+				await this.fs.promises.rename(tmp, this.file);
+				const writeMs = performance.now() - writeStartedAt;
+				getCpuDiagnostics().recordPersistence(`${this.label}:write`, writeMs, bytes);
+				this.lastWriteMetrics = { bytes, durationMs: writeMs };
+				this.onWrite?.(this.lastWriteMetrics);
+				this.settlePublished(revision);
+			} catch (error) {
+				console.error(`[${this.label}] Failed to save:`, error);
+				try { await this.fs.promises.unlink(`${this.file}.tmp`); } catch { /* best-effort cleanup */ }
+				this.settleFailed(revision, error);
+				// Do not spin on an I/O failure. A later ordinary mutation may retry;
+				// explicit callers receive the exact failure instead of false success.
+				return;
+			}
+		}
+	}
+}

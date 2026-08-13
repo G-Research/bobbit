@@ -52,6 +52,7 @@ export function adaptReadyToMergeVerify(
 				name: "Master merged into branch",
 				type: "command" as const,
 				run: `echo 'child goal — merges locally into parent branch ${parentBranch}; no master merge required'`,
+				...(step.failureGuidance !== undefined ? { failureGuidance: step.failureGuidance } : {}),
 			};
 		}
 		if (step.name === "PR raised") {
@@ -59,6 +60,7 @@ export function adaptReadyToMergeVerify(
 				name: "PR raised",
 				type: "command" as const,
 				run: "echo 'child goal — only the root goal raises a PR'",
+				...(step.failureGuidance !== undefined ? { failureGuidance: step.failureGuidance } : {}),
 			};
 		}
 		return step;

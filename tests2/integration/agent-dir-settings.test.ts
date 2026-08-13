@@ -1,6 +1,8 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { initializeAgentDirRuntime, resetAgentDirRuntimeForTests } from "../../src/server/agent-dir-config.js";
 import { apiFetch, bobbitDir } from "./_e2e/e2e-setup.js";
 
 test.describe.configure({ mode: "serial" });
@@ -47,7 +49,56 @@ async function expectOkJson(resp: Response): Promise<any> {
 	return body;
 }
 
-test("agent-dir REST flow validates, saves restart-gated pending state, and migrates by copy", async () => {
+interface PathSnapshot {
+	target: string;
+	backup?: string;
+}
+
+function snapshotPath(target: string, backupRoot: string, index: number): PathSnapshot {
+	if (!fs.existsSync(target)) return { target };
+	const backup = path.join(backupRoot, String(index));
+	fs.cpSync(target, backup, { recursive: true, force: true });
+	return { target, backup };
+}
+
+function restorePath(snapshot: PathSnapshot): void {
+	fs.rmSync(snapshot.target, { recursive: true, force: true });
+	if (!snapshot.backup) return;
+	fs.mkdirSync(path.dirname(snapshot.target), { recursive: true });
+	fs.cpSync(snapshot.backup, snapshot.target, { recursive: true, force: true });
+}
+
+function restorePreferences(
+	gateway: any,
+	initial: Record<string, unknown>,
+	initialAgentDirState: AgentDirState,
+	preferencesPath: string,
+	preferencesBytes: Buffer | undefined,
+): void {
+	const store = gateway.sessionManager?.preferencesStore;
+	if (!store) throw new Error("gateway fixture must expose its PreferencesStore for test cleanup");
+	for (const key of Object.keys(store.getAll())) {
+		if (!Object.prototype.hasOwnProperty.call(initial, key)) store.remove(key);
+	}
+	for (const [key, value] of Object.entries(initial)) store.set(key, structuredClone(value));
+
+	// The pending route also mutates the process-wide agent-dir runtime. Rebuild it
+	// from the original persisted preference after restoring the store in memory.
+	resetAgentDirRuntimeForTests();
+	initializeAgentDirRuntime({
+		env: process.env,
+		projectRoot: initialAgentDirState.startup.projectRoot,
+		stateDir: path.dirname(preferencesPath),
+		persisted: typeof initial.agentDir === "string" ? initial.agentDir : undefined,
+	});
+
+	// PreferencesStore and runtime restoration serialize JSON. Put back the exact
+	// original bytes last so this integration test is transparent to later files.
+	if (preferencesBytes === undefined) fs.rmSync(preferencesPath, { force: true });
+	else fs.writeFileSync(preferencesPath, preferencesBytes);
+}
+
+test("agent-dir REST flow validates, saves restart-gated pending state, and migrates by copy", async ({ gateway }) => {
 	const initial = await expectOkJson(await apiFetch("/api/agent-dir"));
 	const active = activePath(initial);
 	expect(active, JSON.stringify(initial)).toBeTruthy();
@@ -56,35 +107,56 @@ test("agent-dir REST flow validates, saves restart-gated pending state, and migr
 	expect(initial.defaultPath ?? initial.default?.path ?? initial.defaultDir).toBeTruthy();
 	expect(initial.history ?? initial.agentDirHistory ?? []).toEqual(expect.arrayContaining([expect.any(String)]));
 
-	const invalid = await json(await apiFetch("/api/agent-dir/validate", {
-		method: "POST",
-		body: JSON.stringify({ path: "src/agent-dir-credentials" }),
-	}));
-	expect(invalid.ok).toBe(false);
-	expect(errorCode(invalid)).toBe("INSIDE_WORKTREE");
-
-	const bypassPath = path.join(path.dirname(bobbitDir()), `bypass-agent-dir-${process.pid}-${Date.now()}`);
-	const bypassResp = await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({ agentDir: bypassPath, agentDirHistory: [bypassPath] }),
-	});
-	const bypass = await json(bypassResp);
-	expect(bypassResp.status).toBe(400);
-	const bypassPrefsPath = path.join(bobbitDir(), "state", "preferences.json");
-	const bypassPrefs = fs.existsSync(bypassPrefsPath) ? JSON.parse(fs.readFileSync(bypassPrefsPath, "utf-8")) : {};
-	const safePref = await expectOkJson(await apiFetch("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({ showHeadquartersInProjectLists: true }),
-	}));
-	expect(safePref.showHeadquartersInProjectLists).toBe(true);
-	expect(String(bypass.error ?? bypass.message)).toMatch(/agentDir|agent directory|agent-dir\/pending/i);
-	expect(bypass.code).toBe("AGENT_DIR_PREFERENCE_FORBIDDEN");
-	expect(bypassPrefs.agentDir).toBeUndefined();
-	expect((bypassPrefs.agentDirHistory ?? []).map(normalize)).not.toContain(normalize(bypassPath));
-
-	const pending = path.join(path.dirname(bobbitDir()), `pending-agent-dir-${process.pid}-${Date.now()}`);
+	const preferencesPath = path.join(bobbitDir(), "state", "preferences.json");
+	const preferencesBytes = fs.existsSync(preferencesPath) ? fs.readFileSync(preferencesPath) : undefined;
+	const preferencesStore = (gateway.sessionManager as any)?.preferencesStore;
+	expect(preferencesStore, "gateway fixture must expose its PreferencesStore for test cleanup").toBeTruthy();
+	const initialPreferences = structuredClone(preferencesStore.getAll()) as Record<string, unknown>;
+	const backupRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-agent-dir-settings-"));
+	const sessionsDir = path.join(active, "sessions");
+	const sessionsDirExisted = fs.existsSync(sessionsDir);
+	const activeSnapshots = [
+		path.join(active, "sessions", "session-a"),
+		path.join(active, "bin"),
+		...[
+			"auth.json",
+			"models.json",
+			"settings.json",
+			"google-code-assist.json",
+			"not-allowlisted.txt",
+		].map((file) => path.join(active, file)),
+	].map((target, index) => snapshotPath(target, backupRoot, index));
+	const unique = `${process.pid}-${Date.now()}`;
+	const bypassPath = path.join(path.dirname(bobbitDir()), `bypass-agent-dir-${unique}`);
+	const pending = path.join(path.dirname(bobbitDir()), `pending-agent-dir-${unique}`);
+	fs.rmSync(bypassPath, { recursive: true, force: true });
 	fs.rmSync(pending, { recursive: true, force: true });
+
 	try {
+		const invalid = await json(await apiFetch("/api/agent-dir/validate", {
+			method: "POST",
+			body: JSON.stringify({ path: "src/agent-dir-credentials" }),
+		}));
+		expect(invalid.ok).toBe(false);
+		expect(errorCode(invalid)).toBe("INSIDE_WORKTREE");
+
+		const bypassResp = await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ agentDir: bypassPath, agentDirHistory: [bypassPath] }),
+		});
+		const bypass = await json(bypassResp);
+		expect(bypassResp.status).toBe(400);
+		const bypassPrefs = fs.existsSync(preferencesPath) ? JSON.parse(fs.readFileSync(preferencesPath, "utf-8")) : {};
+		const safePref = await expectOkJson(await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ showHeadquartersInProjectLists: true }),
+		}));
+		expect(safePref.showHeadquartersInProjectLists).toBe(true);
+		expect(String(bypass.error ?? bypass.message)).toMatch(/agentDir|agent directory|agent-dir\/pending/i);
+		expect(bypass.code).toBe("AGENT_DIR_PREFERENCE_FORBIDDEN");
+		expect(bypassPrefs.agentDir).toEqual(initialPreferences.agentDir);
+		expect((bypassPrefs.agentDirHistory ?? []).map(normalize)).not.toContain(normalize(bypassPath));
+
 		const valid = await expectOkJson(await apiFetch("/api/agent-dir/validate", {
 			method: "POST",
 			body: JSON.stringify({ path: pending }),
@@ -147,6 +219,16 @@ test("agent-dir REST flow validates, saves restart-gated pending state, and migr
 		expect(normalize(activePath(reloaded))).toBe(normalize(active));
 		expect(normalize(pendingPath(reloaded)!)).toBe(normalize(pending));
 	} finally {
-		fs.rmSync(pending, { recursive: true, force: true });
+		const cleanupErrors: unknown[] = [];
+		const cleanup = (fn: () => void): void => {
+			try { fn(); } catch (error) { cleanupErrors.push(error); }
+		};
+		cleanup(() => fs.rmSync(pending, { recursive: true, force: true }));
+		cleanup(() => fs.rmSync(bypassPath, { recursive: true, force: true }));
+		for (const snapshot of [...activeSnapshots].reverse()) cleanup(() => restorePath(snapshot));
+		if (!sessionsDirExisted) cleanup(() => fs.rmdirSync(sessionsDir));
+		cleanup(() => restorePreferences(gateway, initialPreferences, initial, preferencesPath, preferencesBytes));
+		cleanup(() => fs.rmSync(backupRoot, { recursive: true, force: true }));
+		if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, "Failed to restore agent-dir integration fixture");
 	}
 });
