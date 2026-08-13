@@ -2156,6 +2156,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["indirect:hindsight-service-runtime-assets"]),
 		reads: frozen([
 			{ expression: "composePath", count: 1 },
+			{ expression: "descriptorPath", count: 2 },
 		]),
 	},
 	{
