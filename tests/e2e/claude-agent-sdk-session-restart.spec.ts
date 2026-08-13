@@ -157,7 +157,7 @@ class FakeOfficialSdk {
 				modelUsage: {
 					"sonnet-test": {
 						inputTokens: turn * 10, outputTokens: turn * 4, cacheReadInputTokens: turn * 2, cacheCreationInputTokens: turn,
-						costUSD: turn / 1_000, contextWindow: 200_000, maxOutputTokens: 8_192, contextTokens: turn * 100,
+						costUSD: turn / 1_000, contextWindow: 200_000, maxOutputTokens: 8_192,
 					},
 				},
 			},
@@ -185,7 +185,7 @@ class FakeOfficialSdk {
 			type: "result", session_id: SDK_SESSION_ID, uuid: `sdk-result-${turn}`, subtype: "success",
 			usage: { input_tokens: turn * 10, output_tokens: turn * 4, cache_read_input_tokens: turn * 2, cache_creation_input_tokens: turn },
 			total_cost_usd: turn / 1_000,
-			modelUsage: { "sonnet-test": { inputTokens: turn * 10, outputTokens: turn * 4, cacheReadInputTokens: turn * 2, cacheCreationInputTokens: turn, costUSD: turn / 1_000, contextWindow: 200_000, maxOutputTokens: 8_192, contextTokens: turn * 100 } },
+			modelUsage: { "sonnet-test": { inputTokens: turn * 10, outputTokens: turn * 4, cacheReadInputTokens: turn * 2, cacheCreationInputTokens: turn, costUSD: turn / 1_000, contextWindow: 200_000, maxOutputTokens: 8_192 } },
 		});
 	}
 
@@ -193,8 +193,15 @@ class FakeOfficialSdk {
 		const hooks = (query.args.options.hooks as any)?.PreCompact?.[0]?.hooks;
 		const hook = Array.isArray(hooks) ? hooks[0] : undefined;
 		if (typeof hook !== "function") throw new Error("expected production SDK PreCompact hook");
-		await hook({ custom_instructions: "deterministic compact" });
+		await hook({ trigger: "auto", custom_instructions: "deterministic compact" });
 		this.preCompactRuns++;
+	}
+
+	completeCompaction(): void {
+		// The fake SDK, like the real provider, retains only its compacted tail.
+		this.history.splice(0, this.history.length, ...this.history.filter(message =>
+			message.uuid === "sdk-user-2" || message.uuid === "sdk-assistant-2",
+		));
 	}
 
 	readonly depsFactory = () => ({
@@ -396,18 +403,43 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				notionalCostUsd: 0.003,
 				costBasis: "subscription-notional",
 				byModel: { "sonnet-test": expect.objectContaining({ inputTokens: 30, outputTokens: 12, contextWindow: 200_000, maxOutputTokens: 8_192 }) },
-				context: expect.objectContaining({ currentTokens: 200, highWaterTokens: 200, highWaterModel: "sonnet-test" }),
+				context: expect.objectContaining({ currentTokens: 26, highWaterTokens: 26, highWaterModel: "sonnet-test" }),
 			});
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "info", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "messages", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
 
 			const historyBeforeCompact = structuredClone(fakeSdk.history);
-			await fakeSdk.invokePreCompact(fakeSdk.queries[0]);
-			expect(fakeSdk.preCompactRuns).toBe(1);
-			expect(fakeSdk.history).toEqual(historyBeforeCompact);
+			const compactionConnection = await connectWs(sdkId);
+			try {
+				const cursor = compactionConnection.messageCount();
+				await fakeSdk.invokePreCompact(fakeSdk.queries[0]);
+				expect(fakeSdk.preCompactRuns).toBe(1);
+				expect(fakeSdk.history).toEqual(historyBeforeCompact);
+				// A changed official history, not PreCompact alone, resolves the durable
+				// checkpoint. Replay the root result to exercise its normal observation seam.
+				fakeSdk.completeCompaction();
+				fakeSdk.replayRootResult(fakeSdk.queries[0], 2);
+				await compactionConnection.waitForFrom(cursor, message => message.type === "event"
+					&& message.data?.type === "compaction_end", 15_000);
+			} finally {
+				compactionConnection.close();
+			}
 			expect(gateway.sessionManager.getPersistedSession(sdkId)).toMatchObject({ claudeAgentSdkSessionId: SDK_SESSION_ID });
 			const afterCompact = await gateway.sessionManager.getMessagesSnapshotBase(sdkLive!);
-			expect(afterCompact).toEqual(beforeCompact);
+			expect(afterCompact.success).toBe(true);
+			expect(afterCompact.data).toEqual(expect.arrayContaining([
+				expect.objectContaining({ id: "sdk-user-2" }),
+				expect.objectContaining({ id: "sdk-assistant-2" }),
+				expect.objectContaining({ id: expect.stringMatching(/^sdkc_/), role: "assistant" }),
+			]));
+			const checkpointRow = (afterCompact.data as any[]).find(row => typeof row?.id === "string" && row.id.startsWith("sdkc_"));
+			const checkpointId = checkpointRow?.content?.[0]?.arguments?.compactionId;
+			expect(checkpointId).toMatch(/^sdkc_/);
+			const preCompactionHistory = await apiFetch(`/api/sessions/${sdkId}/transcript/before-compaction?compactionId=${checkpointId}&limit=50&verbose=1`);
+			expect(preCompactionHistory.status, await preCompactionHistory.clone().text()).toBe(200);
+			expect((await preCompactionHistory.json()).messages).toEqual(expect.arrayContaining([
+				expect.objectContaining({ message: expect.objectContaining({ id: "sdk-user-1" }) }),
+			]));
 
 			await gateway.sessionManager.getSessionStore(persisted.projectId).flushAsync();
 			const onDisk = JSON.parse(readFileSync(join(harnessDefaultProjectRoot(), ".bobbit", "state", "sessions.json"), "utf8"));
@@ -435,8 +467,8 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 
 			const restoredSdk = gateway.sessionManager.getSession(sdkId)!;
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(restoredSdk);
-			expect(afterRestart).toEqual(beforeCompact);
-			expect(JSON.stringify(afterRestart.data)).toContain("SDK_TRANSLATED:SDK_BEFORE_RESTART_ONE");
+			expect(afterRestart.data).toEqual(afterCompact.data);
+			expect(JSON.stringify(afterRestart.data)).toContain("SDK_TRANSLATED:SDK_BEFORE_RESTART_TWO");
 
 			// The replacement bridge can replay the terminal SDK result. Its durable
 			// source UUID ledger must leave cost, per-model totals, and context intact.
@@ -446,7 +478,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				outputTokens: 12,
 				notionalCostUsd: 0.003,
 				byModel: { "sonnet-test": expect.objectContaining({ inputTokens: 30 }) },
-				context: expect.objectContaining({ highWaterTokens: 200 }),
+				context: expect.objectContaining({ highWaterTokens: 26 }),
 			});
 
 			const reloadConnection = await connectWs(sdkId);

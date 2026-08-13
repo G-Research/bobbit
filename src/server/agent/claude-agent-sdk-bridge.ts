@@ -31,6 +31,7 @@ export type ClaudeAgentSdkState = "new" | "starting" | "ready" | "running" | "in
 export interface ClaudeSdkPreCompactObservation {
 	readonly source: "claude-agent-sdk";
 	readonly trigger?: string;
+	/** SDK custom instructions are a provider summary, not the lost transcript span. */
 	readonly summary?: string;
 }
 

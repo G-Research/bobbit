@@ -2,6 +2,7 @@ import type { MessageAuthor } from "../../shared/message-author.js";
 import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import { mergeAuthorSidecarIntoMessages, readAuthorSidecar } from "./author-sidecar.js";
 import { mergeCompactionSidecarIntoMessages } from "./compaction-sidecar.js";
+import { mergeClaudeSdkCompactionCheckpoints } from "./claude-sdk-compaction-checkpoint.js";
 import { EventBuffer } from "./event-buffer.js";
 import type { AgentSessionIdentity, NormalizeVisibleMessageContext } from "./message-author.js";
 import type { PersistedInFlightSteer } from "./session-store.js";
@@ -43,7 +44,10 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 		context.inFlightSteerTexts,
 		authorBindings,
 	);
-	const withCompaction = mergeCompactionSidecarIntoMessages(context.sessionId, withInFlight);
+	const withCompaction = mergeClaudeSdkCompactionCheckpoints(
+		context.sessionId,
+		mergeCompactionSidecarIntoMessages(context.sessionId, withInFlight),
+	);
 	// This is the raw-content boundary. Binding-aware author correlation must
 	// see exact Pi model text so its digest can authorize removal of one injected
 	// prefix. Run it before truncation, cloning/order fields, or skill/file
