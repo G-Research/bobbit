@@ -266,6 +266,8 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect((fixture.bridge as any).state).toBe("failed");
 		expect((await fixture.bridge.getState()).data.sessionId).toBeUndefined();
 		expect(observed.filter(event => event.type === "process_exit")).toHaveLength(1);
+		// Once init fails, no provider event may enter the canonical transcript.
+		expect(observed.filter(event => event.type !== "process_exit")).toEqual([]);
 	});
 
 	it("becomes ready with the valid streamed system:init UUID as its only resumable identity", async () => {

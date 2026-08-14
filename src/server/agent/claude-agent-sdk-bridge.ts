@@ -616,12 +616,16 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.initializationIdentity.resolve(event.session_id);
 	}
 
+	private isClosedOrFailed(): boolean {
+		return this.closed || this.state === "failed";
+	}
+
 	private async consume(query: Query): Promise<void> {
 		try {
 			for await (const sdkEvent of query) {
-				if (this.closed || this.state === "failed") return;
+				if (this.isClosedOrFailed()) return;
 				this.observeInitializationIdentity(sdkEvent);
-				if (this.closed || this.state === "failed") return;
+				if (this.isClosedOrFailed()) return;
 				const translated = translateClaudeSdkEvent(this.translatorState, sdkEvent as unknown as Record<string, unknown>);
 				this.reportDiagnostics(translated.diagnostics);
 				const events = this.canonicalizeToolNames(translated.events);

@@ -297,12 +297,14 @@ describe("Claude Agent SDK sandbox runtime", () => {
 			cwd: "/workspace",
 			bobbitSessionId: "history-pages",
 			exec: async (args) => {
-				const operation = args.at(-6);
+				// The trailing module URL is reader-owned, so consume the fixed eight
+				// reader arguments rather than Docker's variable-length prefix.
+				const [, operation, , , , offset] = args.slice(-8);
 				if (operation === "info") return JSON.stringify({ sessionId: SDK_ID, summary: "SDK owned", lastModified: 1 });
-				const offset = Number(args.at(-2));
-				offsets.push(offset);
+				const numericOffset = Number(offset);
+				offsets.push(numericOffset);
 				const makeMessage = (index: number) => ({ type: "assistant", uuid: `message-${index}`, session_id: SDK_ID, message: { content: "x".repeat(15_000) }, parent_tool_use_id: null, parent_agent_id: null });
-				return JSON.stringify(offset === 0 ? Array.from({ length: 100 }, (_, index) => makeMessage(index)) : [makeMessage(100)]);
+				return JSON.stringify(numericOffset === 0 ? Array.from({ length: 100 }, (_, index) => makeMessage(index)) : [makeMessage(100)]);
 			},
 		});
 		const messages = await access.getSessionMessages(SDK_ID);
