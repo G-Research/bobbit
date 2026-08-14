@@ -331,15 +331,15 @@ describe("ProjectSandbox state mount staleness", () => {
 		]);
 		assert.equal(commands[0][5], "sh");
 		const prepare = commands[0][7];
-		assert.match(prepare, /boot="\$\(awk '\{print \$22\}' \/proc\/1\/stat\)"/);
-		assert.match(prepare, /started="\$\(awk '\{print \$22\}' "\/proc\/\$\$\/stat"\)"/);
+		assert.match(prepare, /migration-lock-v3/);
+		assert.match(prepare, /exec 9>"\$lock"/);
+		assert.match(prepare, /flock -w 10 9 \|\| exit 75/);
 		assert.match(prepare, /trap cleanup EXIT/);
-		assert.ok(prepare.indexOf("trap cleanup EXIT") < prepare.indexOf('mkdir -m 0700 "$pending"'), "cleanup must be installed before publishing pending");
-		assert.match(prepare, /kill -0 "\$owner_pid"/);
-		assert.match(prepare, /migration-intent-v2-\$boot-\$pid-\$started-\$token/);
-		assert.match(prepare, /ln "\$intent" "\$lock"/);
+		assert.ok(prepare.indexOf("flock -w 10 9") < prepare.indexOf('rm -f "$marker"'), "marker must be revoked only while flock is held");
+		assert.match(prepare, /clean_legacy_artifacts/);
+		assert.match(prepare, /migration-pending-\*/);
+		assert.match(prepare, /\*\[!0-9\]\*\) exit 65/);
 		assert.match(prepare, /rm -f "\$marker"/);
-		assert.match(prepare, /rmdir "\$pending"/);
 		assert.match(commands[0][7], /chown -h root:root/);
 		assert.match(commands[0][7], /find -P/);
 		assert.match(commands[0][7], /-links \+1/);
@@ -349,9 +349,10 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.match(commands[1].at(-1) ?? "", /test -O/);
 		assert.match(commands[2].at(-1) ?? "", /test -r/);
 		assert.equal(await (sandbox as any)._getClaudeAgentSdkStateParentStatus("container-sdk"), "secure");
-		assert.match(commands[3][7], /migration-pending-v2-\*/);
-		assert.match(commands[3][7], /kill -0 "\$2"/);
-		assert.match(commands[3][7], /exit 75/);
+		assert.match(commands[3][7], /flock -n 9 \|\| exit 75/);
+		assert.match(commands[3][7], /migration-lock-v3/);
+		assert.match(commands[3][7], /migration-pending-\*/);
+		assert.match(commands[3][7], /flock -n 9 \|\| exit 75/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/host/project", "sdk-session"), /session path is invalid/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session identity is invalid/);
 	});
@@ -408,7 +409,7 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.deepEqual(calls, []);
 	});
 
-	it("gives the root migration exec more time than its ten-second acquisition ceiling", async () => {
+	it("gives the root migration exec more time than its ten-second flock ceiling", async () => {
 		const sandbox = makeSandbox();
 		const calls: Array<{ args: string[]; options: any }> = [];
 		(sandbox as any).execDocker = async (args: string[], options: any) => { calls.push({ args, options }); return { stdout: "", stderr: "" }; };

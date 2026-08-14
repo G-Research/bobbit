@@ -51,131 +51,68 @@ const PREPARE_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
 marker="$parent/.bobbit-sdk-state-parent-lock-v2"
-lock="$parent/.bobbit-sdk-state-migration-lock-v2"
+lock="$parent/.bobbit-sdk-state-migration-lock-v3"
 legacy_lock="$parent/.bobbit-sdk-state-migration-lock-v1"
-boot="$(awk '{print $22}' /proc/1/stat)"
-pid=$$
-started="$(awk '{print $22}' "/proc/$$/stat")"
-token="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
-owner="$boot $pid $started $token"
-pending="$parent/.bobbit-sdk-state-migration-pending-v2-$boot-$pid-$started-$token"
-intent="$parent/.bobbit-sdk-state-migration-intent-v2-$boot-$pid-$started-$token"
-owned_lock=0
-marker_invalidated=0
-succeeded=0
+legacy_pending_prefix="$parent/.bobbit-sdk-state-migration-pending-"
 
-# The lock is an atomically linked, fully populated file.  Its owner identity
-# exists before the fixed-name coordination lock becomes visible, so SIGKILL
-# cannot leave an ownerless same-boot lock that cannot be recovered safely.
-cleanup() {
-  if [ "$owned_lock" -eq 1 ] && [ -f "$lock" ] && [ ! -L "$lock" ] && [ "$(cat "$lock" 2>/dev/null || :)" = "$owner" ]; then rm -f "$lock"; fi
-  rm -f "$intent"
-  rmdir "$pending" 2>/dev/null || :
-  if [ "$marker_invalidated" -eq 1 ] && [ "$succeeded" -ne 1 ]; then rm -f "$marker"; fi
-}
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-
-valid_owner() (
-  owner_value="$1"
-  set -- $owner_value
-  [ "$#" -eq 4 ] || return 1
-  case "$1:$2:$3:$4" in *[!0-9A-Fa-f:]*|*::*|:*) return 1 ;; esac
-  return 0
-)
-owner_state() (
-  owner_value="$1"
-  valid_owner "$owner_value" || return 2
-  set -- $owner_value
-  owner_boot=$1 owner_pid=$2 owner_started=$3
-  [ "$owner_boot" = "$boot" ] || return 0
-  kill -0 "$owner_pid" 2>/dev/null || return 0
-  [ -r "/proc/$owner_pid/stat" ] || return 2
-  [ "$(awk '{print $22}' "/proc/$owner_pid/stat")" = "$owner_started" ] || return 0
-  return 1
-)
-name_owner() (
-  name="$1" prefix="$2"
-  value="\${name#"$prefix"}"
-  [ "$value" != "$name" ] || return 1
-  old_ifs=$IFS; IFS=-; set -- $value; IFS=$old_ifs
-  [ "$#" -eq 4 ] || return 1
-  printf '%s %s %s %s\n' "$1" "$2" "$3" "$4"
-)
-legacy_owner_state() {
-  legacy_pid="$1"
-  case "$legacy_pid" in ''|*[!0-9]*) return 2 ;; esac
-  kill -0 "$legacy_pid" 2>/dev/null && return 1
-  return 0
-}
-
-# Reap only a previous container boot or a demonstrably dead process. A live
-# or queued owner remains visible to VERIFY; malformed artifacts fail closed.
-live_artifact=0
-reap_artifacts() {
-  live_artifact=0
-  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-v2-*; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
-    artifact_owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-pending-v2-')" || exit 65
-    if owner_state "$artifact_owner"; then state=0; else state=$?; fi
-    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
-  done
-  for artifact in "$parent"/.bobbit-sdk-state-migration-intent-v2-*; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    [ -f "$artifact" ] && [ ! -L "$artifact" ] || exit 65
-    artifact_owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-intent-v2-')" || exit 65
-    if owner_state "$artifact_owner"; then state=0; else state=$?; fi
-    case "$state" in 0) rm -f "$artifact" ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
-  done
+ensure_lock() {
   if [ -e "$lock" ] || [ -L "$lock" ]; then
     [ -f "$lock" ] && [ ! -L "$lock" ] || exit 65
-    lock_owner="$(cat "$lock" 2>/dev/null || :)"
-    if owner_state "$lock_owner"; then state=0; else state=$?; fi
-    case "$state" in 0) rm -f "$lock" ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+  else
+    (umask 077; : > "$lock")
   fi
+  chown -h root:root "$lock"
+  chmod 0600 "$lock"
+  [ "$(stat -c '%u:%a' "$lock")" = "0:600" ]
+}
+# v1 used an empty mkdir lock and an empty PID-suffixed pending directory.
+# Under the v3 flock boundary there is no live v1 writer; clean only those
+# exact empty shapes. Anything else is malicious/corrupt and fails closed.
+clean_legacy_artifacts() {
   if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
-    [ -d "$legacy_lock" ] && [ ! -L "$legacy_lock" ] && [ -f "$legacy_lock/pid" ] && [ ! -L "$legacy_lock/pid" ] || exit 65
-    if legacy_owner_state "$(cat "$legacy_lock/pid" 2>/dev/null || :)"; then state=0; else state=$?; fi
-    case "$state" in 0) rm -f "$legacy_lock/pid" && rmdir "$legacy_lock" ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+    [ -d "$legacy_lock" ] && [ ! -L "$legacy_lock" ] || exit 65
+    [ -z "$(find -P "$legacy_lock" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 65
+    rmdir "$legacy_lock" || exit 65
   fi
-  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-[0-9]*; do
+  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-*; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
-    legacy_pid="\${artifact##*-}"
-    if legacy_owner_state "$legacy_pid"; then state=0; else state=$?; fi
-    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+    name="\${artifact##*/}"
+    legacy_pid="\${name#.bobbit-sdk-state-migration-pending-}"
+    case "$legacy_pid" in ""|*[!0-9]*) exit 65 ;; esac
+    [ -z "$(find -P "$artifact" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 65
+    rmdir "$artifact" || exit 65
   done
 }
-
+validate_root_entries() {
+  for entry in "$parent"/* "$parent"/.*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="\${entry##*/}"
+    case "$name" in
+      .|..|.bobbit-sdk-state-parent-lock-v2|.bobbit-sdk-state-migration-lock-v3) continue ;;
+      .bobbit-sdk-state-migration-*) exit 65 ;;
+      .*) continue ;; # unrelated root dotfiles are outside the lifecycle surface
+      *[!A-Za-z0-9_-]*|"") exit 65 ;;
+    esac
+    [ -d "$entry" ] && [ ! -L "$entry" ] || exit 65
+  done
+}
 [ -d "$parent" ] && [ ! -L "$parent" ]
 chown -h root:root "$parent"
 chmod 0711 "$parent"
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
-reap_artifacts
-mkdir -m 0700 "$pending"
-chown -h root:root "$pending"
-[ "$(stat -c '%u:%a' "$pending")" = "0:700" ]
-attempt=0
-while :; do
-  reap_artifacts
-  umask 077
-  set -C
-  : > "$intent"
-  set +C
-  printf '%s\n' "$owner" > "$intent"
-  chmod 0600 "$intent"
-  if ln "$intent" "$lock" 2>/dev/null; then
-    owned_lock=1
-    rm -f "$intent"
-    break
-  fi
-  rm -f "$intent"
-  attempt=$((attempt + 1))
-  [ "$attempt" -lt 100 ] || exit 75
-  sleep 0.1
-done
+ensure_lock
+exec 9>"$lock"
+flock -w 10 9 || exit 75
+clean_legacy_artifacts
+validate_root_entries
 marker_invalidated=1
+succeeded=0
+cleanup() {
+  if [ "$marker_invalidated" -eq 1 ] && [ "$succeeded" -ne 1 ]; then rm -f "$marker"; fi
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 rm -f "$marker"
 prepare_session() {
   session="$1"
@@ -202,22 +139,14 @@ prepare_session() {
 }
 case "\${1-}" in
   "")
-    for entry in "$parent"/* "$parent"/.*; do
-      [ -e "$entry" ] || [ -L "$entry" ] || continue
-      name="\${entry##*/}"
-      case "$name" in
-        .|..|.bobbit-sdk-state-parent-lock-v2|.bobbit-sdk-state-migration-lock-v1|.bobbit-sdk-state-migration-lock-v2|.bobbit-sdk-state-migration-pending-v2-*|.bobbit-sdk-state-migration-intent-v2-*|.bobbit-sdk-state-migration-pending-[0-9]*) continue ;;
-        *) prepare_session "$name" ;;
-      esac
+    for entry in "$parent"/*; do
+      [ -e "$entry" ] || continue
+      prepare_session "\${entry##*/}"
     done
     ;;
   *) prepare_session "$1" ;;
 esac
-if [ -e "$marker" ] || [ -L "$marker" ]; then
-  [ -f "$marker" ] && [ ! -L "$marker" ] || exit 65
-else
-  : > "$marker"
-fi
+: > "$marker"
 chown -h root:root "$marker"
 chmod 0600 "$marker"
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
@@ -228,68 +157,42 @@ const VERIFY_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
 marker="$parent/.bobbit-sdk-state-parent-lock-v2"
-lock="$parent/.bobbit-sdk-state-migration-lock-v2"
+lock="$parent/.bobbit-sdk-state-migration-lock-v3"
 legacy_lock="$parent/.bobbit-sdk-state-migration-lock-v1"
-boot="$(awk '{print $22}' /proc/1/stat)"
-valid_owner() (
-  set -- $1
-  [ "$#" -eq 4 ] || return 1
-  case "$1:$2:$3:$4" in *[!0-9A-Fa-f:]*|*::*|:*) return 1 ;; esac
-)
-owner_state() (
-  valid_owner "$1" || return 2
-  set -- $1
-  [ "$1" = "$boot" ] || return 0
-  kill -0 "$2" 2>/dev/null || return 0
-  [ -r "/proc/$2/stat" ] || return 2
-  [ "$(awk '{print $22}' "/proc/$2/stat")" = "$3" ] || return 0
-  return 1
-)
-name_owner() (
-  value="\${1#"$2"}"; [ "$value" != "$1" ] || return 1
-  old_ifs=$IFS; IFS=-; set -- $value; IFS=$old_ifs
-  [ "$#" -eq 4 ] || return 1
-  printf '%s %s %s %s\n' "$1" "$2" "$3" "$4"
-)
-legacy_owner_state() { case "$1" in ''|*[!0-9]*) return 2 ;; esac; kill -0 "$1" 2>/dev/null && return 1; return 0; }
-live=0
-reap_artifacts() {
-  live=0
-  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-v2-*; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
-    owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-pending-v2-')" || exit 65
-    if owner_state "$owner"; then state=0; else state=$?; fi
-    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live=1 ;; *) exit 65 ;; esac
-  done
-  for artifact in "$parent"/.bobbit-sdk-state-migration-intent-v2-*; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    [ -f "$artifact" ] && [ ! -L "$artifact" ] || exit 65
-    owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-intent-v2-')" || exit 65
-    if owner_state "$owner"; then state=0; else state=$?; fi
-    case "$state" in 0) rm -f "$artifact" ;; 1) live=1 ;; *) exit 65 ;; esac
-  done
-  if [ -e "$lock" ] || [ -L "$lock" ]; then
-    [ -f "$lock" ] && [ ! -L "$lock" ] || exit 65
-    if owner_state "$(cat "$lock" 2>/dev/null || :)"; then state=0; else state=$?; fi
-    case "$state" in 0) rm -f "$lock" ;; 1) live=1 ;; *) exit 65 ;; esac
-  fi
-  if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
-    [ -d "$legacy_lock" ] && [ ! -L "$legacy_lock" ] && [ -f "$legacy_lock/pid" ] && [ ! -L "$legacy_lock/pid" ] || exit 65
-    if legacy_owner_state "$(cat "$legacy_lock/pid" 2>/dev/null || :)"; then state=0; else state=$?; fi
-    case "$state" in 0) rm -f "$legacy_lock/pid" && rmdir "$legacy_lock" ;; 1) live=1 ;; *) exit 65 ;; esac
-  fi
-  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-[0-9]*; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
-    if legacy_owner_state "\${artifact##*-}"; then state=0; else state=$?; fi
-    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live=1 ;; *) exit 65 ;; esac
-  done
-}
+
+# VERIFY never creates or replaces the coordination inode on a running
+# container. Existing containers without v3 attestations remain invalid.
 [ -d "$parent" ] && [ ! -L "$parent" ]
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
-reap_artifacts
-[ "$live" -eq 0 ] || exit 75
+[ -f "$lock" ] && [ ! -L "$lock" ]
+[ "$(stat -c '%u:%a' "$lock")" = "0:600" ]
+exec 9>"$lock"
+flock -n 9 || exit 75
+# A v1 artifact can only be reclaimed while exclusively holding the permanent
+# v3 inode. Exact predecessor shapes are safe; malformed entries fail closed.
+if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
+  [ -d "$legacy_lock" ] && [ ! -L "$legacy_lock" ] || exit 65
+  [ -z "$(find -P "$legacy_lock" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 65
+  rmdir "$legacy_lock" || exit 65
+fi
+for artifact in "$parent"/.bobbit-sdk-state-migration-pending-*; do
+  [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+  [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
+  name="\${artifact##*/}"
+  legacy_pid="\${name#.bobbit-sdk-state-migration-pending-}"
+  case "$legacy_pid" in ""|*[!0-9]*) exit 65 ;; esac
+  [ -z "$(find -P "$artifact" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 65
+  rmdir "$artifact" || exit 65
+done
+for entry in "$parent"/.*; do
+  [ -e "$entry" ] || [ -L "$entry" ] || continue
+  name="\${entry##*/}"
+  case "$name" in
+    .|..|.bobbit-sdk-state-parent-lock-v2|.bobbit-sdk-state-migration-lock-v3) ;;
+    .bobbit-sdk-state-migration-*) exit 65 ;;
+    .*) ;; # unrelated root dotfiles never participate in lifecycle recovery
+  esac
+done
 [ -f "$marker" ] && [ ! -L "$marker" ]
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
 `;
