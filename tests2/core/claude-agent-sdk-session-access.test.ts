@@ -5,6 +5,7 @@ import {
 	claudeAgentSdkDirectConfigDir,
 	claudeAgentSdkModuleUrl,
 	createDirectClaudeAgentSdkSessionAccess,
+	SDK_HISTORY_READER_EXEC_OPTIONS,
 	readSdkSessionInfo,
 	readSdkSessionMessages,
 	readSdkSubagentMessages,
@@ -62,10 +63,12 @@ describe("Claude Agent SDK session access", () => {
 
 	it("passes Bobbit's resolved absolute SDK module URL to direct history readers", async () => {
 		const executions: string[][] = [];
+		const executionOptions: unknown[] = [];
 		const access = createDirectClaudeAgentSdkSessionAccess({
 			configDir: "/isolated/direct-sdk-config",
-			exec: async (args) => {
+			exec: async (args, options) => {
 				executions.push(args);
+				executionOptions.push(options);
 				return JSON.stringify({ sessionId: SESSION_ID, summary: "direct", lastModified: 1 });
 			},
 		});
@@ -73,6 +76,7 @@ describe("Claude Agent SDK session access", () => {
 		expect(executions).toHaveLength(1);
 		expect(executions[0].at(-1)).toBe(claudeAgentSdkModuleUrl());
 		expect(executions[0].at(-1)).toMatch(/^file:\/\//);
+		expect(executionOptions).toEqual([SDK_HISTORY_READER_EXEC_OPTIONS]);
 	});
 
 	it("prefers sandbox history access when both runtime-specific accessors are supplied", async () => {

@@ -149,8 +149,11 @@ export const SANDBOX_SDK_HISTORY_PAGE_SIZE = 100;
 export const MAX_SANDBOX_SDK_HISTORY_MESSAGES = 1_000;
 export const MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES = 16 * 1024 * 1024;
+export const SDK_HISTORY_READER_TIMEOUT_MS = 10_000;
+export const SDK_HISTORY_READER_EXEC_OPTIONS = { timeout: SDK_HISTORY_READER_TIMEOUT_MS, killSignal: "SIGKILL" } as const;
 /** Image-pinned wrapper resolves its package from /usr/local/lib/node_modules. */
-export const SANDBOX_SDK_MODULE_URL = "file:///usr/local/lib/bobbit/claude-agent-sdk.mjs";
+export const SANDBOX_SDK_MODULE_PATH = "/usr/local/lib/bobbit/claude-agent-sdk.mjs";
+export const SANDBOX_SDK_MODULE_URL = pathToFileURL(SANDBOX_SDK_MODULE_PATH).href;
 
 /** Resolve from Bobbit's module location, never the user project CWD. */
 export function claudeAgentSdkModuleUrl(): string {
@@ -198,7 +201,7 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 	bobbitSessionId: string;
 	/** Re-establishes private SDK state ownership before dormant archive reads. */
 	prepare?: () => Promise<void>;
-	exec?: (args: string[]) => Promise<string>;
+	exec?: (args: string[], options: typeof SDK_HISTORY_READER_EXEC_OPTIONS) => Promise<string>;
 }): ClaudeAgentSdkSessionApi {
 	if (!input.containerId || !isSandboxContainerCwd(input.cwd)) {
 		throw unavailable("sandbox session access is unavailable");
@@ -206,9 +209,10 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 	const dir = `/bobbit-state/claude-agent-sdk/${input.bobbitSessionId}`;
 	let preparation: Promise<void> | undefined;
 	const prepare = (): Promise<void> => preparation ??= input.prepare?.() ?? Promise.resolve();
-	const execute = input.exec ?? (async (args: string[]) => {
+	const execute: NonNullable<typeof input.exec> = input.exec ?? (async (args: string[]) => {
 		const { stdout } = await execFileAsync("docker", args, {
 			maxBuffer: MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES,
+			...SDK_HISTORY_READER_EXEC_OPTIONS,
 			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 		});
 		return stdout;
@@ -233,7 +237,7 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 			request.agentId ?? "", request.operation, request.sessionId, "",
 			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
 			SANDBOX_SDK_MODULE_URL,
-		]);
+		], SDK_HISTORY_READER_EXEC_OPTIONS);
 		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("sandbox SDK response page exceeds limit");
 		try { return JSON.parse(output) as T; }
 		catch { throw new Error("sandbox SDK returned invalid JSON"); }
@@ -285,13 +289,14 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
  */
 export function createDirectClaudeAgentSdkSessionAccess(input: {
 	configDir: string;
-	exec?: (args: string[]) => Promise<string>;
+	exec?: (args: string[], options: typeof SDK_HISTORY_READER_EXEC_OPTIONS) => Promise<string>;
 }): ClaudeAgentSdkSessionApi {
 	if (!input.configDir) throw unavailable("direct session access is unavailable");
-	const execute = input.exec ?? (async (args: string[]) => {
+	const execute: NonNullable<typeof input.exec> = input.exec ?? (async (args: string[]) => {
 		const { stdout } = await execFileAsync(process.execPath, args, {
 			cwd: process.cwd(),
 			maxBuffer: MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES,
+			...SDK_HISTORY_READER_EXEC_OPTIONS,
 			env: {
 				HOME: input.configDir,
 				PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
@@ -315,7 +320,7 @@ export function createDirectClaudeAgentSdkSessionAccess(input: {
 			request.agentId ?? "", request.operation, request.sessionId, "",
 			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
 			moduleUrl,
-		]);
+		], SDK_HISTORY_READER_EXEC_OPTIONS);
 		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("direct SDK response page exceeds limit");
 		try { return JSON.parse(output) as T; }
 		catch { throw new Error("direct SDK returned invalid JSON"); }

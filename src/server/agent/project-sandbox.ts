@@ -23,6 +23,7 @@ import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import { CLAUDE_AGENT_SDK_DOCKER_UID, CLAUDE_AGENT_SDK_DOCKER_USER, isSandboxContainerCwd } from "./docker-exec-spawn.js";
+import { SANDBOX_SDK_MODULE_PATH } from "./claude-agent-sdk-session-access.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, resolveBaseRefWithExec, hasResolvedHeadWithExec, UnresolvedHeadWorktreeError } from "../skills/git.js";
@@ -872,6 +873,9 @@ export class ProjectSandbox {
 			if (stdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION) return false;
 			const containerId = await this.getContainerId();
 			await this._dockerExec(containerId, ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
+			await this.execDocker([
+				"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, containerId, "test", "-r", SANDBOX_SDK_MODULE_PATH,
+			], { timeout: 5_000, env: DOCKER_ENV });
 			const sdkUid = (await this._dockerExec(containerId, ["id", "-u", CLAUDE_AGENT_SDK_DOCKER_USER], { timeout: 5_000 })).trim();
 			return sdkUid === CLAUDE_AGENT_SDK_DOCKER_UID;
 		} catch {

@@ -4,7 +4,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ClaudeAgentSdkBridge, type ClaudeAgentSdkBridgeDeps } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
-import { createSandboxClaudeAgentSdkSessionAccess, SANDBOX_SDK_MODULE_URL, SANDBOX_SDK_READER } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
+import { createSandboxClaudeAgentSdkSessionAccess, SANDBOX_SDK_MODULE_URL, SANDBOX_SDK_READER, SDK_HISTORY_READER_EXEC_OPTIONS } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
 
 const dockerSpawn = vi.fn<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>();
 type DockerSpawnOptions = Parameters<ReturnType<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>>[0];
@@ -221,12 +221,14 @@ describe("Claude Agent SDK sandbox runtime", () => {
 
 	it("reads SDK history in the pooled container with a read-only closed environment", async () => {
 		const executions: string[][] = [];
+		const executionOptions: unknown[] = [];
 		const access = createSandboxClaudeAgentSdkSessionAccess({
 			containerId: "container-history",
 			cwd: "/workspace-wt/history",
 			bobbitSessionId: "history-session",
-			exec: async (args) => {
+			exec: async (args, options) => {
 				executions.push(args);
+				executionOptions.push(options);
 				return args.includes("info")
 					? JSON.stringify({ sessionId: SDK_ID, summary: "SDK owned", lastModified: 1 })
 					: JSON.stringify([{ type: "user", uuid: "message-1", session_id: SDK_ID, message: { role: "user", content: "container transcript" }, parent_tool_use_id: null, parent_agent_id: null }]);
@@ -235,6 +237,7 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		await expect(access.getSessionInfo(SDK_ID)).resolves.toMatchObject({ summary: "SDK owned" });
 		await expect(access.getSessionMessages(SDK_ID)).resolves.toHaveLength(1);
 		expect(executions).toHaveLength(2);
+		expect(executionOptions).toEqual([SDK_HISTORY_READER_EXEC_OPTIONS, SDK_HISTORY_READER_EXEC_OPTIONS]);
 		for (const args of executions) {
 			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-u", "bobbit-sdk", "-w", "/", "container-history", "node", "--input-type=module"]));
 			expect(args.join(" ")).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/history-session");
