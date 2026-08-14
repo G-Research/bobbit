@@ -333,19 +333,45 @@ export class PromptQueue {
 	}
 
 	/**
-	 * Move unresolved continuation occurrences to the next turn after Stop. Their
-	 * identities, metadata, relative order, and lane sequence remain unchanged.
+	 * Restore proven-no-start rows and move every unresolved continuation into the
+	 * next-turn lane as one operation. Accepted time is the session-wide immutable
+	 * admission ordinal for modern rows; stable input order conservatively breaks
+	 * ties in legacy persisted data. Reallocating the merged lane prevents sequence
+	 * collisions while preserving the occurrence payload and identity.
 	 */
-	retargetContinuationToNextTurn(reason: string): QueuedMessage[] {
-		const retargeted: QueuedMessage[] = [];
-		for (const row of this.queue) {
-			if (row.targetTurn !== "continuation" || row.deliveryState === "received") continue;
+	retargetContinuationToNextTurn(reason: string, restoredRows: QueuedMessage[] = []): QueuedMessage[] {
+		for (const message of restoredRows) this.enqueueExisting(message);
+
+		const retargeted = this.queue.filter((row) =>
+			row.targetTurn === "continuation"
+				&& (row.deliveryState === undefined || row.deliveryState === "queued" || row.deliveryState === "failed"));
+		if (retargeted.length === 0) return [];
+
+		for (const row of retargeted) {
 			row.targetTurn = "next-turn";
 			row.deliveryReason = reason;
-			retargeted.push(row);
-			this.observeSequence(row);
 		}
-		return retargeted;
+
+		const laneSlots: number[] = [];
+		const laneRows: Array<{ row: QueuedMessage; priorIndex: number }> = [];
+		for (let index = 0; index < this.queue.length; index++) {
+			const row = this.queue[index];
+			if (row.targetTurn !== "next-turn" || row.kind === undefined) continue;
+			laneSlots.push(index);
+			laneRows.push({ row, priorIndex: index });
+		}
+		laneRows.sort((left, right) => {
+			const acceptedDifference = left.row.createdAt - right.row.createdAt;
+			return acceptedDifference || left.priorIndex - right.priorIndex;
+		});
+		for (let index = 0; index < laneRows.length; index++) {
+			const row = laneRows[index].row;
+			row.sequence = this.allocateSequence("next-turn");
+			this.queue[laneSlots[index]] = row;
+		}
+
+		const retargetedIds = new Set(retargeted.map((row) => row.id));
+		return laneRows.map(({ row }) => row).filter((row) => retargetedIds.has(row.id));
 	}
 
 	private reorder(): void {

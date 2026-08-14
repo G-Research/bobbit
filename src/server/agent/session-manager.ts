@@ -6686,23 +6686,21 @@ export class SessionManager {
 		}
 		for (const record of recoverable) this.cancelRestoredPromptAuthorDispatch(session, record);
 		session.inFlightSteerTexts = ledger.filter((record) => !recoverable.includes(record));
-		for (const record of [...recoverable].reverse()) {
+		const recoveredRows = recoverable.map((record): ReliableQueuedMessage => {
 			const intentId = record.intentId ?? record.promptId;
 			const kind = record.kind ?? "steer";
 			const originalTarget = record.targetTurn
 				?? (record.intentId ? (kind === "steer" ? "continuation" : "next-turn") : "next-turn");
-			const retargeted = opts?.retargetContinuation === true
-				&& (record.targetTurn ?? "continuation") === "continuation";
-			this.enqueueReliableIntent(session, {
+			return {
 				id: intentId,
 				text: record.text,
 				isSteered: kind === "steer",
 				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
 				kind,
-				targetTurn: retargeted ? "next-turn" : originalTarget,
+				targetTurn: originalTarget,
 				sequence: record.sequence,
 				deliveryState: "queued",
-				deliveryReason: retargeted ? "continuation-aborted" : (record.deliveryReason ?? "delivery-recovered"),
+				deliveryReason: record.deliveryReason ?? "delivery-recovered",
 				attemptId: record.attemptId,
 				dispatchEpoch: record.dispatchEpoch,
 				source: record.source,
@@ -6710,7 +6708,12 @@ export class SessionManager {
 				images: record.images,
 				attachments: record.attachments,
 				suppressTitleGen: record.suppressTitleGen,
-			}, { front: true });
+			};
+		});
+		if (opts?.retargetContinuation === true) {
+			session.promptQueue.retargetContinuationToNextTurn("continuation-aborted", recoveredRows);
+		} else {
+			for (const row of [...recoveredRows].reverse()) this.enqueueReliableIntent(session, row, { front: true });
 		}
 		this.broadcastQueue(session);
 	}
@@ -6723,28 +6726,16 @@ export class SessionManager {
 			retargetQueuedContinuation?: boolean;
 		},
 	): void {
-		const queue = session.promptQueue as any;
 		const retargetQueuedContinuation = opts?.retargetQueuedContinuation
 			?? (opts?.outcome === "proven-no-start");
-		if (retargetQueuedContinuation) {
-			if (typeof queue.retargetContinuationToNextTurn === "function") {
-				queue.retargetContinuationToNextTurn("continuation-aborted");
-			} else {
-				const rows = session.promptQueue.toArray() as ReliableQueuedMessage[];
-				const retargeted = rows.filter((row) => row.targetTurn === "continuation" && row.deliveryState !== "received");
-				for (const row of retargeted) {
-					row.targetTurn = "next-turn";
-					row.deliveryReason = "continuation-aborted";
-				}
-				if (retargeted.length > 0) {
-					const ids = new Set(retargeted.map((row) => row.id));
-					session.promptQueue.reorderByIds([...retargeted.map((row) => row.id), ...rows.filter((row) => !ids.has(row.id)).map((row) => row.id)]);
-				}
-			}
+		const consolidateProvenRestore = retargetQueuedContinuation
+			&& opts?.outcome === "proven-no-start";
+		if (retargetQueuedContinuation && !consolidateProvenRestore) {
+			session.promptQueue.retargetContinuationToNextTurn("continuation-aborted");
 		}
 		this._reconcileInFlightSteers(session, {
 			outcome: opts?.outcome,
-			retargetContinuation: opts?.outcome === "proven-no-start",
+			retargetContinuation: consolidateProvenRestore,
 		});
 		if (session._reliableCompactionReleaseDeferred && retargetQueuedContinuation) {
 			session._reliableCompactionReleaseDeferred = false;
@@ -7694,10 +7685,8 @@ export class SessionManager {
 				// rows become next-turn work; legacy rows retain their historical flush.
 				const reliableSteers = (session.promptQueue.toArray() as ReliableQueuedMessage[])
 					.filter((row) => row.kind === "steer" && row.deliveryState === "queued");
-				for (const row of reliableSteers) {
-					if (row.targetTurn !== "continuation") continue;
-					row.targetTurn = "next-turn";
-					row.deliveryReason = "continuation-ended";
+				if (reliableSteers.some((row) => row.targetTurn === "continuation")) {
+					session.promptQueue.retargetContinuationToNextTurn("continuation-ended");
 				}
 				if (reliableSteers.length === 0) {
 					const steered = session.promptQueue.dequeueAllSteered();

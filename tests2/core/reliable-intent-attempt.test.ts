@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizePersistedInFlightSteers } from "../../src/server/agent/session-store.js";
+import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
 import { reconcilePersistedIntentRestore } from "../../src/server/agent/session-manager.js";
 import { foldAuthorSidecarRecords, initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.js";
 import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.js";
@@ -513,29 +514,112 @@ describe("reliable intent abort and stale-attempt fences", () => {
 		expect(session.promptQueue.toArray()).toHaveLength(1);
 	});
 
-	it("restores a proven-no-start attempt once, retargeted ahead of later next-turn work", async () => {
+	it("restores a proven-no-start attempt after an earlier next-turn prompt across persistence", async () => {
 		const steer = vi.fn(async () => ({ success: true }));
-		const { manager, session } = useHarness({
+		const { manager, session, storeUpdates } = useHarness({
 			rpcClient: {
 				steer,
 				prompt: vi.fn(async () => ({ success: true })),
 				getState: vi.fn(async () => ({ success: true, data: {} })),
 			},
 		});
-		await manager.deliverLiveSteer(session.id, "restore after proof", { intentId: "intent-proven-no-start" });
+		queueNextTurn(session, "earlier-prompt");
+		await manager.deliverLiveSteer(session.id, "same text", {
+			intentId: "later-steer",
+			source: "agent",
+			author: { kind: "agent", id: "session:later", label: "Later" },
+		});
+
+		manager._reconcileAfterAbort(session, { outcome: "proven-no-start" });
+		manager._reconcileAfterAbort(session, { outcome: "proven-no-start" });
+
+		const rows = session.promptQueue.toArray() as any[];
+		expect(rows.map((row) => row.id)).toEqual(["earlier-prompt", "later-steer"]);
+		expect(rows.map((row) => row.sequence)).toEqual([expect.any(Number), expect.any(Number)]);
+		expect(new Set(rows.map((row) => row.sequence)).size).toBe(2);
+		expect(rows[1]).toMatchObject({
+			text: "same text",
+			kind: "steer",
+			targetTurn: "next-turn",
+			deliveryReason: "continuation-aborted",
+			author: { kind: "agent", id: "session:later", label: "Later" },
+		});
+		const persisted = latestPersistedQueue(storeUpdates);
+		expect(persisted.inFlightSteerTexts).toBeUndefined();
+		expect(nextTurnDrainOrder(persisted.messageQueue)).toEqual(["earlier-prompt", "later-steer"]);
+	});
+
+	it("restores an earlier proven-no-start steer before a later prompt across persistence", async () => {
+		const steer = vi.fn(async () => ({ success: true }));
+		const { manager, session, storeUpdates } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		await manager.deliverLiveSteer(session.id, "same text", {
+			intentId: "earlier-steer",
+			source: "agent",
+			author: { kind: "agent", id: "session:earlier", label: "Earlier" },
+		});
 		queueNextTurn(session, "later-prompt");
 
 		manager._reconcileAfterAbort(session, { outcome: "proven-no-start" });
 		manager._reconcileAfterAbort(session, { outcome: "proven-no-start" });
 
-		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual([
-			"intent-proven-no-start", "later-prompt",
-		]);
-		expect(session.promptQueue.toArray()[0]).toMatchObject({
+		const rows = session.promptQueue.toArray() as any[];
+		expect(rows.map((row) => row.id)).toEqual(["earlier-steer", "later-prompt"]);
+		expect(new Set(rows.map((row) => row.sequence)).size).toBe(2);
+		expect(rows[0]).toMatchObject({
+			text: "same text",
+			deliveryReason: "continuation-aborted",
+			author: { kind: "agent", id: "session:earlier", label: "Earlier" },
+		});
+		const persisted = latestPersistedQueue(storeUpdates);
+		expect(nextTurnDrainOrder(persisted.messageQueue)).toEqual(["earlier-steer", "later-prompt"]);
+	});
+
+	it("retargets queue-only continuations with unique persisted next-turn sequences", () => {
+		const { manager, session, storeUpdates } = useHarness();
+		(session.promptQueue as any).enqueueExisting({
+			id: "prompt-first",
+			text: "same text",
+			isSteered: false,
+			createdAt: 100,
+			kind: "prompt",
+			targetTurn: "next-turn",
+			sequence: 1,
+			deliveryState: "queued",
+			author: { kind: "user", id: "user:first", label: "First" },
+		});
+		(session.promptQueue as any).enqueueExisting({
+			id: "steer-second",
+			text: "same text",
+			isSteered: true,
+			createdAt: 101,
 			kind: "steer",
+			targetTurn: "continuation",
+			sequence: 1,
+			deliveryState: "queued",
+			author: { kind: "agent", id: "session:second", label: "Second" },
+		});
+
+		manager._reconcileAfterAbort(session, { retargetQueuedContinuation: true });
+		manager._reconcileAfterAbort(session, { retargetQueuedContinuation: true });
+		manager.broadcastQueueUpdate(session.id);
+
+		const rows = session.promptQueue.toArray() as any[];
+		expect(rows.map((row) => row.id)).toEqual(["prompt-first", "steer-second"]);
+		expect(new Set(rows.map((row) => row.sequence)).size).toBe(2);
+		expect(rows[1]).toMatchObject({
+			text: "same text",
 			targetTurn: "next-turn",
 			deliveryReason: "continuation-aborted",
+			author: { kind: "agent", id: "session:second", label: "Second" },
 		});
+		const persisted = latestPersistedQueue(storeUpdates);
+		expect(nextTurnDrainOrder(persisted.messageQueue)).toEqual(["prompt-first", "steer-second"]);
 	});
 });
 
@@ -550,6 +634,23 @@ function queueNextTurn(session: any, id: string): void {
 		sequence: 99,
 		deliveryState: "queued",
 	});
+}
+
+function latestPersistedQueue(storeUpdates: Array<Record<string, unknown>>): {
+	messageQueue: any[];
+	inFlightSteerTexts?: any[];
+} {
+	const persisted = [...storeUpdates].reverse().find((patch) => Array.isArray(patch.messageQueue));
+	expect(persisted).toBeDefined();
+	return persisted as { messageQueue: any[]; inFlightSteerTexts?: any[] };
+}
+
+function nextTurnDrainOrder(persistedRows: any[]): string[] {
+	const restored = new PromptQueue(persistedRows);
+	const ids: string[] = [];
+	let row;
+	while ((row = restored.dequeueForTarget("next-turn"))) ids.push(row.id);
+	return ids;
 }
 
 describe("reliable intent restore settlement ordering", () => {
