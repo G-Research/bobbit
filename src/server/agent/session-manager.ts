@@ -5903,8 +5903,11 @@ export class SessionManager {
 			if (session.status === "idle" && session.lastTurnErrored) {
 				const consecutiveErrors = session.consecutiveErrorTurns ?? 0;
 				this.cancelPendingAutoRetry(session, "new-prompt");
-				if (consecutiveErrors >= MAX_CONSECUTIVE_ERROR_TURNS) return { status: "queued" };
 
+				// Orphan tool-result history cannot be repaired by parking another
+				// prompt on the poisoned bridge. Browser-created stable-ID intents must
+				// take the same sanitizer/respawn path as legacy callers before the
+				// generic consecutive-error cap is applied.
 				if (isOrphanToolResultOrderingError(session.lastTurnErrorMessage)) {
 					this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
 					const recovered = await this._recoverPoisonedHistory(session, "follow-up", async (target) => {
@@ -5928,6 +5931,8 @@ export class SessionManager {
 					}
 					return { status: "dispatched" };
 				}
+
+				if (consecutiveErrors >= MAX_CONSECUTIVE_ERROR_TURNS) return { status: "queued" };
 
 				const errorSnippet = (session.lastTurnErrorMessage || "").slice(0, 200);
 				const poisonedByBlankText = isBlankContentBlockError(session.lastTurnErrorMessage);
@@ -7365,7 +7370,7 @@ export class SessionManager {
 	private finishCompactionAndRelease(
 		session: SessionInfo,
 		compactionId: string | undefined,
-		opts?: { willRetry?: boolean; aborted?: boolean; reason?: string },
+		opts?: { willRetry?: boolean; aborted?: boolean; failed?: boolean; reason?: string },
 	): void {
 		const id = compactionId ?? session._reliableCompactionId;
 		if (!id) return;
@@ -7381,8 +7386,10 @@ export class SessionManager {
 			session._reliableCompactionReleaseDeferred = true;
 			return;
 		}
-		const continuing = opts?.willRetry === true
-			|| ((opts?.reason === "threshold" || opts?.reason === "overflow") && session.status === "streaming" && !opts?.aborted);
+		const continuing = opts?.failed !== true && (
+			opts?.willRetry === true
+			|| ((opts?.reason === "threshold" || opts?.reason === "overflow") && session.status === "streaming" && !opts?.aborted)
+		);
 		if (continuing) {
 			const continuation = (session.promptQueue.toArray() as ReliableQueuedMessage[])
 				.filter((row) => row.kind === "steer" && row.targetTurn === "continuation" && row.deliveryState === "queued");
@@ -7758,10 +7765,18 @@ export class SessionManager {
 			const activeCompactionId = (event as any).compactionId ?? session._reliableCompactionId;
 			const reason = (event as any).reason;
 			const aborted = !!(event as any).aborted;
-			const errorMessage = (event as any).errorMessage as string | undefined;
+			const explicitCompactionError = [(event as any).errorMessage, (event as any).error]
+				.find((value): value is string => typeof value === "string" && value.trim().length > 0);
 			const result = (event as any).result as
 				| { summary?: string; tokensBefore?: number; firstKeptEntryId?: string }
 				| undefined;
+			// Pi's automatic-compaction failure shape has changed across releases:
+			// it may carry `success:false`, `error`, `errorMessage`, or simply omit the
+			// required result. Normalize those signals before the sole release owner
+			// decides whether continuation work may re-enter Pi.
+			const failed = (event as any).success === false
+				|| explicitCompactionError !== undefined
+				|| (!aborted && (reason === "threshold" || reason === "overflow") && !result);
 			if (reason !== "manual") {
 				const pending = (session as any)._pendingCompactionStart as
 					| {
@@ -7775,7 +7790,7 @@ export class SessionManager {
 				(session as any)._pendingCompactionStart = undefined;
 				if (pending) {
 					const endedAtMs = this.clock.now();
-					const success = !!result && !aborted && !errorMessage;
+					const success = !!result && !aborted && !failed;
 					if (success) (event as any).compactionId = pending.compactionId;
 					const entry: CompactionSidecarEntry = {
 						schemaVersion: 1,
@@ -7787,7 +7802,7 @@ export class SessionManager {
 						startedAt: new Date(pending.startedAtMs).toISOString(),
 						endedAt: new Date(endedAtMs).toISOString(),
 						success,
-						error: success ? undefined : (errorMessage || (aborted ? "aborted" : "compaction failed")),
+						error: success ? undefined : (explicitCompactionError || (aborted ? "aborted" : "compaction failed")),
 						firstKeptEntryId: result?.firstKeptEntryId ?? null,
 					};
 					(session as any)._compactionFinalization = this.finalizeCompactionSidecar(
@@ -7810,7 +7825,7 @@ export class SessionManager {
 				(session as any)._manualCompactionId = undefined;
 				(session as any)._manualCompactionRpcClient = undefined;
 				(session as any)._manualCompactionBaselinePromise = undefined;
-				const success = !!manualId && !!result && !aborted && !errorMessage;
+				const success = !!manualId && !!result && !aborted && !failed;
 				if (manualId && !aborted) (event as any).compactionId = manualId;
 				if (manualId && success) {
 					const endedAtMs = this.clock.now();
@@ -7858,6 +7873,7 @@ export class SessionManager {
 			this.finishCompactionAndRelease(session, activeCompactionId, {
 				willRetry: (event as any).willRetry === true,
 				aborted,
+				failed,
 				reason,
 			});
 		} else if (event.type === "process_exit") {
