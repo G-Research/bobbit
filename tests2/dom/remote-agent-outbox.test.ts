@@ -443,7 +443,7 @@ describe("RemoteAgent send outbox (S2)", () => {
 		expect(r.sent).toHaveLength(0); // no remove_queued sent to server for a never-sent row
 	});
 
-	it("keeps a newer retry carrier when a stale tab dismisses the failed revision", async () => {
+	it("has a connected stale tab take over a newer retry when its writer closes before send", async () => {
 		const sessionId = `pre-admission-${Date.now()}-${Math.random()}`;
 		const records = new Map<string, PersistedDeliveryIntent>();
 		let releaseRetry!: () => void;
@@ -506,39 +506,38 @@ describe("RemoteAgent send outbox (S2)", () => {
 		await retryPersisted;
 		expect(records.get(`${sessionId}:${intentId}`)).toMatchObject({ revision: 2, row: { deliveryState: "local" } });
 
-		// Tab A rendered failed revision 1. Its dismissal must lose the CAS to
-		// Tab B's persisted retry revision 2 and adopt, not delete, that carrier.
+		// Tab B closes after persistence but before its retry callback can send.
+		// Tab A is still connected and rendered failed revision 1.
+		retryingTab.ws.readyState = CLOSED;
+		retryingTab._connectionStatus = "disconnected";
+		retryingTab._pendingOutbox = [];
 		staleTab.removeQueued(intentId);
 		await vi.waitFor(() => expect(snapshot(staleTab).queue[0]).toMatchObject({ id: intentId, deliveryState: "local" }));
 		expect(records.has(`${sessionId}:${intentId}`)).toBe(true);
 
-		// Simulate Tab B closing after persistence but before socket admission.
-		retryingTab._pendingOutbox = [];
+		// Losing the dismissal CAS adopts revision 2 and immediately takes over its
+		// send. The initial rejected send plus exactly one retry use the same ID.
+		expect(snapshot(staleTab).sent).toEqual([originalFrame, originalFrame]);
+		staleTab._flushOutbox();
+		expect(snapshot(staleTab).sent).toHaveLength(2);
+
 		releaseRetry();
 		await Promise.resolve();
 		expect(snapshot(retryingTab).sent).toHaveLength(0);
 
-		const reloadedTab = makeAgent(OPEN);
-		reloadedTab._sessionId = sessionId;
-		reloadedTab._connectionStatus = "connected";
-		await reloadedTab._restoreDeliveryOutbox();
-		reloadedTab._flushOutbox();
-		expect(snapshot(reloadedTab).sent).toEqual([originalFrame]);
-		reloadedTab._flushOutbox();
-		expect(snapshot(reloadedTab).sent).toHaveLength(1);
-
-		await reloadedTab.handleServerMessage({
+		await staleTab.handleServerMessage({
 			type: "delivery_outbox",
 			outbox: [{ id: intentId, text: "choose a model then retry", isSteered: false, deliveryState: "dispatching", createdAt: 1 }],
 		});
-		expect(snapshot(reloadedTab).queue).toHaveLength(1);
+		expect(snapshot(staleTab).queue).toHaveLength(1);
 		expect(records.has(`${sessionId}:${intentId}`)).toBe(false);
-		reloadedTab.handleAgentEvent({
+		staleTab.handleAgentEvent({
 			type: "message_start",
 			message: { id: "pi-retry", role: "user", content: [{ type: "text", text: "choose a model then retry" }], deliveryIntentId: intentId },
 		});
-		expect(snapshot(reloadedTab).queue).toHaveLength(0);
-		expect(reloadedTab._state.messages).toEqual([expect.objectContaining({ deliveryIntentId: intentId })]);
+		expect(snapshot(staleTab).queue).toHaveLength(0);
+		expect(staleTab._state.messages.filter((message: any) => message.deliveryIntentId === intentId))
+			.toEqual([expect.objectContaining({ deliveryIntentId: intentId })]);
 	});
 
 	it("atomically refuses deletion after the persisted revision advances", async () => {

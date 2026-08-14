@@ -2023,18 +2023,24 @@ export class RemoteAgent {
 		return true;
 	}
 
-	/** A losing CAS adopts the newer shared carrier instead of deleting or
-	 * dispatching it. An absent record is not proof of transcript surfacing: a
-	 * different tab may already have transferred ownership to the server, so this
-	 * tab retains its visible row until its own authoritative projection arrives. */
+	/** A losing CAS adopts the newer shared carrier instead of deleting it. An
+	 * absent record is not proof of transcript surfacing: a different tab may
+	 * already have transferred ownership to the server, so this tab retains its
+	 * visible row until its own authoritative projection arrives. */
 	private _reconcileConditionalMutation(
 		entry: PendingOutboxEntry,
 		current?: PersistedDeliveryIntent,
 	): void {
+		const renderedRevision = entry.localRevision ?? -1;
 		if (current && this._applyPersistedLocalRecord(entry, current)) {
-			// The winning tab owns immediate dispatch. This stale tab may resend only
-			// after a later connection epoch, where server admission is idempotent.
-			entry.lastSentEpoch = this._connectionEpoch;
+			const adoptedNewerLocal = (entry.localRevision ?? 0) > renderedRevision && !entry.retryRequired;
+			if (adoptedNewerLocal) {
+				// The writer can close after committing this revision but before sending.
+				// Any connected tab that adopts the local carrier may take over immediately;
+				// duplicate frames are safe because server admission is occurrence-idempotent.
+				entry.lastSentEpoch = undefined;
+				this._sendOutboxEntry(entry);
+			}
 		}
 		this.onQueueUpdate?.(this.getQueue());
 	}
