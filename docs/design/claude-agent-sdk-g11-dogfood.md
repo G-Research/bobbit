@@ -204,9 +204,10 @@ record and must not be used for a readiness decision.
 | Automated unavailable-provider case | Passed at final tip: the expected unavailable category settled without a hang, Pi fallback, replacement conversation, or model turn. |
 | Direct-run discovery and repair | The initial attempt exposed a role-scope rejection before SDK startup. The role scope was repaired; a separate unavailable-route log-redaction defect was also repaired. |
 | Retried direct startup | The retry reached official SDK startup, but no usable local subscription or resumable SDK session was discoverable. It returned a bounded `503`; no Pi fallback or model turn occurred. |
+| Docker attempted/unavailable | The current image supplied SDK `0.3.222`; its isolated service identity and locking prerequisites were present. It reached official SDK startup, then returned the same bounded `503` because no usable local OAuth subscription or resumable SDK session was discoverable; no Pi fallback or model turn occurred. |
 | Focused regression evidence | All 25 focused checks passed. The implementation gate also passed. |
 | Direct real-model row | Pending a locally discoverable OAuth subscription and user-run confirmation. |
-| Docker real-model row | Pending local OAuth prerequisites, Docker execution, and user-run confirmation. |
+| Docker real-model row | Docker was attempted; a usable local OAuth subscription and user-run confirmation remain pending. |
 
 **Readiness remains prohibited.** Direct and Docker real-model evidence, including
 user signoff, are still required; automated passes and bounded unavailable results
