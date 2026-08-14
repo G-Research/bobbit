@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import { createMemFs } from "../harness/mem-fs.js";
+import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 
 const tmpRoot = makeTmpDir("runtime-model-zombie-recovery-");
 const stateDir = path.join(tmpRoot, "state");
@@ -133,6 +134,11 @@ describe("runtime selection recovery for a role-less pre-transcript session", ()
 			spawnPinnedModel: `${DURABLE.provider}/${DURABLE.id}`,
 			spawnPinnedThinkingLevel: DURABLE.thinkingLevel,
 		};
+		// Runtime termination now fences verifier-owned rows before stopping the
+		// bridge. Production SessionInfo always has this durable queue; retain it in
+		// this partial runtime-model fixture so the zombie path exercises ownership,
+		// rather than failing on an impossible missing field.
+		session.promptQueue = new PromptQueue();
 		manager.sessions.set(SESSION_ID, session);
 
 		let selectionError: Error | undefined;

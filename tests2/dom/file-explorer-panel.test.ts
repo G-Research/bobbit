@@ -406,6 +406,7 @@ describe("built-in file explorer panel", () => {
 
 	it("refreshes on the first idle and later non-idle to idle transitions while pruning vanished selection", async () => {
 		let statusCallback: ((value: { status: "idle" | "running" | "error" }) => void) | undefined;
+
 		let entries: Entry[] = [{ path: "keep.txt", name: "keep.txt", kind: "file" }];
 		const statusDispose = vi.fn();
 		const fakeHost = host({
@@ -413,7 +414,8 @@ describe("built-in file explorer panel", () => {
 			read: ({ path }) => ({ kind: "text", text: String(path) }),
 			diff: () => ({ kind: "empty" }),
 		}, { onStatus: (cb) => { statusCallback = cb; }, statusDispose });
-		const root = mount("refresh-lifecycle", fakeHost);
+		const sid = `refresh-lifecycle-${++mountAttempt}`;
+		const root = mount(sid, fakeHost);
 		await vi.waitFor(() => {
 			expect(statusCallback).toBeTypeOf("function");
 			expect(row(root, "keep.txt")).not.toBeNull();
@@ -435,7 +437,7 @@ describe("built-in file explorer panel", () => {
 		expect(row(root, "keep.txt").getAttribute("aria-selected")).toBe("true");
 
 		entries = [];
-		await createFileExplorerPanel().refresh?.({ __sessionId: "refresh-lifecycle" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
+		await createFileExplorerPanel().refresh?.({ __sessionId: sid }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
 		await tick();
 		expect(root.textContent).toContain("This folder is empty.");
 		expect(root.textContent).toContain("Select a file to preview");
@@ -443,6 +445,8 @@ describe("built-in file explorer panel", () => {
 
 		root.remove();
 		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
+		await tick();
+		expect(statusDispose).toHaveBeenCalledTimes(1);
 	});
 
 	it("disposes status subscriptions through element disconnect without document mutation observation", async () => {

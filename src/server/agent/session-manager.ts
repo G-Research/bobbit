@@ -26,7 +26,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import {
 	canonicalContainerAgentSessionPath,
 	sessionFileDelete,
@@ -125,7 +125,7 @@ let sessionManagerModuleClock: Clock = realClock;
 
 import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from "../mcp/mcp-manager.js";
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
-import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
+import { isReviewerBusyError, isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
@@ -1514,6 +1514,7 @@ export async function dispatchTrackedPrompt(
 		source?: PromptSource;
 		author?: MessageAuthor;
 		whenReady?: boolean;
+		streamingBehavior?: PromptStreamingBehavior;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -1527,8 +1528,12 @@ export async function dispatchTrackedPrompt(
 
 	try {
 		const response = opts.whenReady
-			? await session.rpcClient.promptWhenReady(prepared.piText, undefined)
-			: await session.rpcClient.prompt(prepared.piText);
+			? opts.streamingBehavior
+				? await session.rpcClient.promptWhenReady(prepared.piText, undefined, { streamingBehavior: opts.streamingBehavior })
+				: await session.rpcClient.promptWhenReady(prepared.piText, undefined)
+			: opts.streamingBehavior
+				? await session.rpcClient.prompt(prepared.piText, undefined, undefined, opts.streamingBehavior)
+				: await session.rpcClient.prompt(prepared.piText);
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
@@ -1554,6 +1559,7 @@ export function dispatchTrackedSystemPrompt(
 	opts: {
 		source?: SystemPromptSource;
 		whenReady?: boolean;
+		streamingBehavior?: PromptStreamingBehavior;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -2929,8 +2935,28 @@ export function buildWorkflowListText(workflows: import("./workflow-store.js").W
 	}).join('\n');
 }
 
+export interface VerifierPromptReceipt {
+	/** Durable queue identity for this one verifier-owned intent. */
+	rowId: string;
+	/** Resolves only when this exact row's RPC delivery is accepted. */
+	dispatched: Promise<void>;
+	/** Actual delivery path, updated when a direct attempt is busy-recovered. */
+	readonly mode: "direct" | "queued" | "busy-recovered";
+	/** Removes an undispatched row and fences a late dispatch acknowledgement. */
+	cancel(): boolean;
+}
+
+type PendingVerifierPromptReceipt = {
+	resolve: () => void;
+	reject: (error: Error) => void;
+	cancelled: boolean;
+	mode: "direct" | "queued" | "busy-recovered";
+};
+
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
+	/** Exact verifier rows waiting for provider acceptance, keyed by session/row. */
+	private _verifierPromptReceipts?: Map<string, Map<string, PendingVerifierPromptReceipt>>;
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
 	private sessionsWithConnectedClients = new Set<SessionInfo>();
 	private agentCliPath?: string;
@@ -3078,6 +3104,134 @@ export class SessionManager {
 	}
 
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
+
+	/** The replacement coordinator owns the only queue that may accept prompts. */
+	private _promptQueueOwner(sessionId: string): SessionInfo | undefined {
+		return this._sessionReplacementCoordinators.get(sessionId)?.promptOwner ?? this.sessions.get(sessionId);
+	}
+
+	/**
+	 * Lightweight unit seams may instantiate the prototype without field
+	 * initializers. Receipt bookkeeping is auxiliary to regular prompt delivery,
+	 * so lazily restore it instead of letting settlement throw from a queue drain.
+	 */
+	private _getVerifierPromptReceipts(): Map<string, Map<string, PendingVerifierPromptReceipt>> | undefined {
+		return this._verifierPromptReceipts;
+	}
+
+	private _ensureVerifierPromptReceipts(): Map<string, Map<string, PendingVerifierPromptReceipt>> {
+		return this._verifierPromptReceipts ??= new Map<string, Map<string, PendingVerifierPromptReceipt>>();
+	}
+
+	private createVerifierPromptReceipt(
+		sessionId: string,
+		rowId: string,
+		mode: PendingVerifierPromptReceipt["mode"],
+	): VerifierPromptReceipt {
+		let resolve!: () => void;
+		let reject!: (error: Error) => void;
+		const dispatched = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+		const pending: PendingVerifierPromptReceipt = { resolve, reject, cancelled: false, mode };
+		const receiptStore = this._ensureVerifierPromptReceipts();
+		const receipts = receiptStore.get(sessionId) ?? new Map<string, PendingVerifierPromptReceipt>();
+		receipts.set(rowId, pending);
+		receiptStore.set(sessionId, receipts);
+		return {
+			rowId,
+			dispatched,
+			get mode() { return pending.mode; },
+			cancel: () => this.cancelVerifierPrompt(sessionId, rowId),
+		};
+	}
+
+	private markVerifierPromptBusyRecovered(sessionId: string, rowId: string): void {
+		const pending = this._getVerifierPromptReceipts()?.get(sessionId)?.get(rowId);
+		if (pending) pending.mode = "busy-recovered";
+	}
+
+	/** Remove only a verifier-owned row from the coordinator's canonical queue. */
+	private removeVerifierPromptRow(sessionId: string, rowId: string): boolean {
+		const owner = this._promptQueueOwner(sessionId);
+		const row = owner?.promptQueue.toArray().find(candidate => candidate.id === rowId);
+		if (!owner || row?.verifierOwned !== true) return false;
+		const removed = owner.promptQueue.remove(rowId);
+		if (removed) this.broadcastQueue(owner);
+		return removed;
+	}
+
+	private abandonVerifierPrompt(sessionId: string, rowId: string, error: Error): void {
+		this.removeVerifierPromptRow(sessionId, rowId);
+		this.settleVerifierPromptReceipt(sessionId, rowId, error);
+	}
+
+	/**
+	 * Settle only the verifier receipts belonging to an exact rejected dispatch.
+	 * Ordinary durable rows remain available for the interactive manual-retry
+	 * lifecycle, but verification must never wait for a row this path no longer
+	 * owns (notably after auth, terminal retry, or process-exit failures).
+	 */
+	private abandonVerifierPromptDispatchRows(session: SessionInfo, rows: Array<{
+		id?: string;
+		verifierOwned?: boolean;
+	}>, durableQueueRowIds: Array<string | undefined> | undefined, error: Error): boolean {
+		let abandoned = false;
+		for (let index = 0; index < rows.length; index += 1) {
+			const row = rows[index];
+			if (row.verifierOwned !== true) continue;
+			const rowId = durableQueueRowIds?.[index] ?? row.id;
+			if (!rowId) continue;
+			this.abandonVerifierPrompt(session.id, rowId, error);
+			abandoned = true;
+		}
+		return abandoned;
+	}
+
+	/** Purge verifier rows from the same canonical queue used for enqueue/cancel. */
+	private purgeVerifierPromptRows(sessionId: string, reason: string): void {
+		// Teardown can observe a replacement owner after only part of SessionInfo
+		// has been assembled. Receipt fencing is still mandatory, but a missing or
+		// malformed queue must never prevent termination/restart from proceeding.
+		try {
+			const owner = this._promptQueueOwner(sessionId);
+			const rows = owner?.promptQueue?.toArray?.() ?? [];
+			for (const row of rows) {
+				if (row.verifierOwned === true) this.removeVerifierPromptRow(sessionId, row.id);
+			}
+		} catch {
+			console.warn(`[session-manager] Best-effort verifier queue purge failed for ${sessionId}`);
+		} finally {
+			this.cancelAllVerifierPromptReceipts(sessionId, reason);
+		}
+	}
+
+	private settleVerifierPromptReceipt(sessionId: string, rowId: string, error?: Error): void {
+		const receiptStore = this._getVerifierPromptReceipts();
+		if (!receiptStore) return;
+		const receipts = receiptStore.get(sessionId);
+		const pending = receipts?.get(rowId);
+		if (!pending || !receipts) return;
+		receipts.delete(rowId);
+		if (receipts.size === 0) receiptStore.delete(sessionId);
+		if (pending.cancelled) {
+			pending.reject(new Error(`Verifier prompt ${rowId} was cancelled before dispatch`));
+		} else if (error) {
+			pending.reject(error);
+		} else {
+			pending.resolve();
+		}
+	}
+
+	private cancelAllVerifierPromptReceipts(sessionId: string, reason: string): void {
+		const receiptStore = this._getVerifierPromptReceipts();
+		if (!receiptStore) return;
+		const receipts = receiptStore.get(sessionId);
+		if (!receipts) return;
+		receiptStore.delete(sessionId);
+		for (const pending of receipts.values()) {
+			pending.cancelled = true;
+			pending.reject(new Error(reason));
+		}
+	}
 
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
 	 *  boot. The team-manager boot-resume nudge consults `wasBootReprompted` to
@@ -5535,6 +5689,8 @@ export class SessionManager {
 			images?: Array<{ type: "image"; data: string; mimeType: string }>;
 			attachments?: unknown[];
 			suppressTitleGen?: boolean;
+			streamingBehavior?: PromptStreamingBehavior;
+			coldStart?: boolean;
 			source: PromptSource;
 			author: MessageAuthor;
 		},
@@ -5551,6 +5707,8 @@ export class SessionManager {
 			...(opts.images?.length ? { images: opts.images } : {}),
 			...(opts.attachments?.length ? { attachments: opts.attachments } : {}),
 			...(opts.suppressTitleGen ? { suppressTitleGen: true } : {}),
+			...(opts.streamingBehavior ? { streamingBehavior: opts.streamingBehavior } : {}),
+			...(opts.coldStart ? { coldStart: true } : {}),
 			source: opts.source,
 			author: opts.author,
 		};
@@ -5617,6 +5775,8 @@ export class SessionManager {
 		fileMentions?: FileMention[];
 		source?: PromptSource;
 		author?: MessageAuthor;
+		streamingBehavior?: PromptStreamingBehavior;
+		coldStart?: boolean;
 		suppressTitleGen?: boolean;
 		intentId?: string;
 	}): { status: "queued" } | undefined {
@@ -5659,7 +5819,15 @@ export class SessionManager {
 				dispatchText,
 				opts.isSteered ? "steer" : "prompt",
 				"next-turn",
-				{ images: opts.images, attachments: opts.attachments, suppressTitleGen: opts.suppressTitleGen, source, author },
+				{
+					images: opts.images,
+					attachments: opts.attachments,
+					suppressTitleGen: opts.suppressTitleGen,
+					streamingBehavior: opts.streamingBehavior,
+					coldStart: opts.coldStart,
+					source,
+					author,
+				},
 			));
 		} else {
 			session.promptQueue.enqueue(dispatchText, {
@@ -5669,6 +5837,8 @@ export class SessionManager {
 				suppressTitleGen: opts?.suppressTitleGen,
 				source,
 				author,
+				streamingBehavior: opts?.streamingBehavior,
+				coldStart: opts?.coldStart,
 			});
 		}
 		this.broadcastQueue(session);
@@ -5693,6 +5863,68 @@ export class SessionManager {
 	 * That's why this helper returns the (possibly fresh) `SessionInfo` rather
 	 * than letting the caller hold onto a stale reference.
 	 */
+	/**
+	 * Admit a verifier turn as one durable queue row and return a receipt for
+	 * that exact row. Unlike `enqueuePrompt`, this never turns an accepted
+	 * verifier intent into a separate direct dispatch, so recovery retains the
+	 * same ID and cancellation cannot target an equal-text neighbour.
+	 */
+	enqueueVerifierPrompt(sessionId: string, text: string, opts?: {
+		coldStart?: boolean;
+		streamingBehavior?: PromptStreamingBehavior;
+		suppressTitleGen?: boolean;
+	}): VerifierPromptReceipt {
+		this._assertModelSelectionReady(sessionId);
+		// Replacement owns one durable acceptance queue while the live map may
+		// briefly contain a successor or no session at all. Attach this receipt to
+		// that owner so reconciliation carries the same row ID forward.
+		const session = this._promptQueueOwner(sessionId);
+		if (!session) {
+			const rowId = randomUUID();
+			const receipt = this.createVerifierPromptReceipt(sessionId, rowId, "queued");
+			this.settleVerifierPromptReceipt(sessionId, rowId, new Error(`Verifier session ${sessionId} is unavailable`));
+			return receipt;
+		}
+		const direct = session.status === "idle"
+			&& session.promptQueue.isEmpty
+			&& !session.isCompacting
+			&& !this._sessionReplacementCoordinators.has(sessionId);
+		const row = session.promptQueue.enqueue(text, {
+			source: "verification",
+			verifierOwned: true,
+			author: BOBBIT_SYSTEM_AUTHOR,
+			streamingBehavior: opts?.streamingBehavior ?? "followUp",
+			coldStart: opts?.coldStart,
+			suppressTitleGen: opts?.suppressTitleGen ?? true,
+		});
+		const receipt = this.createVerifierPromptReceipt(sessionId, row.id, direct ? "direct" : "queued");
+		this.broadcastQueue(session);
+
+		// A terminal retry cap must not silently consume this step's full active
+		// allowance. Busy contention is a narrow transient infrastructure signal;
+		// keep the row durable for cancellation/inspection but settle this receipt
+		// promptly so verification can apply its bounded retry policy.
+		if (session.lastTurnErrored
+			&& (session.consecutiveErrorTurns ?? 0) >= MAX_CONSECUTIVE_ERROR_TURNS
+			&& isReviewerBusyError(session.lastTurnErrorMessage || "")) {
+			this.abandonVerifierPrompt(sessionId, row.id, new Error(`Verifier prompt parked after reviewer contention: ${session.lastTurnErrorMessage}`));
+			return receipt;
+		}
+		if (session.status === "idle" && !session.isCompacting && !this._sessionReplacementCoordinators.has(sessionId)) this.drainQueue(session);
+		return receipt;
+	}
+
+	/** Cancel one verifier receipt and remove its still-durable row, if any. */
+	cancelVerifierPrompt(sessionId: string, rowId: string): boolean {
+		const receipts = this._getVerifierPromptReceipts()?.get(sessionId);
+		const pending = receipts?.get(rowId);
+		if (!pending) return false;
+		pending.cancelled = true;
+		const removed = this.removeVerifierPromptRow(sessionId, rowId);
+		this.settleVerifierPromptReceipt(sessionId, rowId);
+		return removed;
+	}
+
 	/**
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
@@ -5723,6 +5955,9 @@ export class SessionManager {
 		 *  RpcBridge.promptWhenReady, so the boot-resume nudge actually lands
 		 *  instead of timing out on the default 30s. */
 		coldStart?: boolean;
+		/** Pi atomic delivery mode. `followUp` appends to an active SDK turn
+		 * rather than rejecting this accepted intent as "already processing". */
+		streamingBehavior?: PromptStreamingBehavior;
 		/** When true, this prompt must NOT trigger first-message auto-title
 		 *  generation. Set for assistant auto-kickoff prompts so naming fires on
 		 *  the first GENUINE user message rather than the kickoff text. Does NOT
@@ -5800,6 +6035,8 @@ export class SessionManager {
 							images: opts.images,
 							attachments: opts.attachments,
 							suppressTitleGen: opts.suppressTitleGen,
+							streamingBehavior: opts.streamingBehavior,
+							coldStart: opts.coldStart,
 							source,
 							author,
 						},
@@ -5812,6 +6049,8 @@ export class SessionManager {
 						suppressTitleGen: opts?.suppressTitleGen,
 						source,
 						author,
+						streamingBehavior: opts?.streamingBehavior,
+						coldStart: opts?.coldStart,
 					});
 				}
 				this.broadcastQueue(rollback);
@@ -5958,6 +6197,8 @@ export class SessionManager {
 				images: opts?.images,
 				attachments: opts?.attachments,
 				suppressTitleGen: opts?.suppressTitleGen,
+				streamingBehavior: opts?.streamingBehavior,
+				coldStart: opts?.coldStart,
 				source,
 				author,
 			});
@@ -5988,7 +6229,7 @@ export class SessionManager {
 						target.lastPromptSource = source;
 						if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
 						try {
-							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, accepted.id, opts?.streamingBehavior, false, false, opts?.suppressTitleGen);
 						} catch (error) {
 							target.lastTurnErrored = true;
 							target.lastTurnErrorMessage = error instanceof Error ? error.message : String(error);
@@ -6017,12 +6258,12 @@ export class SessionManager {
 					const recovered = await this._recoverBlankTextPoison(session);
 					if (recovered) {
 						const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
-						await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+						await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, accepted.id, opts?.streamingBehavior, false, false, opts?.suppressTitleGen);
 						return { status: "dispatched" };
 					}
 				}
 				const prefixedDispatch = buildErrorRecoveryPrefix(errorSnippet, dispatchText);
-				await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+				await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, accepted.id, opts?.streamingBehavior, false, false, opts?.suppressTitleGen);
 				return { status: "dispatched" };
 			}
 			if (session.status === "idle") {
@@ -6052,6 +6293,7 @@ export class SessionManager {
 				suppressTitleGen: opts?.suppressTitleGen,
 				source,
 				author,
+				streamingBehavior: opts?.streamingBehavior,
 			});
 			this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
 			this.broadcastQueue(session);
@@ -6071,6 +6313,11 @@ export class SessionManager {
 				source,
 				author,
 				accepted.id,
+				undefined,
+				opts?.streamingBehavior,
+				undefined,
+				false,
+				opts?.suppressTitleGen,
 			);
 			return { status: "dispatched" };
 		}
@@ -6109,6 +6356,7 @@ export class SessionManager {
 					suppressTitleGen: opts?.suppressTitleGen,
 					source,
 					author,
+					streamingBehavior: opts?.streamingBehavior,
 				});
 				this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
 				this.broadcastQueue(session);
@@ -6121,7 +6369,7 @@ export class SessionManager {
 						target.lastPromptSource = opts?.source ?? "user";
 						if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
 						try {
-							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 						} catch (err) {
 							target.lastTurnErrored = true;
 							target.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
@@ -6158,6 +6406,7 @@ export class SessionManager {
 					suppressTitleGen: opts?.suppressTitleGen,
 					source,
 					author,
+					streamingBehavior: opts?.streamingBehavior,
 				});
 				this.broadcastQueue(session);
 				return { status: "queued" };
@@ -6207,7 +6456,7 @@ export class SessionManager {
 					// where attachments aren't tracked on SessionInfo), fall back to
 					// the synthetic phrase so we never re-send blank/invalid content.
 					const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
-					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 					return { status: "dispatched" };
 				}
 			}
@@ -6218,7 +6467,7 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 			return { status: "dispatched" };
 		}
 
@@ -6227,7 +6476,7 @@ export class SessionManager {
 		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 			return { status: "dispatched" };
 		}
 
@@ -6242,6 +6491,7 @@ export class SessionManager {
 			suppressTitleGen: opts?.suppressTitleGen,
 			source,
 			author,
+			streamingBehavior: opts?.streamingBehavior,
 		});
 		this.broadcastQueue(session);
 
@@ -6998,12 +7248,17 @@ export class SessionManager {
 	}
 
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
+		id?: string;
 		text: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
 		source?: PromptSource;
+		verifierOwned?: boolean;
 		author?: MessageAuthor;
+		streamingBehavior?: PromptStreamingBehavior;
+		coldStart?: boolean;
+		suppressTitleGen?: boolean;
 	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>, manualRecoveryRequired = false): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		const providerAuthFailure = isProviderAuthFailure(reason);
@@ -7012,10 +7267,16 @@ export class SessionManager {
 		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
 		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
 			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
+			this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
 			return;
 		}
 
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${safeReason}); preserving ${rows.length} row(s) at front`);
+		if (isReviewerBusyError(reason)) {
+			for (const row of rows) {
+				if (row.id && row.verifierOwned === true) this.markVerifierPromptBusyRecovered(session.id, row.id);
+			}
+		}
 		// A coordinated poison redrive keeps its initiating row durable until the
 		// bridge accepts the RPC. On rejection, reuse that exact row instead of
 		// enqueueing a duplicate. Other dispatch paths retain the normal front
@@ -7030,13 +7291,32 @@ export class SessionManager {
 				continue;
 			}
 			const r = rows[index];
-			const recovered = session.promptQueue.enqueueAtFront(r.text, {
-				images: r.images,
-				attachments: r.attachments,
-				isSteered: r.isSteered,
-				source: r.source,
-				author: r.author,
-			});
+			const recovered = r.id
+				? session.promptQueue.restoreAtFront({
+					id: r.id,
+					text: r.text,
+					images: r.images,
+					attachments: r.attachments,
+					isSteered: r.isSteered ?? false,
+					createdAt: this.clock.now(),
+					source: r.source,
+					verifierOwned: r.verifierOwned,
+					author: r.author,
+					streamingBehavior: r.streamingBehavior,
+					coldStart: r.coldStart,
+					suppressTitleGen: r.suppressTitleGen,
+				})
+				: session.promptQueue.enqueueAtFront(r.text, {
+					images: r.images,
+					attachments: r.attachments,
+					isSteered: r.isSteered,
+					source: r.source,
+					verifierOwned: r.verifierOwned,
+					author: r.author,
+					streamingBehavior: r.streamingBehavior,
+					coldStart: r.coldStart,
+					suppressTitleGen: r.suppressTitleGen,
+				});
 			recoveredIds.push(recovered.id);
 			if (durableId && poisonOwnedIds.has(durableId)) {
 				const wasExplicitRetry = session.explicitRetryQueueRowId === durableId;
@@ -7058,6 +7338,10 @@ export class SessionManager {
 			session.promptQueue.reorderByIds([...recoveredIds].reverse());
 		}
 		if (manualRecoveryRequired) {
+			// This direct-dispatch recovery has handed ordinary work to the manual
+			// retry path. A verifier receipt cannot share that ownership: reject its
+			// exact row now rather than making the harness wait for its timeout.
+			this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
 			session.lastTurnErrored = true;
 			session.lastTurnErrorMessage = safeReason;
 			session.turnHadToolCalls = false;
@@ -7069,6 +7353,9 @@ export class SessionManager {
 			return;
 		}
 		if (providerAuthFailure) {
+			// Provider credentials are deterministic, terminal delivery failures.
+			// Do not leave verifier work parked behind a 60-second receipt timeout.
+			this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
 			this.surfaceProviderAuthFailure(session, reason, source);
 			this.broadcastQueue(session);
 			return;
@@ -7076,6 +7363,18 @@ export class SessionManager {
 		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
 		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
+			// Bounded retry exhaustion switches regular prompts to manual recovery.
+			// It must instead settle the verifier's exact receipt and remove its row.
+			if (session.manualRetryRequired) {
+				this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
+			}
+			return;
+		}
+		// Configuration/schema/auth-like failures have no useful tick-0 retry.
+		// Let ordinary rows retain their existing queue behavior, but settle a
+		// verifier receipt immediately rather than turning it into a timeout.
+		if (isNonRetryableAgentError(reason)
+			&& this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason))) {
 			return;
 		}
 		// Schedule a follow-up drain on the next tick so the rows we just
@@ -7093,6 +7392,13 @@ export class SessionManager {
 		if (attempts > MAX_RECOVER_DRAIN_RETRIES) {
 			session.recoverDrainAttempts = 0;
 			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${safeReason}); deferring ${rows.length} row(s) to the next agent_end drain`);
+			if (isReviewerBusyError(reason)) {
+				// Keep the contention envelope narrow so verifier-scoped retry policy
+				// can distinguish SDK busy from every other terminal dispatch failure.
+				this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, new Error(`Verifier prompt parked after reviewer contention: ${safeReason}`));
+			} else {
+				this.abandonVerifierPromptDispatchRows(session, rows, durableQueueRowIds, this.safeDispatchError(session, reason));
+			}
 			return;
 		}
 		session.recoverDrainAttempts = attempts;
@@ -7114,6 +7420,10 @@ export class SessionManager {
 		author: MessageAuthor = LOCAL_USER_AUTHOR,
 		durableQueueRowId?: string,
 		promptId = promptAttemptId("prompt"),
+		streamingBehavior?: PromptStreamingBehavior,
+		manualRecoveryRequired = durableQueueRowId !== undefined,
+		verifierOwned = false,
+		suppressTitleGen = false,
 	): Promise<void> {
 		const replacementKind = this._sessionReplacementCoordinators?.get(session.id)?.active?.kind;
 		// Poison repair deliberately redrives its accepted durable row inside the
@@ -7154,8 +7464,12 @@ export class SessionManager {
 			let definiteRejection = false;
 			try {
 				const response = coldStart
-					? await session.rpcClient.promptWhenReady(prepared.piText, images)
-					: await session.rpcClient.prompt(prepared.piText, images);
+					? streamingBehavior
+						? await session.rpcClient.promptWhenReady(prepared.piText, images, { streamingBehavior })
+						: await session.rpcClient.promptWhenReady(prepared.piText, images)
+					: streamingBehavior
+						? await session.rpcClient.prompt(prepared.piText, images, undefined, streamingBehavior)
+						: await session.rpcClient.prompt(prepared.piText, images);
 				if (response && (response as any).success === false) {
 					definiteRejection = true;
 					throw new Error((response as any).error || "prompt rejected");
@@ -7216,13 +7530,14 @@ export class SessionManager {
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
 
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
+		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, verifierOwned, author, streamingBehavior, coldStart, suppressTitleGen }];
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const consumeDurableAcceptanceRow = () => {
 			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
 			this.clearRecoveredPromptDispatchOwnership(session, [durableQueueRowId]);
 			this.broadcastQueue(session);
+			this.settleVerifierPromptReceipt(session.id, durableQueueRowId);
 		};
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
 			if (activityBoundary?.state !== "committed") return false;
@@ -7240,14 +7555,18 @@ export class SessionManager {
 			// generous timeout so a boot-resume nudge lands instead of timing out
 			// on the default 30s. Everything else (recovery, rethrow) is identical.
 			const resp = coldStart
-				? await session.rpcClient.promptWhenReady(prepared.piText, images)
-				: await session.rpcClient.prompt(prepared.piText, images);
+				? streamingBehavior
+					? await session.rpcClient.promptWhenReady(prepared.piText, images, { streamingBehavior })
+					: await session.rpcClient.promptWhenReady(prepared.piText, images)
+				: streamingBehavior
+					? await session.rpcClient.prompt(prepared.piText, images, undefined, streamingBehavior)
+					: await session.rpcClient.prompt(prepared.piText, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				if (acceptedBeforeAckFailure(reason)) return;
 				if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 				cancelled = true;
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], manualRecoveryRequired);
 				recovered = true;
 				throw this.safeDispatchError(session, reason);
 			}
@@ -7260,7 +7579,7 @@ export class SessionManager {
 			if (!recovered && acceptedBeforeAckFailure(reason)) return;
 			if (!cancelled && !this.cancelPromptAuthorDispatch(session, prepared)) return;
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], manualRecoveryRequired);
 			}
 			if (isProviderAuthFailure(reason)) {
 				throw this.safeDispatchError(session, reason);
@@ -7306,17 +7625,34 @@ export class SessionManager {
 				reliableNext.images,
 				reliableNext.attachments,
 				reliableNext.kind === "steer",
-				false,
+				reliableNext.coldStart === true,
 				promptSource,
 				promptAuthor,
 				reliableNext.id,
 				reliableNext.id,
+				reliableNext.streamingBehavior,
+				false,
+				reliableNext.verifierOwned === true,
+				reliableNext.suppressTitleGen === true,
 			).catch(() => {});
 			return;
 		}
 
-		// Batch all steered messages at the front into a single prompt
-		const steered = session.promptQueue.dequeueAllSteered();
+		// Batch compatible steered messages at the front into a single prompt.
+		// A verifier-owned row has a receipt and cancellation lifecycle that cannot
+		// be represented by a mixed batch: on recovery, retryLastPrompt must redrive
+		// its exact durable row rather than the batch's lastPromptText. Keep an
+		// ownership boundary between verifier and ordinary steers.
+		const allSteered = session.promptQueue.dequeueAllSteered();
+		const firstSteerVerifierOwned = allSteered[0]?.verifierOwned === true;
+		const ownershipBoundary = allSteered.findIndex(row => (row.verifierOwned === true) !== firstSteerVerifierOwned);
+		const steered = ownershipBoundary === -1 ? allSteered : allSteered.slice(0, ownershipBoundary);
+		if (ownershipBoundary !== -1) {
+			// restoreAtFront unshifts, so reverse the suffix to preserve FIFO order.
+			for (let index = allSteered.length - 1; index >= ownershipBoundary; index -= 1) {
+				session.promptQueue.restoreAtFront(allSteered[index]);
+			}
+		}
 		let next: QueuedMessage | undefined;
 
 		if (steered.length > 0) {
@@ -7356,8 +7692,8 @@ export class SessionManager {
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
 		// when drainQueue races the SDK's finishRun() during a graceful abort).
 		const dispatchedRowsForRecovery = steered.length > 0
-			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, author: r.author }))
-			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, author: promptAuthor }];
+			? steered.map(r => ({ id: r.id, text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart, suppressTitleGen: r.suppressTitleGen }))
+			: [{ id: next.id, text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart, suppressTitleGen: next.suppressTitleGen }];
 		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
@@ -7380,6 +7716,7 @@ export class SessionManager {
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after its correlated user echo; not recovering ${dispatchedRowsForRecovery.length} row(s)`);
 			this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
+			for (const rowId of dispatchedQueueRowIds) this.settleVerifierPromptReceipt(session.id, rowId);
 			return true;
 		};
 
@@ -7396,7 +7733,11 @@ export class SessionManager {
 
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
 		const activityBoundary = beginPreparedPromptActivity(session, prepared);
-		const dispatchPromise = session.rpcClient.prompt(prepared.piText, next.images);
+		const dispatchPromise = next.coldStart
+			? session.rpcClient.promptWhenReady(prepared.piText, next.images, next.streamingBehavior ? { streamingBehavior: next.streamingBehavior } : undefined)
+			: next.streamingBehavior
+				? session.rpcClient.prompt(prepared.piText, next.images, undefined, next.streamingBehavior)
+				: session.rpcClient.prompt(prepared.piText, next.images);
 		dispatchPromise
 			.then((resp: any) => {
 				// The bridge resolves with `{success:false, error}` when the agent
@@ -7414,6 +7755,14 @@ export class SessionManager {
 					// identifies a stale bridge acknowledgement and owns no state.
 					this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
 					session.recoverDrainAttempts = 0;
+					for (const rowId of dispatchedQueueRowIds) this.settleVerifierPromptReceipt(session.id, rowId);
+				} else {
+					// A replacement/cancellation can win after the provider accepts but before
+					// this stale bridge acknowledges. The row was dequeued already, so leaving
+					// its receipt pending would force the verifier harness to wait 60 seconds.
+					for (const rowId of dispatchedQueueRowIds) {
+						this.abandonVerifierPrompt(session.id, rowId, new Error(`Verifier prompt ${rowId} dispatch was superseded before acknowledgement`));
+					}
 				}
 			})
 			.catch((err: any) => {
@@ -8253,11 +8602,11 @@ export class SessionManager {
 		}
 	}
 
-	private consumeRecoveredPromptDispatchRows(session: SessionInfo): boolean {
+	private consumeRecoveredPromptDispatchRows(session: SessionInfo, preserveIds?: ReadonlySet<string>): boolean {
 		const ids = session.recoveredPromptDispatchQueueIds;
 		if (!ids?.length) return false;
 		const poisonOwned = new Set(session.poisonRecoveryPromptDispatchQueueIds ?? []);
-		const supersededIds = ids.filter(id => !poisonOwned.has(id));
+		const supersededIds = ids.filter(id => !poisonOwned.has(id) && !preserveIds?.has(id));
 		let removedAny = false;
 		for (const id of supersededIds) {
 			removedAny = session.promptQueue.remove(id) || removedAny;
@@ -8518,11 +8867,42 @@ export class SessionManager {
 			// Dispatch failures before agent_start re-enqueue the failed row for
 			// recovery. Auto retry may use the legacy text fallback; explicit Retry
 			// consumes only the ID ledger and allocates its own unique durable row.
-			if (!this.consumeRecoveredPromptDispatchRows(session) && isAuto) {
+			// An auto-retried verifier row remains the same durable acceptance until
+			// the provider accepts it or terminal recovery settles its receipt. Other
+			// recovered work retains the historical consume-and-redrive behaviour.
+			const recoveredVerifierRow = isAuto
+				? session.recoveredPromptDispatchQueueIds
+					?.map((id) => session.promptQueue.toArray().find((row) => row.id === id))
+					.find((row): row is QueuedMessage => row?.verifierOwned === true)
+				: undefined;
+			const consumedRecovered = this.consumeRecoveredPromptDispatchRows(
+				session,
+				recoveredVerifierRow ? new Set([recoveredVerifierRow.id]) : undefined,
+			);
+			if (!recoveredVerifierRow && !consumedRecovered && isAuto) {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
 			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
-			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, acceptedRetry?.id);
+			// Manual recovery belongs only to an explicit Retry's newly accepted
+			// durable row. Automatic retries keep their bounded budget, whether
+			// they consume ordinary recovered work or redrive a verifier's same row.
+			const manualRecoveryRequired = acceptedRetry !== undefined;
+			await this.dispatchDirectPrompt(
+				session,
+				retryText,
+				session.lastPromptImages,
+				undefined,
+				false,
+				false,
+				recoveredVerifierRow?.source ?? "system",
+				recoveredVerifierRow?.author ?? BOBBIT_SYSTEM_AUTHOR,
+				acceptedRetry?.id ?? recoveredVerifierRow?.id,
+				undefined,
+				recoveredVerifierRow?.streamingBehavior,
+				manualRecoveryRequired,
+				recoveredVerifierRow?.verifierOwned === true,
+				recoveredVerifierRow?.suppressTitleGen === true,
+			);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			this.consumeRecoveredPromptDispatchRows(session);
@@ -9007,6 +9387,10 @@ export class SessionManager {
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 		this._fenceReplacedSession(session, token.generation);
+		// Verification restart-resume owns the next reviewer turn. Do not carry a
+		// pre-restart verifier row into the replacement bridge where it could race
+		// that harness-owned continuation; ordinary user/system rows are preserved.
+		this.purgeVerifierPromptRows(id, `Verifier session ${id} restarted before dispatch`);
 		try { await session.rpcClient.stop(); } catch { /* already dead */ }
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} respawn replacement was superseded after old bridge stop`);
@@ -9685,6 +10069,24 @@ export class SessionManager {
 		}
 	}
 
+	/** Remove stale harness-owned rows before either live or dormant restoration. */
+	private pruneRestoredVerifierPromptRows(ps: PersistedSession): {
+		messageQueue: QueuedMessage[];
+		changed: boolean;
+	} {
+		const persistedQueue = ps.messageQueue ?? [];
+		const messageQueue = persistedQueue.filter(row => row.verifierOwned !== true);
+		const changed = messageQueue.length !== persistedQueue.length;
+		if (changed) {
+			for (const row of persistedQueue) {
+				if (row.verifierOwned === true) {
+					this.settleVerifierPromptReceipt(ps.id, row.id, new Error(`Verifier prompt ${row.id} was discarded during session restore`));
+				}
+			}
+		}
+		return { messageQueue, changed };
+	}
+
 	private preparePersistedIntentRestore(ps: PersistedSession): {
 		ps: PersistedSession;
 		bindings: PromptAuthorBinding[];
@@ -9693,12 +10095,14 @@ export class SessionManager {
 	} {
 		const store = this.getSessionStore(ps.projectId);
 		const bindings = readAuthorSidecar(ps.id);
+		const pruned = this.pruneRestoredVerifierPromptRows(ps);
 		const normalizedLedger = normalizePersistedInFlightSteers(ps.inFlightSteerTexts);
-		const reconciled = reconcilePersistedIntentRestore(ps.messageQueue, normalizedLedger, bindings);
-		if (reconciled.changed) {
-			// Publish terminal sidecar evidence before a queue can be installed or
-			// drained. A crash between settlement and the prior queue transaction must
-			// not resurrect the accepted occurrence on another restore.
+		const reconciled = reconcilePersistedIntentRestore(pruned.messageQueue, normalizedLedger, bindings);
+		const changed = pruned.changed || reconciled.changed;
+		if (changed) {
+			// Publish verifier pruning and terminal sidecar evidence before a queue can
+			// be installed or drained. A crash between settlement and the prior queue
+			// transaction must not resurrect either lifecycle's retired occurrence.
 			store.update(ps.id, {
 				messageQueue: reconciled.messageQueue,
 				inFlightSteerTexts: reconciled.inFlightSteerTexts,
@@ -9707,7 +10111,7 @@ export class SessionManager {
 		return {
 			store,
 			bindings,
-			changed: reconciled.changed,
+			changed,
 			ps: {
 				...ps,
 				messageQueue: reconciled.messageQueue,
@@ -9722,6 +10126,7 @@ export class SessionManager {
 		condition?: ModelSelectionRequiredCondition,
 	): void {
 		ps = this.preparePersistedIntentRestore(ps).ps;
+		const restoredQueue = ps.messageQueue ?? [];
 		this.sessions.set(ps.id, {
 			id: ps.id,
 			title: ps.title,
@@ -9762,7 +10167,7 @@ export class SessionManager {
 				? `${ps.modelProvider}/${ps.modelId}`
 				: undefined,
 			spawnPinnedThinkingLevel: ps.effectiveThinkingLevel,
-			promptQueue: new PromptQueue(ps.messageQueue),
+			promptQueue: new PromptQueue(restoredQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
 		});
@@ -9816,6 +10221,7 @@ export class SessionManager {
 			await dispatchTrackedSystemPrompt(session, continuationPrompt, {
 				source: "system",
 				whenReady: true,
+				streamingBehavior: "followUp",
 				now: () => this.clock.now(),
 			});
 			// Keep the boot marker until agent_start so the team boot-resume pass cannot
@@ -9839,10 +10245,13 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
+		// Verifier-owned work is re-driven by VerificationHarness. Reliable user
+		// occurrences are reconciled against their terminal sidecar before install.
 		const preparedRestore = this.preparePersistedIntentRestore(ps);
 		ps = preparedRestore.ps;
 		const restoreStore = preparedRestore.store;
 		const restoredAuthorBindings = preparedRestore.bindings;
+		const restoredQueue = ps.messageQueue ?? [];
 		if (preparedRestore.changed) await restoreStore.flushAsync();
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
@@ -10231,7 +10640,7 @@ export class SessionManager {
 			accessory: ps.accessory,
 			preview: ps.preview,
 			allowedTools: restoredAllowedNames,
-			promptQueue: new PromptQueue(ps.messageQueue),
+			promptQueue: new PromptQueue(restoredQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
@@ -13636,6 +14045,11 @@ export class SessionManager {
 				reason: "Session ended before permission was resolved.",
 			});
 		}
+
+		// Fence verifier-owned queued prompts before any potentially slow final
+		// get_state/stop work. Their harness may be cancelling or re-signalling and
+		// must not wait for an unrelated teardown turn to settle.
+		this.purgeVerifierPromptRows(id, `Verifier session ${id} was terminated before dispatch`);
 
 		// Cancel any pending transient auto-retry so it doesn't fire after terminate
 		this.cancelPendingAutoRetry(session, "terminated");

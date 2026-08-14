@@ -2227,6 +2227,15 @@
       }
     },
     {
+      "path": "tests2/core/verification-busy-concurrency-repro.test.ts",
+      "reason": "Deterministic failing-first verifier contention coverage: two goals with distinct healthy-but-busy reviewer sessions queue and complete exactly once, while cancel/re-signal invalidates the superseded queued delivery and fences its late verdict from the replacement signal.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/message-author-surfacing.test.ts",
       "reason": "Pure core coverage for accountable-prompt visibility, exact human/system/agent badge presentation, safe label normalization, deterministic display IDs, and model-prefix formatting that leaves human prompts unprefixed.",
       "execution": {

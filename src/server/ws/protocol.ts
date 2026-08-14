@@ -121,8 +121,21 @@ export interface QueuedMessage {
 	retryable?: boolean;
 	/** Internal prompt provenance; absent on legacy persisted queue rows. */
 	source?: PromptSource;
+	/**
+	 * Explicit lifecycle ownership for prompts admitted by enqueueVerifierPrompt.
+	 * Source remains attribution/UI metadata: legacy source:"verification" rows
+	 * are ordinary durable work unless this flag is true.
+	 */
+	verifierOwned?: boolean;
 	/** Accountable author resolved by the server; absent on legacy rows. */
 	author?: MessageAuthor;
+	/**
+	 * Preserve the SDK delivery semantics across durable queue admission. A
+	 * verifier follow-up must remain a follow-up when drainQueue sends it.
+	 */
+	streamingBehavior?: "steer" | "followUp";
+	/** Wait for a restored agent to accept commands before delivery. */
+	coldStart?: boolean;
 	/**
 	 * When true, this prompt must NOT trigger first-message auto-title
 	 * generation (used for assistant auto-kickoff prompts so naming fires on
