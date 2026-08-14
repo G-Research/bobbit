@@ -2412,7 +2412,7 @@ Returns 400 if `section` is missing or invalid, regex compilation fails, line co
 
 Behaviour: while `lastTurnErrored` is `true`, an incoming prompt or steer **implicitly unsticks** the session (clears the flag, prepends a system-prefix, dispatches the new message without retrying the failed turn) as long as `consecutiveErrorTurns < MAX_CONSECUTIVE_ERROR_TURNS` (`3`). At or above the cap, the message is parked in `promptQueue` awaiting a human Retry click — which bypasses the cap. Both fields default to `false` / `0` for backward compatibility if the underlying session predates the feature.
 
-See [Error-state queue gating](prompt-queue.md#turn-errors-suppress-queue-draining), [Cancellation-shaped terminal recovery](prompt-queue.md#cancellation-shaped-terminal-recovery), and [Parked work is never silently idle](prompt-queue.md#parked-work-is-never-silently-idle). For diagnosis, see [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
+See [Errored turns](prompt-queue.md#errored-turns) and [Stop, failure, and recovery](prompt-queue.md#stop-failure-and-recovery). For diagnosis, see [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
 
 ### Archived child enrichment in session response
 
