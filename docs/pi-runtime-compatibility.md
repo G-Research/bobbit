@@ -2,15 +2,63 @@
 
 Bobbit depends on Pi for provider metadata, browser-side first-message streaming helpers, and the `pi-coding-agent` process that runs agent turns. Pi upgrades are runtime compatibility changes, not simple package bumps: they can affect browser bundle safety, model catalog reads, authentication, RPC lifecycle events, tool-result shapes, transcript metadata, compaction, sandbox credentials, and provider default selection.
 
-This page records the durable Bobbit-side contracts added or reaffirmed across Pi runtime upgrades. The selected runtime line pins these packages exactly and together:
+This page records the durable Bobbit-side contracts added or reaffirmed across Pi runtime upgrades. The current runtime line pins these packages exactly and together:
 
-- `@earendil-works/pi-agent-core@0.82.1`
-- `@earendil-works/pi-ai@0.82.1`
-- `@earendil-works/pi-coding-agent@0.82.1`
+- `@earendil-works/pi-agent-core@0.84.1`
+- `@earendil-works/pi-ai@0.84.1`
+- `@earendil-works/pi-coding-agent@0.84.1`
 
 A mixed Pi line can compile while still breaking the spawned-agent runtime contract.
 
-## Pi `0.82.1` compatibility outcome
+## Pi `0.84.1` reliable-turn compatibility
+
+Bobbit upgraded the trio together from `0.82.1` to the newest compatible stable release containing Pi `0.84.0`'s reliable-turn fixes. The source/release audit covered the upstream changes that:
+
+- flush prompts accepted while compaction is active;
+- serialize manual and automatic compaction and preserve events across compaction;
+- reject direct prompt submission inside Pi core while manual compaction is active;
+- classify recoverable `length` stops as overflow, remove the truncated assistant tail, compact, and retry once; and
+- change JSON/RPC `message_update` to delta-only payloads.
+
+Bobbit adopts those Pi contracts rather than recreating Pi's internal retry or compaction queues. Bobbit's own responsibility is the durable browser/server outbox above the Pi boundary: it accepts and persists user intent while Pi cannot accept direct input, then releases it at the correct lifecycle boundary.
+
+### Delta-only RPC and terminal authority
+
+Pi `0.84.1` JSON/RPC `message_update` frames contain `assistantMessageEvent` deltas but no cumulative `message` and no `assistantMessageEvent.partial`. `RpcBridge` scopes one `PiAssistantStreamNormalizer` to each Pi process and reconstructs Bobbit's cumulative internal update stream from the preceding assistant `message_start.message`.
+
+The adapter handles text, thinking, and progressive tool-call JSON. It tolerates a delta arriving without its matching start only when an authoritative message-start baseline exists. It resets on a new assistant start, `message_end`, final `agent_end`, process exit, or process failure.
+
+`message_end.message` is terminal authority. Bobbit passes that provider/Pi terminal through the normal metadata projection; it never synthesizes the final answer from accumulated deltas. After a terminal reset, a stray delta cannot inherit the previous stream.
+
+The Pi bridge normalization and browser transport compaction are separate layers:
+
+- the bridge reconstructs Pi's delta-only wire format into Bobbit's cumulative internal event;
+- Bobbit retains cumulative events for replay and legacy clients; and
+- clients that advertise `assistantStreamDelta: 1` receive compact live deltas and reconstruct them against a self-contained baseline.
+
+A failed browser reconstruction closes/reconnects instead of presenting a plausible corrupt stream. Snapshot attach re-establishes a cumulative baseline.
+
+### Compaction and recoverable length
+
+Pi emits `compaction_start` before compaction and `compaction_end` after releasing its compaction controller. Direct prompt submission during manual compaction is expected to reject inside Pi; Bobbit therefore queues above that boundary and does not call Pi while `session.isCompacting`.
+
+`compaction_end.willRetry` describes the interrupted agent turn, not another compaction operation. Bobbit completes the compaction boundary and preserves continuation affinity while waiting for the final non-retry `agent_end`.
+
+For a recoverable assistant `stopReason: "length"`, Pi removes the first truncated tail, performs overflow compaction, and retries the input at most once. Bobbit assigns `assistantStreamId` values and emits `assistant_stream_invalidated` before retry output so the browser and snapshots mirror Pi's rewritten branch. Only the retry's final non-retrying terminal is canonical. See [Context compaction](compaction.md#recoverable-length-overflow).
+
+### Steer acknowledgement boundary
+
+Pi's `Agent.steer()` acknowledgement means the steer entered Pi's pending queue; it does not mean a user message entered the transcript. Pi keeps queued steers until the current response releases and emits each user start before the next model call. Bobbit therefore retains the occurrence in its delivery outbox until the correlated Pi user event is surfaced. See [Reliable prompt and steer delivery](prompt-queue.md#durable-handoff-and-settlement).
+
+### TypeBox v1 boundary
+
+Pi `0.84.1` uses TypeBox v1. Bobbit pins `typebox@1.3.7` and migrates Pi-facing tool schemas and generated extension templates to `Type`/`Static` from `typebox`, avoiding incompatible v0/v1 `TSchema` values. `@sinclair/typebox` remains installed for unrelated legacy consumers; do not pass its schema objects into Pi v1 APIs.
+
+### Pinning coverage
+
+`tests2/core/pi-installed-contract.test.ts` executes the installed runtime to pin the aligned trio, delta-only event shape, terminal authority, manual-compaction ordering and prompt rejection, recoverable-length removal and one-retry cap, overflow `willRetry`, and steer queue acknowledgement boundary. `tests2/core/assistant-stream-delta.test.ts`, `assistant-stream-session-broadcast.test.ts`, and `tests2/dom/remote-agent-assistant-stream-delta.test.ts` pin bridge reconstruction and browser live/replay behavior.
+
+## Historical Pi `0.82.1` compatibility outcome
 
 ### PR #1057 disposition (historical)
 
@@ -440,18 +488,64 @@ Worktree setup commands are non-fatal, but timeout handling must still wait unti
 
 The reason is operational rather than cosmetic: a worktree that appears claimable while setup children still hold handles can fail later move, cleanup, or reuse operations. The regression is pinned by the worktree-pool tests.
 
-## Manual integration blockers and diagnostics
+## Real-model context-pressure smoke
 
-Manual integration remains required for future Pi runtime upgrades because only a real agent turn proves Pi built-in tools, Bobbit extensions, MCP/meta tools, model selection, thinking propagation, sandbox auth propagation, and credential-backed providers work together.
+`tests/manual-integration/reliable-agent-context-pressure.spec.ts` is an opt-in real Pi/real-model test of exact-once prompt and steer delivery through genuine automatic context pressure. Deterministic mock-Pi coverage remains the CI gate; this smoke validates the installed provider/runtime path when credentials and budget are available.
 
-Two environment-sensitive blockers are reported explicitly:
+### Credentials and model selection
 
-- **Missing usable model credentials** — if no explicit `MANUAL_TEST_MODEL` or provider credential is configured and the gateway default resolves to unauthenticated Code Assist, `agent-tool-use` skips or fails early with an actionable message instead of timing out after sandbox setup.
-- **Docker/local transport availability** — Docker must be reachable for sandboxed coverage. Multi-repo readiness polling retries transient local fetch resets, but still fails on HTTP errors, setup errors, or deadline expiry.
+Choose one setup:
 
-For live developer smoke runs, set `BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1` so isolated manual gateways inherit current model/provider preferences and Pi auth/config files without copying live sessions, goals, projects, gateway tokens, or TLS material. `MANUAL_TEST_MODEL` and `MANUAL_TEST_THINKING_LEVEL` remain highest precedence.
+```bash
+MANUAL_TEST_MODEL="<provider>/<model>" \
+<provider-credential-environment> \
+npm run test:manual -- tests/manual-integration/reliable-agent-context-pressure.spec.ts --project=manual-integration --workers=1
+```
 
-A skipped credential-backed run is a diagnostic, not proof of compatibility.
+Or explicitly inherit only the live server's model/auth subset into the isolated test gateway:
+
+```bash
+BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1 \
+BOBBIT_DIR="/absolute/path/to/live/.bobbit" \
+npm run test:manual -- tests/manual-integration/reliable-agent-context-pressure.spec.ts --project=manual-integration --workers=1
+```
+
+`MANUAL_TEST_MODEL` overrides an inherited default; `MANUAL_TEST_THINKING_LEVEL` is optional. The inherit switch accepts `1` or `true`. On PowerShell, set the same variables through `$env:<NAME>` before running the unchanged npm command.
+
+The selected value must use exact `<provider>/<model>` syntax and must appear in `/api/models` as authenticated and session-selectable. The fixture forces `allowSessionModelFallback=false` and fails if runtime state reports another provider/model. It lowers only that exact model's advertised context window to 48,000 tokens inside the isolated agent directory so genuine pressure is reachable within the budget.
+
+Inheritance copies the relevant model/thinking/provider preferences, `providerKey.*`, AI Gateway/custom-provider configuration, and Pi agent auth/config files. It does not reuse the live Bobbit directory or copy sessions, goals, projects, gateway tokens, or TLS state. Git and provider network access are required; Docker and sandboxing are not used by this spec.
+
+If neither explicit model credentials nor explicit inheritance is configured, or the exact model is absent/unauthenticated/unselectable, the test skips with an actionable reason. A skip is not compatibility evidence and the test never falls back to another provider.
+
+### Spend and time guards
+
+The spec aborts and fails with body-free lifecycle diagnostics when any guard is reached:
+
+| Guard | Limit |
+| --- | --- |
+| Estimated model requests | The sixth request start triggers abort; no seventh request is intentionally queued. The estimate combines assistant/agent starts with automatic compaction summarizer starts. |
+| Aggregate reported tokens | 250,000 input, output, cache-read, and cache-write tokens. |
+| Reported session cost | USD 2.00. |
+| Measured model scenario | 8 minutes, after gateway startup. |
+| Overall Playwright test | 630 seconds, including the separately bounded gateway startup and cleanup margin. |
+| Pressure generation | At most four pressure turns, each with a bounded inert ledger body. |
+
+The configured model and provider determine actual spend. Review their pricing before opting in; do not weaken the guards to make a flaky model pass.
+
+### Assertions and cleanup
+
+The test observes a real threshold or overflow compaction start, then submits one steer and one next-turn prompt in the same WebSocket callback while compaction is active. It requires:
+
+- successful compaction completion;
+- one correlated Pi user start for each exact `intentId`;
+- useful post-compaction output containing both nonce facts;
+- exactly one transcript occurrence for each ID in a settled snapshot;
+- no matching row in a fresh attach outbox;
+- no late duplicate after a server `ping`/`pong` barrier; and
+- no runtime provider/model fallback.
+
+Failure output contains bounded IDs, counters, state, and lifecycle summaries, not prompt or provider bodies. The `finally` path aborts the turn, purges the session best-effort, stops the isolated gateway, and removes the temporary fixture even on budget failure.
 
 ## Upgrade verification
 
@@ -459,13 +553,19 @@ Run focused contract coverage before the broad gates:
 
 ```bash
 npx vitest run --config vitest.config.ts --project v2-core \
+  tests2/core/pi-installed-contract.test.ts \
+  tests2/core/assistant-stream-delta.test.ts \
+  tests2/core/assistant-stream-session-broadcast.test.ts \
+  tests2/core/reliable-intent-queue.test.ts \
+  tests2/core/reliable-intent-attempt.test.ts \
+  tests2/core/reliable-compaction-release.test.ts \
   tests2/core/oauth-external-callbacks.test.ts \
   tests2/core/pi-rpc-agent-end-retry.test.ts \
   tests2/core/pi-tool-lifecycle-contract.test.ts \
-  tests2/core/pi-published-shrinkwrap-security.test.ts \
-  tests2/core/compaction-types.test.ts \
-  tests2/core/transcript-sanitizer.test.ts \
-  tests2/core/google-code-assist-provider-extension.test.ts
+  tests2/core/pi-published-shrinkwrap-security.test.ts
+npx vitest run --config vitest.config.ts --project v2-integration \
+  tests2/integration/reliable-intent-recovery.test.ts \
+  tests2/integration/steer-gateway-restart.test.ts
 npm run test:e2e:run -- tests/e2e/pi-packed-consumer.spec.ts --project=api --workers=1 --retries=0
 ```
 

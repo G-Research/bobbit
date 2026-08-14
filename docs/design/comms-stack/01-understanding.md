@@ -1,5 +1,7 @@
 # Bobbit Real-Time Comms Stack — Consolidated Understanding (Reliability/UX Audit, Step 1)
 
+> Pre-remediation audit snapshot. File anchors and prompt-delivery claims below describe the audited baseline, not current behavior. See [Reliable prompt and steer delivery](../../prompt-queue.md).
+
 > Single authoritative map of the prompt → WS → gateway → RPC → LLM → events → reducer → render
 > pipeline, reconciled from seven independent layer maps. File:line anchors are load-bearing.
 > "Step-2 verification" flags hypotheses that still need a reproduction or a trace before they

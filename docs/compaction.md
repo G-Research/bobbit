@@ -5,11 +5,7 @@ window, Bobbit can fold older turns into a shorter summary — *compaction*.
 The transcript keeps moving forward, the user keeps their conversation
 history in the UI, and the agent stops bleeding tokens on every turn.
 
-This page documents the **client-facing** surface: the three triggers, the
-rich summary card that appears in the transcript, how it round-trips across
-navigation and reload, and the test entrypoints. Server-side mechanics
-(how the agent subprocess actually compacts, refresh-after-compaction RPC)
-live in [internals.md](internals.md).
+This page documents both the client surface and the reliable-turn boundary around compaction. Compaction is active turn work: Bobbit continues to accept visible user intent, but it does not call Pi until the appropriate post-compaction release boundary.
 
 ## Triggers
 
@@ -34,10 +30,55 @@ upstream event's `reason` field:
   recover and emits `reason: "overflow"`. Maps to `trigger: "overflow"` on
   the card, displayed as the `context limit` pill.
 
-Both paths end with the same `compaction_end` event carrying `reason`,
-an optional `result.tokensBefore`, an `aborted` / `success` flag, and
-(on failure) an `errorMessage` string. The client maps `reason` to the
-payload's `trigger` field in `src/app/remote-agent.ts::_triggerFromEvent`.
+All paths end with a `compaction_end` event carrying `reason`, optional result and usage data, abort/failure signals, and `willRetry` when Pi will continue an interrupted overflow turn. The client maps `reason` to the summary card's `trigger` field.
+
+## Reliable-turn fence and release
+
+### Admission stays open; dispatch is fenced
+
+Manual compaction establishes `session.isCompacting` synchronously before calling Pi. Threshold and overflow compaction establish it on Pi's start event. While the fence is active, Bobbit still persists and broadcasts prompt and steer occurrences, but none of these paths may call Pi:
+
+- direct prompt or steer dispatch;
+- ordinary queue draining;
+- queued-prompt promotion to steer;
+- tool-end continuation-steer flushing; or
+- retry dispatch.
+
+The fence is checked again at the final dispatch boundary. If Pi nevertheless returns its canonical “compaction is in progress” rejection, Bobbit treats that as proof that no turn started and restores the exact occurrence to the queue. This closes the race without treating an RPC error as ambiguous delivery.
+
+Input affinity depends on the compaction type:
+
+- during **manual** compaction, prompts and steers target the next turn;
+- during **threshold** or **overflow** compaction, steers target the continuing turn while prompts target the next turn; and
+- when Pi reports `willRetry: true`, only continuation steers may re-enter the interrupted turn. Next-turn work waits for its final `agent_end`.
+
+Every occurrence remains in the visible delivery outbox while fenced. See [Reliable prompt and steer delivery](prompt-queue.md) for identity, settlement, and recovery.
+
+### One idempotent finisher
+
+`SessionManager.finishCompactionAndRelease()` is the sole release decision for Pi events and the manual-RPC resolve/reject fallbacks. Each compaction has one `compactionId`; a bounded completed-ID set makes duplicate end signals no-ops.
+
+| Outcome | Release behavior |
+| --- | --- |
+| Manual success | Clear the fence once. If the session is safely idle, drain next-turn work normally. |
+| Threshold/overflow continues, or `willRetry: true` | Clear once and release queued continuation steers in FIFO order. Keep next-turn work parked. |
+| Final non-retry turn boundary | Retarget any remaining continuation rows once with `continuation-ended`, then drain next-turn work. |
+| Automatic compaction failure | Clear the compaction epoch but do not inject continuation work into a possibly failed/interrupted turn. The final safe turn boundary owns later release. |
+| Stop near compaction end | Record the compaction finish, defer release to Stop/replacement ownership, reconcile the in-flight attempt, and retarget undispatched continuation work. |
+
+No lock spans an RPC acknowledgement. Queue and ledger persistence happens before handoff, and stale lifecycle generations cannot drain after a replacement.
+
+### Recoverable `length` overflow
+
+Pi `0.84.1` treats a recoverable assistant `stopReason: "length"` as context overflow: it removes the truncated assistant tail, compacts, and retries the interrupted input at most once. Bobbit mirrors Pi's canonical history rewrite without disabling live streaming:
+
+1. Bobbit assigns one `assistantStreamId` to the assistant start, reconstructed updates, and terminal event.
+2. The first `length` terminal remains provisional while Pi decides whether to recover.
+3. On overflow `compaction_end` with `willRetry: true`, the server emits `assistant_stream_invalidated(assistantStreamId)` before releasing continuation work or forwarding retry output.
+4. The browser clears the matching streaming row and removes any matching provisional terminal by ID, never by text.
+5. Retry output uses a new stream ID. Its final non-retrying `message_end.message` is authoritative.
+
+Post-compaction snapshots come from Pi's rewritten branch, so reload cannot restore the invalidated tail. A second recoverable-length outcome is not retried again; its final terminal/error remains visible. Invalidation changes only the assistant stream, not the accepted user's `intentId` or settlement.
 
 ## The rich summary card
 
@@ -115,8 +156,7 @@ uses a fixed id, `COMPACTION_ACTIVE_ID = "compact_active"` (exported from
 `compaction-result` cases both filter out any prior row with that id
 before appending. Lit then diffs to the same DOM node, repainting only
 the card body — there is never a plaintext `"Compacting context…"` row
-in the transcript. Pinned by `tests/message-reducer.test.ts` case 12d
-and `tests/e2e/ui/compaction-widget.spec.ts`.
+in the transcript. Pinned by `tests2/core/message-reducer.test.ts` and `tests2/dom/ui-fixtures/compaction-widget.test.ts`.
 
 ### Overflow `tokensBefore` resolution
 
@@ -130,9 +170,7 @@ priority order — first non-null wins:
 4. `this._lastKnownContextTokens` — last-seen live count, kept current
    as the in-progress payload is built.
 
-This means `reductionPct` now resolves for overflow as well, where v1
-left it uniformly `null`. Pinned by `tests/compaction-types.test.ts`
-and reducer case 12e.
+This means `reductionPct` resolves for overflow as well. Pinned by `tests2/core/compaction-types.test.ts` and the reducer coverage.
 
 `schemaVersion: 1` is reserved for forward compatibility — bump it if a
 future renderer adds fields that older snapshots cannot supply.
@@ -208,41 +246,19 @@ position. The richer in-place upgrade helpers
 removed when the sidecar landed; the sidecar splice supplies a real
 structured row instead of trying to reconstruct one from text.
 
-Invariants are pinned by `tests/message-reducer.test.ts` cases 12, 12b,
-12d (in-place lifecycle transition), 12e (overflow trigger +
-tokensBefore propagation), and the sidecar-snapshot reducer test that
-replaced case 12c.
+Reducer invariants are pinned in `tests2/core/message-reducer.test.ts` and `message-reducer-dedup.test.ts`, including in-place lifecycle transition, overflow payload propagation, and live-versus-sidecar deduplication.
 
 ## Tests
 
-Both the manual `/compact` and the auto/threshold compaction paths are
-covered **deterministically** (mock agent, no real LLM) by the
-`@live-compaction-affordance` tests in
-`tests/e2e/ui/pre-compaction-history.spec.ts`:
+Deterministic CI coverage uses named runtime barriers rather than timing sleeps:
 
-- **Auto/threshold** — drives a mock-agent auto compaction (`AUTO_COMPACT:N`),
-  exercising `auto_compaction_start`/`auto_compaction_end` -> session-manager
-  sidecar append + broadcast -> client render.
-- **Manual `/compact`** — types `/compact` in the prompt box, exercising
-  `session.compact()` -> ws-handler manual branch -> session-manager manual
-  sidecar -> `compaction_start`/`compaction_end` (`reason: "manual"`) ->
-  client render.
-
-Both assert the summary card resolves to `data-state="complete"` with
-`data-verdict="ok"` and the single-card invariant. The mock agent's
-`compact` command and `AUTO_COMPACT` trigger emit the same event shapes as
-pi 0.74+ (see `tests/e2e/mock-agent-core.mjs::_handleAutoCompaction`).
-
-> Two real-LLM manual specs (`compaction.spec.ts` for `/compact` and
-> `compaction-pressure.spec.ts` for auto-compaction) previously covered
-> these paths, but both were removed: each seeded agent auth by copying a
-> static `auth.json` OAuth snapshot whose short-lived access token expires
-> mid-run (refresh fails with `invalid_grant`), so they could not
-> authenticate reliably. The deterministic e2e above replaces them.
-
-Renderer lifecycle (all three states, file:// harness) is additionally
-covered by `tests/e2e/ui/compaction-widget.spec.ts`, and reducer behaviour
-by `tests/message-reducer.test.ts`.
+- `tests2/core/reliable-compaction-release.test.ts` pins admission fencing and the single release owner across manual, threshold, overflow, failure, and Stop outcomes.
+- `tests2/core/pi-installed-contract.test.ts` pins Pi event order, `willRetry`, direct-prompt rejection during compaction, recoverable-length tail removal, and the one-retry cap.
+- `tests2/core/assistant-stream-session-broadcast.test.ts` pins invalidation-before-release ordering and one invalidation for the first recoverable tail.
+- `tests2/integration/reliable-intent-recovery.test.ts` exercises held compaction boundaries and visible outbox continuity through failure and recovery.
+- `tests2/browser/journeys/reliable-agent-turns.journey.spec.ts` drives manual, threshold, overflow, Stop, reload, reconnect, and second-tab stories through the visible composer.
+- `tests2/dom/ui-fixtures/compaction-widget.test.ts`, `tests2/core/compaction-types.test.ts`, and `tests2/browser/e2e/pre-compaction-history.spec.ts` retain summary-card, payload, sidecar, affordance, and reload coverage.
+- `tests/manual-integration/reliable-agent-context-pressure.spec.ts` is the opt-in real Pi/real-model pressure smoke documented in [Pi runtime compatibility](pi-runtime-compatibility.md#real-model-context-pressure-smoke).
 
 ## Files
 
@@ -256,11 +272,11 @@ by `tests/message-reducer.test.ts`.
 | Live card carries server `compactionId`; pre-compaction affordance + count-probe retry | `src/app/remote-agent.ts`, `src/ui/components/PreCompactionHistory.ts` |
 | Renderer (three states + adjacent layout + overflow pill) | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` |
 | Renderer registration | `src/ui/tools/index.ts` — `__compaction_summary` |
-| Helper unit tests | `tests/compaction-types.test.ts` — `parseOverflowTokenCount`, in-progress builder, stable id |
-| Reducer unit tests | `tests/message-reducer.test.ts` — cases 12, 12b, 12c, 12d, 12e |
-| Browser E2E (renderer lifecycle, file:// harness) | `tests/e2e/ui/compaction-widget.spec.ts`, `tests/fixtures/compaction-widget.html` |
-| Browser E2E (`@live-compaction-affordance` live-session affordance + transient count-probe retry) | `tests/e2e/ui/pre-compaction-history.spec.ts` |
-| Compact-cost regression | `tests/e2e/compact-cost-ws.spec.ts`, `tests/e2e/ui/compact-cost.spec.ts`, `tests/context-cost-stats.spec.ts` |
-| Manual `/compact` + auto-compaction lifecycle (deterministic e2e) | `tests/e2e/ui/pre-compaction-history.spec.ts` (`@live-compaction-affordance`) |
-| Mock agent compaction event emission | `tests/e2e/mock-agent-core.mjs` — `_handleAutoCompaction(preCount, reason)`, `compact` command |
+| Helper unit tests | `tests2/core/compaction-types.test.ts` |
+| Reducer unit tests | `tests2/core/message-reducer.test.ts`, `message-reducer-dedup.test.ts` |
+| Renderer lifecycle | `tests2/dom/ui-fixtures/compaction-widget.test.ts` |
+| Live sidecar/affordance browser E2E | `tests2/browser/e2e/pre-compaction-history.spec.ts` |
+| Compact-cost regressions | `tests2/integration/compact-cost-ws.test.ts`, `tests2/dom/context-cost-stats.test.ts` |
+| Reliable-turn compaction lifecycle | `tests2/core/reliable-compaction-release.test.ts`, `tests2/integration/reliable-intent-recovery.test.ts`, `tests2/browser/journeys/reliable-agent-turns.journey.spec.ts` |
+| Mock agent compaction event emission | `tests/e2e/mock-agent-core.mjs` |
 | Full design rationale | `docs/design/compaction-e2e-rich-summary.md` |
