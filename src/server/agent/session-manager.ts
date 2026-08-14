@@ -585,6 +585,49 @@ function looksLikeSensitiveToken(value: string | undefined): boolean {
 	return !!value && /^(?:sk|pk|rk|ghp|gho|ghu|ghs|github_pat|ya29|xox[baprs]?)[-_]/i.test(value);
 }
 
+const GITHUB_PR_URL_CANDIDATE_RE = /(?:^|[\s([<{>"'`])(https:\/\/[^\s<>"'`]+)/gimu;
+const TRAILING_URL_PUNCTUATION_RE = /[)\]}>.,;:!?]+$/u;
+const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
+const GITHUB_REPOSITORY_RE = /^[A-Za-z0-9._-]+$/u;
+const GITHUB_PR_NUMBER_RE = /^[1-9]\d*$/u;
+
+/** Detect a canonical GitHub pull-request URL without trusting substring matches. */
+export function containsExactGithubPullRequestUrl(text: string): boolean {
+	GITHUB_PR_URL_CANDIDATE_RE.lastIndex = 0;
+	for (const match of text.matchAll(GITHUB_PR_URL_CANDIDATE_RE)) {
+		const candidate = match[1]?.replace(TRAILING_URL_PUNCTUATION_RE, "");
+		if (!candidate) continue;
+		let parsed: URL;
+		try {
+			parsed = new URL(candidate);
+		} catch {
+			continue;
+		}
+		const rawAuthority = candidate.slice("https://".length).split(/[/?#]/u, 1)[0]?.toLowerCase();
+		if (
+			parsed.protocol !== "https:"
+			|| rawAuthority !== "github.com"
+			|| parsed.host !== "github.com"
+			|| parsed.username !== ""
+			|| parsed.password !== ""
+			|| parsed.search !== ""
+			|| parsed.hash !== ""
+		) continue;
+
+		const segments = parsed.pathname.split("/");
+		if (segments.at(-1) === "") segments.pop();
+		if (
+			segments.length === 5
+			&& segments[0] === ""
+			&& GITHUB_OWNER_RE.test(segments[1] ?? "")
+			&& GITHUB_REPOSITORY_RE.test(segments[2] ?? "")
+			&& segments[3] === "pull"
+			&& GITHUB_PR_NUMBER_RE.test(segments[4] ?? "")
+		) return true;
+	}
+	return false;
+}
+
 function safeProviderId(provider: string | undefined): string | undefined {
 	if (!provider) return undefined;
 	const normalized = provider.toLowerCase();
@@ -7914,7 +7957,6 @@ export class SessionManager {
 			if (Array.isArray(content)) {
 				let prDetected = false;
 				const PR_CMD_RE = /gh\s+pr\s+(create|ready)/;
-				const PR_URL_RE = /github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 				for (const block of content) {
 					if (block.type === "tool_use" && /^[Bb]ash$/.test(block.name) && block.input?.command) {
 						if (PR_CMD_RE.test(block.input.command)) { prDetected = true; break; }
@@ -7922,9 +7964,9 @@ export class SessionManager {
 					if (block.type === "tool_result") {
 						const text = typeof block.content === "string" ? block.content
 							: Array.isArray(block.content) ? block.content.map((c: any) => typeof c === "string" ? c : c.text || "").join("") : "";
-						if (PR_URL_RE.test(text)) { prDetected = true; break; }
+						if (containsExactGithubPullRequestUrl(text)) { prDetected = true; break; }
 					}
-					if (block.type === "text" && typeof block.text === "string" && PR_URL_RE.test(block.text)) {
+					if (block.type === "text" && typeof block.text === "string" && containsExactGithubPullRequestUrl(block.text)) {
 						prDetected = true; break;
 					}
 				}

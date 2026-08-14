@@ -23,6 +23,7 @@ function isVirtualSidecarPath(value: fs.PathLike): boolean {
 
 const {
 	SessionManager,
+	containsExactGithubPullRequestUrl,
 	dispatchTrackedSystemPrompt,
 	prepareArchivedMessageSnapshot,
 	restorePromptAuthorBindings,
@@ -257,6 +258,30 @@ afterAll(() => {
 });
 
 describe("SessionManager direct idle prompt lifecycle", () => {
+	it("detects only exact GitHub pull-request URLs", () => {
+		for (const valid of [
+			"https://github.com/SuuBro/bobbit/pull/123",
+			"Created PR: [open it](https://GitHub.com/acme/widgets/pull/42).",
+			"https://github.com/acme/widgets/pull/7/",
+		]) {
+			assert.equal(containsExactGithubPullRequestUrl(valid), true, valid);
+		}
+
+		for (const lookalike of [
+			"https://github.com.evil.test/acme/widgets/pull/42",
+			"https://evil.test/github.com/acme/widgets/pull/42",
+			"https://token@github.com/acme/widgets/pull/42",
+			"https://github.com:443/acme/widgets/pull/42",
+			"https://github.com/acme/widgets/pull/42/files",
+			"https://github.com/acme/widgets/pull/42?redirect=https://evil.test",
+			"https://github.com/acme/widgets/pull/42#hostile",
+			"https://github.com/acme%2Fwidgets/pull/42",
+			"javascript:https://github.com/acme/widgets/pull/42",
+		]) {
+			assert.equal(containsExactGithubPullRequestUrl(lookalike), false, lookalike);
+		}
+	});
+
 	it("durably tracks direct delegate, verification, and restart system producers with exact provider prefixes", async () => {
 		const manager = makeManager();
 		const delegateText = "Execute the task described in your system prompt. Follow the instructions carefully.";
