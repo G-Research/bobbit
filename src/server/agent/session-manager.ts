@@ -5880,7 +5880,57 @@ export class SessionManager {
 				await this._dispatchSteer(session, [accepted]);
 				return { status: "dispatched" };
 			}
-			if (session.status === "idle" && !session.lastTurnErrored) {
+			if (session.status === "idle" && session.lastTurnErrored) {
+				const consecutiveErrors = session.consecutiveErrorTurns ?? 0;
+				this.cancelPendingAutoRetry(session, "new-prompt");
+				if (consecutiveErrors >= MAX_CONSECUTIVE_ERROR_TURNS) return { status: "queued" };
+
+				if (isOrphanToolResultOrderingError(session.lastTurnErrorMessage)) {
+					this.markPoisonRecoveryPromptDispatchRow(session, accepted.id);
+					const recovered = await this._recoverPoisonedHistory(session, "follow-up", async (target) => {
+						target.lastTurnErrored = false;
+						target.lastTurnErrorMessage = undefined;
+						target.turnHadToolCalls = false;
+						target.transientRetryAttempts = 0;
+						target.lastPromptSource = source;
+						if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+						try {
+							await this.dispatchDirectPrompt(target, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+						} catch (error) {
+							target.lastTurnErrored = true;
+							target.lastTurnErrorMessage = error instanceof Error ? error.message : String(error);
+							throw error;
+						}
+						this.consumeRecoveredPromptDispatchRows(target);
+					});
+					if (!recovered && this.sessions.has(session.id)) {
+						throw new Error(`Session ${session.id} has poisoned history but no persisted transcript to repair`);
+					}
+					return { status: "dispatched" };
+				}
+
+				const errorSnippet = (session.lastTurnErrorMessage || "").slice(0, 200);
+				const poisonedByBlankText = isBlankContentBlockError(session.lastTurnErrorMessage);
+				this.consumeRecoveredPromptDispatchRows(session);
+				session.lastTurnErrored = false;
+				session.lastTurnErrorMessage = undefined;
+				this.setManualRetryRequired(session, false);
+				session.turnHadToolCalls = false;
+				session.transientRetryAttempts = 0;
+				if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+				if (poisonedByBlankText) {
+					const recovered = await this._recoverBlankTextPoison(session);
+					if (recovered) {
+						const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
+						await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+						return { status: "dispatched" };
+					}
+				}
+				const prefixedDispatch = buildErrorRecoveryPrefix(errorSnippet, dispatchText);
+				await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id);
+				return { status: "dispatched" };
+			}
+			if (session.status === "idle") {
 				this.drainQueue(session);
 				return { status: "dispatched" };
 			}
@@ -6447,9 +6497,14 @@ export class SessionManager {
 				? ledger.findIndex((record) => record.attemptId === authorBinding.attemptId)
 				: -1;
 		// Raw text is retained only for legacy records that predate occurrence IDs.
+		// When author correlation identified a different occurrence, constrain the
+		// compatibility fallback to that prompt instead of consuming a later
+		// identical-text steer.
 		if (idx === -1 && event.type === "message_end") {
 			const text = extractUserMessageText(event.message);
-			idx = ledger.findIndex((record) => !record.intentId && record.text === text);
+			idx = ledger.findIndex((record) => !record.intentId
+				&& record.text === text
+				&& (!authorBinding || record.promptId === authorBinding.promptId));
 		}
 		let changed = false;
 		if (idx !== -1) {
@@ -6933,7 +6988,11 @@ export class SessionManager {
 		durableQueueRowId?: string,
 		promptId = promptAttemptId("prompt"),
 	): Promise<void> {
-		if (session.isCompacting || session.status === "aborting" || (this._sessionReplacementCoordinators?.has(session.id) ?? false)) return;
+		const replacementKind = this._sessionReplacementCoordinators?.get(session.id)?.active?.kind;
+		// Poison repair deliberately redrives its accepted durable row inside the
+		// replacement coordinator. All unrelated dispatch remains fenced until the
+		// coordinator releases.
+		if (session.isCompacting || session.status === "aborting" || (replacementKind !== undefined && replacementKind !== "poison-redrive")) return;
 		const reliableRow = durableQueueRowId
 			? (session.promptQueue.toArray() as ReliableQueuedMessage[]).find((row) => row.id === durableQueueRowId && row.kind !== undefined)
 			: undefined;
@@ -6975,6 +7034,7 @@ export class SessionManager {
 					throw new Error((response as any).error || "prompt rejected");
 				}
 				acceptPreparedPromptDispatch(session, prepared, activityBoundary);
+				this.clearRecoveredPromptDispatchOwnership(session, [reliableRow.id]);
 				if (!this.pruneTerminalInFlightAttempt(session, reliableRow.id, prepared.attemptId)) {
 					this.broadcastQueue(session);
 				}

@@ -75,7 +75,7 @@ describe("writeAigwModelsJson — authoritative per-model api/baseUrl", () => {
 		assert.equal(normalizeAigwModelString("aigw/first/shared"), "aigw/first/shared");
 	});
 
-	it("adds a forward-only marker and Pi 0.82.1 ignores it while loading the model", async () => {
+	it("adds a forward-only marker and Pi 0.84.1 ignores it while loading the model", async () => {
 		const models = translateWellKnown(loadFixture(), GATEWAY);
 		writeAigwModelsJson(`${GATEWAY}/v1`, models);
 		const modelsPath = path.join(tmpAgentDir, "models.json");

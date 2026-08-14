@@ -53,7 +53,7 @@ describe("Model registry", () => {
 
 	it("passes representative direct Pi rows through byte-for-byte except authentication presentation", () => {
 		const cases = [
-			["anthropic", "claude-opus-4-1"], // authoritative 200K Claude row
+			["anthropic", "claude-opus-4-5"], // authoritative 200K Claude row
 			["anthropic", "claude-sonnet-4-5"], // authoritative 1M Claude row
 			["openrouter", "openai/gpt-5.2-chat"], // Pi says non-reasoning
 			["openai", "gpt-4"], // text-only GPT-4
@@ -82,7 +82,7 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("preserves exact Pi 0.82.1 Anthropic and Bedrock Claude Opus 5 catalog metadata", () => {
+	it("preserves exact Pi 0.84.1 Anthropic and Bedrock Claude Opus 5 catalog metadata", () => {
 		const cases = [
 			{ provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5", api: "anthropic-messages", baseUrl: "https://api.anthropic.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
 			{ provider: "amazon-bedrock", id: "au.anthropic.claude-opus-5", name: "Claude Opus 5 (AU)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
@@ -143,7 +143,7 @@ describe("Model registry", () => {
 		assert.equal(model.contextWindow, 272_000);
 	});
 
-	it("retains Pi 0.82.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
+	it("retains Pi 0.84.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
@@ -181,7 +181,7 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("retains supported Pi 0.82.1 catalog and routing fixes through the synchronous registry", () => {
+	it("retains supported Pi 0.84.1 catalog and routing fixes through the synchronous registry", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
