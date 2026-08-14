@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
+import { bobbitStateDir } from "../bobbit-dir.js";
 import { isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
 import { ClaudeAgentSdkUnavailableError, normalizeClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 import { CLAUDE_AGENT_SDK_DOCKER_HOME, CLAUDE_AGENT_SDK_DOCKER_USER, isSandboxContainerCwd } from "./docker-exec-spawn.js";
@@ -41,6 +43,14 @@ export interface ClaudeAgentSdkSessionAccessDeps {
 export interface SdkSessionAccessInput {
 	sessionId: string;
 	cwd?: string;
+}
+
+/** The only host root for direct SDK config and official history. */
+export function claudeAgentSdkDirectConfigDir(bobbitSessionId: string, stateDir = bobbitStateDir()): string {
+	if (!isClaudeAgentSdkSessionId(bobbitSessionId)) {
+		throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: invalid Bobbit session identity");
+	}
+	return path.join(stateDir, "claude-agent-sdk", bobbitSessionId);
 }
 
 function unavailable(_operation: string, error?: unknown): ClaudeAgentSdkUnavailableError {

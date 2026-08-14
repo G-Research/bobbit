@@ -30,7 +30,7 @@ import { hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentT
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
 import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
 import { sanitizeClaudeAgentSdkErrorForLog } from "./claude-agent-sdk-error.js";
-import { createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
+import { claudeAgentSdkDirectConfigDir, createDirectClaudeAgentSdkSessionAccess, createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type ClaudeAgentSdkSessionApi, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { projectClaudeSdkEmbeddedWork, recoverClaudeSdkEmbeddedWork } from "./claude-sdk-subagent-work.js";
@@ -10772,17 +10772,20 @@ export class SessionManager {
 			options.sandboxed === true || !!options.containerId,
 			effectiveModel.slice(0, slash),
 		);
-		if (effectiveModel.startsWith("claude-agent-sdk/") && options.sandboxed !== true && !options.containerId
-			&& !(options as SessionBridgeOptions).claudeAgentSdkBridgeDepsFactory) {
+		if (effectiveModel.startsWith("claude-agent-sdk/") && options.sandboxed !== true && !options.containerId) {
 			const sessionId = options.env?.BOBBIT_SESSION_ID;
 			if (!isClaudeAgentSdkSessionId(sessionId)) throw new ClaudeAgentSdkDirectAuthUnavailableError();
-			// Serialize refresh through the existing Bobbit OAuth lock. The returned
-			// value is passed only to this bridge's child environment, never persisted.
-			const oauthAccessToken = await withSandboxAgentAuthFileLock("claude-agent-sdk-direct", () =>
-				resolveDirectClaudeAgentSdkOAuthAccessToken());
-			const configDir = path.join(bobbitStateDir(), "claude-agent-sdk", sessionId);
+			const configDir = claudeAgentSdkDirectConfigDir(sessionId);
 			fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
 			fs.chmodSync(configDir, 0o700);
+			const testFactory = (options as SessionBridgeOptions).claudeAgentSdkBridgeDepsFactory;
+			// Production resolves one current OAuth access token under Bobbit's lock.
+			// Test-only SDK factories still receive the same private config path, but
+			// never touch an operator's OAuth store.
+			const oauthAccessToken = testFactory
+				? "test-sdk-direct-access"
+				: await withSandboxAgentAuthFileLock("claude-agent-sdk-direct", () =>
+					resolveDirectClaudeAgentSdkOAuthAccessToken());
 			(options as SessionBridgeOptions).claudeSdkDirectLaunch = { sessionId, configDir, oauthAccessToken };
 		}
 	}
@@ -12997,7 +13000,28 @@ export class SessionManager {
 			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
 		};
 		const base = this.claudeAgentSdkBridgeDepsFactory?.(options).sessionAccess ?? defaultClaudeAgentSdkSessionAccessDeps;
-		if (!ps.sandboxed) return base;
+		if (!ps.sandboxed) {
+			try {
+				// Never let a dormant direct session use the gateway process's native
+				// Claude config. Live, archived, transcript, and Continue paths share
+				// this exact Bobbit-session config root.
+				return {
+					...base,
+					directSdk: base.directSdk ?? createDirectClaudeAgentSdkSessionAccess({
+						configDir: claudeAgentSdkDirectConfigDir(ps.id),
+					}),
+				};
+			} catch {
+				const unavailable = (): never => { throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: direct SDK state is unavailable"); };
+				const unavailableSdk: ClaudeAgentSdkSessionApi = {
+					getSessionInfo: async () => unavailable(),
+					getSessionMessages: async () => unavailable(),
+					listSubagents: async () => unavailable(),
+					getSubagentMessages: async () => unavailable(),
+				};
+				return { ...base, directSdk: unavailableSdk };
+			}
+		}
 		const sandbox = ps.projectId ? this.sandboxManager?.get(ps.projectId) : undefined;
 		const containerId = sandbox?.getStatus().containerId;
 		if (!containerId || !isSandboxContainerCwd(ps.cwd)) {
@@ -14048,7 +14072,7 @@ export class SessionManager {
 			persistedRuntime: ps.runtime,
 		}) === "claude-agent-sdk" && isClaudeAgentSdkSessionId(ps.id)) {
 			try {
-				await removeTree(path.join(bobbitStateDir(), "claude-agent-sdk", ps.id));
+				await removeTree(claudeAgentSdkDirectConfigDir(ps.id));
 			} catch (err) {
 				console.warn(`[session-manager] Claude SDK direct state purge failed for ${ps.id}:`, err);
 			}

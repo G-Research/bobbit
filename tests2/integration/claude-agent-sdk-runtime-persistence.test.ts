@@ -78,37 +78,39 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 	});
 
 	it("reads archived SDK history derived from the provider tuple without touching Pi JSONL", async () => {
-		const session = { ...persistedSdkSession("sdk-archived"), archived: true, agentSessionFile: "/must-not-read.jsonl" };
+		const session = { ...persistedSdkSession("00000000-0000-4000-8000-000000000010"), archived: true, agentSessionFile: "/must-not-read.jsonl" };
 		expect(session.runtime).toBeUndefined();
 		const calls: Array<[string, string, unknown]> = [];
 		const manager: any = Object.create(SessionManager.prototype);
 		manager.sessions = new Map();
 		manager.projectContextManager = null;
 		manager._testStore = { get: vi.fn((id: string) => id === session.id ? session : undefined) };
-		manager.claudeAgentSdkBridgeDepsFactory = () => ({
-			clock: { now: () => 0, setTimeout: () => 0, setInterval: () => 0, clearTimeout: () => {}, clearInterval: () => {} },
-			query: vi.fn(),
-			sessionAccess: {
-				loadSdk: async () => ({
-					getSessionInfo: async (id: string, options: unknown) => {
-						calls.push(["info", id, options]);
-						return { sessionId: id, summary: "archived", lastModified: 1 };
-					},
-					getSessionMessages: async (id: string, options: unknown) => {
-						calls.push(["messages", id, options]);
-						return [{
-							type: "user" as const,
-							uuid: "archived-sdk-message",
-							session_id: id,
-							message: { role: "user", content: "SDK-owned archive" },
-							parent_tool_use_id: null,
-							parent_agent_id: null,
-						}];
-					},
-					forkSession: async () => ({ sessionId: SDK_SESSION_ID }),
-				}),
-			},
-		});
+		manager.claudeAgentSdkBridgeDepsFactory = () => {
+			const directSdk = {
+				getSessionInfo: async (id: string, options: unknown) => {
+					calls.push(["info", id, options]);
+					return { sessionId: id, summary: "archived", lastModified: 1 };
+				},
+				getSessionMessages: async (id: string, options: unknown) => {
+					calls.push(["messages", id, options]);
+					return [{
+						type: "user" as const,
+						uuid: "archived-sdk-message",
+						session_id: id,
+						message: { role: "user", content: "SDK-owned archive" },
+						parent_tool_use_id: null,
+						parent_agent_id: null,
+					}];
+				},
+				listSubagents: async () => [],
+				getSubagentMessages: async () => [],
+			};
+			return {
+				clock: { now: () => 0, setTimeout: () => 0, setInterval: () => 0, clearTimeout: () => {}, clearInterval: () => {} },
+				query: vi.fn(),
+				sessionAccess: { loadSdk: async () => directSdk, directSdk },
+			};
+		};
 
 		const messages = await manager.getArchivedMessages(session.id) as any[];
 		expect(messages).toEqual([expect.objectContaining({ id: "archived-sdk-message", role: "user", content: "SDK-owned archive" })]);
@@ -116,6 +118,21 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 			["info", SDK_SESSION_ID, { dir: "/workspace/project" }],
 			["messages", SDK_SESSION_ID, { dir: "/workspace/project" }],
 		]);
+	});
+
+	it("fails closed on invalid Bobbit identity without loading native direct history", async () => {
+		const session = persistedSdkSession("not-a-bobbit-uuid");
+		let nativeLoads = 0;
+		const manager: any = Object.create(SessionManager.prototype);
+		manager.claudeAgentSdkBridgeDepsFactory = () => ({
+			clock: { now: () => 0, setTimeout: () => 0, setInterval: () => 0, clearTimeout: () => {}, clearInterval: () => {} },
+			query: vi.fn(),
+			sessionAccess: {
+				loadSdk: async () => { nativeLoads++; throw new Error("native SDK must not load"); },
+			},
+		});
+		await expect(manager.readSdkSessionInfo(session)).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE" });
+		expect(nativeLoads).toBe(0);
 	});
 
 	it("accounts only a canonical SDK root result once", () => {

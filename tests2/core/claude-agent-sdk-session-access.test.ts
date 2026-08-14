@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+	claudeAgentSdkDirectConfigDir,
 	readSdkSessionInfo,
 	readSdkSessionMessages,
 	readSdkSubagentMessages,
@@ -28,6 +29,23 @@ function sdkFixture(overrides: Partial<ClaudeAgentSdkSessionApi> = {}) {
 }
 
 describe("Claude Agent SDK session access", () => {
+	it("derives direct config only from a validated Bobbit session UUID", () => {
+		const stateDir = "/isolated/bobbit-state";
+		const previousHome = process.env.HOME;
+		const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+		try {
+			process.env.HOME = "/hostile/home";
+			process.env.CLAUDE_CONFIG_DIR = "/hostile/config";
+			expect(claudeAgentSdkDirectConfigDir(SESSION_ID, stateDir)).toBe(`/isolated/bobbit-state/claude-agent-sdk/${SESSION_ID}`);
+			expect(() => claudeAgentSdkDirectConfigDir("not-a-uuid", stateDir)).toThrow(/SDK_SESSION_UNAVAILABLE/);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+			else process.env.CLAUDE_CONFIG_DIR = previousConfig;
+		}
+	});
+
 	it("uses only the official API with the persisted cwd and accepts confirmed empty history", async () => {
 		const fixture = sdkFixture();
 
