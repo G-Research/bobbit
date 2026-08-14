@@ -145,6 +145,10 @@ Actions depend on state:
 
 Draft persistence is separate. Composer text and attachments survive navigation, but once Send or Steer creates an occurrence, the delivery outbox—not the draft—is responsible for it.
 
+## Scope boundaries
+
+This delivery reuses the existing session store, prompt-author sidecar fsync points, and lifecycle-generation fencing. It does not introduce a new hard-kill fsync/generation protocol beyond those owners. Likewise, the IndexedDB spool limits protect browser-local admission, but this change does not add an aggregate authenticated server-side durable-steer budget. Do not infer either guarantee from the occurrence lifecycle above.
+
 ## Diagnostics
 
 The reliable-turn lifecycle diagnostics below are body-free. Useful server lines include:
