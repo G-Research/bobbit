@@ -5756,6 +5756,16 @@ export class SessionManager {
 			} catch (err) {
 				const rollback = this.sessions.get(sessionId);
 				if (!rollback) throw err;
+				// A replay of the browser occurrence must resolve against the rollback
+				// capsule before appending its display envelope. Otherwise the rejected
+				// shared recovery can create a second sidecar row even when queue admission
+				// itself is idempotent.
+				if (opts?.intentId) {
+					const duplicate = this.reliableIntentById(rollback, opts.intentId);
+					if (duplicate || this.reliableIntentWasSettled(rollback, opts.intentId)) {
+						return { status: duplicate && (duplicate as ReliableQueuedMessage).deliveryState === "queued" ? "queued" : "dispatched" };
+					}
+				}
 				const source = opts?.source ?? "user";
 				const author = resolveAcceptedPromptAuthor(source, opts?.author);
 				rollback.lastPromptSource = source;
@@ -5779,14 +5789,31 @@ export class SessionManager {
 						...(recordId ? { recordId } : {}),
 					});
 				}
-				rollback.promptQueue.enqueue(dispatchText, {
-					images: opts?.images,
-					attachments: opts?.attachments,
-					isSteered: opts?.isSteered,
-					suppressTitleGen: opts?.suppressTitleGen,
-					source,
-					author,
-				});
+				if (opts?.intentId) {
+					this.enqueueReliableIntent(rollback, this.makeReliableIntentRow(
+						rollback,
+						opts.intentId,
+						dispatchText,
+						opts.isSteered ? "steer" : "prompt",
+						"next-turn",
+						{
+							images: opts.images,
+							attachments: opts.attachments,
+							suppressTitleGen: opts.suppressTitleGen,
+							source,
+							author,
+						},
+					));
+				} else {
+					rollback.promptQueue.enqueue(dispatchText, {
+						images: opts?.images,
+						attachments: opts?.attachments,
+						isSteered: opts?.isSteered,
+						suppressTitleGen: opts?.suppressTitleGen,
+						source,
+						author,
+					});
+				}
 				this.broadcastQueue(rollback);
 				return { status: "queued" };
 			}
