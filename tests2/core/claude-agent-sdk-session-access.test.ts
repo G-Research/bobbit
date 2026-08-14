@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
 	claudeAgentSdkDirectConfigDir,
+	claudeAgentSdkModuleUrl,
+	createDirectClaudeAgentSdkSessionAccess,
 	readSdkSessionInfo,
 	readSdkSessionMessages,
 	readSdkSubagentMessages,
@@ -56,6 +58,33 @@ describe("Claude Agent SDK session access", () => {
 		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(1, SESSION_ID, { dir: CWD });
 		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(2, SESSION_ID, { dir: CWD });
 		expect(fixture.sdk.getSessionMessages).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
+	});
+
+	it("passes Bobbit's resolved absolute SDK module URL to direct history readers", async () => {
+		const executions: string[][] = [];
+		const access = createDirectClaudeAgentSdkSessionAccess({
+			configDir: "/isolated/direct-sdk-config",
+			exec: async (args) => {
+				executions.push(args);
+				return JSON.stringify({ sessionId: SESSION_ID, summary: "direct", lastModified: 1 });
+			},
+		});
+		await expect(access.getSessionInfo(SESSION_ID)).resolves.toMatchObject({ summary: "direct" });
+		expect(executions).toHaveLength(1);
+		expect(executions[0].at(-1)).toBe(claudeAgentSdkModuleUrl());
+		expect(executions[0].at(-1)).toMatch(/^file:\/\//);
+	});
+
+	it("prefers sandbox history access when both runtime-specific accessors are supplied", async () => {
+		const sandbox = sdkFixture({ getSessionInfo: vi.fn(async () => ({ sessionId: SESSION_ID, summary: "sandbox", lastModified: 1 })) });
+		const direct = sdkFixture({ getSessionInfo: vi.fn(async () => ({ sessionId: SESSION_ID, summary: "direct", lastModified: 1 })) });
+		await expect(readSdkSessionInfo({ sessionId: SESSION_ID }, {
+			loadSdk: vi.fn(async () => { throw new Error("default must not load"); }),
+			directSdk: direct.sdk,
+			sandboxSdk: sandbox.sdk,
+		})).resolves.toMatchObject({ summary: "sandbox" });
+		expect(sandbox.sdk.getSessionInfo).toHaveBeenCalledOnce();
+		expect(direct.sdk.getSessionInfo).not.toHaveBeenCalled();
 	});
 
 	it("uses the injected private direct config accessor instead of the gateway SDK environment", async () => {

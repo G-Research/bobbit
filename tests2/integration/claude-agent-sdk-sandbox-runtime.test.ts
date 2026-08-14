@@ -4,7 +4,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ClaudeAgentSdkBridge, type ClaudeAgentSdkBridgeDeps } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
-import { createSandboxClaudeAgentSdkSessionAccess, SANDBOX_SDK_READER } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
+import { createSandboxClaudeAgentSdkSessionAccess, SANDBOX_SDK_MODULE_URL, SANDBOX_SDK_READER } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
 
 const dockerSpawn = vi.fn<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>();
 type DockerSpawnOptions = Parameters<ReturnType<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>>[0];
@@ -238,6 +238,7 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		for (const args of executions) {
 			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-u", "bobbit-sdk", "-w", "/", "container-history", "node", "--input-type=module"]));
 			expect(args.join(" ")).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/history-session");
+			expect(args.at(-1)).toBe(SANDBOX_SDK_MODULE_URL);
 			expect(args.join(" ")).not.toMatch(/OAUTH|BOBBIT_TOKEN|ANTHROPIC_API_KEY/);
 		}
 	});
@@ -261,10 +262,12 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		for (const args of executions) {
 			expect(args).toEqual(expect.arrayContaining(["-w", "/"]));
 			expect(args).not.toContain("/workspace-wt/session/terminated");
-			expect(args.at(-4)).toBe("");
+			expect(args.at(-5)).toBe("");
+			expect(args.at(-1)).toBe(SANDBOX_SDK_MODULE_URL);
 		}
 		// Empty cwd must omit `dir`, not pass an undocumented `dir: ""` filter.
 		expect(SANDBOX_SDK_READER).toContain("...(cwd ? { dir: cwd } : {})");
+		expect(SANDBOX_SDK_READER).toContain("await import(moduleUrl)");
 		expect(SANDBOX_SDK_READER).not.toContain("{ dir: cwd,");
 	});
 

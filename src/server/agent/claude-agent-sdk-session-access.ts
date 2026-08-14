@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
@@ -71,7 +73,7 @@ async function withSdk<T>(
 ): Promise<T> {
 	validate(input);
 	try {
-		return await work(deps.directSdk ?? deps.sandboxSdk ?? await deps.loadSdk());
+		return await work(deps.sandboxSdk ?? deps.directSdk ?? await deps.loadSdk());
 	} catch (error) {
 		throw unavailable(operation, error);
 	}
@@ -147,11 +149,19 @@ export const SANDBOX_SDK_HISTORY_PAGE_SIZE = 100;
 export const MAX_SANDBOX_SDK_HISTORY_MESSAGES = 1_000;
 export const MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES = 16 * 1024 * 1024;
+/** Image-pinned wrapper resolves its package from /usr/local/lib/node_modules. */
+export const SANDBOX_SDK_MODULE_URL = "file:///usr/local/lib/bobbit/claude-agent-sdk.mjs";
+
+/** Resolve from Bobbit's module location, never the user project CWD. */
+export function claudeAgentSdkModuleUrl(): string {
+	return pathToFileURL(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk")).href;
+}
+
 export const SANDBOX_SDK_READER = `
 // Keep operation at the historical argv position: deterministic Docker seams
 // inspect it while the child-only agent id remains an explicit extra input.
-const [agentId, operation, sessionId, cwd, limitText, offsetText, includeSystemText] = process.argv.slice(1);
-const sdk = await import("@anthropic-ai/claude-agent-sdk");
+const [agentId, operation, sessionId, cwd, limitText, offsetText, includeSystemText, moduleUrl] = process.argv.slice(1);
+const sdk = await import(moduleUrl);
 const limit = Number(limitText);
 const offset = Number(offsetText);
 const options = {
@@ -222,6 +232,7 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 			input.containerId, "node", "--input-type=module", "-e", SANDBOX_SDK_READER,
 			request.agentId ?? "", request.operation, request.sessionId, "",
 			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
+			SANDBOX_SDK_MODULE_URL,
 		]);
 		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("sandbox SDK response page exceeds limit");
 		try { return JSON.parse(output) as T; }
@@ -290,6 +301,7 @@ export function createDirectClaudeAgentSdkSessionAccess(input: {
 		});
 		return stdout;
 	});
+	const moduleUrl = claudeAgentSdkModuleUrl();
 	const read = async <T>(request: {
 		operation: "info" | "messages" | "subagents" | "subagentMessages";
 		sessionId: string;
@@ -302,6 +314,7 @@ export function createDirectClaudeAgentSdkSessionAccess(input: {
 			"--input-type=module", "-e", SANDBOX_SDK_READER,
 			request.agentId ?? "", request.operation, request.sessionId, "",
 			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
+			moduleUrl,
 		]);
 		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("direct SDK response page exceeds limit");
 		try { return JSON.parse(output) as T; }

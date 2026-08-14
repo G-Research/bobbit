@@ -69,6 +69,8 @@ RUN npm install -g @anthropic-ai/claude-agent-sdk@${CLAUDE_AGENT_SDK_VERSION} --
       'binary="$(npm root -g)/$package/claude"' 'if [ ! -x "$binary" ]; then' \
       '  echo "Bobbit Claude Agent SDK binary is unavailable in the sandbox image" >&2' '  exit 127' 'fi' \
       'exec "$binary" "$@"' > /usr/local/bin/bobbit-claude-agent-sdk \
+    && mkdir -p /usr/local/lib/bobbit \
+    && printf '%s\n' 'export * from "@anthropic-ai/claude-agent-sdk";' > /usr/local/lib/bobbit/claude-agent-sdk.mjs \
     && chmod 0755 /usr/local/bin/bobbit-claude-agent-sdk
 LABEL bobbit.claude-agent-sdk-version=${CLAUDE_AGENT_SDK_VERSION}
 
