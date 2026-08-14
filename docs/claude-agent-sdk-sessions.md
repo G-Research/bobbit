@@ -129,17 +129,31 @@ change; a host or globally installed `claude` binary is never a substitute.
 Each Bobbit project uses a deterministic private Docker named volume at
 `/bobbit-state/claude-agent-sdk`, separate from the host project state bind
 mount. The volume survives ordinary container replacement and restart, while an
-explicit sandbox destroy removes it. The SDK process runs as fixed UID 1001,
-which is distinct from the model-invocable `node` UID. Its root is locked before
-node/Pi/tool processes are exposed; legacy per-session state is accepted only
-after a bounded physical migration rejects links and aliases and applies
-SDK-private ownership and modes. A pre-volume host bind is intentionally not
-reused or archived as sandbox SDK state; archived SDK history stays in the
-private volume. SDK history remains SDK-owned: Bobbit reads it with bounded,
-read-only SDK calls in the same pooled container, without requiring a terminated
-worktree to still exist. Those history calls have no OAuth or Bobbit gateway
-authority, and Bobbit does not create a Pi JSONL fallback or a second transcript
-store.
+explicit sandbox destroy removes it. The SDK process runs as fixed UID 1001
+(`bobbit-sdk`), distinct from the model-invocable `node` UID 1000. This prevents
+same-UID process inspection from exposing the SDK process environment to model
+invocable tools.
+
+Before node, Pi, or tool processes are exposed, Bobbit's root-only sandbox setup
+locks and attests the SDK-state root. Its permanent intent and migration `flock`
+files prevent a verifier from overtaking either an active migration or a queued
+writer. The matching `bobbit-agent` image therefore needs `flock` as well as the
+SDK, binary, and launcher. A stopped/new replacement may retire only validated
+predecessor migration artifacts, then performs a bounded physical migration that
+rejects links and aliases and applies SDK-private ownership and modes. A running
+container never retrofits or deletes these artifacts: it is reported busy or
+invalid and fails closed.
+
+For a busy migration, wait and retry through Bobbit; do not delete lock files or
+use `docker exec` to alter SDK state. If it remains invalid after normal
+replacement, rebuild the matching image and use Bobbit's sandbox lifecycle to
+recreate it. An explicit sandbox destroy also removes this private volume and
+its archived SDK history. A pre-volume host bind is intentionally not reused or
+archived as sandbox SDK state. SDK history remains SDK-owned: Bobbit reads it
+with bounded, read-only SDK calls in the same pooled container, without requiring
+a terminated worktree to still exist. Those history calls have no OAuth or
+Bobbit gateway authority, and Bobbit does not create a Pi JSONL fallback or a
+second transcript store.
 
 ## Persistence, history, and recovery
 
@@ -877,6 +891,59 @@ BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
 MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
 ```
+
+## Dogfood record and release boundary
+
+Run the credential-free unavailable-provider case before asking anyone to use
+subscription quota. It is intentionally included outside the opt-in blocks and
+must settle with `SDK_SESSION_UNAVAILABLE`, not hang, create a replacement
+conversation, or route the SDK session to Pi:
+
+```bash
+npm run test:manual -- --grep "provider-unavailable failure"
+```
+
+Then record the focused deterministic checks already listed above, including the
+restart E2E and literal initialization-inventory test, before either opt-in
+command. They prove the implementation boundary, but they cannot prove a local
+OAuth login, a real model's advertised controls, Docker's credential handoff, or
+the user's browser workflow.
+
+| Evidence | Deterministic automated coverage | Direct subscription session | Docker subscription session |
+| --- | --- | --- | --- |
+| Runtime routing, official-history projection, root-only usage, unavailable-provider recovery, tool/permission ceilings, slash ownership, helpers, and tuple transaction | Required before a live run; credential-free | Pending a user-run session | Pending a user-run session |
+| Local subscription discovery and one real SDK conversation | Cannot prove | Required and pending until recorded | Does not replace direct evidence |
+| Docker image capability, private volume/UID boundary, explicit OAuth-policy handoff, and sandbox resume | Can prove isolated branches, not a host credential handoff | Not applicable | Required and pending until recorded |
+| User-visible tool card, nested helper card, controls, restart/resume, reload, transcript, cost, and usage observation | Can prove fixtures and projections | Required and pending until recorded | Required and pending until recorded |
+| Release readiness | Cannot establish | Requires user sign-off | Requires user sign-off |
+
+A manual command is not a readiness declaration. **Do not claim readiness until a
+user has run and signed off on both a real direct subscription session and a real
+Docker sandbox subscription session.** If sandbox operation is not supported in
+the intended environment, record that limitation and do not substitute a
+credential-free run or direct run for it.
+
+### What to record
+
+Use a short sanitized matrix in the workflow or release evidence. For each
+scenario, record only:
+
+| Field | Expected record |
+| --- | --- |
+| Run identity | Date, Bobbit commit, command, and unprefixed model ID. |
+| Versions | Installed SDK package and bundled Claude binary version; for Docker, matching image label/version. |
+| Auth and prerequisites | `local OAuth available` or a sanitized failure category; Docker policy present with an empty value, image capability, and Docker availability. Never record tokens, account data, opaque IDs or UUIDs, config/session paths, environment dumps, provider bodies, prompts, or model output. |
+| Lifecycle outcomes | Start/readiness; canonical Bobbit tool and permission-card request/settlement; read-only gate action; Bobbit-owned slash; local SDK `/compact` rejection; one admitted helper beneath its root `Agent` card; advertised control's verified tuple or the accurate unsupported result; automatic compaction only if observed; restart/resume and reload. |
+| Durable observations | Stable official transcript projection; `costBasis`, nullable billed total, nullable notional value, usage totals, and current/high-water context. Record field presence and outcome, not raw transcript rows, opaque IDs, prompts, tool arguments, or model output. |
+| Failure and approval | Sanitized category, remediation and rerun result; provider-unavailable deterministic-check reference; user confirmation that the real session was run. UI artifacts may show only redacted labels and outcomes. |
+
+The required live matrix is complete only when every direct and sandbox row has
+a bounded observed outcome. An SDK control that is not advertised is an accurate
+unsupported result, not a pass by substitution. Likewise,
+automatic compaction is observation-only: do not invoke or fabricate a manual
+compaction event. `SDK_SESSION_UNAVAILABLE`, a sandbox auth/image failure,
+permission-card mismatch, transcript/cost regression, child content outside its
+root card, or Pi fallback is a failed row until it is fixed and rerun.
 
 For the original implementation rationale and acceptance plan, see
 [Claude Agent SDK session lifecycle design](design/claude-agent-sdk-session-lifecycle.md)
