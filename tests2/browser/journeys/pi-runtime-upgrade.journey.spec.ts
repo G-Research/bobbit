@@ -46,12 +46,12 @@ async function loadModelsFromApi(): Promise<ApiModel[]> {
 	return models;
 }
 
-const AUTHORITATIVE_CLAUDE = { provider: "anthropic", id: "claude-opus-4-1", thinkingLevel: "high" } as const;
+const AUTHORITATIVE_CLAUDE = { provider: "anthropic", id: "claude-opus-4-5", thinkingLevel: "high" } as const;
 const AUTHORITATIVE_CLAUDE_LEVEL_LABELS = ["Off", "Minimal", "Low", "Medium", "High"] as const;
 
 function requireAuthoritativeClaude(models: ApiModel[]): ApiModel {
 	const model = models.find((candidate) => candidate.provider === AUTHORITATIVE_CLAUDE.provider && candidate.id === AUTHORITATIVE_CLAUDE.id);
-	expect(model, "expected anthropic/claude-opus-4-1 in /api/models").toBeTruthy();
+	expect(model, `expected ${AUTHORITATIVE_CLAUDE.provider}/${AUTHORITATIVE_CLAUDE.id} in /api/models`).toBeTruthy();
 	return model as ApiModel;
 }
 
@@ -67,11 +67,11 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 		const models = await loadModelsFromApi();
 		const model = requireAuthoritativeClaude(models);
 		expect(model).toMatchObject({
-			name: "Claude Opus 4.1 (latest)",
+			name: "Claude Opus 4.5 (latest)",
 			api: "anthropic-messages",
 			baseUrl: "https://api.anthropic.com",
 			contextWindow: 200_000,
-			maxTokens: 32_000,
+			maxTokens: 64_000,
 			reasoning: true,
 			input: ["text", "image"],
 		});
@@ -116,7 +116,7 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 			await expect(item, `expected ${AUTHORITATIVE_CLAUDE.provider}/${AUTHORITATIVE_CLAUDE.id} in the session picker`).toBeVisible({ timeout: 15_000 });
 			// The selector must render the exact /api/models limits rather than the
 			// retired blanket Claude 1M override.
-			await expect(item).toContainText("200K/32K");
+			await expect(item).toContainText("200K/64K");
 
 			// These filters consume the same reasoning/image metadata as the row icons.
 			await selector.getByText("Thinking", { exact: true }).click();
