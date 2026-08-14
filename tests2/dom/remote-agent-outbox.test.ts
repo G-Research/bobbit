@@ -8,9 +8,11 @@ __syncBeforeAll(() => __syncCE());
 // import cycle before remote-agent pulls it in (TDZ guard); safe-markdown-block
 // is pre-imported so any fire-and-forget lazy define resolves during the test
 // rather than racing env teardown.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { installConfirmedSessionModelPersistence } from "../../src/app/session-manager.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
+import { storage } from "../../src/app/storage.js";
+import "../../src/ui/components/MessageEditor.js";
 import "../../src/ui/lazy/safe-markdown-block.js";
 import { setRenderApp, state } from "../../src/app/state.js";
 
@@ -45,6 +47,7 @@ const nextRenderFrame = () => new Promise<void>((resolve) => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	state.showHeadquartersInProjectLists = false;
 	localStorage.clear();
 });
@@ -436,5 +439,82 @@ describe("RemoteAgent send outbox (S2)", () => {
 		expect(r.outboxLen).toBe(0);
 		expect(r.queue).toHaveLength(0);
 		expect(r.sent).toHaveLength(0); // no remove_queued sent to server for a never-sent row
+	});
+
+	it("persists a correlated pre-admission rejection until explicit Retry or local Dismiss", async () => {
+		const sessionId = `pre-admission-${Date.now()}-${Math.random()}`;
+		const records = new Map<string, any>();
+		vi.spyOn(storage.deliveryIntents, "put").mockImplementation(async (sid, intentId, frame, row) => {
+			records.set(`${sid}:${intentId}`, { sessionId: sid, intentId, frame, row });
+			return { ok: true };
+		});
+		vi.spyOn(storage.deliveryIntents, "list").mockImplementation(async (sid) =>
+			[...records.values()].filter((record) => record.sessionId === sid));
+		vi.spyOn(storage.deliveryIntents, "delete").mockImplementation(async (sid, intentId) => {
+			records.delete(`${sid}:${intentId}`);
+		});
+
+		const ra = makeAgent(OPEN);
+		ra._sessionId = sessionId;
+		ra._connectionStatus = "connected";
+		await ra.prompt("choose a model then retry");
+		const originalFrame = snapshot(ra).sent[0];
+		const intentId = originalFrame.intentId;
+
+		await ra.handleServerMessage({
+			type: "error",
+			code: "MODEL_SELECTION_REQUIRED",
+			message: "A different tab was rejected.",
+			intentId: "different-occurrence",
+			retryable: true,
+		});
+		await ra.handleServerMessage({ type: "error", code: "GENERIC", message: "Uncorrelated failure." });
+		expect(snapshot(ra).queue[0]).toMatchObject({ id: intentId, deliveryState: "local" });
+
+		await ra.handleServerMessage({
+			type: "error",
+			code: "MODEL_SELECTION_REQUIRED",
+			message: "Choose a replacement model before sending.",
+			intentId,
+			retryable: true,
+		});
+		expect(snapshot(ra).queue).toEqual([
+			expect.objectContaining({
+				id: intentId,
+				deliveryState: "failed",
+				retryable: true,
+				deliveryError: "Choose a replacement model before sending.",
+			}),
+		]);
+
+		const restored = makeAgent(OPEN);
+		restored._sessionId = sessionId;
+		restored._connectionStatus = "connected";
+		await restored._restoreDeliveryOutbox();
+		restored._flushOutbox();
+		expect(snapshot(restored).sent).toHaveLength(0);
+		expect(snapshot(restored).queue[0]).toMatchObject({ id: intentId, deliveryState: "failed" });
+
+		const editor = document.createElement("message-editor") as any;
+		editor.queuedMessages = restored.getQueue();
+		document.body.appendChild(editor);
+		await editor.updateComplete;
+		const intentRow = editor.querySelector(`[data-intent-id="${intentId}"]`)!;
+		expect(intentRow.querySelector('[aria-label="Retry"]')).not.toBeNull();
+		expect(intentRow.querySelector('[aria-label="Dismiss"]')).not.toBeNull();
+		editor.remove();
+
+		restored.retryIntent(intentId);
+		await vi.waitFor(() => expect(snapshot(restored).sent).toHaveLength(1));
+		expect(snapshot(restored).sent[0]).toEqual(originalFrame);
+		restored._flushOutbox();
+		expect(snapshot(restored).sent).toHaveLength(1);
+
+		// The originating tab still has an exclusively local failed carrier. Its
+		// Dismiss must not ask a server that never admitted this occurrence.
+		ra.removeQueued(intentId);
+		expect(snapshot(ra).queue).toHaveLength(0);
+		expect(snapshot(ra).sent).toEqual([originalFrame]);
+		expect(records.has(`${sessionId}:${intentId}`)).toBe(false);
 	});
 });

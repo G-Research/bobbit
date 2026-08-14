@@ -168,6 +168,15 @@ function acceptedIntentId(msg: unknown): string {
 		: randomUUID();
 }
 
+/** Return only a client-supplied, already validated occurrence identity. */
+function rejectionIntentId(msg: unknown): string | undefined {
+	const candidate = msg as { type?: unknown; intentId?: unknown } | null;
+	if (candidate?.type !== "prompt" && candidate?.type !== "steer") return undefined;
+	return typeof candidate.intentId === "string" && candidate.intentId.length > 0 && candidate.intentId.length <= 256
+		? candidate.intentId
+		: undefined;
+}
+
 function intentProjection(
 	sessionManager: SessionManager,
 	sessionId: string,
@@ -615,7 +624,13 @@ function sendSessionWorkPolicyError(
 		send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
 		return;
 	}
-	send(ws, { type: "error", message, code });
+	const intentId = rejectionIntentId(msg);
+	send(ws, {
+		type: "error",
+		message,
+		code,
+		...(intentId ? { intentId, retryable: true } : {}),
+	});
 }
 
 /**
@@ -763,7 +778,26 @@ export function handleWebSocketConnection(
 	let surfaceTokenAuthorityKey: string | undefined;
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 
-	const sendCommandFailure = (err: unknown): void => {
+	const sendIntentRejection = (
+		msg: ReliableIntentClientMessage,
+		message: string,
+		code: string,
+		retryable = true,
+	): void => {
+		const intentId = rejectionIntentId(msg);
+		send(ws, {
+			type: "error",
+			message,
+			code,
+			...(intentId ? { intentId, retryable } : {}),
+		});
+	};
+
+	const sendCommandFailure = (err: unknown, msg?: ReliableIntentClientMessage): void => {
+		if (msg) {
+			sendIntentRejection(msg, String(err), "COMMAND_ERROR");
+			return;
+		}
 		send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
 	};
 
@@ -846,7 +880,7 @@ export function handleWebSocketConnection(
 			const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
 			send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
 		} else {
-			send(ws, { type: "error", message, code });
+			sendIntentRejection(msg, message, code);
 		}
 		return true;
 	};
@@ -1119,7 +1153,7 @@ export function handleWebSocketConnection(
 					send(ws, { type: "pong" });
 					break;
 				default:
-					send(ws, { type: "error", message: "This session is archived (read-only)", code: "SESSION_ARCHIVED" });
+					sendIntentRejection(msg, "This session is archived (read-only)", "SESSION_ARCHIVED");
 			}
 			return;
 		}
@@ -1127,7 +1161,7 @@ export function handleWebSocketConnection(
 		// Authenticated — route commands to agent
 		const session = sessionManager.getSession(sessionId);
 		if (!session) {
-			send(ws, { type: "error", message: "Session not found", code: "SESSION_NOT_FOUND" });
+			sendIntentRejection(msg, "Session not found", "SESSION_NOT_FOUND");
 			return;
 		}
 
@@ -1174,7 +1208,7 @@ export function handleWebSocketConnection(
 					// ext_surface_token_result that never arrives.
 					break;
 				default:
-					send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
+					sendIntentRejection(msg, "Session is still being set up", "SESSION_PREPARING");
 					return;
 			}
 		}
@@ -1227,6 +1261,16 @@ export function handleWebSocketConnection(
 				}
 				case "prompt": {
 					const intentId = acceptedIntentId(msg);
+					let preprocessingCancellationSent = false;
+					const rejectCancelledPreprocessing = (): void => {
+						if (preprocessingCancellationSent) return;
+						preprocessingCancellationSent = true;
+						sendIntentRejection(
+							msg,
+							"Message preparation was cancelled by Stop. Retry when you are ready.",
+							"INTENT_PREPARATION_CANCELLED",
+						);
+					};
 					const existingIntent = intentProjection(sessionManager, sessionId, intentId);
 					if (existingIntent) {
 						sendIntentUpdate(existingIntent);
@@ -1236,11 +1280,11 @@ export function handleWebSocketConnection(
 					// preprocessing or SessionManager's authoritative acceptance boundary.
 					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
 					if (modelSelectionCondition) {
-						send(ws, {
-							type: "error",
-							message: modelSelectionRequiredMessage(modelSelectionCondition),
-							code: MODEL_SELECTION_REQUIRED,
-						});
+						sendIntentRejection(
+							msg,
+							modelSelectionRequiredMessage(modelSelectionCondition),
+							MODEL_SELECTION_REQUIRED,
+						);
 						return;
 					}
 
@@ -1257,14 +1301,20 @@ export function handleWebSocketConnection(
 						// @ts-ignore — public signal options land in the resolver sibling change.
 						await preflightFileMentionAdmission(msg.text, fileMentionCwd, { signal: commandSignal });
 					} catch (error) {
-						if (commandSignal?.aborted) return;
+						if (commandSignal?.aborted) {
+							rejectCancelledPreprocessing();
+							return;
+						}
 						if (error instanceof FileMentionBudgetError) {
-							send(ws, { type: "error", message: error.message, code: error.code });
+							sendIntentRejection(msg, error.message, error.code);
 							return;
 						}
 						throw error;
 					}
-					if (commandSignal?.aborted) return;
+					if (commandSignal?.aborted) {
+						rejectCancelledPreprocessing();
+						return;
+					}
 
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
@@ -1327,14 +1377,20 @@ export function handleWebSocketConnection(
 					// worktreePath is required to reach the real files.
 					// @ts-ignore — public signal options land in the resolver sibling change.
 					const fileMentionResult = await resolveFileMentions(msg.text, fileMentionCwd, { signal: commandSignal }).catch((error: unknown) => {
-						if (commandSignal?.aborted) return undefined;
+						if (commandSignal?.aborted) {
+							rejectCancelledPreprocessing();
+							return undefined;
+						}
 						if (error instanceof FileMentionBudgetError) {
-							send(ws, { type: "error", message: error.message, code: error.code });
+							sendIntentRejection(msg, error.message, error.code);
 							return undefined;
 						}
 						throw error;
 					});
-					if (!fileMentionResult || commandSignal?.aborted) return;
+					if (!fileMentionResult || commandSignal?.aborted) {
+						if (commandSignal?.aborted) rejectCancelledPreprocessing();
+						return;
+					}
 					for (const w of fileMentionResult.warnings) {
 						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
@@ -1384,7 +1440,10 @@ export function handleWebSocketConnection(
 						? fileMentionResult.mentions.map(toWireMention)
 						: undefined;
 
-					if (commandSignal?.aborted) return;
+					if (commandSignal?.aborted) {
+						rejectCancelledPreprocessing();
+						return;
+					}
 					const delivery = (sessionManager.enqueuePrompt as any)(sessionId, originalText, {
 						images: sendImages.length ? sendImages : undefined,
 						attachments: sendAttachments.length ? sendAttachments : undefined,
@@ -1410,11 +1469,11 @@ export function handleWebSocketConnection(
 					}
 					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
 					if (modelSelectionCondition) {
-						send(ws, {
-							type: "error",
-							message: modelSelectionRequiredMessage(modelSelectionCondition),
-							code: MODEL_SELECTION_REQUIRED,
-						});
+						sendIntentRejection(
+							msg,
+							modelSelectionRequiredMessage(modelSelectionCondition),
+							MODEL_SELECTION_REQUIRED,
+						);
 						break;
 					}
 					// Admission always lands in SessionManager's durable outbox before its
@@ -2316,7 +2375,7 @@ export function handleWebSocketConnection(
 					send(ws, { type: "error", message: "Unknown message type", code: "UNKNOWN_TYPE" });
 			}
 		} catch (err) {
-			sendCommandFailure(err);
+			sendCommandFailure(err, msg);
 		}
 	};
 
@@ -2372,11 +2431,11 @@ export function handleWebSocketConnection(
 				|| msg.type === "restart_agent"
 				|| msg.type === "set_thinking_level")
 		) {
-			send(ws, {
-				type: "error",
-				message: modelSelectionRequiredMessage(recoveryAdmissionAtFrame.condition),
-				code: MODEL_SELECTION_REQUIRED,
-			});
+			sendIntentRejection(
+				msg,
+				modelSelectionRequiredMessage(recoveryAdmissionAtFrame.condition),
+				MODEL_SELECTION_REQUIRED,
+			);
 			return;
 		}
 		// Reject a second model/thinking choice before it can wait behind the first
@@ -2407,25 +2466,25 @@ export function handleWebSocketConnection(
 			// Admission is synchronous and atomic: a rejected parsed frame is never
 			// attached to the FIFO tail, so its closure becomes collectible now.
 			if (err instanceof SessionCommandQueueFullError) {
-				send(ws, { type: "error", message: err.message, code: SESSION_COMMAND_QUEUE_FULL });
+				sendIntentRejection(msg, err.message, SESSION_COMMAND_QUEUE_FULL);
 				return;
 			}
 			console.error(`[ws-handler] Command admission failure for ${sessionId}:`, err);
-			sendCommandFailure(err);
+			sendCommandFailure(err, msg);
 			return;
 		}
 		void result.catch((err) => {
 			// Queue admission rejects without linking the parsed-message closure to
 			// the FIFO tail. Surface the stable code and isolate later commands.
 			if (err instanceof SessionCommandQueueFullError) {
-				send(ws, { type: "error", message: err.message, code: err.code });
+				sendIntentRejection(msg, err.message, err.code);
 				return;
 			}
 			// Covers authentication/archive branches and any future routing added
 			// outside the command-level try/catch. The serialiser's fulfilled tail
 			// still permits the next same-session ordered delivery to run.
 			console.error(`[ws-handler] Unhandled command failure for ${sessionId}:`, err);
-			sendCommandFailure(err);
+			sendCommandFailure(err, msg);
 		});
 	});
 
