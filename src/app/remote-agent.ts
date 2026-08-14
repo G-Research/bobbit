@@ -75,6 +75,7 @@ import { LOCAL_USER_AUTHOR, type BobbitMessage, type MessageAuthor } from "../sh
 import type { PromptSource } from "../shared/prompt-source.js";
 import { reconstructAssistantStreamDelta } from "../shared/assistant-stream-delta.js";
 import { storage } from "./storage.js";
+import type { PersistedDeliveryIntent } from "../ui/storage/app-storage.js";
 
 const CLIENT_SYSTEM_AUTHOR: MessageAuthor = {
 	kind: "system",
@@ -414,10 +415,13 @@ interface PendingOutboxEntry {
 	frame: any;
 	row?: QueuedMessage;
 	persisted?: boolean;
+	/** Exact durable revision from which this tab rendered the local row. */
+	localRevision?: number;
 	lastSentEpoch?: number;
 	/** A correlated pre-admission rejection requires an explicit user Retry.
 	 * It must not be flushed automatically on this or a later connection. */
 	retryRequired?: boolean;
+	mutationPending?: boolean;
 }
 
 function createIntentId(): string {
@@ -1395,35 +1399,65 @@ export class RemoteAgent {
 		// server projection explicitly marks this exact occurrence retryable.
 		if (projected && (projected.deliveryState === "cancelled" || projected.retryable === false)) return;
 		const local = this._pendingOutbox.find((entry) => entry.row?.id === intentId);
-		if (local?.row && !projected && local.row.retryable === false) return;
+		if (local?.row && !projected && (local.row.retryable === false || local.mutationPending)) return;
 		if (local?.row && !projected && (local.row.deliveryState === "failed" || !local.persisted)) {
-			local.row.deliveryState = "local";
-			local.row.unsent = true;
-			delete local.row.deliveryReason;
-			delete local.row.deliveryError;
-			delete local.row.retryable;
-			local.lastSentEpoch = undefined;
-			local.retryRequired = false;
-			this.onQueueUpdate?.(this.getQueue());
-			void storage.deliveryIntents.put(this._sessionId, intentId, local.frame, persistedOutboxRow(local.row))
-				.then((result) => {
-					if (!this._pendingOutbox.includes(local)) {
-						if (result.ok) void storage.deliveryIntents.delete(this._sessionId, intentId);
-						return;
-					}
-					if (result.ok) {
-						local.persisted = true;
-						this._sendOutboxEntry(local);
-						this.onQueueUpdate?.(this.getQueue());
-						return;
-					}
-					local.retryRequired = true;
-					local.row!.deliveryState = "failed";
-					local.row!.unsent = false;
-					local.row!.retryable = false;
-					local.row!.deliveryError = "This message could not be saved for reliable delivery.";
+			const retriedRow: QueuedMessage = {
+				...local.row,
+				deliveryState: "local",
+				unsent: true,
+			};
+			delete retriedRow.deliveryReason;
+			delete retriedRow.deliveryError;
+			delete retriedRow.retryable;
+			local.mutationPending = true;
+
+			const persistRetry = local.persisted && this._sessionId && local.localRevision !== undefined
+				? storage.deliveryIntents.replaceIfRevision(
+					this._sessionId,
+					intentId,
+					local.localRevision,
+					local.frame,
+					persistedOutboxRow(retriedRow),
+				)
+				: storage.deliveryIntents.put(this._sessionId, intentId, local.frame, persistedOutboxRow(retriedRow))
+					.then((result) => ({
+						ok: result.ok,
+						applied: result.ok,
+						...(result.ok ? {
+							current: {
+								key: `${this._sessionId}:${intentId}`,
+								sessionId: this._sessionId,
+								intentId,
+								frame: local.frame,
+								row: persistedOutboxRow(retriedRow),
+								revision: result.revision ?? 0,
+								createdAt: retriedRow.createdAt,
+								updatedAt: Date.now(),
+							},
+						} : {}),
+					}));
+
+			void persistRetry.then((result) => {
+				local.mutationPending = false;
+				if (!this._pendingOutbox.includes(local)) return;
+				if (result.ok && result.applied && result.current) {
+					this._applyPersistedLocalRecord(local, result.current);
+					local.lastSentEpoch = undefined;
+					this._sendOutboxEntry(local);
 					this.onQueueUpdate?.(this.getQueue());
-				});
+					return;
+				}
+				if (result.ok && !result.applied) {
+					this._reconcileConditionalMutation(local, result.current);
+					return;
+				}
+				local.retryRequired = true;
+				local.row!.deliveryState = "failed";
+				local.row!.unsent = false;
+				local.row!.retryable = false;
+				local.row!.deliveryError = "This message could not be saved for reliable delivery.";
+				this.onQueueUpdate?.(this.getQueue());
+			});
 			return;
 		}
 		this.send({ type: "retry_intent", intentId });
@@ -1796,8 +1830,24 @@ export class RemoteAgent {
 			|| this._serverQueue.some((row) => row.id === messageId);
 		const local = idx === -1 ? undefined : this._pendingOutbox[idx];
 		if (local && !hasServerProjection && (local.lastSentEpoch === undefined || local.retryRequired === true)) {
+			if (local.mutationPending) return;
+			if (local.persisted && this._sessionId && local.localRevision !== undefined) {
+				const renderedRevision = local.localRevision;
+				local.mutationPending = true;
+				void storage.deliveryIntents.deleteIfRevision(this._sessionId, messageId, renderedRevision)
+					.then((result) => {
+						local.mutationPending = false;
+						if (!this._pendingOutbox.includes(local)) return;
+						if (result.ok && result.applied && local.localRevision === renderedRevision) {
+							this._pendingOutbox = this._pendingOutbox.filter((entry) => entry !== local);
+							this.onQueueUpdate?.(this.getQueue());
+							return;
+						}
+						if (result.ok && !result.applied) this._reconcileConditionalMutation(local, result.current);
+					});
+				return;
+			}
 			this._pendingOutbox.splice(idx, 1);
-			void storage.deliveryIntents.delete(this._sessionId, messageId);
 			this.onQueueUpdate?.(this.getQueue());
 			return;
 		}
@@ -1952,6 +2002,43 @@ export class RemoteAgent {
 		for (const p of pendingSurfaceTokens) p.reject(new Error(`pack surface-token mint: ${reason}`));
 	}
 
+	private _applyPersistedLocalRecord(entry: PendingOutboxEntry, record: PersistedDeliveryIntent): boolean {
+		if (
+			!record?.frame
+			|| !record?.row
+			|| record.intentId !== (record.row as any).id
+			|| deliveryIntentId(record.frame) !== record.intentId
+		) return false;
+		const restoredState = (record.row as any).deliveryState;
+		const retryRequired = restoredState === "failed";
+		entry.frame = record.frame;
+		entry.row = {
+			...(record.row as any),
+			deliveryState: retryRequired ? "failed" : "local",
+			unsent: !retryRequired,
+		};
+		entry.persisted = true;
+		entry.localRevision = Number.isSafeInteger(record.revision) && record.revision >= 0 ? record.revision : 0;
+		entry.retryRequired = retryRequired;
+		return true;
+	}
+
+	/** A losing CAS adopts the newer shared carrier instead of deleting or
+	 * dispatching it. An absent record is not proof of transcript surfacing: a
+	 * different tab may already have transferred ownership to the server, so this
+	 * tab retains its visible row until its own authoritative projection arrives. */
+	private _reconcileConditionalMutation(
+		entry: PendingOutboxEntry,
+		current?: PersistedDeliveryIntent,
+	): void {
+		if (current && this._applyPersistedLocalRecord(entry, current)) {
+			// The winning tab owns immediate dispatch. This stale tab may resend only
+			// after a later connection epoch, where server admission is idempotent.
+			entry.lastSentEpoch = this._connectionEpoch;
+		}
+		this.onQueueUpdate?.(this.getQueue());
+	}
+
 	private async _restoreDeliveryOutbox(): Promise<void> {
 		const restored = await storage.deliveryIntents.list(this._sessionId);
 		for (const record of restored) {
@@ -1962,18 +2049,8 @@ export class RemoteAgent {
 				|| deliveryIntentId(record.frame) !== record.intentId
 			) continue;
 			if (this._pendingOutbox.some((entry) => entry.row?.id === record.intentId)) continue;
-			const restoredState = (record.row as any).deliveryState;
-			const retryRequired = restoredState === "failed";
-			this._pendingOutbox.push({
-				frame: record.frame,
-				row: {
-					...(record.row as any),
-					deliveryState: retryRequired ? "failed" : "local",
-					unsent: !retryRequired,
-				},
-				persisted: true,
-				retryRequired,
-			});
+			const entry: PendingOutboxEntry = { frame: record.frame };
+			if (this._applyPersistedLocalRecord(entry, record)) this._pendingOutbox.push(entry);
 		}
 	}
 
@@ -2006,6 +2083,7 @@ export class RemoteAgent {
 			return;
 		}
 		entry.persisted = true;
+		entry.localRevision = result.revision ?? 0;
 		this._sendOutboxEntry(entry);
 	}
 
@@ -2044,14 +2122,19 @@ export class RemoteAgent {
 		entry.retryRequired = true;
 		this.onQueueUpdate?.(this.getQueue());
 
-		if (entry.persisted && this._sessionId) {
-			const result = await storage.deliveryIntents.put(
+		if (entry.persisted && this._sessionId && entry.localRevision !== undefined) {
+			const result = await storage.deliveryIntents.replaceIfRevision(
 				this._sessionId,
 				intentId,
+				entry.localRevision,
 				entry.frame,
 				persistedOutboxRow(entry.row),
 			);
-			if (!result.ok) {
+			if (result.ok && result.applied && result.current) {
+				this._applyPersistedLocalRecord(entry, result.current);
+			} else if (result.ok && !result.applied) {
+				this._reconcileConditionalMutation(entry, result.current);
+			} else {
 				entry.row.retryable = false;
 				entry.row.deliveryError = "The server rejected this message, but its failed state could not be saved. Dismiss it or copy the text before reloading.";
 				this.onQueueUpdate?.(this.getQueue());
