@@ -5,6 +5,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
+import { PiAssistantStreamNormalizer } from "../../src/shared/assistant-stream-delta.ts";
 
 const SELECTED_PI_VERSION = "0.84.1";
 const PI_PACKAGES = [
@@ -111,6 +112,66 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 			},
 		};
 		expect(toJsonEvent(exactTerminal)).toBe(exactTerminal);
+	});
+
+	it("reconstructs installed Pi delta-only updates while keeping message_end terminal-authoritative", async () => {
+		const { toJsonEvent } = await loadInstalledJsonEventAdapter();
+		const normalizer = new PiAssistantStreamNormalizer();
+		const baseline = {
+			role: "assistant",
+			content: [],
+			api: "contract",
+			provider: "contract",
+			model: "delta-only",
+			timestamp: 1_735_000_000_000,
+		};
+		const start = toJsonEvent({ type: "message_start", message: baseline });
+		expect(normalizer.normalize(start)).toBe(start);
+
+		const cumulative = structuredClone(baseline) as any;
+		cumulative.content.push({ type: "text", text: "" });
+		const rawUpdates: any[] = [
+			{
+				type: "message_update",
+				message: structuredClone(cumulative),
+				assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: structuredClone(cumulative) },
+			},
+		];
+		cumulative.content[0].text = "live ";
+		rawUpdates.push({
+			type: "message_update",
+			message: structuredClone(cumulative),
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "live ", partial: structuredClone(cumulative) },
+		});
+		cumulative.content[0].text = "live delta";
+		rawUpdates.push({
+			type: "message_update",
+			message: structuredClone(cumulative),
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "delta", partial: structuredClone(cumulative) },
+		});
+
+		const reconstructed = rawUpdates.map((raw) => {
+			const installedFrame = toJsonEvent(raw);
+			expect(installedFrame).not.toHaveProperty("message");
+			expect(installedFrame.assistantMessageEvent).not.toHaveProperty("partial");
+			return normalizer.normalize(installedFrame) as any;
+		});
+		expect(reconstructed.map((event) => messageText(event.message))).toEqual(["", "live ", "live delta"]);
+		expect(reconstructed.at(-1)?.assistantMessageEvent.partial).toEqual(reconstructed.at(-1)?.message);
+
+		const terminal = toJsonEvent({
+			type: "message_end",
+			message: {
+				...baseline,
+				content: [{ type: "text", text: "provider-authoritative final" }],
+				stopReason: "stop",
+			},
+		});
+		expect(normalizer.normalize(terminal), "PI_CONTRACT_TERMINAL_NOT_AUTHORITATIVE").toBe(terminal);
+		expect(messageText(terminal.message)).toBe("provider-authoritative final");
+
+		const postTerminalDelta = toJsonEvent(rawUpdates[1]);
+		expect(normalizer.normalize(postTerminalDelta)).not.toHaveProperty("message");
 	});
 
 	it("orders manual compaction events and releases its controller before compaction_end", async () => {

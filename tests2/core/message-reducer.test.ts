@@ -192,6 +192,42 @@ describe("message-reducer", () => {
 		]);
 	});
 
+	it("invalidates only the provisional recoverable-length stream and retains the retry terminal", () => {
+		const firstTail = assistantMsg("first-tail", "truncated first tail", {
+			assistantStreamId: "assistant-stream:first",
+			stopReason: "length",
+		});
+		const unrelated = assistantMsg("unrelated", "prior canonical output", {
+			assistantStreamId: "assistant-stream:prior",
+		});
+		const retryTerminal = assistantMsg("retry-final", "complete retry output", {
+			assistantStreamId: "assistant-stream:retry",
+			stopReason: "stop",
+		});
+		const s = applyAll([
+			{ type: "snapshot", messages: [unrelated, firstTail] },
+			{ type: "assistant-stream-invalidated", assistantStreamId: "assistant-stream:first" },
+			liveMessageEnd(3, retryTerminal),
+		]);
+
+		assert.deepStrictEqual(s.messages.map((row) => row.id), ["unrelated", "retry-final"]);
+		assert.equal(s.messages.some((row: any) => row.assistantStreamId === "assistant-stream:first"), false);
+		assert.equal(extractText(s.messages.at(-1)), "complete retry output");
+	});
+
+	it("keeps a final second length terminal when no matching retry invalidation is emitted", () => {
+		const finalLength = assistantMsg("second-length", "final bounded length outcome", {
+			assistantStreamId: "assistant-stream:second",
+			stopReason: "length",
+		});
+		const s = applyAll([
+			liveMessageEnd(1, finalLength),
+			{ type: "assistant-stream-invalidated", assistantStreamId: "assistant-stream:first" },
+		]);
+		assert.deepStrictEqual(s.messages.map((row) => row.id), ["second-length"]);
+		assert.equal(extractText(s.messages[0]), "final bounded length outcome");
+	});
+
 	it("(2) out-of-order live events sort by _order", () => {
 		const s = applyAll([
 			liveMessageEnd(2, assistantMsg("a1", "hello")),
