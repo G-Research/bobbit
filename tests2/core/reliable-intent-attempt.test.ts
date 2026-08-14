@@ -1,7 +1,10 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizePersistedInFlightSteers } from "../../src/server/agent/session-store.js";
 import { reconcilePersistedIntentRestore } from "../../src/server/agent/session-manager.js";
-import { foldAuthorSidecarRecords } from "../../src/server/agent/author-sidecar.js";
+import { foldAuthorSidecarRecords, initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.js";
 import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.js";
 import {
 	barrier,
@@ -12,7 +15,14 @@ import {
 
 const TEST_MODEL_TEXT_DIGEST = "A".repeat(43);
 const harnesses: ReliableIntentHarness[] = [];
+const sidecarDirs: string[] = [];
 const useHarness = (overrides: Record<string, any> = {}) => {
+	const sidecarRoot = fs.mkdtempSync(path.join(os.tmpdir(), "reliable-intent-sidecar-"));
+	sidecarDirs.push(sidecarRoot);
+	initAuthorSidecarDir(sidecarRoot, {
+		secretsDir: path.join(sidecarRoot, "secrets"),
+		hmacKey: Buffer.alloc(32, 0x52),
+	});
 	const harness = makeReliableIntentHarness(overrides);
 	harnesses.push(harness);
 	return harness;
@@ -30,16 +40,25 @@ function userStart(text: string, entryId: string) {
 	};
 }
 
+function userEnd(text: string, entryId: string) {
+	return {
+		type: "message_end",
+		entryId,
+		message: { id: entryId, role: "user", content: [{ type: "text", text }] },
+	};
+}
+
 afterEach(() => {
 	while (harnesses.length > 0) harnesses.pop()!.cleanup();
+	while (sidecarDirs.length > 0) fs.rmSync(sidecarDirs.pop()!, { recursive: true, force: true });
 	vi.restoreAllMocks();
 });
 
 describe("reliable intent dispatch attempt settlement", () => {
-	it("keeps a steer dispatching after RPC acknowledgement and settles only on correlated user start", async () => {
+	it("keeps a steer reserved after RPC acknowledgement and settles only on correlated user end", async () => {
 		const ack = barrier<any>();
 		const steer = vi.fn(() => ack.hold());
-		const { manager, session } = useHarness({
+		const { manager, session, storeUpdates } = useHarness({
 			rpcClient: {
 				steer,
 				prompt: vi.fn(async () => ({ success: true })),
@@ -66,6 +85,30 @@ describe("reliable intent dispatch attempt settlement", () => {
 		manager.handleAgentLifecycle(session, visible);
 
 		expect(visible.deliveryIntentId).toBe("intent-held");
+		expect(ledgerFor(session, "intent-held")).toMatchObject({ state: "received", retryable: false });
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: "intent-held", deliveryState: "received" }),
+		]);
+		const persistedReceived = [...storeUpdates].reverse().find((patch) =>
+			Array.isArray(patch.inFlightSteerTexts)
+			&& (patch.inFlightSteerTexts as any[]).some((row) => row.intentId === "intent-held" && row.state === "received"));
+		const normalizedReceived = normalizePersistedInFlightSteers(persistedReceived?.inFlightSteerTexts as any[]);
+		expect(normalizedReceived).toEqual([
+			expect.objectContaining({ intentId: "intent-held", state: "received" }),
+		]);
+		const restartProjection = reconcilePersistedIntentRestore(undefined, normalizedReceived, []);
+		expect(restartProjection.messageQueue).toBeUndefined();
+		expect(restartProjection.inFlightSteerTexts).toEqual([
+			expect.objectContaining({ intentId: "intent-held", state: "received" }),
+		]);
+
+		const replay = await manager.deliverLiveSteer(session.id, "held until echo", { intentId: "intent-held" });
+		expect(replay).toMatchObject({ duplicate: true, settled: false });
+		expect(steer).toHaveBeenCalledTimes(1);
+
+		const terminal = manager.prepareVisibleAgentEvent(session, userEnd("held until echo", "pi-entry-held"));
+		manager.handleAgentLifecycle(session, terminal);
+		expect(terminal.deliveryIntentId ?? terminal.message?.deliveryIntentId).toBe("intent-held");
 		expect(ledgerFor(session, "intent-held")).toBeUndefined();
 	});
 
@@ -102,6 +145,14 @@ describe("reliable intent dispatch attempt settlement", () => {
 		expect([firstVisible.deliveryIntentId, secondVisible.deliveryIntentId]).toEqual([
 			"intent-A", "intent-B",
 		]);
+		expect(session.inFlightSteerTexts).toEqual([
+			expect.objectContaining({ intentId: "intent-A", state: "received" }),
+			expect.objectContaining({ intentId: "intent-B", state: "received" }),
+		]);
+		for (const [text, entryId] of [["same steer", "pi-same-A"], ["same steer", "pi-same-B"]]) {
+			const terminal = manager.prepareVisibleAgentEvent(session, userEnd(text, entryId));
+			manager.handleAgentLifecycle(session, terminal);
+		}
 		expect(session.inFlightSteerTexts).toEqual([]);
 	});
 
@@ -280,6 +331,9 @@ describe("reliable intent abort and stale-attempt fences", () => {
 		const lateStart = manager.prepareVisibleAgentEvent(session, userStart("uncertain before abort", "pi-stop-late"));
 		manager.handleAgentLifecycle(session, lateStart);
 		expect(lateStart.deliveryIntentId).toBe("intent-stop-admission");
+		expect(ledgerFor(session, "intent-stop-admission")?.state).toBe("received");
+		const lateEnd = manager.prepareVisibleAgentEvent(session, userEnd("uncertain before abort", "pi-stop-late"));
+		manager.handleAgentLifecycle(session, lateEnd);
 		expect(ledgerFor(session, "intent-stop-admission")).toBeUndefined();
 
 		replacement.release(undefined);
@@ -310,6 +364,9 @@ describe("reliable intent abort and stale-attempt fences", () => {
 		const lateStart = manager.prepareVisibleAgentEvent(session, userStart("late after stop", "pi-late"));
 		manager.handleAgentLifecycle(session, lateStart);
 		expect(lateStart.deliveryIntentId).toBe("intent-late");
+		expect(ledgerFor(session, "intent-late")?.state).toBe("received");
+		const lateEnd = manager.prepareVisibleAgentEvent(session, userEnd("late after stop", "pi-late"));
+		manager.handleAgentLifecycle(session, lateEnd);
 		expect(ledgerFor(session, "intent-late")).toBeUndefined();
 		expect(session.promptQueue.toArray().some((row: any) => row.id === "intent-late")).toBe(false);
 	});
@@ -360,6 +417,9 @@ describe("reliable intent abort and stale-attempt fences", () => {
 		const lateStart = manager.prepareVisibleAgentEvent(session, userStart("late graceful echo", "pi-graceful-late"));
 		manager.handleAgentLifecycle(session, lateStart);
 		expect(lateStart.deliveryIntentId).toBe("intent-graceful-late");
+		expect(ledgerFor(session, "intent-graceful-late")?.state).toBe("received");
+		const lateEnd = manager.prepareVisibleAgentEvent(session, userEnd("late graceful echo", "pi-graceful-late"));
+		manager.handleAgentLifecycle(session, lateEnd);
 		expect(ledgerFor(session, "intent-graceful-late")).toBeUndefined();
 		expect(manager.projectDeliveryOutbox(session.id).some((row: any) => row.id === "intent-graceful-late")).toBe(false);
 		expect(steer).toHaveBeenCalledTimes(1);

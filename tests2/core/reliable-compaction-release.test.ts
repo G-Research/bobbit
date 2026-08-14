@@ -113,6 +113,59 @@ describe("reliable compaction admission fences", () => {
 	);
 });
 
+describe("Pi compaction-active proven-no-start restoration", () => {
+	const rejection = "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.";
+
+	it.each([
+		{ kind: "prompt" as const, mode: "response" as const, reason: "manual" as const },
+		{ kind: "prompt" as const, mode: "throw" as const, reason: "manual" as const },
+		{ kind: "steer" as const, mode: "response" as const, reason: "threshold" as const },
+		{ kind: "steer" as const, mode: "throw" as const, reason: "threshold" as const },
+	])("restores a $kind after canonical $mode rejection and releases it only at $reason end", async ({ kind, mode, reason }) => {
+		const rpc = vi.fn();
+		if (mode === "response") rpc.mockResolvedValueOnce({ success: false, error: rejection });
+		else rpc.mockRejectedValueOnce(new Error(rejection));
+		rpc.mockResolvedValue({ success: true });
+		const { manager, session } = useHarness({
+			status: kind === "prompt" ? "idle" : "streaming",
+			...(kind === "prompt" ? { prompt: rpc } : { steer: rpc }),
+		});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const id = `compaction-race-${kind}-${mode}`;
+
+		const admission = kind === "prompt"
+			? manager.enqueuePrompt(session.id, "restore after compaction race", { intentId: id })
+			: manager.deliverLiveSteer(session.id, "restore after compaction race", { intentId: id });
+		if (kind === "prompt") await expect(admission).resolves.toEqual({ status: "dispatched" });
+		else await expect(admission).resolves.toBeUndefined();
+		expect(rpc).toHaveBeenCalledTimes(1);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(session.promptQueue.toArray()).toEqual([
+			expect.objectContaining({
+				id,
+				kind,
+				deliveryState: "queued",
+				deliveryReason: "compaction-active",
+				retryable: false,
+				attemptId: expect.stringMatching(/^attempt:/),
+				dispatchEpoch: expect.any(Number),
+			}),
+		]);
+
+		manager.handleAgentLifecycle(session, { type: "compaction_start", reason, compactionId: `compact-${id}` });
+		await flushMicrotasks();
+		expect(rpc, "the restored occurrence must remain fenced until compaction_end").toHaveBeenCalledTimes(1);
+
+		manager.handleAgentLifecycle(session, compactionEnd(reason));
+		await flushMicrotasks();
+		expect(rpc).toHaveBeenCalledTimes(2);
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(session.inFlightSteerTexts).toEqual([
+			expect.objectContaining({ intentId: id, state: "dispatching" }),
+		]);
+	});
+});
+
 describe("single compaction release boundary", () => {
 	it.each([
 		{ reason: "manual" as const, failed: false },

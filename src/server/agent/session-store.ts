@@ -26,9 +26,9 @@ function defaultVerifierAccessory(id: string): string {
 /** Legacy persisted value. Retained only so older session records remain readable. */
 export type WorktreePushPolicy = "local-only" | "publish";
 
-export type InFlightAttemptState = Extract<DeliveryState, "dispatching" | "uncertain">;
+export type InFlightAttemptState = Extract<DeliveryState, "dispatching" | "received" | "uncertain">;
 
-/** A steer dispatched to Pi but not yet correlated to its user-message start. */
+/** A user intent handed to Pi and retained until its exact user-message end is durably settled. */
 export interface InFlightSteerRecord {
 	/** Unprefixed durable base model text. The author sidecar proves any per-RPC decoration. */
 	text: string;
@@ -110,7 +110,7 @@ export function normalizePersistedInFlightSteers(
 				intentId: entry.intentId,
 				attemptId: entry.attemptId,
 				dispatchEpoch: entry.dispatchEpoch,
-				state: entry.state === "dispatching" || entry.state === "uncertain"
+				state: entry.state === "dispatching" || entry.state === "received" || entry.state === "uncertain"
 					? entry.state
 					: "uncertain",
 				targetTurn: entry.targetTurn === "next-turn" || entry.targetTurn === "continuation"
