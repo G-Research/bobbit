@@ -5779,7 +5779,7 @@ export class SessionManager {
 		coldStart?: boolean;
 		suppressTitleGen?: boolean;
 		intentId?: string;
-	}): { status: "queued" } | undefined {
+	}): { status: "queued" | "dispatched" } | undefined {
 		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
 		if (!coordinator) return undefined;
 		// Keep one ordered acceptance ledger for the coordinator's whole lifetime.
@@ -5789,6 +5789,20 @@ export class SessionManager {
 		const session = coordinator.promptOwner ?? this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
 		coordinator.promptOwner ??= session;
+		// Replay must converge on the coordinator's canonical acceptance ledger
+		// before author/skill envelopes or queue persistence are mutated. The live
+		// sessions map may already point at a staged successor, so deduping there
+		// would miss an occurrence still owned by promptOwner.
+		if (opts?.intentId) {
+			const existing = this.reliableIntentById(session, opts.intentId);
+			if (existing || this.reliableIntentWasSettled(session, opts.intentId)) {
+				return {
+					status: existing && (existing as ReliableQueuedMessage).deliveryState === "queued"
+						? "queued"
+						: "dispatched",
+				};
+			}
+		}
 		const source = opts?.source ?? "user";
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
