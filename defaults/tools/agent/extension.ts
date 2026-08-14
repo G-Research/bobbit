@@ -21,7 +21,7 @@
  */
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { readGatewayCreds, apiCall, apiCallDetailed } from "./gateway.js";
 
 // ── Types ──

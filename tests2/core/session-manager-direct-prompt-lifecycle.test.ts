@@ -7,6 +7,7 @@ import { createManualClock } from "../harness/clock.js";
 
 const VIRTUAL_STATE_DIR = path.resolve("/.bobbit-test/session-direct-prompt");
 const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");
+const VIRTUAL_SKILL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "skill-sidecar");
 const VIRTUAL_HMAC_KEY = Buffer.alloc(32, 0x36);
 const virtualSidecarFiles = new Map<string, string>();
 const virtualFds = new Map<number, { path: string; flags: number }>();
@@ -18,11 +19,15 @@ function virtualPath(value: fs.PathLike): string {
 
 function isVirtualSidecarPath(value: fs.PathLike): boolean {
 	const target = virtualPath(value);
-	return target === VIRTUAL_SIDECAR_DIR || target.startsWith(`${VIRTUAL_SIDECAR_DIR}${path.sep}`);
+	return target === VIRTUAL_SIDECAR_DIR
+		|| target.startsWith(`${VIRTUAL_SIDECAR_DIR}${path.sep}`)
+		|| target === VIRTUAL_SKILL_SIDECAR_DIR
+		|| target.startsWith(`${VIRTUAL_SKILL_SIDECAR_DIR}${path.sep}`);
 }
 
 const {
 	SessionManager,
+	containsExactGithubPullRequestUrl,
 	dispatchTrackedSystemPrompt,
 	prepareArchivedMessageSnapshot,
 	restorePromptAuthorBindings,
@@ -43,6 +48,10 @@ const {
 	purgeAuthorSidecar,
 	readAuthorSidecar,
 } = await import("../../src/server/agent/author-sidecar.ts");
+const {
+	initSkillSidecarDir,
+	readSkillSidecarEntries,
+} = await import("../../src/server/skills/skill-sidecar.ts");
 
 // Author persistence is exercised through the real secure sidecar API, backed
 // by a descriptor-aware in-memory filesystem. Unexpected paths fail closed.
@@ -59,7 +68,7 @@ fsSpies.push(
 	vi.spyOn(fs, "existsSync").mockImplementation((target) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem read: ${String(target)}`);
 		const key = virtualPath(target);
-		return key === VIRTUAL_SIDECAR_DIR || virtualSidecarFiles.has(key);
+		return key === VIRTUAL_SIDECAR_DIR || key === VIRTUAL_SKILL_SIDECAR_DIR || virtualSidecarFiles.has(key);
 	}),
 	vi.spyOn(fs, "mkdirSync").mockImplementation(((target: fs.PathLike) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem write: ${String(target)}`);
@@ -68,7 +77,7 @@ fsSpies.push(
 	vi.spyOn(fs, "lstatSync").mockImplementation(((target: fs.PathLike) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem read: ${String(target)}`);
 		const key = virtualPath(target);
-		if (key === VIRTUAL_SIDECAR_DIR) return virtualStats(true);
+		if (key === VIRTUAL_SIDECAR_DIR || key === VIRTUAL_SKILL_SIDECAR_DIR) return virtualStats(true);
 		if (virtualSidecarFiles.has(key)) return virtualStats(false);
 		throw enoent(key);
 	}) as typeof fs.lstatSync),
@@ -125,11 +134,18 @@ fsSpies.push(
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem write: ${String(target)}`);
 		virtualSidecarFiles.delete(virtualPath(target));
 	}),
+	vi.spyOn(fs, "appendFileSync").mockImplementation(((target: fs.PathOrFileDescriptor, data: string | Uint8Array) => {
+		const key = typeof target === "number" ? virtualFds.get(target)?.path : virtualPath(target);
+		if (!key || !isVirtualSidecarPath(key)) throw new Error(`unexpected filesystem append: ${String(target)}`);
+		const chunk = typeof data === "string" ? data : Buffer.from(data).toString("utf8");
+		virtualSidecarFiles.set(key, (virtualSidecarFiles.get(key) ?? "") + chunk);
+	}) as typeof fs.appendFileSync),
 );
 initAuthorSidecarDir(VIRTUAL_STATE_DIR, {
 	secretsDir: VIRTUAL_STATE_DIR,
 	hmacKey: VIRTUAL_HMAC_KEY,
 });
+initSkillSidecarDir(VIRTUAL_STATE_DIR);
 
 const AUTH_SECRET = "sk-or-retry-secret-never-leak";
 const AUTH_ERROR = `No API key found for openrouter: ${AUTH_SECRET}`;
@@ -264,6 +280,30 @@ afterAll(() => {
 });
 
 describe("SessionManager direct idle prompt lifecycle", () => {
+	it("detects only exact GitHub pull-request URLs", () => {
+		for (const valid of [
+			"https://github.com/SuuBro/bobbit/pull/123",
+			"Created PR: [open it](https://GitHub.com/acme/widgets/pull/42).",
+			"https://github.com/acme/widgets/pull/7/",
+		]) {
+			assert.equal(containsExactGithubPullRequestUrl(valid), true, valid);
+		}
+
+		for (const lookalike of [
+			"https://github.com.evil.test/acme/widgets/pull/42",
+			"https://evil.test/github.com/acme/widgets/pull/42",
+			"https://token@github.com/acme/widgets/pull/42",
+			"https://github.com:443/acme/widgets/pull/42",
+			"https://github.com/acme/widgets/pull/42/files",
+			"https://github.com/acme/widgets/pull/42?redirect=https://evil.test",
+			"https://github.com/acme/widgets/pull/42#hostile",
+			"https://github.com/acme%2Fwidgets/pull/42",
+			"javascript:https://github.com/acme/widgets/pull/42",
+		]) {
+			assert.equal(containsExactGithubPullRequestUrl(lookalike), false, lookalike);
+		}
+	});
+
 	it("durably tracks direct delegate, verification, and restart system producers with exact provider prefixes", async () => {
 		const manager = makeManager();
 		const delegateText = "Execute the task described in your system prompt. Follow the instructions carefully.";
@@ -1253,7 +1293,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 1);
 	});
 
-	it("redrains a rejected steer when abort already settled idle", async () => {
+	it("retains a rejected legacy steer visibly when abort already settled idle", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const steer = vi.fn(() => pending.promise);
@@ -1276,9 +1316,10 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		pending.resolve({ success: false, error: "steer rejected after idle" });
 		await assert.rejects(steerPromise, /steer rejected after idle/);
 
-		assert.equal(prompt.mock.calls.length, 1, "recovered steer should redrain without a fresh user prompt");
-		assert.equal((prompt.mock.calls[0] as any[])[0], "redrain rejected steer");
-		assert.equal(session.promptQueue.length, 0);
+		assert.equal(prompt.mock.calls.length, 0, "the recovered occurrence stays visibly queued until the next safe drain");
+		assert.equal(session.promptQueue.length, 1);
+		assert.equal(session.promptQueue.peek()?.text, "redrain rejected steer");
+		assert.equal(session.promptQueue.peek()?.isSteered, true);
 	});
 
 	it("does not replay a queued steered task notification after its prompt has started", async () => {
@@ -1890,6 +1931,112 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(createSession.mock.calls.length, 0, "a healthy verifier is redriven in its original session");
 		assert.equal(session.promptQueue.length, 0, "acceptance consumes the original durable verifier row");
 		assert.equal(session.id, "s-verifier-one-session-redrive");
+	});
+
+	it("dedupes staged stable-ID admission on promptOwner before envelope side effects and release", async () => {
+		const manager = makeManager();
+		const sessionId = "s-staged-stable-id-dedupe";
+		const ownerPrompt = vi.fn(async (_text: string) => ({ success: true }));
+		const successorPrompt = vi.fn(async (_text: string, _images?: unknown) => ({ success: true }));
+		const { session: promptOwner, client } = putSession(manager, {
+			id: sessionId,
+			rpcClient: { prompt: ownerPrompt },
+		});
+		const successor = {
+			...promptOwner,
+			promptQueue: new PromptQueue(),
+			pendingSkillExpansions: undefined,
+			rpcClient: { prompt: successorPrompt },
+		};
+		const staged = deferred<void>();
+		const release = deferred<void>();
+		const replacement = manager._coordinateSessionReplacement(
+			sessionId,
+			"stable-id-dedupe-test",
+			async () => {
+				manager.sessions.set(sessionId, successor);
+				staged.resolve(undefined);
+				await release.promise;
+			},
+			{ drainOnRelease: true },
+		);
+		await staged.promise;
+
+		const intentId = "intent:staged-exact-occurrence";
+		const author = { kind: "agent", id: "session:caller", label: "Caller" } as const;
+		const admission = {
+			intentId,
+			modelText: "expanded model text",
+			skillExpansions: [{ name: "inspect", originalText: "/inspect", expandedText: "expanded model text" }],
+			fileMentions: [{ path: "src/reliable.ts", label: "src/reliable.ts", kind: "file" }],
+			images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+			attachments: [{ name: "evidence.txt", mimeType: "text/plain", size: 8 }],
+			source: "agent",
+			author,
+		};
+		const first = await manager.enqueuePrompt(sessionId, "visible staged prompt", admission);
+		const broadcastsAfterFirst = client.sent.length;
+		const replay = await manager.enqueuePrompt(sessionId, "visible staged prompt", admission);
+
+		assert.deepEqual(first, { status: "queued" });
+		assert.deepEqual(replay, { status: "queued" });
+		assert.equal(client.sent.length, broadcastsAfterFirst, "duplicate admission must not broadcast another projection");
+		assert.equal(promptOwner.promptQueue.length, 1);
+		const accepted = promptOwner.promptQueue.peek();
+		assert.equal(accepted?.id, intentId);
+		assert.equal(accepted?.sequence, 1, "one occurrence allocates exactly one lane sequence");
+		assert.deepEqual(accepted?.images, admission.images);
+		assert.deepEqual(accepted?.attachments, admission.attachments);
+		assert.deepEqual(accepted?.author, author);
+		assert.equal(promptOwner.pendingSkillExpansions?.length, 1, "duplicate admission cannot append a second display envelope");
+		assert.equal(readSkillSidecarEntries(sessionId).length, 1, "duplicate admission cannot append a second skill/file sidecar record");
+		assert.equal(ownerPrompt.mock.calls.length, 0);
+		assert.equal(successorPrompt.mock.calls.length, 0, "replacement fencing prohibits Pi dispatch while staged");
+
+		release.resolve(undefined);
+		await replacement;
+		await flushAsyncWork();
+		assert.equal(successorPrompt.mock.calls.length, 1, "release drains the exact occurrence once on the canonical successor");
+		assert.equal(successorPrompt.mock.calls[0][0], "[Caller (caller)]: expanded model text");
+		const binding = readAuthorSidecar(sessionId).find((record: any) => record.intentId === intentId);
+		assert.ok(binding);
+		assert.deepEqual(binding.author, author, "the released dispatch retains its accountable author");
+
+		assert.equal(appendPromptAuthorSettlement(sessionId, {
+			promptId: binding.promptId,
+			intentId,
+			attemptId: binding.attemptId,
+			settledAt: manager._testClock.now() + 1,
+			outcome: "echoed",
+		}), true);
+		successor.inFlightSteerTexts = [];
+		const settledOwner = {
+			...successor,
+			status: "idle",
+			promptQueue: new PromptQueue(),
+			pendingSkillExpansions: undefined,
+		};
+		const settledSuccessorPrompt = vi.fn(async () => ({ success: true }));
+		manager.sessions.set(sessionId, {
+			...settledOwner,
+			promptQueue: new PromptQueue(),
+			rpcClient: { prompt: settledSuccessorPrompt },
+		});
+		manager._sessionReplacementCoordinators.set(sessionId, {
+			tail: Promise.resolve(),
+			pending: 1,
+			coalesced: new Map(),
+			promptOwner: settledOwner,
+			drainOnRelease: false,
+			bootContinuationPending: false,
+		});
+		const settledReplay = await manager.enqueuePrompt(sessionId, "visible staged prompt", admission);
+		assert.deepEqual(settledReplay, { status: "dispatched" });
+		assert.equal(settledOwner.promptQueue.length, 0);
+		assert.equal(settledOwner.pendingSkillExpansions, undefined);
+		assert.equal(readSkillSidecarEntries(sessionId).length, 1, "terminal replay cannot append sidecar state");
+		assert.equal(settledSuccessorPrompt.mock.calls.length, 0, "terminal replay cannot reach Pi");
+		manager._sessionReplacementCoordinators.delete(sessionId);
 	});
 
 	it("rejects an in-flight verifier receipt after process exit without a replacement dispatch", async () => {

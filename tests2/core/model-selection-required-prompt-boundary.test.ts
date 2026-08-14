@@ -198,9 +198,11 @@ describe("MODEL_SELECTION_REQUIRED prompt boundaries", () => {
 			assert.deepEqual(explicitState.data.condition, CONDITION);
 
 			const queueBefore = JSON.stringify(h.queueRows);
+			const intentId = "intent-model-selection-rejection";
 			const attachmentDraft = Object.freeze({ id: "attachment-1", fileName: "draft.txt", content: "draft bytes" });
 			h.ws.emit("message", JSON.stringify({
 				type: "prompt",
+				intentId,
 				text: "/missing-skill inspect @draft.txt",
 				attachments: [attachmentDraft],
 			}));
@@ -210,6 +212,8 @@ describe("MODEL_SELECTION_REQUIRED prompt boundaries", () => {
 			);
 
 			const error = h.ws.sent.find((frame) => frame.type === "error" && frame.code === MODEL_SELECTION_REQUIRED);
+			assert.equal(error.intentId, intentId);
+			assert.equal(error.retryable, true);
 			assert.match(error.message, /retired-provider\/retired-model/);
 			assert.match(error.message, /choose a replacement model/i);
 			assert.equal(h.cwdReads(), 0, "file mention preprocessing must not inspect cwd");

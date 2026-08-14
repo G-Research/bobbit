@@ -320,7 +320,11 @@ test.describe("authenticated WebSocket session write policy", () => {
 			live.status = "streaming";
 			conn.send({ type: "steer", text: "redirect active review" });
 			await vi.waitFor(() => {
-				expect(deliverLiveSteer).toHaveBeenCalledWith(sessionId, "redirect active review");
+				expect(deliverLiveSteer).toHaveBeenCalledWith(
+					sessionId,
+					"redirect active review",
+					expect.objectContaining({ intentId: expect.any(String), source: "user" }),
+				);
 			}, { timeout: 2_000 });
 			// Streaming only carves out the direct steer frame. Alternate retry and
 			// extension redirect/enqueue paths stay forbidden.

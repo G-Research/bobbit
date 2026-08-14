@@ -1,5 +1,7 @@
 # Steer subsystem rewrite — single source of truth, exactly-once, durable
 
+> Historical design. Its text-ledger, batching, queue-removal, and Sent-pill descriptions predate stable occurrence identity and the delivery outbox. Use [Reliable prompt and steer delivery](../prompt-queue.md) for current behavior.
+
 Status: implemented (commits `f37aadd8`, `3d3d34cd`, `377f4bb7`, `6ed08fc9`). Reverted on `master` between `v0.8.0` and the freeze investigation, then restored on `goal/restore-st-ac566fee` once the actual freeze culprit was isolated to PR #514 (the WebSocket `emitSessionEvent` refactor — out of scope for this design and intentionally absent from `master`). The four implementation commits plus the three follow-ups (#477 abort-race, #478 listener-ordering, #480 `bash_bg wait` end-of-turn hint) are all back in place.
 
 ## 1. Problem
@@ -350,6 +352,6 @@ grep -c "_dispatchSteer\|_reconcileAfterAbort\|inFlightSteerTexts" src/server/ag
 
 ### Where to look next
 
-- Steer architecture, shadow-ledger lifecycle, and force-kill recovery: [docs/prompt-queue.md — Abort and force-kill recovery](../prompt-queue.md#abort-and-force-kill-recovery).
+- Current reliable occurrence, attempt-ledger, and Stop recovery contract: [docs/prompt-queue.md — Stop, failure, and recovery](../prompt-queue.md#stop-failure-and-recovery).
 - Live-steer call-site map and the `_dispatchSteer()`-owned wait abort path: [docs/internals.md — Steer-interruptible bash_bg wait](../internals.md#steer-interruptible-bash_bg-wait).
 - Debugging duplicate-on-Stop, lost-after-abort, and reconnect mid-steer scenarios: [docs/debugging.md — Abort, steer & queue](../debugging.md#abort-steer--queue).

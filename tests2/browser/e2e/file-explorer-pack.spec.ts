@@ -504,7 +504,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(treeItem(page, "src/changed.ts"), "manual refresh preserves selection").toHaveAttribute("aria-selected", "true");
 
 		await sendMessage(page, "STAY_BUSY:2500 explorer idle refresh");
-		await expect(page.locator("button[title='Stop streaming']"), "the refresh fixture must exercise a real non-idle agent state").toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("button", { name: "Stop current turn" }), "the refresh fixture must exercise a real non-idle agent state").toBeVisible({ timeout: 10_000 });
 		write(root!, "new-after-idle.txt", "created while the agent was active\n");
 		await waitForSessionStatus(gitFixture.sessionId, "idle", 15_000);
 		await expect(treeItem(page, "new-after-idle.txt"), "the real transition back to idle refreshes the explorer").toBeVisible({ timeout: 15_000 });

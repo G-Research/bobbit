@@ -74,9 +74,15 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			const queued = await conn.waitFor(queueLenPredicate(1));
 			const messageId = queued.queue!.find((message: any) => message.text === STEER_TEXT)!.id;
 
-			const emptyQueueCursor = conn.messageCount();
+			const dispatchCursor = conn.messageCount();
 			conn.send({ type: "steer_queued", messageId });
-			await conn.waitForFrom(emptyQueueCursor, queueLenPredicate(0));
+			const dispatching = await conn.waitForFrom(dispatchCursor, (message: any) =>
+				message.type === "queue_update"
+				&& message.queue?.length === 1
+				&& message.queue[0]?.id === messageId
+				&& message.queue[0]?.deliveryState === "dispatching",
+			);
+			expect(dispatching.queue?.map((row: any) => row.id)).toEqual([messageId]);
 			expect(steerRpc).toHaveBeenCalledOnce();
 			expect(steerRpc).toHaveBeenCalledWith(STEER_TEXT);
 
@@ -85,8 +91,10 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			expect(persistedBeforeRestore?.messageQueue ?? []).toHaveLength(0);
 			expect(persistedBeforeRestore?.inFlightSteerTexts).toEqual([
 				expect.objectContaining({
+					intentId: messageId,
+					state: "dispatching",
 					text: STEER_TEXT,
-					promptId: expect.stringMatching(/^steer:[a-f0-9]{64}$/),
+					promptId: messageId,
 					source: "user",
 					author: { kind: "user", id: "user:local", label: "User" },
 				}),
