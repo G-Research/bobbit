@@ -9,7 +9,7 @@ FROM node:22-slim
 # sandbox. Instead we pull a fixed-version fd binary from sharkdp's GitHub
 # release below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates build-essential python3 ripgrep \
+    git curl ca-certificates build-essential python3 ripgrep util-linux \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install fd from sharkdp/fd GitHub release (must be >= 9.0 for --no-require-git).

@@ -399,21 +399,42 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			// PID-suffixed pending directory. The v3 flock owner cleans both only
 			// while exclusively holding its permanent lock inode.
 			const lifecycle = "/bobbit-state/claude-agent-sdk";
-			docker(["exec", "-u", "root", name, "sh", "-ceu", `mkdir ${lifecycle}/.bobbit-sdk-state-migration-lock-v1; mkdir ${lifecycle}/.bobbit-sdk-state-migration-pending-999999`]);
+			docker(["exec", "-u", "root", name, "sh", "-ceu", `mkdir ${lifecycle}/.bobbit-sdk-state-migration-lock-v1; install -d -m 700 ${lifecycle}/.bobbit-sdk-state-migration-pending-999999`]);
+			// VERIFY running-container policy: never delete predecessor artifacts.
+			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("invalid");
+			expect(docker(["exec", "-u", "root", name, "test", "-d", `${lifecycle}/.bobbit-sdk-state-migration-lock-v1`])).toBe("");
 			docker(["restart", name]);
 			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
 			expect(docker(["exec", "-u", "root", name, "sh", "-ceu", `test ! -e ${lifecycle}/.bobbit-sdk-state-migration-lock-v1; test ! -e ${lifecycle}/.bobbit-sdk-state-migration-pending-999999`])).toBe("");
 
-			// A deterministic flock holder makes VERIFY busy without changing the
-			// inode. A bounded contender leaves no pending artifacts, and restarting
-			// the container releases the kernel-owned lock without a stale reaper.
-			docker(["exec", "-d", "-u", "root", name, "sh", "-ceu", `exec 9>${lifecycle}/.bobbit-sdk-state-migration-lock-v3; flock -x 9; : > /tmp/sdk-flock-ready; while test ! -e /tmp/sdk-flock-release; do sleep 1; done`]);
-			docker(["exec", "-u", "root", name, "sh", "-ceu", "for _ in $(seq 1 50); do test -f /tmp/sdk-flock-ready && exit 0; sleep 0.1; done; exit 1"]);
-			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("busy");
-			await expect((sandbox as any)._prepareClaudeAgentSdkStateParent(name)).rejects.toThrow();
-			expect(docker(["exec", "-u", "root", name, "sh", "-ceu", `test -z "$(find ${lifecycle} -maxdepth 1 -name '.bobbit-sdk-state-migration-pending-*' -print -quit)"`])).toBe("");
+			// A SIGKILL/replacement can leave bbffbee1's v2 file and directory
+			// shapes. They are retired only by PREPARE on the restarted container.
+			const v2Owner = "1 999999 1 0123456789abcdef0123456789abcdef";
+			const v2Suffix = "1-999999-1-0123456789abcdef0123456789abcdef";
+			docker(["exec", "-u", "root", name, "sh", "-ceu", `printf '${v2Owner}\\n' > ${lifecycle}/.bobbit-sdk-state-migration-lock-v2; chmod 600 ${lifecycle}/.bobbit-sdk-state-migration-lock-v2; printf '${v2Owner}\\n' > ${lifecycle}/.bobbit-sdk-state-migration-intent-v2-${v2Suffix}; chmod 600 ${lifecycle}/.bobbit-sdk-state-migration-intent-v2-${v2Suffix}; install -d -m 700 ${lifecycle}/.bobbit-sdk-state-migration-pending-v2-${v2Suffix}`]);
+			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("invalid");
 			docker(["restart", name]);
 			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
+			expect(docker(["exec", "-u", "root", name, "sh", "-ceu", `test ! -e ${lifecycle}/.bobbit-sdk-state-migration-lock-v2; test ! -e ${lifecycle}/.bobbit-sdk-state-migration-intent-v2-${v2Suffix}; test ! -e ${lifecycle}/.bobbit-sdk-state-migration-pending-v2-${v2Suffix}`])).toBe("");
+
+			// Shared intent remains held by both the active writer and a queued
+			// writer. VERIFY cannot overtake either phase of the migration handoff.
+			const intent = `${lifecycle}/.bobbit-sdk-state-migration-intent-lock-v3`;
+			const migration = `${lifecycle}/.bobbit-sdk-state-migration-lock-v3`;
+			docker(["exec", "-d", "-u", "root", name, "sh", "-ceu", `exec 8<${intent}; flock -s 8; exec 9<${migration}; flock -x 9; : > /tmp/sdk-active-ready; while test ! -e /tmp/sdk-active-release; do sleep 1; done`]);
+			docker(["exec", "-u", "root", name, "sh", "-ceu", "for _ in $(seq 1 50); do test -f /tmp/sdk-active-ready && exit 0; sleep 0.1; done; exit 1"]);
+			docker(["exec", "-d", "-u", "root", name, "sh", "-ceu", `exec 8<${intent}; flock -s 8; : > /tmp/sdk-queued-ready; while test ! -e /tmp/sdk-queued-release; do sleep 1; done`]);
+			docker(["exec", "-u", "root", name, "sh", "-ceu", "for _ in $(seq 1 50); do test -f /tmp/sdk-queued-ready && exit 0; sleep 0.1; done; exit 1"]);
+			try {
+				expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("busy");
+				await expect((sandbox as any)._prepareClaudeAgentSdkStateParent(name)).rejects.toThrow();
+				docker(["exec", "-u", "root", name, "touch", "/tmp/sdk-active-release"]);
+				docker(["exec", "-u", "root", name, "sh", "-ceu", `for _ in $(seq 1 50); do flock -n -x ${migration} -c true && exit 0; sleep 0.1; done; exit 1`]);
+				expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("busy");
+			} finally {
+				try { docker(["exec", "-u", "root", name, "sh", "-c", "touch /tmp/sdk-active-release /tmp/sdk-queued-release"]); } catch { /* best-effort detached holder cleanup */ }
+			}
+			docker(["exec", "-u", "root", name, "sh", "-ceu", `for _ in $(seq 1 50); do flock -n -x ${intent} -c true && exit 0; sleep 0.1; done; exit 1`]);
 			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("secure");
 			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
 			expect(() => docker(["exec", "-u", "node", name, "sh", "-c", "mv /bobbit-state/claude-agent-sdk/legacy-session /tmp/replaced; ln -s /tmp/replaced /bobbit-state/claude-agent-sdk/legacy-session"])).toThrow();
