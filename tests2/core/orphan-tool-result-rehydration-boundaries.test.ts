@@ -2608,6 +2608,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const manager = makeManager(ps, replacement);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
 		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.prompt = vi.fn(async () => ({ success: true }));
 		const original = liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() });
 		manager.sessions.set(ps.id, original);
 
@@ -2629,6 +2630,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical.lifecycleFenced).not.toBe(true);
 		expect(canonical.rpcClient).toBe(oldBridge);
 		expect(canonical.status).toBe("idle");
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
 		expect(replacement.prompt).not.toHaveBeenCalled();
 		expect(canonical.promptQueue.toArray().map((row: any) => row.text))

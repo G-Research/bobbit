@@ -15316,6 +15316,10 @@ export class SessionManager {
 			&& !session.lifecycleFenced
 			&& session.rpcClient.running !== false
 			&& session.streamingStartedAt === undefined) {
+			// The queued Stop joined an assignRole owner that requested a release
+			// drain. Cancelling staging must also cancel that sticky drain request or
+			// the untouched old bridge immediately starts the queued next turn.
+			token.coordinator.drainOnRelease = false;
 			broadcastStatus(session, "idle");
 			return;
 		}
