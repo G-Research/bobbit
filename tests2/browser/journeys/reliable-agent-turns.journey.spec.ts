@@ -266,7 +266,7 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			await expect(page.getByRole("button", { name: "Stopping current turn" })).toBeVisible({ timeout: 15_000 });
 			await expectOneCarrier(page, queuedId, "outbox");
 			await expectOneCarrier(page, steerId, "outbox");
-			await expectIntentState(page, steerId, "uncertain", /Checking delivery/);
+			await expectIntentState(page, steerId, "uncertain", /Awaiting delivery confirmation/);
 
 			expect(scenario.runtime.barrierJournal.map((entry) => entry.name)).toEqual(expect.arrayContaining([
 				steerStart.boundary,
@@ -320,7 +320,7 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			await abort.received;
 			await abort.beforeAgentEnd.entered;
 			await expectOneCarrier(page, id, "outbox");
-			await expectIntentState(page, id, "uncertain", /Checking delivery/);
+			await expectIntentState(page, id, "uncertain", /Awaiting delivery confirmation/);
 			expect(scenario.runtime.barrierJournal.map((entry) => entry.name)).toEqual(expect.arrayContaining([
 				steerStart.boundary,
 				abort.receivedBoundary,
